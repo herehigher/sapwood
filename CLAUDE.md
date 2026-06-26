@@ -31,7 +31,8 @@ re-implemented as a standalone, public tool. Status: **early development, pre-v1
 ## Locked decisions (see PLAN.md table)
 
 TypeScript engine · Claude Code plugin form factor · trusted repos first · default
-merge gate = produce-PR-and-stop (autonomous-merge opt-in) · dashboard deferred to
+merge gate = 0day-style: Conductor merges on CI green + a fresh different-model Codex
+review (produce-PR-and-stop selectable) · dashboard deferred to
 v0.2 (built *by* borehole as the flagship dogfood) · JSON config default · 0day's
 TDD/two-gate method as overridable defaults.
 

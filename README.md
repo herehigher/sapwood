@@ -21,9 +21,10 @@ roles in the loop.
   approve or merge it. Enforced by a fail-closed PreToolUse hook, not a prompt.
 - **GitHub is the source of truth** — a ProjectV2 board's `Status` field + issue
   labels *are* the work queue. No hidden database, no opaque state.
-- **Configurable review chain** — default is *produce-PR-and-stop* (the loop does
-  everything; a human clicks merge). Autonomous-merge with a pluggable reviewer is
-  opt-in, once you trust it.
+- **Configurable review chain** — by default the merge is gated on an independent
+  (different-model) code review, the way the source project works: CI green + a fresh
+  review → the conductor merges. The reviewer is pluggable, and a *produce-PR-and-stop*
+  mode (a human clicks merge) is available when you want a tighter leash.
 - **Cost is bounded and legible** — engine-enforced spend ceilings, a dry-run
   preview, and a kill switch.
 
@@ -37,8 +38,8 @@ gate, and (in autonomous mode) merges.
 
 ```
 GitHub issue (Ready)
-   → claim → isolated worktree → TDD → PR (Closes #N) → review
-   → [default] stop for human merge   |   [opt-in] conductor merges
+   → claim → isolated worktree → TDD → PR (Closes #N) → independent review
+   → [default] CI green + review → conductor merges   |   [opt] stop for human merge
    → board: Done
 ```
 

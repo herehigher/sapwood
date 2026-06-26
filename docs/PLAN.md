@@ -71,7 +71,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 2 | Engine language | TypeScript (whole stack) |
 | 3 | Trust context | **Trusted repos first**, architected toward public-repo hardening |
 | 4 | Dashboard | **Deferred to v0.2.** v1 ships a CLI/terminal status view; validate demand, then build the dashboard from real usage |
-| 5 | Default merge gate | **Produce-PR-and-stop** (loop does everything, human clicks merge). Autonomous-merge is opt-in, with a pluggable reviewer; same-model Claude self-review is opt-in "trusted repos only" |
+| 5 | Default merge gate | **0day-style: autonomous-merge gated on a different-model Codex PR review** — gate① CI green + gate② a fresh non-author Codex review → the Conductor merges (producer≠merger). Reviewer is pluggable; **produce-PR-and-stop** (human merges) and same-model self-review remain selectable modes. Different-model default matches 0day and the security review's recommendation. |
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
 | 7 | Config format | JSON default (Zod-validated); `.ts` typed config as opt-in |
 
@@ -90,7 +90,7 @@ borehole/
 │   ├── merge-driver.ts      # the only place a merge happens (autonomous-merge mode)
 │   ├── forge.ts             # IForge interface + GithubForge impl (gh CLI/GraphQL)
 │   ├── guard.ts             # fail-closed PreToolUse hook (port of guard.py), zero-dep
-│   ├── reviewer.ts          # pluggable review gate (default mode = produce-PR-and-stop)
+│   ├── reviewer.ts          # pluggable review gate (default = different-model Codex review, 0day-style)
 │   ├── config.ts            # load/validate borehole.config.json (zod) + defaults
 │   ├── state.ts             # SQLite (WAL) state + per-round metrics/events
 │   └── cli.ts               # `borehole` binary: init / status / stop — runs WITHOUT a live session
@@ -136,10 +136,11 @@ rewrite.** v1 requirements:
   `guard.py:36-93`). **Fail-closed on hook error/timeout/malformed output** is a
   tested requirement. Engine must use `execFile`/`spawn` with arg arrays — never
   `child_process.exec`/`shell:true`.
-- **Structural producer≠merger (not just the argv guard):** in autonomous-merge
-  mode, rely on branch protection + a merge identity distinct from the worker, so the
-  invariant holds even if the guard is bypassed. (v1 default is produce-PR-and-stop,
-  so a human is the merger by default — the safest posture.)
+- **Structural producer≠merger (not just the argv guard):** the merge is always
+  executed by the Conductor, never the worker (matches 0day's `loop_merge_driver.sh`),
+  backed by branch protection + a merge identity distinct from the worker, so the
+  invariant holds even if the guard is bypassed. gate② is a fresh non-author Codex
+  review; produce-PR-and-stop (human merges) is the conservative selectable mode.
 - **Protect the boundary from worker `Write`:** path-level deny on
   `.claude/settings.json` (hook wiring) and `.github/workflows/**`; **human-merge-only**
   for any change to `guard.ts`, hook wiring, `reviewer.ts`, or security config
@@ -192,9 +193,12 @@ rewrite.** v1 requirements:
   structured tick results; parity tests against 0day's pure-function tests
   (`test_loop_conductor.sh`, `test_loop_merge_driver.sh`). **Dogfood starts here:**
   run borehole on one borehole issue end-to-end.
-- **M3 — Review gate + merge modes:** `reviewer.ts` with **produce-PR-and-stop
-  default**; opt-in autonomous-merge (`merge-driver.ts`) with pluggable reviewer
-  (different-model / same-model-trusted-only / human); engine cost ceiling + kill switch.
+- **M3 — Review gate + merge modes:** `reviewer.ts` + `merge-driver.ts` with the
+  **0day-style default**: autonomous-merge gated on a fresh non-author Codex review
+  (gate②) + CI green (gate①), merged by the Conductor. Pluggable reviewer
+  (different-model Codex / same-model-trusted-only / human) and a produce-PR-and-stop
+  mode; engine cost ceiling + kill switch. Port 0day's `pr_gate.sh` ACTION protocol +
+  `loop_merge_driver.sh` (incl. `--match-head-commit` TOCTOU pin).
 - **M4 — UX surface + CLI:** skills/commands (`/borehole-run`, `/borehole-status`,
   `/borehole-stop`, supervised "watch one issue" mode), `borehole` status CLI,
   first-run trust ramp, docs set.
@@ -232,10 +236,10 @@ rewrite.** v1 requirements:
   confirm stale-heartbeat reclaim resets lanes to claimable, and `borehole status`
   shows the dead workers.
 - **End-to-end dogfood:** on a trusted throwaway repo — `init` (zero manual GitHub UI
-  steps, from clean `gh auth`), seed 2–3 issues, run supervised "watch one issue":
-  claim → worktree → PR → review comment → **stop for human merge** (default mode).
-  Then enable opt-in autonomous-merge and confirm the Conductor (not the worker) merges
-  and the worker never self-merges.
+  steps, from clean `gh auth`), seed 2–3 issues. Default 0day-style run:
+  claim → worktree → PR → **Codex review** → CI green + fresh review → **Conductor
+  merges** (confirm the worker never self-merges). Also exercise the conservative
+  produce-PR-and-stop mode (stops for human merge).
 - **Cost ceiling:** breach the cumulative cap mid-run → auto-drain; kill switch halts
   dispatch independent of conductor liveness.
 - **Onboarding:** missing `project` scope → clear actionable message, no partial board.
