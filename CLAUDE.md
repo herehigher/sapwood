@@ -25,8 +25,28 @@ re-implemented as a standalone, public tool. Status: **early development, pre-v1
   Anything touching `guard.ts`, hook wiring, `reviewer.ts`, or security config is
   **human-merge-only**.
 - **Guard ships green before anything autonomous runs** (M1, before M2 engine).
-- **GitHub is the source of truth** — the ProjectV2 board `Status` + labels are the
-  work queue. No parallel task DB.
+- **GitHub is the source of truth for *process*** — the ProjectV2 board `Status` +
+  labels are the work queue (no parallel task DB). For *durable knowledge*, the docs
+  are the source of truth — see "Documentation principle" below.
+
+## Documentation principle (source-of-truth partition)
+
+Single source of truth, **partitioned by what kind of fact it is** — every fact has
+exactly one home, so the two never drift:
+
+- **GitHub (issues / Project #4 / PRs) = the *development process* only:** what's in
+  flight, by whom, in what state. The audit trail — *"how did we get here."* Ephemeral.
+- **Project docs (`README`, `docs/PLAN.md`, usage/config guides) = *durable
+  knowledge*:** goals, plans, architecture, decisions, outcomes of finished work, and
+  how to use the tool — *"what is true now."* Users read docs, never issues.
+- Docs never mirror issue mechanics; issues never hold knowledge a user needs.
+
+**Round-close documentation gate:** a development round is not "closed" until the
+docs reflect that round's **durable-knowledge** changes (new/changed capability,
+behavior, decision, or milestone). Trigger on *knowledge change, not every round* —
+a round that changed no durable knowledge closes with zero doc edits, and that is a
+pass, not churn. Doc changes go through the same review gate as code (gate②) and are
+part of an issue's definition-of-done. Distilled outcomes, never issue transcripts.
 
 ## Locked decisions (see PLAN.md table)
 
