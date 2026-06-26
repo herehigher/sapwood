@@ -73,7 +73,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 4 | Dashboard | **Deferred to v0.2.** v1 ships a CLI/terminal status view; validate demand, then build the dashboard from real usage |
 | 5 | Default merge gate | **0day-style: autonomous-merge gated on a different-model Codex PR review** — gate① CI green + gate② a fresh non-author Codex review → the Conductor merges (producer≠merger). Reviewer is pluggable; **produce-PR-and-stop** (human merges) and same-model self-review remain selectable modes. Different-model default matches 0day and the security review's recommendation. |
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
-| 7 | Config format | JSON default (Zod-validated); `.ts` typed config as opt-in |
+| 7 | Config format | **YAML default** — `borehole.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
 
 ## Architecture (v1)
 
@@ -91,7 +91,7 @@ borehole/
 │   ├── forge.ts             # IForge interface + GithubForge impl (gh CLI/GraphQL)
 │   ├── guard.ts             # fail-closed PreToolUse hook (port of guard.py), zero-dep
 │   ├── reviewer.ts          # pluggable review gate (default = different-model Codex review, 0day-style)
-│   ├── config.ts            # load/validate borehole.config.json (zod) + defaults
+│   ├── config.ts            # load borehole.config.yaml (yaml→zod), JSON also parses; defaults
 │   ├── state.ts             # SQLite (WAL) state + per-round metrics/events
 │   └── cli.ts               # `borehole` binary: init / status / stop — runs WITHOUT a live session
 └── docs/                    # getting-started, config ref, security model, troubleshooting
@@ -165,7 +165,7 @@ rewrite.** v1 requirements:
      before creating; tolerate partial failure; safely re-runnable. (0day stops here
      and asks the human to make the board by hand — `bootstrap_github.sh:89`; we
      automate it.)
-  4. Writes a starter `borehole.config.json` and wires the guard hook.
+  4. Writes a starter `borehole.config.yaml` (with explanatory comments) and wires the guard hook.
 - **First-run trust ramp** (the missing safety UX): a `--dry-run` that lists issues
   it *would* dispatch + estimated cost; a **"watch one issue" supervised mode** that
   pauses after worktree/PR/review for explicit confirmation (the recommended first
@@ -180,7 +180,7 @@ rewrite.** v1 requirements:
 
 ## Build sequencing (planning only)
 
-- **M0 — Skeleton + config + forge:** plugin manifest, `borehole.config.json` schema
+- **M0 — Skeleton + config + forge:** plugin manifest, `borehole.config.yaml` schema
   + Zod + defaults, `IForge` interface + `GithubForge` (all hard-coding removed),
   SQLite (WAL) state layer with schema versioning.
 - **M0.5 — Minimal onboarding:** `borehole init` (auth preflight, user-vs-org,
