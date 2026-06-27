@@ -143,9 +143,10 @@ function extractCommandSubstitutions(text: string): string[] {
   return results;
 }
 
-// chain operators. `&(?!>)` so `&>`/`&>>` (redirect both streams) stay with their
-// fragment instead of being split apart and losing the redirect target.
-const CHAIN_RE = /&&|\|\||;|\||&(?!>)|\n/;
+// chain operators. The `&` only splits when it's a real control operator — not part of
+// `&>`/`&>>` (redirect both, & before >) or `>&` (redirect-to, & after >); those must stay
+// with their fragment so the redirect target isn't lost.
+const CHAIN_RE = /&&|\|\||;|\||(?<!>)&(?!>)|\n/;
 
 function splitFragments(command: string): string[] {
   const subs = extractCommandSubstitutions(command);
@@ -292,6 +293,7 @@ function ghSkipGlobalFlags(tokens: string[]): string[] {
 function checkGhApi(tokens: string[], fragment: string): string | null {
   let method: string | null = null;
   let hasField = false;
+  let hasInput = false; // gh defaults to POST when --input is given (cli/cli api.go)
   let pathToken: string | null = null;
   let i = 2;
   while (i < tokens.length) {
@@ -299,6 +301,7 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
     if ((tok === "-X" || tok === "--method") && i + 1 < tokens.length) { method = tokens[i + 1]!.toUpperCase(); i += 2; continue; }
     if (tok.startsWith("--method=") || tok.startsWith("-X=")) { method = tok.split("=", 2)[1]!.toUpperCase(); i += 1; continue; }
     if (tok.startsWith("-X") && tok.length > 2 && tok[2] !== "=") { method = tok.slice(2).toUpperCase(); i += 1; continue; }
+    if (tok === "--input" || tok.startsWith("--input=")) { hasInput = true; i += tok === "--input" ? 2 : 1; continue; }
     if (FIELD_FLAGS.has(tok)) {
       hasField = true;
       i += 1;
@@ -313,7 +316,7 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
     if (!tok.startsWith("-") && pathToken === null) pathToken = tok;
     i++;
   }
-  if (method === null && hasField) method = "POST";
+  if (method === null && (hasField || hasInput)) method = "POST";
 
   if (pathToken && pathToken.toLowerCase().replace(/^\/+|\/+$/g, "") === "graphql") {
     const fieldValues: string[] = [];
@@ -363,6 +366,25 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
   }
   if (sub1 === "release") return "BLOCK [gh] release — producer must not publish releases";
   if (sub1 === "api") return checkGhApi([tokens[0]!, ...remaining], fragment);
+  return null;
+}
+
+/**
+ * Find a `gh <overreach>` sequence at ANY position, not just token[0]. Wrappers have
+ * open-ended value flags we can't fully enumerate (`uv run --with rich gh pr merge`
+ * leaves "rich" as the apparent command), so rather than perfectly parse every wrapper,
+ * we scan for `gh` anywhere and apply Category C from there. checkCategoryC still allows
+ * read-only gh, so this only blocks genuine overreach. (Quoted data stays a single token,
+ * so it can't masquerade as `gh <sub>`.)
+ */
+function scanGhOverreach(tokens: string[]): string | null {
+  for (let i = 0; i < tokens.length; i++) {
+    if (basename(tokens[i]!).toLowerCase() === "gh") {
+      const slice = tokens.slice(i);
+      const r = checkCategoryC(slice, slice.join(" "));
+      if (r) return r;
+    }
+  }
   return null;
 }
 
@@ -434,11 +456,8 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null 
   const w = checkBashWritePath(stripped.length ? stripped : tokens, cwd);
   if (w) return w;
 
-  if (stripped.length && stripped.join(" ") !== tokens.join(" ")) {
-    const c = checkCategoryC(stripped, stripped.join(" "));
-    if (c) return c;
-  }
-  return checkCategoryC(tokens, fragment);
+  // gh overreach, scanned at any position on both the stripped and the original tokens.
+  return scanGhOverreach(stripped) ?? scanGhOverreach(tokens);
 }
 
 // ── Write-path protection (issue #9) ─────────────────────────────────────────
@@ -472,10 +491,11 @@ function checkWritePath(filePath: string, cwd: string): string | null {
 }
 
 // Shell write vectors that bypass the Write/Edit tool: redirections and write commands.
-// A pure redirection operator token: >, >>, >|, 2>, 1>>, &>, &>> (target is the next token).
-const REDIR_OP_RE = /^&?[0-9]*>>?\|?$/;
-// A redirection glued to its target: >file, 2>>file, &>file (target captured).
-const REDIR_GLUED_RE = /^&?[0-9]*>>?\|?(.+)$/;
+// A pure redirection operator token (target is the next token): >, >>, >|, 2>, 1>>,
+// &>, &>>, >& (bash redirect-both forms). `&` may lead (&>) or trail (>&) the >.
+const REDIR_OP_RE = /^&?[0-9]*>>?&?\|?$/;
+// A redirection glued to its target: >file, 2>>file, &>file, >&file (target captured).
+const REDIR_GLUED_RE = /^&?[0-9]*>>?&?\|?(.+)$/;
 const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "mv", "install"]);
 
 /** Detect a Bash command writing to a boundary file (redirect or write-command). */

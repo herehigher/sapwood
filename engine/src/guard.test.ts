@@ -78,6 +78,14 @@ const BLOCK: [string, string, string][] = [
   ["echo x &> .github/workflows/ci.yml", CWD, "write-path"],
   ["echo x &>> engine/src/guard.ts", CWD, "write-path"],
   ["echo x &>engine/src/guard-hook.ts", CWD, "write-path"],
+  // round-3 P1 bypasses (Codex): open-ended uv value-flags, gh api --input POST, >& redirect
+  ["uv run --with rich gh pr merge 1", CWD, "merge"],
+  ["uv run --group dev gh release create v1", CWD, "release"],
+  ["uv run --env-file .env gh pr ready 5", CWD, "ready"],
+  ["gh api repos/o/r/releases --input body.json", CWD, "release"],
+  ["gh api repos/o/r/pulls/1/merge --input x.json", CWD, "merge"],
+  ["echo x >& .github/workflows/ci.yml", CWD, "write-path"],
+  ["echo x >&engine/src/guard.ts", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -122,6 +130,11 @@ const ALLOW: string[] = [
   "{ git status; }",
   "echo x &> /tmp/out.log",
   "env -S 'ls -la'",
+  // round-3 guardrails: benign uv-with, >& to non-boundary, read-only gh after wrapper
+  "uv run --with rich pytest -q",
+  "ls foo 2>&1",
+  "echo x >& /tmp/out.log",
+  "uv run --with rich gh pr view 5 --json state",
 ];
 
 for (const command of ALLOW) {
