@@ -34,8 +34,9 @@ const Board = z.object({
       inProgress: z.string().default("In Progress"),
       done: z.string().default("Done"),
     })
+    .strict()
     .default({}),
-});
+}).strict();
 
 const Lanes = z.object({
   max: z.number().int().positive().default(3),
@@ -43,7 +44,7 @@ const Lanes = z.object({
   reserveCap: z.number().int().nonnegative().default(1),
   prFixCap: z.number().int().nonnegative().default(2),
   frictionMin: z.number().nonnegative().default(0),
-});
+}).strict();
 
 const Worker = z.object({
   model: z.string().default("opus"),
@@ -51,20 +52,20 @@ const Worker = z.object({
   timeoutSec: z.number().int().positive().default(3600),
   budgetUsdSoft: z.number().positive().default(10), // SOFT: reaching it -> graceful handoff
   heartbeatStaleSecs: z.number().int().positive().default(180),
-});
+}).strict();
 
 const Cost = z.object({
   // Engine-enforced HARD ceiling (independent of the drift-prone CLI --max-budget-usd).
   roundBudgetUsd: z.number().positive().default(30),
   dailyBudgetUsd: z.number().positive().default(100),
-});
+}).strict();
 
 const Reviewer = z.object({
   mode: z
     .enum(["different-model-codex", "same-model-trusted", "human", "produce-pr-and-stop"])
     .default("different-model-codex"),
   trustedReviewers: z.array(z.string()).default([]),
-});
+}).strict();
 
 const Labels = z.object({
   inProgress: z.string().default("in-progress"),
@@ -72,7 +73,7 @@ const Labels = z.object({
   blocked: z.string().default("blocked"),
   reserve: z.string().default("reserve"),
   verifyNa: z.string().default("verify:n/a"), // Decision #8: skips the verification-plan gate
-});
+}).strict();
 
 export const ConfigSchema = z.object({
   board: Board,
@@ -83,10 +84,11 @@ export const ConfigSchema = z.object({
   labels: Labels.default({}),
   escalation: z
     .object({ humanLabels: z.array(z.string()).default(["needs-human", "blocked"]) })
+    .strict()
     .default({}),
-  coverage: z.object({ minPercent: z.number().min(0).max(100).default(0) }).default({}),
-  optimize: z.object({ recur: z.boolean().default(false) }).default({}),
-});
+  coverage: z.object({ minPercent: z.number().min(0).max(100).default(0) }).strict().default({}),
+  optimize: z.object({ recur: z.boolean().default(false) }).strict().default({}),
+}).strict();
 
 export type SapwoodConfig = z.infer<typeof ConfigSchema>;
 

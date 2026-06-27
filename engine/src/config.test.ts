@@ -33,6 +33,21 @@ test("rejects an unknown reviewer mode", () => {
   );
 });
 
+test("rejects an unknown key (typo in a safety-critical field is not silently dropped)", () => {
+  // roundBudgetUSd typo must error, not fall back to the default hard ceiling.
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ncost: { roundBudgetUSd: 5 }"),
+    /roundBudgetUSd|[Uu]nrecognized/,
+  );
+});
+
+test("rejects an unknown top-level key", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanez: { max: 2 }"),
+    /lanez|[Uu]nrecognized/,
+  );
+});
+
 test("overrides survive validation", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 9 }\nworker: { effort: low }",
