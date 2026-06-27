@@ -101,7 +101,7 @@ export class GithubForge implements IForge {
     // if the issue isn't on the board or the lane name doesn't exist (no silent no-op).
     const value = this.cfg.board.status[status];
     const project = await this.fetchProject();
-    const itemId = findItemId(project, issue, this.cfg.board.repo);
+    const itemId = findItemId(project, issue, `${this.cfg.board.owner}/${this.cfg.board.repo}`);
     if (!itemId) throw new Error(`setBoardStatus: issue #${issue} is not on project board ${this.cfg.board.projectNumber}`);
     const optionId = findOptionId(project, value);
     if (!optionId) throw new Error(`setBoardStatus: no "${value}" option in the "${this.cfg.board.statusField}" field`);
@@ -284,15 +284,15 @@ export function hasVerificationPlan(body: string, labels: string[], verifyNaLabe
 }
 
 type ReadyCfg = {
-  board: { repo: string; statusField: string; status: { ready: string } };
+  board: { owner: string; repo: string; statusField: string; status: { ready: string } };
   labels: { verifyNa: string };
 };
 
 /** Ready-lane + OPEN + this repo + has-verification-plan. The dispatch work-queue. */
 export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[] {
-  const repoSuffix = `/${cfg.board.repo}`;
+  const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
   return project.items
-    .filter((it) => it.repo.endsWith(repoSuffix))
+    .filter((it) => it.repo === fullName)
     .filter((it) => it.state === "OPEN")
     .filter((it) => it.status === cfg.board.status.ready)
     .filter((it) => hasVerificationPlan(it.body, it.labels, cfg.labels.verifyNa))
@@ -303,11 +303,11 @@ export function findOptionId(project: ParsedProject, name: string): string | und
   return project.options.find((o) => o.name === name)?.id;
 }
 
-/** Item id for an issue. Repo-scoped when `repo` is given (board items are unique by
- *  (repo, number), not number alone — a multi-repo board can hold the same #N twice). */
-export function findItemId(project: ParsedProject, issue: number, repo?: string): string | undefined {
+/** Item id for an issue. Scoped by full `owner/repo` when given — board items are unique by
+ *  (repo, number), and a /repo suffix would also match a foreign `other/repo` (Codex R2 P1). */
+export function findItemId(project: ParsedProject, issue: number, repoFullName?: string): string | undefined {
   return project.items.find(
-    (it) => it.number === issue && (repo === undefined || it.repo.endsWith(`/${repo}`)),
+    (it) => it.number === issue && (repoFullName === undefined || it.repo === repoFullName),
   )?.itemId;
 }
 

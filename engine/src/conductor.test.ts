@@ -130,21 +130,51 @@ test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+n
   assert.deepEqual(byWorker["lane-donenopr"], { kind: "done", worker: "lane-donenopr", issue: 3, next: "ESCALATE_NOPR" });
   assert.deepEqual(forge.labelsAdded, [[3, "needs-human"]]); // only the no-PR done escalates
   assert.equal(st.getWorker("lane-keep")?.state, "running");
-  assert.equal(st.getWorker("lane-donepr")?.state, "done");
+  assert.equal(st.getWorker("lane-donepr")?.state, "driving"); // PR -> lane held for the review gate
+  assert.equal(st.getWorker("lane-donenopr")?.state, "done"); // no PR -> lane freed, escalated
   st.close();
 });
 
-test("tick reclaim: DEAD lane is torn down, board handed back to ready", async () => {
+test("tick reclaim: DEAD lane with NO PR is torn down, board handed back to ready", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-dead", 4);
   sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
-  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4 });
+  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4, rescued: false });
   assert.deepEqual(sup.reclaimed, ["lane-dead"]);
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
   assert.equal(st.getWorker("lane-dead")?.state, "failed");
+  st.close();
+});
+
+test("tick reclaim: DEAD lane WITH a PR is rescued to driving, not requeued (Codex R2 P1)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-deadpr", 6);
+  sup.probes["lane-deadpr"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-deadpr", issue: 6, rescued: true });
+  assert.deepEqual(sup.reclaimed, ["lane-deadpr"]); // orphan still killed
+  assert.deepEqual(forge.boardSet, []); // NOT handed back to Ready (would race the open PR)
+  assert.equal(st.getWorker("lane-deadpr")?.state, "driving");
+  st.close();
+});
+
+test("tick capacity: a reclaimed DONE+PR (driving) lane still occupies a lane (Codex R2 P2)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  // max=1: one lane, already full and the worker is DONE+PR this tick -> becomes driving.
+  seedRunning(st, "lane-driving", 2);
+  sup.probes["lane-driving"] = { ...DEFAULT_PROBE, done: true, hasPr: true };
+  forge.ready = [{ number: 9, title: "", labels: ["prio:3-feature"] }];
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 } }) });
+  assert.equal(st.getWorker("lane-driving")?.state, "driving");
+  assert.deepEqual(sup.dispatched, []); // the driving lane keeps capacity full -> #9 not launched
+  assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 9 && d.reason === "no-lane"));
   st.close();
 });
 

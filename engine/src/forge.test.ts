@@ -109,7 +109,7 @@ const PROJECT_JSON = JSON.stringify({
 });
 
 const cfg = {
-  board: { repo: "sapwood", statusField: "Status", status: { ready: "Ready", inProgress: "In Progress", done: "Done" } },
+  board: { owner: "herehigher", repo: "sapwood", statusField: "Status", status: { ready: "Ready", inProgress: "In Progress", done: "Done" } },
   labels: { verifyNa: "verify:n/a" },
 } as Parameters<typeof selectReadyIssues>[1];
 
@@ -165,9 +165,33 @@ test("findItemId: repo-scoped so a multi-repo board can't hit the wrong #N (Code
     }),
     "Status",
   );
-  assert.equal(findItemId(p, 50, "sapwood"), "ITEM_A"); // repo-scoped picks ours
-  assert.equal(findItemId(p, 50, "0day"), "ITEM_B");
-  assert.equal(findItemId(p, 50), "ITEM_A"); // no repo -> first match (back-compat)
+  assert.equal(findItemId(p, 50, "herehigher/sapwood"), "ITEM_A"); // full owner/repo picks ours
+  assert.equal(findItemId(p, 50, "herehigher/0day"), "ITEM_B");
+  assert.equal(findItemId(p, 50), "ITEM_A"); // no scope -> first match (back-compat)
+});
+
+test("findItemId/selectReadyIssues: full owner/repo, not a /repo suffix (Codex R2 P1)", () => {
+  // A foreign `other/sapwood` item must NOT match a board configured for herehigher/sapwood.
+  const p = parseProject(
+    JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "P",
+            field: { id: "F", options: [{ id: "opt_ready", name: "Ready" }] },
+            items: {
+              nodes: [
+                { id: "FOREIGN", content: { number: 60, title: "foreign", state: "OPEN", body: "## Verification", repository: { nameWithOwner: "other/sapwood" }, labels: { nodes: [] } }, fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] } },
+              ],
+            },
+          },
+        },
+      },
+    }),
+    "Status",
+  );
+  assert.equal(findItemId(p, 60, "herehigher/sapwood"), undefined); // suffix `other/sapwood` rejected
+  assert.deepEqual(selectReadyIssues(p, cfg), []); // foreign item never enters the queue
 });
 
 test("parsePageInfo: reads the items connection cursor (pagination)", () => {

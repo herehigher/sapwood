@@ -173,7 +173,7 @@ export type ReclaimOutcome =
   | { kind: "done"; worker: string; issue: number; next: ReclaimDone }
   | { kind: "failed"; worker: string; issue: number; next: ReclaimFailed }
   | { kind: "handoff"; worker: string; issue: number }
-  | { kind: "dead"; worker: string; issue: number };
+  | { kind: "dead"; worker: string; issue: number; rescued: boolean };
 
 export type DispatchOutcome =
   | { kind: "dispatched"; issue: number; worker: string }
@@ -239,24 +239,44 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       reclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
     } else if (cls === "DONE") {
       const next = laneOnReclaimDone(p.hasPr);
-      state.upsertWorker({ ...w, state: "done", ended_at: iso() });
-      if (next === "ESCALATE_NOPR") await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      if (next === "DRIVING") {
+        // PR produced: hold the lane in `driving` (it still occupies a lane until the M3
+        // review gate resolves it). No requeue, no human escalation.
+        state.upsertWorker({ ...w, state: "driving", ended_at: iso() });
+      } else {
+        // ESCALATE_NOPR: done but no PR -> nothing to drive; free the lane, escalate to human.
+        state.upsertWorker({ ...w, state: "done", ended_at: iso() });
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      }
       state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next });
       reclaimed.push({ kind: "done", worker: w.name, issue: w.issue, next });
     } else if (cls === "FAILED") {
       const next = laneOnReclaimFailed(p.hasPr);
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-      if (next === "ESCALATE") await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      if (next === "DRIVING") {
+        // Failed but a clean PR exists (e.g. budget-exhausted after opening it): rescue —
+        // hold the lane driving for the review gate rather than escalating.
+        state.upsertWorker({ ...w, state: "driving", ended_at: iso() });
+      } else {
+        state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      }
       state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next });
       reclaimed.push({ kind: "failed", worker: w.name, issue: w.issue, next });
     } else {
-      // DEAD: stale heartbeat or confirmed-dead wrapper with no sentinel. Tear the lane
-      // down (process-tree kill + cleanup) and hand the issue back to the Ready lane.
+      // DEAD: stale heartbeat or confirmed-dead wrapper with no sentinel. Always tear the
+      // lane down (process-tree kill + cleanup). If a PR was already opened, rescue it to
+      // `driving` rather than requeuing — requeuing would let a second worker race the open
+      // PR (Codex R2 P1). Only a dead lane with NO PR is handed back to Ready.
       await supervisor.reclaim(w.name);
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-      await forge.setBoardStatus(w.issue, "ready");
-      state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue });
-      reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue });
+      const rescued = p.hasPr;
+      if (rescued) {
+        state.upsertWorker({ ...w, state: "driving", ended_at: iso() });
+      } else {
+        state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+        await forge.setBoardStatus(w.issue, "ready");
+      }
+      state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
+      reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued });
     }
   }
 
@@ -267,8 +287,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // ── DISPATCH: fill free lanes from the Ready queue, by priority, within caps + budget ──
   const dispatched: DispatchOutcome[] = [];
   const overBudget = budgetExceeded(deps.roundSpendUsd ?? 0, cfg.cost.roundBudgetUsd);
-  const inFlightIssues = new Set(state.runningWorkers().map((w) => w.issue)); // re-read post-reclaim
-  let lanesUsed = inFlightIssues.size;
+  // Capacity counts running + driving lanes: a driving lane holds a PR awaiting the review
+  // gate and must keep occupying a lane, else reclaiming a PR-producing worker would free a
+  // slot and over-fill past cfg.lanes.max (Codex R2 P2). Re-read post-reclaim.
+  const active = state.activeWorkers();
+  const inFlightIssues = new Set(active.map((w) => w.issue));
+  let lanesUsed = active.length;
   let dispatchedThisTick = 0;
   let metaUsed = 0; // meta-rank (<=2) lanes taken this tick — anti-starvation accounting
 
