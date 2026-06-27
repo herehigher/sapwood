@@ -1,8 +1,8 @@
-# borehole
+# sapwood
 
 **The autonomous coding loop with governance built in.**
 
-borehole turns a GitHub backlog into merged, reviewed code: *issues in → reviewed
+sapwood turns a GitHub backlog into merged, reviewed code: *issues in → reviewed
 PRs out*. It is a [Claude Code](https://claude.com/claude-code) plugin that drives
 self-directed development through a real governance layer — not a black box that
 self-merges and hopes for the best.
@@ -13,7 +13,7 @@ self-merges and hopes for the best.
 
 ## Why it's different
 
-Most autonomous coding tools ask you to trust the model and let it merge. borehole's
+Most autonomous coding tools ask you to trust the model and let it merge. sapwood's
 core is the opposite: a **fail-closed safety layer** that structurally separates the
 roles in the loop.
 
@@ -48,12 +48,12 @@ GitHub issue (Ready)
 | Milestone | Focus |
 |-----------|-------|
 | M0 | Plugin skeleton, config schema, `IForge` interface, SQLite state |
-| M0.5 | Turnkey onboarding (`borehole init`: board/labels/milestones) |
+| M0.5 | Turnkey onboarding (`sapwood init`: board/labels/milestones) |
 | M1 | Guard port — the fail-closed safety core (ships green first) |
-| M2 | Engine core (conductor/worker) — **borehole starts building borehole** |
+| M2 | Engine core (conductor/worker) — **sapwood starts building sapwood** |
 | M3 | Review gate + opt-in autonomous-merge + cost ceiling |
 | M4 | Commands, status CLI, first-run trust ramp, docs |
-| v0.2 | Dashboard — built *by* borehole itself, as the flagship dogfood |
+| v0.2 | Dashboard — built *by* sapwood itself, as the flagship dogfood |
 
 Built in TypeScript. Targets your own / your team's repos first (trusted context),
 architected toward public-repo hardening.

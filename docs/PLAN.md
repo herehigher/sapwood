@@ -1,4 +1,4 @@
-# borehole — Project Goals & Plan (planning only)
+# sapwood — Project Goals & Plan (planning only)
 
 ## Context
 
@@ -8,7 +8,7 @@ AI-led, GitHub-native, self-directed dev loop. Today that framework is ~4,700
 lines of macOS-bash (~3,400 non-test) entangled with the trading domain, hard to
 read, hard to maintain, and not packaged for anyone else to use.
 
-**borehole** extracts that framework, re-implements the engine in TypeScript, and
+**sapwood** extracts that framework, re-implements the engine in TypeScript, and
 ships it as a **public, production-usable Claude Code plugin** so any repo can run
 "GitHub issues in → reviewed PRs out" with a real governance layer.
 
@@ -18,7 +18,7 @@ product is the trust/governance layer, not a dashboard.** producer≠reviewer≠
 enforced by a fail-closed hook, is the thing no competitor (Sweep, OpenHands,
 Copilot Workspace, Claude's own `/loop`) ships. We lead with that.
 
-The trading domain stays behind in 0day. borehole is the method, not the money.
+The trading domain stays behind in 0day. sapwood is the method, not the money.
 
 ## Positioning & vision
 
@@ -35,9 +35,9 @@ The trading domain stays behind in 0day. borehole is the method, not the money.
   pluggable forge (GitLab/Gitea), pluggable reviewer, public-repo hardening
   (untrusted-input safe), a real supervisor, and eventually a dashboard. v1
   architecture must keep these as *extensions, not rewrites*.
-- **Dogfooding is the proof and the pitch:** from M2 onward, borehole builds
-  borehole — every remaining feature is driven through borehole's own loop. The
-  flagship demonstration is **borehole building its own dashboard (v0.2)**: a
+- **Dogfooding is the proof and the pitch:** from M2 onward, sapwood builds
+  sapwood — every remaining feature is driven through sapwood's own loop. The
+  flagship demonstration is **sapwood building its own dashboard (v0.2)**: a
   recorded autonomous run that produces the dashboard, doubling as the launch
   artifact (the tool building the thing that visualizes it). This is stronger
   evidence than any test suite that the loop handles real, non-trivial work.
@@ -73,17 +73,17 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 4 | Dashboard | **Deferred to v0.2.** v1 ships a CLI/terminal status view; validate demand, then build the dashboard from real usage |
 | 5 | Default merge gate | **0day-style: autonomous-merge gated on a different-model Codex PR review** — gate① CI green + gate② a fresh non-author Codex review → the Conductor merges (producer≠merger). Reviewer is pluggable; **produce-PR-and-stop** (human merges) and same-model self-review remain selectable modes. Different-model default matches 0day and the security review's recommendation. |
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
-| 7 | Config format | **YAML default** — `borehole.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
+| 7 | Config format | **YAML default** — `sapwood.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
 
 ## Architecture (v1)
 
 **Plugin layout:**
 
 ```
-borehole/
+sapwood/
 ├── .claude-plugin/          # plugin manifest (skills, commands, hooks)
 ├── skills/                  # dev-round, dev-loop (ported from 0day skills)
-├── commands/                # /borehole-init, /borehole-run, /borehole-status, /borehole-stop ...
+├── commands/                # /sapwood-init, /sapwood-run, /sapwood-status, /sapwood-stop ...
 ├── engine/                  # TS orchestration engine (the port)
 │   ├── conductor.ts         # scheduler: tick (reclaim→drive→dispatch), state machine
 │   ├── worker.ts            # headless `claude -p` wrapper in a worktree + sentinels
@@ -91,9 +91,9 @@ borehole/
 │   ├── forge.ts             # IForge interface + GithubForge impl (gh CLI/GraphQL)
 │   ├── guard.ts             # fail-closed PreToolUse hook (port of guard.py), zero-dep
 │   ├── reviewer.ts          # pluggable review gate (default = different-model Codex review, 0day-style)
-│   ├── config.ts            # load borehole.config.yaml (yaml→zod), JSON also parses; defaults
+│   ├── config.ts            # load sapwood.config.yaml (yaml→zod), JSON also parses; defaults
 │   ├── state.ts             # SQLite (WAL) state + per-round metrics/events
-│   └── cli.ts               # `borehole` binary: init / status / stop — runs WITHOUT a live session
+│   └── cli.ts               # `sapwood` binary: init / status / stop — runs WITHOUT a live session
 └── docs/                    # getting-started, config ref, security model, troubleshooting
 ```
 
@@ -107,7 +107,7 @@ borehole/
   trusted-reviewer login) into config.
 - **SQLite (WAL) state.** Replaces 0day's non-atomic `jq` read-modify-write with no
   locking (`loop_conductor.sh:738-762`). Conductor stays single-writer-serial;
-  WAL gives atomic writes + concurrent reads (for `borehole status`). Fully durable
+  WAL gives atomic writes + concurrent reads (for `sapwood status`). Fully durable
   → engine restart is always a clean resume. Schema is versioned (migration path).
 - **Structured tick results** (typed discriminated union) replace the stringly-typed
   `DISPATCHED.../RECLAIMED...` text protocol greped by skills.
@@ -116,11 +116,11 @@ borehole/
   `stream-json` cost parsing, and `CLAUDE_BIN` discovery live in one module. State a
   minimum Claude Code CLI version and test against it in CI.
 - **Lifecycle (v1):** conductor ticks via ScheduleWakeup (session-bound — documented
-  limitation; durable SQLite makes restart clean). `borehole status` (the CLI, not a
+  limitation; durable SQLite makes restart clean). `sapwood status` (the CLI, not a
   skill) reads SQLite directly and works with no live session; it detects a dead
   engine and prints the restart command. A real supervisor (launchd/daemon) is v1.1.
 - **Skill↔engine IPC:** skills/commands talk to the engine only through the
-  `borehole` CLI / a read-only state read — never bespoke SQLite coupling per skill.
+  `sapwood` CLI / a read-only state read — never bespoke SQLite coupling per skill.
 
 ## Security & trust model (trusted-first, designed toward public)
 
@@ -157,7 +157,7 @@ rewrite.** v1 requirements:
 
 ## Onboarding / DX (v1)
 
-- **`/borehole-init` + `borehole init`** must be credible and idempotent:
+- **`/sapwood-init` + `sapwood init`** must be credible and idempotent:
   1. **Auth preflight:** `gh auth status` + check `project` scope; if missing, print
      the exact fix (`gh auth refresh -s project`) and exit cleanly.
   2. **User-vs-org detection** before any ProjectV2 mutation.
@@ -165,11 +165,11 @@ rewrite.** v1 requirements:
      before creating; tolerate partial failure; safely re-runnable. (0day stops here
      and asks the human to make the board by hand — `bootstrap_github.sh:89`; we
      automate it.)
-  4. Writes a starter `borehole.config.yaml` (with explanatory comments) and wires the guard hook.
+  4. Writes a starter `sapwood.config.yaml` (with explanatory comments) and wires the guard hook.
 - **First-run trust ramp** (the missing safety UX): a `--dry-run` that lists issues
   it *would* dispatch + estimated cost; a **"watch one issue" supervised mode** that
   pauses after worktree/PR/review for explicit confirmation (the recommended first
-  run); a cost preview; a documented kill switch (`/borehole-stop drain` semantics,
+  run); a cost preview; a documented kill switch (`/sapwood-stop drain` semantics,
   including what happens to in-flight workers).
 - **Reviewer/cost legibility:** first run prints which reviewer/mode is active and its
   cost implication.
@@ -180,10 +180,10 @@ rewrite.** v1 requirements:
 
 ## Build sequencing (planning only)
 
-- **M0 — Skeleton + config + forge:** plugin manifest, `borehole.config.yaml` schema
+- **M0 — Skeleton + config + forge:** plugin manifest, `sapwood.config.yaml` schema
   + Zod + defaults, `IForge` interface + `GithubForge` (all hard-coding removed),
   SQLite (WAL) state layer with schema versioning.
-- **M0.5 — Minimal onboarding:** `borehole init` (auth preflight, user-vs-org,
+- **M0.5 — Minimal onboarding:** `sapwood init` (auth preflight, user-vs-org,
   idempotent board/label/milestone provisioning, config write). Early so real users
   can try it and feedback the config schema before it locks.
 - **M1 — Guard port (safety first):** zero-dep `guard.ts` + reproduced bypass suite
@@ -192,18 +192,18 @@ rewrite.** v1 requirements:
 - **M2 — Engine core:** `conductor.ts` (tick: reclaim→drive→dispatch), `worker.ts`,
   structured tick results; parity tests against 0day's pure-function tests
   (`test_loop_conductor.sh`, `test_loop_merge_driver.sh`). **Dogfood starts here:**
-  run borehole on one borehole issue end-to-end.
+  run sapwood on one sapwood issue end-to-end.
 - **M3 — Review gate + merge modes:** `reviewer.ts` + `merge-driver.ts` with the
   **0day-style default**: autonomous-merge gated on a fresh non-author Codex review
   (gate②) + CI green (gate①), merged by the Conductor. Pluggable reviewer
   (different-model Codex / same-model-trusted-only / human) and a produce-PR-and-stop
   mode; engine cost ceiling + kill switch. Port 0day's `pr_gate.sh` ACTION protocol +
   `loop_merge_driver.sh` (incl. `--match-head-commit` TOCTOU pin).
-- **M4 — UX surface + CLI:** skills/commands (`/borehole-run`, `/borehole-status`,
-  `/borehole-stop`, supervised "watch one issue" mode), `borehole` status CLI,
+- **M4 — UX surface + CLI:** skills/commands (`/sapwood-run`, `/sapwood-status`,
+  `/sapwood-stop`, supervised "watch one issue" mode), `sapwood` status CLI,
   first-run trust ramp, docs set.
-- **v0.2 (post-v1) — Dashboard, built BY borehole (flagship dogfood):** drive the
-  entire dashboard build through borehole's own loop on the borehole repo, and
+- **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
+  entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`
   & `/events` (current-state, from SQLite) → React views (lane board, event feed)
   reusing 0day's TanStack Query polling + replay player + charts (chart/domain
@@ -218,11 +218,11 @@ rewrite.** v1 requirements:
 - **Platform risk:** Anthropic/GitHub could ship native "issues → PRs." Mitigation =
   lead with governance depth + community, the part hardest to absorb.
 - **Persistence:** v1 workers are session-bound (die on SIGHUP); durable SQLite makes
-  restart clean; `borehole status` surfaces dead workers. Real supervisor = v1.1.
+  restart clean; `sapwood status` surfaces dead workers. Real supervisor = v1.1.
 - **Process-tree kill:** `worker.ts` must kill the whole `claude` subtree (process
   groups) — 0day couldn't on bash 3.2.
 - **Dashboard scope inflation (v0.2):** estimate as new frontend work, not a port.
-- **Naming:** "borehole" communicates nothing to a stranger; revisit before public
+- **Naming:** "sapwood" communicates nothing to a stranger; revisit before public
   launch (minor, pre-launch).
 
 ## Verification (how we'll prove v1)
@@ -233,7 +233,7 @@ rewrite.** v1 requirements:
 - **Engine parity:** 0day pure-function tests (priority/blocker/selffeed/merge-decision)
   pass in TS.
 - **Session-death recovery (explicit test):** kill the conductor mid-run, restart,
-  confirm stale-heartbeat reclaim resets lanes to claimable, and `borehole status`
+  confirm stale-heartbeat reclaim resets lanes to claimable, and `sapwood status`
   shows the dead workers.
 - **End-to-end dogfood:** on a trusted throwaway repo — `init` (zero manual GitHub UI
   steps, from clean `gh auth`), seed 2–3 issues. Default 0day-style run:
