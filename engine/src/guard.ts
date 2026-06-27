@@ -158,12 +158,17 @@ function splitFragments(command: string): string[] {
 const SHELL_CMDS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 const INTERPRETER_EVAL_FLAGS: Record<string, Set<string>> = {
   python: new Set(["-c"]),
-  python3: new Set(["-c"]),
   perl: new Set(["-e"]),
   ruby: new Set(["-e"]),
   php: new Set(["-r"]),
   node: new Set(["-e", "--eval"]),
 };
+
+/** Resolve an interpreter's eval flags, tolerating versioned binaries (python3.11, node20). */
+function interpreterEvalFlags(name: string): Set<string> | undefined {
+  const m = /^(python|node|perl|ruby|php)[0-9.]*$/.exec(name);
+  return m ? INTERPRETER_EVAL_FLAGS[m[1]!] : undefined;
+}
 // uv run value-consuming flags (skip flag + value). NOTE: --all-extras is a *boolean* and
 // must NOT be here, else the command after it is mistaken for its value. The allowlist is
 // best-effort; the gh/write scans are position-independent so an unknown flag can't bypass.
@@ -257,7 +262,7 @@ function checkOpaque(tokens: string[], fragment: string): string | null {
   const first = basename(firstRaw).toLowerCase();
   if (SHELL_CMDS.has(first) && shellHasDashC(tokens)) return `BLOCK [opaque] ${firstRaw} -c shell wrapper`;
   if (first === "eval") return "BLOCK [opaque] eval";
-  const evalFlags = INTERPRETER_EVAL_FLAGS[first];
+  const evalFlags = interpreterEvalFlags(first);
   if (evalFlags) {
     for (const tok of tokens.slice(1)) {
       if (evalFlags.has(tok)) return `BLOCK [opaque] ${firstRaw} ${tok} code eval`;
@@ -366,6 +371,11 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
     const sub2 = remaining[1]!.toLowerCase();
     if (sub2 === "merge") return "BLOCK [gh] pr merge — producer must not merge";
     if (sub2 === "ready") return "BLOCK [gh] pr ready — producer must not promote its own PR";
+    // producer ≠ reviewer: a worker must not approve / request-changes (gate② is a fresh
+    // non-author review). A plain `gh pr review --comment` is fine.
+    if (sub2 === "review" && remaining.some((t) => t === "--approve" || t === "-a" || t === "--request-changes")) {
+      return "BLOCK [gh] pr review --approve/--request-changes — producer must not review (producer≠reviewer)";
+    }
   }
   if (sub1 === "release") return "BLOCK [gh] release — producer must not publish releases";
   if (sub1 === "api") return checkGhApi([tokens[0]!, ...remaining], fragment);
@@ -503,12 +513,17 @@ function checkWritePath(filePath: string, cwd: string): string | null {
 const REDIR_OP_RE = /^&?[0-9]*>>?&?\|?$/;
 // A redirection glued to its target: >file, 2>>file, &>file, >&file (target captured).
 const REDIR_GLUED_RE = /^&?[0-9]*>>?&?\|?(.+)$/;
-const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "mv", "install"]);
+// Commands that create/modify/delete a file at a path argument (write or destructive).
+const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "install", "mv", "rm", "git"]);
 
-/** Evaluate one write command's target args; return a block reason or null. */
+/** Evaluate one write/destructive command's path args; return a block reason or null. */
 function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null {
   const hitFor = (t: string): string | null => protectedPathLabel(normalizePath(t, cwd));
   const nonFlag = args.filter((a) => !a.startsWith("-"));
+  const blockAny = (verb: string): string | null => {
+    for (const a of nonFlag) { const h = hitFor(a); if (h) return `BLOCK [write-path] ${verb} ${h} is human-merge-only`; }
+    return null;
+  };
 
   if (cmd === "dd") {
     for (const a of args) if (a.startsWith("of=")) { const h = hitFor(a.slice(3)); if (h) return `BLOCK [write-path] dd writes ${h} is human-merge-only`; }
@@ -516,12 +531,22 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
   }
   if (cmd === "sed" || cmd === "perl") {
     const inPlace = args.some((a) => a === "-i" || a.startsWith("-i") || a === "--in-place" || a.startsWith("--in-place"));
-    if (!inPlace) return null;
-    for (const a of nonFlag) { const h = hitFor(a); if (h) return `BLOCK [write-path] ${cmd} -i edits ${h} is human-merge-only`; }
+    return inPlace ? blockAny(`${cmd} -i edits`) : null;
+  }
+  // rm deletes, and mv moving a boundary file away deletes it from its location — so for
+  // both, ANY protected path arg (source or dest) is blocked.
+  if (cmd === "rm") return blockAny("rm deletes");
+  if (cmd === "mv") return blockAny("mv writes/moves");
+  // git rm / git mv stage destructive changes to the boundary.
+  if (cmd === "git") {
+    const sub = nonFlag[0]?.toLowerCase();
+    if (sub === "rm" || sub === "mv") {
+      for (const a of nonFlag.slice(1)) { const h = hitFor(a); if (h) return `BLOCK [write-path] git ${sub} ${h} is human-merge-only`; }
+    }
     return null;
   }
-  if (cmd === "cp" || cmd === "mv" || cmd === "install") {
-    // destination = -t/--target-directory value if present, else the last non-flag arg.
+  if (cmd === "cp" || cmd === "install") {
+    // cp/install only WRITE the destination (reading a protected source is harmless).
     let dest: string | undefined;
     for (let k = 0; k < args.length; k++) {
       const a = args[k]!;
@@ -534,8 +559,7 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
     return null;
   }
   // tee: every non-flag arg is a write target
-  for (const a of nonFlag) { const h = hitFor(a); if (h) return `BLOCK [write-path] tee writes ${h} is human-merge-only`; }
-  return null;
+  return blockAny("tee writes");
 }
 
 /**

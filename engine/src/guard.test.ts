@@ -94,6 +94,15 @@ const BLOCK: [string, string, string][] = [
   ["env -u FOO -S 'gh pr merge 1'", CWD, "merge"],
   ["uv run --all-extras tee .github/workflows/ci.yml", CWD, "write-path"],
   ["uv run --with rich tee engine/src/guard.ts", CWD, "write-path"],
+  // round-5 P1 bypasses (Codex): versioned interpreter, rm/git rm, pr review approve
+  ["python3.11 -c 'import os; os.system(\"x\")'", CWD, "opaque"],
+  ["node20 -e 'x'", CWD, "opaque"],
+  ["rm engine/src/guard.ts", CWD, "write-path"],
+  ["rm -rf .github/workflows", CWD, "write-path"],
+  ["git rm .github/workflows/ci.yml", CWD, "write-path"],
+  ["mv engine/src/guard.ts /tmp/x", CWD, "write-path"],
+  ["gh pr review 149 --approve", CWD, "review"],
+  ["gh pr review 149 -a", CWD, "review"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -111,7 +120,7 @@ const ALLOW: string[] = [
   "cat README.md",
   "gh pr view 149 --json state",
   "gh api repos/o/r/pulls/149",
-  "gh pr review 149 --approve", // GitHub forbids self-approval; matches 0day
+  "gh pr review 149 --comment -b ok", // commenting is fine; only approve/request-changes blocked
   "gh api -X DELETE repos/o/r/git/refs/heads/feat-x",
   "gh -R o/r pr view 5 --json state",
   "gh -R o/r pr list",
@@ -148,6 +157,11 @@ const ALLOW: string[] = [
   "cp ci.yml /tmp/backup/",
   "uv run --all-extras pytest -q",
   "cp engine/src/forge.ts /tmp/",
+  // round-5 guardrails: benign rm/git/mv on non-boundary, cp reading a protected source
+  "rm /tmp/scratch.txt",
+  "git commit -m wip",
+  "mv src/a.ts src/b.ts",
+  "cp engine/src/guard.ts /tmp/readonly-copy.ts",
 ];
 
 for (const command of ALLOW) {
@@ -209,6 +223,13 @@ test("hook: invalid JSON fails closed (deny)", () => {
 test("hook: non-object payload fails closed (deny)", () => {
   assert.equal(hookResponse(42)?.hookSpecificOutput.permissionDecision, "deny");
   assert.equal(hookResponse(null)?.hookSpecificOutput.permissionDecision, "deny");
+});
+
+test("hook: a guarded tool with missing/non-object tool_input fails closed", () => {
+  assert.equal(hookResponse({ tool_name: "Bash" })?.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(hookResponse({ tool_name: "Write", tool_input: "oops" })?.hookSpecificOutput.permissionDecision, "deny");
+  // a non-guarded tool without input is still fine (allowed)
+  assert.equal(hookResponse({ tool_name: "Read" }), null);
 });
 
 test("hook: a write to a boundary file is denied through the hook", () => {

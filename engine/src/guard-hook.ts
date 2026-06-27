@@ -7,6 +7,9 @@
 // safety hook. The pure mapping (`hookResponse`) is offline-testable; only `main()` does IO.
 import { guardDecision, type GuardInput } from "./guard.js";
 
+// Tools the guard actually inspects — a malformed tool_input for these fails closed.
+const GUARDED_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit"]);
+
 export interface DenyOutput {
   hookSpecificOutput: {
     hookEventName: "PreToolUse";
@@ -30,7 +33,14 @@ export function hookResponse(payload: unknown): DenyOutput | null {
   try {
     const p = payload as Record<string, unknown>;
     const tool = typeof p["tool_name"] === "string" ? p["tool_name"] : "";
-    const toolInput = (p["tool_input"] && typeof p["tool_input"] === "object" ? p["tool_input"] : {}) as GuardInput;
+    const rawInput = p["tool_input"];
+    const inputIsObject = typeof rawInput === "object" && rawInput !== null;
+    // For a guarded tool, a missing/non-object tool_input means we can't inspect what it
+    // would do → fail closed rather than treat it as an empty (and therefore allowed) call.
+    if (GUARDED_TOOLS.has(tool) && !inputIsObject) {
+      return deny(`BLOCK [fail-closed] ${tool} with malformed tool_input`);
+    }
+    const toolInput = (inputIsObject ? rawInput : {}) as GuardInput;
     const cwd = typeof p["cwd"] === "string" ? p["cwd"] : "";
     const decision = guardDecision(tool, toolInput, cwd);
     return decision.allow ? null : deny(decision.reason);
