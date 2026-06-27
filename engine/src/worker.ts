@@ -140,10 +140,13 @@ export class WorkerSupervisor implements Supervisor {
     const prompt = (this.deps.renderPrompt ?? defaultPrompt)(issue);
     const jsonlPath = this.path(laneName, "jsonl");
     const jsonlFd = openSync(jsonlPath, "w");
+    // NB: NO --add-dir for the engine `data/` tree. That dir holds the sentinels + SQLite
+    // state; mounting it would let the worker write its own .done/.failed or mutate state,
+    // defeating "completion is signaled by the WRAPPER, not the model" (Codex R3 P1). The
+    // worker only needs its --worktree (the repo). Guard-hook --settings lands in #26.
     const args = claudeArgs({
       prompt, model: this.deps.cfg.worker.model, effort: this.deps.cfg.worker.effort,
       worktree: laneName, name: laneName, sessionId,
-      addDir: join(process.cwd(), "data"),
     });
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree
     // via kill(-pid) even if a grandchild reparents (the tree-kill 0day couldn't do on bash 3.2).
@@ -234,9 +237,17 @@ export class WorkerSupervisor implements Supervisor {
       const cost = parseCostUsd(this.readJsonl(lane.jsonlPath));
       const endedAt = this.now().toISOString();
       const base = { name, issue: lane.issue, session_id: lane.sessionId, total_cost_usd: cost, ended_at: endedAt };
-      // timedOut takes precedence (a stuck handoff that hit the ceiling is a failure, not a
-      // clean handoff). Otherwise: requested handoff -> handoff; exit 0 -> done; else failed.
-      const tag = lane.timedOut ? "failed" : lane.handoffRequested ? "handoff" : code === 0 ? "done" : "failed";
+      // .handoff means "resumable, work preserved" — claim it ONLY when the worker exited
+      // cleanly (code 0) AFTER a handoff request, i.e. it caught SIGTERM and completed its
+      // commit/checkpoint. A handoff-requested worker that died by signal/non-zero was aborted
+      // mid-step -> .failed, not a false "resumable" (Codex R3 P2). timedOut is always failed.
+      const tag = lane.timedOut
+        ? "failed"
+        : lane.handoffRequested && code === 0
+          ? "handoff"
+          : code === 0
+            ? "done"
+            : "failed";
       this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: code });
       this.removeIfExists(this.path(name, "running.json"));
     }

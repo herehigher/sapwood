@@ -128,17 +128,35 @@ test("reclaim kills a stubborn (ignores TERM) claude subtree via SIGKILL", async
 test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not killed)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    // A worker that's still running (sleeps); no TERM trap -> SIGTERM ends it gracefully.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    // A COOPERATIVE worker: catches SIGTERM and exits 0 (it checkpointed/committed). Only a
+    // clean exit-0 after a handoff request counts as a resumable .handoff.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
-    await sleep(60); // let it start
+    await sleep(300); // let bash install its TERM trap before we drain (else it dies by default)
     assert.equal(s.requestHandoff(name), true);
     for (let i = 0; i < 150 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
-    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff sentinel written on requestHandoff");
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff sentinel written on cooperative drain");
     assert.ok(!existsSync(join(dir, `${name}.done.json`)) && !existsSync(join(dir, `${name}.failed.json`)));
     const probe = await s.probe(name);
     assert.equal(probe.handoff, true);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("requestHandoff but the worker dies by signal (no clean wrap-up) -> .failed, not a false handoff (Codex R3 P2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`); // no TERM trap -> SIGTERM kills it (code null)
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
+    await sleep(60);
+    s.requestHandoff(name);
+    for (let i = 0; i < 150 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.failed.json`)), "aborted (signal-killed) drain is .failed");
+    assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "NOT a false resumable handoff");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
