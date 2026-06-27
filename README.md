@@ -58,7 +58,7 @@ GitHub issue (Ready)
 |-----------|-------|
 | M0 ✅ | Plugin skeleton, config schema, `IForge` interface, SQLite state — **shipped** |
 | M0.5 ✅ | Turnkey onboarding (`sapwood init`: board/labels/milestones) — **shipped** |
-| M1 | Guard port — the fail-closed safety core (ships green first) |
+| M1 ✅ | Guard port — the fail-closed safety core (ships green first) — **shipped** |
 | M2 | Engine core (conductor/worker) — **sapwood starts building sapwood** |
 | M3 | Review gate + opt-in autonomous-merge + cost ceiling |
 | M4 | Commands, status CLI, first-run trust ramp, docs |
