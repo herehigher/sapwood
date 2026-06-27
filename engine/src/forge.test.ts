@@ -8,6 +8,7 @@ import {
   findItemId,
   hasVerificationPlan,
   parsePageInfo,
+  projectQuery,
 } from "./forge.js";
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —
@@ -119,6 +120,14 @@ test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section
   assert.equal(hasVerificationPlan("no plan here", ["verify:n/a"], "verify:n/a"), true); // doc-gate path
   assert.equal(hasVerificationPlan("no plan here", ["type:feature"], "verify:n/a"), false); // fail-closed
   assert.equal(hasVerificationPlan("", [], "verify:n/a"), false);
+});
+
+test("projectQuery: no line is a // comment (GraphQL uses #, not //) — Codex R5 P1 guard", () => {
+  for (const root of ["user", "organization"] as const) {
+    const q = projectQuery(root, "Status");
+    const offending = q.split("\n").filter((l) => l.trimStart().startsWith("//"));
+    assert.deepEqual(offending, [], `'//' comment lines are invalid GraphQL: ${offending.join(" | ")}`);
+  }
 });
 
 test("parseProject: extracts project id, status field id, options, items (owner-kind agnostic)", () => {

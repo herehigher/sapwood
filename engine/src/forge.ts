@@ -208,9 +208,10 @@ query($login: String!, $number: Int!, $after: String) {
               labels(first: 100) { nodes { name } }
             }
           }
-          // first:100 — an item has at most one value per project field, and GitHub caps a
-          // ProjectV2 at ~50 fields, so 100 can't truncate the Status value of a real board
-          // (a first:20 could, dropping otherwise-Ready issues). (Codex R3 P2, PR #30.)
+          # first:100 — an item has at most one value per project field, and GitHub caps a
+          # ProjectV2 at ~50 fields, so 100 can't truncate the Status value of a real board
+          # (a first:20 could, dropping otherwise-Ready issues). (Codex R3 P2, PR #30.)
+          # NB: GraphQL comments are '#', not '//' — '//' here is a syntax error (Codex R5 P1).
           fieldValues(first: 100) {
             nodes {
               ... on ProjectV2ItemFieldSingleSelectValue {
