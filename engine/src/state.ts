@@ -107,6 +107,13 @@ export class State {
       | undefined;
   }
 
+  /** In-flight lanes: workers still in the `running` state (the conductor reclaim set). */
+  runningWorkers(): WorkerRow[] {
+    return this.db
+      .prepare("SELECT * FROM workers WHERE state = 'running' ORDER BY name")
+      .all() as unknown as WorkerRow[];
+  }
+
   appendEvent(kind: string, payload: unknown): void {
     this.db
       .prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)")

@@ -50,14 +50,26 @@ export class GithubForge implements IForge {
     return out.trim() === "Organization" ? "org" : "user";
   }
 
+  /** Fetch + parse the ProjectV2 board (items + Status field options). One round-trip. */
+  private async fetchProject(): Promise<ParsedProject> {
+    const kind = this.cfg.board.ownerKind ?? (await this.detectOwnerKind(this.cfg.board.owner));
+    const root = kind === "org" ? "organization" : "user";
+    const query = projectQuery(root, this.cfg.board.statusField);
+    const out = await this.gh([
+      "api", "graphql",
+      "-f", `query=${query}`,
+      "-f", `login=${this.cfg.board.owner}`,
+      "-F", `number=${this.cfg.board.projectNumber}`,
+    ]);
+    return parseProject(out, this.cfg.board.statusField);
+  }
+
   async getReadyIssues(): Promise<Issue[]> {
-    // FAIL CLOSED until M2. This is the source-of-truth work-queue boundary: it must
-    // return only ProjectV2 items in the configured Ready lane (cfg.board.status.ready)
-    // that also carry a verification plan (Decision #8) — never every open issue, which
-    // would dispatch Backlog/Blocked/untriaged work. The ProjectV2 GraphQL query lands
-    // with the conductor (M2); until then, returning nothing-but-throwing is the safe
-    // posture (better no dispatch than a wrong one).
-    throw new Error("getReadyIssues: ProjectV2 Ready-lane query wired in M2 (conductor)");
+    // Source-of-truth work-queue boundary: only ProjectV2 items in the configured Ready
+    // lane, OPEN, in THIS repo, that also carry a verification plan (Decision #8). Never
+    // every open issue. Fail-closed: a missing plan -> not returned -> not dispatched.
+    const project = await this.fetchProject();
+    return selectReadyIssues(project, this.cfg);
   }
 
   async claimIssue(issue: number): Promise<void> {
@@ -66,11 +78,22 @@ export class GithubForge implements IForge {
   }
 
   async setBoardStatus(issue: number, status: "ready" | "inProgress" | "done"): Promise<void> {
-    // ProjectV2 single-select mutation; concrete GraphQL lands with the conductor (M2).
-    // The status *value* comes from config (cfg.board.status[status]), never a literal.
+    // ProjectV2 single-select mutation. The status *value* comes from config
+    // (cfg.board.status[status]), never a literal. Resolve ids, then mutate. Fail closed
+    // if the issue isn't on the board or the lane name doesn't exist (no silent no-op).
     const value = this.cfg.board.status[status];
-    void issue; void value;
-    throw new Error("setBoardStatus: ProjectV2 mutation wired in M2 (conductor)");
+    const project = await this.fetchProject();
+    const itemId = findItemId(project, issue);
+    if (!itemId) throw new Error(`setBoardStatus: issue #${issue} is not on project board ${this.cfg.board.projectNumber}`);
+    const optionId = findOptionId(project, value);
+    if (!optionId) throw new Error(`setBoardStatus: no "${value}" option in the "${this.cfg.board.statusField}" field`);
+    await this.gh([
+      "api", "graphql", "-f", `query=${BOARD_MUTATION}`,
+      "-f", `projectId=${project.projectId}`,
+      "-f", `itemId=${itemId}`,
+      "-f", `fieldId=${project.statusFieldId}`,
+      "-f", `optionId=${optionId}`,
+    ]);
   }
 
   async addLabel(issue: number, label: string): Promise<void> {
@@ -112,6 +135,157 @@ export class GithubForge implements IForge {
   private repo(): string {
     return this.cfg.board.repo;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProjectV2 board — pure parse/select helpers (exported for offline testing). The
+// GraphQL plumbing above is the only impure part; everything below is deterministic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ProjectItem {
+  itemId: string;
+  number: number;
+  title: string;
+  state: string;
+  body: string;
+  repo: string; // nameWithOwner
+  labels: string[];
+  status: string | null; // current Status single-select value, if set
+}
+
+export interface ParsedProject {
+  projectId: string;
+  statusFieldId: string;
+  options: { name: string; id: string }[];
+  items: ProjectItem[];
+}
+
+/** The project query. `root` is "user" or "organization" (owner-kind agnostic downstream). */
+export function projectQuery(root: "user" | "organization", statusField: string): string {
+  return `
+query($login: String!, $number: Int!) {
+  ${root}(login: $login) {
+    projectV2(number: $number) {
+      id
+      field(name: ${JSON.stringify(statusField)}) {
+        ... on ProjectV2SingleSelectField { id options { id name } }
+      }
+      items(first: 100) {
+        nodes {
+          id
+          content {
+            ... on Issue {
+              number title state body
+              repository { nameWithOwner }
+              labels(first: 100) { nodes { name } }
+            }
+          }
+          fieldValues(first: 20) {
+            nodes {
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                name
+                field { ... on ProjectV2SingleSelectField { name } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+}
+
+export const BOARD_MUTATION = `
+mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+    value: { singleSelectOptionId: $optionId }
+  }) { projectV2Item { id } }
+}`;
+
+/** Parse the project query response. Owner-kind agnostic: reads data.user ?? data.organization. */
+export function parseProject(json: string, statusField: string): ParsedProject {
+  const d = JSON.parse(json) as { data?: { user?: unknown; organization?: unknown } };
+  const owner = (d.data?.user ?? d.data?.organization) as
+    | {
+        projectV2?: {
+          id: string;
+          field?: { id?: string; options?: { id: string; name: string }[] };
+          items?: { nodes?: RawItem[] };
+        };
+      }
+    | undefined;
+  const proj = owner?.projectV2;
+  if (!proj) throw new Error("parseProject: no projectV2 in response (bad owner/number, or missing project scope)");
+  const items: ProjectItem[] = (proj.items?.nodes ?? [])
+    .filter((n): n is RawItem & { content: NonNullable<RawItem["content"]> } => n?.content?.number != null)
+    .map((n) => ({
+      itemId: n.id,
+      number: n.content.number as number, // narrowed by the filter above
+      title: n.content.title ?? "",
+      state: n.content.state ?? "",
+      body: n.content.body ?? "",
+      repo: n.content.repository?.nameWithOwner ?? "",
+      labels: (n.content.labels?.nodes ?? []).map((l) => l.name),
+      status: statusValue(n, statusField),
+    }));
+  return {
+    projectId: proj.id,
+    statusFieldId: proj.field?.id ?? "",
+    options: proj.field?.options ?? [],
+    items,
+  };
+}
+
+interface RawItem {
+  id: string;
+  content?: {
+    number?: number;
+    title?: string;
+    state?: string;
+    body?: string;
+    repository?: { nameWithOwner?: string };
+    labels?: { nodes?: { name: string }[] };
+  };
+  fieldValues?: { nodes?: { name?: string; field?: { name?: string } }[] };
+}
+
+function statusValue(item: RawItem, statusField: string): string | null {
+  for (const fv of item.fieldValues?.nodes ?? []) {
+    if (fv.field?.name === statusField && fv.name != null) return fv.name;
+  }
+  return null;
+}
+
+/** True if the issue carries a verification plan (Decision #8): verify:n/a label OR a
+ *  Verification/Acceptance section in the body. Fail-closed: no signal -> false. */
+export function hasVerificationPlan(body: string, labels: string[], verifyNaLabel: string): boolean {
+  if (labels.includes(verifyNaLabel)) return true;
+  return /(^|\n)#{1,6}\s*(verification|acceptance)/i.test(body);
+}
+
+type ReadyCfg = {
+  board: { repo: string; statusField: string; status: { ready: string } };
+  labels: { verifyNa: string };
+};
+
+/** Ready-lane + OPEN + this repo + has-verification-plan. The dispatch work-queue. */
+export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[] {
+  const repoSuffix = `/${cfg.board.repo}`;
+  return project.items
+    .filter((it) => it.repo.endsWith(repoSuffix))
+    .filter((it) => it.state === "OPEN")
+    .filter((it) => it.status === cfg.board.status.ready)
+    .filter((it) => hasVerificationPlan(it.body, it.labels, cfg.labels.verifyNa))
+    .map((it) => ({ number: it.number, title: it.title, labels: it.labels }));
+}
+
+export function findOptionId(project: ParsedProject, name: string): string | undefined {
+  return project.options.find((o) => o.name === name)?.id;
+}
+
+export function findItemId(project: ParsedProject, issue: number): string | undefined {
+  return project.items.find((it) => it.number === issue)?.itemId;
 }
 
 /** Pure parse of `gh pr view --json ...` output. Exported for offline testing. */

@@ -1,6 +1,147 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parsePRStatus } from "./forge.js";
+import {
+  parsePRStatus,
+  parseProject,
+  selectReadyIssues,
+  findOptionId,
+  findItemId,
+  hasVerificationPlan,
+} from "./forge.js";
+
+// A representative ProjectV2 query response. `data.user` or `data.organization` —
+// the parser is owner-kind agnostic (reads whichever root is present).
+const PROJECT_JSON = JSON.stringify({
+  data: {
+    user: {
+      projectV2: {
+        id: "PVT_proj",
+        field: {
+          id: "PVTF_status",
+          options: [
+            { id: "opt_ready", name: "Ready" },
+            { id: "opt_wip", name: "In Progress" },
+            { id: "opt_done", name: "Done" },
+          ],
+        },
+        items: {
+          nodes: [
+            {
+              id: "ITEM_10",
+              content: {
+                number: 10,
+                title: "ready with plan",
+                state: "OPEN",
+                body: "Do the thing.\n## Verification\n- run npm test",
+                repository: { nameWithOwner: "herehigher/sapwood" },
+                labels: { nodes: [{ name: "type:feature" }, { name: "prio:1-high" }] },
+              },
+              fieldValues: {
+                nodes: [{ name: "Ready", field: { name: "Status" } }],
+              },
+            },
+            {
+              id: "ITEM_11",
+              content: {
+                number: 11,
+                title: "ready but NO verification plan",
+                state: "OPEN",
+                body: "just vibes",
+                repository: { nameWithOwner: "herehigher/sapwood" },
+                labels: { nodes: [{ name: "type:feature" }] },
+              },
+              fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+            },
+            {
+              id: "ITEM_12",
+              content: {
+                number: 12,
+                title: "ready, verify:n/a (doc-gate path)",
+                state: "OPEN",
+                body: "no plan needed",
+                repository: { nameWithOwner: "herehigher/sapwood" },
+                labels: { nodes: [{ name: "type:docs" }, { name: "verify:n/a" }] },
+              },
+              fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+            },
+            {
+              id: "ITEM_13",
+              content: {
+                number: 13,
+                title: "in progress (not Ready lane)",
+                state: "OPEN",
+                body: "## Verification\nx",
+                repository: { nameWithOwner: "herehigher/sapwood" },
+                labels: { nodes: [] },
+              },
+              fieldValues: { nodes: [{ name: "In Progress", field: { name: "Status" } }] },
+            },
+            {
+              id: "ITEM_14",
+              content: {
+                number: 14,
+                title: "ready but a different repo",
+                state: "OPEN",
+                body: "## Verification\nx",
+                repository: { nameWithOwner: "herehigher/0day" },
+                labels: { nodes: [] },
+              },
+              fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+            },
+            {
+              id: "ITEM_15",
+              content: {
+                number: 15,
+                title: "ready but CLOSED",
+                state: "CLOSED",
+                body: "## Verification\nx",
+                repository: { nameWithOwner: "herehigher/sapwood" },
+                labels: { nodes: [{ name: "verify:n/a" }] },
+              },
+              fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+            },
+          ],
+        },
+      },
+    },
+  },
+});
+
+const cfg = {
+  board: { repo: "sapwood", statusField: "Status", status: { ready: "Ready", inProgress: "In Progress", done: "Done" } },
+  labels: { verifyNa: "verify:n/a" },
+} as Parameters<typeof selectReadyIssues>[1];
+
+test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section", () => {
+  assert.equal(hasVerificationPlan("## Verification\nrun tests", [], "verify:n/a"), true);
+  assert.equal(hasVerificationPlan("### Acceptance criteria", [], "verify:n/a"), true);
+  assert.equal(hasVerificationPlan("no plan here", ["verify:n/a"], "verify:n/a"), true); // doc-gate path
+  assert.equal(hasVerificationPlan("no plan here", ["type:feature"], "verify:n/a"), false); // fail-closed
+  assert.equal(hasVerificationPlan("", [], "verify:n/a"), false);
+});
+
+test("parseProject: extracts project id, status field id, options, items (owner-kind agnostic)", () => {
+  const p = parseProject(PROJECT_JSON, "Status");
+  assert.equal(p.projectId, "PVT_proj");
+  assert.equal(p.statusFieldId, "PVTF_status");
+  assert.equal(findOptionId(p, "In Progress"), "opt_wip");
+  assert.equal(findItemId(p, 12), "ITEM_12");
+  assert.equal(p.items.length, 6);
+});
+
+test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (Decision #8)", () => {
+  const p = parseProject(PROJECT_JSON, "Status");
+  const ready = selectReadyIssues(p, cfg);
+  // #10 (has plan) and #12 (verify:n/a) pass. #11 no plan, #13 not Ready, #14 other repo, #15 closed -> all out.
+  assert.deepEqual(ready.map((i) => i.number).sort((a, b) => a - b), [10, 12]);
+  assert.deepEqual(ready.find((i) => i.number === 10)?.labels, ["type:feature", "prio:1-high"]);
+});
+
+test("findOptionId/findItemId: missing -> undefined (caller fails closed)", () => {
+  const p = parseProject(PROJECT_JSON, "Status");
+  assert.equal(findOptionId(p, "Nonexistent"), undefined);
+  assert.equal(findItemId(p, 999), undefined);
+});
 
 test("parsePRStatus: clean mergeable PR with passing checks", () => {
   const s = parsePRStatus(
