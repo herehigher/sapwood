@@ -130,15 +130,18 @@ export function parsePRStatus(json: string): PRStatus {
     statusCheckRollup?: { conclusion?: string | null; state?: string | null }[];
   };
   const checks = d.statusCheckRollup ?? [];
-  // Green only when every check is in a *completed* passing state. A null/absent
-  // conclusion on a CheckRun means queued/in-progress — NOT green (else autonomous-merge
-  // could merge mid-CI). SKIPPED/NEUTRAL are completed non-failing. For StatusContext
-  // entries (no conclusion), accept a passing `state`. No checks at all (docs-only repo)
-  // is green. (Codex P1 + P2, PR #22.)
+  // FAIL CLOSED: green only when there is >=1 check AND every check is in a *completed*
+  // passing state. An EMPTY rollup is NOT green — on a fresh/just-pushed PR, checks may
+  // not be created yet, so empty != "this repo has no CI". A null/absent conclusion on a
+  // CheckRun means queued/in-progress (not green); SKIPPED/NEUTRAL are completed
+  // non-failing; StatusContext entries (no conclusion) pass on state==SUCCESS.
+  // ponytail: genuinely CI-less repos get an explicit `ci.requireChecks: false` opt-in
+  // when the merge gate is wired (M3), not a silent empty-means-green default.
+  // (Codex P1/P2, PR #22.)
   const PASSING = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
-  const ciGreen = checks.every((c) =>
-    c.conclusion != null ? PASSING.has(c.conclusion) : c.state === "SUCCESS",
-  );
+  const ciGreen =
+    checks.length > 0 &&
+    checks.every((c) => (c.conclusion != null ? PASSING.has(c.conclusion) : c.state === "SUCCESS"));
   return {
     number: d.number,
     headOid: d.headRefOid,

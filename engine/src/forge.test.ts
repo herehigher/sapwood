@@ -15,11 +15,11 @@ test("parsePRStatus: clean mergeable PR with passing checks", () => {
   assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: true, ciGreen: true });
 });
 
-test("parsePRStatus: no checks configured counts as green (docs-only repo)", () => {
+test("parsePRStatus: an empty rollup fails closed (checks may not be created yet)", () => {
   const s = parsePRStatus(
     JSON.stringify({ number: 1, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] }),
   );
-  assert.equal(s.ciGreen, true);
+  assert.equal(s.ciGreen, false); // genuinely CI-less repos opt in via ci.requireChecks (M3)
 });
 
 test("parsePRStatus: a queued/in-progress check (null conclusion) is not green", () => {
