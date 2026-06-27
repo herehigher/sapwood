@@ -159,6 +159,40 @@ test("dispatch rejects (and cleans up) when claude can't spawn — bad CLAUDE_BI
   }
 });
 
+test("enforces worker timeout: a run past timeoutSec is killed and marked failed (Codex R2 P1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // ignores TERM -> needs the KILL
+    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
+    const s = new WorkerSupervisor({ cfg: tcfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 100 });
+    const { name } = await s.dispatch({ number: 5, title: "t", labels: [] });
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    for (let i = 0; i < 250 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.failed.json`)), "timed-out worker marked failed");
+    for (let i = 0; i < 100 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "timed-out worker process killed");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fast non-zero exit writes .failed (exit handler attached before the await) — Codex R2 P2", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 3\n`); // exits immediately, like the CLI rejecting args
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 8, title: "t", labels: [] }, "lane-fast");
+    for (let i = 0; i < 100 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.failed.json`)), "fast exit still recorded a .failed sentinel");
+    const probe = await s.probe(name);
+    assert.equal(probe.failed, true);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);

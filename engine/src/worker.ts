@@ -100,9 +100,11 @@ interface Lane {
   sessionId: string;
   jsonlFd: number;
   jsonlPath: string;
-  hb: NodeJS.Timeout;
+  hb: NodeJS.Timeout | undefined; // set once the spawn is confirmed still-running
   handoffRequested: boolean;
   reclaiming: boolean;
+  startedMs: number; // wall-clock start, for the timeoutSec ceiling
+  timedOut: boolean;
 }
 
 export class WorkerSupervisor implements Supervisor {
@@ -146,35 +148,44 @@ export class WorkerSupervisor implements Supervisor {
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree
     // via kill(-pid) even if a grandchild reparents (the tree-kill 0day couldn't do on bash 3.2).
     const child = spawn(this.bin, args, { detached: true, stdio: ["ignore", jsonlFd, jsonlFd] });
-    // spawn() reports a bad CLAUDE_BIN / missing `claude` via an async `error` event, not a
-    // throw — so AWAIT the spawn outcome before reporting success. On failure clean up and
-    // reject, so the conductor's claim-rollback runs and no bogus running marker is left
-    // (Codex PR #32 P2). Without this, dispatch() returns success then the process crashes
-    // on the unhandled error.
-    try {
-      await new Promise<void>((resolve, reject) => {
-        child.once("spawn", resolve);
-        child.once("error", reject);
-      });
-    } catch (err) {
-      try { closeSync(jsonlFd); } catch { /* noop */ }
-      this.removeIfExists(jsonlPath);
-      throw new Error(`worker spawn failed (${this.bin}): ${String(err)}`);
-    }
-    const startedAt = this.now().toISOString();
-    this.writeJsonAtomic(this.path(laneName, "running.json"), {
-      name: laneName, issue: issue.number, session_id: sessionId, wrapper_pid: child.pid, started_at: startedAt,
-    });
-    this.touchHeartbeat(laneName);
+    // Register the lane + `exit` handler BEFORE any await. Node does not replay `exit` to
+    // listeners attached after it fires, so a fast exit (instant completion / the CLI
+    // rejecting args) must already have its handler or its terminal sentinel is lost and the
+    // conductor mis-reads the lane as DEAD (Codex PR #32 R2 P2).
     const lane: Lane = {
       child, issue: issue.number, sessionId, jsonlFd, jsonlPath,
-      hb: setInterval(() => this.heartbeatTick(laneName), this.hbMs),
-      handoffRequested: false, reclaiming: false,
+      hb: undefined, handoffRequested: false, reclaiming: false,
+      startedMs: this.now().getTime(), timedOut: false,
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
-    // A post-spawn error (rare) must not crash the host — treat it as a failed exit.
+
+    // spawn() reports a bad CLAUDE_BIN / missing `claude` via an async `error` event, not a
+    // throw — AWAIT the spawn outcome before reporting success. On failure clean up + reject
+    // so the conductor's claim-rollback runs and no bogus running marker is left (Codex R1 P2).
+    let spawnErr: unknown;
+    await new Promise<void>((resolve) => {
+      child.once("spawn", () => resolve());
+      child.once("error", (e) => { spawnErr = e; resolve(); });
+    });
+    if (spawnErr) {
+      this.lanes.delete(laneName);
+      try { closeSync(jsonlFd); } catch { /* noop */ }
+      this.removeIfExists(jsonlPath);
+      throw new Error(`worker spawn failed (${this.bin}): ${String(spawnErr)}`);
+    }
+    // Post-spawn error (rare) must not crash the host — route to a failed exit.
     child.on("error", () => this.onExit(laneName, 1));
+    // Only set up the running marker + heartbeat if the child is still alive — a very fast
+    // exit during the await is already handled by onExit (lane removed); don't resurrect it.
+    if (this.lanes.has(laneName) && child.exitCode === null && child.signalCode === null) {
+      this.writeJsonAtomic(this.path(laneName, "running.json"), {
+        name: laneName, issue: issue.number, session_id: sessionId,
+        wrapper_pid: child.pid, started_at: new Date(lane.startedMs).toISOString(),
+      });
+      this.touchHeartbeat(laneName);
+      lane.hb = setInterval(() => this.heartbeatTick(laneName), this.hbMs);
+    }
     return { name: laneName, sessionId };
   }
 
@@ -191,12 +202,25 @@ export class WorkerSupervisor implements Supervisor {
     return true;
   }
 
-  /** Outer liveness heartbeat (mtime), independent of the model self-reporting. NOTE: this
-   *  deliberately does NOT monitor cost — stream-json carries no in-progress total_cost_usd
-   *  (it's only in the terminal result message), so a per-tick cost check would read 0 the
-   *  whole run and never fire. Auto cost-triggered handoff is a follow-up; requestHandoff()
-   *  is the live (drain) path for M2. */
+  /** Outer liveness heartbeat (mtime), independent of the model self-reporting, plus the
+   *  wall-clock timeout ceiling. NOTE: this deliberately does NOT monitor cost — stream-json
+   *  carries no in-progress total_cost_usd (only the terminal result message has it), so a
+   *  per-tick cost check would read 0 the whole run. Auto cost-triggered handoff is a
+   *  follow-up (#33); requestHandoff() is the live (drain) path for M2. */
   private heartbeatTick(name: string): void {
+    const lane = this.lanes.get(name);
+    if (!lane || lane.reclaiming) return;
+    // Wall-clock timeout: a hung/overlong claude must not hold a lane forever (without this,
+    // a fresh heartbeat + live pid make classifyLane return KEEP indefinitely — Codex R2 P1;
+    // 0day wrapped claude in run_timeout). Past timeoutSec: stop refreshing AND kill the tree
+    // -> onExit writes .failed -> the conductor reclaims the lane.
+    const elapsedSec = (this.now().getTime() - lane.startedMs) / 1000;
+    if (!lane.timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
+      lane.timedOut = true;
+      if (lane.hb) clearInterval(lane.hb);
+      void this.killTree(lane.child);
+      return;
+    }
     this.touchHeartbeat(name);
   }
 
@@ -210,7 +234,9 @@ export class WorkerSupervisor implements Supervisor {
       const cost = parseCostUsd(this.readJsonl(lane.jsonlPath));
       const endedAt = this.now().toISOString();
       const base = { name, issue: lane.issue, session_id: lane.sessionId, total_cost_usd: cost, ended_at: endedAt };
-      const tag = lane.handoffRequested ? "handoff" : code === 0 ? "done" : "failed";
+      // timedOut takes precedence (a stuck handoff that hit the ceiling is a failure, not a
+      // clean handoff). Otherwise: requested handoff -> handoff; exit 0 -> done; else failed.
+      const tag = lane.timedOut ? "failed" : lane.handoffRequested ? "handoff" : code === 0 ? "done" : "failed";
       this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: code });
       this.removeIfExists(this.path(name, "running.json"));
     }
