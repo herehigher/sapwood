@@ -76,6 +76,13 @@ test("rejects an unknown top-level key", () => {
   );
 });
 
+test("rejects a non-finite budget ceiling (overflow must not disable the cap)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ncost: { roundBudgetUsd: 1e999 }"),
+    /roundBudgetUsd|finite/i,
+  );
+});
+
 test("overrides survive validation", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 9 }\nworker: { effort: low }",

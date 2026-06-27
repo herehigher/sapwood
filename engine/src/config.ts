@@ -50,14 +50,16 @@ const Worker = z.object({
   model: z.string().default("opus"),
   effort: z.enum(["low", "medium", "high"]).default("high"),
   timeoutSec: z.number().int().positive().default(3600),
-  budgetUsdSoft: z.number().positive().default(10), // SOFT: reaching it -> graceful handoff
+  budgetUsdSoft: z.number().finite().positive().default(10), // SOFT: reaching it -> graceful handoff
   heartbeatStaleSecs: z.number().int().positive().default(180),
 }).strict();
 
 const Cost = z.object({
   // Engine-enforced HARD ceiling (independent of the drift-prone CLI --max-budget-usd).
-  roundBudgetUsd: z.number().positive().default(30),
-  dailyBudgetUsd: z.number().positive().default(100),
+  // .finite() rejects YAML/JSON overflow (1e999 -> Infinity), which would silently
+  // disable the cap (Infinity > any spend). (Codex P2, PR #22.)
+  roundBudgetUsd: z.number().finite().positive().default(30),
+  dailyBudgetUsd: z.number().finite().positive().default(100),
 }).strict();
 
 const Reviewer = z.object({
