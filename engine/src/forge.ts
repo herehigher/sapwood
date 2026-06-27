@@ -3,13 +3,10 @@
 // 0day hard-coding (PROJECT_NUMBER, user-vs-org, literal status names, reviewer
 // login) lives in SapwoodConfig and is passed in here — never baked into the impl.
 //
-// SECURITY: all subprocess calls use execFile with an argv array — never exec/shell:true
-// (PLAN security model). Issue text is treated as data, never interpolated into a shell.
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+// SECURITY: all subprocess calls go through gh.ts (execFile with an argv array — never
+// exec/shell:true). Issue text is treated as data, never interpolated into a shell.
+import { gh } from "./gh.js";
 import type { SapwoodConfig } from "./config.js";
-
-const pexecFile = promisify(execFile);
 
 export type OwnerKind = "user" | "org";
 
@@ -42,10 +39,9 @@ export interface IForge {
 export class GithubForge implements IForge {
   constructor(private readonly cfg: SapwoodConfig) {}
 
-  /** Run `gh` with an argv array (no shell). Returns stdout. */
+  /** Run `gh` via the shared (execFile, no-shell) helper. Returns stdout. */
   private async gh(args: string[]): Promise<string> {
-    const { stdout } = await pexecFile("gh", args, { maxBuffer: 32 * 1024 * 1024 });
-    return stdout;
+    return gh(args);
   }
 
   async detectOwnerKind(owner: string): Promise<OwnerKind> {

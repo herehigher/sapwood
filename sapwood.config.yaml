@@ -57,3 +57,9 @@ coverage:
 
 optimize:
   recur: false # enable the recurring optimization round
+
+# Milestones `sapwood init` ensures exist (idempotent). Empty = create none — the loop
+# needs labels + board lanes, not milestones (those are your organizational choice).
+milestones: []
+# milestones: [M0, M1, v1.0]
+
