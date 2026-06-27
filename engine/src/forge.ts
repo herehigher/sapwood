@@ -91,8 +91,17 @@ export class GithubForge implements IForge {
   }
 
   async claimIssue(issue: number): Promise<void> {
+    // Atomic-ish claim: board -> In Progress, then the in-progress label. If the label step
+    // fails, roll the board back to Ready so a partial claim can't strand the issue out of
+    // the dispatch queue with no worker (Codex R3/R4, PR #30). claimIssue must leave the
+    // issue dispatchable on any failure — the conductor relies on that.
     await this.setBoardStatus(issue, "inProgress");
-    await this.addLabel(issue, this.cfg.labels.inProgress);
+    try {
+      await this.addLabel(issue, this.cfg.labels.inProgress);
+    } catch (e) {
+      await this.setBoardStatus(issue, "ready").catch(() => {});
+      throw e;
+    }
   }
 
   async setBoardStatus(issue: number, status: "ready" | "inProgress" | "done"): Promise<void> {

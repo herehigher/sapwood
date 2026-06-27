@@ -53,11 +53,17 @@ export function budgetExceeded(total: number, cap: number): boolean {
   return total > cap;
 }
 
-/** Lowest prio:N-* rank across labels (0..4, low = higher priority). No prio label -> 3. */
+/**
+ * Lowest prio:N rank across labels (0..4, low = higher priority). No prio label -> 3.
+ * Matches both the bare `prio:N` form that `sapwood init` creates AND the suffixed
+ * `prio:N-foo` form used in practice (e.g. prio:1-high). This intentionally diverges from
+ * 0day's bash twin, which only matched the hyphenated form — sapwood's own taxonomy
+ * (init.ts) is bare, so a bare-only-or-suffixed match is required for the taxonomy to work.
+ */
 export function issuePriority(labels: string[]): number {
   let min = 5; // sentinel: no prio label found
   for (const tok of labels) {
-    const m = /^prio:([0-4])-/.exec(tok);
+    const m = /^prio:([0-4])(?:-|$)/.exec(tok);
     if (m) {
       const d = Number(m[1]);
       if (d < min) min = d;

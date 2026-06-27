@@ -290,6 +290,16 @@ test("issuePriority: min prio:N-* across labels, default 3", () => {
   assert.equal(issuePriority(["prio:3-feature", "prio:0-gov"]), 0); // multiple -> highest priority (min rank)
 });
 
+test("issuePriority: bare init-created labels (prio:N, no suffix) are recognized (Codex R4)", () => {
+  // sapwood init.ts creates bare prio:0..3; the real repo also uses suffixed prio:1-high.
+  // Both must rank (diverges from the bash twin, which only matched the hyphenated form).
+  assert.equal(issuePriority(["prio:0"]), 0);
+  assert.equal(issuePriority(["prio:1"]), 1);
+  assert.equal(issuePriority(["prio:3"]), 3);
+  assert.equal(issuePriority(["prio:2", "prio:0"]), 0); // min across bare labels
+  assert.equal(issuePriority(["prio:00"]), 3); // malformed -> no match -> default
+});
+
 test("labelsBlockers: parse blocked-by:[#]N, ascending", () => {
   assert.deepEqual(labelsBlockers(["blocked-by:42", "type:feature"]), [42]);
   assert.deepEqual(labelsBlockers(["blocked-by:42", "blocked-by:7"]), [7, 42]);
