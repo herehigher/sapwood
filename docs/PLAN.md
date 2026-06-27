@@ -125,6 +125,28 @@ sapwood/
 - **Skill↔engine IPC:** skills/commands talk to the engine only through the
   `sapwood` CLI / a read-only state read — never bespoke SQLite coupling per skill.
 
+**M0 stack (locked, delivered in PR #22)**
+
+Zero-runtime-dependency-where-possible, fail-closed-by-default:
+
+- **Build/runtime:** npm workspaces (`engine` now; `dashboard` slots in at v0.2),
+  strict NodeNext TypeScript, **Node ≥ 22.13** (floor declared on both root and
+  `@sapwood/engine`). Runtime deps: `yaml` + `zod` only.
+- **State = built-in `node:sqlite`** (WAL), not `better-sqlite3` — zero native build.
+  Schema versioning via `PRAGMA user_version` + ordered, append-only migrations in a
+  transaction. `workers` table carries the `handoff` terminal state.
+- **Tests = built-in `node:test` + `tsx`**, not jest/vitest — zero test-framework dep.
+- **Config:** YAML default (JSON parses for free), Zod-validated and **`.strict()`**
+  (unknown keys / typos error, never silently drop) and **`.finite()`** on budget
+  ceilings (overflow can't disable the cap). `loadConfig()` probes
+  `sapwood.config.{yaml,yml,json}`. Every 0day `LOOP_*` env var is a named, defaulted,
+  documented field (mapping in `engine/src/config.ts`).
+- **Forge:** all subprocess calls use `execFile` with argv arrays — never `shell:true`.
+- **CI-green is fail-closed:** an empty `statusCheckRollup` is **not** green (checks
+  may be uncreated on a fresh PR); genuinely CI-less repos opt in via `ci.requireChecks`
+  when the merge gate is wired (M3). Legacy `StatusContext.state` is honored alongside
+  CheckRun `conclusion`.
+
 ## Security & trust model (trusted-first, designed toward public)
 
 The committee's keystone finding: 0day's guard was built for a *trusted* model on a
@@ -196,9 +218,11 @@ rewrite.** v1 requirements:
 
 ## Build sequencing (planning only)
 
-- **M0 — Skeleton + config + forge:** plugin manifest, `sapwood.config.yaml` schema
-  + Zod + defaults, `IForge` interface + `GithubForge` (all hard-coding removed),
-  SQLite (WAL) state layer with schema versioning.
+- **M0 — Skeleton + config + forge:** ✅ **delivered (PR #22).** plugin manifest,
+  `sapwood.config.yaml` schema + Zod + defaults, `IForge` interface + `GithubForge`
+  (all hard-coding removed), SQLite (WAL) state layer with schema versioning. **Stack
+  locked here** (see "M0 stack" below). `getReadyIssues` and `setBoardStatus` fail
+  closed until the M2 ProjectV2 query, so no half-wired board access ships early.
 - **M0.5 — Minimal onboarding:** `sapwood init` (auth preflight, user-vs-org,
   idempotent board/label/milestone provisioning incl. the `verify:n/a` label, config
   write). The `Ready` gate (Decision #8) lands here: `getReadyIssues` rejects issues

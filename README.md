@@ -56,7 +56,7 @@ GitHub issue (Ready)
 
 | Milestone | Focus |
 |-----------|-------|
-| M0 | Plugin skeleton, config schema, `IForge` interface, SQLite state |
+| M0 ✅ | Plugin skeleton, config schema, `IForge` interface, SQLite state — **shipped** |
 | M0.5 | Turnkey onboarding (`sapwood init`: board/labels/milestones) |
 | M1 | Guard port — the fail-closed safety core (ships green first) |
 | M2 | Engine core (conductor/worker) — **sapwood starts building sapwood** |
