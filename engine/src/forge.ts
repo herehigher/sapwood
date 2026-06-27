@@ -125,15 +125,20 @@ export function parsePRStatus(json: string): PRStatus {
     headRefOid: string;
     state: string;
     mergeable: string;
-    statusCheckRollup?: { conclusion?: string | null }[];
+    // CheckRun entries carry `conclusion`; legacy commit StatusContext entries carry
+    // `state` and no `conclusion`. The rollup can mix both.
+    statusCheckRollup?: { conclusion?: string | null; state?: string | null }[];
   };
   const checks = d.statusCheckRollup ?? [];
-  // Green only when every check has a *completed* passing conclusion. A null conclusion
-  // means queued/in-progress — NOT green (else autonomous-merge could merge mid-CI).
-  // SKIPPED/NEUTRAL are completed non-failing states and don't block. No checks at all
-  // (e.g. a docs-only repo) is green. (Codex P1, PR #22.)
+  // Green only when every check is in a *completed* passing state. A null/absent
+  // conclusion on a CheckRun means queued/in-progress — NOT green (else autonomous-merge
+  // could merge mid-CI). SKIPPED/NEUTRAL are completed non-failing. For StatusContext
+  // entries (no conclusion), accept a passing `state`. No checks at all (docs-only repo)
+  // is green. (Codex P1 + P2, PR #22.)
   const PASSING = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
-  const ciGreen = checks.every((c) => c.conclusion != null && PASSING.has(c.conclusion));
+  const ciGreen = checks.every((c) =>
+    c.conclusion != null ? PASSING.has(c.conclusion) : c.state === "SUCCESS",
+  );
   return {
     number: d.number,
     headOid: d.headRefOid,

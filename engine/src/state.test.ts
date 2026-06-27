@@ -32,6 +32,25 @@ test("worker upsert round-trips and updates state on conflict", () => {
   s.close();
 });
 
+test("upsert refreshes ALL fields on name reuse (resume / reassigned lane)", () => {
+  const s = mem();
+  s.upsertWorker({
+    name: "lane-1", issue: 2, session_id: "uuid-A", state: "done",
+    started_at: "2026-06-27T00:00:00Z", ended_at: "2026-06-27T00:30:00Z",
+  });
+  // lane name reused for a different issue + fresh session
+  s.upsertWorker({
+    name: "lane-1", issue: 9, session_id: "uuid-B", state: "running",
+    started_at: "2026-06-27T02:00:00Z", ended_at: null,
+  });
+  const row = s.getWorker("lane-1");
+  assert.equal(row?.issue, 9);
+  assert.equal(row?.session_id, "uuid-B");
+  assert.equal(row?.started_at, "2026-06-27T02:00:00Z");
+  assert.equal(row?.ended_at, null);
+  s.close();
+});
+
 test("events append in order", () => {
   const s = mem();
   s.appendEvent("dispatched", { issue: 2 });

@@ -45,8 +45,8 @@ GitHub issue (Ready)
 
 ## Requirements
 
-- **Node.js ≥ 22.5** — the engine uses the built-in `node:sqlite` (WAL) for durable
-  state, so no native build step.
+- **Node.js ≥ 22.13** — the engine uses the built-in `node:sqlite` (WAL) for durable
+  state (unflagged since 22.13), so no native build step.
 - **Claude Code CLI ≥ 2.0** — workers run as headless `claude -p` sessions; the
   worker module pins the exact flags it depends on and CI tests against this floor.
 - **GitHub CLI (`gh`)** authenticated with the `project` scope (the loop drives a

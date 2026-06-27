@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "description": "sapwood — the autonomous coding loop with governance built in",
   "workspaces": ["engine"],
-  "engines": { "node": ">=22.5.0" },
+  "engines": { "node": ">=22.13.0" },
   "scripts": {
     "typecheck": "npm run -ws typecheck",
     "test": "npm run -ws test",

@@ -48,6 +48,32 @@ test("parsePRStatus: SKIPPED/NEUTRAL count as passing", () => {
   assert.equal(s.ciGreen, true);
 });
 
+test("parsePRStatus: legacy StatusContext with passing state is green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 5,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ state: "SUCCESS" }, { conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.equal(s.ciGreen, true);
+});
+
+test("parsePRStatus: legacy StatusContext with pending/failing state is not green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 6,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ state: "PENDING" }],
+    }),
+  );
+  assert.equal(s.ciGreen, false);
+});
+
 test("parsePRStatus: a failing check is not green", () => {
   const s = parsePRStatus(
     JSON.stringify({

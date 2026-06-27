@@ -3,8 +3,8 @@
 // writes + concurrent reads (so `sapwood status` reads a live DB without blocking).
 // Fully durable -> engine restart is a clean resume.
 //
-// Uses Node's built-in node:sqlite (Node >=22.5). ponytail: zero native dep; if the
-// experimental API bites (it warns on import), swap to better-sqlite3 — same call shape.
+// Uses Node's built-in node:sqlite (unflagged since Node 22.13 — see engines floor).
+// ponytail: zero native dep; if the API bites, swap to better-sqlite3 — same call shape.
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -94,7 +94,9 @@ export class State {
         `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
-           state = excluded.state, ended_at = excluded.ended_at`,
+           issue = excluded.issue, session_id = excluded.session_id,
+           state = excluded.state, started_at = excluded.started_at,
+           ended_at = excluded.ended_at`,
       )
       .run(row.name, row.issue, row.session_id, row.state, row.started_at, row.ended_at);
   }
