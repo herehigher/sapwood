@@ -1,11 +1,11 @@
-# CLAUDE.md — borehole
+# CLAUDE.md — sapwood
 
 Guide for Claude sessions working in this repo. Keep it short; the canonical
 detail lives in [`docs/PLAN.md`](docs/PLAN.md) — **read that first.**
 
 ## What this is
 
-borehole = "the autonomous coding loop with governance built in." A Claude Code
+sapwood = "the autonomous coding loop with governance built in." A Claude Code
 plugin that turns a GitHub backlog into reviewed PRs: *issues in → reviewed PRs
 out*. It is the dev-loop **framework** extracted from the `0day` project and
 re-implemented as a standalone, public tool. Status: **early development, pre-v1.**
@@ -53,7 +53,7 @@ part of an issue's definition-of-done. Distilled outcomes, never issue transcrip
 TypeScript engine · Claude Code plugin form factor · trusted repos first · default
 merge gate = 0day-style: Conductor merges on CI green + a fresh different-model Codex
 review (produce-PR-and-stop selectable) · dashboard deferred to
-v0.2 (built *by* borehole as the flagship dogfood) · YAML config default (commented;
+v0.2 (built *by* sapwood as the flagship dogfood) · YAML config default (commented;
 JSON also accepted) · 0day's
 TDD/two-gate method as overridable defaults.
 
@@ -63,4 +63,4 @@ TDD/two-gate method as overridable defaults.
   `M0 → M0.5 → M1 → M2 → M3 → M4 → v0.2`. Labels: `type:*`, `prio:0-3`,
   `in-progress`, `needs-human`, `blocked`, `reserve`.
 - **Never push directly to `main`** — branch + PR. (The repo dogfoods its own model.)
-- From M2 onward, borehole builds borehole; prefer routing real work through the loop.
+- From M2 onward, sapwood builds sapwood; prefer routing real work through the loop.
