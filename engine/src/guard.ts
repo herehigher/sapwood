@@ -283,6 +283,7 @@ const FIELD_FLAGS = new Set(["-f", "--field", "-F", "--raw-field"]);
 // isn't mistaken for the endpoint (e.g. `gh api --hostname HOST graphql ...`).
 const GH_API_VALUE_FLAGS = new Set([
   "--hostname", "-H", "--header", "--input", "--cache", "--jq", "-q", "--template", "-t",
+  "-p", "--preview",
 ]);
 
 function ghSkipGlobalFlags(tokens: string[]): string[] {
@@ -373,7 +374,7 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
     if (sub2 === "ready") return "BLOCK [gh] pr ready — producer must not promote its own PR";
     // producer ≠ reviewer: a worker must not approve / request-changes (gate② is a fresh
     // non-author review). A plain `gh pr review --comment` is fine.
-    if (sub2 === "review" && remaining.some((t) => t === "--approve" || t === "-a" || t === "--request-changes")) {
+    if (sub2 === "review" && remaining.some((t) => t === "--approve" || t === "-a" || t === "--request-changes" || t === "-r")) {
       return "BLOCK [gh] pr review --approve/--request-changes — producer must not review (producer≠reviewer)";
     }
   }
@@ -537,10 +538,11 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
   // both, ANY protected path arg (source or dest) is blocked.
   if (cmd === "rm") return blockAny("rm deletes");
   if (cmd === "mv") return blockAny("mv writes/moves");
-  // git rm / git mv stage destructive changes to the boundary.
+  // git subcommands that delete/rewrite a working-tree path: rm, mv, restore, checkout
+  // (e.g. `git checkout HEAD^ -- .github/workflows/ci.yml`, `git restore -- guard.ts`).
   if (cmd === "git") {
     const sub = nonFlag[0]?.toLowerCase();
-    if (sub === "rm" || sub === "mv") {
+    if (sub === "rm" || sub === "mv" || sub === "restore" || sub === "checkout") {
       for (const a of nonFlag.slice(1)) { const h = hitFor(a); if (h) return `BLOCK [write-path] git ${sub} ${h} is human-merge-only`; }
     }
     return null;

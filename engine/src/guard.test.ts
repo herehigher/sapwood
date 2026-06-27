@@ -103,6 +103,12 @@ const BLOCK: [string, string, string][] = [
   ["mv engine/src/guard.ts /tmp/x", CWD, "write-path"],
   ["gh pr review 149 --approve", CWD, "review"],
   ["gh pr review 149 -a", CWD, "review"],
+  // round-6 P1 bypasses (Codex): gh api -p/--preview value flag, pr review -r, git restore/checkout
+  ["gh api -p corsair graphql -f query='mutation { x }'", CWD, "graphql"],
+  ["gh api --preview corsair graphql --input body.json", CWD, "graphql"],
+  ["gh pr review 149 -r -b nope", CWD, "review"],
+  ["git restore --source HEAD^ -- engine/src/guard.ts", CWD, "write-path"],
+  ["git checkout HEAD^ -- .github/workflows/ci.yml", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -162,6 +168,11 @@ const ALLOW: string[] = [
   "git commit -m wip",
   "mv src/a.ts src/b.ts",
   "cp engine/src/guard.ts /tmp/readonly-copy.ts",
+  // round-6 guardrails: benign git checkout/restore + gh api preview read
+  "git checkout -b feature",
+  "git checkout main",
+  "git restore src/app.ts",
+  "gh api -p corsair repos/o/r/pulls/1",
 ];
 
 for (const command of ALLOW) {
