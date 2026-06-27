@@ -143,10 +143,10 @@ function extractCommandSubstitutions(text: string): string[] {
   return results;
 }
 
-// chain operators. The `&` only splits when it's a real control operator — not part of
-// `&>`/`&>>` (redirect both, & before >) or `>&` (redirect-to, & after >); those must stay
-// with their fragment so the redirect target isn't lost.
-const CHAIN_RE = /&&|\|\||;|\||(?<!>)&(?!>)|\n/;
+// chain operators. `|`/`&` only split as real control operators, never as part of a
+// redirection: `>|` (noclobber override), `&>`/`&>>` (& before >), `>&` (& after >). The
+// lookbehinds keep those redirections intact so their target isn't lost.
+const CHAIN_RE = /&&|\|\||;|(?<!>)\||(?<!>)&(?!>)|\n/;
 
 function splitFragments(command: string): string[] {
   const subs = extractCommandSubstitutions(command);
@@ -164,8 +164,11 @@ const INTERPRETER_EVAL_FLAGS: Record<string, Set<string>> = {
   php: new Set(["-r"]),
   node: new Set(["-e", "--eval"]),
 };
+// uv run value-consuming flags (skip flag + value). NOTE: --all-extras is a *boolean* and
+// must NOT be here, else the command after it is mistaken for its value. The allowlist is
+// best-effort; the gh/write scans are position-independent so an unknown flag can't bypass.
 const UV_FLAGS_WITH_VALUE = new Set([
-  "--directory", "--project", "--python", "--extra", "--all-extras", "--package", "-p",
+  "--directory", "--project", "--python", "--extra", "--package", "-p",
 ]);
 
 function skipWrapperFlags(tokens: string[]): string[] {
@@ -412,6 +415,10 @@ function envSplitInner(tokens: string[]): string | null {
     } else if (tok.startsWith("-S=") && tok.length > 3) {
       value = tok.slice(3);
       nextI = i + 1;
+    } else if (ENV_VALUE_FLAGS.has(tok) && i + 1 < tokens.length) {
+      // -u NAME / -C DIR consume their argument before we reach -S
+      i += 2;
+      continue;
     } else if (tok.startsWith("-")) {
       i++;
       continue;
@@ -452,8 +459,8 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null 
   if (opaque) return opaque;
 
   // shell writes to boundary files (redirect / tee / sed -i / dd / cp-mv-install) —
-  // closes the "switch from Write tool to Bash" bypass of the Write-path policy.
-  const w = checkBashWritePath(stripped.length ? stripped : tokens, cwd);
+  // scanned on the original tokens (any position) so a wrapper can't hide the write.
+  const w = checkBashWritePath(tokens, cwd);
   if (w) return w;
 
   // gh overreach, scanned at any position on both the stripped and the original tokens.
@@ -480,7 +487,7 @@ const PROTECTED_SUFFIXES = ["/engine/src/guard.ts", "/engine/src/guard-hook.ts",
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
   if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
-  if (/\/\.github\/workflows\//.test(abs)) return ".github/workflows/** (CI integrity)";
+  if (/\/\.github\/workflows(\/|$)/.test(abs)) return ".github/workflows/** (CI integrity)";
   if (PROTECTED_SUFFIXES.some((s) => abs.endsWith(s))) return "guard/reviewer source";
   return null;
 }
@@ -498,27 +505,9 @@ const REDIR_OP_RE = /^&?[0-9]*>>?&?\|?$/;
 const REDIR_GLUED_RE = /^&?[0-9]*>>?&?\|?(.+)$/;
 const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "mv", "install"]);
 
-/** Detect a Bash command writing to a boundary file (redirect or write-command). */
-function checkBashWritePath(tokens: string[], cwd: string): string | null {
-  const hitFor = (target: string): string | null => protectedPathLabel(normalizePath(target, cwd));
-
-  // 1. redirections: `cmd > path`, `cmd >>path`, `cmd 2> path`
-  for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i]!;
-    if (REDIR_OP_RE.test(tok)) {
-      const target = tokens[i + 1];
-      if (target) { const h = hitFor(target); if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`; }
-    } else if (tok.includes(">")) {
-      const m = REDIR_GLUED_RE.exec(tok);
-      if (m && m[1]) { const h = hitFor(m[1]); if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`; }
-    }
-  }
-
-  // 2. write commands (basename-normalized first word)
-  if (tokens.length === 0) return null;
-  const cmd = basename(tokens[0]!).toLowerCase();
-  if (!WRITE_CMDS.has(cmd)) return null;
-  const args = tokens.slice(1);
+/** Evaluate one write command's target args; return a block reason or null. */
+function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null {
+  const hitFor = (t: string): string | null => protectedPathLabel(normalizePath(t, cwd));
   const nonFlag = args.filter((a) => !a.startsWith("-"));
 
   if (cmd === "dd") {
@@ -532,13 +521,50 @@ function checkBashWritePath(tokens: string[], cwd: string): string | null {
     return null;
   }
   if (cmd === "cp" || cmd === "mv" || cmd === "install") {
-    // destination is the last non-flag argument
-    const dest = nonFlag[nonFlag.length - 1];
+    // destination = -t/--target-directory value if present, else the last non-flag arg.
+    let dest: string | undefined;
+    for (let k = 0; k < args.length; k++) {
+      const a = args[k]!;
+      if ((a === "-t" || a === "--target-directory") && k + 1 < args.length) dest = args[k + 1];
+      else if (a.startsWith("--target-directory=")) dest = a.slice("--target-directory=".length);
+      else if (a.startsWith("-t") && a.length > 2) dest = a.slice(2);
+    }
+    if (dest === undefined) dest = nonFlag[nonFlag.length - 1];
     if (dest) { const h = hitFor(dest); if (h) return `BLOCK [write-path] ${cmd} writes ${h} is human-merge-only`; }
     return null;
   }
   // tee: every non-flag arg is a write target
   for (const a of nonFlag) { const h = hitFor(a); if (h) return `BLOCK [write-path] tee writes ${h} is human-merge-only`; }
+  return null;
+}
+
+/**
+ * Detect a Bash command writing to a boundary file. Redirections and write commands are
+ * scanned at ANY position (not just token[0]) so a wrapper (`uv run --with rich tee X`)
+ * can't hide the write. Quoted data stays a single token, so it can't masquerade.
+ */
+function checkBashWritePath(tokens: string[], cwd: string): string | null {
+  const hitFor = (t: string): string | null => protectedPathLabel(normalizePath(t, cwd));
+
+  // 1. redirections: `cmd > path`, `cmd >>path`, `cmd &> path`, `cmd >| path` ...
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if (REDIR_OP_RE.test(tok)) {
+      const target = tokens[i + 1];
+      if (target) { const h = hitFor(target); if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`; }
+    } else if (tok.includes(">")) {
+      const m = REDIR_GLUED_RE.exec(tok);
+      if (m && m[1]) { const h = hitFor(m[1]); if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`; }
+    }
+  }
+
+  // 2. write commands at any position
+  for (let i = 0; i < tokens.length; i++) {
+    const cmd = basename(tokens[i]!).toLowerCase();
+    if (!WRITE_CMDS.has(cmd)) continue;
+    const r = writeCmdTarget(cmd, tokens.slice(i + 1), cwd);
+    if (r) return r;
+  }
   return null;
 }
 

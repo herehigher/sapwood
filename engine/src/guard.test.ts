@@ -86,6 +86,14 @@ const BLOCK: [string, string, string][] = [
   ["gh api repos/o/r/pulls/1/merge --input x.json", CWD, "merge"],
   ["echo x >& .github/workflows/ci.yml", CWD, "write-path"],
   ["echo x >&engine/src/guard.ts", CWD, "write-path"],
+  // round-4 P1 bypasses (Codex): >| split, workflows dir as dest, env -u before -S,
+  // write command behind a uv boolean/value flag
+  ["echo x >| .github/workflows/ci.yml", CWD, "write-path"],
+  ["cp ci.yml .github/workflows", CWD, "write-path"],
+  ["cp -t .github/workflows ci.yml", CWD, "write-path"],
+  ["env -u FOO -S 'gh pr merge 1'", CWD, "merge"],
+  ["uv run --all-extras tee .github/workflows/ci.yml", CWD, "write-path"],
+  ["uv run --with rich tee engine/src/guard.ts", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -135,6 +143,11 @@ const ALLOW: string[] = [
   "ls foo 2>&1",
   "echo x >& /tmp/out.log",
   "uv run --with rich gh pr view 5 --json state",
+  // round-4 guardrails: benign >|, cp to a non-boundary dir, uv boolean + benign cmd
+  "echo x >| /tmp/out.log",
+  "cp ci.yml /tmp/backup/",
+  "uv run --all-extras pytest -q",
+  "cp engine/src/forge.ts /tmp/",
 ];
 
 for (const command of ALLOW) {
