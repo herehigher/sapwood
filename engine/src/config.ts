@@ -24,6 +24,7 @@ import { z } from "zod";
 const Board = z.object({
   // Removes 0day's hard-coded PROJECT_NUMBER / user-vs-org / literal status names.
   owner: z.string().min(1),
+  repo: z.string().min(1), // every gh call targets owner/repo — required, no silent default
   ownerKind: z.enum(["user", "org"]).optional(), // auto-detected at init if omitted
   projectNumber: z.number().int().positive(),
   statusField: z.string().default("Status"),

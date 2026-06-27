@@ -55,19 +55,13 @@ export class GithubForge implements IForge {
   }
 
   async getReadyIssues(): Promise<Issue[]> {
-    const { owner } = this.cfg.board;
-    const ready = this.cfg.board.status.ready;
-    const out = await this.gh([
-      "issue", "list", "--repo", `${owner}/${this.repo()}`,
-      "--state", "open", "--limit", "100",
-      "--json", "number,title,labels",
-    ]);
-    const items = JSON.parse(out) as { number: number; title: string; labels: { name: string }[] }[];
-    // ponytail: board-Status filtering is a GraphQL ProjectV2 query the conductor wires
-    // in M2; for M0 we expose the parse + label shape and filter by the `ready` lane name
-    // once the project query lands. Marker so the field isn't silently dropped:
-    void ready;
-    return items.map((i) => ({ number: i.number, title: i.title, labels: i.labels.map((l) => l.name) }));
+    // FAIL CLOSED until M2. This is the source-of-truth work-queue boundary: it must
+    // return only ProjectV2 items in the configured Ready lane (cfg.board.status.ready)
+    // that also carry a verification plan (Decision #8) — never every open issue, which
+    // would dispatch Backlog/Blocked/untriaged work. The ProjectV2 GraphQL query lands
+    // with the conductor (M2); until then, returning nothing-but-throwing is the safe
+    // posture (better no dispatch than a wrong one).
+    throw new Error("getReadyIssues: ProjectV2 Ready-lane query wired in M2 (conductor)");
   }
 
   async claimIssue(issue: number): Promise<void> {
@@ -119,10 +113,8 @@ export class GithubForge implements IForge {
     ]);
   }
 
-  // ponytail: repo name is part of board identity; until config carries it explicitly,
-  // derive nothing — require it via owner/repo on the project. Stubbed for M0 wiring.
   private repo(): string {
-    return process.env["SAPWOOD_REPO"] ?? "sapwood";
+    return this.cfg.board.repo;
   }
 }
 
@@ -136,7 +128,12 @@ export function parsePRStatus(json: string): PRStatus {
     statusCheckRollup?: { conclusion?: string | null }[];
   };
   const checks = d.statusCheckRollup ?? [];
-  const ciGreen = checks.length === 0 || checks.every((c) => c.conclusion === "SUCCESS" || c.conclusion === null);
+  // Green only when every check has a *completed* passing conclusion. A null conclusion
+  // means queued/in-progress — NOT green (else autonomous-merge could merge mid-CI).
+  // SKIPPED/NEUTRAL are completed non-failing states and don't block. No checks at all
+  // (e.g. a docs-only repo) is green. (Codex P1, PR #22.)
+  const PASSING = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
+  const ciGreen = checks.every((c) => c.conclusion != null && PASSING.has(c.conclusion));
   return {
     number: d.number,
     headOid: d.headRefOid,

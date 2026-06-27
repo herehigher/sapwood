@@ -2,11 +2,12 @@
 # (engine/src/config.ts) after parse. This file is YAML, but the parser also accepts
 # JSON (YAML ⊃ JSON), so a sapwood.config.json works with zero extra code.
 #
-# Only `board.owner` and `board.projectNumber` are required; everything else has a
-# default shown below. `sapwood init` writes a starter copy of this file.
+# Only `board.owner`, `board.repo`, and `board.projectNumber` are required; everything
+# else has a default shown below. `sapwood init` writes a starter copy of this file.
 
 board:
   owner: herehigher # GitHub user or org that owns the repo + ProjectV2 board
+  repo: sapwood # the repository name (every gh call targets owner/repo)
   # ownerKind: user           # auto-detected at init (user | org) if omitted
   projectNumber: 4 # the ProjectV2 board number
   statusField: Status # the board's single-select field used as the work queue

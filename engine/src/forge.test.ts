@@ -22,6 +22,32 @@ test("parsePRStatus: no checks configured counts as green (docs-only repo)", () 
   assert.equal(s.ciGreen, true);
 });
 
+test("parsePRStatus: a queued/in-progress check (null conclusion) is not green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 3,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: null }],
+    }),
+  );
+  assert.equal(s.ciGreen, false);
+});
+
+test("parsePRStatus: SKIPPED/NEUTRAL count as passing", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 4,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SKIPPED" }, { conclusion: "NEUTRAL" }, { conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.equal(s.ciGreen, true);
+});
+
 test("parsePRStatus: a failing check is not green", () => {
   const s = parsePRStatus(
     JSON.stringify({

@@ -5,6 +5,8 @@
 //
 // Uses Node's built-in node:sqlite (Node >=22.5). ponytail: zero native dep; if the
 // experimental API bites (it warns on import), swap to better-sqlite3 — same call shape.
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
@@ -49,6 +51,11 @@ export class State {
   private readonly db: DatabaseSync;
 
   constructor(path = "data/sapwood.sqlite") {
+    // SQLite won't create missing parent dirs, and data/ is gitignored (absent on a
+    // fresh checkout). Create it first. (Codex P2, PR #22.) Skip for special handles.
+    if (path !== ":memory:" && !path.startsWith("file::memory:")) {
+      mkdirSync(dirname(path), { recursive: true });
+    }
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
