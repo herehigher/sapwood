@@ -7,6 +7,7 @@ import {
   findOptionId,
   findItemId,
   hasVerificationPlan,
+  parsePageInfo,
 } from "./forge.js";
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —
@@ -141,6 +142,41 @@ test("findOptionId/findItemId: missing -> undefined (caller fails closed)", () =
   const p = parseProject(PROJECT_JSON, "Status");
   assert.equal(findOptionId(p, "Nonexistent"), undefined);
   assert.equal(findItemId(p, 999), undefined);
+});
+
+test("findItemId: repo-scoped so a multi-repo board can't hit the wrong #N (Codex P2)", () => {
+  // Two items both numbered 50, different repos.
+  const p = parseProject(
+    JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "P",
+            field: { id: "F", options: [] },
+            items: {
+              nodes: [
+                { id: "ITEM_A", content: { number: 50, title: "ours", state: "OPEN", body: "", repository: { nameWithOwner: "herehigher/sapwood" }, labels: { nodes: [] } }, fieldValues: { nodes: [] } },
+                { id: "ITEM_B", content: { number: 50, title: "theirs", state: "OPEN", body: "", repository: { nameWithOwner: "herehigher/0day" }, labels: { nodes: [] } }, fieldValues: { nodes: [] } },
+              ],
+            },
+          },
+        },
+      },
+    }),
+    "Status",
+  );
+  assert.equal(findItemId(p, 50, "sapwood"), "ITEM_A"); // repo-scoped picks ours
+  assert.equal(findItemId(p, 50, "0day"), "ITEM_B");
+  assert.equal(findItemId(p, 50), "ITEM_A"); // no repo -> first match (back-compat)
+});
+
+test("parsePageInfo: reads the items connection cursor (pagination)", () => {
+  const withMore = JSON.stringify({
+    data: { user: { projectV2: { items: { pageInfo: { hasNextPage: true, endCursor: "CUR2" } } } } },
+  });
+  assert.deepEqual(parsePageInfo(withMore), { hasNextPage: true, endCursor: "CUR2" });
+  // Missing pageInfo (or org root) -> terminal, no cursor.
+  assert.deepEqual(parsePageInfo(PROJECT_JSON), { hasNextPage: false, endCursor: null });
 });
 
 test("parsePRStatus: clean mergeable PR with passing checks", () => {

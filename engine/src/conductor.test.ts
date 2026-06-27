@@ -77,6 +77,41 @@ test("orderForDispatch: priority then number; reserve/needs-human + blocked-by f
   assert.deepEqual(out, [2, 5, 8]); // gov(0) first, then features by number
 });
 
+test("orderForDispatch: the plain `blocked` escalation label is held out of dispatch", () => {
+  const cfg = mkCfg(); // escalation.humanLabels defaults to [needs-human, blocked]
+  const issues: Issue[] = [
+    { number: 1, title: "", labels: ["prio:3-feature"] },
+    { number: 2, title: "", labels: ["prio:3-feature", "blocked"] }, // held
+    { number: 3, title: "", labels: ["prio:3-feature", "needs-human"] }, // held
+  ];
+  assert.deepEqual(orderForDispatch(issues, cfg).map((i) => i.number), [1]);
+});
+
+test("tick dispatch: claim happens before launch; a claim failure spawns no worker", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
+  forge.claimIssue = async () => { throw new Error("board claim failed"); };
+  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }));
+  assert.deepEqual(sup.dispatched, []); // claim threw first -> nothing launched, no untracked worker
+  assert.equal(st.runningWorkers().length, 0);
+  st.close();
+});
+
+test("tick dispatch: a launch failure rolls the board back to Ready", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
+  sup.dispatch = async () => { throw new Error("spawn failed"); };
+  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }));
+  assert.deepEqual(forge.claimed, [7]); // claimed first
+  assert.ok(forge.boardSet.some(([n, s]) => n === 7 && s === "ready")); // then rolled back
+  assert.equal(st.runningWorkers().length, 0);
+  st.close();
+});
+
 test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+needs-human", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

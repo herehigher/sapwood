@@ -50,18 +50,36 @@ export class GithubForge implements IForge {
     return out.trim() === "Organization" ? "org" : "user";
   }
 
-  /** Fetch + parse the ProjectV2 board (items + Status field options). One round-trip. */
+  /** Fetch + parse the ProjectV2 board (items + Status field options), paging the items
+   *  connection to exhaustion — boards with >100 items would otherwise silently drop Ready
+   *  issues and break item lookups (Codex P2, PR #30). */
   private async fetchProject(): Promise<ParsedProject> {
     const kind = this.cfg.board.ownerKind ?? (await this.detectOwnerKind(this.cfg.board.owner));
     const root = kind === "org" ? "organization" : "user";
     const query = projectQuery(root, this.cfg.board.statusField);
-    const out = await this.gh([
-      "api", "graphql",
-      "-f", `query=${query}`,
-      "-f", `login=${this.cfg.board.owner}`,
-      "-F", `number=${this.cfg.board.projectNumber}`,
-    ]);
-    return parseProject(out, this.cfg.board.statusField);
+    const statusField = this.cfg.board.statusField;
+    let merged: ParsedProject | undefined;
+    let after: string | null = null;
+    // ponytail: hard page ceiling (500 items) so a cursor bug can't spin forever.
+    for (let page = 0; page < 50; page++) {
+      const args = [
+        "api", "graphql",
+        "-f", `query=${query}`,
+        "-f", `login=${this.cfg.board.owner}`,
+        "-F", `number=${this.cfg.board.projectNumber}`,
+        // First page: -F passes the literal `null` as JSON null. Later pages: the cursor is
+        // an opaque string -> -f (raw), so a number-/bool-looking cursor isn't mistyped by -F.
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ];
+      const out = await this.gh(args);
+      const parsed = parseProject(out, statusField);
+      if (!merged) merged = parsed;
+      else merged.items.push(...parsed.items);
+      const pi = parsePageInfo(out);
+      if (!pi.hasNextPage || !pi.endCursor) return merged;
+      after = pi.endCursor;
+    }
+    return merged!; // page ceiling hit; return what we have rather than loop unbounded
   }
 
   async getReadyIssues(): Promise<Issue[]> {
@@ -83,7 +101,7 @@ export class GithubForge implements IForge {
     // if the issue isn't on the board or the lane name doesn't exist (no silent no-op).
     const value = this.cfg.board.status[status];
     const project = await this.fetchProject();
-    const itemId = findItemId(project, issue);
+    const itemId = findItemId(project, issue, this.cfg.board.repo);
     if (!itemId) throw new Error(`setBoardStatus: issue #${issue} is not on project board ${this.cfg.board.projectNumber}`);
     const optionId = findOptionId(project, value);
     if (!optionId) throw new Error(`setBoardStatus: no "${value}" option in the "${this.cfg.board.statusField}" field`);
@@ -163,14 +181,15 @@ export interface ParsedProject {
 /** The project query. `root` is "user" or "organization" (owner-kind agnostic downstream). */
 export function projectQuery(root: "user" | "organization", statusField: string): string {
   return `
-query($login: String!, $number: Int!) {
+query($login: String!, $number: Int!, $after: String) {
   ${root}(login: $login) {
     projectV2(number: $number) {
       id
       field(name: ${JSON.stringify(statusField)}) {
         ... on ProjectV2SingleSelectField { id options { id name } }
       }
-      items(first: 100) {
+      items(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           content {
@@ -284,8 +303,22 @@ export function findOptionId(project: ParsedProject, name: string): string | und
   return project.options.find((o) => o.name === name)?.id;
 }
 
-export function findItemId(project: ParsedProject, issue: number): string | undefined {
-  return project.items.find((it) => it.number === issue)?.itemId;
+/** Item id for an issue. Repo-scoped when `repo` is given (board items are unique by
+ *  (repo, number), not number alone — a multi-repo board can hold the same #N twice). */
+export function findItemId(project: ParsedProject, issue: number, repo?: string): string | undefined {
+  return project.items.find(
+    (it) => it.number === issue && (repo === undefined || it.repo.endsWith(`/${repo}`)),
+  )?.itemId;
+}
+
+/** Items-connection page cursor. Owner-kind agnostic; absent pageInfo -> terminal. */
+export function parsePageInfo(json: string): { hasNextPage: boolean; endCursor: string | null } {
+  const d = JSON.parse(json) as { data?: { user?: unknown; organization?: unknown } };
+  const owner = (d.data?.user ?? d.data?.organization) as
+    | { projectV2?: { items?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } } } }
+    | undefined;
+  const pi = owner?.projectV2?.items?.pageInfo;
+  return { hasNextPage: pi?.hasNextPage ?? false, endCursor: pi?.endCursor ?? null };
 }
 
 /** Pure parse of `gh pr view --json ...` output. Exported for offline testing. */

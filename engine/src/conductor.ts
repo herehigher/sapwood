@@ -204,7 +204,10 @@ export interface TickDeps {
  * now triage removes the label. Avoids an extra gh round-trip per blocker per tick.
  */
 export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
-  const reserveish = [cfg.labels.reserve, cfg.labels.needsHuman];
+  // Held out of the main lane: reserve + every escalation label (needs-human, blocked, …).
+  // Sourced from config so the plain `blocked` label (escalation.humanLabels) is honored,
+  // not just reserve/needs-human (Codex P2, PR #30).
+  const reserveish = [cfg.labels.reserve, ...cfg.escalation.humanLabels];
   return ready
     .filter((i) => !hasReserveLabel(i.labels, reserveish))
     .filter((i) => labelsBlockers(i.labels).length === 0)
@@ -299,8 +302,20 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
     }
-    const { name, sessionId } = await supervisor.dispatch(issue);
+    // Claim BEFORE launching (matches 0day claim_issue.sh order). The board transition
+    // takes the issue out of the Ready lane first, so a launch failure can't leave an
+    // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
+    // the launch fails after the claim, roll the board back to Ready so it's reclaimable.
     await forge.claimIssue(issue.number);
+    let dispatchRes: { name: string; sessionId: string };
+    try {
+      dispatchRes = await supervisor.dispatch(issue);
+    } catch (e) {
+      await forge.setBoardStatus(issue.number, "ready").catch(() => {});
+      state.appendEvent("dispatch-failed", { issue: issue.number, error: String(e) });
+      throw e;
+    }
+    const { name, sessionId } = dispatchRes;
     state.upsertWorker({
       name, issue: issue.number, session_id: sessionId, state: "running",
       started_at: iso(), ended_at: null,
