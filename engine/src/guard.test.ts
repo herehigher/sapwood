@@ -49,6 +49,24 @@ const BLOCK: [string, string, string][] = [
   ["gh api --hostname HOST repos/o/r/pulls/1/merge -X POST", CWD, "merge"],
   // env -S split-string recurses into the inner command (here: a gh overreach)
   ["env -S 'gh pr merge 143'", CWD, "merge"],
+  // round-1 P1 bypasses (Codex): wrapper recursion + env value-flags
+  ["env -u FOO gh pr merge 143", CWD, "merge"],
+  ["env FOO=1 uv run gh pr merge 143", CWD, "merge"],
+  ["env -C /tmp gh release create v1", CWD, "release"],
+  ["uv run npx gh pr merge 1", CWD, "merge"],
+  // round-1 P1: gh api value-flags before endpoint + graphql --input opaque
+  ["gh api --hostname HOST graphql -f query='mutation { x }'", CWD, "graphql"],
+  ["gh api -H 'A: B' graphql -f query='mutation { x }'", CWD, "graphql"],
+  ["gh api graphql --input op.json", CWD, "graphql"],
+  // round-1 P1: protected-path writes via Bash (redirect / sed -i / tee / cp / dd)
+  ["cat foo > engine/src/guard.ts", CWD, "write-path"],
+  ["echo x >> .github/workflows/ci.yml", CWD, "write-path"],
+  ["echo x >engine/src/guard-hook.ts", CWD, "write-path"],
+  ["sed -i s/a/b/ .github/workflows/ci.yml", CWD, "write-path"],
+  ["tee .claude/settings.json", CWD, "write-path"],
+  ["cp /tmp/evil engine/src/reviewer.ts", CWD, "write-path"],
+  ["dd if=/dev/zero of=.claude/settings.local.json", CWD, "write-path"],
+  ["echo x > /repo/.github/workflows/deploy.yaml", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -81,6 +99,13 @@ const ALLOW: string[] = [
   "gh api graphql -f query='query { repository { name } }'",
   "env -S 'ls -la'",
   "gh api --hostname HOST repos/o/r/pulls/1",
+  // guardrails for the round-1 fixes: benign writes / reads must still pass
+  "cat foo > /tmp/out.txt",
+  "echo hi > output.log",
+  "sed -i s/a/b/ src/app.ts",
+  "cp engine/src/forge.ts /tmp/backup.ts",
+  "uv run npx tsc -p .",
+  "gh api -H 'A: B' repos/o/r/pulls/1",
 ];
 
 for (const command of ALLOW) {

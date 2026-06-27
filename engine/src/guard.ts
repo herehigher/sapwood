@@ -186,31 +186,41 @@ function stripLeadingAssignments(tokens: string[]): string[] {
   return tokens.slice(i);
 }
 
-function stripExecPrefix(tokensIn: string[]): string[] {
+// env flags that consume a following argument (so the arg isn't mistaken for the command).
+const ENV_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir"]);
+
+function stripExecPrefix(tokensIn: string[], depth = 0): string[] {
+  if (depth > 8) return tokensIn; // recursion bound (nested wrappers)
   let tokens = stripLeadingAssignments(tokensIn);
   if (tokens.length === 0) return tokens;
   const first = tokens[0]!.toLowerCase();
 
+  // All wrapper branches recurse on the remainder, so a stacked wrapper
+  // (env FOO=1 uv run gh ...) strips all the way down to the real command.
   if ((first === "uv" || first === "poetry") && tokens.length >= 2 && tokens[1]!.toLowerCase() === "run") {
-    return skipWrapperFlags(tokens.slice(2));
+    return stripExecPrefix(skipWrapperFlags(tokens.slice(2)), depth + 1);
   }
-  if (first === "uvx" || first === "npx") return tokens.slice(1);
+  if (first === "uvx" || first === "npx") return stripExecPrefix(tokens.slice(1), depth + 1);
   if (first === "env") {
     let i = 1;
-    while (i < tokens.length && tokens[i]!.startsWith("-")) i++;
+    while (i < tokens.length && tokens[i]!.startsWith("-")) {
+      // -u NAME / -C DIR consume the next token (unless given as --flag=value)
+      if (ENV_VALUE_FLAGS.has(tokens[i]!) && i + 1 < tokens.length) i += 2;
+      else i += 1;
+    }
     while (i < tokens.length && ASSIGN_RE.test(tokens[i]!)) i++;
-    return tokens.slice(i);
+    return stripExecPrefix(tokens.slice(i), depth + 1);
   }
   if (["command", "exec", "nohup", "builtin", "time"].includes(first)) {
     let rest = tokens.slice(1);
     while (rest.length && rest[0]!.startsWith("-")) rest = rest.slice(1);
-    return rest.length ? stripExecPrefix(rest) : rest;
+    return rest.length ? stripExecPrefix(rest, depth + 1) : rest;
   }
   if (first === "stdbuf") {
     let i = 1;
     while (i < tokens.length && tokens[i]!.startsWith("-")) i++;
     const rest = tokens.slice(i);
-    return rest.length ? stripExecPrefix(rest) : rest;
+    return rest.length ? stripExecPrefix(rest, depth + 1) : rest;
   }
   return tokens;
 }
@@ -258,6 +268,11 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const SENSITIVE_PATH_RE = /\/pulls\/[^/]+\/merge|\/releases/i;
 const ALLOWED_DELETE_PATH_RE = /\/git\/refs/i;
 const FIELD_FLAGS = new Set(["-f", "--field", "-F", "--raw-field"]);
+// gh api flags that consume the NEXT token as their value — must be skipped so the value
+// isn't mistaken for the endpoint (e.g. `gh api --hostname HOST graphql ...`).
+const GH_API_VALUE_FLAGS = new Set([
+  "--hostname", "-H", "--header", "--input", "--cache", "--jq", "-q", "--template", "-t",
+]);
 
 function ghSkipGlobalFlags(tokens: string[]): string[] {
   const withValue = new Set(["-R", "--repo"]);
@@ -291,6 +306,8 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
     for (const ff of FIELD_FLAGS) {
       if (tok.startsWith(ff + "=") || (ff.length === 2 && tok.startsWith(ff) && tok.length > ff.length)) { hasField = true; break; }
     }
+    // value-taking flag (e.g. --hostname HOST): skip flag + value so HOST isn't the endpoint
+    if (GH_API_VALUE_FLAGS.has(tok)) { i += 2; continue; }
     if (!tok.startsWith("-") && pathToken === null) pathToken = tok;
     i++;
   }
@@ -310,6 +327,10 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
         if (ff.length === 2 && t.startsWith(ff) && t.length > ff.length) { fieldValues.push(t.slice(ff.length)); break; }
       }
       j++;
+    }
+    // --input <file> supplies the whole request body from a file we can't read → fail-closed.
+    if (tokens.some((t) => t === "--input" || t.startsWith("--input="))) {
+      return "BLOCK [gh] graphql --input file is opaque — cannot verify non-mutation (fail-closed)";
     }
     const isFileRef = (v: string): boolean => (v.includes("=") ? v.split("=", 2)[1]! : v).startsWith("@");
     if (fieldValues.some(isFileRef)) return "BLOCK [gh] graphql @file reference is opaque — cannot verify non-mutation (fail-closed)";
@@ -361,7 +382,7 @@ function extractEnvSplitString(tokens: string[]): string | null {
 }
 
 // ── single-fragment judgement ────────────────────────────────────────────────
-function judgeFragment(fragment: string, depth = 0): string | null {
+function judgeFragment(fragment: string, cwd: string, depth = 0): string | null {
   if (depth > 8) return null;
   let tokens = safeSplit(fragment);
   if (tokens.length === 0) return null;
@@ -369,12 +390,17 @@ function judgeFragment(fragment: string, depth = 0): string | null {
 
   if (tokens[0]!.toLowerCase() === "env") {
     const inner = extractEnvSplitString(tokens);
-    if (inner !== null) return judgeFragment(inner, depth + 1);
+    if (inner !== null) return judgeFragment(inner, cwd, depth + 1);
   }
 
   const stripped = stripExecPrefix(tokens);
   const opaque = checkOpaque(stripped, fragment);
   if (opaque) return opaque;
+
+  // shell writes to boundary files (redirect / tee / sed -i / dd / cp-mv-install) —
+  // closes the "switch from Write tool to Bash" bypass of the Write-path policy.
+  const w = checkBashWritePath(stripped.length ? stripped : tokens, cwd);
+  if (w) return w;
 
   if (stripped.length && stripped.join(" ") !== tokens.join(" ")) {
     const c = checkCategoryC(stripped, stripped.join(" "));
@@ -400,11 +426,67 @@ function normalizePath(p: string, cwd: string): string {
 
 const PROTECTED_SUFFIXES = ["/engine/src/guard.ts", "/engine/src/guard-hook.ts", "/engine/src/reviewer.ts"];
 
+/** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
+function protectedPathLabel(abs: string): string | null {
+  if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
+  if (/\/\.github\/workflows\//.test(abs)) return ".github/workflows/** (CI integrity)";
+  if (PROTECTED_SUFFIXES.some((s) => abs.endsWith(s))) return "guard/reviewer source";
+  return null;
+}
+
 function checkWritePath(filePath: string, cwd: string): string | null {
-  const abs = normalizePath(filePath, cwd);
-  if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return "BLOCK [write-path] .claude/settings.json (hook wiring) is human-merge-only";
-  if (/\/\.github\/workflows\//.test(abs)) return "BLOCK [write-path] .github/workflows/** (CI integrity) is human-merge-only";
-  if (PROTECTED_SUFFIXES.some((s) => abs.endsWith(s))) return "BLOCK [write-path] guard/reviewer source is human-merge-only";
+  const hit = protectedPathLabel(normalizePath(filePath, cwd));
+  return hit ? `BLOCK [write-path] ${hit} is human-merge-only` : null;
+}
+
+// Shell write vectors that bypass the Write/Edit tool: redirections and write commands.
+// A pure redirection operator token: >, >>, >|, 2>, 1>> ... (target is the next token).
+const REDIR_OP_RE = /^[0-9]*>>?\|?$/;
+// A redirection glued to its target: >file, 2>>file, >|file (target captured).
+const REDIR_GLUED_RE = /^[0-9]*>>?\|?(.+)$/;
+const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "mv", "install"]);
+
+/** Detect a Bash command writing to a boundary file (redirect or write-command). */
+function checkBashWritePath(tokens: string[], cwd: string): string | null {
+  const hitFor = (target: string): string | null => protectedPathLabel(normalizePath(target, cwd));
+
+  // 1. redirections: `cmd > path`, `cmd >>path`, `cmd 2> path`
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if (REDIR_OP_RE.test(tok)) {
+      const target = tokens[i + 1];
+      if (target) { const h = hitFor(target); if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`; }
+    } else if (tok.includes(">")) {
+      const m = REDIR_GLUED_RE.exec(tok);
+      if (m && m[1]) { const h = hitFor(m[1]); if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`; }
+    }
+  }
+
+  // 2. write commands (basename-normalized first word)
+  if (tokens.length === 0) return null;
+  const cmd = basename(tokens[0]!).toLowerCase();
+  if (!WRITE_CMDS.has(cmd)) return null;
+  const args = tokens.slice(1);
+  const nonFlag = args.filter((a) => !a.startsWith("-"));
+
+  if (cmd === "dd") {
+    for (const a of args) if (a.startsWith("of=")) { const h = hitFor(a.slice(3)); if (h) return `BLOCK [write-path] dd writes ${h} is human-merge-only`; }
+    return null;
+  }
+  if (cmd === "sed" || cmd === "perl") {
+    const inPlace = args.some((a) => a === "-i" || a.startsWith("-i") || a === "--in-place" || a.startsWith("--in-place"));
+    if (!inPlace) return null;
+    for (const a of nonFlag) { const h = hitFor(a); if (h) return `BLOCK [write-path] ${cmd} -i edits ${h} is human-merge-only`; }
+    return null;
+  }
+  if (cmd === "cp" || cmd === "mv" || cmd === "install") {
+    // destination is the last non-flag argument
+    const dest = nonFlag[nonFlag.length - 1];
+    if (dest) { const h = hitFor(dest); if (h) return `BLOCK [write-path] ${cmd} writes ${h} is human-merge-only`; }
+    return null;
+  }
+  // tee: every non-flag arg is a write target
+  for (const a of nonFlag) { const h = hitFor(a); if (h) return `BLOCK [write-path] tee writes ${h} is human-merge-only`; }
   return null;
 }
 
@@ -428,7 +510,7 @@ export function guardDecision(tool: string, input: GuardInput, cwd: string): Dec
   if (tool !== "Bash") return ALLOW;
   const command = input.command ?? "";
   for (const frag of splitFragments(command)) {
-    const reason = judgeFragment(frag);
+    const reason = judgeFragment(frag, cwd);
     if (reason) return block(reason);
   }
   return ALLOW;
