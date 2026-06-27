@@ -165,8 +165,36 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
   clobbers a lane). If no board exists at the configured number it **reports** that with
   the fix rather than creating a number-mismatched board.
 - **`gh.ts`** is the single `execFile`/no-shell boundary for every gh call (forge + init).
-- The guard PreToolUse hook is **not** wired here — deferred to M1 (guard.ts doesn't
-  exist yet; human-merge-only when wired).
+- The guard PreToolUse hook is **not** wired here — the guard core lands in M1, and its
+  *live* wiring into worker sessions in M2 (issue #26); human-merge-only when wired.
+
+**M1 guard (locked, delivered in PRs #27 / #28)**
+
+`guard.ts` is the fail-closed PreToolUse safety core — a pure, zero-dep, deterministic
+`guardDecision(tool, input, cwd)`. Ported the *generic safety mechanism* from 0day's
+`guard.py`, **not the trading domain** (CLAUDE.md):
+
+- **Ported:** shlex-equivalent tokenizer, fragment splitting (`$()`/`` `` `` recurse),
+  recursive exec-prefix stripping (env/uv/npx/poetry/`command`/`stdbuf`/leading
+  assignments), opaque-construct fail-closed detection (`eval`, shell `-c`, interpreter
+  `-e`/`-c` incl. versioned `python3.11`, process substitution, `env -S`), and **Category
+  C — gh overreach** = the structural producer≠merger/reviewer enforcement (`gh pr
+  merge|ready`, `gh pr review --approve/-r`, `gh release`, `gh api` mutating
+  merge/release paths + graphql mutations + `@file`/`--input` fail-closed).
+- **Omitted:** 0day's Category A (on-chain funds) / B (private keys).
+- **Write-path protection (#9):** denies writes to boundary files — `.claude/settings*.json`,
+  `.github/workflows/**`, `guard.ts`/`guard-hook.ts`/`reviewer.ts` — across **both** the
+  Write/Edit tools **and** Bash (redirections incl. `>|`/`&>`/`>&`, `tee`/`sed -i`/`dd`/
+  `cp -t`/`mv`/`rm`/`git rm|mv|restore|checkout`), scanned position-independently so a
+  wrapper can't hide the write. These files are human-merge-only.
+- **Fail-closed (a deliberate divergence from 0day, which fails open):** the hook denies
+  on malformed JSON, a non-object payload, a guarded tool with malformed `tool_input`, or
+  any thrown guard. A safety hook disable-able with garbage isn't one.
+- **Verification:** a BLOCK/ALLOW bypass matrix (`guard.test.ts`) **plus** a differential
+  fuzz (`guard.fuzz.test.ts`) running 1500 seeded commands through both `guard.ts` and
+  `guard.py`, asserting sapwood is **at least as strict as guard.py** on the shared
+  surface (0 divergences). The guard survived a 6-round adversarial review (18 bypass
+  vectors found + closed).
 
 ## Security & trust model (trusted-first, designed toward public)
 
@@ -252,9 +280,12 @@ rewrite.** v1 requirements:
   manual board step 0day left to the human (`bootstrap_github.sh:89`). Key behaviors
   (see "M0.5 init" above). Early so real users can try it and feedback the config
   schema before it locks.
-- **M1 — Guard port (safety first):** zero-dep `guard.ts` + reproduced bypass suite
-  + differential/fuzz tests + fail-closed-on-error + hook wiring + `Write`-path
-  protections. Nothing autonomous ships before this is green.
+- **M1 — Guard port (safety first):** ✅ **delivered (PRs #27, #28).** zero-dep
+  `guard.ts` + reproduced bypass suite + differential/fuzz tests + fail-closed-on-error
+  + `Write`-path protections. Nothing autonomous ships before this is green. Key
+  decisions in "M1 guard" above. **Live hook wiring into worker sessions is deferred to
+  M2 (issue #26)** — the guard core ships green and ready; attaching it to `claude -p`
+  needs build-dist packaging + worker-vs-human scoping.
 - **M2 — Engine core:** `conductor.ts` (tick: reclaim→drive→dispatch), `worker.ts`,
   structured tick results; parity tests against 0day's pure-function tests
   (`test_loop_conductor.sh`, `test_loop_merge_driver.sh`). **Dogfood starts here:**
