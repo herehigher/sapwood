@@ -147,6 +147,27 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
   when the merge gate is wired (M3). Legacy `StatusContext.state` is honored alongside
   CheckRun `conclusion`.
 
+**M0.5 init (locked, delivered in PR #24)**
+
+`sapwood init` is idempotent + recovery-safe (detect-before-create everywhere):
+
+- **Auth preflight first** — parses `gh auth status`; fails with the exact fix on a bad
+  state (`gh auth login` / `gh auth refresh -s project`) before touching anything, so a
+  scope problem never leaves a half-provisioned repo. Gates on the `Token scopes:` line
+  (multi-host safe).
+- **Labels** — detect-before-create (no `--force`), so re-runs preserve user edits;
+  taxonomy derived from config.
+- **Milestones are config-driven** (`config.milestones`, default `[]`) — init imposes
+  none by default; the loop needs labels + board lanes, not milestones. List uses
+  `state=all` + line-parsed pagination (closed/`>30` safe).
+- **Board** — ensures the `Status` field carries the configured lanes, preserving
+  existing option colors + descriptions (the mutation replaces the full set, so it never
+  clobbers a lane). If no board exists at the configured number it **reports** that with
+  the fix rather than creating a number-mismatched board.
+- **`gh.ts`** is the single `execFile`/no-shell boundary for every gh call (forge + init).
+- The guard PreToolUse hook is **not** wired here — deferred to M1 (guard.ts doesn't
+  exist yet; human-merge-only when wired).
+
 ## Security & trust model (trusted-first, designed toward public)
 
 The committee's keystone finding: 0day's guard was built for a *trusted* model on a
@@ -223,12 +244,14 @@ rewrite.** v1 requirements:
   (all hard-coding removed), SQLite (WAL) state layer with schema versioning. **Stack
   locked here** (see "M0 stack" above). `getReadyIssues` and `setBoardStatus` fail
   closed until the M2 ProjectV2 query, so no half-wired board access ships early.
-- **M0.5 — Minimal onboarding:** `sapwood init` (auth preflight, user-vs-org,
-  idempotent board/label/milestone provisioning incl. the `verify:n/a` label, config
-  write). Provisions the **inputs** for the Decision #8 `Ready` gate (the `verify:n/a`
-  label, board lanes); the gate is *enforced* once `getReadyIssues` is implemented in
-  M2 (it fails closed until then). Early so real users can try it and feedback the
-  config schema before it locks.
+- **M0.5 — Minimal onboarding:** ✅ **delivered (PR #24).** `sapwood init` (auth
+  preflight, user-vs-org, idempotent board/label/milestone provisioning incl. the
+  `verify:n/a` label, config write). Provisions the **inputs** for the Decision #8
+  `Ready` gate (the `verify:n/a` label, board lanes); the gate is *enforced* once
+  `getReadyIssues` is implemented in M2 (it fails closed until then). Automates the
+  manual board step 0day left to the human (`bootstrap_github.sh:89`). Key behaviors
+  (see "M0.5 init" above). Early so real users can try it and feedback the config
+  schema before it locks.
 - **M1 — Guard port (safety first):** zero-dep `guard.ts` + reproduced bypass suite
   + differential/fuzz tests + fail-closed-on-error + hook wiring + `Write`-path
   protections. Nothing autonomous ships before this is green.
