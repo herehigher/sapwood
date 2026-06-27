@@ -1,0 +1,9 @@
+{
+  "name": "sapwood",
+  "version": "0.0.0",
+  "description": "The autonomous coding loop with governance built in: GitHub issues in -> reviewed PRs out, with a fail-closed producer!=reviewer!=merger guard.",
+  "author": { "name": "herehigher" },
+  "homepage": "https://github.com/herehigher/sapwood",
+  "license": "MIT",
+  "keywords": ["claude-code", "automation", "github", "governance", "ci"]
+}
