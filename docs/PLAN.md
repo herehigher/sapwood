@@ -165,8 +165,8 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
   clobbers a lane). If no board exists at the configured number it **reports** that with
   the fix rather than creating a number-mismatched board.
 - **`gh.ts`** is the single `execFile`/no-shell boundary for every gh call (forge + init).
-- The guard PreToolUse hook is **not** wired here — deferred to M1 (guard.ts doesn't
-  exist yet; human-merge-only when wired).
+- The guard PreToolUse hook is **not** wired here — the guard core lands in M1, and its
+  *live* wiring into worker sessions in M2 (issue #26); human-merge-only when wired.
 
 **M1 guard (locked, delivered in PRs #27 / #28)**
 
