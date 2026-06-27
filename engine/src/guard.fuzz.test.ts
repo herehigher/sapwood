@@ -135,7 +135,10 @@ test("differential: 0day's shared-surface BLOCK cases all block in guard.ts", (t
   ];
   const py = runGuardPy(bin, cases);
   for (let i = 0; i < cases.length; i++) {
-    if (!isSharedBlock(py[i]!)) continue;
+    // These are hand-picked opaque / Category C cases — assert guard.py actually
+    // shared-blocks each one (so a drift in its reason format / our filter fails loudly
+    // instead of silently skipping the comparison), THEN assert guard.ts blocks too.
+    assert.ok(isSharedBlock(py[i]!), `guard.py should shared-block (opaque/类别C): ${cases[i]} (got: ${JSON.stringify(py[i])})`);
     assert.equal(guardDecision("Bash", { command: cases[i]! }, CWD).allow, false, `guard.ts must block: ${cases[i]}`);
   }
 });
