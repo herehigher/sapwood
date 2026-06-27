@@ -47,6 +47,13 @@ test("preflight passes with project scope", async () => {
   await preflight(async () => OK_AUTH); // resolves
 });
 
+test("preflight is not fooled by a second, unauthenticated host", async () => {
+  const multi =
+    "github.com\n  ✓ Logged in to github.com account x\n  - Token scopes: 'repo', 'project'\n" +
+    "ghe.example.com\n  X Not logged in to ghe.example.com\n";
+  await preflight(async () => multi); // github.com is authed with project → resolves
+});
+
 // --- a fake gh runner that records calls and answers the queries init makes ----------
 function fakeRun(opts: {
   labels?: string[];
@@ -62,8 +69,8 @@ function fakeRun(opts: {
       return JSON.stringify((opts.labels ?? []).map((name) => ({ name })));
     }
     if (args[0] === "label" && args[1] === "create") return "";
-    if (args[0] === "api" && args[1]?.endsWith("/milestones") && !args.includes("-f")) {
-      return JSON.stringify(opts.milestones ?? []);
+    if (args[0] === "api" && args[1]?.includes("/milestones") && args.includes("--jq")) {
+      return (opts.milestones ?? []).join("\n"); // --jq '.[].title' => one title per line
     }
     if (args[0] === "api" && args[1]?.endsWith("/milestones")) return ""; // create
     if (args[0] === "api" && args[1]?.startsWith("users/")) return opts.ownerType ?? "User";
@@ -71,7 +78,7 @@ function fakeRun(opts: {
       const q = args.find((a) => a.startsWith("query=")) ?? "";
       if (q.includes("mutation")) return JSON.stringify({ data: { updateProjectV2Field: { projectV2Field: { id: "F" } } } });
       const projectV2 = opts.boardExists
-        ? { id: "P", field: { id: "F", options: (opts.boardOptions ?? []).map((name) => ({ name, color: "GRAY" })) } }
+        ? { id: "P", field: { id: "F", options: (opts.boardOptions ?? []).map((name) => ({ name, color: "GRAY", description: "" })) } }
         : null;
       return JSON.stringify({ data: { user: { projectV2 } } });
     }
@@ -107,6 +114,23 @@ test("init creates missing labels and provisions a missing board lane", async ()
     assert.ok(calls.some((c) => c.join(" ").includes("mutation")), "board mutation issued");
     // wrote starter config into the empty temp dir
     assert.ok(readdirSync(dir).includes("sapwood.config.yaml"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("milestones: only missing ones are created (idempotent, line-parsed)", async () => {
+  const cfgMs = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\nmilestones: [M0, M1, v1.0]");
+  const { run, calls } = fakeRun({ labels: requiredLabels(cfgMs).map((l) => l.name), milestones: ["M0", "v1.0"], boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfgMs, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const created = calls.filter((c) => c[0] === "api" && c[1]?.endsWith("/milestones") && c.includes("-f"));
+    assert.equal(created.length, 1, "only M1 created");
+    assert.ok(created[0]!.some((a) => a === "title=M1"));
+    // list query uses state=all so closed milestones aren't re-created
+    assert.ok(calls.some((c) => c[1] === "repos/acme/widgets/milestones?state=all"));
+    assert.ok(actions.some((a) => /created milestone\(s\): M1/.test(a)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

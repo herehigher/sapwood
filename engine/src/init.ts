@@ -74,8 +74,10 @@ export class InitError extends Error {}
 /** Throw an actionable error if not authenticated or missing the `project` scope. */
 export async function preflight(getAuthStatus: () => Promise<string>): Promise<void> {
   const text = await getAuthStatus();
-  const loggedIn = /logged in to/i.test(text) && !/not logged in/i.test(text);
-  if (!loggedIn) {
+  // A "Token scopes:" line only appears for an authenticated account, so its presence is
+  // the auth signal — robust even when `gh auth status` lists multiple hosts and another
+  // host is "not logged in" (a global /not logged in/ check would false-reject here).
+  if (!/token scopes:/i.test(text)) {
     throw new InitError("not logged in to GitHub — run: gh auth login");
   }
   if (!parseAuthScopes(text).includes("project")) {
@@ -98,9 +100,11 @@ async function ensureLabels(cfg: SapwoodConfig, run: GhRunner, repo: string): Pr
 
 async function ensureMilestones(cfg: SapwoodConfig, run: GhRunner, repo: string): Promise<string[]> {
   if (cfg.milestones.length === 0) return [];
-  const existing = JSON.parse(
-    await run(["api", `repos/${repo}/milestones`, "--paginate", "--jq", "[.[].title]"]),
-  ) as string[];
+  // state=all so a closed milestone isn't re-created (would 422). `--jq '.[].title'` (no
+  // array wrap) emits one title per line, which survives --paginate concatenating pages
+  // — a wrapped `[...]` per page would break JSON.parse past 30 milestones.
+  const out = await run(["api", `repos/${repo}/milestones?state=all`, "--paginate", "--jq", ".[].title"]);
+  const existing = out.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
   const toCreate = missing(cfg.milestones, existing);
   for (const title of toCreate) {
     await run(["api", `repos/${repo}/milestones`, "-f", `title=${title}`]);
@@ -113,6 +117,7 @@ async function ensureMilestones(cfg: SapwoodConfig, run: GhRunner, repo: string)
 export interface BoardOption {
   name: string;
   color: string; // ProjectV2 single-select color enum (GRAY, BLUE, ...)
+  description: string;
 }
 interface BoardState {
   exists: boolean;
@@ -126,11 +131,13 @@ async function queryBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunne
   // statusField is bound as a variable, not inlined, so a field name is never query text.
   const q = `query($owner:String!,$num:Int!,$status:String!){
     ${root}(login:$owner){ projectV2(number:$num){ id
-      field(name:$status){ ... on ProjectV2SingleSelectField { id options{ name color } } } } } }`;
+      field(name:$status){ ... on ProjectV2SingleSelectField { id options{ name color description } } } } } }`;
+  // string vars via -f (raw); only the Int! `num` needs -F. -F magic-types @file/numeric,
+  // which could misread an owner/status value starting with '@' or looking numeric.
   const out = await run([
     "api", "graphql", "-f", `query=${q}`,
-    "-F", `owner=${cfg.board.owner}`, "-F", `num=${cfg.board.projectNumber}`,
-    "-F", `status=${cfg.board.statusField}`,
+    "-f", `owner=${cfg.board.owner}`, "-F", `num=${cfg.board.projectNumber}`,
+    "-f", `status=${cfg.board.statusField}`,
   ]);
   const proj = (JSON.parse(out)?.data?.[root]?.projectV2) as
     | { id: string; field?: { id: string; options: BoardOption[] } | null }
@@ -164,8 +171,11 @@ async function ensureBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunn
   const need = missing(desired, board.options.map((o) => o.name));
   if (need.length === 0) return [];
   // updateProjectV2Field replaces the FULL option set, so resend the existing lanes
-  // (preserving their colors) plus the new ones (default GRAY) — never clobber a lane.
-  const full: BoardOption[] = [...board.options, ...need.map((name) => ({ name, color: "GRAY" }))];
+  // (preserving their colors + descriptions) plus the new ones (GRAY) — never clobber a lane.
+  const full: BoardOption[] = [
+    ...board.options,
+    ...need.map((name) => ({ name, color: "GRAY", description: "" })),
+  ];
   await run(setStatusOptionsArgs(board.statusFieldId, full));
   return need.map((n) => `board: added Status lane "${n}"`);
 }
@@ -184,7 +194,7 @@ export function setStatusOptionsArgs(fieldId: string, options: BoardOption[]): s
   const inline = options
     .map((o) => {
       const color = VALID_OPTION_COLORS.has(o.color) ? o.color : "GRAY";
-      return `{name:${JSON.stringify(o.name)}, color:${color}, description:""}`;
+      return `{name:${JSON.stringify(o.name)}, color:${color}, description:${JSON.stringify(o.description)}}`;
     })
     .join(", ");
   const mutation = `mutation($f:ID!){
