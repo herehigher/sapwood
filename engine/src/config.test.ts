@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { parseConfig } from "./config.js";
+import { loadConfig, parseConfig } from "./config.js";
 
 test("applies defaults when only required board fields given", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
@@ -24,6 +27,31 @@ test("rejects missing required repo", () => {
 
 test("rejects missing required board identity with a field path", () => {
   assert.throws(() => parseConfig("lanes:\n  max: 5\n"), /board/);
+});
+
+test("loadConfig probes sapwood.config.json when no YAML file exists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  const cwd = process.cwd();
+  try {
+    writeFileSync(join(dir, "sapwood.config.json"), '{"board":{"owner":"a","repo":"r","projectNumber":1}}');
+    process.chdir(dir);
+    assert.equal(loadConfig().board.owner, "a"); // default probe finds the .json
+  } finally {
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig throws a clear error when no config file is present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  const cwd = process.cwd();
+  try {
+    process.chdir(dir);
+    assert.throws(() => loadConfig(), /no config found/);
+  } finally {
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("rejects an unknown reviewer mode", () => {

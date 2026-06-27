@@ -17,7 +17,7 @@
 //   LOOP_TRUSTED_REVIEWERS-> reviewer.trustedReviewers
 //   LOOP_FRICTION_MIN     -> lanes.frictionMin
 //   LOOP_OPTIM_RECUR      -> optimize.recur
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
@@ -98,7 +98,19 @@ export function parseConfig(text: string): SapwoodConfig {
   return ConfigSchema.parse(raw);
 }
 
-/** Load and validate a config file. Throws ZodError with field paths on invalid input. */
-export function loadConfig(path = "sapwood.config.yaml"): SapwoodConfig {
-  return parseConfig(readFileSync(path, "utf8"));
+// Default lookup order when no explicit path is given. The YAML parser handles all
+// three (YAML ⊃ JSON), so .json is real support, not just advertised.
+const DEFAULT_CONFIG_PATHS = ["sapwood.config.yaml", "sapwood.config.yml", "sapwood.config.json"];
+
+/**
+ * Load and validate a config file. With no argument, probes the default names in order
+ * (.yaml, .yml, .json) and uses the first that exists. Throws ZodError with field paths
+ * on invalid input.
+ */
+export function loadConfig(path?: string): SapwoodConfig {
+  const file = path ?? DEFAULT_CONFIG_PATHS.find(existsSync);
+  if (file === undefined) {
+    throw new Error(`no config found; looked for ${DEFAULT_CONFIG_PATHS.join(", ")}`);
+  }
+  return parseConfig(readFileSync(file, "utf8"));
 }
