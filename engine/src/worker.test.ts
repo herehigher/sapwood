@@ -125,19 +125,34 @@ test("reclaim kills a stubborn (ignores TERM) claude subtree via SIGKILL", async
   }
 });
 
-test("soft-budget overrun -> graceful handoff sentinel (SIGTERM, not killed mid-step)", async () => {
+test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not killed)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    // Emit a result line with cost above the default soft budget (10), then linger so the
-    // monitor catches the overrun before exit. No TERM trap -> SIGTERM ends it gracefully.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '{"type":"result","total_cost_usd":99.0}'\nsleep 30\n`);
+    // A worker that's still running (sleeps); no TERM trap -> SIGTERM ends it gracefully.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
+    await sleep(60); // let it start
+    assert.equal(s.requestHandoff(name), true);
     for (let i = 0; i < 150 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
-    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff sentinel written on soft-budget overrun");
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff sentinel written on requestHandoff");
     assert.ok(!existsSync(join(dir, `${name}.done.json`)) && !existsSync(join(dir, `${name}.failed.json`)));
     const probe = await s.probe(name);
     assert.equal(probe.handoff, true);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch rejects (and cleans up) when claude can't spawn — bad CLAUDE_BIN", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const s = sup(dir, join(dir, "does-not-exist-claude"));
+    await assert.rejects(() => s.dispatch({ number: 4, title: "t", labels: [] }, "lane-bad"), /spawn failed/i);
+    // no bogus running marker / jsonl left behind for the conductor to misread
+    assert.ok(!existsSync(join(dir, "lane-bad.running.json")));
+    assert.ok(!existsSync(join(dir, "lane-bad.jsonl")));
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

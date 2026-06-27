@@ -146,6 +146,21 @@ export class WorkerSupervisor implements Supervisor {
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree
     // via kill(-pid) even if a grandchild reparents (the tree-kill 0day couldn't do on bash 3.2).
     const child = spawn(this.bin, args, { detached: true, stdio: ["ignore", jsonlFd, jsonlFd] });
+    // spawn() reports a bad CLAUDE_BIN / missing `claude` via an async `error` event, not a
+    // throw — so AWAIT the spawn outcome before reporting success. On failure clean up and
+    // reject, so the conductor's claim-rollback runs and no bogus running marker is left
+    // (Codex PR #32 P2). Without this, dispatch() returns success then the process crashes
+    // on the unhandled error.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once("spawn", resolve);
+        child.once("error", reject);
+      });
+    } catch (err) {
+      try { closeSync(jsonlFd); } catch { /* noop */ }
+      this.removeIfExists(jsonlPath);
+      throw new Error(`worker spawn failed (${this.bin}): ${String(err)}`);
+    }
     const startedAt = this.now().toISOString();
     this.writeJsonAtomic(this.path(laneName, "running.json"), {
       name: laneName, issue: issue.number, session_id: sessionId, wrapper_pid: child.pid, started_at: startedAt,
@@ -158,21 +173,31 @@ export class WorkerSupervisor implements Supervisor {
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
+    // A post-spawn error (rare) must not crash the host — treat it as a failed exit.
+    child.on("error", () => this.onExit(laneName, 1));
     return { name: laneName, sessionId };
   }
 
-  /** Heartbeat + soft-budget monitor: touch liveness, then check accrued cost. Crossing the
-   *  SOFT per-worker budget triggers a GRACEFUL handoff (SIGTERM, not SIGKILL) — the worker
-   *  checkpoints per its prompt and we mark the lane resumable. Never a mid-step kill. */
+  /** Operator/drain-initiated graceful handoff: SIGTERM (not SIGKILL) so the worker wraps up
+   *  the current step; onExit then writes the resumable .handoff sentinel. This is the live
+   *  handoff path for M2 (the drain half of the kill-switch, PLAN.md). AUTO cost-triggered
+   *  handoff is deferred — it needs a live cost signal, which stream-json does not carry
+   *  (total_cost_usd is only in the terminal result message). See the follow-up issue. */
+  requestHandoff(name: string): boolean {
+    const lane = this.lanes.get(name);
+    if (!lane || lane.reclaiming || lane.handoffRequested) return false;
+    lane.handoffRequested = true;
+    this.killGroup(lane.child, "SIGTERM");
+    return true;
+  }
+
+  /** Outer liveness heartbeat (mtime), independent of the model self-reporting. NOTE: this
+   *  deliberately does NOT monitor cost — stream-json carries no in-progress total_cost_usd
+   *  (it's only in the terminal result message), so a per-tick cost check would read 0 the
+   *  whole run and never fire. Auto cost-triggered handoff is a follow-up; requestHandoff()
+   *  is the live (drain) path for M2. */
   private heartbeatTick(name: string): void {
     this.touchHeartbeat(name);
-    const lane = this.lanes.get(name);
-    if (!lane || lane.handoffRequested || lane.reclaiming) return;
-    const cost = parseCostUsd(this.readJsonl(lane.jsonlPath));
-    if (cost > this.deps.cfg.worker.budgetUsdSoft) {
-      lane.handoffRequested = true;
-      this.killGroup(lane.child, "SIGTERM"); // graceful: let claude wrap up the current step
-    }
   }
 
   private onExit(name: string, code: number | null): void {
