@@ -20,7 +20,7 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         name        TEXT PRIMARY KEY,
         issue       INTEGER NOT NULL,
         session_id  TEXT NOT NULL,
-        state       TEXT NOT NULL,            -- running | done | failed | handoff
+        state       TEXT NOT NULL,            -- running | driving | done | failed | handoff
         started_at  TEXT NOT NULL,
         ended_at    TEXT
       );
@@ -36,7 +36,9 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
-export type WorkerState = "running" | "done" | "failed" | "handoff";
+// running = live worker (probed each reclaim). driving = produced a PR, lane held awaiting
+// the review gate (M3) — no live worker, but still occupies a lane. done/failed/handoff = terminal.
+export type WorkerState = "running" | "driving" | "done" | "failed" | "handoff";
 
 export interface WorkerRow {
   name: string;
@@ -105,6 +107,21 @@ export class State {
     return this.db.prepare("SELECT * FROM workers WHERE name = ?").get(name) as
       | WorkerRow
       | undefined;
+  }
+
+  /** In-flight lanes: workers still in the `running` state (the conductor reclaim/probe set). */
+  runningWorkers(): WorkerRow[] {
+    return this.db
+      .prepare("SELECT * FROM workers WHERE state = 'running' ORDER BY name")
+      .all() as unknown as WorkerRow[];
+  }
+
+  /** Occupied lanes: running + driving (a driving lane holds a PR awaiting the review gate
+   *  and still counts against cfg.lanes.max). The dispatch capacity + in-flight set. */
+  activeWorkers(): WorkerRow[] {
+    return this.db
+      .prepare("SELECT * FROM workers WHERE state IN ('running', 'driving') ORDER BY name")
+      .all() as unknown as WorkerRow[];
   }
 
   appendEvent(kind: string, payload: unknown): void {

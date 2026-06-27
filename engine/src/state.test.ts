@@ -51,6 +51,29 @@ test("upsert refreshes ALL fields on name reuse (resume / reassigned lane)", () 
   s.close();
 });
 
+test("runningWorkers returns only state=running rows (in-flight lanes)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "done", started_at: "t", ended_at: "t2" });
+  s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "running", started_at: "t", ended_at: null });
+  s.upsertWorker({ name: "d", issue: 4, session_id: "s4", state: "handoff", started_at: "t", ended_at: "t2" });
+  const running = s.runningWorkers();
+  assert.deepEqual(running.map((w) => w.name).sort(), ["a", "c"]);
+  assert.ok(running.every((w) => w.state === "running"));
+  s.close();
+});
+
+test("activeWorkers returns running + driving (occupied lanes), not terminal states", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "driving", started_at: "t", ended_at: "t2" });
+  s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "done", started_at: "t", ended_at: "t2" });
+  s.upsertWorker({ name: "d", issue: 4, session_id: "s4", state: "handoff", started_at: "t", ended_at: "t2" });
+  assert.deepEqual(s.activeWorkers().map((w) => w.name), ["a", "b"]);
+  assert.deepEqual(s.runningWorkers().map((w) => w.name), ["a"]); // running only (probe set)
+  s.close();
+});
+
 test("events append in order", () => {
   const s = mem();
   s.appendEvent("dispatched", { issue: 2 });
