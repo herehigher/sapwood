@@ -28,6 +28,14 @@ re-implemented as a standalone, public tool. Status: **early development, pre-v1
 - **GitHub is the source of truth for *process*** — the ProjectV2 board `Status` +
   labels are the work queue (no parallel task DB). For *durable knowledge*, the docs
   are the source of truth — see "Documentation principle" below.
+- **No issue is dispatched without a verification plan.** `Ready` requires acceptance
+  criteria + how to prove them; the reviewer re-checks the PR against it at gate②.
+  Inherently-unverifiable work (docs/chore) is labelled `verify:n/a` and uses the
+  doc-gate path instead. (PLAN.md Decision #8.)
+- **Worker cost limit is soft, never a mid-work kill.** Reaching the per-worker budget
+  triggers a graceful handoff (commit+push WIP, progress note, `.handoff` sentinel,
+  clean exit), not a SIGKILL. Hard stop is reserved for the engine safety ceiling /
+  kill switch, and even there drains before killing. (PLAN.md Security model.)
 
 ## Documentation principle (source-of-truth partition)
 

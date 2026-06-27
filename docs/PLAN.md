@@ -74,6 +74,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 5 | Default merge gate | **0day-style: autonomous-merge gated on a different-model Codex PR review** — gate① CI green + gate② a fresh non-author Codex review → the Conductor merges (producer≠merger). Reviewer is pluggable; **produce-PR-and-stop** (human merges) and same-model self-review remain selectable modes. Different-model default matches 0day and the security review's recommendation. |
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
 | 7 | Config format | **YAML default** — `sapwood.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
+| 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. |
 
 ## Architecture (v1)
 
@@ -111,7 +112,9 @@ sapwood/
   → engine restart is always a clean resume. Schema is versioned (migration path).
 - **Structured tick results** (typed discriminated union) replace the stringly-typed
   `DISPATCHED.../RECLAIMED...` text protocol greped by skills.
-- **Keep sentinel-based completion** + heartbeat/PID liveness classification.
+- **Keep sentinel-based completion** + heartbeat/PID liveness classification. Add a
+  third terminal state alongside done/failed: **`.handoff`** (soft-budget reached,
+  work preserved, resumable) — see the soft-budget design in the Security model.
 - **Claude CLI coupling isolated** in `worker.ts`: every `claude -p` flag, the
   `stream-json` cost parsing, and `CLAUDE_BIN` discovery live in one module. State a
   minimum Claude Code CLI version and test against it in CI.
@@ -145,10 +148,23 @@ rewrite.** v1 requirements:
   `.claude/settings.json` (hook wiring) and `.github/workflows/**`; **human-merge-only**
   for any change to `guard.ts`, hook wiring, `reviewer.ts`, or security config
   (closes the self-dogfooding risk: a worker weakening its own guard).
-- **Engine-enforced cost ceiling:** a cumulative/daily USD cap + wall-clock cap in
-  the conductor (independent of the CLI `--max-budget-usd`, which is drift-prone),
-  with auto-drain on breach + an out-of-band kill switch. Conservative defaults
-  (small round budget, dispatch cap 1–2).
+- **Two-tier cost control — soft per-worker budget, hard engine ceiling:**
+  - *Per-worker budget is **soft**.* Reaching it never SIGKILLs a worker mid-step
+    (that burns the spend **and** throws away the work). Instead it triggers a
+    **graceful handoff**: finish the current atomic step, commit + push WIP, write a
+    structured progress note (done / remaining / how to resume) to the PR/issue, drop
+    a `.handoff` sentinel carrying the resumable `session_id`, then exit clean. The
+    Conductor treats handoff as "incomplete, resumable" and may `--resume` later. Work
+    is always durable because the worker checkpoints (commit + push + note) at **every
+    green step**, not just at exit — so the latest pushed state is itself a handoff.
+    This improves on 0day, which passes `--max-budget-usd` as a hard cut
+    (`loop_worker.sh:81`) and only has crash-`--resume` (no pre-budget handoff).
+  - *Engine ceiling is **hard**.* A cumulative/daily USD cap + wall-clock cap in the
+    conductor (independent of the drift-prone CLI `--max-budget-usd`), with auto-drain
+    on breach + an out-of-band kill switch. This is a **safety boundary** for runaway
+    spend, not routine cost management — prefer drain (let in-flight workers hand off)
+    over kill; hard kill is the last resort. Conservative defaults (small round budget,
+    dispatch cap 1–2).
 - **Designed-for-public seams (built as interfaces in v1, enforced in v1.1):**
   scoped ephemeral GitHub App tokens per worker (replacing host `gh` auth); a written
   threat model treating issue text as hostile data; fixing the public-repo merge-gate
@@ -184,8 +200,10 @@ rewrite.** v1 requirements:
   + Zod + defaults, `IForge` interface + `GithubForge` (all hard-coding removed),
   SQLite (WAL) state layer with schema versioning.
 - **M0.5 — Minimal onboarding:** `sapwood init` (auth preflight, user-vs-org,
-  idempotent board/label/milestone provisioning, config write). Early so real users
-  can try it and feedback the config schema before it locks.
+  idempotent board/label/milestone provisioning incl. the `verify:n/a` label, config
+  write). The `Ready` gate (Decision #8) lands here: `getReadyIssues` rejects issues
+  with no verification plan (unless `verify:n/a`). Early so real users can try it and
+  feedback the config schema before it locks.
 - **M1 — Guard port (safety first):** zero-dep `guard.ts` + reproduced bypass suite
   + differential/fuzz tests + fail-closed-on-error + hook wiring + `Write`-path
   protections. Nothing autonomous ships before this is green.
@@ -197,7 +215,8 @@ rewrite.** v1 requirements:
   **0day-style default**: autonomous-merge gated on a fresh non-author Codex review
   (gate②) + CI green (gate①), merged by the Conductor. Pluggable reviewer
   (different-model Codex / same-model-trusted-only / human) and a produce-PR-and-stop
-  mode; engine cost ceiling + kill switch. Port 0day's `pr_gate.sh` ACTION protocol +
+  mode; engine cost ceiling + kill switch. gate② also checks the PR against the
+  issue's verification plan (Decision #8). Port 0day's `pr_gate.sh` ACTION protocol +
   `loop_merge_driver.sh` (incl. `--match-head-commit` TOCTOU pin).
 - **M4 — UX surface + CLI:** skills/commands (`/sapwood-run`, `/sapwood-status`,
   `/sapwood-stop`, supervised "watch one issue" mode), `sapwood` status CLI,
@@ -240,6 +259,12 @@ rewrite.** v1 requirements:
   claim → worktree → PR → **Codex review** → CI green + fresh review → **Conductor
   merges** (confirm the worker never self-merges). Also exercise the conservative
   produce-PR-and-stop mode (stops for human merge).
-- **Cost ceiling:** breach the cumulative cap mid-run → auto-drain; kill switch halts
-  dispatch independent of conductor liveness.
+- **Soft budget handoff (explicit test):** a worker reaching its soft per-worker
+  budget is **not** killed mid-step — it commits + pushes WIP, writes a `.handoff`
+  sentinel + progress note, exits clean; the Conductor classifies it resumable and
+  `--resume` continues from the pushed state with no lost work.
+- **Hard cost ceiling:** breach the cumulative cap mid-run → auto-drain (in-flight
+  workers hand off); kill switch halts dispatch independent of conductor liveness.
+- **Readiness gate:** an issue with no verification plan is refused by `getReadyIssues`
+  (never dispatched); one labelled `verify:n/a` passes via the doc-gate path.
 - **Onboarding:** missing `project` scope → clear actionable message, no partial board.
