@@ -221,13 +221,14 @@ rewrite.** v1 requirements:
 - **M0 — Skeleton + config + forge:** ✅ **delivered (PR #22).** plugin manifest,
   `sapwood.config.yaml` schema + Zod + defaults, `IForge` interface + `GithubForge`
   (all hard-coding removed), SQLite (WAL) state layer with schema versioning. **Stack
-  locked here** (see "M0 stack" below). `getReadyIssues` and `setBoardStatus` fail
+  locked here** (see "M0 stack" above). `getReadyIssues` and `setBoardStatus` fail
   closed until the M2 ProjectV2 query, so no half-wired board access ships early.
 - **M0.5 — Minimal onboarding:** `sapwood init` (auth preflight, user-vs-org,
   idempotent board/label/milestone provisioning incl. the `verify:n/a` label, config
-  write). The `Ready` gate (Decision #8) lands here: `getReadyIssues` rejects issues
-  with no verification plan (unless `verify:n/a`). Early so real users can try it and
-  feedback the config schema before it locks.
+  write). Provisions the **inputs** for the Decision #8 `Ready` gate (the `verify:n/a`
+  label, board lanes); the gate is *enforced* once `getReadyIssues` is implemented in
+  M2 (it fails closed until then). Early so real users can try it and feedback the
+  config schema before it locks.
 - **M1 — Guard port (safety first):** zero-dep `guard.ts` + reproduced bypass suite
   + differential/fuzz tests + fail-closed-on-error + hook wiring + `Write`-path
   protections. Nothing autonomous ships before this is green.
