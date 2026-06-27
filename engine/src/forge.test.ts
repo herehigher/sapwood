@@ -1,0 +1,89 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { parsePRStatus } from "./forge.js";
+
+test("parsePRStatus: clean mergeable PR with passing checks", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 21,
+      headRefOid: "d0ce0a5",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: true, ciGreen: true });
+});
+
+test("parsePRStatus: an empty rollup fails closed (checks may not be created yet)", () => {
+  const s = parsePRStatus(
+    JSON.stringify({ number: 1, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] }),
+  );
+  assert.equal(s.ciGreen, false); // genuinely CI-less repos opt in via ci.requireChecks (M3)
+});
+
+test("parsePRStatus: a queued/in-progress check (null conclusion) is not green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 3,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: null }],
+    }),
+  );
+  assert.equal(s.ciGreen, false);
+});
+
+test("parsePRStatus: SKIPPED/NEUTRAL count as passing", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 4,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SKIPPED" }, { conclusion: "NEUTRAL" }, { conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.equal(s.ciGreen, true);
+});
+
+test("parsePRStatus: legacy StatusContext with passing state is green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 5,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ state: "SUCCESS" }, { conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.equal(s.ciGreen, true);
+});
+
+test("parsePRStatus: legacy StatusContext with pending/failing state is not green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 6,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ state: "PENDING" }],
+    }),
+  );
+  assert.equal(s.ciGreen, false);
+});
+
+test("parsePRStatus: a failing check is not green", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 2,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "CONFLICTING",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: "FAILURE" }],
+    }),
+  );
+  assert.equal(s.ciGreen, false);
+  assert.equal(s.mergeable, false);
+});

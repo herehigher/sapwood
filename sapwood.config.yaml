@@ -1,0 +1,59 @@
+# sapwood configuration — hand-edited, inline comments. Validated by a Zod schema
+# (engine/src/config.ts) after parse. This file is YAML, but the parser also accepts
+# JSON (YAML ⊃ JSON), so a sapwood.config.json works with zero extra code.
+#
+# Only `board.owner`, `board.repo`, and `board.projectNumber` are required; everything
+# else has a default shown below. `sapwood init` writes a starter copy of this file.
+
+board:
+  owner: herehigher # GitHub user or org that owns the repo + ProjectV2 board
+  repo: sapwood # the repository name (every gh call targets owner/repo)
+  # ownerKind: user           # auto-detected at init (user | org) if omitted
+  projectNumber: 4 # the ProjectV2 board number
+  statusField: Status # the board's single-select field used as the work queue
+  status: # lane names on that field (no literals baked into code)
+    ready: Ready
+    inProgress: In Progress
+    done: Done
+
+lanes:
+  max: 3 # max concurrent workers
+  roundDispatchCap: 2 # max new dispatches per round (conservative default)
+  reserveCap: 1 # lanes held back as reserve
+  prFixCap: 2 # max PR-fix iterations before escalating
+  frictionMin: 0 # min minutes between dispatches (rate limit; 0 = off)
+
+worker:
+  model: opus
+  effort: high # low | medium | high
+  timeoutSec: 3600 # wall-clock hard cap (safety bound)
+  budgetUsdSoft: 10 # SOFT per-worker budget: reaching it triggers a graceful
+  #                   handoff (commit+push WIP, progress note, .handoff sentinel,
+  #                   clean exit) — never a mid-work kill.
+  heartbeatStaleSecs: 180 # heartbeat older than this => worker considered dead
+
+cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
+  roundBudgetUsd: 30
+  dailyBudgetUsd: 100
+
+reviewer:
+  # different-model-codex: 0day-style gate② (fresh non-author Codex review) — default.
+  # same-model-trusted | human | produce-pr-and-stop are the other modes.
+  mode: different-model-codex
+  trustedReviewers: [] # allowlisted reviewer logins (public-repo hardening, v1.1)
+
+labels: # taxonomy used by the loop
+  inProgress: in-progress
+  needsHuman: needs-human
+  blocked: blocked
+  reserve: reserve
+  verifyNa: verify:n/a # Decision #8: issues with this label skip the verification-plan gate
+
+escalation:
+  humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human
+
+coverage:
+  minPercent: 0 # test-coverage gate (0 = off for M0)
+
+optimize:
+  recur: false # enable the recurring optimization round

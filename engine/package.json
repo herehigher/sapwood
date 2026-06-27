@@ -1,0 +1,22 @@
+{
+  "name": "@sapwood/engine",
+  "version": "0.0.0",
+  "description": "sapwood orchestration engine (conductor, worker, forge, guard, state)",
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "main": "dist/index.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "yaml": "^2.5.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
