@@ -250,7 +250,7 @@ rewrite.** v1 requirements:
   `Ready` gate (the `verify:n/a` label, board lanes); the gate is *enforced* once
   `getReadyIssues` is implemented in M2 (it fails closed until then). Automates the
   manual board step 0day left to the human (`bootstrap_github.sh:89`). Key behaviors
-  (see "M0.5 init" below). Early so real users can try it and feedback the config
+  (see "M0.5 init" above). Early so real users can try it and feedback the config
   schema before it locks.
 - **M1 — Guard port (safety first):** zero-dep `guard.ts` + reproduced bypass suite
   + differential/fuzz tests + fail-closed-on-error + hook wiring + `Write`-path
