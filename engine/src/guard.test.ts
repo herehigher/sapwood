@@ -67,6 +67,17 @@ const BLOCK: [string, string, string][] = [
   ["cp /tmp/evil engine/src/reviewer.ts", CWD, "write-path"],
   ["dd if=/dev/zero of=.claude/settings.local.json", CWD, "write-path"],
   ["echo x > /repo/.github/workflows/deploy.yaml", CWD, "write-path"],
+  // round-2 P1 bypasses (Codex): env -S appended argv, wrapped path-prefixed gh,
+  // shell grouping, &> redirections
+  ["env -S gh pr merge 1", CWD, "merge"],
+  ["env /usr/bin/gh pr merge 1", CWD, "merge"],
+  ["uv run /usr/bin/gh pr merge 1", CWD, "merge"],
+  ["(gh pr merge 1)", CWD, "merge"],
+  ["{ gh pr merge 1; }", CWD, "merge"],
+  ["( gh release create v1 )", CWD, "release"],
+  ["echo x &> .github/workflows/ci.yml", CWD, "write-path"],
+  ["echo x &>> engine/src/guard.ts", CWD, "write-path"],
+  ["echo x &>engine/src/guard-hook.ts", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -106,6 +117,11 @@ const ALLOW: string[] = [
   "cp engine/src/forge.ts /tmp/backup.ts",
   "uv run npx tsc -p .",
   "gh api -H 'A: B' repos/o/r/pulls/1",
+  // round-2 guardrails: benign grouping / &> to a non-boundary path must still pass
+  "(ls -la)",
+  "{ git status; }",
+  "echo x &> /tmp/out.log",
+  "env -S 'ls -la'",
 ];
 
 for (const command of ALLOW) {

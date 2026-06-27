@@ -143,7 +143,9 @@ function extractCommandSubstitutions(text: string): string[] {
   return results;
 }
 
-const CHAIN_RE = /&&|\|\||;|\||&|\n/;
+// chain operators. `&(?!>)` so `&>`/`&>>` (redirect both streams) stay with their
+// fragment instead of being split apart and losing the redirect target.
+const CHAIN_RE = /&&|\|\||;|\||&(?!>)|\n/;
 
 function splitFragments(command: string): string[] {
   const subs = extractCommandSubstitutions(command);
@@ -350,7 +352,7 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
 }
 
 function checkCategoryC(tokens: string[], fragment: string): string | null {
-  if (tokens.length === 0 || tokens[0]!.toLowerCase() !== "gh" || tokens.length < 2) return null;
+  if (tokens.length < 2 || basename(tokens[0]!).toLowerCase() !== "gh") return null;
   const remaining = ghSkipGlobalFlags(tokens);
   if (remaining.length === 0) return null;
   const sub1 = remaining[0]!.toLowerCase();
@@ -365,18 +367,36 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
 }
 
 // ── env -S split-string extraction ───────────────────────────────────────────
-function extractEnvSplitString(tokens: string[]): string | null {
+// GNU env -S splits the string into argv, then APPENDS any trailing COMMAND [ARG] tokens.
+// So `env -S gh pr merge 1` runs `gh pr merge 1` — we must judge the split string plus
+// everything after it, not just the -S argument.
+function envSplitInner(tokens: string[]): string | null {
   if (tokens.length === 0 || tokens[0]!.toLowerCase() !== "env") return null;
   let i = 1;
   while (i < tokens.length) {
     const tok = tokens[i]!;
-    if (tok === "--split-string") return i + 1 < tokens.length ? tokens[i + 1]! : null;
-    if (tok.startsWith("--split-string=")) return tok.slice("--split-string=".length);
-    if (tok === "-S") return i + 1 < tokens.length ? tokens[i + 1]! : null;
-    if (tok.startsWith("-S") && tok.length > 2 && !tok.startsWith("-S=")) return tok.slice(2);
-    if (tok.startsWith("-S=") && tok.length > 3) return tok.slice(3);
-    if (tok.startsWith("-")) { i++; continue; }
-    break;
+    let value: string | null = null;
+    let nextI = i;
+    if (tok === "--split-string" || tok === "-S") {
+      if (i + 1 >= tokens.length) return null;
+      value = tokens[i + 1]!;
+      nextI = i + 2;
+    } else if (tok.startsWith("--split-string=")) {
+      value = tok.slice("--split-string=".length);
+      nextI = i + 1;
+    } else if (tok.startsWith("-S") && tok.length > 2 && !tok.startsWith("-S=")) {
+      value = tok.slice(2);
+      nextI = i + 1;
+    } else if (tok.startsWith("-S=") && tok.length > 3) {
+      value = tok.slice(3);
+      nextI = i + 1;
+    } else if (tok.startsWith("-")) {
+      i++;
+      continue;
+    } else {
+      break;
+    }
+    return [value, ...tokens.slice(nextI)].join(" ");
   }
   return null;
 }
@@ -386,14 +406,26 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null 
   if (depth > 8) return null;
   let tokens = safeSplit(fragment);
   if (tokens.length === 0) return null;
+
+  // strip shell grouping/subshell punctuation that hides the command:
+  //   (gh pr merge 1)  →  ["(gh", ...] ;  { gh pr merge 1; } → ["{", "gh", ...]
+  while (tokens.length && (tokens[0] === "(" || tokens[0] === "{" || tokens[0] === "((")) tokens = tokens.slice(1);
+  if (tokens.length) {
+    const head = tokens[0]!.replace(/^[({]+/, "");
+    tokens = head ? [head, ...tokens.slice(1)] : tokens.slice(1);
+  }
+  if (tokens.length === 0) return null;
+
   if (hasPathSep(tokens[0]!)) tokens = [basename(tokens[0]!), ...tokens.slice(1)];
 
   if (tokens[0]!.toLowerCase() === "env") {
-    const inner = extractEnvSplitString(tokens);
+    const inner = envSplitInner(tokens);
     if (inner !== null) return judgeFragment(inner, cwd, depth + 1);
   }
 
-  const stripped = stripExecPrefix(tokens);
+  let stripped = stripExecPrefix(tokens);
+  // a wrapper can reintroduce a path-prefixed command (uv run /usr/bin/gh ...) — normalize.
+  if (stripped.length && hasPathSep(stripped[0]!)) stripped = [basename(stripped[0]!), ...stripped.slice(1)];
   const opaque = checkOpaque(stripped, fragment);
   if (opaque) return opaque;
 
@@ -440,10 +472,10 @@ function checkWritePath(filePath: string, cwd: string): string | null {
 }
 
 // Shell write vectors that bypass the Write/Edit tool: redirections and write commands.
-// A pure redirection operator token: >, >>, >|, 2>, 1>> ... (target is the next token).
-const REDIR_OP_RE = /^[0-9]*>>?\|?$/;
-// A redirection glued to its target: >file, 2>>file, >|file (target captured).
-const REDIR_GLUED_RE = /^[0-9]*>>?\|?(.+)$/;
+// A pure redirection operator token: >, >>, >|, 2>, 1>>, &>, &>> (target is the next token).
+const REDIR_OP_RE = /^&?[0-9]*>>?\|?$/;
+// A redirection glued to its target: >file, 2>>file, &>file (target captured).
+const REDIR_GLUED_RE = /^&?[0-9]*>>?\|?(.+)$/;
 const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "mv", "install"]);
 
 /** Detect a Bash command writing to a boundary file (redirect or write-command). */
