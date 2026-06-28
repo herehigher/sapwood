@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, existsSync, readFileSync, chmodSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { spawn } from "node:child_process";
 import { parseCostUsd, discoverClaudeBin, claudeArgs, guardSettings, WorkerSupervisor } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
@@ -172,14 +173,32 @@ test("requestHandoff but the worker dies by signal (no clean wrap-up) -> .failed
   }
 });
 
-test("guardSettings: PreToolUse hook runs `node <hookPath>` for the guarded tools", () => {
+test("guardSettings: PreToolUse hook runs `node <hookPath>` and fails closed (exit 2) on a hook crash", () => {
   const s = guardSettings("/x/dist/guard-hook.js") as {
     hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ type: string; command: string }> }> };
   };
   const entry = s.hooks.PreToolUse[0]!;
   assert.match(entry.matcher, /Bash/);
   assert.equal(entry.hooks[0]!.type, "command");
-  assert.equal(entry.hooks[0]!.command, 'node "/x/dist/guard-hook.js"');
+  const cmd = entry.hooks[0]!.command;
+  assert.match(cmd, /^node "\/x\/dist\/guard-hook\.js"/); // runs the quoted hook path
+  assert.match(cmd, /\bexit 2\b/); // a hook launch/runtime failure blocks (fail-closed, hard)
+  assert.match(cmd, /SAPWOOD_GUARD_MODE.*soft.*exit 0/); // soft mode allows on crash (observe-only)
+});
+
+test("guard hook wrapper fails closed: a crashing hook exits 2 in hard mode, 0 in soft (Codex #26 P1)", async () => {
+  // A hook path that makes `node` exit non-zero (module not found). In hard mode the wrapper
+  // must map that to exit 2 (BLOCKING); in soft (observe-only) it allows (exit 0).
+  const cmd = (guardSettings("/nonexistent/sapwood-guard-hook.js") as {
+    hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };
+  }).hooks.PreToolUse[0]!.hooks[0]!.command;
+  const run = (mode: string): Promise<number | null> =>
+    new Promise((resolve) => {
+      const c = spawn("sh", ["-c", cmd], { stdio: "ignore", env: { ...process.env, SAPWOOD_GUARD_MODE: mode } });
+      c.on("exit", (code) => resolve(code));
+    });
+  assert.equal(await run("hard"), 2); // fail-closed: a broken hook BLOCKS the tool
+  assert.equal(await run("soft"), 0); // observe-only: a broken hook allows
 });
 
 test("dispatch writes a per-worker guard settings file + sets SAPWOOD_GUARD_MODE in the worker env (#26)", async () => {

@@ -82,17 +82,23 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "handoff.json", "heartbeat", "jsonl"];
 
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
- *  command runs `node <hookPath>`; hookPath is trusted (our own dist path) and quoted. The
- *  matcher covers exactly the tools the guard inspects. */
+ *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
+ *  matcher covers exactly the tools the guard inspects.
+ *
+ *  FAIL-CLOSED even if `node` can't run the hook (stale dist whose guard-hook.js imports a
+ *  missing guard.js, a module-load/syntax error, missing node/PATH): Claude Code treats a
+ *  non-zero *non-2* PreToolUse exit as NON-blocking, so the tool would proceed unguarded — a
+ *  fail-OPEN in the only live safety boundary (Codex #26 P1). So a hook launch/runtime failure
+ *  is mapped to exit 2 (BLOCKING) in hard mode. Soft mode is observe-only, so a crash there
+ *  allows (exit 0). Mode is read from the SAPWOOD_GUARD_MODE spawn env. */
 export function guardSettings(hookPath: string): object {
+  const hook = JSON.stringify(hookPath);
+  const command =
+    `node ${hook} || { [ "$SAPWOOD_GUARD_MODE" = soft ] && exit 0 || ` +
+    `{ echo '[sapwood-guard] hook failed to run — blocking (fail-closed)' >&2; exit 2; }; }`;
   return {
     hooks: {
-      PreToolUse: [
-        {
-          matcher: "Bash|Write|Edit|MultiEdit",
-          hooks: [{ type: "command", command: `node ${JSON.stringify(hookPath)}` }],
-        },
-      ],
+      PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit", hooks: [{ type: "command", command }] }],
     },
   };
 }
