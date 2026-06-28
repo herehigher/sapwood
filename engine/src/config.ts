@@ -50,7 +50,12 @@ const Worker = z.object({
   model: z.string().default("opus"),
   effort: z.enum(["low", "medium", "high"]).default("high"),
   timeoutSec: z.number().int().positive().default(3600),
-  budgetUsdSoft: z.number().finite().positive().default(10), // SOFT: reaching it -> graceful handoff
+  // SOFT per-worker budget -> graceful handoff (never a mid-work kill). NOTE: automatic
+  // enforcement at this limit is pending #33 — it needs a live cost signal, which stream-json
+  // does not carry (total_cost_usd is only in the terminal result message). Interim spend
+  // bound: worker.timeoutSec (enforced) + the engine HARD ceiling (M3, the actual runaway
+  // safety boundary). requestHandoff() is the live drain path today.
+  budgetUsdSoft: z.number().finite().positive().default(10),
   heartbeatStaleSecs: z.number().int().positive().default(180),
 }).strict();
 
