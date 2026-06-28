@@ -217,6 +217,9 @@ const WRITE_BLOCK: [string, string][] = [
   ["engine/src/guard-hook.ts", "write-path"],
   ["engine/src/reviewer.ts", "write-path"],
   ["../../repo/.claude/settings.json", "write-path"], // path traversal still resolves in
+  ["sapwood.config.yaml", "write-path"], // engine/guard config -> a worker can't set guard.mode:soft (#26 R2)
+  ["/repo/sapwood.config.yml", "write-path"],
+  ["sapwood.config.json", "write-path"],
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
@@ -233,6 +236,12 @@ for (const file_path of ["src/app.ts", "README.md", "/repo/engine/src/forge.ts",
 }
 
 // ── hook adapter: fail-closed ────────────────────────────────────────────────
+test("config write via Bash redirect is also blocked (worker can't echo > sapwood.config.yaml)", () => {
+  const d = guardDecision("Bash", { command: "echo 'guard: {mode: soft}' > sapwood.config.yaml" }, CWD);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
 test("hook: a blocking command yields a deny output naming the reason", () => {
   const out = responseFromText(JSON.stringify({ tool_name: "Bash", tool_input: { command: "gh pr merge 5" }, cwd: CWD }));
   assert.ok(out);

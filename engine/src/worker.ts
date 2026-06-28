@@ -92,7 +92,10 @@ const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "handoff.json
  *  is mapped to exit 2 (BLOCKING) in hard mode. Soft mode is observe-only, so a crash there
  *  allows (exit 0). Mode is read from the SAPWOOD_GUARD_MODE spawn env. */
 export function guardSettings(hookPath: string): object {
-  const hook = JSON.stringify(hookPath);
+  // The command is shell-evaluated, so single-quote the path: double quotes still expand $,
+  // backticks, and $() — an install path containing those would break or inject (Codex #26 R2).
+  // Single quotes suppress all expansion; embedded single quotes are escaped '\'' .
+  const hook = shellSingleQuote(hookPath);
   const command =
     `node ${hook} || { [ "$SAPWOOD_GUARD_MODE" = soft ] && exit 0 || ` +
     `{ echo '[sapwood-guard] hook failed to run — blocking (fail-closed)' >&2; exit 2; }; }`;
@@ -405,6 +408,12 @@ export class WorkerSupervisor implements Supervisor {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** POSIX single-quote escaping: wrap in '...' and replace each ' with '\'' so no shell
+ *  expansion ($, backticks, $()) occurs in the interpolated path. */
+export function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 function defaultPrompt(issue: Issue): string {

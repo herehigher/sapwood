@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
-import { parseCostUsd, discoverClaudeBin, claudeArgs, guardSettings, WorkerSupervisor } from "./worker.js";
+import { parseCostUsd, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote, WorkerSupervisor } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
@@ -181,9 +181,15 @@ test("guardSettings: PreToolUse hook runs `node <hookPath>` and fails closed (ex
   assert.match(entry.matcher, /Bash/);
   assert.equal(entry.hooks[0]!.type, "command");
   const cmd = entry.hooks[0]!.command;
-  assert.match(cmd, /^node "\/x\/dist\/guard-hook\.js"/); // runs the quoted hook path
+  assert.match(cmd, /^node '\/x\/dist\/guard-hook\.js'/); // single-quoted hook path (no shell expansion)
   assert.match(cmd, /\bexit 2\b/); // a hook launch/runtime failure blocks (fail-closed, hard)
   assert.match(cmd, /SAPWOOD_GUARD_MODE.*soft.*exit 0/); // soft mode allows on crash (observe-only)
+});
+
+test("shellSingleQuote: suppresses shell expansion of $, backticks, $()", () => {
+  assert.equal(shellSingleQuote("/a/b"), "'/a/b'");
+  assert.equal(shellSingleQuote("/p/$(rm -rf x)/h.js"), "'/p/$(rm -rf x)/h.js'"); // $() not expanded
+  assert.equal(shellSingleQuote("/it's/here"), "'/it'\\''s/here'"); // embedded quote escaped
 });
 
 test("guard hook wrapper fails closed: a crashing hook exits 2 in hard mode, 0 in soft (Codex #26 P1)", async () => {
