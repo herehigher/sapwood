@@ -1,7 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { guardDecision } from "./guard.js";
-import { hookResponse, responseFromText } from "./guard-hook.js";
+import { hookResponse, responseFromText, resolveGuardMode, applyGuardMode } from "./guard-hook.js";
+
+test("resolveGuardMode: only the exact 'soft' selects observe-mode; everything else -> hard (fail-safe)", () => {
+  assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "soft" }), "soft");
+  assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "hard" }), "hard");
+  assert.equal(resolveGuardMode({}), "hard"); // unset -> hard
+  assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "Soft" }), "hard"); // typo/case -> hard
+  assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "" }), "hard");
+});
+
+test("applyGuardMode: hard enforces (deny passes through); soft allows but logs the would-block", () => {
+  const denyOut = responseFromText(JSON.stringify({ tool_name: "Bash", tool_input: { command: "gh pr merge 1" }, cwd: "/r" }));
+  assert.ok(denyOut, "precondition: a gh-merge is a deny");
+  // hard: the deny is enforced, nothing logged
+  assert.deepEqual(applyGuardMode(denyOut, "hard"), { output: denyOut, logged: null });
+  // soft: allowed (output null) but the would-block is surfaced via logged
+  assert.deepEqual(applyGuardMode(denyOut, "soft"), { output: null, logged: denyOut });
+  // an allow decision is untouched in both modes
+  assert.deepEqual(applyGuardMode(null, "soft"), { output: null, logged: null });
+  assert.deepEqual(applyGuardMode(null, "hard"), { output: null, logged: null });
+});
 
 const CWD = "/repo";
 const bash = (command: string, cwd = CWD) => guardDecision("Bash", { command }, cwd);

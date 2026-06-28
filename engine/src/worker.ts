@@ -19,6 +19,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
 import type { Supervisor, LaneProbe } from "./conductor.js";
@@ -80,6 +81,22 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "handoff.json", "heartbeat", "jsonl"];
 
+/** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
+ *  command runs `node <hookPath>`; hookPath is trusted (our own dist path) and quoted. The
+ *  matcher covers exactly the tools the guard inspects. */
+export function guardSettings(hookPath: string): object {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Bash|Write|Edit|MultiEdit",
+          hooks: [{ type: "command", command: `node ${JSON.stringify(hookPath)}` }],
+        },
+      ],
+    },
+  };
+}
+
 export interface WorkerDeps {
   cfg: SapwoodConfig;
   /** Directory for sentinels/jsonl/heartbeat. Default <cwd>/data/sessions/state. */
@@ -90,6 +107,8 @@ export interface WorkerDeps {
   hasOpenPr: (issue: number) => Promise<boolean>;
   /** Worker prompt for an issue. Default: a minimal imperative skeleton. */
   renderPrompt?: (issue: Issue) => string;
+  /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
+  guardHookPath?: string;
   heartbeatMs?: number; // default 30_000
   now?: () => Date;
 }
@@ -111,12 +130,17 @@ export class WorkerSupervisor implements Supervisor {
   private readonly dir: string;
   private readonly bin: string;
   private readonly hbMs: number;
+  private readonly guardHookPath: string;
   private readonly lanes = new Map<string, Lane>();
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
     this.bin = deps.claudeBin ?? discoverClaudeBin(process.env);
     this.hbMs = deps.heartbeatMs ?? 30_000;
+    // Default to the compiled hook sibling (dist/guard-hook.js when running compiled). The
+    // "build-dist" step (#26) is the existing `npm run build`; dispatch fails closed below if
+    // the file is absent in hard mode rather than running an unguarded worker.
+    this.guardHookPath = deps.guardHookPath ?? fileURLToPath(new URL("./guard-hook.js", import.meta.url));
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -136,21 +160,38 @@ export class WorkerSupervisor implements Supervisor {
         throw new Error(`worker name in use (${laneName}.${ext} exists) — reassign a fresh name`);
       }
     }
+    // FAIL-CLOSED: never dispatch an unguarded worker in hard mode. If the compiled guard hook
+    // is missing (engine not built), refuse rather than run claude with no live PreToolUse
+    // guard — a missing hook file would otherwise be a silent fail-OPEN (#26).
+    const guardMode = this.deps.cfg.guard.mode;
+    if (guardMode === "hard" && !existsSync(this.guardHookPath)) {
+      throw new Error(
+        `guard hook not found at ${this.guardHookPath} — build the engine (npm run build) before ` +
+          `dispatching; refusing to run an unguarded worker in hard mode`,
+      );
+    }
     const sessionId = randomUUID();
     const prompt = (this.deps.renderPrompt ?? defaultPrompt)(issue);
     const jsonlPath = this.path(laneName, "jsonl");
     const jsonlFd = openSync(jsonlPath, "w");
-    // NB: NO --add-dir for the engine `data/` tree. That dir holds the sentinels + SQLite
-    // state; mounting it would let the worker write its own .done/.failed or mutate state,
-    // defeating "completion is signaled by the WRAPPER, not the model" (Codex R3 P1). The
-    // worker only needs its --worktree (the repo). Guard-hook --settings lands in #26.
+    // Per-worker settings wiring the guard hook, scoped to THIS claude -p via --settings (not a
+    // plugin-global PreToolUse that would also hit the human's interactive session) (#26).
+    const settingsPath = this.path(laneName, "settings.json");
+    this.writeJsonAtomic(settingsPath, guardSettings(this.guardHookPath));
+    // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
+    // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
       prompt, model: this.deps.cfg.worker.model, effort: this.deps.cfg.worker.effort,
-      worktree: laneName, name: laneName, sessionId,
+      worktree: laneName, name: laneName, sessionId, settings: settingsPath,
     });
-    // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree
-    // via kill(-pid) even if a grandchild reparents (the tree-kill 0day couldn't do on bash 3.2).
-    const child = spawn(this.bin, args, { detached: true, stdio: ["ignore", jsonlFd, jsonlFd] });
+    // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree.
+    // SAPWOOD_GUARD_MODE in the spawn env reaches the hook subprocess (inherited from claude)
+    // but is NOT worker-writable, so a worker can't flip its own guard hard->soft (#26).
+    const child = spawn(this.bin, args, {
+      detached: true,
+      stdio: ["ignore", jsonlFd, jsonlFd],
+      env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
+    });
     // Register the lane + `exit` handler BEFORE any await. Node does not replay `exit` to
     // listeners attached after it fires, so a fast exit (instant completion / the CLI
     // rejecting args) must already have its handler or its terminal sentinel is lost and the

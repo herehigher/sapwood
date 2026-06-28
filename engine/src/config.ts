@@ -82,10 +82,20 @@ const Labels = z.object({
   verifyNa: z.string().default("verify:n/a"), // Decision #8: skips the verification-plan gate
 }).strict();
 
+const Guard = z.object({
+  // PreToolUse guard enforcement. HARD (default) = fail-closed deny — the producer≠merger /
+  // boundary-write safety boundary. SOFT = observe-only: log what WOULD be blocked, allow it
+  // (a first-run trust-ramp / dogfood affordance, never the shipped default). The mode reaches
+  // the hook via the SAPWOOD_GUARD_MODE spawn env worker.ts sets — not a worker-writable file —
+  // so a worker can't weaken its own guard.
+  mode: z.enum(["hard", "soft"]).default("hard"),
+}).strict();
+
 export const ConfigSchema = z.object({
   board: Board,
   lanes: Lanes.default({}),
   worker: Worker.default({}),
+  guard: Guard.default({}),
   cost: Cost.default({}),
   reviewer: Reviewer.default({}),
   labels: Labels.default({}),
