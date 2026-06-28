@@ -1,7 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { guardDecision } from "./guard.js";
-import { hookResponse, responseFromText } from "./guard-hook.js";
+import { hookResponse, responseFromText, resolveGuardMode, applyGuardMode } from "./guard-hook.js";
+
+test("resolveGuardMode: only the exact 'soft' selects observe-mode; everything else -> hard (fail-safe)", () => {
+  assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "soft" }), "soft");
+  assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "hard" }), "hard");
+  assert.equal(resolveGuardMode({}), "hard"); // unset -> hard
+  assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "Soft" }), "hard"); // typo/case -> hard
+  assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "" }), "hard");
+});
+
+test("applyGuardMode: hard enforces (deny passes through); soft allows but logs the would-block", () => {
+  const denyOut = responseFromText(JSON.stringify({ tool_name: "Bash", tool_input: { command: "gh pr merge 1" }, cwd: "/r" }));
+  assert.ok(denyOut, "precondition: a gh-merge is a deny");
+  // hard: the deny is enforced, nothing logged
+  assert.deepEqual(applyGuardMode(denyOut, "hard"), { output: denyOut, logged: null });
+  // soft: allowed (output null) but the would-block is surfaced via logged
+  assert.deepEqual(applyGuardMode(denyOut, "soft"), { output: null, logged: denyOut });
+  // an allow decision is untouched in both modes
+  assert.deepEqual(applyGuardMode(null, "soft"), { output: null, logged: null });
+  assert.deepEqual(applyGuardMode(null, "hard"), { output: null, logged: null });
+});
 
 const CWD = "/repo";
 const bash = (command: string, cwd = CWD) => guardDecision("Bash", { command }, cwd);
@@ -197,6 +217,11 @@ const WRITE_BLOCK: [string, string][] = [
   ["engine/src/guard-hook.ts", "write-path"],
   ["engine/src/reviewer.ts", "write-path"],
   ["../../repo/.claude/settings.json", "write-path"], // path traversal still resolves in
+  ["sapwood.config.yaml", "write-path"], // engine/guard config -> a worker can't set guard.mode:soft (#26 R2)
+  ["/repo/sapwood.config.yml", "write-path"],
+  ["sapwood.config.json", "write-path"],
+  ["/repo/engine/dist/guard-hook.js", "write-path"], // compiled hook artifact -> can't overwrite the live hook (#26 R3)
+  ["engine/dist/guard.js", "write-path"],
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
@@ -213,6 +238,12 @@ for (const file_path of ["src/app.ts", "README.md", "/repo/engine/src/forge.ts",
 }
 
 // ── hook adapter: fail-closed ────────────────────────────────────────────────
+test("config write via Bash redirect is also blocked (worker can't echo > sapwood.config.yaml)", () => {
+  const d = guardDecision("Bash", { command: "echo 'guard: {mode: soft}' > sapwood.config.yaml" }, CWD);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("write-path"));
+});
+
 test("hook: a blocking command yields a deny output naming the reason", () => {
   const out = responseFromText(JSON.stringify({ tool_name: "Bash", tool_input: { command: "gh pr merge 5" }, cwd: CWD }));
   assert.ok(out);

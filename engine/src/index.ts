@@ -35,12 +35,20 @@ export {
   parseCostUsd,
   discoverClaudeBin,
   claudeArgs,
+  guardSettings,
   type WorkerDeps,
   type ClaudeArgsOpts,
 } from "./worker.js";
 export { gh, ghText, type GhRunner } from "./gh.js";
 export { guardDecision, safeSplit, type Decision, type GuardInput } from "./guard.js";
-export { hookResponse, responseFromText, type DenyOutput } from "./guard-hook.js";
+export {
+  hookResponse,
+  responseFromText,
+  resolveGuardMode,
+  applyGuardMode,
+  type DenyOutput,
+  type GuardMode,
+} from "./guard-hook.js";
 export {
   init,
   preflight,

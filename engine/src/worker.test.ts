@@ -4,7 +4,8 @@ import { mkdtempSync, writeFileSync, existsSync, readFileSync, chmodSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { parseCostUsd, discoverClaudeBin, claudeArgs, WorkerSupervisor } from "./worker.js";
+import { spawn } from "node:child_process";
+import { parseCostUsd, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote, WorkerSupervisor } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
@@ -60,6 +61,14 @@ const mkStub = (dir: string, body: string): string => {
 };
 const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001}'\nexit 0\n`;
 
+// A present (dummy) guard hook so hard-mode dispatch doesn't fail closed; the stub `claude`
+// ignores --settings, so its contents don't matter here (the hook mode is unit-tested separately).
+const mkHook = (dir: string): string => {
+  const p = join(dir, "guard-hook.js");
+  writeFileSync(p, "process.exit(0)\n");
+  return p;
+};
+
 const sup = (dir: string, claudeBin: string, hasPr = false) =>
   new WorkerSupervisor({
     cfg,
@@ -68,6 +77,7 @@ const sup = (dir: string, claudeBin: string, hasPr = false) =>
     hasOpenPr: async () => hasPr,
     renderPrompt: () => "test prompt",
     heartbeatMs: 50,
+    guardHookPath: mkHook(dir),
   });
 
 test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees DONE", async () => {
@@ -163,6 +173,78 @@ test("requestHandoff but the worker dies by signal (no clean wrap-up) -> .failed
   }
 });
 
+test("guardSettings: PreToolUse hook runs `node <hookPath>` and fails closed (exit 2) on a hook crash", () => {
+  const s = guardSettings("/x/dist/guard-hook.js") as {
+    disableAllHooks: boolean;
+    hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ type: string; command: string }> }> };
+  };
+  assert.equal(s.disableAllHooks, false); // force hooks on so a global disable can't silence the guard
+  const entry = s.hooks.PreToolUse[0]!;
+  assert.match(entry.matcher, /Bash/);
+  assert.equal(entry.hooks[0]!.type, "command");
+  const cmd = entry.hooks[0]!.command;
+  assert.match(cmd, /^node '\/x\/dist\/guard-hook\.js'/); // single-quoted hook path (no shell expansion)
+  assert.match(cmd, /\bexit 2\b/); // a hook launch/runtime failure blocks (fail-closed, hard)
+  assert.match(cmd, /SAPWOOD_GUARD_MODE.*soft.*exit 0/); // soft mode allows on crash (observe-only)
+});
+
+test("shellSingleQuote: suppresses shell expansion of $, backticks, $()", () => {
+  assert.equal(shellSingleQuote("/a/b"), "'/a/b'");
+  assert.equal(shellSingleQuote("/p/$(rm -rf x)/h.js"), "'/p/$(rm -rf x)/h.js'"); // $() not expanded
+  assert.equal(shellSingleQuote("/it's/here"), "'/it'\\''s/here'"); // embedded quote escaped
+});
+
+test("guard hook wrapper fails closed: a crashing hook exits 2 in hard mode, 0 in soft (Codex #26 P1)", async () => {
+  // A hook path that makes `node` exit non-zero (module not found). In hard mode the wrapper
+  // must map that to exit 2 (BLOCKING); in soft (observe-only) it allows (exit 0).
+  const cmd = (guardSettings("/nonexistent/sapwood-guard-hook.js") as {
+    hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };
+  }).hooks.PreToolUse[0]!.hooks[0]!.command;
+  const run = (mode: string): Promise<number | null> =>
+    new Promise((resolve) => {
+      const c = spawn("sh", ["-c", cmd], { stdio: "ignore", env: { ...process.env, SAPWOOD_GUARD_MODE: mode } });
+      c.on("exit", (code) => resolve(code));
+    });
+  assert.equal(await run("hard"), 2); // fail-closed: a broken hook BLOCKS the tool
+  assert.equal(await run("soft"), 0); // observe-only: a broken hook allows
+});
+
+test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_GUARD_MODE in the worker env (#26)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    // stub records its argv + the guard mode env, proving the inline settings + env reach the process.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho "$SAPWOOD_GUARD_MODE" > "${join(dir, "mode.seen")}"\nexit 0\n`);
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
+    const s = new WorkerSupervisor({ cfg: scfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: hook });
+    const { name } = await s.dispatch({ number: 7, title: "t", labels: [] });
+    assert.ok(!existsSync(join(dir, `${name}.settings.json`)), "no mutable settings file written");
+    // mode.seen is the stub's LAST write — waiting on it guarantees args.seen exists too
+    // (waiting on args.seen could race the second write on a slow FS). (Codex #26 R6 P3.)
+    for (let i = 0; i < 400 && !existsSync(join(dir, "mode.seen")); i++) await sleep(20);
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    assert.match(args, /--settings/);
+    assert.match(args, /guard-hook\.js/); // the inline JSON carries the hook command
+    assert.match(args, /disableAllHooks/);
+    assert.equal(readFileSync(join(dir, "mode.seen"), "utf8").trim(), "soft"); // env reached the worker
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch fails closed in hard mode when the guard hook is missing (no unguarded worker)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", guardHookPath: join(dir, "nonexistent-hook.js") });
+    await assert.rejects(() => s.dispatch({ number: 1, title: "t", labels: [] }), /guard hook not found|unguarded/i);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("dispatch rejects (and cleans up) when claude can't spawn — bad CLAUDE_BIN", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
@@ -182,7 +264,7 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // ignores TERM -> needs the KILL
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
-    const s = new WorkerSupervisor({ cfg: tcfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 100 });
+    const s = new WorkerSupervisor({ cfg: tcfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 100, guardHookPath: mkHook(dir) });
     const { name } = await s.dispatch({ number: 5, title: "t", labels: [] });
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);

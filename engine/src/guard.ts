@@ -499,6 +499,13 @@ const PROTECTED_SUFFIXES = ["/engine/src/guard.ts", "/engine/src/guard-hook.ts",
 function protectedPathLabel(abs: string): string | null {
   if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
   if (/\/\.github\/workflows(\/|$)/.test(abs)) return ".github/workflows/** (CI integrity)";
+  // The engine config carries guard.mode + reviewer/security settings — a worker editing it to
+  // guard.mode:soft would make future workers observe-only. Human-merge-only (Codex #26 R2).
+  if (/\/sapwood\.config\.(ya?ml|json)$/.test(abs)) return "sapwood.config.* (engine/guard config)";
+  // The COMPILED guard artifacts are what each PreToolUse invocation actually executes — a
+  // worker overwriting dist/guard-hook.js (or the guard.js it loads) with a no-op would disable
+  // hard-mode enforcement for the next tool call. Protect the artifact, not just src (Codex #26 R3).
+  if (/\/engine\/dist\/guard(-hook)?\.js$/.test(abs)) return "engine/dist/guard*.js (compiled guard artifact)";
   if (PROTECTED_SUFFIXES.some((s) => abs.endsWith(s))) return "guard/reviewer source";
   return null;
 }

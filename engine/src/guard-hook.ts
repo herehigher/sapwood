@@ -49,6 +49,32 @@ export function hookResponse(payload: unknown): DenyOutput | null {
   }
 }
 
+export type GuardMode = "hard" | "soft";
+
+/**
+ * Resolve the enforcement mode from the environment. HARD is the default and the fail-safe:
+ * ONLY the exact value "soft" selects observe-mode; anything else (unset, typo, empty) → hard.
+ * Sourced from the spawn env set by worker.ts/conductor (trusted) — NOT a worker-writable file
+ * — so a worker can't flip its own guard from hard to soft (the self-dogfooding risk).
+ */
+export function resolveGuardMode(env: Record<string, string | undefined>): GuardMode {
+  return env["SAPWOOD_GUARD_MODE"] === "soft" ? "soft" : "hard";
+}
+
+/**
+ * Apply the mode to a raw decision. HARD: pass the deny through (enforce). SOFT: never deny —
+ * return allow (null), but surface what WOULD have been blocked via `logged` so observe-mode
+ * has a record. An allow decision is unaffected in both modes.
+ */
+export function applyGuardMode(
+  decision: DenyOutput | null,
+  mode: GuardMode,
+): { output: DenyOutput | null; logged: DenyOutput | null } {
+  if (decision === null) return { output: null, logged: null };
+  if (mode === "soft") return { output: null, logged: decision };
+  return { output: decision, logged: null };
+}
+
 /** Parse hook stdin text and decide. Fail-closed: a JSON parse error → deny. */
 export function responseFromText(text: string): DenyOutput | null {
   let payload: unknown;
@@ -67,14 +93,19 @@ async function readStdin(): Promise<string> {
 }
 
 export async function main(): Promise<number> {
-  let out: DenyOutput | null;
+  let decision: DenyOutput | null;
   try {
-    out = responseFromText(await readStdin());
+    decision = responseFromText(await readStdin());
   } catch (e) {
     // Even an stdin read failure fails closed.
-    out = deny(`BLOCK [fail-closed] hook IO error: ${e instanceof Error ? e.message : String(e)}`);
+    decision = deny(`BLOCK [fail-closed] hook IO error: ${e instanceof Error ? e.message : String(e)}`);
   }
-  if (out !== null) process.stdout.write(JSON.stringify(out) + "\n");
+  const { output, logged } = applyGuardMode(decision, resolveGuardMode(process.env));
+  if (logged !== null) {
+    // observe-mode: record the would-block to stderr (captured in the worker's hook log).
+    process.stderr.write(`[sapwood-guard:soft] would BLOCK: ${logged.hookSpecificOutput.permissionDecisionReason}\n`);
+  }
+  if (output !== null) process.stdout.write(JSON.stringify(output) + "\n");
   return 0;
 }
 
