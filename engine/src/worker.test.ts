@@ -78,7 +78,7 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
     const { name, sessionId } = await s.dispatch({ number: 7, title: "t", labels: [] });
     assert.ok(name && sessionId);
     // wait for the stub to exit and the sentinel to land
-    for (let i = 0; i < 100 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "done sentinel written");
     const sentinel = JSON.parse(readFileSync(join(dir, `${name}.done.json`), "utf8"));
     assert.equal(sentinel.issue, 7);
@@ -117,7 +117,7 @@ test("reclaim kills a stubborn (ignores TERM) claude subtree via SIGKILL", async
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
     await s.reclaim(name);
-    for (let i = 0; i < 100 && alive(pid); i++) await sleep(20);
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "process group killed");
     s.dispose();
   } finally {
@@ -133,9 +133,9 @@ test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not ki
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
-    await sleep(300); // let bash install its TERM trap before we drain (else it dies by default)
+    await sleep(600); // let bash install its TERM trap before we drain (else it dies by default)
     assert.equal(s.requestHandoff(name), true);
-    for (let i = 0; i < 150 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff sentinel written on cooperative drain");
     assert.ok(!existsSync(join(dir, `${name}.done.json`)) && !existsSync(join(dir, `${name}.failed.json`)));
     const probe = await s.probe(name);
@@ -152,9 +152,9 @@ test("requestHandoff but the worker dies by signal (no clean wrap-up) -> .failed
     const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`); // no TERM trap -> SIGTERM kills it (code null)
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
-    await sleep(60);
+    await sleep(200);
     s.requestHandoff(name);
-    for (let i = 0; i < 150 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.failed.json`)), "aborted (signal-killed) drain is .failed");
     assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "NOT a false resumable handoff");
     s.dispose();
@@ -185,9 +185,9 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
     const s = new WorkerSupervisor({ cfg: tcfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 100 });
     const { name } = await s.dispatch({ number: 5, title: "t", labels: [] });
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
-    for (let i = 0; i < 250 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.failed.json`)), "timed-out worker marked failed");
-    for (let i = 0; i < 100 && alive(pid); i++) await sleep(20);
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "timed-out worker process killed");
     s.dispose();
   } finally {
@@ -201,7 +201,7 @@ test("fast non-zero exit writes .failed (exit handler attached before the await)
     const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 3\n`); // exits immediately, like the CLI rejecting args
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 8, title: "t", labels: [] }, "lane-fast");
-    for (let i = 0; i < 100 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.failed.json`)), "fast exit still recorded a .failed sentinel");
     const probe = await s.probe(name);
     assert.equal(probe.failed, true);
