@@ -175,8 +175,10 @@ test("requestHandoff but the worker dies by signal (no clean wrap-up) -> .failed
 
 test("guardSettings: PreToolUse hook runs `node <hookPath>` and fails closed (exit 2) on a hook crash", () => {
   const s = guardSettings("/x/dist/guard-hook.js") as {
+    disableAllHooks: boolean;
     hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ type: string; command: string }> }> };
   };
+  assert.equal(s.disableAllHooks, false); // force hooks on so a global disable can't silence the guard
   const entry = s.hooks.PreToolUse[0]!;
   assert.match(entry.matcher, /Bash/);
   assert.equal(entry.hooks[0]!.type, "command");

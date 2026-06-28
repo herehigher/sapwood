@@ -100,6 +100,11 @@ export function guardSettings(hookPath: string): object {
     `node ${hook} || { [ "$SAPWOOD_GUARD_MODE" = soft ] && exit 0 || ` +
     `{ echo '[sapwood-guard] hook failed to run — blocking (fail-closed)' >&2; exit 2; }; }`;
   return {
+    // Force hooks ON for the worker session: a user/local settings layer with
+    // "disableAllHooks": true would otherwise survive (omitted --settings keys keep file
+    // values), leaving the guard inert — a fail-OPEN even with the hook file present (Codex
+    // #26 R3 P1). Explicitly re-enabling here overrides that layer.
+    disableAllHooks: false,
     hooks: {
       PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit", hooks: [{ type: "command", command }] }],
     },
