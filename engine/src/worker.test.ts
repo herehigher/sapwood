@@ -219,7 +219,9 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     const s = new WorkerSupervisor({ cfg: scfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: hook });
     const { name } = await s.dispatch({ number: 7, title: "t", labels: [] });
     assert.ok(!existsSync(join(dir, `${name}.settings.json`)), "no mutable settings file written");
-    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    // mode.seen is the stub's LAST write — waiting on it guarantees args.seen exists too
+    // (waiting on args.seen could race the second write on a slow FS). (Codex #26 R6 P3.)
+    for (let i = 0; i < 400 && !existsSync(join(dir, "mode.seen")); i++) await sleep(20);
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.match(args, /--settings/);
     assert.match(args, /guard-hook\.js/); // the inline JSON carries the hook command
