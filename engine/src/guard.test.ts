@@ -220,6 +220,8 @@ const WRITE_BLOCK: [string, string][] = [
   ["sapwood.config.yaml", "write-path"], // engine/guard config -> a worker can't set guard.mode:soft (#26 R2)
   ["/repo/sapwood.config.yml", "write-path"],
   ["sapwood.config.json", "write-path"],
+  ["/repo/engine/dist/guard-hook.js", "write-path"], // compiled hook artifact -> can't overwrite the live hook (#26 R3)
+  ["engine/dist/guard.js", "write-path"],
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
