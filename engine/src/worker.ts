@@ -54,7 +54,7 @@ export interface ClaudeArgsOpts {
   name: string;
   sessionId: string;
   addDir?: string;
-  settings?: string; // guard-hook settings file (#26); omitted -> no --settings
+  settings?: string; // --settings value: inline JSON string (or path); omitted -> no --settings (#26)
 }
 
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
@@ -188,15 +188,17 @@ export class WorkerSupervisor implements Supervisor {
     const prompt = (this.deps.renderPrompt ?? defaultPrompt)(issue);
     const jsonlPath = this.path(laneName, "jsonl");
     const jsonlFd = openSync(jsonlPath, "w");
-    // Per-worker settings wiring the guard hook, scoped to THIS claude -p via --settings (not a
-    // plugin-global PreToolUse that would also hit the human's interactive session) (#26).
-    const settingsPath = this.path(laneName, "settings.json");
-    this.writeJsonAtomic(settingsPath, guardSettings(this.guardHookPath));
+    // Guard wiring is passed as INLINE --settings JSON (not a file): a settings *file* under
+    // stateDir would be worker-writable via Bash to its absolute path, and Claude reloads hook
+    // edits live — a worker could set disableAllHooks:true on its own settings mid-session and
+    // disable the guard (Codex #26 R4 P1). An argv JSON string has no file to mutate. Scoped to
+    // THIS claude -p only (not a plugin-global hook that would hit the human).
+    const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
       prompt, model: this.deps.cfg.worker.model, effort: this.deps.cfg.worker.effort,
-      worktree: laneName, name: laneName, sessionId, settings: settingsPath,
+      worktree: laneName, name: laneName, sessionId, settings: settingsJson,
     });
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree.
     // SAPWOOD_GUARD_MODE in the spawn env reaches the hook subprocess (inherited from claude)
