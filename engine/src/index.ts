@@ -23,12 +23,17 @@ export {
   laneOnReclaimDone,
   laneOnReclaimFailed,
   driveDecision,
+  evaluateCeiling,
+  drainEscalationDue,
+  ENGINE_SESSION_GAP_SEC,
+  engineSessionGapSec,
   type Supervisor,
   type LaneProbe,
   type TickDeps,
   type TickResult,
   type ReclaimOutcome,
   type DispatchOutcome,
+  type CeilingReason,
 } from "./conductor.js";
 export {
   WorkerSupervisor,

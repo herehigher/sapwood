@@ -97,6 +97,45 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
     const probe = await s.probe(name);
     assert.equal(probe.done, true);
     assert.equal(probe.failed, false);
+    // #14: the terminal sentinel's total_cost_usd feeds the conductor's engine-ceiling
+    // ledger (state.recordSpend) — probe() must surface it.
+    assert.equal(probe.costUsd, 0.0001);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: costUsd is 0 while a lane is still running (no terminal sentinel yet)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 4, title: "t", labels: [] });
+    await sleep(100);
+    const probe = await s.probe(name);
+    assert.equal(probe.done, false);
+    assert.equal(probe.costUsd, 0);
+    await s.reclaim(name);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: recovers costUsd from the jsonl when a restart-orphaned lane has NO terminal sentinel (Codex PR #41 R3 P1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = sup(dir, bin);
+    // Simulate a lane orphaned by an engine restart: claude finished and wrote its terminal
+    // result line to the jsonl, but no attached onExit handler existed to write a sentinel.
+    // The probe must not report 0 — that would omit real spend from the daily-cap ledger.
+    writeFileSync(join(dir, "lane-orphan.running.json"), JSON.stringify({ issue: 5, wrapper_pid: 999999999 }));
+    writeFileSync(join(dir, "lane-orphan.jsonl"), `{"type":"system"}\n{"type":"result","subtype":"success","total_cost_usd":1.25}\n`);
+    const probe = await s.probe("lane-orphan");
+    assert.equal(probe.done, false); // no sentinel — classifyLane will call this DEAD (pid gone)
+    assert.equal(probe.costUsd, 1.25); // but the real cost is still recovered from the jsonl
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -151,6 +190,33 @@ test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not ki
     const probe = await s.probe(name);
     assert.equal(probe.handoff, true);
     s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Codex PR #41 P1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    // A cooperative worker that exits 0 on TERM. Dispatch with supervisor #1, then simulate
+    // an engine restart: dispose() #1 (clears its in-memory lane map — its exit handler
+    // becomes a no-op) and create supervisor #2 over the SAME stateDir. #2 has no in-memory
+    // handle, only the persisted running.json — the ceiling drain must still reach the
+    // process group via the persisted pid instead of silently no-opping.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const s1 = sup(dir, bin);
+    const { name } = await s1.dispatch({ number: 8, title: "t", labels: [] });
+    await sleep(600); // let bash install its TERM trap
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    assert.equal(alive(pid), true);
+    s1.dispose(); // "restart": the new supervisor knows this lane only from disk
+    const s2 = sup(dir, bin);
+    assert.equal(s2.requestHandoff(name), true); // persisted-pid fallback fires
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "SIGTERM reached the detached process group");
+    assert.equal(s2.requestHandoff(name), false); // idempotent: second request is a no-op
+    assert.equal(s2.requestHandoff("lane-unknown"), false); // no persisted lane -> false, no throw
+    s2.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

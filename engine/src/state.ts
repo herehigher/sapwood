@@ -5,8 +5,8 @@
 //
 // Uses Node's built-in node:sqlite (unflagged since Node 22.13 — see engines floor).
 // ponytail: zero native dep; if the API bites, swap to better-sqlite3 — same call shape.
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
@@ -32,6 +32,44 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       );
     `);
   },
+  // 1 -> 2: engine cost ceiling + kill switch (#14). Append-only additions — never edit
+  // migration 0.
+  (db) => {
+    db.exec(`
+      -- Every completed (done/failed/handoff) worker's stream-json total_cost_usd, recorded
+      -- exactly once by the conductor at reclaim time. Append-only ledger (like events); the
+      -- daily cumulative cap is a SUM over rows whose ts falls on the query day. Persisted so
+      -- an engine restart mid-day does not reset the cumulative spend (#14).
+      CREATE TABLE spend_ledger (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts       TEXT NOT NULL,
+        worker   TEXT NOT NULL,
+        issue    INTEGER NOT NULL,
+        usd      REAL NOT NULL
+      );
+      -- Singleton row: the ACTIVE engine session backing the wall-clock ceiling
+      -- (cfg.cost.maxWallClockSec). A session is continuous ticking: every tick refreshes
+      -- last_tick_at; a gap longer than the stale threshold (engine stopped/crashed) resets
+      -- started_at. Persisted so a rapid crash-loop restart CANNOT evade the cap (the gap
+      -- stays under the threshold), while a deliberate operator pause recovers a
+      -- wall-clock-breached engine (Codex PR #41 R2 P1 — a DB-lifetime start time would
+      -- permanently breach every data dir maxWallClockSec after its first-ever tick).
+      CREATE TABLE engine_session (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        started_at   TEXT NOT NULL,
+        last_tick_at TEXT NOT NULL
+      );
+      -- Singleton row: set once when a ceiling breach (daily budget / wall-clock / kill
+      -- switch) is FIRST detected; cleared once the breach condition resolves. The bounded
+      -- drain window (cfg.cost.drainWindowSec) is measured from this "at", not re-armed each
+      -- tick, so a still-breached engine doesn't perpetually reset its own drain clock.
+      CREATE TABLE ceiling_breach (
+        id        INTEGER PRIMARY KEY CHECK (id = 1),
+        reason    TEXT NOT NULL,
+        at        TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -51,12 +89,18 @@ export interface WorkerRow {
 
 export class State {
   private readonly db: DatabaseSync;
+  // The on-disk directory holding this engine's data (sqlite + sentinels). null for the
+  // in-memory handles tests use — there is no directory to watch, so the kill switch is
+  // always inactive there (tests inject their own via a real tmp-dir State instead).
+  private readonly dataDir: string | null;
 
   constructor(path = "data/sapwood.sqlite") {
     // SQLite won't create missing parent dirs, and data/ is gitignored (absent on a
     // fresh checkout). Create it first. (Codex P2, PR #22.) Skip for special handles.
-    if (path !== ":memory:" && !path.startsWith("file::memory:")) {
-      mkdirSync(dirname(path), { recursive: true });
+    const isMemory = path === ":memory:" || path.startsWith("file::memory:");
+    this.dataDir = isMemory ? null : dirname(path);
+    if (this.dataDir) {
+      mkdirSync(this.dataDir, { recursive: true });
     }
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
@@ -128,6 +172,92 @@ export class State {
     this.db
       .prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)")
       .run(new Date().toISOString(), kind, JSON.stringify(payload));
+  }
+
+  // ── Engine cost ceiling + kill switch (#14) ───────────────────────────────────────────
+
+  /** Record a completed worker's terminal cost (from stream-json, worker.ts). Call exactly
+   *  once per lane at reclaim time (conductor.tick) — append-only, no in-place dedup.
+   *  Clamped at this single choke point: the safety accumulator can only GROW. A negative or
+   *  non-finite total_cost_usd (corrupt jsonl, bad parse) must never SUBTRACT from the daily
+   *  sum and erode the hard cap (gate② PR #41 P3 — defense-in-depth; no worker-reachable
+   *  write path is known, since workers get no --add-dir data). */
+  recordSpend(worker: string, issue: number, usd: number, at: string): void {
+    const safeUsd = Number.isFinite(usd) && usd > 0 ? usd : 0;
+    this.db
+      .prepare("INSERT INTO spend_ledger (ts, worker, issue, usd) VALUES (?, ?, ?, ?)")
+      .run(at, worker, issue, safeUsd);
+  }
+
+  /** Cumulative spend for `now`'s UTC calendar day (spend_ledger sum, ts-prefix match). */
+  dailySpendUsd(now: Date): number {
+    const dayPrefix = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts LIKE ?")
+      .get(`${dayPrefix}%`) as { total: number };
+    return row.total;
+  }
+
+  /** Active-session start for the wall-clock ceiling; call once per tick. Each call
+   *  refreshes last_tick_at (the session's liveness heartbeat). If the previous tick is
+   *  older than staleGapSec — the engine was stopped, crashed, or deliberately paused — the
+   *  session RESETS to `now` and the wall-clock elapsed starts over. A continuously ticking
+   *  engine (including a rapid crash-loop restart, whose gaps stay under the threshold)
+   *  keeps accumulating and CANNOT evade the cap; recovery from a wall-clock breach is a
+   *  deliberate operator action (pause longer than the gap, or raise cost.maxWallClockSec).
+   *  (Codex PR #41 R2 P1.) */
+  engineSessionStart(now: Date, staleGapSec: number): Date {
+    const row = this.db
+      .prepare("SELECT started_at, last_tick_at FROM engine_session WHERE id = 1")
+      .get() as { started_at: string; last_tick_at: string } | undefined;
+    const nowIso = now.toISOString();
+    if (!row || (now.getTime() - Date.parse(row.last_tick_at)) / 1000 > staleGapSec) {
+      this.db
+        .prepare(
+          `INSERT INTO engine_session (id, started_at, last_tick_at) VALUES (1, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             started_at = excluded.started_at, last_tick_at = excluded.last_tick_at`,
+        )
+        .run(nowIso, nowIso);
+      return now;
+    }
+    this.db.prepare("UPDATE engine_session SET last_tick_at = ? WHERE id = 1").run(nowIso);
+    return new Date(row.started_at);
+  }
+
+  /** Record a ceiling breach's first-detected time (INSERT OR IGNORE: re-detecting a
+   *  still-active breach on a later tick must NOT reset the drain-window clock). */
+  recordCeilingBreach(reasons: string[], now: Date): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO ceiling_breach (id, reason, at) VALUES (1, ?, ?)")
+      .run(JSON.stringify(reasons), now.toISOString());
+  }
+
+  ceilingBreach(): { reasons: string[]; at: Date } | null {
+    const row = this.db.prepare("SELECT reason, at FROM ceiling_breach WHERE id = 1").get() as
+      | { reason: string; at: string }
+      | undefined;
+    if (!row) return null;
+    return { reasons: JSON.parse(row.reason) as string[], at: new Date(row.at) };
+  }
+
+  /** Clear a resolved breach (e.g. the kill switch was lifted, or the daily cap rolled over
+   *  to a fresh day) so a later re-breach starts its own fresh drain window. */
+  clearCeilingBreach(): void {
+    this.db.prepare("DELETE FROM ceiling_breach WHERE id = 1").run();
+  }
+
+  /** Out-of-band kill switch: a file sentinel in the engine's OWN data dir (never a worker's
+   *  worktree — workers get no --add-dir data, so they cannot see or forge this path).
+   *  Flippable by a human (`touch`/`rm`) without touching config. null dir (in-memory State,
+   *  tests) -> never active. */
+  killSwitchPath(): string | null {
+    return this.dataDir ? join(this.dataDir, "KILL_SWITCH") : null;
+  }
+
+  isKillSwitchActive(): boolean {
+    const p = this.killSwitchPath();
+    return p != null && existsSync(p);
   }
 
   close(): void {

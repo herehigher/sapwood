@@ -146,6 +146,10 @@ export class WorkerSupervisor implements Supervisor {
   private readonly hbMs: number;
   private readonly guardHookPath: string;
   private readonly lanes = new Map<string, Lane>();
+  // Detached lanes (persisted running.json, no in-memory handle — engine restarted while the
+  // worker kept running) already asked to hand off. Keeps requestHandoff idempotent-per-tick
+  // for lanes we can only reach by persisted pid (Codex PR #41 P1).
+  private readonly detachedHandoffRequested = new Set<string>();
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -256,9 +260,26 @@ export class WorkerSupervisor implements Supervisor {
    *  (total_cost_usd is only in the terminal result message). See the follow-up issue. */
   requestHandoff(name: string): boolean {
     const lane = this.lanes.get(name);
-    if (!lane || lane.reclaiming || lane.handoffRequested) return false;
-    lane.handoffRequested = true;
-    this.killGroup(lane.child, "SIGTERM");
+    if (lane) {
+      if (lane.reclaiming || lane.handoffRequested) return false;
+      lane.handoffRequested = true;
+      this.killGroup(lane.child, "SIGTERM");
+      return true;
+    }
+    // Cross-process / post-restart: a persisted `running` lane with no in-memory handle (the
+    // engine restarted while the worker kept running). Without this fallback the #14 ceiling
+    // drain would silently no-op on such lanes — no SIGTERM for the whole drain window, the
+    // worker keeps spending, then gets hard-killed instead of the intended graceful handoff
+    // (Codex PR #41 P1). Signal the persisted process group with SIGTERM only (graceful —
+    // never the KILL escalation reclaim() adds). Caveat: with no attached onExit handler the
+    // .handoff sentinel cannot be written, so a cooperative exit is later classified DEAD;
+    // the SIGTERM still lets the worker checkpoint (commit+push) before exiting, which is the
+    // part that preserves work — the pushed state is itself the handoff (PLAN.md).
+    if (this.detachedHandoffRequested.has(name)) return false;
+    const pid = this.persistedPid(name);
+    if (pid == null || this.wrapperAlive(name) !== 1) return false;
+    this.detachedHandoffRequested.add(name);
+    this.signalGroup(pid, "SIGTERM");
     return true;
   }
 
@@ -319,7 +340,28 @@ export class WorkerSupervisor implements Supervisor {
     const wrapperAlive = this.wrapperAlive(name);
     const issue = this.laneIssue(name);
     const hasPr = issue != null ? await this.deps.hasOpenPr(issue) : false;
-    return { done, failed, handoff, hbAge, wrapperAlive, hasPr };
+    const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
+    return { done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd };
+  }
+
+  /** The terminal sentinel (whichever is present) carries the parsed stream-json
+   *  total_cost_usd (onExit writes it into all three: done/failed/handoff). Feeds the
+   *  conductor's #14 engine-ceiling ledger (state.recordSpend).
+   *
+   *  No sentinel (or a sentinel without a cost) does NOT mean no cost: a lane orphaned by an
+   *  engine restart has no attached onExit handler, so it never gets a sentinel — but claude
+   *  still wrote its terminal result line to <name>.jsonl. Returning 0 there would let a
+   *  restart mid-run omit real spend from spend_ledger and quietly under-count the daily
+   *  hard cap (Codex PR #41 R3 P1). Fall back to parsing the jsonl: for a still-running
+   *  lane it parses to 0 anyway (total_cost_usd only appears in the terminal result
+   *  message), so the fallback is safe unconditionally. */
+  private terminalCostUsd(flags: { done: boolean; failed: boolean; handoff: boolean }, name: string): number {
+    const ext = flags.done ? "done.json" : flags.failed ? "failed.json" : flags.handoff ? "handoff.json" : null;
+    if (ext) {
+      const r = this.readJson(this.path(name, ext));
+      if (typeof r?.total_cost_usd === "number") return r.total_cost_usd;
+    }
+    return parseCostUsd(this.readJsonl(this.path(name, "jsonl")));
   }
 
   async reclaim(name: string): Promise<void> {

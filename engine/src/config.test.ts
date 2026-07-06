@@ -14,6 +14,23 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.reviewer.mode, "different-model-codex");
   assert.equal(cfg.labels.verifyNa, "verify:n/a");
+  // #14 engine cost ceiling + kill switch: conservative defaults.
+  assert.equal(cfg.cost.dailyBudgetUsd, 100);
+  assert.equal(cfg.cost.maxWallClockSec, 14400);
+  assert.equal(cfg.cost.drainWindowSec, 300);
+});
+
+test("cost: #14 ceiling fields are finite-guarded and overridable", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\ncost: { dailyBudgetUsd: 5, maxWallClockSec: 60, drainWindowSec: 10 }",
+  );
+  assert.equal(cfg.cost.dailyBudgetUsd, 5);
+  assert.equal(cfg.cost.maxWallClockSec, 60);
+  assert.equal(cfg.cost.drainWindowSec, 10);
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ncost: { dailyBudgetUsd: 1e999 }"),
+    /dailyBudgetUsd|finite/i,
+  );
 });
 
 test("parses JSON too (YAML superset)", () => {
