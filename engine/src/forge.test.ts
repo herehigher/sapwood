@@ -9,6 +9,10 @@ import {
   hasVerificationPlan,
   parsePageInfo,
   projectQuery,
+  parsePRReviewView,
+  parsePRReactions,
+  parseUnresolvedThreads,
+  assemblePRReviewData,
 } from "./forge.js";
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —
@@ -296,4 +300,84 @@ test("parsePRStatus: a failing check is not green", () => {
   );
   assert.equal(s.ciGreen, false);
   assert.equal(s.mergeable, false);
+});
+
+// ── #13 review-gate data: parsePRReviewView / parsePRReactions / parseUnresolvedThreads ──
+
+test("parsePRReviewView: parses headRefOid/author/updatedAt/isDraft/labels/state/reviews", () => {
+  const v = parsePRReviewView(
+    JSON.stringify({
+      headRefOid: "HEAD123",
+      author: { login: "producer" },
+      updatedAt: "2026-06-17T12:00:00Z",
+      isDraft: false,
+      labels: [{ name: "type:feature" }, { name: "needs-human" }],
+      state: "OPEN",
+      reviews: [
+        { author: { login: "codex" }, commit: { oid: "HEAD123" }, state: "COMMENTED" },
+        { author: {}, commit: {}, state: "PENDING" }, // missing login/oid -> "" not a crash
+      ],
+    }),
+  );
+  assert.equal(v.headOid, "HEAD123");
+  assert.equal(v.author, "producer");
+  assert.deepEqual(v.labels, ["type:feature", "needs-human"]);
+  assert.deepEqual(v.reviews, [
+    { author: "codex", commitOid: "HEAD123", state: "COMMENTED" },
+    { author: "", commitOid: "", state: "PENDING" },
+  ]);
+});
+
+test("parsePRReviewView: absent labels/reviews arrays default to empty (no crash)", () => {
+  const v = parsePRReviewView(
+    JSON.stringify({ headRefOid: "H", updatedAt: "t", isDraft: true, state: "OPEN" }),
+  );
+  assert.deepEqual(v.labels, []);
+  assert.deepEqual(v.reviews, []);
+  assert.equal(v.author, "");
+});
+
+test("parsePRReactions: maps GitHub reaction rows to {content, createdAt, login}", () => {
+  const r = parsePRReactions(
+    JSON.stringify([
+      { content: "+1", created_at: "2026-06-17T13:00:00Z", user: { login: "alice" } },
+      { content: "eyes", created_at: "2026-06-17T13:30:00Z", user: null },
+    ]),
+  );
+  assert.deepEqual(r, [
+    { content: "+1", createdAt: "2026-06-17T13:00:00Z", login: "alice" },
+    { content: "eyes", createdAt: "2026-06-17T13:30:00Z", login: "" },
+  ]);
+});
+
+test("parseUnresolvedThreads: counts only isResolved=false nodes", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: { nodes: [{ isResolved: false }, { isResolved: true }, { isResolved: false }] },
+        },
+      },
+    },
+  });
+  assert.equal(parseUnresolvedThreads(json), 2);
+});
+
+test("parseUnresolvedThreads: absent/malformed shape -> 0, never throws", () => {
+  assert.equal(parseUnresolvedThreads(JSON.stringify({})), 0);
+});
+
+test("assemblePRReviewData: combines all 3 raw gh responses into one PRReviewData", () => {
+  const view = JSON.stringify({
+    headRefOid: "H", author: { login: "producer" }, updatedAt: "t", isDraft: false,
+    labels: [], state: "OPEN", reviews: [],
+  });
+  const reactions = JSON.stringify([{ content: "eyes", created_at: "t", user: { login: "codex" } }]);
+  const threads = JSON.stringify({
+    data: { repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: false }] } } } },
+  });
+  const data = assemblePRReviewData(view, reactions, threads);
+  assert.equal(data.headOid, "H");
+  assert.equal(data.reactions.length, 1);
+  assert.equal(data.unresolvedThreads, 1);
 });

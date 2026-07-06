@@ -100,6 +100,41 @@ test("rejects a non-finite budget ceiling (overflow must not disable the cap)", 
   );
 });
 
+test("#13: reviewer/merge defaults — codex reviewer, conductor-merge, sane poll bounds", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.reviewer.mode, "different-model-codex");
+  assert.equal(cfg.reviewer.pollIntervalSec, 120);
+  assert.equal(cfg.reviewer.pollTimeoutSec, 1200);
+  assert.equal(cfg.merge.mode, "conductor-merge");
+});
+
+test("#13: produce-pr-and-stop is a merge.mode value, not a reviewer.mode value", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: produce-pr-and-stop }"),
+    /reviewer/,
+  );
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nmerge: { mode: produce-pr-and-stop }");
+  assert.equal(cfg.merge.mode, "produce-pr-and-stop");
+});
+
+test("#13: reviewer.mode accepts same-model-trusted and human", () => {
+  assert.equal(
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: same-model-trusted }").reviewer.mode,
+    "same-model-trusted",
+  );
+  assert.equal(
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: human }").reviewer.mode,
+    "human",
+  );
+});
+
+test("#13: rejects an unknown merge mode", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nmerge: { mode: yolo }"),
+    /merge/,
+  );
+});
+
 test("overrides survive validation", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 9 }\nworker: { effort: low }",

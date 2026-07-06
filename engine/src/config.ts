@@ -87,10 +87,29 @@ const Cost = z.object({
 }).strict();
 
 const Reviewer = z.object({
-  mode: z
-    .enum(["different-model-codex", "same-model-trusted", "human", "produce-pr-and-stop"])
-    .default("different-model-codex"),
+  // The reviewer KIND (gate②'s "who reviews"). NOTE: produce-pr-and-stop was previously a
+  // value of this same enum, conflating "who reviews" with "does the Conductor merge" — split
+  // out to merge.mode (#13) so the two questions are independent (e.g. same-model-trusted +
+  // produce-pr-and-stop is a legal combination). Narrowing this enum is additive/back-compat:
+  // sapwood.config.yaml's checked-in `mode: different-model-codex` still parses; nothing ever
+  // shipped `mode: produce-pr-and-stop` here.
+  mode: z.enum(["different-model-codex", "same-model-trusted", "human"]).default("different-model-codex"),
   trustedReviewers: z.array(z.string()).default([]),
+  // How often the Conductor's tick re-polls a triggered review (documents the operational
+  // policy; the actual re-poll cadence is driven by the tick loop itself, not a timer here).
+  pollIntervalSec: z.number().int().positive().default(120),
+  // How long a triggered review may sit unresolved (no verdict past "reviewing") before the
+  // merge driver treats it as REVIEW_UNAVAILABLE (rate-limit/timeout) and QUEUES the PR —
+  // gate② must never be skipped or softened on an unavailable review (#13).
+  pollTimeoutSec: z.number().int().positive().default(1200),
+}).strict();
+
+const Merge = z.object({
+  // conductor-merge (0day-style default): gate① (CI green) + gate② (fresh non-author review on
+  // the current head) both pass -> the Conductor squash-merges with --match-head-commit pinned
+  // to the head that passed the gates (TOCTOU guard). produce-pr-and-stop: the driver still
+  // computes + reports both gates every tick but NEVER calls forge.mergePR — a human merges.
+  mode: z.enum(["conductor-merge", "produce-pr-and-stop"]).default("conductor-merge"),
 }).strict();
 
 const Labels = z.object({
@@ -117,6 +136,7 @@ export const ConfigSchema = z.object({
   guard: Guard.default({}),
   cost: Cost.default({}),
   reviewer: Reviewer.default({}),
+  merge: Merge.default({}),
   labels: Labels.default({}),
   escalation: z
     .object({ humanLabels: z.array(z.string()).default(["needs-human", "blocked"]) })

@@ -15,6 +15,7 @@
 import type { IForge, Issue } from "./forge.js";
 import type { State } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
+import type { DriveOutcome } from "./merge-driver.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -206,9 +207,10 @@ export function driveDecision(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tick orchestration: reclaim -> drive -> dispatch. Side-effecting collaborators are
-// injected (IForge, Supervisor, State) so the whole tick is unit-testable without ever
-// spawning a real `claude` or calling `gh`. producer != merger: the tick never merges
-// (no worker self-merge); the merge gate (reviewer + merge-driver) is M3.
+// injected (IForge, Supervisor, State, MergeGate) so the whole tick is unit-testable without
+// ever spawning a real `claude` or calling `gh`. producer != merger: the tick itself never
+// calls forge.mergePR — that lives one level down, in MergeGate.driveOne (merge-driver.ts),
+// invoked ONLY from here (never from a worker).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The 4-signal snapshot of one in-flight lane (sentinels + heartbeat + pid). Worker domain. */
@@ -219,6 +221,11 @@ export interface LaneProbe {
   hbAge: number; // seconds since heartbeat mtime; -1 if no heartbeat file yet (just spawned)
   wrapperAlive: -1 | 0 | 1; // 1 alive | 0 confirmed dead (kill -0 failed) | -1 unknown
   hasPr: boolean; // an open PR exists for this lane's issue
+  /** The open PR's number, when hasPr — the merge driver's gate/merge target (#13). Optional:
+   *  probe fixtures that predate #13 (hasPr only, no number) still type-check; a driving lane
+   *  with hasPr=true but no prNumber known keeps hasPr's rescue behavior but can't be driven
+   *  through gates until a number is available (tick's fail-safe below escalates it). */
+  prNumber?: number;
   /** Terminal total_cost_usd (stream-json), once done/failed/handoff; 0 while still running
    *  or if unknown (e.g. a DEAD lane with no sentinel). Optional for probe fixtures that
    *  predate #14 — treated as 0. */
@@ -235,6 +242,24 @@ export interface Supervisor {
    *  (already reclaiming/requested, or unknown lane) — never throws. */
   requestHandoff(worker: string): boolean;
 }
+
+/** The conductor's only handle on the review + merge gate (#13). merge-driver.ts's
+ *  MergeDriver implements this shape structurally — the ONLY caller is tick() below, never a
+ *  worker (producer != reviewer != merger, structural: a worker has no reference to this and
+ *  no path to acquire one). Optional in TickDeps: omitted -> driving lanes stay driving with no
+ *  gate/merge activity (pre-#13 behavior, preserved for callers not yet configuring a reviewer). */
+export interface MergeGate {
+  /** Post the review trigger at most once per PR; idempotent to call again (a plain comment). */
+  ensureTriggered(pr: number): Promise<void>;
+  /** One gate + merge attempt for `pr`. Never throws (see merge-driver.ts). */
+  driveOne(pr: number): Promise<DriveOutcome>;
+}
+
+export type DrivenOutcome =
+  | { kind: "merged"; worker: string; issue: number; pr: number }
+  | { kind: "needs-human"; worker: string; issue: number; pr: number; reason: string }
+  | { kind: "queued"; worker: string; issue: number; pr: number; reason: string }
+  | { kind: "stopped"; worker: string; issue: number; pr: number; reason: string };
 
 export type ReclaimOutcome =
   | { kind: "kept"; worker: string; issue: number }
@@ -268,6 +293,9 @@ export interface TickResult {
    *  drain window elapsed since the breach was first detected. Always a subset of / disjoint
    *  from drainRequested's *previous* ticks — the drain always precedes the kill. */
   escalated: string[];
+  /** #13: driving lanes run through gate①/gate② this tick (only when deps.mergeGate is
+   *  provided). Empty when mergeGate is omitted, or when there were no driving lanes. */
+  driven: DrivenOutcome[];
 }
 
 export interface TickDeps {
@@ -285,6 +313,10 @@ export interface TickDeps {
    *  gap (only safe for callers ticking faster than ENGINE_SESSION_GAP_SEC). */
   tickIntervalSec?: number;
   now?: () => Date;
+  /** #13: the review + merge gate for driving lanes. Omitted -> driving lanes stay driving with
+   *  no gate/merge activity this tick (pre-#13 behavior — M2 dogfood / callers that haven't
+   *  wired a reviewer yet keep working unchanged). */
+  mergeGate?: MergeGate;
 }
 
 /**
@@ -338,9 +370,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     } else if (cls === "DONE") {
       const next = laneOnReclaimDone(p.hasPr);
       if (next === "DRIVING") {
-        // PR produced: hold the lane in `driving` (it still occupies a lane until the M3
+        // PR produced: hold the lane in `driving` (it still occupies a lane until the #13
         // review gate resolves it). No requeue, no human escalation.
-        state.upsertWorker({ ...w, state: "driving", ended_at: iso() });
+        state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
       } else {
         // ESCALATE_NOPR: done but no PR -> nothing to drive; free the lane, escalate to human.
         state.upsertWorker({ ...w, state: "done", ended_at: iso() });
@@ -356,7 +388,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       if (next === "DRIVING") {
         // Failed but a clean PR exists (e.g. budget-exhausted after opening it): rescue —
         // hold the lane driving for the review gate rather than escalating.
-        state.upsertWorker({ ...w, state: "driving", ended_at: iso() });
+        state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
       } else {
         state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
         await forge.addLabel(w.issue, cfg.labels.needsHuman);
@@ -372,7 +404,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       await supervisor.reclaim(w.name);
       const rescued = p.hasPr;
       if (rescued) {
-        state.upsertWorker({ ...w, state: "driving", ended_at: iso() });
+        state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
       } else {
         state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
         await forge.setBoardStatus(w.issue, "ready");
@@ -385,9 +417,59 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     }
   }
 
-  // ── DRIVE: a DONE+PR lane is now "driving" (awaiting the review gate). The gate->merge
-  //   step (reviewer.ts + merge-driver.ts) is M3; M2 stops at produce-PR. No merge here —
-  //   producer != merger is preserved structurally (the tick never calls forge.mergePR).
+  // ── DRIVE (#13): a DONE+PR lane is "driving" (awaiting gate①/gate②). producer != merger is
+  //   preserved structurally: tick() never calls forge.mergePR itself — that lives one level
+  //   down, in deps.mergeGate.driveOne (merge-driver.ts), invoked ONLY from here. Omitted
+  //   mergeGate -> driving lanes stay driving with no gate/merge activity (pre-#13 behavior).
+  const driven: DrivenOutcome[] = [];
+  const gate = deps.mergeGate;
+  if (gate) {
+    for (const w of state.drivingWorkers()) {
+      if (w.pr == null) {
+        // Fail-safe: a driving lane MUST carry a PR number (set at the reclaim transition
+        // above) to be driven through gates. Its absence here (only checked once a mergeGate
+        // is actually configured) is a bug, not a normal state — escalate rather than stall.
+        state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+        state.appendEvent("drive-no-pr", { worker: w.name, issue: w.issue });
+        driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr: -1, reason: "driving-lane-missing-pr" });
+        continue;
+      }
+      const pr = w.pr;
+      if (!w.review_triggered) {
+        await gate.ensureTriggered(pr);
+        state.upsertWorker({ ...w, review_triggered: 1 });
+      }
+      const outcome = await gate.driveOne(pr);
+      switch (outcome.kind) {
+        case "merged":
+          state.upsertWorker({ ...w, state: "done", ended_at: iso() });
+          await forge.setBoardStatus(w.issue, "done");
+          state.appendEvent("merged", { worker: w.name, issue: w.issue, pr, headOid: outcome.headOid });
+          driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
+          break;
+        case "needs-human":
+          state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+          await forge.addLabel(w.issue, cfg.labels.needsHuman);
+          state.appendEvent("drive-needs-human", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          break;
+        case "queued":
+          // Stays driving — retried next tick. Covers gate-pending (WAIT) AND a
+          // review-unavailable (rate-limit/timeout) signal: #13 requires the latter to queue,
+          // never skip/soften gate②.
+          state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          break;
+        case "stopped":
+          // produce-pr-and-stop: gates passed but the driver never merges. Stays driving so a
+          // human sees it (sapwood status / the PR itself) and merges by hand.
+          state.appendEvent("drive-stopped", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          driven.push({ kind: "stopped", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          break;
+      }
+    }
+  }
 
   // ── CEILING (#14): engine-wide hard safety boundary, orthogonal to the per-round
   //   overBudget check below. Any breach (daily USD cap / wall-clock cap / kill switch)
@@ -516,5 +598,5 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     dispatched.push({ kind: "dispatched", issue: issue.number, worker: name });
   }
 
-  return { reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated };
+  return { reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated, driven };
 }

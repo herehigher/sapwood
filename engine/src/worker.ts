@@ -119,6 +119,12 @@ export interface WorkerDeps {
   claudeBin?: string;
   /** probe()'s hasPr — engine wires this to the forge (an open PR for the issue). */
   hasOpenPr: (issue: number) => Promise<boolean>;
+  /** probe()'s prNumber (#13 merge driver needs the actual PR number, not just "has one").
+   *  Optional and additive: when provided it also derives hasPr (a number means yes); when
+   *  omitted, probe() falls back to the legacy hasOpenPr-only boolean path (prNumber stays
+   *  undefined — a driving lane rescued that way can't be gated/merged until a number is
+   *  known, conductor.ts fails that lane safe rather than guessing). */
+  findOpenPr?: (issue: number) => Promise<number | null>;
   /** Worker prompt for an issue. Default: a minimal imperative skeleton. */
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
@@ -339,9 +345,19 @@ export class WorkerSupervisor implements Supervisor {
     const hbAge = this.heartbeatAge(name);
     const wrapperAlive = this.wrapperAlive(name);
     const issue = this.laneIssue(name);
-    const hasPr = issue != null ? await this.deps.hasOpenPr(issue) : false;
+    let hasPr = false;
+    let prNumber: number | undefined;
+    if (issue != null) {
+      if (this.deps.findOpenPr) {
+        const n = await this.deps.findOpenPr(issue);
+        hasPr = n != null;
+        if (n != null) prNumber = n;
+      } else {
+        hasPr = await this.deps.hasOpenPr(issue);
+      }
+    }
     const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
-    return { done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd };
+    return { done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd, ...(prNumber != null ? { prNumber } : {}) };
   }
 
   /** The terminal sentinel (whichever is present) carries the parsed stream-json
