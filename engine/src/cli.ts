@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // `sapwood` CLI. M0.5 ships `init`; status/stop and the full command surface land in M4.
 import { createRequire } from "node:module";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { init, InitError } from "./init.js";
 
@@ -57,7 +59,20 @@ async function main(argv: string[]): Promise<number> {
 
 // Run only when invoked directly (not when imported by tests) — importing this module for
 // `runCli` must not execute main()/process.exit and cut off a test subprocess (Codex PR #36).
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare REALPATHS: when installed, `sapwood` is invoked via a bin symlink
+// (node_modules/.bin/sapwood), so argv[1] is the symlink while import.meta.url is the real
+// dist/cli.js — a raw string compare would be false and the CLI would never run (Codex PR #36).
+function invokedDirectly(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   main(process.argv)
     .then((code) => process.exit(code))
     .catch((e) => {
