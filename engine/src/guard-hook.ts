@@ -5,6 +5,8 @@
 // malformed JSON, an unexpected payload shape, or the guard throwing — yields a DENY, not
 // a silent allow. A safety hook that can be disabled by feeding it garbage is not a
 // safety hook. The pure mapping (`hookResponse`) is offline-testable; only `main()` does IO.
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { guardDecision, type GuardInput } from "./guard.js";
 
 // Tools the guard actually inspects — a malformed tool_input for these fails closed.
@@ -110,6 +112,21 @@ export async function main(): Promise<number> {
 }
 
 // Run only when invoked directly (not when imported by tests).
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare REALPATHS: `guardSettings` (worker.ts) invokes this hook via `node '<hookPath>'`,
+// and that path can itself be reached through a symlink (e.g. a packaged install) — a raw
+// string compare of import.meta.url vs argv[1] would then be false (import.meta.url resolves
+// the real file, argv[1] stays the symlink), main() would never run, and the hook would
+// silently no-op — a fail-OPEN bypass of the safety guard. Same fix/rationale as cli.ts.
+function invokedDirectly(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   main().then((c) => process.exit(c));
 }

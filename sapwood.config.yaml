@@ -27,9 +27,11 @@ worker:
   model: opus
   effort: high # low | medium | high
   timeoutSec: 3600 # wall-clock hard cap (safety bound)
-  budgetUsdSoft: 10 # SOFT per-worker budget: reaching it triggers a graceful
-  #                   handoff (commit+push WIP, progress note, .handoff sentinel,
-  #                   clean exit) — never a mid-work kill.
+  budgetUsdSoft: 10 # SOFT per-worker budget: DECLARED here as the intended graceful-handoff
+  #                   threshold (commit+push WIP, progress note, .handoff sentinel, clean
+  #                   exit — never a mid-work kill), but enforcement is not yet wired: the
+  #                   worker has no live in-flight cost signal to compare against this value.
+  #                   Tracked as issue #33.
   heartbeatStaleSecs: 180 # heartbeat older than this => worker considered dead
 
 cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
