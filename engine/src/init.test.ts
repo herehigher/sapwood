@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseConfig } from "./config.js";
-import { init, missing, parseAuthScopes, preflight, requiredLabels, InitError } from "./init.js";
+import { init, missing, parseAuthScopes, preflight, requiredLabels, setStatusOptionsArgs, InitError } from "./init.js";
 import type { GhRunner } from "./gh.js";
 
 const cfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");
@@ -14,6 +14,18 @@ test("parseAuthScopes handles quoted and bare lists", () => {
   assert.deepEqual(parseAuthScopes("  - Token scopes: 'gist', 'repo', 'project'"), ["gist", "repo", "project"]);
   assert.deepEqual(parseAuthScopes("- Token scopes: repo, read:org, project"), ["repo", "read:org", "project"]);
   assert.deepEqual(parseAuthScopes("no scopes line here"), []);
+});
+
+test("setStatusOptionsArgs inlines an existing option's id but omits it for a brand-new option", () => {
+  const args = setStatusOptionsArgs("FIELD_ID", [
+    { id: "OPT_1", name: "Ready", color: "GREEN", description: "queued" },
+    { name: "Blocked", color: "GRAY", description: "" }, // no id: never existed before
+  ]);
+  const query = args.find((a) => a.startsWith("query=")) ?? "";
+  assert.ok(query.includes('id:"OPT_1", name:"Ready"'), "existing option keeps its id");
+  assert.ok(!query.includes('name:"Blocked"') || !/id:"[^"]*"\s*,\s*name:"Blocked"/.test(query), "new option has no id");
+  assert.ok(args.includes("-F"));
+  assert.ok(args.some((a) => a === "f=FIELD_ID"));
 });
 
 test("missing returns set difference", () => {
@@ -55,11 +67,14 @@ test("preflight is not fooled by a second, unauthenticated host", async () => {
 });
 
 // --- a fake gh runner that records calls and answers the queries init makes ----------
+// boardOptions accepts either bare names (an id is synthesized as `id-<name>`, standing in
+// for whatever id the real API assigned when the option was first created) or explicit
+// {name, id} pairs when a test needs to assert a *specific* id survives the round trip.
 function fakeRun(opts: {
   labels?: string[];
   milestones?: string[];
   boardExists?: boolean;
-  boardOptions?: string[];
+  boardOptions?: (string | { name: string; id: string })[];
   ownerType?: string;
 }) {
   const calls: string[][] = [];
@@ -77,9 +92,10 @@ function fakeRun(opts: {
     if (args[0] === "api" && args[1] === "graphql") {
       const q = args.find((a) => a.startsWith("query=")) ?? "";
       if (q.includes("mutation")) return JSON.stringify({ data: { updateProjectV2Field: { projectV2Field: { id: "F" } } } });
-      const projectV2 = opts.boardExists
-        ? { id: "P", field: { id: "F", options: (opts.boardOptions ?? []).map((name) => ({ name, color: "GRAY", description: "" })) } }
-        : null;
+      const options = (opts.boardOptions ?? []).map((o) =>
+        typeof o === "string" ? { id: `id-${o}`, name: o, color: "GRAY", description: "" } : { ...o, color: "GRAY", description: "" },
+      );
+      const projectV2 = opts.boardExists ? { id: "P", field: { id: "F", options } } : null;
       return JSON.stringify({ data: { user: { projectV2 } } });
     }
     return "";
@@ -114,6 +130,36 @@ test("init creates missing labels and provisions a missing board lane", async ()
     assert.ok(calls.some((c) => c.join(" ").includes("mutation")), "board mutation issued");
     // wrote starter config into the empty temp dir
     assert.ok(readdirSync(dir).includes("sapwood.config.yaml"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("board mutation preserves existing option ids (guards against issue #37's status wipe)", async () => {
+  // "In Progress" and "Done" already exist on the board with real ids from a prior run.
+  // Adding the missing "Ready" lane must resend those two WITH their existing ids — the only
+  // thing (per ProjectV2SingleSelectFieldOptionInput.id) that stops updateProjectV2Field from
+  // minting fresh ids and reverting every item currently on those lanes to "No Status".
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: [
+      { name: "In Progress", id: "OPT_IN_PROGRESS" },
+      { name: "Done", id: "OPT_DONE" },
+    ],
+  });
+  const dir = tmpCwd();
+  try {
+    await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const mutationCall = calls.find((c) => c.join(" ").includes("mutation"));
+    assert.ok(mutationCall, "board mutation issued");
+    const query = mutationCall!.find((a) => a.startsWith("query=")) ?? "";
+    assert.ok(query.includes('id:"OPT_IN_PROGRESS"'), "In Progress kept its existing id");
+    assert.ok(query.includes('id:"OPT_DONE"'), "Done kept its existing id");
+    // The new "Ready" option has no prior id — the API mints one, so it must NOT appear
+    // with a fabricated id (no item references it yet, so there is nothing to preserve).
+    const readyOption = query.slice(query.indexOf('name:"Ready"') - 40, query.indexOf('name:"Ready"'));
+    assert.ok(!readyOption.includes("id:"), "new option sent without an id");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
