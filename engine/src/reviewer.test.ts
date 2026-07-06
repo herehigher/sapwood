@@ -6,7 +6,9 @@ import { test } from "node:test";
 import {
   freshThumbCount,
   freshHeadReviewCount,
+  changesRequestedOnHead,
   deriveReviewAction,
+  normalizeLogin,
   CodexReviewer,
   HumanReviewer,
   SameModelTrustedReviewer,
@@ -66,27 +68,72 @@ test("freshHeadReviewCount: acceptStates restricts which states count (human rev
 
 test("deriveReviewAction: unresolved threads outrank a fresh approving review (findings first)", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 2 }),
+    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 2, changesRequestedOnHead: false }),
+    "HANDLE_THREADS",
+  );
+});
+
+test("deriveReviewAction: a standing change request outranks a fresh approving review (Codex PR #42 P1)", () => {
+  assert.equal(
+    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: true }),
     "HANDLE_THREADS",
   );
 });
 
 test("deriveReviewAction: a fresh approving review with no threads -> MERGE_OK", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 0 }),
+    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "MERGE_OK",
   );
 });
 
 test("deriveReviewAction: nothing yet (no review, no eyes) -> WAIT_REVIEW, never a silent MERGE_OK", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 0, unresolvedThreads: 0 }),
+    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "WAIT_REVIEW",
   );
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: true, freshApprovingReviews: 0, unresolvedThreads: 0 }),
+    deriveReviewAction({ hasEyesReaction: true, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "WAIT_REVIEW",
   );
+});
+
+// ── changesRequestedOnHead (Codex PR #42 P1: approve-then-changes-requested must block) ──
+
+test("changesRequestedOnHead: a change request on the current head blocks", () => {
+  assert.equal(changesRequestedOnHead([mkReview("rev", "HEAD", "CHANGES_REQUESTED")], "HEAD", "author"), true);
+});
+
+test("changesRequestedOnHead: accepted review THEN a later change request on the same head still blocks", () => {
+  const reviews = [
+    mkReview("codex", "HEAD", "COMMENTED"),
+    mkReview("rev", "HEAD", "CHANGES_REQUESTED"), // later CR wins
+  ];
+  assert.equal(changesRequestedOnHead(reviews, "HEAD", "author"), true);
+});
+
+test("changesRequestedOnHead: the SAME reviewer re-approving the same head clears their change request", () => {
+  const reviews = [
+    mkReview("rev", "HEAD", "CHANGES_REQUESTED"),
+    mkReview("rev", "HEAD", "APPROVED"), // reviewer satisfied -> cleared
+  ];
+  assert.equal(changesRequestedOnHead(reviews, "HEAD", "author"), false);
+});
+
+test("changesRequestedOnHead: a mere COMMENTED does NOT clear a standing change request (GitHub semantics)", () => {
+  const reviews = [
+    mkReview("rev", "HEAD", "CHANGES_REQUESTED"),
+    mkReview("rev", "HEAD", "COMMENTED"),
+  ];
+  assert.equal(changesRequestedOnHead(reviews, "HEAD", "author"), true);
+});
+
+test("changesRequestedOnHead: a change request on an OLD head does not block the current head", () => {
+  assert.equal(changesRequestedOnHead([mkReview("rev", "OLD", "CHANGES_REQUESTED")], "HEAD", "author"), false);
+});
+
+test("changesRequestedOnHead: a DISMISSED review never blocks (state is DISMISSED, not CHANGES_REQUESTED)", () => {
+  assert.equal(changesRequestedOnHead([mkReview("rev", "HEAD", "DISMISSED")], "HEAD", "author"), false);
 });
 
 // ── Reviewer implementations ───────────────────────────────────────────────────────────────
@@ -104,10 +151,53 @@ const mkData = (over: Partial<PRReviewData> = {}): PRReviewData => ({
   ...over,
 });
 
-test("CodexReviewer: a non-author COMMENTED review on the current head is enough (Codex's normal review state)", () => {
+test("CodexReviewer: a Codex-bot COMMENTED review on the current head is enough (Codex's normal review state)", () => {
   const r = new CodexReviewer();
   const data = mkData({ reviews: [mkReview("chatgpt-codex-connector[bot]", "HEAD", "COMMENTED")] });
   assert.deepEqual(r.verdictFromData(data), { action: "MERGE_OK", headOid: "HEAD" });
+});
+
+test("CodexReviewer: bot login matches with OR without the [bot] suffix (REST vs GraphQL forms)", () => {
+  const r = new CodexReviewer();
+  assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("chatgpt-codex-connector", "HEAD", "COMMENTED")] })).action, "MERGE_OK");
+  assert.equal(normalizeLogin("chatgpt-codex-connector[bot]"), "chatgpt-codex-connector");
+});
+
+test("CodexReviewer: a review from a RANDOM non-author account does NOT satisfy gate② (Codex PR #42 P1)", () => {
+  const r = new CodexReviewer();
+  // Non-author, current head, accepted state — but not the Codex bot and not allowlisted:
+  // identity is part of the gate; anyone-but-the-author must never unlock autonomous merge.
+  const data = mkData({ reviews: [mkReview("random-account", "HEAD", "APPROVED")] });
+  assert.equal(r.verdictFromData(data).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: cfg trustedReviewers EXTENDS the allowlist (never replaces the Codex bot)", () => {
+  const r = new CodexReviewer(["extra-trusted-bot"]);
+  assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("extra-trusted-bot", "HEAD", "COMMENTED")] })).action, "MERGE_OK");
+  assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("chatgpt-codex-connector", "HEAD", "COMMENTED")] })).action, "MERGE_OK");
+  assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("still-random", "HEAD", "COMMENTED")] })).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: approve-then-CHANGES_REQUESTED on the same head blocks — never MERGE_OK (Codex PR #42 P1)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    reviews: [
+      mkReview("chatgpt-codex-connector", "HEAD", "COMMENTED"), // gate②-satisfying review...
+      mkReview("second-reviewer", "HEAD", "CHANGES_REQUESTED"), // ...then a standing CR
+    ],
+  });
+  assert.equal(r.verdictFromData(data).action, "HANDLE_THREADS");
+});
+
+test("CodexReviewer: a change request from an UNLISTED account still blocks (filter shrinks approvals, never blockers)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    reviews: [
+      mkReview("chatgpt-codex-connector", "HEAD", "APPROVED"),
+      mkReview("random-account", "HEAD", "CHANGES_REQUESTED"),
+    ],
+  });
+  assert.equal(r.verdictFromData(data).action, "HANDLE_THREADS");
 });
 
 test("CodexReviewer: a review of a STALE head counts as no review (#101 — the exact bypass gate② closes)", () => {

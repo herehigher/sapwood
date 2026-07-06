@@ -199,8 +199,10 @@ export class GithubForge implements IForge {
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
-    // 3 read-only gh calls (0day pr_gate.sh): PR metadata + reviews, reactions, unresolved
-    // review threads. Never touches merge/approve/ready — this is a read surface only.
+    // Read-only gh calls (0day pr_gate.sh): PR metadata + reviews, reactions (--paginate), and
+    // the review-threads connection PAGED TO EXHAUSTION (Codex PR #42 P2 — a first-100-only
+    // fetch could report zero findings while an unresolved thread sits on a later page).
+    // Never touches merge/approve/ready — this is a read surface only.
     const viewJson = await this.gh([
       "pr", "view", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
       "--json", "headRefOid,author,updatedAt,isDraft,labels,state,reviews",
@@ -208,11 +210,15 @@ export class GithubForge implements IForge {
     const reactionsJson = await this.gh([
       "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/reactions`, "--paginate",
     ]);
-    const threadsJson = await this.gh([
-      "api", "graphql", "-f", `query=${REVIEW_THREADS_QUERY}`,
-      "-f", `owner=${this.cfg.board.owner}`, "-f", `repo=${this.repo()}`, "-F", `number=${pr}`,
-    ]);
-    return assemblePRReviewData(viewJson, reactionsJson, threadsJson);
+    const unresolvedThreads = await countUnresolvedThreads((after) =>
+      this.gh([
+        "api", "graphql", "-f", `query=${REVIEW_THREADS_QUERY}`,
+        "-f", `owner=${this.cfg.board.owner}`, "-f", `repo=${this.repo()}`, "-F", `number=${pr}`,
+        // Same -F null / -f cursor split as fetchProject: an opaque cursor must go raw.
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ]),
+    );
+    return assemblePRReviewData(viewJson, reactionsJson, unresolvedThreads);
   }
 
   private repo(): string {
@@ -429,15 +435,62 @@ export function parsePRStatus(json: string): PRStatus {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const REVIEW_THREADS_QUERY = `
-query($owner: String!, $repo: String!, $number: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
         nodes { id isResolved }
       }
     }
   }
 }`;
+
+/** One page of the reviewThreads connection: unresolved count + cursor. Absent/malformed
+ *  pageInfo -> terminal (no infinite loop on a bad response). */
+export function parseReviewThreadsPage(json: string): {
+  unresolved: number;
+  hasNextPage: boolean;
+  endCursor: string | null;
+} {
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          reviewThreads?: {
+            pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+            nodes?: { isResolved: boolean }[];
+          };
+        };
+      };
+    };
+  };
+  const conn = d.data?.repository?.pullRequest?.reviewThreads;
+  return {
+    unresolved: (conn?.nodes ?? []).filter((n) => !n.isResolved).length,
+    hasNextPage: conn?.pageInfo?.hasNextPage ?? false,
+    endCursor: conn?.pageInfo?.endCursor ?? null,
+  };
+}
+
+/**
+ * Total unresolved threads across the WHOLE connection, paging to exhaustion (Codex PR #42
+ * P2: a first-100 fetch with all first-page threads resolved would report 0 findings while an
+ * unresolved thread sits on page 2 — a fail-open in gate②). Same pattern + page ceiling as
+ * fetchProject's items paging. `fetchPage` is injected so the loop is testable offline.
+ */
+export async function countUnresolvedThreads(fetchPage: (after: string | null) => Promise<string>): Promise<number> {
+  let unresolved = 0;
+  let after: string | null = null;
+  // ponytail: hard page ceiling (50 pages = 5000 threads) so a cursor bug can't spin forever.
+  for (let page = 0; page < 50; page++) {
+    const p = parseReviewThreadsPage(await fetchPage(after));
+    unresolved += p.unresolved;
+    if (!p.hasNextPage || !p.endCursor) return unresolved;
+    after = p.endCursor;
+  }
+  return unresolved; // page ceiling hit; return what we counted rather than loop unbounded
+}
 
 /** Pure parse of `gh pr view --json headRefOid,author,updatedAt,isDraft,labels,state,reviews`. */
 export function parsePRReviewView(json: string): {
@@ -479,18 +532,10 @@ export function parsePRReactions(json: string): PRReaction[] {
   return arr.map((r) => ({ content: r.content, createdAt: r.created_at, login: r.user?.login ?? "" }));
 }
 
-/** Pure parse of the reviewThreads GraphQL response -> unresolved thread count. */
-export function parseUnresolvedThreads(json: string): number {
-  const d = JSON.parse(json) as {
-    data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: { isResolved: boolean }[] } } } };
-  };
-  const nodes = d.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
-  return nodes.filter((n) => !n.isResolved).length;
-}
-
-/** Assemble the 3 raw gh responses into one PRReviewData. Exported for offline testing —
- *  GithubForge.getPRReviewData is the only impure caller. */
-export function assemblePRReviewData(viewJson: string, reactionsJson: string, threadsJson: string): PRReviewData {
+/** Assemble the raw gh responses into one PRReviewData. `unresolvedThreads` arrives as an
+ *  already-paged total (countUnresolvedThreads) — never a single-page count. Exported for
+ *  offline testing; GithubForge.getPRReviewData is the only impure caller. */
+export function assemblePRReviewData(viewJson: string, reactionsJson: string, unresolvedThreads: number): PRReviewData {
   const view = parsePRReviewView(viewJson);
   return {
     headOid: view.headOid,
@@ -501,6 +546,6 @@ export function assemblePRReviewData(viewJson: string, reactionsJson: string, th
     state: view.state,
     reviews: view.reviews,
     reactions: parsePRReactions(reactionsJson),
-    unresolvedThreads: parseUnresolvedThreads(threadsJson),
+    unresolvedThreads,
   };
 }

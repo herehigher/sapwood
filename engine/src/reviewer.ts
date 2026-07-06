@@ -55,20 +55,43 @@ export function freshHeadReviewCount(
   ).length;
 }
 
+/**
+ * True if any non-author reviewer's STANDING state on the CURRENT head is CHANGES_REQUESTED —
+ * a blocking signal (Codex PR #42 P1): an accepted review followed by a later
+ * CHANGES_REQUESTED on the same head must NOT yield MERGE_OK. GitHub semantics: a change
+ * request stands until the SAME reviewer later APPROVES (a mere COMMENTED does not clear it),
+ * or the review is dismissed (its state then reads DISMISSED, so it never matches here).
+ * Computed over ALL reviews, not just allowlisted reviewers' — anyone requesting changes
+ * blocks the autonomous path (fail-safe; a human triages the disagreement). Relies on the
+ * reviews array being in submission order (gh returns them chronologically).
+ */
+export function changesRequestedOnHead(reviews: PRReview[], headOid: string, prAuthor: string): boolean {
+  const standing = new Map<string, boolean>(); // author -> has an un-cleared change request
+  for (const r of reviews) {
+    if (r.commitOid !== headOid || r.author === prAuthor) continue;
+    if (r.state === "CHANGES_REQUESTED") standing.set(r.author, true);
+    else if (r.state === "APPROVED") standing.set(r.author, false); // same reviewer re-approved
+  }
+  return [...standing.values()].some(Boolean);
+}
+
 export interface ReviewSignals {
   hasEyesReaction: boolean;
   freshApprovingReviews: number;
   unresolvedThreads: number;
+  /** A standing CHANGES_REQUESTED on the current head (see changesRequestedOnHead). */
+  changesRequestedOnHead: boolean;
 }
 
 /**
  * Pure ACTION derivation from review signals — the review-only half of pr_gate.sh's ACTION
  * protocol (CI-flavored actions live in merge-driver.deriveGate, which folds in gate①
- * separately). Fail-safe ordering: unresolved findings outrank a stale/partial approval signal;
- * "nothing yet" (no review, no 👀) is WAIT_REVIEW, never a silent MERGE_OK.
+ * separately). Fail-safe ordering: unresolved findings / a standing change request outrank an
+ * approval signal (Codex PR #42 P1 — approve-then-changes-requested must block); "nothing yet"
+ * (no review, no 👀) is WAIT_REVIEW, never a silent MERGE_OK.
  */
 export function deriveReviewAction(s: ReviewSignals): ReviewAction {
-  if (s.unresolvedThreads > 0) return "HANDLE_THREADS";
+  if (s.unresolvedThreads > 0 || s.changesRequestedOnHead) return "HANDLE_THREADS";
   if (s.freshApprovingReviews > 0) return "MERGE_OK";
   return "WAIT_REVIEW"; // covers both "👀 in progress" and "nothing yet" — both mean keep polling
 }
@@ -88,29 +111,61 @@ export interface Reviewer {
   verdictFromData(data: PRReviewData): ReviewVerdict;
 }
 
-function verdictFrom(data: PRReviewData, acceptStates: readonly string[]): ReviewVerdict {
-  const fresh = freshHeadReviewCount(data.reviews, data.headOid, data.author, acceptStates);
+/** GitHub bot logins vary by API surface: REST reactions report `foo[bot]`, GraphQL/pr-view
+ *  reviews report `foo`. Normalize by stripping the suffix so an allowlist entry written
+ *  either way matches (0day's LOOP_TRUSTED_REVIEWERS default was the `[bot]`-suffixed form). */
+export function normalizeLogin(login: string): string {
+  return login.replace(/\[bot\]$/, "");
+}
+
+/** The Codex review bot's login (normalized form — see normalizeLogin). */
+export const CODEX_REVIEWER_LOGINS = ["chatgpt-codex-connector"] as const;
+
+/**
+ * Verdict core. `countableReview` restricts WHOSE reviews may satisfy gate② (Codex PR #42 P1:
+ * in codex mode, a review from any random non-author account must NOT count — only the Codex
+ * bot / configured allowlist). The BLOCKING signals are deliberately un-filtered: a standing
+ * change request from ANYONE blocks (changesRequestedOnHead reads all reviews), and unresolved
+ * threads always block — the filter can only shrink what approves, never what blocks.
+ */
+function verdictFrom(
+  data: PRReviewData,
+  acceptStates: readonly string[],
+  countableReview?: (r: PRReview) => boolean,
+): ReviewVerdict {
+  const countable = countableReview ? data.reviews.filter(countableReview) : data.reviews;
+  const fresh = freshHeadReviewCount(countable, data.headOid, data.author, acceptStates);
   const action = deriveReviewAction({
     hasEyesReaction: data.reactions.some((r) => r.content === "eyes"),
     freshApprovingReviews: fresh,
     unresolvedThreads: data.unresolvedThreads,
+    changesRequestedOnHead: changesRequestedOnHead(data.reviews, data.headOid, data.author),
   });
   return { action, headOid: data.headOid };
 }
 
-/** Default reviewer (0day-style): triggers `@codex review`; an accepted verdict is any
- *  non-author COMMENTED-or-APPROVED review on the current head (Codex's normal review state is
- *  COMMENTED, not APPROVED — matching pr_gate.sh's fresh_head_review_count). */
+/** Default reviewer (0day-style): triggers `@codex review`; an accepted verdict is a
+ *  COMMENTED-or-APPROVED review on the current head (Codex's normal review state is COMMENTED,
+ *  not APPROVED — matching pr_gate.sh's fresh_head_review_count) from the CODEX BOT or a
+ *  configured trusted login — never from an arbitrary non-author account (Codex PR #42 P1:
+ *  gate② is "a fresh different-model review", so the reviewer identity is part of the gate). */
 export class CodexReviewer implements Reviewer {
   readonly kind = "different-model-codex" as const;
   private static readonly ACCEPT = ["COMMENTED", "APPROVED"] as const;
+  private readonly allowedLogins: string[];
+
+  /** `extraTrustedLogins` (cfg.reviewer.trustedReviewers) extends — never replaces — the
+   *  Codex bot's own login. */
+  constructor(extraTrustedLogins: readonly string[] = []) {
+    this.allowedLogins = [...CODEX_REVIEWER_LOGINS, ...extraTrustedLogins].map(normalizeLogin);
+  }
 
   async triggerReview(forge: IForge, pr: number): Promise<void> {
     await forge.addPRComment(pr, "@codex review");
   }
 
   verdictFromData(data: PRReviewData): ReviewVerdict {
-    return verdictFrom(data, CodexReviewer.ACCEPT);
+    return verdictFrom(data, CodexReviewer.ACCEPT, (r) => this.allowedLogins.includes(normalizeLogin(r.author)));
   }
 }
 
@@ -146,8 +201,10 @@ export class SameModelTrustedReviewer implements Reviewer {
 
   verdictFromData(data: PRReviewData): ReviewVerdict {
     if (this.trustedLogins.length === 0) return { action: "WAIT_REVIEW", headOid: data.headOid };
-    const trustedOnly = data.reviews.filter((r) => this.trustedLogins.includes(r.author));
-    return verdictFrom({ ...data, reviews: trustedOnly }, SameModelTrustedReviewer.ACCEPT);
+    const trusted = this.trustedLogins.map(normalizeLogin);
+    // Filter what can APPROVE only — blocking signals (change requests, threads) intentionally
+    // still see every review (verdictFrom's contract).
+    return verdictFrom(data, SameModelTrustedReviewer.ACCEPT, (r) => trusted.includes(normalizeLogin(r.author)));
   }
 }
 
@@ -161,6 +218,8 @@ export function makeReviewer(cfg: SapwoodConfig): Reviewer {
       return new SameModelTrustedReviewer(cfg.reviewer.trustedReviewers);
     case "different-model-codex":
     default:
-      return new CodexReviewer();
+      // trustedReviewers EXTENDS the Codex-bot allowlist in this mode (public-repo hardening:
+      // gate② acceptance is identity-checked, not merely non-author — Codex PR #42 P1).
+      return new CodexReviewer(cfg.reviewer.trustedReviewers);
   }
 }

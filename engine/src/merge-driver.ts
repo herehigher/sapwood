@@ -160,6 +160,14 @@ export class MergeDriver {
       return { kind: "queued", pr, reason: `gate-data-unavailable: ${String(e)}` };
     }
 
+    // Both gate inputs MUST observe the SAME head (Codex PR #42 P1): the two reads above can
+    // race a push — the CI read seeing old-green commit A while the review read sees
+    // newly-reviewed commit B whose CI hasn't run would otherwise merge B on A's CI result.
+    // Split observation -> queue and re-read next tick; never derive a gate from mixed heads.
+    if (status.headOid !== data.headOid) {
+      return { kind: "queued", pr, reason: `gate-head-mismatch: ci-head=${status.headOid} review-head=${data.headOid}` };
+    }
+
     const verdict = reviewer.verdictFromData(data);
     const gate = deriveGate({
       ciGreen: status.ciGreen,

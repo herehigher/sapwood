@@ -11,7 +11,8 @@ import {
   projectQuery,
   parsePRReviewView,
   parsePRReactions,
-  parseUnresolvedThreads,
+  parseReviewThreadsPage,
+  countUnresolvedThreads,
   assemblePRReviewData,
 } from "./forge.js";
 
@@ -350,33 +351,60 @@ test("parsePRReactions: maps GitHub reaction rows to {content, createdAt, login}
   ]);
 });
 
-test("parseUnresolvedThreads: counts only isResolved=false nodes", () => {
-  const json = JSON.stringify({
+const threadsPage = (
+  resolved: boolean[],
+  pageInfo?: { hasNextPage: boolean; endCursor: string | null },
+): string =>
+  JSON.stringify({
     data: {
       repository: {
         pullRequest: {
-          reviewThreads: { nodes: [{ isResolved: false }, { isResolved: true }, { isResolved: false }] },
+          reviewThreads: {
+            ...(pageInfo ? { pageInfo } : {}),
+            nodes: resolved.map((r) => ({ isResolved: r })),
+          },
         },
       },
     },
   });
-  assert.equal(parseUnresolvedThreads(json), 2);
+
+test("parseReviewThreadsPage: counts only isResolved=false nodes + surfaces the page cursor", () => {
+  const p = parseReviewThreadsPage(threadsPage([false, true, false], { hasNextPage: true, endCursor: "CUR" }));
+  assert.deepEqual(p, { unresolved: 2, hasNextPage: true, endCursor: "CUR" });
 });
 
-test("parseUnresolvedThreads: absent/malformed shape -> 0, never throws", () => {
-  assert.equal(parseUnresolvedThreads(JSON.stringify({})), 0);
+test("parseReviewThreadsPage: absent/malformed shape -> 0 + terminal, never throws or loops", () => {
+  assert.deepEqual(parseReviewThreadsPage(JSON.stringify({})), { unresolved: 0, hasNextPage: false, endCursor: null });
 });
 
-test("assemblePRReviewData: combines all 3 raw gh responses into one PRReviewData", () => {
+test("countUnresolvedThreads: pages to exhaustion — an unresolved thread PAST page 1 is still counted (Codex PR #42 P2)", async () => {
+  // Page 1: all resolved, more pages remain. Page 2: one unresolved. A first-100-only fetch
+  // would have declared zero findings here — the exact fail-open the pagination closes.
+  const pages: Record<string, string> = {
+    "": threadsPage(Array(100).fill(true) as boolean[], { hasNextPage: true, endCursor: "P2" }),
+    P2: threadsPage([true, false], { hasNextPage: false, endCursor: null }),
+  };
+  const fetched: (string | null)[] = [];
+  const n = await countUnresolvedThreads(async (after) => {
+    fetched.push(after);
+    return pages[after ?? ""]!;
+  });
+  assert.equal(n, 1);
+  assert.deepEqual(fetched, [null, "P2"]); // followed the cursor exactly once
+});
+
+test("countUnresolvedThreads: single page (no pageInfo) -> one fetch, its count", async () => {
+  const n = await countUnresolvedThreads(async () => threadsPage([false, false, true]));
+  assert.equal(n, 2);
+});
+
+test("assemblePRReviewData: combines the raw gh responses + the paged thread total", () => {
   const view = JSON.stringify({
     headRefOid: "H", author: { login: "producer" }, updatedAt: "t", isDraft: false,
     labels: [], state: "OPEN", reviews: [],
   });
   const reactions = JSON.stringify([{ content: "eyes", created_at: "t", user: { login: "codex" } }]);
-  const threads = JSON.stringify({
-    data: { repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: false }] } } } },
-  });
-  const data = assemblePRReviewData(view, reactions, threads);
+  const data = assemblePRReviewData(view, reactions, 1);
   assert.equal(data.headOid, "H");
   assert.equal(data.reactions.length, 1);
   assert.equal(data.unresolvedThreads, 1);

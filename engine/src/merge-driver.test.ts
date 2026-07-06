@@ -165,6 +165,18 @@ test("MergeDriver.driveOne: gates pass (CI green + MERGE_OK) -> merges with the 
   assert.deepEqual(forge.merged, [[7, "HEAD"]]);
 });
 
+test("MergeDriver.driveOne: SPLIT-HEAD observation (CI read saw one head, review read another) -> queued, never merges (Codex PR #42 P1)", async () => {
+  const forge = new FakeForge();
+  // The CI status call observed old-green commit A while the review-data call observed the
+  // newly-reviewed commit HEAD whose CI hasn't run — merging would apply A's CI result to HEAD.
+  forge.status = { ...forge.status, headOid: "OLD_GREEN_A", ciGreen: true };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /gate-head-mismatch/);
+  assert.deepEqual(forge.merged, []);
+});
+
 test("MergeDriver.driveOne: CI not green -> queued (WAIT), never merges", async () => {
   const forge = new FakeForge();
   forge.status = { ...forge.status, ciGreen: false };
