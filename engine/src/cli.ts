@@ -1,13 +1,45 @@
 #!/usr/bin/env node
 // `sapwood` CLI. M0.5 ships `init`; status/stop and the full command surface land in M4.
+import { createRequire } from "node:module";
 import { loadConfig } from "./config.js";
 import { init, InitError } from "./init.js";
 
-async function main(argv: string[]): Promise<number> {
-  if (argv[2] !== "init") {
-    console.error("usage: sapwood init");
-    return 2;
+const require = createRequire(import.meta.url);
+// ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
+const { version } = require("../package.json") as { version: string };
+
+const USAGE = `\
+usage: sapwood <command> [options]
+
+Commands:
+  init          Scaffold .sapwood config and verify GitHub auth
+
+Flags:
+  --version, -v  Print version and exit
+  --help, -h     Print this help and exit
+`;
+
+export function runCli(argv: string[]): { stdout: string; stderr: string; code: number } {
+  const arg = argv[2];
+  if (arg === "--version" || arg === "-v") {
+    return { stdout: version + "\n", stderr: "", code: 0 };
   }
+  if (arg === "--help" || arg === "-h" || arg === undefined) {
+    return { stdout: USAGE, stderr: "", code: 0 };
+  }
+  if (arg !== "init") {
+    return { stdout: "", stderr: USAGE, code: 2 };
+  }
+  // "init" falls through to async path — signal caller to proceed
+  return { stdout: "", stderr: "", code: -1 };
+}
+
+async function main(argv: string[]): Promise<number> {
+  const { stdout, stderr, code } = runCli(argv);
+  if (stdout) process.stdout.write(stdout);
+  if (stderr) process.stderr.write(stderr);
+  if (code !== -1) return code;
+
   try {
     const { actions } = await init(loadConfig());
     for (const a of actions) console.log("•", a);
