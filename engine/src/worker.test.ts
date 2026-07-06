@@ -123,6 +123,25 @@ test("probe: costUsd is 0 while a lane is still running (no terminal sentinel ye
   }
 });
 
+test("probe: recovers costUsd from the jsonl when a restart-orphaned lane has NO terminal sentinel (Codex PR #41 R3 P1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = sup(dir, bin);
+    // Simulate a lane orphaned by an engine restart: claude finished and wrote its terminal
+    // result line to the jsonl, but no attached onExit handler existed to write a sentinel.
+    // The probe must not report 0 — that would omit real spend from the daily-cap ledger.
+    writeFileSync(join(dir, "lane-orphan.running.json"), JSON.stringify({ issue: 5, wrapper_pid: 999999999 }));
+    writeFileSync(join(dir, "lane-orphan.jsonl"), `{"type":"system"}\n{"type":"result","subtype":"success","total_cost_usd":1.25}\n`);
+    const probe = await s.probe("lane-orphan");
+    assert.equal(probe.done, false); // no sentinel — classifyLane will call this DEAD (pid gone)
+    assert.equal(probe.costUsd, 1.25); // but the real cost is still recovered from the jsonl
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("dispatch rejects a name already in use (no concurrent same-name clobber)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

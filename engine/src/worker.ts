@@ -345,14 +345,23 @@ export class WorkerSupervisor implements Supervisor {
   }
 
   /** The terminal sentinel (whichever is present) carries the parsed stream-json
-   *  total_cost_usd (onExit writes it into all three: done/failed/handoff). 0 while still
-   *  running or if no terminal sentinel exists yet (e.g. a DEAD lane never got one). Feeds
-   *  the conductor's #14 engine-ceiling ledger (state.recordSpend). */
+   *  total_cost_usd (onExit writes it into all three: done/failed/handoff). Feeds the
+   *  conductor's #14 engine-ceiling ledger (state.recordSpend).
+   *
+   *  No sentinel (or a sentinel without a cost) does NOT mean no cost: a lane orphaned by an
+   *  engine restart has no attached onExit handler, so it never gets a sentinel — but claude
+   *  still wrote its terminal result line to <name>.jsonl. Returning 0 there would let a
+   *  restart mid-run omit real spend from spend_ledger and quietly under-count the daily
+   *  hard cap (Codex PR #41 R3 P1). Fall back to parsing the jsonl: for a still-running
+   *  lane it parses to 0 anyway (total_cost_usd only appears in the terminal result
+   *  message), so the fallback is safe unconditionally. */
   private terminalCostUsd(flags: { done: boolean; failed: boolean; handoff: boolean }, name: string): number {
     const ext = flags.done ? "done.json" : flags.failed ? "failed.json" : flags.handoff ? "handoff.json" : null;
-    if (!ext) return 0;
-    const r = this.readJson(this.path(name, ext));
-    return typeof r?.total_cost_usd === "number" ? r.total_cost_usd : 0;
+    if (ext) {
+      const r = this.readJson(this.path(name, ext));
+      if (typeof r?.total_cost_usd === "number") return r.total_cost_usd;
+    }
+    return parseCostUsd(this.readJsonl(this.path(name, "jsonl")));
   }
 
   async reclaim(name: string): Promise<void> {
