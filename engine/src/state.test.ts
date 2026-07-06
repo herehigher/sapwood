@@ -114,6 +114,18 @@ test("recordSpend + dailySpendUsd: sums only rows on the query's UTC calendar da
   s.close();
 });
 
+test("recordSpend clamps negative/non-finite cost: the safety accumulator can only grow (gate② PR #41 P3)", () => {
+  const s = mem();
+  const day = "2026-07-06T12:00:00.000Z";
+  s.recordSpend("lane-a", 1, 3, day);
+  s.recordSpend("lane-b", 2, -5, day); // negative must NOT subtract from the daily sum
+  s.recordSpend("lane-c", 3, NaN, day);
+  s.recordSpend("lane-d", 4, Infinity, day);
+  s.recordSpend("lane-e", 5, -Infinity, day);
+  assert.equal(s.dailySpendUsd(new Date(day)), 3); // only the legitimate positive spend counts
+  s.close();
+});
+
 test("engineSessionStart: continuous ticking keeps the original session start", () => {
   const s = mem();
   const gap = 900;

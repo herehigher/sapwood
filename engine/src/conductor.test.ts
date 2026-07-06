@@ -24,6 +24,8 @@ import {
   orderForDispatch,
   evaluateCeiling,
   drainEscalationDue,
+  engineSessionGapSec,
+  ENGINE_SESSION_GAP_SEC,
   type Supervisor,
   type LaneProbe,
 } from "./conductor.js";
@@ -500,6 +502,40 @@ test("tick ceiling: wall-clock breaches on continuous ticking but RECOVERS after
   assert.equal(recovered.ceilingBreached, false);
   assert.equal(st.ceilingBreach(), null); // the breach record cleared -> a re-breach gets a fresh drain window
   assert.ok(recovered.dispatched.some((d) => d.kind === "dispatched" && d.issue === 4));
+  st.close();
+});
+
+test("engineSessionGapSec: scales with tick cadence — max(base, 2x); unknown/garbage cadence -> base", () => {
+  assert.equal(engineSessionGapSec(0), ENGINE_SESSION_GAP_SEC); // unknown/self-paced
+  assert.equal(engineSessionGapSec(60), ENGINE_SESSION_GAP_SEC); // fast cadence: base wins
+  assert.equal(engineSessionGapSec(450), ENGINE_SESSION_GAP_SEC); // 2x450=900: base still wins (ties to base)
+  assert.equal(engineSessionGapSec(1200), 2400); // slow cadence: 2x cadence wins
+  assert.equal(engineSessionGapSec(-5), ENGINE_SESSION_GAP_SEC); // garbage -> fail-safe base
+  assert.equal(engineSessionGapSec(NaN), ENGINE_SESSION_GAP_SEC);
+  assert.equal(engineSessionGapSec(Infinity), ENGINE_SESSION_GAP_SEC);
+});
+
+test("tick ceiling PINNING: a legal slow cadence (>= 15min) must NOT void the wall-clock tier (gate② PR #41 P2)", async () => {
+  // With a fixed 900s stale gap, ticking every 20min made EVERY tick look stale: the session
+  // reset each tick, elapsed ~= 0 forever, and the wall-clock ceiling silently never fired.
+  // With tickIntervalSec passed, the gap scales to 2x cadence and the tier stays live.
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ cost: { maxWallClockSec: 600 } }); // 10-min cap
+  let clock = new Date("2026-07-06T00:00:00Z");
+  const now = () => clock;
+  const tickAt = async (iso: string) => {
+    clock = new Date(iso);
+    return tick({ forge, state: st, supervisor: sup, cfg, now, tickIntervalSec: 1200 }); // 20-min cadence
+  };
+  assert.equal((await tickAt("2026-07-06T00:00:00Z")).ceilingBreached, false);
+  // t=20min: gap since last tick is 1200s. Old behavior: 1200 > 900 -> session resets ->
+  // elapsed 0 -> NO breach, tier dead. Fixed behavior: gap = max(900, 2x1200) = 2400 ->
+  // session holds -> elapsed 1200 > 600 cap -> breach. This test fails on the old behavior.
+  const r = await tickAt("2026-07-06T00:20:00Z");
+  assert.equal(r.ceilingBreached, true);
+  assert.deepEqual(r.ceilingReasons, ["wall-clock"]);
   st.close();
 });
 

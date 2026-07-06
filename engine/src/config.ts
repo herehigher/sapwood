@@ -67,7 +67,9 @@ const Cost = z.object({
   // Cumulative daily USD cap (#14): summed from completed workers' stream-json
   // total_cost_usd, persisted in State (engine.spend_ledger) so it survives an engine
   // restart mid-day. Breaching it is an engine-wide dispatch freeze + drain, not just a
-  // per-tick skip (see conductor.ts evaluateCeiling / tick's CEILING step).
+  // per-tick skip (see conductor.ts evaluateCeiling / tick's CEILING step). Enforced
+  // POST-HOC at tick boundaries — cost is only known at worker completion, so bounded
+  // overshoot ≈ lanes.roundDispatchCap × per-worker spend is possible before the freeze.
   dailyBudgetUsd: z.number().finite().positive().default(100),
   // Aggregate wall-clock ceiling (#14) over the ACTIVE engine session
   // (State.engineSessionStart: continuous ticking; a stop/crash/pause longer than the stale

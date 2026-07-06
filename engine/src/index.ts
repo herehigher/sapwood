@@ -26,6 +26,7 @@ export {
   evaluateCeiling,
   drainEscalationDue,
   ENGINE_SESSION_GAP_SEC,
+  engineSessionGapSec,
   type Supervisor,
   type LaneProbe,
   type TickDeps,

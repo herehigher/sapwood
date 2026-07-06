@@ -65,11 +65,24 @@ export function budgetExceeded(total: number, cap: number): boolean {
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
 
-/** Engine-session stale gap (State.engineSessionStart): a tick gap longer than this means
- *  the engine was stopped/crashed/paused, and the wall-clock session resets. Longer than any
- *  sane tick interval (0day ticks are minutes apart) so a live engine never self-resets, yet
- *  short enough that an operator pause is a practical recovery from a wall-clock breach. */
+/** Engine-session BASE stale gap (State.engineSessionStart): a tick gap longer than this
+ *  means the engine was stopped/crashed/paused, and the wall-clock session resets. Longer
+ *  than any sane tick interval (0day ticks are minutes apart) so a live engine never
+ *  self-resets, yet short enough that an operator pause is a practical recovery from a
+ *  wall-clock breach. NEVER compare a tick cadence against this constant directly — use
+ *  engineSessionGapSec(tickIntervalSec), which scales the gap with the cadence. */
 export const ENGINE_SESSION_GAP_SEC = 900;
+
+/** The stale gap actually used: max(base, 2 × the caller's tick cadence). A fixed 900s gap
+ *  with a legal tick cadence ≥ 15min would make EVERY tick look stale — the session resets
+ *  each tick, wallClockElapsedSec ≈ 0 forever, and the wall-clock tier silently never fires
+ *  (gate② PR #41 P2, exactly the fail-open class this repo guards against). Scaling by 2×
+ *  keeps one missed tick from resetting the session while any cadence stays well under the
+ *  gap. Non-finite/negative cadence (unknown / self-paced caller) -> the base gap. */
+export function engineSessionGapSec(tickIntervalSec: number): number {
+  if (!Number.isFinite(tickIntervalSec) || tickIntervalSec <= 0) return ENGINE_SESSION_GAP_SEC;
+  return Math.max(ENGINE_SESSION_GAP_SEC, 2 * tickIntervalSec);
+}
 
 /** Pure ceiling check. Order is fixed (kill-switch, daily-budget, wall-clock) so multiple
  *  simultaneous breaches report deterministically; empty array = no breach. */
@@ -265,6 +278,12 @@ export interface TickDeps {
   /** Cumulative round spend (USD) for the hard round-budget gate. Worker cost sum; caller
    *  computes it from stream-json (worker.ts). Default 0 (no spend known yet). */
   roundSpendUsd?: number;
+  /** The caller's tick cadence in seconds, when ticks run on a fixed schedule. Scales the
+   *  wall-clock session stale gap (engineSessionGapSec: max(900, 2× cadence)) so a legal
+   *  slow cadence cannot make every tick look stale and silently void the wall-clock tier
+   *  (gate② PR #41 P2). The M4 loop driver MUST pass its cadence here. Omitted -> the base
+   *  gap (only safe for callers ticking faster than ENGINE_SESSION_GAP_SEC). */
+  tickIntervalSec?: number;
   now?: () => Date;
 }
 
@@ -302,6 +321,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // Soft-budget graceful handoff: terminal-but-resumable. Never killed; the conductor
       // may --resume later. Checked before classifyLane (a handoff is not a failure).
       state.upsertWorker({ ...w, state: "handoff", ended_at: iso() });
+      // M4 --resume TRAP (gate② PR #41 P3): this records the handed-off run's
+      // total_cost_usd. If this lane is later resumed and claude reports CUMULATIVE
+      // total_cost_usd for the resumed session, recording the resumed run's total again at
+      // its terminal transition double-counts the pre-handoff portion — fail-SAFE for the
+      // cap (over-counts) but corrupts accounting. Whoever wires --resume (M4) must record
+      // the delta, or verify claude's resume cost semantics first.
       state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
       state.appendEvent("handoff", { worker: w.name, issue: w.issue });
       reclaimed.push({ kind: "handoff", worker: w.name, issue: w.issue });
@@ -369,13 +394,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   freezes ALL new dispatch this tick and starts (or continues) a bounded drain: running
   //   workers are asked to hand off gracefully; only after cfg.cost.drainWindowSec with no
   //   resolution does the conductor escalate to the hard process-tree kill. Drain before
-  //   kill, always (PLAN.md Security model). ──
+  //   kill, always (PLAN.md Security model).
+  //   NOTE the daily cap is POST-HOC, not a real-time cutoff: spend is only known at worker
+  //   completion (stream-json carries no in-flight cost), so still-running lanes contribute
+  //   nothing until they finish and the cap trips on the completion that crosses it. Max
+  //   overshoot ≈ concurrent lanes × per-worker spend — bounded in practice by
+  //   lanes.roundDispatchCap (default 2) × worker.budgetUsdSoft, plus the wall-clock tier. ──
   const nowDate = now();
   const ceilingReasons = evaluateCeiling({
     dailySpendUsd: state.dailySpendUsd(nowDate),
     dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
     wallClockElapsedSec:
-      (nowDate.getTime() - state.engineSessionStart(nowDate, ENGINE_SESSION_GAP_SEC).getTime()) / 1000,
+      (nowDate.getTime() -
+        state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec ?? 0)).getTime()) / 1000,
     maxWallClockSec: cfg.cost.maxWallClockSec,
     killSwitchActive: state.isKillSwitchActive(),
   });

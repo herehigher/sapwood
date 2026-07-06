@@ -177,11 +177,16 @@ export class State {
   // ── Engine cost ceiling + kill switch (#14) ───────────────────────────────────────────
 
   /** Record a completed worker's terminal cost (from stream-json, worker.ts). Call exactly
-   *  once per lane at reclaim time (conductor.tick) — append-only, no in-place dedup. */
+   *  once per lane at reclaim time (conductor.tick) — append-only, no in-place dedup.
+   *  Clamped at this single choke point: the safety accumulator can only GROW. A negative or
+   *  non-finite total_cost_usd (corrupt jsonl, bad parse) must never SUBTRACT from the daily
+   *  sum and erode the hard cap (gate② PR #41 P3 — defense-in-depth; no worker-reachable
+   *  write path is known, since workers get no --add-dir data). */
   recordSpend(worker: string, issue: number, usd: number, at: string): void {
+    const safeUsd = Number.isFinite(usd) && usd > 0 ? usd : 0;
     this.db
       .prepare("INSERT INTO spend_ledger (ts, worker, issue, usd) VALUES (?, ?, ?, ?)")
-      .run(at, worker, issue, usd);
+      .run(at, worker, issue, safeUsd);
   }
 
   /** Cumulative spend for `now`'s UTC calendar day (spend_ledger sum, ts-prefix match). */
