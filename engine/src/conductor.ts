@@ -65,6 +65,12 @@ export function budgetExceeded(total: number, cap: number): boolean {
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
 
+/** Engine-session stale gap (State.engineSessionStart): a tick gap longer than this means
+ *  the engine was stopped/crashed/paused, and the wall-clock session resets. Longer than any
+ *  sane tick interval (0day ticks are minutes apart) so a live engine never self-resets, yet
+ *  short enough that an operator pause is a practical recovery from a wall-clock breach. */
+export const ENGINE_SESSION_GAP_SEC = 900;
+
 /** Pure ceiling check. Order is fixed (kill-switch, daily-budget, wall-clock) so multiple
  *  simultaneous breaches report deterministically; empty array = no breach. */
 export function evaluateCeiling(input: {
@@ -368,7 +374,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const ceilingReasons = evaluateCeiling({
     dailySpendUsd: state.dailySpendUsd(nowDate),
     dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
-    wallClockElapsedSec: (nowDate.getTime() - state.engineStartedAt(nowDate).getTime()) / 1000,
+    wallClockElapsedSec:
+      (nowDate.getTime() - state.engineSessionStart(nowDate, ENGINE_SESSION_GAP_SEC).getTime()) / 1000,
     maxWallClockSec: cfg.cost.maxWallClockSec,
     killSwitchActive: state.isKillSwitchActive(),
   });

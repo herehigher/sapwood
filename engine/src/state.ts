@@ -47,12 +47,17 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         issue    INTEGER NOT NULL,
         usd      REAL NOT NULL
       );
-      -- Singleton row: when this engine (this data dir) first ticked. Backs the wall-clock
-      -- ceiling (cfg.cost.maxWallClockSec) — survives restarts, same durability rationale as
-      -- spend_ledger.
+      -- Singleton row: the ACTIVE engine session backing the wall-clock ceiling
+      -- (cfg.cost.maxWallClockSec). A session is continuous ticking: every tick refreshes
+      -- last_tick_at; a gap longer than the stale threshold (engine stopped/crashed) resets
+      -- started_at. Persisted so a rapid crash-loop restart CANNOT evade the cap (the gap
+      -- stays under the threshold), while a deliberate operator pause recovers a
+      -- wall-clock-breached engine (Codex PR #41 R2 P1 — a DB-lifetime start time would
+      -- permanently breach every data dir maxWallClockSec after its first-ever tick).
       CREATE TABLE engine_session (
-        id         INTEGER PRIMARY KEY CHECK (id = 1),
-        started_at TEXT NOT NULL
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        started_at   TEXT NOT NULL,
+        last_tick_at TEXT NOT NULL
       );
       -- Singleton row: set once when a ceiling breach (daily budget / wall-clock / kill
       -- switch) is FIRST detected; cleared once the breach condition resolves. The bounded
@@ -188,17 +193,31 @@ export class State {
     return row.total;
   }
 
-  /** Get-or-init this engine's (this data dir's) persisted session start. First caller
-   *  across the DB's lifetime wins and that timestamp sticks across restarts. */
-  engineStartedAt(now: Date): Date {
-    const row = this.db.prepare("SELECT started_at FROM engine_session WHERE id = 1").get() as
-      | { started_at: string }
-      | undefined;
-    if (row) return new Date(row.started_at);
-    this.db
-      .prepare("INSERT INTO engine_session (id, started_at) VALUES (1, ?)")
-      .run(now.toISOString());
-    return now;
+  /** Active-session start for the wall-clock ceiling; call once per tick. Each call
+   *  refreshes last_tick_at (the session's liveness heartbeat). If the previous tick is
+   *  older than staleGapSec — the engine was stopped, crashed, or deliberately paused — the
+   *  session RESETS to `now` and the wall-clock elapsed starts over. A continuously ticking
+   *  engine (including a rapid crash-loop restart, whose gaps stay under the threshold)
+   *  keeps accumulating and CANNOT evade the cap; recovery from a wall-clock breach is a
+   *  deliberate operator action (pause longer than the gap, or raise cost.maxWallClockSec).
+   *  (Codex PR #41 R2 P1.) */
+  engineSessionStart(now: Date, staleGapSec: number): Date {
+    const row = this.db
+      .prepare("SELECT started_at, last_tick_at FROM engine_session WHERE id = 1")
+      .get() as { started_at: string; last_tick_at: string } | undefined;
+    const nowIso = now.toISOString();
+    if (!row || (now.getTime() - Date.parse(row.last_tick_at)) / 1000 > staleGapSec) {
+      this.db
+        .prepare(
+          `INSERT INTO engine_session (id, started_at, last_tick_at) VALUES (1, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             started_at = excluded.started_at, last_tick_at = excluded.last_tick_at`,
+        )
+        .run(nowIso, nowIso);
+      return now;
+    }
+    this.db.prepare("UPDATE engine_session SET last_tick_at = ? WHERE id = 1").run(nowIso);
+    return new Date(row.started_at);
   }
 
   /** Record a ceiling breach's first-detected time (INSERT OR IGNORE: re-detecting a

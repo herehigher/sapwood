@@ -69,10 +69,12 @@ const Cost = z.object({
   // restart mid-day. Breaching it is an engine-wide dispatch freeze + drain, not just a
   // per-tick skip (see conductor.ts evaluateCeiling / tick's CEILING step).
   dailyBudgetUsd: z.number().finite().positive().default(100),
-  // Aggregate wall-clock ceiling (#14) since the engine's persisted session start
-  // (State.engineStartedAt — survives restarts). Independent of worker.timeoutSec (which
-  // bounds a single worker); this bounds the engine's total active dispatching time as a
-  // runaway-time safety net. Conservative default: 4h.
+  // Aggregate wall-clock ceiling (#14) over the ACTIVE engine session
+  // (State.engineSessionStart: continuous ticking; a stop/crash/pause longer than the stale
+  // gap resets it, so a rapid crash-loop can't evade the cap but a data dir is never
+  // permanently breached). Independent of worker.timeoutSec (which bounds a single worker);
+  // this bounds the engine's total continuous running time as a runaway-time safety net.
+  // Conservative default: 4h.
   maxWallClockSec: z.number().int().positive().default(14400),
   // Bounded grace window (#14) after a ceiling breach (daily budget / wall-clock / kill
   // switch) is first detected, during which running workers are asked to hand off

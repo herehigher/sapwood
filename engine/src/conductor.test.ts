@@ -472,6 +472,37 @@ test("tick ceiling: escalates to a hard kill only after the bounded drain window
   }
 });
 
+test("tick ceiling: wall-clock breaches on continuous ticking but RECOVERS after an operator pause (Codex R2 P1)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ cost: { maxWallClockSec: 600 } }); // 10-min cap for the test
+  let clock = new Date("2026-07-06T00:00:00Z");
+  const now = () => clock;
+  const tickAt = async (iso: string) => {
+    clock = new Date(iso);
+    return tick({ forge, state: st, supervisor: sup, cfg, now });
+  };
+
+  // Continuous ticking (5-min intervals, under the 15-min session gap): the session start
+  // never moves, so elapsed accumulates past the 600s cap -> wall-clock breach at t=15min.
+  assert.equal((await tickAt("2026-07-06T00:00:00Z")).ceilingBreached, false);
+  assert.equal((await tickAt("2026-07-06T00:05:00Z")).ceilingBreached, false);
+  forge.ready = [{ number: 4, title: "", labels: ["prio:3-feature"] }]; // arrives pre-breach
+  const breached = await tickAt("2026-07-06T00:15:00Z"); // 900s elapsed > 600s cap
+  assert.equal(breached.ceilingBreached, true);
+  assert.deepEqual(breached.ceilingReasons, ["wall-clock"]);
+  assert.deepEqual(breached.dispatched, [{ kind: "skipped", issue: 4, reason: "ceiling" }]);
+
+  // An operator pause longer than the session gap (15min) resets the session — the data dir
+  // is NOT permanently breached (the original engineStartedAt design was). Dispatch resumes.
+  const recovered = await tickAt("2026-07-06T00:31:00Z"); // 16-min gap since the last tick
+  assert.equal(recovered.ceilingBreached, false);
+  assert.equal(st.ceilingBreach(), null); // the breach record cleared -> a re-breach gets a fresh drain window
+  assert.ok(recovered.dispatched.some((d) => d.kind === "dispatched" && d.issue === 4));
+  st.close();
+});
+
 test("tick ceiling: daily spend accumulates across ticks and SURVIVES a State reopen (restart-safe)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-ceiling-"));
   try {

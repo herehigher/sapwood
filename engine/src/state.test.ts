@@ -114,12 +114,30 @@ test("recordSpend + dailySpendUsd: sums only rows on the query's UTC calendar da
   s.close();
 });
 
-test("engineStartedAt: first call sets it; later calls (even with a different `now`) return the same persisted time", () => {
+test("engineSessionStart: continuous ticking keeps the original session start", () => {
   const s = mem();
-  const first = s.engineStartedAt(new Date("2026-07-06T00:00:00Z"));
-  assert.equal(first.toISOString(), "2026-07-06T00:00:00.000Z");
-  const second = s.engineStartedAt(new Date("2026-07-06T05:00:00Z")); // later "now" — ignored
-  assert.equal(second.toISOString(), "2026-07-06T00:00:00.000Z");
+  const gap = 900;
+  const t0 = s.engineSessionStart(new Date("2026-07-06T00:00:00Z"), gap);
+  assert.equal(t0.toISOString(), "2026-07-06T00:00:00.000Z");
+  // Ticks every 5 minutes (under the 15-min gap): the session start never moves, so
+  // wall-clock elapsed keeps accumulating — a live engine cannot self-reset the cap.
+  assert.equal(s.engineSessionStart(new Date("2026-07-06T00:05:00Z"), gap).toISOString(), "2026-07-06T00:00:00.000Z");
+  assert.equal(s.engineSessionStart(new Date("2026-07-06T00:10:00Z"), gap).toISOString(), "2026-07-06T00:00:00.000Z");
+  assert.equal(s.engineSessionStart(new Date("2026-07-06T00:14:00Z"), gap).toISOString(), "2026-07-06T00:00:00.000Z");
+  s.close();
+});
+
+test("engineSessionStart: a tick gap past staleGapSec (engine stopped/paused) RESETS the session (Codex PR #41 R2 P1)", () => {
+  const s = mem();
+  const gap = 900;
+  s.engineSessionStart(new Date("2026-07-06T00:00:00Z"), gap);
+  s.engineSessionStart(new Date("2026-07-06T00:05:00Z"), gap); // still the same session
+  // 16 minutes of silence (> 900s): the engine was down/paused — new session, fresh start.
+  const restarted = s.engineSessionStart(new Date("2026-07-06T00:21:01Z"), gap);
+  assert.equal(restarted.toISOString(), "2026-07-06T00:21:01.000Z");
+  // Exactly-at-gap is NOT stale (same ">" convention as budgetExceeded).
+  const next = s.engineSessionStart(new Date("2026-07-06T00:36:01Z"), gap); // +900s exactly
+  assert.equal(next.toISOString(), "2026-07-06T00:21:01.000Z"); // still the same session
   s.close();
 });
 

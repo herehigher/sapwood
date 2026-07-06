@@ -25,6 +25,7 @@ export {
   driveDecision,
   evaluateCeiling,
   drainEscalationDue,
+  ENGINE_SESSION_GAP_SEC,
   type Supervisor,
   type LaneProbe,
   type TickDeps,
