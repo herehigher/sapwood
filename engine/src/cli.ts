@@ -55,9 +55,13 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-main(process.argv)
-  .then((code) => process.exit(code))
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  });
+// Run only when invoked directly (not when imported by tests) — importing this module for
+// `runCli` must not execute main()/process.exit and cut off a test subprocess (Codex PR #36).
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main(process.argv)
+    .then((code) => process.exit(code))
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
+}
