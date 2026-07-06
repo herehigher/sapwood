@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawn } from "node:child_process";
+import { symlinkSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { guardDecision } from "./guard.js";
 import { hookResponse, responseFromText, resolveGuardMode, applyGuardMode } from "./guard-hook.js";
 
@@ -277,4 +282,42 @@ test("hook: a guarded tool with missing/non-object tool_input fails closed", () 
 test("hook: a write to a boundary file is denied through the hook", () => {
   const out = responseFromText(JSON.stringify({ tool_name: "Write", tool_input: { file_path: ".github/workflows/ci.yml" }, cwd: CWD }));
   assert.equal(out?.hookSpecificOutput.permissionDecision, "deny");
+});
+
+// ── hook adapter: direct-invocation check survives symlink invocation (no fail-open) ────────
+// Regression test for the symlink bypass: a naive `import.meta.url === file://${argv[1]}`
+// direct-invocation check is FALSE when the hook is launched through a symlink (import.meta.url
+// resolves the real file; argv[1] stays the symlink path). That would make `main()` never run,
+// so the hook process exits with no decision at all — a silent fail-open of the safety guard.
+// Spawn the real guard-hook.ts through a symlink (as tsx would run it) and prove it still
+// enforces: a forbidden Bash command fed on stdin must still come back denied, not pass through.
+test("guard-hook: invoked via a symlink still enforces (realpath direct-invocation check, no fail-open)", async () => {
+  const srcDir = dirname(fileURLToPath(import.meta.url));
+  const engineRoot = join(srcDir, "..");
+  const real = join(srcDir, "guard-hook.ts");
+  const linkDir = mkdtempSync(join(tmpdir(), "sapwood-guard-hook-symlink-"));
+  const link = join(linkDir, "guard-hook-via-symlink.ts");
+  try {
+    symlinkSync(real, link);
+    const forbidden = JSON.stringify({ tool_name: "Bash", tool_input: { command: "gh pr merge 5" }, cwd: "/repo" });
+    const result = await new Promise<{ stdout: string; code: number | null }>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--import", "tsx", link], { cwd: engineRoot, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d.toString()));
+      child.stderr.on("data", (d) => (stderr += d.toString()));
+      child.on("error", reject);
+      child.on("exit", (code) => resolve({ stdout, code }));
+      child.stdin.write(forbidden);
+      child.stdin.end();
+      void stderr;
+    });
+    assert.equal(result.code, 0, "hook process itself exits 0 (decision travels via stdout JSON, not exit code)");
+    assert.ok(result.stdout.trim().length > 0, "hook must still emit a decision when invoked via a symlink — empty output means the guard silently no-op'd (fail-open)");
+    const parsed = JSON.parse(result.stdout.trim());
+    assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
+    assert.ok(parsed.hookSpecificOutput.permissionDecisionReason.toLowerCase().includes("merge"));
+  } finally {
+    rmSync(linkDir, { recursive: true, force: true });
+  }
 });
