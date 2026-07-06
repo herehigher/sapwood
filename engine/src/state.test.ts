@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { State, SCHEMA_VERSION } from "./state.js";
 
 // In-memory DB keeps tests hermetic (no disk, no cleanup). WAL pragma is a no-op on
@@ -89,4 +92,74 @@ test("re-opening an already-migrated DB is a no-op (idempotent)", () => {
   const v = s.userVersion();
   assert.equal(v, SCHEMA_VERSION);
   s.close();
+});
+
+// ── #14: engine cost ceiling + kill switch persistence ──────────────────────────────────
+
+test("schema v2 adds the #14 ceiling tables (spend_ledger, engine_session, ceiling_breach)", () => {
+  const s = mem();
+  assert.ok(SCHEMA_VERSION >= 2);
+  assert.equal(s.userVersion(), SCHEMA_VERSION);
+  s.close();
+});
+
+test("recordSpend + dailySpendUsd: sums only rows on the query's UTC calendar day", () => {
+  const s = mem();
+  s.recordSpend("lane-a", 1, 5, "2026-07-06T01:00:00.000Z");
+  s.recordSpend("lane-b", 2, 7, "2026-07-06T23:59:00.000Z");
+  s.recordSpend("lane-c", 3, 100, "2026-07-05T23:00:00.000Z"); // a different day — excluded
+  assert.equal(s.dailySpendUsd(new Date("2026-07-06T12:00:00Z")), 12);
+  assert.equal(s.dailySpendUsd(new Date("2026-07-05T12:00:00Z")), 100);
+  assert.equal(s.dailySpendUsd(new Date("2026-07-07T00:00:00Z")), 0); // no spend that day
+  s.close();
+});
+
+test("engineStartedAt: first call sets it; later calls (even with a different `now`) return the same persisted time", () => {
+  const s = mem();
+  const first = s.engineStartedAt(new Date("2026-07-06T00:00:00Z"));
+  assert.equal(first.toISOString(), "2026-07-06T00:00:00.000Z");
+  const second = s.engineStartedAt(new Date("2026-07-06T05:00:00Z")); // later "now" — ignored
+  assert.equal(second.toISOString(), "2026-07-06T00:00:00.000Z");
+  s.close();
+});
+
+test("recordCeilingBreach: first detection sticks (INSERT OR IGNORE) — a re-detect does not reset `at`", () => {
+  const s = mem();
+  s.recordCeilingBreach(["daily-budget"], new Date("2026-07-06T00:00:00Z"));
+  s.recordCeilingBreach(["daily-budget", "wall-clock"], new Date("2026-07-06T01:00:00Z")); // later tick, still breached
+  const b = s.ceilingBreach();
+  assert.deepEqual(b?.reasons, ["daily-budget"]); // original reasons, not overwritten
+  assert.equal(b?.at.toISOString(), "2026-07-06T00:00:00.000Z"); // original "at", not reset
+  s.close();
+});
+
+test("clearCeilingBreach: resolves the breach so a later re-breach starts a fresh drain window", () => {
+  const s = mem();
+  s.recordCeilingBreach(["kill-switch"], new Date("2026-07-06T00:00:00Z"));
+  assert.ok(s.ceilingBreach() !== null);
+  s.clearCeilingBreach();
+  assert.equal(s.ceilingBreach(), null);
+  s.close();
+});
+
+test("kill switch: in-memory State has no data dir -> always inactive", () => {
+  const s = mem();
+  assert.equal(s.killSwitchPath(), null);
+  assert.equal(s.isKillSwitchActive(), false);
+  s.close();
+});
+
+test("kill switch: a file sentinel in the engine's own data dir flips it, human-flippable, no config touched", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const s = new State(join(dir, "sapwood.sqlite"));
+    assert.equal(s.isKillSwitchActive(), false);
+    const p = s.killSwitchPath();
+    assert.ok(p && p.startsWith(dir)); // lives in the engine's OWN data dir
+    writeFileSync(p!, "");
+    assert.equal(s.isKillSwitchActive(), true);
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

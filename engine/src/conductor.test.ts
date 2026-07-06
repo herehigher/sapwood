@@ -4,6 +4,9 @@
 // disagrees with the bash row it mirrors, that's a parity regression.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   nextRoundId,
   classifyLane,
@@ -19,6 +22,8 @@ import {
   driveDecision,
   tick,
   orderForDispatch,
+  evaluateCeiling,
+  drainEscalationDue,
   type Supervisor,
   type LaneProbe,
 } from "./conductor.js";
@@ -48,6 +53,7 @@ class FakeSupervisor implements Supervisor {
   probes: Record<string, LaneProbe> = {};
   dispatched: Issue[] = [];
   reclaimed: string[] = [];
+  handoffRequested: string[] = [];
   private n = 0;
   async probe(w: string): Promise<LaneProbe> { return this.probes[w] ?? DEFAULT_PROBE; }
   async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
@@ -56,6 +62,7 @@ class FakeSupervisor implements Supervisor {
     return { name, sessionId: `sess-${name}` };
   }
   async reclaim(w: string): Promise<void> { this.reclaimed.push(w); }
+  requestHandoff(w: string): boolean { this.handoffRequested.push(w); return true; }
 }
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -207,6 +214,12 @@ test("tick dispatch: fills lanes by priority up to roundDispatchCap; claims + re
   assert.deepEqual(forge.claimed, [2, 5]);
   assert.equal(st.runningWorkers().length, 2);
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 8 && d.reason === "cap"));
+  // Under-ceiling normal operation is unaffected by #14 (no daily/wall-clock/kill-switch
+  // breach): dispatch proceeds exactly as before, ceiling fields are all empty/false.
+  assert.equal(r.ceilingBreached, false);
+  assert.deepEqual(r.ceilingReasons, []);
+  assert.deepEqual(r.drainRequested, []);
+  assert.deepEqual(r.escalated, []);
   st.close();
 });
 
@@ -347,6 +360,148 @@ test("laneOnReclaimDone: has PR -> DRIVING, else ESCALATE_NOPR (fail-safe)", () 
 test("laneOnReclaimFailed: has PR -> DRIVING (rescue), else ESCALATE", () => {
   assert.equal(laneOnReclaimFailed(true), "DRIVING");
   assert.equal(laneOnReclaimFailed(false), "ESCALATE");
+});
+
+// ── #14: engine cost ceiling + kill switch ──────────────────────────────────────────────
+
+test("evaluateCeiling: no breach when under both caps and kill switch off", () => {
+  const reasons = evaluateCeiling({
+    dailySpendUsd: 10, dailyBudgetUsd: 100, wallClockElapsedSec: 100, maxWallClockSec: 14400,
+    killSwitchActive: false,
+  });
+  assert.deepEqual(reasons, []);
+});
+
+test("evaluateCeiling: daily budget / wall-clock / kill-switch each independently breach", () => {
+  const base = { dailySpendUsd: 10, dailyBudgetUsd: 100, wallClockElapsedSec: 10, maxWallClockSec: 14400, killSwitchActive: false };
+  assert.deepEqual(evaluateCeiling({ ...base, dailySpendUsd: 101 }), ["daily-budget"]);
+  assert.deepEqual(evaluateCeiling({ ...base, wallClockElapsedSec: 14401 }), ["wall-clock"]);
+  assert.deepEqual(evaluateCeiling({ ...base, killSwitchActive: true }), ["kill-switch"]);
+  assert.deepEqual(evaluateCeiling({ ...base, dailySpendUsd: 100 }), []); // equal is NOT over
+});
+
+test("evaluateCeiling: multiple simultaneous breaches report in fixed order (kill-switch, daily, wall-clock)", () => {
+  const reasons = evaluateCeiling({
+    dailySpendUsd: 200, dailyBudgetUsd: 100, wallClockElapsedSec: 99999, maxWallClockSec: 14400,
+    killSwitchActive: true,
+  });
+  assert.deepEqual(reasons, ["kill-switch", "daily-budget", "wall-clock"]);
+});
+
+test("drainEscalationDue: bounded by drainWindowSec; equal-at-window is NOT yet due", () => {
+  const breachAt = "2026-07-06T00:00:00.000Z";
+  const t0 = Date.parse(breachAt);
+  assert.equal(drainEscalationDue(breachAt, t0 + 60_000, 60), false); // exactly at window
+  assert.equal(drainEscalationDue(breachAt, t0 + 60_001, 60), true); // just past
+  assert.equal(drainEscalationDue(breachAt, t0, 60), false); // no time elapsed
+});
+
+test("tick ceiling: daily budget breach freezes ALL new dispatch + drains running workers", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-run", 1);
+  sup.probes["lane-run"] = { ...DEFAULT_PROBE }; // alive, KEEP — the lane to drain
+  // A previously-completed worker's cost, already over the daily cap.
+  st.recordSpend("lane-earlier", 99, 500, new Date().toISOString());
+  forge.ready = [{ number: 2, title: "", labels: ["prio:3-feature"] }];
+  const cfg = mkCfg({ cost: { dailyBudgetUsd: 10 } });
+  const r = await tick({ forge, state: st, supervisor: sup, cfg });
+
+  assert.equal(r.ceilingBreached, true);
+  assert.deepEqual(r.ceilingReasons, ["daily-budget"]);
+  assert.deepEqual(r.dispatched, [{ kind: "skipped", issue: 2, reason: "ceiling" }]);
+  assert.deepEqual(sup.dispatched, []); // nothing launched
+  assert.deepEqual(r.drainRequested, ["lane-run"]); // the running worker was asked to hand off
+  assert.deepEqual(sup.handoffRequested, ["lane-run"]);
+  assert.deepEqual(r.escalated, []); // drain window not yet elapsed on first detection
+  st.close();
+});
+
+test("tick ceiling: out-of-band kill switch (file sentinel, engine data dir) freezes dispatch + drains", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-ceiling-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 1);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    forge.ready = [{ number: 5, title: "", labels: ["prio:3-feature"] }];
+    assert.equal(st.isKillSwitchActive(), false); // no sentinel yet
+    writeFileSync(join(dir, "KILL_SWITCH"), ""); // a human flips it — no config touched
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.equal(r.ceilingBreached, true);
+    assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
+    assert.deepEqual(r.dispatched, [{ kind: "skipped", issue: 5, reason: "ceiling" }]);
+    assert.deepEqual(sup.handoffRequested, ["lane-run"]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick ceiling: escalates to a hard kill only after the bounded drain window elapses", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-ceiling-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const st = new State(dbPath);
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 3);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    let clock = new Date("2026-07-06T00:00:00Z");
+    const now = () => clock;
+
+    const r1 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.equal(r1.ceilingBreached, true);
+    assert.deepEqual(r1.drainRequested, ["lane-run"]);
+    assert.deepEqual(r1.escalated, []); // just breached — still within the drain window
+    assert.equal(st.getWorker("lane-run")?.state, "running"); // not yet touched
+
+    clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, still breached
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r2.escalated, ["lane-run"]);
+    assert.deepEqual(sup.reclaimed, ["lane-run"]); // hard process-tree kill (drain exhausted)
+    assert.equal(st.getWorker("lane-run")?.state, "failed");
+    assert.deepEqual(forge.labelsAdded, [[3, "needs-human"]]); // fail-safe: human triage
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick ceiling: daily spend accumulates across ticks and SURVIVES a State reopen (restart-safe)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-ceiling-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    let st = new State(dbPath);
+    const forge = new FakeForge();
+    const cfg = mkCfg({ cost: { dailyBudgetUsd: 50 } });
+
+    // First engine "session": a worker completes with PR, cost 40 — under the 50 cap.
+    const sup1 = new FakeSupervisor();
+    seedRunning(st, "lane-a", 1);
+    sup1.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 40 };
+    const r1 = await tick({ forge, state: st, supervisor: sup1, cfg });
+    assert.equal(r1.ceilingBreached, false);
+    st.close();
+
+    // Reopen the SAME db path — simulates an engine restart. The ledger must survive.
+    st = new State(dbPath);
+    const sup2 = new FakeSupervisor();
+    seedRunning(st, "lane-b", 2);
+    sup2.probes["lane-b"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 20 };
+    const r2 = await tick({ forge, state: st, supervisor: sup2, cfg });
+    // 40 (persisted from before the restart) + 20 (this session) = 60 > 50 -> breached. If the
+    // restart had reset the accumulator this would read 20 and stay under budget.
+    assert.equal(r2.ceilingBreached, true);
+    assert.deepEqual(r2.ceilingReasons, ["daily-budget"]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("driveDecision: gate + fix rounds -> scheduling action (fail-safe ESCALATE)", () => {

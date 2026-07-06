@@ -64,7 +64,22 @@ const Cost = z.object({
   // .finite() rejects YAML/JSON overflow (1e999 -> Infinity), which would silently
   // disable the cap (Infinity > any spend). (Codex P2, PR #22.)
   roundBudgetUsd: z.number().finite().positive().default(30),
+  // Cumulative daily USD cap (#14): summed from completed workers' stream-json
+  // total_cost_usd, persisted in State (engine.spend_ledger) so it survives an engine
+  // restart mid-day. Breaching it is an engine-wide dispatch freeze + drain, not just a
+  // per-tick skip (see conductor.ts evaluateCeiling / tick's CEILING step).
   dailyBudgetUsd: z.number().finite().positive().default(100),
+  // Aggregate wall-clock ceiling (#14) since the engine's persisted session start
+  // (State.engineStartedAt — survives restarts). Independent of worker.timeoutSec (which
+  // bounds a single worker); this bounds the engine's total active dispatching time as a
+  // runaway-time safety net. Conservative default: 4h.
+  maxWallClockSec: z.number().int().positive().default(14400),
+  // Bounded grace window (#14) after a ceiling breach (daily budget / wall-clock / kill
+  // switch) is first detected, during which running workers are asked to hand off
+  // gracefully (SIGTERM -> checkpoint -> .handoff) before the conductor escalates to the
+  // hard process-tree kill (supervisor.reclaim). "Drain before kill" (PLAN.md Security
+  // model) — this is the bound on how long that drain gets. Conservative default: 5min.
+  drainWindowSec: z.number().int().nonnegative().default(300),
 }).strict();
 
 const Reviewer = z.object({

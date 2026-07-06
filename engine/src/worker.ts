@@ -319,7 +319,19 @@ export class WorkerSupervisor implements Supervisor {
     const wrapperAlive = this.wrapperAlive(name);
     const issue = this.laneIssue(name);
     const hasPr = issue != null ? await this.deps.hasOpenPr(issue) : false;
-    return { done, failed, handoff, hbAge, wrapperAlive, hasPr };
+    const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
+    return { done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd };
+  }
+
+  /** The terminal sentinel (whichever is present) carries the parsed stream-json
+   *  total_cost_usd (onExit writes it into all three: done/failed/handoff). 0 while still
+   *  running or if no terminal sentinel exists yet (e.g. a DEAD lane never got one). Feeds
+   *  the conductor's #14 engine-ceiling ledger (state.recordSpend). */
+  private terminalCostUsd(flags: { done: boolean; failed: boolean; handoff: boolean }, name: string): number {
+    const ext = flags.done ? "done.json" : flags.failed ? "failed.json" : flags.handoff ? "handoff.json" : null;
+    if (!ext) return 0;
+    const r = this.readJson(this.path(name, ext));
+    return typeof r?.total_cost_usd === "number" ? r.total_cost_usd : 0;
   }
 
   async reclaim(name: string): Promise<void> {

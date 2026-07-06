@@ -97,6 +97,26 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
     const probe = await s.probe(name);
     assert.equal(probe.done, true);
     assert.equal(probe.failed, false);
+    // #14: the terminal sentinel's total_cost_usd feeds the conductor's engine-ceiling
+    // ledger (state.recordSpend) — probe() must surface it.
+    assert.equal(probe.costUsd, 0.0001);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: costUsd is 0 while a lane is still running (no terminal sentinel yet)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 4, title: "t", labels: [] });
+    await sleep(100);
+    const probe = await s.probe(name);
+    assert.equal(probe.done, false);
+    assert.equal(probe.costUsd, 0);
+    await s.reclaim(name);
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

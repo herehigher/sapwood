@@ -53,6 +53,41 @@ export function budgetExceeded(total: number, cap: number): boolean {
   return total > cap;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine cost ceiling + kill switch (#14, M3 Security model "hard engine ceiling").
+// Two-tier cost control: worker.budgetUsdSoft is a per-worker graceful handoff (never a
+// mid-work kill, see worker.ts requestHandoff). This is the OTHER tier — an engine-wide,
+// aggregate-across-workers safety boundary: a cumulative daily USD cap + a wall-clock cap,
+// plus an out-of-band kill switch (a file sentinel only the engine can write — see
+// State.isKillSwitchActive). Any one of the three freezes ALL new dispatch and starts a
+// bounded drain (graceful handoff of running workers) before escalating to a hard kill.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
+
+/** Pure ceiling check. Order is fixed (kill-switch, daily-budget, wall-clock) so multiple
+ *  simultaneous breaches report deterministically; empty array = no breach. */
+export function evaluateCeiling(input: {
+  dailySpendUsd: number;
+  dailyBudgetUsd: number;
+  wallClockElapsedSec: number;
+  maxWallClockSec: number;
+  killSwitchActive: boolean;
+}): CeilingReason[] {
+  const reasons: CeilingReason[] = [];
+  if (input.killSwitchActive) reasons.push("kill-switch");
+  if (budgetExceeded(input.dailySpendUsd, input.dailyBudgetUsd)) reasons.push("daily-budget");
+  if (input.wallClockElapsedSec > input.maxWallClockSec) reasons.push("wall-clock");
+  return reasons;
+}
+
+/** Has the bounded drain window (cfg.cost.drainWindowSec) elapsed since a ceiling breach was
+ *  FIRST detected (breachAtIso)? Float-safe; exactly-at-window is NOT yet due (matches
+ *  budgetExceeded's ">" convention — equal is not over). */
+export function drainEscalationDue(breachAtIso: string, nowMs: number, drainWindowSec: number): boolean {
+  return (nowMs - Date.parse(breachAtIso)) / 1000 > drainWindowSec;
+}
+
 /**
  * Lowest prio:N rank across labels (0..4, low = higher priority). No prio label -> 3.
  * Matches both the bare `prio:N` form that `sapwood init` creates AND the suffixed
@@ -165,6 +200,10 @@ export interface LaneProbe {
   hbAge: number; // seconds since heartbeat mtime; -1 if no heartbeat file yet (just spawned)
   wrapperAlive: -1 | 0 | 1; // 1 alive | 0 confirmed dead (kill -0 failed) | -1 unknown
   hasPr: boolean; // an open PR exists for this lane's issue
+  /** Terminal total_cost_usd (stream-json), once done/failed/handoff; 0 while still running
+   *  or if unknown (e.g. a DEAD lane with no sentinel). Optional for probe fixtures that
+   *  predate #14 — treated as 0. */
+  costUsd?: number;
 }
 
 /** The conductor's only handle on workers. worker.ts (M2 #11) implements this. */
@@ -172,6 +211,10 @@ export interface Supervisor {
   probe(worker: string): Promise<LaneProbe>;
   dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
   reclaim(worker: string): Promise<void>; // tear down a dead/stale lane (process-tree kill + cleanup)
+  /** Graceful drain (SIGTERM, not SIGKILL): the #14 engine-ceiling drain path reuses this —
+   *  same mechanism as a worker's own soft-budget handoff. Returns false if not applicable
+   *  (already reclaiming/requested, or unknown lane) — never throws. */
+  requestHandoff(worker: string): boolean;
 }
 
 export type ReclaimOutcome =
@@ -183,12 +226,29 @@ export type ReclaimOutcome =
 
 export type DispatchOutcome =
   | { kind: "dispatched"; issue: number; worker: string }
-  | { kind: "skipped"; issue: number; reason: "cap" | "no-lane" | "in-flight" | "over-budget" | "meta-floor" };
+  | {
+      kind: "skipped";
+      issue: number;
+      reason: "cap" | "no-lane" | "in-flight" | "over-budget" | "meta-floor" | "ceiling";
+    };
 
 export interface TickResult {
   reclaimed: ReclaimOutcome[];
   dispatched: DispatchOutcome[];
   overBudget: boolean;
+  /** #14 engine ceiling: daily USD cap / wall-clock cap / kill switch. Any breach freezes
+   *  ALL new dispatch this tick (every ready issue skipped with reason "ceiling") regardless
+   *  of lanes/caps/budget below. */
+  ceilingBreached: boolean;
+  ceilingReasons: CeilingReason[];
+  /** Running-worker names asked to gracefully hand off (SIGTERM) this tick because of the
+   *  ceiling breach. Idempotent to call every tick while still breached (empty once no
+   *  workers are running, or the ceiling clears). */
+  drainRequested: string[];
+  /** Running-worker names hard-killed (supervisor.reclaim) this tick because the bounded
+   *  drain window elapsed since the breach was first detected. Always a subset of / disjoint
+   *  from drainRequested's *previous* ticks — the drain always precedes the kill. */
+  escalated: string[];
 }
 
 export interface TickDeps {
@@ -236,6 +296,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // Soft-budget graceful handoff: terminal-but-resumable. Never killed; the conductor
       // may --resume later. Checked before classifyLane (a handoff is not a failure).
       state.upsertWorker({ ...w, state: "handoff", ended_at: iso() });
+      state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
       state.appendEvent("handoff", { worker: w.name, issue: w.issue });
       reclaimed.push({ kind: "handoff", worker: w.name, issue: w.issue });
       continue;
@@ -254,6 +315,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         state.upsertWorker({ ...w, state: "done", ended_at: iso() });
         await forge.addLabel(w.issue, cfg.labels.needsHuman);
       }
+      // Completed-run cost becomes known exactly once, here — record it into the #14
+      // engine-ceiling ledger regardless of which branch (DRIVING or ESCALATE_NOPR) fired.
+      state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
       state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next });
       reclaimed.push({ kind: "done", worker: w.name, issue: w.issue, next });
     } else if (cls === "FAILED") {
@@ -266,6 +330,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
         await forge.addLabel(w.issue, cfg.labels.needsHuman);
       }
+      state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
       state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next });
       reclaimed.push({ kind: "failed", worker: w.name, issue: w.issue, next });
     } else {
@@ -281,6 +346,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
         await forge.setBoardStatus(w.issue, "ready");
       }
+      // Usually 0 (a DEAD lane has no terminal sentinel to parse a cost from) but record
+      // whatever the probe knows — harmless, and future probes may recover a partial cost.
+      state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
       state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
       reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued });
     }
@@ -289,6 +357,52 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // ── DRIVE: a DONE+PR lane is now "driving" (awaiting the review gate). The gate->merge
   //   step (reviewer.ts + merge-driver.ts) is M3; M2 stops at produce-PR. No merge here —
   //   producer != merger is preserved structurally (the tick never calls forge.mergePR).
+
+  // ── CEILING (#14): engine-wide hard safety boundary, orthogonal to the per-round
+  //   overBudget check below. Any breach (daily USD cap / wall-clock cap / kill switch)
+  //   freezes ALL new dispatch this tick and starts (or continues) a bounded drain: running
+  //   workers are asked to hand off gracefully; only after cfg.cost.drainWindowSec with no
+  //   resolution does the conductor escalate to the hard process-tree kill. Drain before
+  //   kill, always (PLAN.md Security model). ──
+  const nowDate = now();
+  const ceilingReasons = evaluateCeiling({
+    dailySpendUsd: state.dailySpendUsd(nowDate),
+    dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+    wallClockElapsedSec: (nowDate.getTime() - state.engineStartedAt(nowDate).getTime()) / 1000,
+    maxWallClockSec: cfg.cost.maxWallClockSec,
+    killSwitchActive: state.isKillSwitchActive(),
+  });
+  const ceilingBreached = ceilingReasons.length > 0;
+  const drainRequested: string[] = [];
+  const escalated: string[] = [];
+  if (ceilingBreached) {
+    // INSERT OR IGNORE: only the FIRST detection sets "at" — a still-breached engine must
+    // not keep resetting its own drain-window clock tick after tick.
+    state.recordCeilingBreach(ceilingReasons, nowDate);
+    const stillRunning = state.runningWorkers();
+    for (const w of stillRunning) {
+      // Idempotent (worker.ts guards re-requests) — safe to call every tick while breached.
+      if (supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
+    }
+    const breach = state.ceilingBreach();
+    if (breach && drainEscalationDue(breach.at.toISOString(), nowDate.getTime(), cfg.cost.drainWindowSec)) {
+      // Bounded drain window elapsed with no resolution -> escalate to the hard kill
+      // (reuses the same process-tree kill the DEAD-lane reclaim path uses above). Treated
+      // like a dead lane: no PR-aware rescue here — this is a safety-ceiling breach, not a
+      // liveness classification, so fail-safe to escalate + human triage.
+      for (const w of stillRunning) {
+        await supervisor.reclaim(w.name);
+        state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+        state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons: ceilingReasons });
+        escalated.push(w.name);
+      }
+    }
+  } else {
+    // Resolved (kill switch lifted / daily cap rolled to a fresh day / wall-clock cfg
+    // raised) -> clear so a future re-breach starts its own fresh drain window.
+    state.clearCeilingBreach();
+  }
 
   // ── DISPATCH: fill free lanes from the Ready queue, by priority, within caps + budget ──
   const dispatched: DispatchOutcome[] = [];
@@ -304,6 +418,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
 
   const order = orderForDispatch(await forge.getReadyIssues(), cfg);
   for (const issue of order) {
+    // The #14 engine ceiling outranks every other dispatch reason: a breach freezes ALL new
+    // dispatch, not just the ones that happen to also be over the (separate) round budget.
+    if (ceilingBreached) {
+      dispatched.push({ kind: "skipped", issue: issue.number, reason: "ceiling" });
+      continue;
+    }
     if (inFlightIssues.has(issue.number)) {
       dispatched.push({ kind: "skipped", issue: issue.number, reason: "in-flight" });
       continue;
@@ -358,5 +478,5 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     dispatched.push({ kind: "dispatched", issue: issue.number, worker: name });
   }
 
-  return { reclaimed, dispatched, overBudget };
+  return { reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated };
 }
