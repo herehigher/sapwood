@@ -176,6 +176,33 @@ test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not ki
   }
 });
 
+test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Codex PR #41 P1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    // A cooperative worker that exits 0 on TERM. Dispatch with supervisor #1, then simulate
+    // an engine restart: dispose() #1 (clears its in-memory lane map — its exit handler
+    // becomes a no-op) and create supervisor #2 over the SAME stateDir. #2 has no in-memory
+    // handle, only the persisted running.json — the ceiling drain must still reach the
+    // process group via the persisted pid instead of silently no-opping.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const s1 = sup(dir, bin);
+    const { name } = await s1.dispatch({ number: 8, title: "t", labels: [] });
+    await sleep(600); // let bash install its TERM trap
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    assert.equal(alive(pid), true);
+    s1.dispose(); // "restart": the new supervisor knows this lane only from disk
+    const s2 = sup(dir, bin);
+    assert.equal(s2.requestHandoff(name), true); // persisted-pid fallback fires
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "SIGTERM reached the detached process group");
+    assert.equal(s2.requestHandoff(name), false); // idempotent: second request is a no-op
+    assert.equal(s2.requestHandoff("lane-unknown"), false); // no persisted lane -> false, no throw
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("requestHandoff but the worker dies by signal (no clean wrap-up) -> .failed, not a false handoff (Codex R3 P2)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

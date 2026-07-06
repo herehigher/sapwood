@@ -146,6 +146,10 @@ export class WorkerSupervisor implements Supervisor {
   private readonly hbMs: number;
   private readonly guardHookPath: string;
   private readonly lanes = new Map<string, Lane>();
+  // Detached lanes (persisted running.json, no in-memory handle — engine restarted while the
+  // worker kept running) already asked to hand off. Keeps requestHandoff idempotent-per-tick
+  // for lanes we can only reach by persisted pid (Codex PR #41 P1).
+  private readonly detachedHandoffRequested = new Set<string>();
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -256,9 +260,26 @@ export class WorkerSupervisor implements Supervisor {
    *  (total_cost_usd is only in the terminal result message). See the follow-up issue. */
   requestHandoff(name: string): boolean {
     const lane = this.lanes.get(name);
-    if (!lane || lane.reclaiming || lane.handoffRequested) return false;
-    lane.handoffRequested = true;
-    this.killGroup(lane.child, "SIGTERM");
+    if (lane) {
+      if (lane.reclaiming || lane.handoffRequested) return false;
+      lane.handoffRequested = true;
+      this.killGroup(lane.child, "SIGTERM");
+      return true;
+    }
+    // Cross-process / post-restart: a persisted `running` lane with no in-memory handle (the
+    // engine restarted while the worker kept running). Without this fallback the #14 ceiling
+    // drain would silently no-op on such lanes — no SIGTERM for the whole drain window, the
+    // worker keeps spending, then gets hard-killed instead of the intended graceful handoff
+    // (Codex PR #41 P1). Signal the persisted process group with SIGTERM only (graceful —
+    // never the KILL escalation reclaim() adds). Caveat: with no attached onExit handler the
+    // .handoff sentinel cannot be written, so a cooperative exit is later classified DEAD;
+    // the SIGTERM still lets the worker checkpoint (commit+push) before exiting, which is the
+    // part that preserves work — the pushed state is itself the handoff (PLAN.md).
+    if (this.detachedHandoffRequested.has(name)) return false;
+    const pid = this.persistedPid(name);
+    if (pid == null || this.wrapperAlive(name) !== 1) return false;
+    this.detachedHandoffRequested.add(name);
+    this.signalGroup(pid, "SIGTERM");
     return true;
   }
 
