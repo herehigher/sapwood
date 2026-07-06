@@ -196,6 +196,52 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
   surface (0 divergences). The guard survived a 6-round adversarial review (18 bypass
   vectors found + closed).
 
+**M2 engine core (locked, delivered in PRs #30 / #32 / #34, dogfood #35→#36)**
+
+The scheduler + worker + live guard. TS port of 0day's `loop_conductor.sh` +
+`loop_worker.sh` — the *generic scheduling/worker mechanics only*, never the trading
+domain (no reserve/SLA/eval-report/HTML machinery).
+
+- **`conductor.ts`** — pure scheduling core mirrors `test_loop_conductor.sh` row-for-row
+  (`classifyLane` 4-signal lane state, `issuePriority` [matches bare `prio:N` *and* suffixed],
+  `labelsBlockers`, `budgetExceeded`, `codingFloor`/`isCodingRank`/`metaLaneAllowed`
+  anti-starvation, `laneOnReclaim*`, `driveDecision`). **Structured discriminated-union tick
+  result** replaces 0day's stringly-typed `DISPATCHED/RECLAIMED` text protocol. `tick()` =
+  reclaim→drive→dispatch with **dependency injection** (`IForge` + `Supervisor` + `State`
+  injected → the whole tick is unit-testable with no real `claude`/`gh`). New **`driving`**
+  lane state: a PR-backed reclaimed lane keeps occupying a lane against `lanes.max` until the
+  M3 review gate resolves it. Claim-before-launch with board rollback on dispatch failure.
+- **`forge`** — landed the M2-deferred ProjectV2 wiring: `getReadyIssues` (Ready-lane + OPEN +
+  full `owner/repo` + the **verification-plan gate**, Decision #8, fail-closed, **paginated**)
+  and `setBoardStatus`. Owner-kind-agnostic pure parsers, offline-tested.
+- **`worker.ts`** — the only module touching the Claude CLI: headless `claude -p` in a git
+  worktree (argv array, **no shell**, **detached process group**), atomic sentinels
+  (`.running`/`.done`/`.failed`/`.handoff`, tmp+rename), heartbeat + PID liveness,
+  **process-tree kill** via `kill(-pid)` (the tree 0day couldn't on bash 3.2), stream-json cost
+  parse, name-reuse reject, wall-clock **timeout enforcement**, spawn-error handling.
+  Completion is signaled by the WRAPPER, not the model — and there is **no `--add-dir data`**,
+  so a worker cannot forge its own sentinels or mutate engine state.
+- **Guard wired live (#26)** — attached via **inline `--settings` JSON** (no worker-writable
+  settings file) scoped to the worker's `claude -p`, **not** a plugin-global hook (the human's
+  interactive session is unaffected). **Hard default / soft opt-in** via the
+  **`SAPWOOD_GUARD_MODE` spawn env** (trusted, not worker-writable — a worker cannot weaken its
+  own guard). Fail-closed hardening (a 7-round adversarial review) closed **five distinct
+  fail-open vectors**: a hook crash → the command maps to exit 2 (blocking); a global
+  `disableAllHooks` → forced `false`; and three self-protection writes now blocked by the guard
+  boundary — `sapwood.config.*`, the compiled `engine/dist/guard*.js` artifact, and (removed
+  entirely) the settings file. Dispatch **fails closed** if the compiled hook is missing.
+- **Scope boundaries:** `drive_decision` only — the PR-gate ACTION→action map (0day
+  `merge_decision`/`pr_gate`) + parity vs `test_loop_merge_driver.sh` move to **M3** with
+  `merge-driver.ts`. Deferred follow-ups: **#31** (double-failure rollback/requeue hardening),
+  **#33** (soft-budget *auto*-enforcement — needs a live cost signal, which stream-json does not
+  carry; interim per-worker spend bound = `worker.timeoutSec` + the engine hard ceiling), **#37**
+  (`init` ProjectV2 option-update wipes item status — a real board hazard found during dogfood).
+- **Dogfood proven (#12):** ran the loop end-to-end on a real issue (#35, a `cli --version/--help`
+  feature) with a live **sonnet** worker — claim → worktree → TDD → PR (#36) — guard **live in
+  hard mode** (PreToolUse firing on every tool call, zero bypass), and the worker **never
+  self-merged**. The producer≠reviewer gate then caught two real defects in the autonomous PR
+  before merge. *sapwood builds sapwood* is now demonstrated, not just claimed.
+
 ## Security & trust model (trusted-first, designed toward public)
 
 The committee's keystone finding: 0day's guard was built for a *trusted* model on a
@@ -283,13 +329,15 @@ rewrite.** v1 requirements:
 - **M1 — Guard port (safety first):** ✅ **delivered (PRs #27, #28).** zero-dep
   `guard.ts` + reproduced bypass suite + differential/fuzz tests + fail-closed-on-error
   + `Write`-path protections. Nothing autonomous ships before this is green. Key
-  decisions in "M1 guard" above. **Live hook wiring into worker sessions is deferred to
-  M2 (issue #26)** — the guard core ships green and ready; attaching it to `claude -p`
-  needs build-dist packaging + worker-vs-human scoping.
-- **M2 — Engine core:** `conductor.ts` (tick: reclaim→drive→dispatch), `worker.ts`,
-  structured tick results; parity tests against 0day's pure-function tests
-  (`test_loop_conductor.sh`, `test_loop_merge_driver.sh`). **Dogfood starts here:**
-  run sapwood on one sapwood issue end-to-end.
+  decisions in "M1 guard" above. Live hook wiring into worker sessions landed in **M2
+  (#26)** — see "M2 engine core" above.
+- **M2 — Engine core:** ✅ **delivered (PRs #30, #32, #34; dogfood #35→#36).**
+  `conductor.ts` (tick: reclaim→drive→dispatch, structured results, parity core), `worker.ts`
+  (headless `claude -p` in a worktree), and the guard **wired live** into worker sessions
+  (#26, hard-default/soft-opt-in). Parity tests against 0day's pure-function tests
+  (`test_loop_conductor.sh`); **dogfooded end-to-end** (claim→worktree→TDD→PR, guard live, no
+  self-merge). Key decisions + deferrals (#31/#33/#37) in "M2 engine core" above.
+  `merge_decision` + parity vs `test_loop_merge_driver.sh` move to M3 with the merge-driver.
 - **M3 — Review gate + merge modes:** `reviewer.ts` + `merge-driver.ts` with the
   **0day-style default**: autonomous-merge gated on a fresh non-author Codex review
   (gate②) + CI green (gate①), merged by the Conductor. Pluggable reviewer
