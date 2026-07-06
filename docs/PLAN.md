@@ -234,8 +234,11 @@ domain (no reserve/SLA/eval-report/HTML machinery).
   `merge_decision`/`pr_gate`) + parity vs `test_loop_merge_driver.sh` move to **M3** with
   `merge-driver.ts`. Deferred follow-ups: **#31** (double-failure rollback/requeue hardening),
   **#33** (soft-budget *auto*-enforcement — needs a live cost signal, which stream-json does not
-  carry; interim per-worker spend bound = `worker.timeoutSec` + the engine hard ceiling), **#37**
-  (`init` ProjectV2 option-update wipes item status — a real board hazard found during dogfood).
+  carry). **⚠️ M2 has no live cost cap:** the worker does not monitor in-flight cost and the
+  conductor only checks `roundSpendUsd` *before* dispatching, so a running worker is bounded only
+  by wall-clock `worker.timeoutSec` — the dollar cost ceiling (per-worker soft + engine hard)
+  arrives with **M3 (#14)**. Also **#37** (`init` ProjectV2 option-update wipes item status — a
+  real board hazard found during dogfood).
 - **Dogfood proven (#12):** ran the loop end-to-end on a real issue (#35, a `cli --version/--help`
   feature) with a live **sonnet** worker — claim → worktree → TDD → PR (#36) — guard **live in
   hard mode** (PreToolUse firing on every tool call, zero bypass), and the worker **never
