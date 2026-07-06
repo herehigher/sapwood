@@ -119,7 +119,7 @@ test("deriveGate: a configured human-triage label always wins, even with MERGE_O
 class FakeForge implements IForge {
   merged: Array<[number, string]> = [];
   labelsAdded: Array<[number, string]> = [];
-  status: PRStatus = { number: 1, headOid: "HEAD", state: "OPEN", mergeable: true, ciGreen: true };
+  status: PRStatus = { number: 1, headOid: "HEAD", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   reviewData: PRReviewData = {
     headOid: "HEAD", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
     labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
@@ -175,6 +175,45 @@ test("MergeDriver.driveOne: SPLIT-HEAD observation (CI read saw one head, review
   assert.equal(outcome.kind, "queued");
   assert.match((outcome as { reason: string }).reason, /gate-head-mismatch/);
   assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne: CONFLICTING PR -> needs-human WITHOUT a merge attempt (Codex PR #42 P2)", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, mergeable: "CONFLICTING" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7);
+  assert.equal(outcome.kind, "needs-human");
+  assert.match((outcome as { reason: string }).reason, /merge-conflict/);
+  assert.deepEqual(forge.merged, []); // routed to human BEFORE calling mergePR
+});
+
+test("MergeDriver.driveOne: mergeability UNKNOWN (GitHub still computing) -> queued, not escalated", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, mergeable: "UNKNOWN" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /mergeability-unknown/);
+  assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne: TOCTOU merge failure (head moved) -> queued for re-gate, not human", async () => {
+  const forge = new FakeForge();
+  forge.mergeErr = new Error("GraphQL: Head branch was modified. Review and try the merge again.");
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /merge-failed-retry/);
+});
+
+test("MergeDriver.driveOne: deterministic 'not mergeable' merge failure -> needs-human, no infinite retry (Codex PR #42 P2)", async () => {
+  const forge = new FakeForge();
+  // Conflict surfaced between our status read (MERGEABLE) and the merge call.
+  forge.mergeErr = new Error("Pull Request is not mergeable");
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7);
+  assert.equal(outcome.kind, "needs-human");
+  assert.match((outcome as { reason: string }).reason, /merge-failed-deterministic/);
 });
 
 test("MergeDriver.driveOne: CI not green -> queued (WAIT), never merges", async () => {

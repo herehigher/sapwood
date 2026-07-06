@@ -49,7 +49,7 @@ class FakeForge implements IForge {
   async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> { this.boardSet.push([n, s]); }
   async addLabel(n: number, l: string): Promise<void> { this.labelsAdded.push([n, l]); }
   async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: true, ciGreen: true }; }
+  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
   async getPRReviewData(): Promise<PRReviewData> {

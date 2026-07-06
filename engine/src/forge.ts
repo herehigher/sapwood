@@ -20,7 +20,10 @@ export interface PRStatus {
   number: number;
   headOid: string;
   state: "OPEN" | "CLOSED" | "MERGED";
-  mergeable: boolean;
+  // Tri-state, not boolean (Codex PR #42 P2): CONFLICTING must route to needs-human
+  // BEFORE a merge attempt, while UNKNOWN (GitHub still computing) only queues — a
+  // boolean would either retry conflicts forever or escalate a transient UNKNOWN.
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   ciGreen: boolean;
 }
 
@@ -208,7 +211,9 @@ export class GithubForge implements IForge {
       "--json", "headRefOid,author,updatedAt,isDraft,labels,state,reviews",
     ]);
     const reactionsJson = await this.gh([
-      "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/reactions`, "--paginate",
+      // --slurp: --paginate alone concatenates one JSON doc per page (unparseable as a
+      // single document); --slurp wraps pages in an outer array parsePRReactions flattens.
+      "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/reactions`, "--paginate", "--slurp",
     ]);
     const unresolvedThreads = await countUnresolvedThreads((after) =>
       this.gh([
@@ -424,7 +429,7 @@ export function parsePRStatus(json: string): PRStatus {
     number: d.number,
     headOid: d.headRefOid,
     state: d.state as PRStatus["state"],
-    mergeable: d.mergeable === "MERGEABLE",
+    mergeable: d.mergeable === "MERGEABLE" || d.mergeable === "CONFLICTING" ? d.mergeable : "UNKNOWN",
     ciGreen,
   };
 }
@@ -526,9 +531,15 @@ export function parsePRReviewView(json: string): {
   };
 }
 
-/** Pure parse of `gh api .../issues/<pr>/reactions --paginate`. */
+/** Pure parse of `gh api .../issues/<pr>/reactions --paginate --slurp`. `--paginate` alone
+ *  emits ONE JSON document PER PAGE — a single JSON.parse throws on any PR whose reactions
+ *  span pages, wedging the merge gate at "queued" forever (Codex PR #42 P2). `--slurp` wraps
+ *  the pages in one array; accept both that (array-of-page-arrays) and the legacy single
+ *  flat array so pre-slurp fixtures/callers keep parsing. */
 export function parsePRReactions(json: string): PRReaction[] {
-  const arr = JSON.parse(json) as { content: string; created_at: string; user?: { login?: string } }[];
+  type Raw = { content: string; created_at: string; user?: { login?: string } };
+  const parsed = JSON.parse(json) as Raw[] | Raw[][];
+  const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
   return arr.map((r) => ({ content: r.content, createdAt: r.created_at, login: r.user?.login ?? "" }));
 }
 

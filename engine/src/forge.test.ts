@@ -227,7 +227,7 @@ test("parsePRStatus: clean mergeable PR with passing checks", () => {
       statusCheckRollup: [{ conclusion: "SUCCESS" }],
     }),
   );
-  assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: true, ciGreen: true });
+  assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true });
 });
 
 test("parsePRStatus: an empty rollup fails closed (checks may not be created yet)", () => {
@@ -300,7 +300,14 @@ test("parsePRStatus: a failing check is not green", () => {
     }),
   );
   assert.equal(s.ciGreen, false);
-  assert.equal(s.mergeable, false);
+  assert.equal(s.mergeable, "CONFLICTING");
+});
+
+test("parsePRStatus: unrecognized mergeable value normalizes to UNKNOWN (queue, not escalate)", () => {
+  const s = parsePRStatus(
+    JSON.stringify({ number: 3, headRefOid: "abc", state: "OPEN", mergeable: "UNKNOWN", statusCheckRollup: [] }),
+  );
+  assert.equal(s.mergeable, "UNKNOWN");
 });
 
 // ── #13 review-gate data: parsePRReviewView / parsePRReactions / parseUnresolvedThreads ──
@@ -349,6 +356,23 @@ test("parsePRReactions: maps GitHub reaction rows to {content, createdAt, login}
     { content: "+1", createdAt: "2026-06-17T13:00:00Z", login: "alice" },
     { content: "eyes", createdAt: "2026-06-17T13:30:00Z", login: "" },
   ]);
+});
+
+test("parsePRReactions: --slurp multi-page output (array of page arrays) flattens in order (Codex PR #42 P2)", () => {
+  // gh api --paginate --slurp wraps each page's array in one outer array; a reaction list
+  // spanning pages previously threw on JSON.parse and wedged the merge gate at "queued".
+  const r = parsePRReactions(
+    JSON.stringify([
+      [{ content: "+1", created_at: "t1", user: { login: "a" } }],
+      [{ content: "eyes", created_at: "t2", user: { login: "b" } }, { content: "+1", created_at: "t3", user: {} }],
+    ]),
+  );
+  assert.deepEqual(r.map((x) => [x.content, x.login]), [["+1", "a"], ["eyes", "b"], ["+1", ""]]);
+});
+
+test("parsePRReactions: empty slurp output parses to []", () => {
+  assert.deepEqual(parsePRReactions("[]"), []);
+  assert.deepEqual(parsePRReactions("[[]]"), []);
 });
 
 const threadsPage = (

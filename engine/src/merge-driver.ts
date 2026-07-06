@@ -198,13 +198,34 @@ export class MergeDriver {
       // attached) — fail-safe: refuse an unpinned merge rather than guess.
       return { kind: "needs-human", pr, reason: "refuse-unpinned-merge-no-head-oid" };
     }
+
+    // Deterministic un-mergeability is HUMAN work, not a retry (Codex PR #42 P2): a
+    // CONFLICTING PR fails `gh pr merge` forever, so returning "queued" would pin the lane
+    // in `driving` re-attempting every tick. UNKNOWN means GitHub is still computing
+    // mergeability (transient, normal right after a push) — that one queues.
+    if (status.mergeable === "CONFLICTING") {
+      return { kind: "needs-human", pr, reason: "merge-conflict" };
+    }
+    if (status.mergeable === "UNKNOWN") {
+      return { kind: "queued", pr, reason: "mergeability-unknown" };
+    }
+
     try {
       // --match-head-commit (GithubForge.mergePR) pins the TOCTOU guard to the exact head this
       // gate check just passed against — a push between the gate check and this call fails the
       // merge command itself rather than silently merging an unreviewed new head.
       await forge.mergePR(pr, verdict.headOid);
     } catch (e) {
-      return { kind: "queued", pr, reason: `merge-failed-retry: ${String(e)}` };
+      // A merge failure with MERGEABLE status is either the TOCTOU pin firing (GitHub 409
+      // "Head branch was modified" — a push raced us; re-gate next tick) or a transient gh/
+      // network error. Both are safe to queue: the merge did not happen. Deterministic
+      // "not mergeable" errors (conflict surfaced between our status read and the merge
+      // call) must escalate instead of retrying forever.
+      const msg = String(e);
+      if (/not mergeable|merge conflict/i.test(msg)) {
+        return { kind: "needs-human", pr, reason: `merge-failed-deterministic: ${msg}` };
+      }
+      return { kind: "queued", pr, reason: `merge-failed-retry: ${msg}` };
     }
     return { kind: "merged", pr, headOid: verdict.headOid };
   }
