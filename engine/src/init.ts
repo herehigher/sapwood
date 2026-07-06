@@ -118,6 +118,7 @@ export interface BoardOption {
   name: string;
   color: string; // ProjectV2 single-select color enum (GRAY, BLUE, ...)
   description: string;
+  id?: string; // existing option's GraphQL ID — see setStatusOptionsArgs for why this matters
 }
 interface BoardState {
   exists: boolean;
@@ -131,7 +132,7 @@ async function queryBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunne
   // statusField is bound as a variable, not inlined, so a field name is never query text.
   const q = `query($owner:String!,$num:Int!,$status:String!){
     ${root}(login:$owner){ projectV2(number:$num){ id
-      field(name:$status){ ... on ProjectV2SingleSelectField { id options{ name color description } } } } } }`;
+      field(name:$status){ ... on ProjectV2SingleSelectField { id options{ id name color description } } } } } }`;
   // string vars via -f (raw); only the Int! `num` needs -F. -F magic-types @file/numeric,
   // which could misread an owner/status value starting with '@' or looking numeric.
   const out = await run([
@@ -169,9 +170,15 @@ async function ensureBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunn
     return [`board: ProjectV2 #${cfg.board.projectNumber} has no "${cfg.board.statusField}" single-select field; add it in the UI, then re-run.`];
   }
   const need = missing(desired, board.options.map((o) => o.name));
+  // Exact match: every desired lane already exists. Make NO mutation call at all — even a
+  // no-op-looking updateProjectV2Field(singleSelectOptions:[...]) reassigns every option's
+  // ID (confirmed via `gh api graphql` schema introspection: ProjectV2SingleSelectFieldOptionInput.id
+  // is the ONLY thing that preserves an option's identity across the call), which silently
+  // wipes every item's Status on the board (issue #37). Idempotent re-runs must be a true no-op.
   if (need.length === 0) return [];
-  // updateProjectV2Field replaces the FULL option set, so resend the existing lanes
-  // (preserving their colors + descriptions) plus the new ones (GRAY) — never clobber a lane.
+  // updateProjectV2Field replaces the FULL option set, so resend the existing lanes with
+  // their existing `id` (preserving identity + colors/descriptions — see setStatusOptionsArgs)
+  // plus the new ones (GRAY, no id — the API assigns a fresh id for those).
   const full: BoardOption[] = [
     ...board.options,
     ...need.map((name) => ({ name, color: "GRAY", description: "" })),
@@ -189,12 +196,20 @@ const VALID_OPTION_COLORS = new Set([
  * `color` is a GraphQL enum (not a String), so options are inlined: names are JSON-escaped
  * and colors are validated against the known enum set (defensive — they come from the API
  * or our own GRAY default). The field id is bound as a variable.
+ *
+ * Each existing option MUST carry its `id` (per `ProjectV2SingleSelectFieldOptionInput.id`,
+ * confirmed via schema introspection: "Include this to preserve the option's identity during
+ * updates, preventing item field values from being cleared") — omitting it, even while
+ * resending the exact same name/color/description, makes the API mint a brand-new id and
+ * every item currently set to that option silently reverts to "No Status" (issue #37). A
+ * genuinely new option has no `id` yet, so it's left out and the API assigns one.
  */
 export function setStatusOptionsArgs(fieldId: string, options: BoardOption[]): string[] {
   const inline = options
     .map((o) => {
       const color = VALID_OPTION_COLORS.has(o.color) ? o.color : "GRAY";
-      return `{name:${JSON.stringify(o.name)}, color:${color}, description:${JSON.stringify(o.description)}}`;
+      const id = o.id ? `id:${JSON.stringify(o.id)}, ` : "";
+      return `{${id}name:${JSON.stringify(o.name)}, color:${color}, description:${JSON.stringify(o.description)}}`;
     })
     .join(", ");
   const mutation = `mutation($f:ID!){
