@@ -233,11 +233,12 @@ export class WorkerSupervisor implements Supervisor {
   // for lanes we can only reach by persisted pid (Codex PR #41 P1).
   private readonly detachedHandoffRequested = new Set<string>();
   // #60 P1 (Codex review): a nonexistent, per-process-random directory used to override
-  // core.hooksPath on every git call preserveHandoffWip makes. A handoff-requested lane's
-  // worktree is under the FULL filesystem control of the (possibly compromised) worker while
-  // it was alive — outside the PreToolUse guard's reach once it's dead — so it could have
-  // planted a pre-commit/pre-push hook, or pointed core.hooksPath at a directory it controls.
-  // A command-line `-c core.hooksPath=...` always wins over any config value (local worktree
+  // core.hooksPath (see tryGit, which also disables core.fsmonitor alongside it) on every git
+  // call preserveHandoffWip makes. A handoff-requested lane's worktree is under the FULL
+  // filesystem control of the (possibly compromised) worker while it was alive — outside the
+  // PreToolUse guard's reach once it's dead — so it could have planted a pre-commit/pre-push
+  // hook, an fsmonitor script, or pointed core.hooksPath at a directory it controls. A
+  // command-line `-c core.hooksPath=...` always wins over any config value (local worktree
   // config included), so this can't be overridden by anything the worker set. The directory
   // deliberately never exists: git treats a missing hooksPath as "no hooks to run", no error.
   private readonly noHooksDir = join(tmpdir(), `sapwood-no-hooks-${randomUUID()}`);
@@ -537,9 +538,13 @@ export class WorkerSupervisor implements Supervisor {
    *  - A stale `index.lock` (left behind by the just-killed process; onExit only runs after
    *    the child has actually exited, so its owner is confirmed dead) is cleared and the
    *    failing command retried once.
-   *  - Every git call disables hooks (see `noHooksDir`) and `commit`/`push` also pass
-   *    `--no-verify` as defense in depth — this worktree was under the worker's full control
-   *    and must not get to run code as the supervisor via a planted hook (Codex #60 P1). */
+   *  - Every git call disables hooks + fsmonitor (see `noHooksDir`) and `commit`/`push` also
+   *    pass `--no-verify` as defense in depth — this worktree was under the worker's full
+   *    control and must not get to run code as the supervisor via a planted hook, fsmonitor
+   *    script, or credential/ssh override (Codex #60 P1 + follow-up second-opinion review).
+   *  - Every git call is timeout-bounded (see tryGit) — this all runs synchronously inside
+   *    onExit, a Node `exit` handler, so a hung git process (e.g. a network-partitioned push
+   *    during the kill-switch drain, of all times) must not block the whole engine forever. */
   private preserveHandoffWip(name: string): void {
     const worktreePath = join(this.worktreeRoot, name);
     if (!existsSync(worktreePath)) return; // never checked out (or already cleaned up) — nothing to preserve
@@ -548,10 +553,20 @@ export class WorkerSupervisor implements Supervisor {
     if (!status.ok) return; // can't even inspect status — best-effort, give up quietly
     if (status.stdout.trim().length === 0) return; // clean — nothing to commit
 
+    // ponytail: `git add -A` can still execute a worker-committed .gitattributes'
+    // filter.<name>.clean program (content filters have no blanket `-c` disable, unlike hooks
+    // — confirmed, no equivalent override exists). Closing this needs plumbing (hash-object
+    // --no-filters + manual tree/commit-tree) instead of porcelain add/commit — deliberately
+    // NOT done here; tracked in #65. Known, documented gap, not an oversight.
     if (!this.runGit(["add", "-A"], worktreePath).ok) return;
     if (!this.runGit(["commit", "--no-verify", "-m", "sapwood: WIP handoff (drain)"], worktreePath).ok) return;
 
-    const push = this.runGit(["push", "--no-verify"], worktreePath);
+    // push is the one step that talks to credential/transport config, so it gets two more
+    // overrides on top of the hooks/fsmonitor ones every call gets: a worker-set
+    // credential.helper could run arbitrary code to "provide" credentials, and core.sshCommand
+    // could point at a worker-controlled binary. Disabling a legitimate one just means the push
+    // fails — already handled as non-fatal below (local commit + .handoff still stand).
+    const push = this.runGit(["push", "--no-verify"], worktreePath, ["credential.helper=", "core.sshCommand=ssh"]);
     if (!push.ok) {
       console.error(
         `[sapwood:worker] lane ${name}: handoff commit landed locally but 'git push' failed ` +
@@ -563,25 +578,41 @@ export class WorkerSupervisor implements Supervisor {
   /** Runs `git <args>` in `cwd`, retrying ONCE if the failure looks like a stale index.lock
    *  from the process onExit just confirmed dead (the owning claude subprocess has already
    *  exited by the time onExit fires — a lock file at this point can only be stale). Never
-   *  throws: failures are reported via the returned `ok` flag. */
-  private runGit(args: string[], cwd: string): { ok: boolean; stdout: string; stderr: string } {
-    const first = this.tryGit(args, cwd);
+   *  throws: failures are reported via the returned `ok` flag. `extraConfig` entries are
+   *  additional `-c key=value` overrides layered on top of the always-on ones (see tryGit) —
+   *  used by the push step for credential/transport-specific overrides. */
+  private runGit(args: string[], cwd: string, extraConfig: string[] = []): { ok: boolean; stdout: string; stderr: string } {
+    const first = this.tryGit(args, cwd, extraConfig);
     if (first.ok || !/index\.lock/i.test(first.stderr)) return first;
     const gitDir = this.tryGit(["rev-parse", "--absolute-git-dir"], cwd);
     if (!gitDir.ok) return first;
     const lockPath = join(gitDir.stdout.trim(), "index.lock");
     if (!existsSync(lockPath)) return first;
     this.removeIfExists(lockPath);
-    return this.tryGit(args, cwd);
+    return this.tryGit(args, cwd, extraConfig);
   }
 
-  /** Every git invocation from preserveHandoffWip goes through here, so the `-c
-   *  core.hooksPath=...` override (see `noHooksDir`) is never accidentally skipped for one
-   *  call. Harmless on commands with no hooks of their own (status/add/rev-parse). */
-  private tryGit(args: string[], cwd: string): { ok: boolean; stdout: string; stderr: string } {
-    const fullArgs = ["-c", `core.hooksPath=${this.noHooksDir}`, ...args];
+  /** Every git invocation from preserveHandoffWip goes through here. Two things are unconditional
+   *  on every call, never skippable per-call: the `-c core.hooksPath=...` / `-c
+   *  core.fsmonitor=false` overrides (worker-controlled config that could otherwise run code
+   *  with the supervisor's privileges — Codex #60 P1 + follow-up review; harmless on commands
+   *  with nothing to filter, e.g. status/rev-parse), and a bounded timeout — this runs
+   *  synchronously inside onExit, a Node `exit` handler, so a hung git process (a
+   *  network-partitioned push, most plausibly, mid kill-switch-drain) must not hang the whole
+   *  engine. On timeout the process is SIGKILLed and this reports it as an ordinary failure
+   *  (`ok: false`), same as any other git error — callers already treat that as non-fatal. */
+  private tryGit(args: string[], cwd: string, extraConfig: string[] = []): { ok: boolean; stdout: string; stderr: string } {
+    const fullArgs = [
+      "-c", `core.hooksPath=${this.noHooksDir}`,
+      "-c", "core.fsmonitor=false",
+      ...extraConfig.flatMap((c) => ["-c", c]),
+      ...args,
+    ];
     try {
-      const stdout = execFileSync("git", fullArgs, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      const stdout = execFileSync("git", fullArgs, {
+        cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+        timeout: 30_000, killSignal: "SIGKILL",
+      });
       return { ok: true, stdout, stderr: "" };
     } catch (e) {
       const err = e as { stdout?: string; stderr?: string };

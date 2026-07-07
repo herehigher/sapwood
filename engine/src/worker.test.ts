@@ -776,7 +776,7 @@ test("#60: a stale index.lock left behind by the just-killed process is cleared 
   }
 });
 
-test("#60 P1 (Codex review): supervisor WIP commit+push disables the worktree's own git hooks — a worker-planted pre-commit/pre-push (or a worker-set core.hooksPath pointing at its own directory) must NOT run with the supervisor's privileges", async () => {
+test("#60 P1 (Codex review + follow-up second-opinion review): supervisor WIP commit+push disables the worktree's own git hooks AND fsmonitor — a worker-planted pre-commit/pre-push (or a worker-set core.hooksPath/core.fsmonitor pointing at its own script) must NOT run with the supervisor's privileges", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   try {
@@ -786,17 +786,16 @@ test("#60 P1 (Codex review): supervisor WIP commit+push disables the worktree's 
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n");
 
     // Simulate a compromised/malicious worker: it had full filesystem access to its OWN
-    // worktree while alive (outside the PreToolUse guard's reach once it's dead). Each hook,
-    // if it ran, writes an observable sentinel AND aborts (exit 1) — so an unbypassed hook
-    // would visibly break the commit/push.
+    // worktree while alive (outside the PreToolUse guard's reach once it's dead). Each planted
+    // hook/script, if it ran, writes an observable sentinel — so an unbypassed one is detectable.
     const defaultHookSentinel = join(dir, "default-hook-ran");
     writeFileSync(
       join(worktreePath, ".git", "hooks", "pre-commit"),
       `#!/usr/bin/env bash\ntouch "${defaultHookSentinel}"\nexit 1\n`,
       { mode: 0o755 },
     );
-    // The named threat from the review: a worker pointing core.hooksPath at a directory IT
-    // controls. Command-line -c must win over this local worktree config.
+    // The named threat from the first review: a worker pointing core.hooksPath at a directory
+    // IT controls. Command-line -c must win over this local worktree config.
     const customHooksDir = join(dir, "worker-controlled-hooks");
     mkdirSync(customHooksDir, { recursive: true });
     const customHookSentinel = join(dir, "custom-hook-ran");
@@ -806,6 +805,14 @@ test("#60 P1 (Codex review): supervisor WIP commit+push disables the worktree's 
       { mode: 0o755 },
     );
     gitIn(worktreePath, ["config", "core.hooksPath", customHooksDir]);
+    // The second, config-driven RCE vector from the follow-up review: a worker-set
+    // core.fsmonitor script, invoked on status/add/commit — a wholly separate config key from
+    // core.hooksPath, closed by its own `-c core.fsmonitor=false` override (confirmed: no
+    // interaction with the hooksPath override needed, each is independent).
+    const fsmonitorSentinel = join(dir, "fsmonitor-ran");
+    const fsmonitorScript = join(dir, "fsmonitor-hook.sh");
+    writeFileSync(fsmonitorScript, `#!/usr/bin/env bash\ntouch "${fsmonitorSentinel}"\nexit 1\n`, { mode: 0o755 });
+    gitIn(worktreePath, ["config", "core.fsmonitor", fsmonitorScript]);
 
     const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
     const s = sup(dir, bin, false, worktreeRoot);
@@ -813,7 +820,7 @@ test("#60 P1 (Codex review): supervisor WIP commit+push disables the worktree's 
     await sleep(200);
     assert.equal(s.requestHandoff(laneName), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
-    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "hostile hooks must not block the handoff commit/push");
+    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "hostile hooks/fsmonitor must not block the handoff commit/push");
 
     const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
     assert.match(log, /sapwood: WIP handoff \(drain\)/, "commit succeeded despite the hostile pre-commit hook");
@@ -822,6 +829,7 @@ test("#60 P1 (Codex review): supervisor WIP commit+push disables the worktree's 
 
     assert.ok(!existsSync(defaultHookSentinel), "the worktree's own .git/hooks/pre-commit must NOT have run");
     assert.ok(!existsSync(customHookSentinel), "the worker-set core.hooksPath pre-push must NOT have run");
+    assert.ok(!existsSync(fsmonitorSentinel), "the worker-set core.fsmonitor script must NOT have run");
 
     s.dispose();
   } finally {
