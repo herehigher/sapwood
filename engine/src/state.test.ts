@@ -224,3 +224,63 @@ test("kill switch: a file sentinel in the engine's own data dir flips it, human-
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #31: double-failure rollback/requeue hardening — pending_rollbacks ─────────────────────
+
+test("schema v4 adds pending_rollbacks (#31)", () => {
+  const s = mem();
+  assert.ok(SCHEMA_VERSION >= 4);
+  assert.equal(s.userVersion(), SCHEMA_VERSION);
+  s.close();
+});
+
+test("pendingRollbacks: add/bump/clear round-trip", () => {
+  const s = mem();
+  const id = s.addPendingRollback(7, "ready", "dispatch-rollback", "2026-07-06T00:00:00.000Z");
+  let rows = s.pendingRollbacks();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.id, id);
+  assert.equal(rows[0]?.issue, 7);
+  assert.equal(rows[0]?.target, "ready");
+  assert.equal(rows[0]?.reason, "dispatch-rollback");
+  assert.equal(rows[0]?.attempts, 0);
+  assert.equal(rows[0]?.created_at, "2026-07-06T00:00:00.000Z");
+  assert.equal(rows[0]?.last_attempt_at, null);
+
+  s.bumpPendingRollback(id, "2026-07-06T00:05:00.000Z");
+  rows = s.pendingRollbacks();
+  assert.equal(rows[0]?.attempts, 1);
+  assert.equal(rows[0]?.last_attempt_at, "2026-07-06T00:05:00.000Z");
+
+  s.clearPendingRollback(id);
+  assert.equal(s.pendingRollbacks().length, 0);
+  s.close();
+});
+
+test("pendingRollbacks: returns rows oldest-first (retry order) across multiple issues", () => {
+  const s = mem();
+  s.addPendingRollback(9, "ready", "dead-lane-requeue", "t1");
+  s.addPendingRollback(2, "ready", "dispatch-rollback", "t2");
+  assert.deepEqual(s.pendingRollbacks().map((r) => r.issue), [9, 2]);
+  s.close();
+});
+
+test("pending_rollbacks persists across close/reopen (an engine restart mid-recovery does not lose the retry marker)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s1 = new State(path);
+    s1.addPendingRollback(9, "ready", "dead-lane-requeue", "2026-07-06T00:00:00.000Z");
+    s1.close();
+
+    const s2 = new State(path);
+    const rows = s2.pendingRollbacks();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.issue, 9);
+    assert.equal(rows[0]?.reason, "dead-lane-requeue");
+    assert.equal(rows[0]?.attempts, 0);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

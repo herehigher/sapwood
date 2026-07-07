@@ -81,6 +81,26 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN review_triggered INTEGER NOT NULL DEFAULT 0;
     `);
   },
+  // 3 -> 4: double-failure rollback/requeue hardening (#31). A recovery-path board mutation
+  // (dispatch rollback to Ready / dead-lane requeue to Ready) is persisted here BEFORE it is
+  // attempted — so if the mutation itself also fails (a *transient forge failure during
+  // recovery*, the exact double-failure window #31 tracks), the row survives to be retried on
+  // a later tick instead of the issue being silently stranded In Progress with no worker row
+  // and no durable trace. Cleared on success; escalated (needs-human + a structured tick
+  // event, never a silent swallow) once attempts hit cfg.recovery.rollbackRetryCap.
+  (db) => {
+    db.exec(`
+      CREATE TABLE pending_rollbacks (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue           INTEGER NOT NULL,
+        target          TEXT NOT NULL,   -- board status to reach: ready | inProgress | done
+        reason          TEXT NOT NULL,   -- dispatch-rollback | dead-lane-requeue
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        last_attempt_at TEXT
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -105,6 +125,22 @@ export interface WorkerRow {
    *  raw-column field on this row (session_id/started_at/ended_at are snake_case too).
    *  Optional; defaults to 0. */
   review_triggered?: number;
+}
+
+/** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
+ *  import just for a 3-string union). Must stay in lockstep with IForge.setBoardStatus. */
+export type BoardStatus = "ready" | "inProgress" | "done";
+
+/** A durably-persisted recovery-path board mutation still awaiting success or escalation
+ *  (#31 — see the schema v3->v4 migration comment for the double-failure window this closes). */
+export interface PendingRollback {
+  id: number;
+  issue: number;
+  target: BoardStatus;
+  reason: string;
+  attempts: number;
+  created_at: string;
+  last_attempt_at: string | null;
 }
 
 export class State {
@@ -294,5 +330,42 @@ export class State {
 
   close(): void {
     this.db.close();
+  }
+
+  // ── Double-failure rollback/requeue hardening (#31) ───────────────────────────────────
+
+  /** Persist a pending rollback BEFORE attempting the board mutation (durable retry marker).
+   *  Returns the row id, which the caller threads through bumpPendingRollback/
+   *  clearPendingRollback for the SAME attempt (the row created here IS "attempt 0"; the
+   *  immediately-following attempt that motivated this call is recorded via those two, not a
+   *  second insert). */
+  addPendingRollback(issue: number, target: BoardStatus, reason: string, at: string): number {
+    const res = this.db
+      .prepare(
+        "INSERT INTO pending_rollbacks (issue, target, reason, attempts, created_at) VALUES (?, ?, ?, 0, ?)",
+      )
+      .run(issue, target, reason, at);
+    return Number(res.lastInsertRowid);
+  }
+
+  /** All rollbacks still awaiting success or escalation, oldest first (retry order). */
+  pendingRollbacks(): PendingRollback[] {
+    return this.db
+      .prepare("SELECT * FROM pending_rollbacks ORDER BY id")
+      .all() as unknown as PendingRollback[];
+  }
+
+  /** Record one more failed attempt (attempts++, last_attempt_at refreshed) — the row stays,
+   *  to be retried again next tick. */
+  bumpPendingRollback(id: number, at: string): void {
+    this.db
+      .prepare("UPDATE pending_rollbacks SET attempts = attempts + 1, last_attempt_at = ? WHERE id = ?")
+      .run(at, id);
+  }
+
+  /** Resolved — either the mutation succeeded, or attempts hit the bounded retry cap and the
+   *  conductor escalated to needs-human instead. Either way, stop retrying. */
+  clearPendingRollback(id: number): void {
+    this.db.prepare("DELETE FROM pending_rollbacks WHERE id = ?").run(id);
   }
 }

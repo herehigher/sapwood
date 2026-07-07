@@ -129,12 +129,22 @@ const Guard = z.object({
   mode: z.enum(["hard", "soft"]).default("hard"),
 }).strict();
 
+const Recovery = z.object({
+  // #31: bounded retry count for a durably-persisted rollback/requeue (a recovery-path board
+  // mutation, e.g. rolling a dispatch-failed claim back to Ready, or requeuing a dead lane).
+  // Retried once per tick (State.pendingRollbacks) until it succeeds; past this many failed
+  // attempts the conductor stops retrying and escalates (needs-human label attempt + a
+  // structured tick-result entry) instead of retrying forever.
+  rollbackRetryCap: z.number().int().positive().default(5),
+}).strict();
+
 export const ConfigSchema = z.object({
   board: Board,
   lanes: Lanes.default({}),
   worker: Worker.default({}),
   guard: Guard.default({}),
   cost: Cost.default({}),
+  recovery: Recovery.default({}),
   reviewer: Reviewer.default({}),
   merge: Merge.default({}),
   labels: Labels.default({}),
