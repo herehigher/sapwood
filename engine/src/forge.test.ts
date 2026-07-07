@@ -167,9 +167,10 @@ test("hasVerificationPlan and extractVerificationPlan agree on every case (share
   }
 });
 
-// ── findOpenPrNumber (#46: the live findOpenPr wiring's pure match) ──────────────────────────
+// ── findOpenPrNumber (#46: the live findOpenPr wiring's pure match; PR #50 P2 #2 hardening —
+//   this selects gate②'s MERGE target, so ambiguity is fail-closed, never guessed) ──────────
 
-test("findOpenPrNumber: matches a bare #<issue> token in a PR body", () => {
+test("findOpenPrNumber: a single bare #<issue> mention is still found (the unambiguous fallback)", () => {
   const prs = [{ number: 10, body: "unrelated" }, { number: 11, body: "Part of #46" }];
   assert.equal(findOpenPrNumber(prs, 46), 11);
 });
@@ -180,11 +181,41 @@ test("findOpenPrNumber: no match -> null", () => {
 
 test("findOpenPrNumber: does not match a longer number containing the issue as a prefix (#460 != #46)", () => {
   assert.equal(findOpenPrNumber([{ number: 10, body: "Part of #460" }], 46), null);
+  assert.equal(findOpenPrNumber([{ number: 10, body: "Fixes #460" }], 46), null);
 });
 
-test("findOpenPrNumber: first match wins (caller passes gh's most-recent-first order)", () => {
+test("findOpenPrNumber: a closing keyword outranks a newer PR's bare mention (never merge the wrong PR)", () => {
+  // Newest-first order: the newer PR (20) merely mentions #46 in passing; the older PR (21)
+  // declares it closes #46. First-match-wins would pick 20 — the exact wrong-merge-target
+  // hazard PR #50 P2 #2 flagged. Closing semantics must win regardless of recency.
+  const prs = [
+    { number: 20, body: "related to #46, but this PR is for issue #12" },
+    { number: 21, body: "Fixes #46" },
+  ];
+  assert.equal(findOpenPrNumber(prs, 46), 21);
+});
+
+test("findOpenPrNumber: all GitHub closing-keyword inflections count, case-insensitive, optional colon", () => {
+  for (const kw of ["Fixes", "fixed", "fix", "Closes", "closed", "close", "Resolves", "resolved", "resolve", "Fixes:"]) {
+    assert.equal(findOpenPrNumber([{ number: 9, body: `${kw} #46` }], 46), 9, kw);
+  }
+  // Word-bounded: "unfixes"/"prefixes" are not closing keywords.
+  assert.equal(findOpenPrNumber([{ number: 9, body: "unfixes #46" }, { number: 8, body: "also #46" }], 46), null);
+});
+
+test("findOpenPrNumber: several closing-keyword matches -> the OLDEST wins (the lane's original PR, not a newer duplicate)", () => {
+  // Newest-first order: 30 is a newer duplicate/rescue PR also claiming to close #46;
+  // 31 is the original. The original must keep the merge target.
+  const prs = [
+    { number: 30, body: "Closes #46 (superseding attempt)" },
+    { number: 31, body: "Fixes #46" },
+  ];
+  assert.equal(findOpenPrNumber(prs, 46), 31);
+});
+
+test("findOpenPrNumber: multiple bare-mention-only candidates are ambiguous -> null (queued, never a guessed merge target)", () => {
   const prs = [{ number: 20, body: "Part of #46" }, { number: 21, body: "Part of #46" }];
-  assert.equal(findOpenPrNumber(prs, 46), 20);
+  assert.equal(findOpenPrNumber(prs, 46), null);
 });
 
 test("projectQuery: no line is a // comment (GraphQL uses #, not //) — Codex R5 P1 guard", () => {

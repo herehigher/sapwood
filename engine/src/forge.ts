@@ -215,15 +215,12 @@ export class GithubForge implements IForge {
     return parsed.body ?? "";
   }
 
-  /** #46: best-effort mapping from an issue to an already-open PR that references it, for the
-   *  live `sapwood run` wiring (WorkerDeps.hasOpenPr/findOpenPr) — the "live findOpenPr forge
-   *  wiring" PLAN.md's M3 deferred list flagged. A first-pass heuristic, not exhaustive: matches
-   *  any open PR whose body contains a bare `#<issue>` reference (this repo's own PRs use
-   *  exactly that convention, e.g. "Part of #46" — see CLAUDE.md-generated PR bodies). Multiple
-   *  matches -> the first (gh's default order, most-recently-updated first); no match -> null.
-   *  Hardening (matching "Closes #N"/"Fixes #N" keywords specifically, disambiguating multiple
-   *  candidate PRs, etc.) is deferred to the live merge-gate run (#46 scope 3) that exercises
-   *  this against a real repo. */
+  /** #46: maps an issue to its already-open PR, for the live `sapwood run` wiring
+   *  (WorkerDeps.hasOpenPr/findOpenPr) — the "live findOpenPr forge wiring" PLAN.md's M3
+   *  deferred list flagged. The selected PR becomes the driving lane's gate/MERGE target, so
+   *  selection is fail-closed on ambiguity — see findOpenPrNumber for the full precedence
+   *  (closing keywords > oldest-among-closing > a single unambiguous bare `#N` mention;
+   *  multiple bare mentions -> null, the lane queues rather than gating a guessed PR). */
   async findOpenPrForIssue(issue: number): Promise<number | null> {
     const out = await this.gh([
       "pr", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
@@ -414,12 +411,30 @@ export function hasVerificationPlan(body: string, labels: string[], verifyNaLabe
   return extractVerificationPlan(body) != null;
 }
 
-/** Pure match for GithubForge.findOpenPrForIssue — a bare `#<issue>` token in the PR body
- *  (not part of a longer number, e.g. `#460` must not match issue 46). Exported for offline
- *  testing; the first match wins (caller passes PRs in gh's default most-recent-first order). */
+/**
+ * Pure match for GithubForge.findOpenPrForIssue. Selecting a lane's PR here decides gate②'s
+ * MERGE TARGET, so ambiguity must never be guessed away (gate② PR #50 P2 #2 — a newer PR
+ * merely *mentioning* the issue must not out-rank / silently replace the issue's own PR):
+ *
+ *  1. PREFERRED: closing-keyword semantics — `Fixes/Closes/Resolves #N` (all GitHub-recognized
+ *     inflections, case-insensitive, word-bounded, optional colon). A PR that declares it
+ *     closes the issue is claiming to BE its PR, not just referencing it.
+ *  2. Tiebreak among several closing-keyword matches: the OLDEST open PR (the last element —
+ *     the caller passes gh's default newest-first order). Rationale: the issue's original PR
+ *     is the one the lane's worker opened first; any newer PR also carrying a closing keyword
+ *     for the same issue is a duplicate/rescue attempt and must not silently steal the merge
+ *     target from the PR already being driven.
+ *  3. FALLBACK: a bare `#N` token (not part of a longer number — `#460` never matches issue
+ *     46), accepted ONLY when exactly one candidate matches. Multiple bare-mention candidates
+ *     are ambiguous -> null (the lane stays undrivable/queued rather than gating a guessed PR).
+ */
 export function findOpenPrNumber(prs: { number: number; body: string }[], issue: number): number | null {
-  const needle = new RegExp(`(^|[^0-9])#${issue}(?!\\d)`);
-  return prs.find((pr) => needle.test(pr.body))?.number ?? null;
+  const closing = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\\s+#${issue}(?!\\d)`, "i");
+  const closingMatches = prs.filter((pr) => closing.test(pr.body));
+  if (closingMatches.length > 0) return closingMatches[closingMatches.length - 1]!.number; // oldest
+  const mention = new RegExp(`(^|[^0-9])#${issue}(?!\\d)`);
+  const mentions = prs.filter((pr) => mention.test(pr.body));
+  return mentions.length === 1 ? mentions[0]!.number : null;
 }
 
 type ReadyCfg = {

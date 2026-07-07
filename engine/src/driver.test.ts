@@ -100,7 +100,7 @@ test("runDriver --once: runs exactly one tick and stops, without sleeping", asyn
   const { sleep, calls } = mkSleepSpy();
   const deps = baseDeps({ sleep, stopMode: "once" });
   const result = await runDriver(deps);
-  assert.deepEqual(result, { ticks: 1, stoppedBy: "once" });
+  assert.deepEqual(result, { ticks: 1, tickErrors: 0, stoppedBy: "once" });
   assert.deepEqual(calls, []); // no inter-tick sleep — the driver stops immediately after tick 1
   deps.state.close();
 });
@@ -111,7 +111,7 @@ test("runDriver --until-idle: stops once a tick leaves nothing in flight and dis
   forge.ready = []; // empty Ready queue -> nothing to dispatch, nothing running -> idle immediately
   const deps = baseDeps({ forge, sleep, stopMode: "until-idle" });
   const result = await runDriver(deps);
-  assert.deepEqual(result, { ticks: 1, stoppedBy: "idle" });
+  assert.deepEqual(result, { ticks: 1, tickErrors: 0, stoppedBy: "idle" });
   deps.state.close();
 });
 
@@ -167,5 +167,72 @@ test("runDriver: onTick is called once per completed tick with that tick's TickR
   await runDriver(deps);
   assert.equal(results.length, 1);
   assert.ok(Array.isArray((results[0] as { dispatched: unknown[] }).dispatched));
+  deps.state.close();
+});
+
+// ── PR #50 P2 #1: tick() throws are contained — a transient forge blip must not kill the daemon ──
+
+test("runDriver: a tick() throw is contained — logged as a tick-error event, normal-cadence sleep, next tick runs", async () => {
+  const { sleep, calls } = mkSleepSpy();
+  const forge = new FakeForge();
+  // First getReadyIssues call throws (a transient GitHub 5xx during the DISPATCH phase — one
+  // of the unguarded awaits inside tick()); every later call succeeds.
+  let failures = 1;
+  const realGetReady = forge.getReadyIssues.bind(forge);
+  forge.getReadyIssues = async () => {
+    if (failures > 0) { failures--; throw new Error("HTTP 502: GitHub is having a moment"); }
+    return realGetReady();
+  };
+  const deps = baseDeps({ forge, sleep, tickIntervalSec: 5 });
+  let stop = () => {};
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  // Stop after the first SUCCESSFUL tick — which must be the attempt AFTER the contained throw.
+  deps.onTick = () => stop();
+  const result = await runDriver(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.tickErrors, 1); // the blip was counted...
+  assert.equal(result.ticks, 1); // ...and the daemon survived to complete the next tick
+  // The failed attempt slept the NORMAL cadence before retrying — contained, never a hot loop.
+  // (The durable tick-error event trace is asserted in the next test via an appendEvent spy.)
+  assert.deepEqual(calls, [5000]);
+  deps.state.close();
+});
+
+test("runDriver: the contained tick() throw is recorded as a structured tick-error event", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.getReadyIssues = async () => { throw new Error("HTTP 502"); };
+  const deps = baseDeps({ forge, sleep, stopMode: "once" });
+  const logged: Array<[string, unknown]> = [];
+  const realAppend = deps.state.appendEvent.bind(deps.state);
+  deps.state.appendEvent = (kind: string, payload: unknown) => {
+    logged.push([kind, payload]);
+    realAppend(kind, payload);
+  };
+  const result = await runDriver(deps);
+  assert.deepEqual(result, { ticks: 0, tickErrors: 1, stoppedBy: "once" }); // --once: one ATTEMPT, then stop
+  assert.ok(
+    logged.some(([kind, payload]) => kind === "tick-error" && /HTTP 502/.test(String((payload as { error: string }).error))),
+    "tick-error event with the original error text",
+  );
+  deps.state.close();
+});
+
+test("runDriver: a persistently-throwing tick keeps the daemon looping at normal cadence (never exits, never hot-loops)", async () => {
+  const calls: number[] = [];
+  let stop = () => {};
+  const sleep = async (ms: number): Promise<void> => {
+    calls.push(ms);
+    if (calls.length >= 3) stop(); // bound the test: signal after 3 failed rounds
+  };
+  const forge = new FakeForge();
+  forge.getReadyIssues = async () => { throw new Error("still down"); };
+  const deps = baseDeps({ forge, sleep, tickIntervalSec: 5 });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runDriver(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.ticks, 0);
+  assert.equal(result.tickErrors, 3); // three contained failures, three normal-cadence sleeps
+  assert.deepEqual(calls, [5000, 5000, 5000]);
   deps.state.close();
 });

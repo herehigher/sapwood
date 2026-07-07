@@ -44,7 +44,12 @@ export interface DriverDeps extends TickDeps {
 export type StopReason = "signal" | "once" | "idle";
 
 export interface DriverResult {
+  /** Completed (successful) ticks. */
   ticks: number;
+  /** tick() attempts that threw and were contained (see runDriver's catch). Always 0 on a
+   *  healthy run; a persistently non-zero, growing count is the operator's signal that the
+   *  forge is unreachable while the daemon keeps (correctly) retrying. */
+  tickErrors: number;
   stoppedBy: StopReason;
 }
 
@@ -72,10 +77,19 @@ function isIdle(deps: DriverDeps, result: TickResult): boolean {
 }
 
 /**
- * Run the tick loop until a stop condition fires. Always ticks at least once. Never rejects on
- * a signal — a signal is a normal, expected stop, not an error; only an actual tick() throw
- * propagates (unchanged conductor.ts contract: a dispatch failure that couldn't even persist its
- * own rollback marker is the one path tick() still rejects on).
+ * Run the tick loop until a stop condition fires. Always attempts at least one tick. Never
+ * rejects on a signal — a signal is a normal, expected stop, not an error.
+ *
+ * tick() throws are CONTAINED, never fatal (gate② PR #50 P2 #1): tick() rejects on more than
+ * one path — the DRIVE (ensureTriggered/addPRComment/setBoardStatus/addLabel), the
+ * CEILING-escalation (addLabel), and the DISPATCH (getReadyIssues/claimIssue) phases all
+ * contain unguarded forge awaits (only RECLAIM was hardened, by #31's pending_rollbacks) — so
+ * a transient GitHub 5xx/network blip mid-tick would otherwise crash the daemon and, worst
+ * case, halt an in-progress kill-switch/ceiling DRAIN until a human restarts. The state layer
+ * is durable (SQLite; #31's rollback markers persist before their board mutations), so a
+ * failed tick loses nothing a later tick can't resume: log a structured `tick-error` event,
+ * sleep the NORMAL cadence (never a hot retry loop), and keep ticking. A persistent failure
+ * shows up as a growing DriverResult.tickErrors count + event-log trail, not a dead daemon.
  */
 export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
   const sleep = deps.sleep ?? defaultSleep;
@@ -86,15 +100,31 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
   });
   try {
     let ticks = 0;
+    let tickErrors = 0;
     for (;;) {
-      const result = await tick(deps);
-      ticks++;
-      deps.onTick?.(result);
-      if (signalled) return { ticks, stoppedBy: "signal" };
-      if (stopMode === "once") return { ticks, stoppedBy: "once" };
-      if (stopMode === "until-idle" && isIdle(deps, result)) return { ticks, stoppedBy: "idle" };
+      let result: TickResult | null = null;
+      try {
+        result = await tick(deps);
+        ticks++;
+        deps.onTick?.(result);
+      } catch (e) {
+        tickErrors++;
+        // Structured + durable — never a silent swallow. Guarded itself: if even the event
+        // write fails (e.g. the disk is gone) there is nothing left to record to, and the
+        // in-memory tickErrors count / returned result still carry the signal.
+        try {
+          deps.state.appendEvent("tick-error", { error: String(e) });
+        } catch { /* state write failed too — tickErrors still counts it */ }
+      }
+      if (signalled) return { ticks, tickErrors, stoppedBy: "signal" };
+      if (stopMode === "once") return { ticks, tickErrors, stoppedBy: "once" };
+      // A failed tick produced no result — idleness is unknowable this round; keep looping
+      // (fail toward "more ticks", the direction drain/escalation progress needs).
+      if (stopMode === "until-idle" && result && isIdle(deps, result)) {
+        return { ticks, tickErrors, stoppedBy: "idle" };
+      }
       await sleep(deps.tickIntervalSec * 1000);
-      if (signalled) return { ticks, stoppedBy: "signal" };
+      if (signalled) return { ticks, tickErrors, stoppedBy: "signal" };
     }
   } finally {
     unregister();
