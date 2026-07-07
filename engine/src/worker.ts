@@ -15,7 +15,7 @@
 // SECURITY: spawn uses an argv array + detached process group — never a shell. The coarse
 // allowed/disallowedTools below are noise-reduction only; the real boundary is the
 // fail-closed PreToolUse guard hook wired in via --settings (#26).
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,7 +25,12 @@ import type { SapwoodConfig } from "./config.js";
 import type { Supervisor, LaneProbe } from "./conductor.js";
 import type { ModelUsageEntry } from "./state.js";
 
-/** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). */
+/** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60: a lane
+ *  that's hard-killed (escalated past drain, or never resumed after a handoff) before ever
+ *  producing a terminal "result" line has genuinely unrecoverable cost here — total_cost_usd
+ *  only ever appears on that line, never mid-stream. That's a known ceiling, not a bug; making
+ *  the .handoff sentinel reliable (onExit's preserveHandoffWip) is what keeps the common drain
+ *  case from hitting it, since a later `claude --resume` produces a real result line normally. */
 export function parseCostUsd(jsonl: string): number {
   let cost = 0;
   for (const line of jsonl.split("\n")) {
@@ -177,6 +182,13 @@ export interface WorkerDeps {
   cfg: SapwoodConfig;
   /** Directory for sentinels/jsonl/heartbeat. Default <cwd>/data/sessions/state. */
   stateDir?: string;
+  /** Parent directory holding each lane's git worktree, keyed by lane name
+   *  (`<worktreeRoot>/<name>`). This is the SAME convention the `claude` CLI's `--worktree
+   *  <name>` flag resolves against (confirmed against this repo's own `.claude/worktrees/*`
+   *  on disk): the engine spawns `claude` with `cwd` inherited from the engine process, so
+   *  the CLI resolves `--worktree <name>` relative to that same cwd. Default
+   *  <cwd>/.claude/worktrees, mirroring stateDir's cwd-anchored default. */
+  worktreeRoot?: string;
   /** claude binary; default discoverClaudeBin(process.env). */
   claudeBin?: string;
   /** probe()'s hasPr — engine wires this to the forge (an open PR for the issue). */
@@ -210,6 +222,7 @@ interface Lane {
 
 export class WorkerSupervisor implements Supervisor {
   private readonly dir: string;
+  private readonly worktreeRoot: string;
   private readonly bin: string;
   private readonly hbMs: number;
   private readonly guardHookPath: string;
@@ -221,6 +234,7 @@ export class WorkerSupervisor implements Supervisor {
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
+    this.worktreeRoot = deps.worktreeRoot ?? join(process.cwd(), ".claude", "worktrees");
     this.bin = deps.claudeBin ?? discoverClaudeBin(process.env);
     this.hbMs = deps.heartbeatMs ?? 30_000;
     // Default to the compiled hook sibling (dist/guard-hook.js when running compiled). The
@@ -420,10 +434,11 @@ export class WorkerSupervisor implements Supervisor {
     // drain would silently no-op on such lanes — no SIGTERM for the whole drain window, the
     // worker keeps spending, then gets hard-killed instead of the intended graceful handoff
     // (Codex PR #41 P1). Signal the persisted process group with SIGTERM only (graceful —
-    // never the KILL escalation reclaim() adds). Caveat: with no attached onExit handler the
-    // .handoff sentinel cannot be written, so a cooperative exit is later classified DEAD;
-    // the SIGTERM still lets the worker checkpoint (commit+push) before exiting, which is the
-    // part that preserves work — the pushed state is itself the handoff (PLAN.md).
+    // never the KILL escalation reclaim() adds). Caveat: with no attached onExit handler
+    // neither the .handoff sentinel NOR the supervisor-side commit+push (preserveHandoffWip,
+    // #60) can run for this detached path — only the in-process onExit (the lane-in-map
+    // branch above) gets that guarantee. A detached lane's WIP preservation still depends on
+    // whatever the model itself managed before dying; this remains a known gap, not fixed here.
     if (this.detachedHandoffRequested.has(name)) return false;
     const pid = this.persistedPid(name);
     if (pid == null || this.wrapperAlive(name) !== 1) return false;
@@ -461,6 +476,16 @@ export class WorkerSupervisor implements Supervisor {
     try { closeSync(lane.jsonlFd); } catch { /* already closed */ }
     // reclaim() owns the lane's terminal state — don't also write a sentinel.
     if (!lane.reclaiming) {
+      // #60: the real `claude` CLI has no SIGTERM trap — a handoff-requested process dies by
+      // signal (code null) or a non-zero exit, NEVER code 0. So "code === 0 after SIGTERM" is
+      // unreachable in practice, and .handoff could never be earned by the old logic (Codex
+      // R3 P2's original concern was false-positive resumability; empirically the failure
+      // mode is the opposite — a real, already-resumable lane getting tagged .failed). The
+      // supervisor now GUARANTEES "resumable" itself: it commits+pushes the worktree's WIP
+      // here, independent of the child's exit status, before deciding the tag.
+      if (lane.handoffRequested && !lane.timedOut) {
+        this.preserveHandoffWip(name);
+      }
       const jsonl = this.readJsonl(lane.jsonlPath);
       const cost = parseCostUsd(jsonl);
       const modelUsage = parseModelUsage(jsonl);
@@ -469,13 +494,13 @@ export class WorkerSupervisor implements Supervisor {
         name, issue: lane.issue, session_id: lane.sessionId, total_cost_usd: cost,
         model_usage: modelUsage, ended_at: endedAt,
       };
-      // .handoff means "resumable, work preserved" — claim it ONLY when the worker exited
-      // cleanly (code 0) AFTER a handoff request, i.e. it caught SIGTERM and completed its
-      // commit/checkpoint. A handoff-requested worker that died by signal/non-zero was aborted
-      // mid-step -> .failed, not a false "resumable" (Codex R3 P2). timedOut is always failed.
+      // .handoff means "resumable, work preserved" — the supervisor-side commit+push above
+      // (preserveHandoffWip) is what guarantees that now, not the child's exit code. A
+      // handoff-requested lane is .handoff regardless of how it died. timedOut is always
+      // .failed — a wall-clock timeout is a distinct, non-drain-requested hard kill.
       const tag = lane.timedOut
         ? "failed"
-        : lane.handoffRequested && code === 0
+        : lane.handoffRequested
           ? "handoff"
           : code === 0
             ? "done"
@@ -484,6 +509,67 @@ export class WorkerSupervisor implements Supervisor {
       this.removeIfExists(this.path(name, "running.json"));
     }
     this.lanes.delete(name);
+  }
+
+  /** #60: the supervisor-side half of the drain contract — GUARANTEE "WIP preserved" for a
+   *  handoff-requested lane, independent of whether the killed `claude` process happened to
+   *  commit/push anything itself. Best-effort and NEVER throws: onExit must still write a
+   *  terminal sentinel even if every git call here fails. Runs synchronously (execFileSync)
+   *  because onExit itself is synchronous (a Node `exit` event handler).
+   *
+   *  - No worktree on disk (lane never got far enough to check one out) -> nothing to do.
+   *  - Clean worktree (nothing to commit) -> nothing to do; no empty commit is created.
+   *  - Uncommitted changes -> `git add -A && git commit` in the worktree ONLY (never the repo
+   *    root — sapwood.config.yaml may carry an uncommitted local override there).
+   *  - `git push` failure is non-fatal/best-effort: the LOCAL commit alone already makes the
+   *    lane resumable via `claude --resume` (worker.ts's resume(), ~line 325), even if the
+   *    remote push didn't land. Logged, never thrown.
+   *  - A stale `index.lock` (left behind by the just-killed process; onExit only runs after
+   *    the child has actually exited, so its owner is confirmed dead) is cleared and the
+   *    failing command retried once. */
+  private preserveHandoffWip(name: string): void {
+    const worktreePath = join(this.worktreeRoot, name);
+    if (!existsSync(worktreePath)) return; // never checked out (or already cleaned up) — nothing to preserve
+
+    const status = this.runGit(["status", "--porcelain"], worktreePath);
+    if (!status.ok) return; // can't even inspect status — best-effort, give up quietly
+    if (status.stdout.trim().length === 0) return; // clean — nothing to commit
+
+    if (!this.runGit(["add", "-A"], worktreePath).ok) return;
+    if (!this.runGit(["commit", "-m", "sapwood: WIP handoff (drain)"], worktreePath).ok) return;
+
+    const push = this.runGit(["push"], worktreePath);
+    if (!push.ok) {
+      console.error(
+        `[sapwood:worker] lane ${name}: handoff commit landed locally but 'git push' failed ` +
+          `(non-fatal — resumable via claude --resume regardless): ${push.stderr.trim()}`,
+      );
+    }
+  }
+
+  /** Runs `git <args>` in `cwd`, retrying ONCE if the failure looks like a stale index.lock
+   *  from the process onExit just confirmed dead (the owning claude subprocess has already
+   *  exited by the time onExit fires — a lock file at this point can only be stale). Never
+   *  throws: failures are reported via the returned `ok` flag. */
+  private runGit(args: string[], cwd: string): { ok: boolean; stdout: string; stderr: string } {
+    const first = this.tryGit(args, cwd);
+    if (first.ok || !/index\.lock/i.test(first.stderr)) return first;
+    const gitDir = this.tryGit(["rev-parse", "--absolute-git-dir"], cwd);
+    if (!gitDir.ok) return first;
+    const lockPath = join(gitDir.stdout.trim(), "index.lock");
+    if (!existsSync(lockPath)) return first;
+    this.removeIfExists(lockPath);
+    return this.tryGit(args, cwd);
+  }
+
+  private tryGit(args: string[], cwd: string): { ok: boolean; stdout: string; stderr: string } {
+    try {
+      const stdout = execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      return { ok: true, stdout, stderr: "" };
+    } catch (e) {
+      const err = e as { stdout?: string; stderr?: string };
+      return { ok: false, stdout: err.stdout ?? "", stderr: err.stderr ?? String(e) };
+    }
   }
 
   async probe(name: string): Promise<LaneProbe> {
