@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runCli, parseRunStopMode, runExitCode } from "./cli.js";
+import {
+  runCli,
+  parseRunStopMode,
+  runExitCode,
+  computeDryRunPreview,
+  formatDryRunPreview,
+  parseStatusArgs,
+  formatStatus,
+  runStatus,
+  type StatusSnapshot,
+} from "./cli.js";
+import { parseConfig } from "./config.js";
+import { State } from "./state.js";
+import type { Issue } from "./forge.js";
 
 test("--version prints package version and exits 0", () => {
   const r = runCli(["node", "sapwood", "--version"]);
@@ -160,4 +173,218 @@ test("validate --help / -h prints validate usage and exits 0", () => {
     assert.equal(r.code, 0, flag);
     assert.match(r.stdout, /usage: sapwood validate/);
   }
+});
+
+// ── #15: `sapwood run --dry-run` ──────────────────────────────────────────────────────────
+
+const baseCfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");
+
+test("computeDryRunPreview: candidates capped at lanes.roundDispatchCap, cost = perWorker x candidates", () => {
+  const cfg = parseConfig(
+    "board: { owner: acme, repo: widgets, projectNumber: 7 }\n" +
+      "lanes: { roundDispatchCap: 2 }\nworker: { budgetUsdSoft: 5 }\ncost: { dailyBudgetUsd: 40 }\n",
+  );
+  const ready: Issue[] = [
+    { number: 1, title: "one", labels: [] },
+    { number: 2, title: "two", labels: [] },
+    { number: 3, title: "three", labels: [] },
+  ];
+  const preview = computeDryRunPreview(ready, cfg);
+  assert.equal(preview.readyCount, 3);
+  assert.equal(preview.candidates.length, 2); // capped at roundDispatchCap
+  assert.deepEqual(preview.candidates.map((i) => i.number), [1, 2]);
+  assert.equal(preview.perWorkerUsd, 5);
+  assert.equal(preview.previewUsd, 10); // 2 x $5
+  assert.equal(preview.dailyBudgetUsd, 40);
+});
+
+test("computeDryRunPreview: fewer ready issues than the cap -> candidates = all of them", () => {
+  const ready: Issue[] = [{ number: 9, title: "solo", labels: [] }];
+  const preview = computeDryRunPreview(ready, baseCfg);
+  assert.equal(preview.candidates.length, 1);
+  assert.equal(preview.previewUsd, baseCfg.worker.budgetUsdSoft);
+});
+
+test("computeDryRunPreview: no ready issues -> zero candidates, zero cost", () => {
+  const preview = computeDryRunPreview([], baseCfg);
+  assert.equal(preview.readyCount, 0);
+  assert.equal(preview.candidates.length, 0);
+  assert.equal(preview.previewUsd, 0);
+});
+
+test("formatDryRunPreview: lists every candidate issue and the cost preview; says nothing was dispatched", () => {
+  const preview = computeDryRunPreview(
+    [
+      { number: 11, title: "fix the thing", labels: [] },
+      { number: 12, title: "add the other thing", labels: [] },
+    ],
+    baseCfg,
+  );
+  const out = formatDryRunPreview(preview);
+  assert.match(out, /#11 fix the thing/);
+  assert.match(out, /#12 add the other thing/);
+  assert.match(out, /cost preview/);
+  assert.match(out, /no worker dispatched, no state written/);
+});
+
+test("run --dry-run appears in --help usage", () => {
+  const r = runCli(["node", "sapwood", "--help"]);
+  assert.match(r.stdout, /--dry-run/);
+});
+
+test("run --dry-run falls through to the async path (code -1), same as init/run", () => {
+  const r = runCli(["node", "sapwood", "run", "--dry-run"]);
+  assert.equal(r.code, -1);
+});
+
+test("run --dry-run combined with --once/--until-idle is rejected, exit 1", () => {
+  const withOnce = runCli(["node", "sapwood", "run", "--dry-run", "--once"]);
+  assert.equal(withOnce.code, 1);
+  assert.match(withOnce.stderr, /--dry-run cannot combine/);
+  const withUntilIdle = runCli(["node", "sapwood", "run", "--dry-run", "--until-idle"]);
+  assert.equal(withUntilIdle.code, 1);
+});
+
+test("run --dry-run --help prints run usage (help wins over any other flag)", () => {
+  const r = runCli(["node", "sapwood", "run", "--dry-run", "--help"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /usage: sapwood run/);
+});
+
+// ── #15: `sapwood status` ─────────────────────────────────────────────────────────────────
+
+test("status: appears in top-level --help usage", () => {
+  const r = runCli(["node", "sapwood", "--help"]);
+  assert.match(r.stdout, /status/);
+});
+
+test("parseStatusArgs: defaults to data/sapwood.sqlite, no config override", () => {
+  const parsed = parseStatusArgs(["node", "sapwood", "status"]);
+  assert.equal(parsed.dbPath, "data/sapwood.sqlite");
+  assert.equal(parsed.configPath, undefined);
+  assert.equal(parsed.help, false);
+});
+
+test("parseStatusArgs: positional db path + --config override", () => {
+  const parsed = parseStatusArgs(["node", "sapwood", "status", "/tmp/x.sqlite", "--config", "/tmp/cfg.yaml"]);
+  assert.equal(parsed.dbPath, "/tmp/x.sqlite");
+  assert.equal(parsed.configPath, "/tmp/cfg.yaml");
+});
+
+test("parseStatusArgs: unknown flag is an error", () => {
+  const parsed = parseStatusArgs(["node", "sapwood", "status", "--bogus"]);
+  assert.equal(parsed.error, "unknown flag: --bogus");
+});
+
+test("parseStatusArgs: --help / -h wins", () => {
+  assert.equal(parseStatusArgs(["node", "sapwood", "status", "--help"]).help, true);
+  assert.equal(parseStatusArgs(["node", "sapwood", "status", "-h"]).help, true);
+});
+
+test("status --help / -h prints status usage and exits 0", () => {
+  for (const flag of ["--help", "-h"]) {
+    const r = runCli(["node", "sapwood", "status", flag]);
+    assert.equal(r.code, 0, flag);
+    assert.match(r.stdout, /usage: sapwood status/);
+  }
+});
+
+test("status: unknown flag errors + usage, exit 1", () => {
+  const r = runCli(["node", "sapwood", "status", "--bogus"]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /unknown flag: --bogus/);
+  assert.match(r.stderr, /usage: sapwood status/);
+});
+
+test("status: no DB at the given path reports 'engine has never run', exit 0, no file created", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  try {
+    const r = runCli(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /no state DB/);
+    assert.match(r.stdout, new RegExp(dbPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    // Read-only: checking status must never create the DB it didn't find.
+    assert.equal(existsSync(dbPath), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status: seeded DB with a running worker, a driving/gated PR, spend, and kill switch — output contains every field", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const configPath = join(dir, "sapwood.config.yaml");
+  writeFileSync(
+    configPath,
+    "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: 3 }\ncost: { dailyBudgetUsd: 50 }\n",
+  );
+  const seed = new State(dbPath);
+  seed.upsertWorker({
+    name: "lane-12-abcd", issue: 12, session_id: "s1", state: "running",
+    started_at: "2026-07-06T10:00:00.000Z", ended_at: null,
+  });
+  seed.upsertWorker({
+    name: "lane-9-efgh", issue: 9, session_id: "s2", state: "driving",
+    started_at: "2026-07-05T09:00:00.000Z", ended_at: null, pr: 101,
+  });
+  seed.recordSpend("lane-9-efgh", 9, 12.5, "2026-07-07T00:00:00.000Z");
+  seed.close();
+  try {
+    const r = runCli(["node", "sapwood", "status", dbPath, "--config", configPath]);
+    assert.equal(r.code, 0);
+    assert.equal(r.stderr, "");
+    assert.match(r.stdout, /lane-12-abcd/);
+    assert.match(r.stdout, /issue #12/);
+    assert.match(r.stdout, /lane-9-efgh/);
+    assert.match(r.stdout, /issue #9/);
+    assert.match(r.stdout, /PR #101/);
+    assert.match(r.stdout, /2\/3 active/); // 1 running + 1 driving, lanes.max=3
+    assert.match(r.stdout, /1 running, 1 driving/);
+    assert.match(r.stdout, /gated PRs \(awaiting review gate\): 1/);
+    assert.match(r.stdout, /\$12\.50 \/ \$50\.00 daily ceiling/);
+    assert.match(r.stdout, /kill switch: inactive/);
+    assert.match(r.stdout, /ceiling breach: none/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status: missing config still prints DB-derived fields, config-derived fields shown as unknown", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const missingConfig = join(dir, "does-not-exist.yaml");
+  const seed = new State(dbPath);
+  seed.close();
+  try {
+    const r = runCli(["node", "sapwood", "status", dbPath, "--config", missingConfig]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /0\/unknown active/);
+    assert.match(r.stdout, /unknown \(no config found\) daily ceiling/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("formatStatus: kill-switch active and a recorded ceiling breach both render", () => {
+  const snapshot: StatusSnapshot = {
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: 6,
+    active: [],
+    driving: [],
+    killSwitchActive: true,
+    ceilingBreach: { reasons: ["daily-budget", "kill-switch"], at: new Date("2026-07-07T00:00:00.000Z") },
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
+  };
+  const out = formatStatus(snapshot);
+  assert.match(out, /kill switch: ACTIVE/);
+  assert.match(out, /ceiling breach: daily-budget, kill-switch \(since 2026-07-07T00:00:00\.000Z\)/);
+});
+
+test("runStatus: exported directly (not just via runCli) for the same result", () => {
+  const r = runStatus(["node", "sapwood", "status", "/tmp/does-not-exist-sapwood-status.sqlite"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /no state DB/);
 });

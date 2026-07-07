@@ -460,11 +460,18 @@ rewrite.** v1 requirements:
   [same-model-trusted]` with an empty `trustedReviewers` is rejected at parse
   (it could never fire). Empty `fallback` (the default) is byte-for-byte the
   pre-#54 behavior: an unavailable primary queues the PR forever, no silent
-  degradation. **Still open:**
-  skills/commands (`/sapwood-run`,
-  `/sapwood-status`, `/sapwood-stop`, supervised "watch one issue" mode), `sapwood`
-  status CLI, first-run trust ramp, docs set, and the **live** merge-gate + kill-switch
-  runs on a real repo (#46 scope 3/4).
+  degradation. **Commands + status CLI + first-run trust ramp delivered
+  (#15, PR TBD):** `sapwood status [db-path]` reads the SQLite state DB directly (no
+  live engine session) and reports active lanes, PRs awaiting the review gate, spend
+  vs. the daily ceiling, and kill-switch state; `sapwood run --dry-run` resolves config
+  and reports what would dispatch this round + a cost preview, spawning nothing and
+  writing no state — the first-run trust ramp's "see before you run" step. Plugin slash
+  commands `/sapwood-run`, `/sapwood-status`, `/sapwood-stop` are thin wrappers in
+  `commands/` that shell out to the CLI (`/sapwood-stop` flips the documented
+  kill-switch file sentinel — see Security model). Supervised "watch one issue" is the
+  existing `--once` mode plus leaving a single issue `Ready` on the board, not a new
+  subsystem. **Still open:** docs set (usage/config guide beyond this plan doc), and
+  the **live** merge-gate + kill-switch runs on a real repo (#46 scope 3/4).
 - **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`

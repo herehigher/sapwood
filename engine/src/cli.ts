@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-// `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) lands here; status/stop
-// and the rest of the command surface are follow-ups.
+// `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
+// landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
+// (/sapwood-run, /sapwood-status, /sapwood-stop) are thin wrappers that shell out to this CLI
+// — see ../../commands/.
 import { createRequire } from "node:module";
 import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
-import { loadConfig, DEFAULT_CONFIG_PATHS } from "./config.js";
+import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.js";
 import { init, InitError } from "./init.js";
-import { State } from "./state.js";
-import { GithubForge } from "./forge.js";
+import { State, type WorkerRow } from "./state.js";
+import { GithubForge, type Issue } from "./forge.js";
 import { WorkerSupervisor } from "./worker.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
@@ -26,6 +28,9 @@ Commands:
   run           Run the engine loop (tick on a fixed cadence)
     --once         Run exactly one tick, then exit (exit 1 if the tick failed)
     --until-idle   Keep ticking until no lanes are in flight, then exit
+    --dry-run      Preview what would be dispatched + a cost estimate, then exit
+                   (no worker spawned, no state written)
+  status [db-path]  Read engine state straight from SQLite (no live session needed)
   validate [path]  Load + validate a sapwood config file, report OK or the issues
 
 Flags:
@@ -47,20 +52,41 @@ Flags:
 `;
 
 const RUN_USAGE = `\
-usage: sapwood run [--once | --until-idle]
+usage: sapwood run [--once | --until-idle | --dry-run]
 
 Run the engine loop: tick (reclaim -> drive -> dispatch) on cfg.engine.tickIntervalSec's cadence.
 
 Flags:
   --once         Run exactly one tick, then exit (exit 1 if the tick attempt failed)
   --until-idle   Keep ticking until no lanes are in flight and nothing dispatches, then exit
+  --dry-run      Resolve config, list the ready issues that WOULD be dispatched this round
+                 and a cost preview (per-worker soft budget x candidate count, daily
+                 ceiling), then exit. Never spawns a worker or writes state — the
+                 first-run trust ramp's "see before you run" step.
   --help, -h     Print this help and exit
 `;
 
 /** Run-subcommand flags the engine path accepts. Anything else must be rejected BEFORE the
  *  engine starts — `sapwood run --bogus` silently starting a daemon that claims issues and
  *  dispatches workers is the exact failure Codex PR #50 flagged (thread on cli.ts:46). */
-const RUN_FLAGS = ["--once", "--until-idle"] as const;
+const RUN_FLAGS = ["--once", "--until-idle", "--dry-run"] as const;
+
+const STATUS_USAGE = `\
+usage: sapwood status [db-path]
+
+Read the engine's SQLite state DB directly (no live engine session required) and print
+a human-readable summary: active lanes/workers, PRs awaiting the review gate, spend vs
+the daily ceiling, and kill-switch state.
+
+Defaults to data/sapwood.sqlite (the same path \`sapwood run\` writes to). Also loads the
+sapwood config (same default probe order as \`validate\`) for lanes.max and the daily cost
+ceiling; a missing config still prints every DB-derived field, with the config-derived
+ones shown as "unknown".
+
+Flags:
+  --config <path>  Load config from this path instead of probing the defaults
+  --help, -h       Print this help and exit
+`;
 
 /** `sapwood validate [path]`: reuses config.ts's own loader (no parsing duplicated here) —
  *  ZodError -> issues one per line, exit 1; anything else (missing/unreadable file, already
@@ -90,6 +116,172 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
   }
 }
 
+// ── #15: `sapwood run --dry-run` — cost preview, no dispatch ────────────────────────────────
+
+/** Preview data for `sapwood run --dry-run`. Deliberately a rough estimate, not a replay of
+ *  conductor.ts's real dispatch loop (priority ordering, meta-floor anti-starvation, in-flight
+ *  dedup, live lane occupancy): this is the first-run trust ramp's "roughly what would happen
+ *  and roughly what it would cost" preview, not a dry-run of the exact tick outcome. Candidate
+ *  count is bounded the same way the round IS bounded (cfg.lanes.roundDispatchCap) — the one
+ *  cap simple enough to reuse here without re-deriving live lane occupancy. */
+export interface DryRunPreview {
+  readyCount: number;
+  candidates: Issue[];
+  perWorkerUsd: number;
+  previewUsd: number;
+  dailyBudgetUsd: number;
+}
+
+/** Pure: no forge/network access, so this is fully unit-testable without mocking `gh`. */
+export function computeDryRunPreview(ready: Issue[], cfg: SapwoodConfig): DryRunPreview {
+  const candidates = ready.slice(0, cfg.lanes.roundDispatchCap);
+  const perWorkerUsd = cfg.worker.budgetUsdSoft;
+  return {
+    readyCount: ready.length,
+    candidates,
+    perWorkerUsd,
+    previewUsd: perWorkerUsd * candidates.length,
+    dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+  };
+}
+
+export function formatDryRunPreview(preview: DryRunPreview): string {
+  const lines = [
+    `sapwood run --dry-run: ${preview.readyCount} ready issue(s), ${preview.candidates.length} candidate(s) this round`,
+    ...preview.candidates.map((i) => `  would dispatch: #${i.number} ${i.title}`),
+    `sapwood run --dry-run: cost preview ~$${preview.previewUsd.toFixed(2)} ` +
+      `(${preview.candidates.length} x $${preview.perWorkerUsd.toFixed(2)} soft budget/worker), ` +
+      `daily ceiling $${preview.dailyBudgetUsd.toFixed(2)}`,
+    "sapwood run --dry-run: no worker dispatched, no state written.",
+  ];
+  return lines.join("\n") + "\n";
+}
+
+async function runDryRun(): Promise<number> {
+  const cfg = loadConfig();
+  const forge = new GithubForge(cfg);
+  const preview = computeDryRunPreview(await forge.getReadyIssues(), cfg);
+  process.stdout.write(formatDryRunPreview(preview));
+  return 0;
+}
+
+// ── #15: `sapwood status` — read the state DB with no live engine session ──────────────────
+
+/** Parsed `sapwood status` args. Pure (no I/O) so the flag/positional handling is unit-testable
+ *  on its own, same split as parseRunStopMode/runCli above. Flat shape (not a discriminated
+ *  union) — `help`/`error` are just checked in order by the caller, same as runValidate does. */
+export interface StatusArgs {
+  help: boolean;
+  error?: string | undefined;
+  dbPath: string;
+  configPath?: string | undefined;
+}
+
+export function parseStatusArgs(argv: string[]): StatusArgs {
+  const args = argv.slice(3);
+  if (args.includes("--help") || args.includes("-h")) {
+    return { help: true, dbPath: "data/sapwood.sqlite" };
+  }
+  const positionals: string[] = [];
+  let configPath: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--config") {
+      configPath = args[i + 1];
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) {
+      return { help: false, error: `unknown flag: ${a}`, dbPath: "data/sapwood.sqlite" };
+    }
+    positionals.push(a);
+  }
+  return { help: false, dbPath: positionals[0] ?? "data/sapwood.sqlite", configPath };
+}
+
+/** Everything `sapwood status` reports, gathered from the DB (+ config, best-effort) — kept
+ *  separate from the DB/config I/O so the actual rendering (formatStatus) is unit-testable
+ *  against hand-built snapshots without a real SQLite file. */
+export interface StatusSnapshot {
+  dbPath: string;
+  schemaVersion: number;
+  active: WorkerRow[]; // running + driving (occupied lanes)
+  driving: WorkerRow[]; // driving lanes: PRs awaiting the review gate
+  killSwitchActive: boolean;
+  ceilingBreach: { reasons: string[]; at: Date } | null;
+  dailySpendUsd: number;
+  /** null when no config could be loaded — reported as "unknown", never a fabricated default. */
+  lanesMax: number | null;
+  dailyBudgetUsd: number | null;
+}
+
+export function formatStatus(s: StatusSnapshot): string {
+  const running = s.active.filter((w) => w.state === "running");
+  const lines: string[] = [
+    `sapwood status — ${s.dbPath} (schema v${s.schemaVersion})`,
+    "",
+    `lanes: ${s.active.length}/${s.lanesMax ?? "unknown"} active ` +
+      `(${running.length} running, ${s.driving.length} driving)`,
+  ];
+  for (const w of s.active) {
+    const pr = w.pr ? `  PR #${w.pr}` : "";
+    lines.push(`  ${w.state.padEnd(8)} ${w.name}   issue #${w.issue}${pr}   started ${w.started_at}`);
+  }
+  lines.push("", `gated PRs (awaiting review gate): ${s.driving.length}`);
+  for (const w of s.driving) {
+    lines.push(`  PR #${w.pr ?? "?"}  issue #${w.issue}  lane ${w.name}`);
+  }
+  const dailyBudget = s.dailyBudgetUsd != null ? `$${s.dailyBudgetUsd.toFixed(2)}` : "unknown (no config found)";
+  lines.push(
+    "",
+    `spend: $${s.dailySpendUsd.toFixed(2)} / ${dailyBudget} daily ceiling`,
+    `kill switch: ${s.killSwitchActive ? "ACTIVE" : "inactive"}`,
+    s.ceilingBreach
+      ? `ceiling breach: ${s.ceilingBreach.reasons.join(", ")} (since ${s.ceilingBreach.at.toISOString()})`
+      : "ceiling breach: none",
+  );
+  return lines.join("\n") + "\n";
+}
+
+/** Fully synchronous (node:sqlite's DatabaseSync + loadConfig are both sync) — like `validate`,
+ *  no async engine-wiring fallthrough needed. Never creates a DB: a missing file means "the
+ *  engine has never run here", reported as such, NOT silently initialized by opening a fresh
+ *  State() (which would create data/ + an empty schema as a side effect of just checking status). */
+export function runStatus(argv: string[]): { stdout: string; stderr: string; code: number } {
+  const parsed = parseStatusArgs(argv);
+  if (parsed.help) return { stdout: STATUS_USAGE, stderr: "", code: 0 };
+  if (parsed.error) {
+    return { stdout: "", stderr: `sapwood status: ${parsed.error}\n\n${STATUS_USAGE}`, code: 1 };
+  }
+  const { dbPath, configPath } = parsed;
+  if (!existsSync(dbPath)) {
+    return { stdout: `sapwood status: no state DB at ${dbPath} — engine has never run\n`, stderr: "", code: 0 };
+  }
+  let cfg: SapwoodConfig | undefined;
+  try {
+    cfg = loadConfig(configPath);
+  } catch {
+    cfg = undefined; // reported as "unknown" fields, never fatal — the DB read is the point
+  }
+  const state = new State(dbPath);
+  try {
+    const snapshot: StatusSnapshot = {
+      dbPath,
+      schemaVersion: state.userVersion(),
+      active: state.activeWorkers(),
+      driving: state.drivingWorkers(),
+      killSwitchActive: state.isKillSwitchActive(),
+      ceilingBreach: state.ceilingBreach(),
+      dailySpendUsd: state.dailySpendUsd(new Date()),
+      lanesMax: cfg?.lanes.max ?? null,
+      dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
+    };
+    return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
+  } finally {
+    state.close();
+  }
+}
+
 export function runCli(argv: string[]): { stdout: string; stderr: string; code: number } {
   const arg = argv[2];
   if (arg === "--version" || arg === "-v") {
@@ -100,6 +292,9 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
   }
   if (arg === "validate") {
     return runValidate(argv);
+  }
+  if (arg === "status") {
+    return runStatus(argv);
   }
   if (arg !== "init" && arg !== "run") {
     return { stdout: "", stderr: USAGE, code: 2 };
@@ -115,6 +310,16 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
     const unknown = flags.filter((f) => !(RUN_FLAGS as readonly string[]).includes(f));
     if (unknown.length > 0) {
       return { stdout: "", stderr: `sapwood run: unknown flag(s): ${unknown.join(" ")}\n\n${RUN_USAGE}`, code: 1 };
+    }
+    // --dry-run is a standalone preview mode — combining it with a real stop mode is almost
+    // certainly a mistake (which one did the caller mean?), so reject rather than silently
+    // picking one (same fail-closed stance as the unknown-flag check above).
+    if (flags.includes("--dry-run") && (flags.includes("--once") || flags.includes("--until-idle"))) {
+      return {
+        stdout: "",
+        stderr: `sapwood run: --dry-run cannot combine with --once/--until-idle\n\n${RUN_USAGE}`,
+        code: 1,
+      };
     }
   }
   // "init"/"run [valid flags]" fall through to the async path — signal caller to proceed
@@ -181,6 +386,8 @@ async function main(argv: string[]): Promise<number> {
   if (code !== -1) return code;
 
   if (argv[2] === "run") {
+    // Validated above (runCli's run-flag block) — a bare presence check is safe here.
+    if (argv.slice(3).includes("--dry-run")) return runDryRun();
     return runEngine(argv);
   }
 
