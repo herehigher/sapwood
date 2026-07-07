@@ -467,8 +467,20 @@ export class WorkerSupervisor implements Supervisor {
     // dead — doesn't forget the request. The in-memory set alone only survives one restart
     // (it's how THIS instance learned to send the SIGTERM); a fresh instance after another
     // restart has an empty set but can still read this field back off disk.
-    const running = this.readJson(this.path(name, "running.json"));
-    if (running) this.writeJsonAtomic(this.path(name, "running.json"), { ...running, handoff_requested: true });
+    //
+    // Best-effort, NEVER throws: requestHandoff is documented on the Supervisor interface as
+    // never throwing, and it's called unguarded from the conductor's CEILING drain loop — a
+    // write failure here (ENOSPC/EACCES/EROFS/...) must not abort a kill-switch/ceiling drain
+    // mid-tick. The in-memory set above already covers this process's lifetime regardless; the
+    // persisted field is purely an enhancement for surviving a SECOND restart, so silently
+    // degrading here (same "best-effort" contract preserveHandoffWip's git push already uses)
+    // is an acceptable trade-off (Codex second-opinion review, PR #67 F1).
+    try {
+      const running = this.readJson(this.path(name, "running.json"));
+      if (running) this.writeJsonAtomic(this.path(name, "running.json"), { ...running, handoff_requested: true });
+    } catch (e) {
+      console.error(`[sapwood:worker] lane ${name}: failed to persist handoff_requested (non-fatal — SIGTERM still sent): ${String(e)}`);
+    }
     return true;
   }
 

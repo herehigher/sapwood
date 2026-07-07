@@ -992,6 +992,44 @@ test("#63: a lane already reclaim()'d must never also be finalized as .handoff, 
   }
 });
 
+test("#63 F1: a failure persisting handoff_requested onto running.json is swallowed — requestHandoff still returns true and the SIGTERM still lands (Codex second-opinion review, PR #67: it's called unguarded from the conductor's CEILING drain loop, which must never abort mid-tick)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const s1 = sup(dir, bin);
+    const { name } = await s1.dispatch({ number: 66, title: "t", labels: [] });
+    await sleep(600); // let bash install its TERM trap
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
+
+    const s2 = sup(dir, bin);
+    // Force the persist write to fail exactly like an ENOSPC/EACCES/EROFS would — stubbing
+    // the private writeJsonAtomic is the most portable way to force this (a chmod-based
+    // fixture would be a no-op when the test runs as root). requestHandoff must swallow it.
+    (s2 as unknown as { writeJsonAtomic: (p: string, obj: unknown) => void }).writeJsonAtomic = () => {
+      throw new Error("simulated disk failure");
+    };
+
+    let result: boolean | undefined;
+    assert.doesNotThrow(() => {
+      result = s2.requestHandoff(name);
+    });
+    assert.equal(result, true, "SIGTERM still gets sent even though the persist write failed");
+
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "SIGTERM reached the detached process despite the persist failure");
+
+    // Confirms this actually exercised the failing write path (not a silent no-op): the field
+    // never landed, because the stubbed writeJsonAtomic threw instead of writing.
+    const running = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8"));
+    assert.notEqual(running.handoff_requested, true);
+
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
