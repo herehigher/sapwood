@@ -170,6 +170,44 @@ test("runDriver: onTick is called once per completed tick with that tick's TickR
   deps.state.close();
 });
 
+// ── Codex PR #50 driver.ts:126: a signal must ABORT the inter-tick sleep, not wait it out ──
+
+test("runDriver: a signal during the inter-tick sleep wakes it immediately — shutdown never waits out the cadence", async () => {
+  // The injected sleep NEVER resolves: if shutdown depended on the sleep completing (the old
+  // behavior — signal only flipped a flag the loop checked after the full await), this test
+  // would hang until the suite timeout. The signal-abort race is the only way out.
+  let stop = () => {};
+  const deps = baseDeps({ sleep: () => new Promise<void>(() => {}) });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.onTick = () => {
+    // Deliver the signal asynchronously, AFTER the loop has entered the inter-tick wait —
+    // modeling a real SIGTERM landing mid-sleep.
+    setTimeout(() => stop(), 10);
+  };
+  const result = await runDriver(deps); // resolves promptly only if the signal aborts the wait
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.ticks, 1); // the completed tick, then an aborted sleep — never a second tick
+  deps.state.close();
+});
+
+test("runDriver: a signal arriving between the post-tick check and the sleep arming still aborts (no missed wake)", async () => {
+  // The injected sleep never resolves; the "signal" fires SYNCHRONOUSLY inside the sleep call
+  // itself — i.e. after the loop's post-tick `if (signalled)` check already passed, in the
+  // narrow window where a wake could be missed. interTickWait's post-arm re-check covers it.
+  let stop = () => {};
+  const deps = baseDeps({
+    sleep: () => {
+      stop(); // signal lands exactly while the wait is being armed
+      return new Promise<void>(() => {});
+    },
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runDriver(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.ticks, 1);
+  deps.state.close();
+});
+
 // ── PR #50 P2 #1: tick() throws are contained — a transient forge blip must not kill the daemon ──
 
 test("runDriver: a tick() throw is contained — logged as a tick-error event, normal-cadence sleep, next tick runs", async () => {

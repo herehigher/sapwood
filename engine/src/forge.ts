@@ -224,7 +224,17 @@ export class GithubForge implements IForge {
   async findOpenPrForIssue(issue: number): Promise<number | null> {
     const out = await this.gh([
       "pr", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--state", "open", "--json", "number,body",
+      // gh's default --limit is 30 (Codex PR #50, forge.ts thread): a worker's PR beyond the
+      // first page would probe hasPr=false and wrongly escalate a completed lane to
+      // needs-human. 200 comfortably covers any repo this loop realistically operates on
+      // (lanes.max caps concurrent PRs in single digits). A targeted `--search "#N"` was
+      // considered and rejected: GitHub's search tokenizer doesn't reliably exact-match
+      // issue-reference tokens (fuzzy hits on similar numbers), which would reintroduce the
+      // ambiguity findOpenPrNumber exists to fail closed on. RESIDUAL: a repo with >200 open
+      // PRs could still hide the target past the page — accepted for v1 trusted repos;
+      // fail direction is the conductor's existing no-PR fail-safe (escalate), never a
+      // wrong-PR merge.
+      "--state", "open", "--limit", "200", "--json", "number,body",
     ]);
     const prs = JSON.parse(out) as { number: number; body?: string }[];
     return findOpenPrNumber(prs.map((p) => ({ number: p.number, body: p.body ?? "" })), issue);

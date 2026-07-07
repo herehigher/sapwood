@@ -28,8 +28,10 @@ export interface DriverDeps extends TickDeps {
    *  for callers with no fixed schedule), the driver itself IS the cadence source — required. */
   tickIntervalSec: number;
   stopMode?: StopMode; // default "forever"
-  /** Injected sleep so tests can drive the loop without real wall-clock waits. Default: a real
-   *  setTimeout-based sleep. */
+  /** Injected sleep so tests can drive the loop without real wall-clock waits. Default: a
+   *  cancelable setTimeout wait. Either way the inter-tick wait is SIGNAL-ABORTABLE — a stop
+   *  signal resolves it immediately rather than waiting out the cadence (see interTickWait in
+   *  runDriver); an injected sleep is raced, not awaited to completion, on shutdown. */
   sleep?: (ms: number) => Promise<void>;
   /** Called once per completed tick with its result (logging/telemetry hook). Never throws back
    *  into the loop — a throwing onTick would be a caller bug, not handled here. */
@@ -51,10 +53,6 @@ export interface DriverResult {
    *  forge is unreachable while the daemon keeps (correctly) retrying. */
   tickErrors: number;
   stoppedBy: StopReason;
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function defaultRegisterSignals(requestStop: () => void): () => void {
@@ -92,12 +90,46 @@ function isIdle(deps: DriverDeps, result: TickResult): boolean {
  * shows up as a growing DriverResult.tickErrors count + event-log trail, not a dead daemon.
  */
 export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
-  const sleep = deps.sleep ?? defaultSleep;
   const stopMode = deps.stopMode ?? "forever";
   let signalled = false;
+  // Wakes an in-progress inter-tick wait (see interTickWait below). Signal-abortable sleep
+  // (Codex PR #50, driver.ts:126 thread): without this, a SIGINT/SIGTERM landing between
+  // ticks would only flip `signalled` and then wait out the FULL cadence before the loop
+  // notices — up to tickIntervalSec of shutdown delay, enough to blow past a service
+  // manager's stop timeout and get SIGKILLed instead of stopping cleanly after the
+  // completed tick. The signal handler resolves the wait immediately instead.
+  let wakeFromSleep: (() => void) | null = null;
   const unregister = (deps.registerSignals ?? defaultRegisterSignals)(() => {
     signalled = true;
+    wakeFromSleep?.();
   });
+  /** The inter-tick wait: resolves after `ms` OR immediately on a stop signal, whichever is
+   *  first. With the default timer the signal path also clears the timeout (no stray timer
+   *  holding the event loop); with an injected test sleep the signal races it (the injected
+   *  promise may still settle later — its resolution is then a no-op). */
+  const interTickWait = (ms: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        wakeFromSleep = null;
+        resolve();
+      };
+      if (deps.sleep) {
+        wakeFromSleep = finish;
+        void deps.sleep(ms).then(finish);
+      } else {
+        const t = setTimeout(finish, ms);
+        wakeFromSleep = () => {
+          clearTimeout(t);
+          finish();
+        };
+      }
+      // A signal that arrived after the pre-sleep check but before this wait was armed must
+      // not sleep at all — it already missed its wake call.
+      if (signalled) wakeFromSleep?.();
+    });
   try {
     let ticks = 0;
     let tickErrors = 0;
@@ -123,7 +155,7 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
       if (stopMode === "until-idle" && result && isIdle(deps, result)) {
         return { ticks, tickErrors, stoppedBy: "idle" };
       }
-      await sleep(deps.tickIntervalSec * 1000);
+      await interTickWait(deps.tickIntervalSec * 1000);
       if (signalled) return { ticks, tickErrors, stoppedBy: "signal" };
     }
   } finally {

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ConfigSchema } from "./config.js";
 import {
+  GithubForge,
   parsePRStatus,
   parseProject,
   selectReadyIssues,
@@ -216,6 +218,29 @@ test("findOpenPrNumber: several closing-keyword matches -> the OLDEST wins (the 
 test("findOpenPrNumber: multiple bare-mention-only candidates are ambiguous -> null (queued, never a guessed merge target)", () => {
   const prs = [{ number: 20, body: "Part of #46" }, { number: 21, body: "Part of #46" }];
   assert.equal(findOpenPrNumber(prs, 46), null);
+});
+
+test("findOpenPrForIssue: passes an explicit high --limit (gh's default 30 would drop later PRs) and finds a PR past the 30th (Codex PR #50)", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  // 40 open PRs, newest-first; the ONLY match ("Fixes #46") is the 35th — a page gh's default
+  // --limit 30 would drop, making probe() report hasPr=false and wrongly escalate the lane.
+  const prs = Array.from({ length: 40 }, (_, i) => ({
+    number: 100 - i,
+    body: i === 34 ? "Fixes #46" : `unrelated PR body ${i}`,
+  }));
+  // Stub the one gh choke point (instance property shadows the private prototype method) —
+  // no real gh call; we assert on the exact argv findOpenPrForIssue builds.
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify(prs);
+  };
+  assert.equal(await forge.findOpenPrForIssue(46), 100 - 34); // the 35th PR is found, not dropped
+  assert.equal(seen.length, 1);
+  const limitIdx = seen[0]!.indexOf("--limit");
+  assert.ok(limitIdx >= 0, "an explicit --limit is passed (never gh's default 30)");
+  assert.ok(Number(seen[0]![limitIdx + 1]) >= 200, "limit is high enough to cover deep PR lists");
 });
 
 test("projectQuery: no line is a // comment (GraphQL uses #, not //) — Codex R5 P1 guard", () => {
