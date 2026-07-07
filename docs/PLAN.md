@@ -279,7 +279,12 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   file sentinel** in the engine's own data dir (human `touch`/`rm`; workers have no
   write path) freezes all new dispatch, sends running workers the graceful
   `requestHandoff()` drain, and only after the bounded `drainWindowSec` escalates to
-  process-tree kill + needs-human. The per-worker *soft* budget stays a graceful
+  process-tree kill + needs-human. It also halts the DRIVE phase's review-gate/merge
+  loop (#59/#61): every driving lane and every ready-issue dispatch iteration re-checks
+  the sentinel fresh (not just once per tick), so an operator's stop takes effect
+  mid-tick too — a lane already through gate①/gate② holds queued instead of
+  autonomously merging, and a later ready issue in the same DISPATCH pass is skipped
+  rather than launching a new worker. The per-worker *soft* budget stays a graceful
   handoff, never a mid-work kill (#33, still open — needs a live cost signal).
 - **Cost telemetry (#47)** — `spend_ledger` also records model id + categorized token
   usage (input/output/cache-read/cache-creation) per (lane, model), parsed from the
@@ -484,7 +489,8 @@ rewrite.** v1 requirements:
   sentinel + progress note, exits clean; the Conductor classifies it resumable and
   `--resume` continues from the pushed state with no lost work.
 - **Hard cost ceiling:** breach the cumulative cap mid-run → auto-drain (in-flight
-  workers hand off); kill switch halts dispatch independent of conductor liveness.
+  workers hand off); kill switch halts dispatch **and** the DRIVE/merge-gate loop
+  (no new dispatch, no autonomous merges), independent of conductor liveness.
 - **Readiness gate:** an issue with no verification plan is refused by `getReadyIssues`
   (never dispatched); one labelled `verify:n/a` passes via the doc-gate path.
 - **Onboarding:** missing `project` scope → clear actionable message, no partial board.

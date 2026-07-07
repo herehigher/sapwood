@@ -62,6 +62,11 @@ export function budgetExceeded(total: number, cap: number): boolean {
 // plus an out-of-band kill switch (a file sentinel only the engine can write — see
 // State.isKillSwitchActive). Any one of the three freezes ALL new dispatch and starts a
 // bounded drain (graceful handoff of running workers) before escalating to a hard kill.
+// #59/#61: the kill switch ALSO freezes the DRIVE loop's review-gate/merge path (below,
+// in tick()) — a lane already past gate①/gate② holds `queued` instead of autonomously
+// merging, and this is checked fresh per driving lane / per dispatched issue (not just
+// once per tick via this section's ceilingBreached snapshot), so the switch takes effect
+// mid-tick, not only on the next tick.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
@@ -530,6 +535,25 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const gate = deps.mergeGate;
   if (gate) {
     for (const w of state.drivingWorkers()) {
+      // #59: the kill switch is a hard "stop ALL outward autonomous action" signal, not just a
+      // dispatch freeze. Re-read it FRESH on every iteration (not once before the loop) —
+      // gate.driveOne below does real async GitHub work (CI status, review verdicts, the merge
+      // call itself), so a single DRIVE phase iterating several driving lanes can span real
+      // wall-clock time. An operator dropping the sentinel mid-loop must stop lanes processed
+      // LATER in this same pass too, not just the next tick. It's a cheap sync file-existence
+      // check (see isKillSwitchActive), so per-lane cost is a non-issue — Codex review on PR
+      // #61 caught both this staleness gap and, separately, that the check needs to run BEFORE
+      // the missing-PR fail-safe just past this branch (it calls forge.addLabel + marks the
+      // worker failed, itself an outward action under a stop signal).
+      if (state.isKillSwitchActive()) {
+        // `pr` falls back to -1 for a malformed/legacy lane with no PR number, matching the
+        // sentinel the missing-PR fail-safe below already uses. Every driving lane — PR or not —
+        // just queues and holds driving, resuming normal driving/merging once the switch clears.
+        const pr = w.pr ?? -1;
+        state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
+        driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
+        continue;
+      }
       if (w.pr == null) {
         // Fail-safe: a driving lane MUST carry a PR number (set at the reclaim transition
         // above) to be driven through gates. Its absence here (only checked once a mergeGate
@@ -681,6 +705,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         dispatched.push({ kind: "skipped", issue: issue.number, reason: "meta-floor" });
         continue;
       }
+    }
+    // #61 F1 (independent second-opinion review, issue #64 filed for a separate follow-up):
+    // the DISPATCH loop has the same staleness gap the DRIVE loop was fixed for above.
+    // forge.claimIssue (board mutation) and supervisor.dispatch just below are real async
+    // outward actions — dispatch spawns a brand-new autonomous worker process, and multiple
+    // issues can dispatch in one tick (up to roundDispatchCap). The `ceilingBreached` snapshot
+    // above only catches a kill switch already set when DISPATCH started; re-read fresh here,
+    // immediately before the outward actions, so a switch dropped mid-loop still stops issues
+    // reached later in this same pass instead of letting them dispatch anyway.
+    if (state.isKillSwitchActive()) {
+      dispatched.push({ kind: "skipped", issue: issue.number, reason: "ceiling" });
+      continue;
     }
     // Claim BEFORE launching (matches 0day claim_issue.sh order). The board transition
     // takes the issue out of the Ready lane first, so a launch failure can't leave an
