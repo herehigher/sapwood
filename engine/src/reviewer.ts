@@ -79,6 +79,11 @@ export function changesRequestedOnHead(reviews: PRReview[], headOid: string, prA
 export interface ReviewSignals {
   hasEyesReaction: boolean;
   freshApprovingReviews: number;
+  /** Fresh `+1` reactions from TRUSTED reviewer logins only (see verdictFrom): Codex's
+   *  "done, no findings" verdict often arrives as comment+👍 with NO formal review object —
+   *  the live #46 run wedged at WAIT_REVIEW because this signal wasn't wired (the ported
+   *  freshThumbCount helper existed but nothing consumed it). */
+  freshTrustedThumbs: number;
   unresolvedThreads: number;
   /** A standing CHANGES_REQUESTED on the current head (see changesRequestedOnHead). */
   changesRequestedOnHead: boolean;
@@ -93,7 +98,7 @@ export interface ReviewSignals {
  */
 export function deriveReviewAction(s: ReviewSignals): ReviewAction {
   if (s.unresolvedThreads > 0 || s.changesRequestedOnHead) return "HANDLE_THREADS";
-  if (s.freshApprovingReviews > 0) return "MERGE_OK";
+  if (s.freshApprovingReviews > 0 || s.freshTrustedThumbs > 0) return "MERGE_OK";
   return "WAIT_REVIEW"; // covers both "👀 in progress" and "nothing yet" — both mean keep polling
 }
 
@@ -147,16 +152,32 @@ export function buildReviewTriggerComment(issue: number, planText: string | null
  * change request from ANYONE blocks (changesRequestedOnHead reads all reviews), and unresolved
  * threads always block — the filter can only shrink what approves, never what blocks.
  */
+/**
+ * Trusted-thumb verdict signal: `+1` reactions count ONLY when (a) the reacting login passes
+ * the same identity filter as countable reviews (a random account's 👍 must never satisfy
+ * gate② — same P1 class as PR #42's reviewer-identity finding), and (b) the reaction is newer
+ * than the CURRENT head commit's own timestamp (reactions aren't commit-pinned like reviews,
+ * so a push invalidates all prior thumbs — the stale-review rule, transposed). No
+ * headCommittedAt in the data ⇒ 0, fail-closed.
+ */
+function freshTrustedThumbCount(data: PRReviewData, trustedLogin?: (login: string) => boolean): number {
+  if (!trustedLogin || !data.headCommittedAt) return 0;
+  const trusted = data.reactions.filter((r) => trustedLogin(normalizeLogin(r.login)));
+  return freshThumbCount(trusted, data.headCommittedAt);
+}
+
 function verdictFrom(
   data: PRReviewData,
   acceptStates: readonly string[],
   countableReview?: (r: PRReview) => boolean,
+  trustedReactionLogin?: (login: string) => boolean,
 ): ReviewVerdict {
   const countable = countableReview ? data.reviews.filter(countableReview) : data.reviews;
   const fresh = freshHeadReviewCount(countable, data.headOid, data.author, acceptStates);
   const action = deriveReviewAction({
     hasEyesReaction: data.reactions.some((r) => r.content === "eyes"),
     freshApprovingReviews: fresh,
+    freshTrustedThumbs: freshTrustedThumbCount(data, trustedReactionLogin),
     unresolvedThreads: data.unresolvedThreads,
     changesRequestedOnHead: changesRequestedOnHead(data.reviews, data.headOid, data.author),
   });
@@ -189,7 +210,8 @@ export class CodexReviewer implements Reviewer {
   }
 
   verdictFromData(data: PRReviewData): ReviewVerdict {
-    return verdictFrom(data, CodexReviewer.ACCEPT, (r) => this.allowedLogins.includes(normalizeLogin(r.author)));
+    const trusted = (login: string) => this.allowedLogins.includes(login);
+    return verdictFrom(data, CodexReviewer.ACCEPT, (r) => trusted(normalizeLogin(r.author)), trusted);
   }
 }
 
@@ -228,7 +250,8 @@ export class SameModelTrustedReviewer implements Reviewer {
     const trusted = this.trustedLogins.map(normalizeLogin);
     // Filter what can APPROVE only — blocking signals (change requests, threads) intentionally
     // still see every review (verdictFrom's contract).
-    return verdictFrom(data, SameModelTrustedReviewer.ACCEPT, (r) => trusted.includes(normalizeLogin(r.author)));
+    // Thumbs count here too, from the same trusted list — mode symmetry with CodexReviewer.
+    return verdictFrom(data, SameModelTrustedReviewer.ACCEPT, (r) => trusted.includes(normalizeLogin(r.author)), (l) => trusted.includes(l));
   }
 }
 

@@ -69,32 +69,32 @@ test("freshHeadReviewCount: acceptStates restricts which states count (human rev
 
 test("deriveReviewAction: unresolved threads outrank a fresh approving review (findings first)", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 2, changesRequestedOnHead: false }),
+    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 2, changesRequestedOnHead: false }),
     "HANDLE_THREADS",
   );
 });
 
 test("deriveReviewAction: a standing change request outranks a fresh approving review (Codex PR #42 P1)", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: true }),
+    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: true }),
     "HANDLE_THREADS",
   );
 });
 
 test("deriveReviewAction: a fresh approving review with no threads -> MERGE_OK", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "MERGE_OK",
   );
 });
 
 test("deriveReviewAction: nothing yet (no review, no eyes) -> WAIT_REVIEW, never a silent MERGE_OK", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "WAIT_REVIEW",
   );
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: true, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({ hasEyesReaction: true, freshTrustedThumbs: 0, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "WAIT_REVIEW",
   );
 });
@@ -193,6 +193,65 @@ test("CodexReviewer: cfg trustedReviewers EXTENDS the allowlist (never replaces 
   assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("extra-trusted-bot", "HEAD", "COMMENTED")] })).action, "MERGE_OK");
   assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("chatgpt-codex-connector", "HEAD", "COMMENTED")] })).action, "MERGE_OK");
   assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("still-random", "HEAD", "COMMENTED")] })).action, "WAIT_REVIEW");
+});
+
+// ── Thumb (👍) verdicts — the live #46 wedge: Codex's clean verdict is comment+reaction, NO
+// formal review object; the engine sat at WAIT_REVIEW forever until this path was wired. ──
+
+const THUMB_HEAD_TIME = "2026-07-07T07:40:00Z"; // current head's commit time (the pin)
+
+test("CodexReviewer: comment+👍 verdict (NO formal review) -> MERGE_OK — the live #46 wedge shape", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    headCommittedAt: THUMB_HEAD_TIME,
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.deepEqual(r.verdictFromData(data), { action: "MERGE_OK", headOid: "HEAD" });
+});
+
+test("CodexReviewer: a RANDOM account's 👍 never satisfies gate② (identity is part of the gate)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    headCommittedAt: THUMB_HEAD_TIME,
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "random-account" }],
+  });
+  assert.equal(r.verdictFromData(data).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: a 👍 OLDER than the current head commit is stale — a push invalidates thumbs", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    headCommittedAt: THUMB_HEAD_TIME,
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:39:59Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: no headCommittedAt in the data -> thumbs never count (fail-closed)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: unresolved threads outrank a fresh trusted 👍 (findings first)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    headCommittedAt: THUMB_HEAD_TIME,
+    unresolvedThreads: 1,
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data).action, "HANDLE_THREADS");
+});
+
+test("HumanReviewer: thumbs do NOT satisfy gate② in human mode (approval = a real review)", () => {
+  const r = new HumanReviewer();
+  const data = mkData({
+    headCommittedAt: THUMB_HEAD_TIME,
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "some-human" }],
+  });
+  assert.equal(r.verdictFromData(data).action, "WAIT_REVIEW");
 });
 
 test("CodexReviewer: approve-then-CHANGES_REQUESTED on the same head blocks — never MERGE_OK (Codex PR #42 P1)", () => {

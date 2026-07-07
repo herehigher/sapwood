@@ -461,6 +461,26 @@ test("parsePRReviewView: absent labels/reviews arrays default to empty (no crash
   assert.equal(v.author, "");
 });
 
+test("parsePRReviewView: headCommittedAt comes from the commit matching headRefOid", () => {
+  const v = parsePRReviewView(
+    JSON.stringify({
+      headRefOid: "H2", updatedAt: "t", isDraft: false, state: "OPEN",
+      commits: [{ oid: "H1", committedDate: "2026-07-07T07:00:00Z" }, { oid: "H2", committedDate: "2026-07-07T07:40:00Z" }],
+    }),
+  );
+  assert.equal(v.headCommittedAt, "2026-07-07T07:40:00Z");
+});
+
+test("parsePRReviewView: truncated commit list (head not present) -> NO headCommittedAt (fail-closed pin)", () => {
+  const v = parsePRReviewView(
+    JSON.stringify({
+      headRefOid: "H99", updatedAt: "t", isDraft: false, state: "OPEN",
+      commits: [{ oid: "H1", committedDate: "2026-07-07T07:00:00Z" }],
+    }),
+  );
+  assert.equal(v.headCommittedAt, undefined);
+});
+
 test("parsePRReactions: maps GitHub reaction rows to {content, createdAt, login}", () => {
   const r = parsePRReactions(
     JSON.stringify([
