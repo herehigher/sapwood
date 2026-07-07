@@ -101,6 +101,20 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       );
     `);
   },
+  // 4 -> 5: cost telemetry (#47) — model + categorized token usage alongside the existing USD
+  // figure. Extends spend_ledger in place (not a companion table): one row per (lane, model)
+  // keeps the daily-cap query (`SUM(usd) FROM spend_ledger WHERE ts LIKE ...`) untouched — it
+  // doesn't care about the extra columns. ADD COLUMN...NOT NULL DEFAULT backfills every
+  // pre-#47 row with model='unknown' and 0 tokens (accurate: we never captured that for them).
+  (db) => {
+    db.exec(`
+      ALTER TABLE spend_ledger ADD COLUMN model TEXT NOT NULL DEFAULT 'unknown';
+      ALTER TABLE spend_ledger ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE spend_ledger ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE spend_ledger ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE spend_ledger ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -130,6 +144,23 @@ export interface WorkerRow {
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
  *  import just for a 3-string union). Must stay in lockstep with IForge.setBoardStatus. */
 export type BoardStatus = "ready" | "inProgress" | "done";
+
+/** Categorized token counts from a stream-json result's `usage` block (#47). Always present
+ *  and non-negative — a missing/malformed source field is normalized to 0, never omitted. */
+export interface CategorizedTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+}
+
+/** One model's token usage for a lane (#47). worker.ts parses this from the stream-json
+ *  result's `modelUsage` map (or, when absent, attributes the flat `usage` block to the
+ *  session's reported model id — see worker.ts parseModelUsage). `model` is "unknown" only
+ *  when the CLI gave no model identifier at all. */
+export interface ModelUsageEntry extends CategorizedTokenUsage {
+  model: string;
+}
 
 /** A durably-persisted recovery-path board mutation still awaiting success or escalation
  *  (#31 — see the schema v3->v4 migration comment for the double-failure window this closes). */
@@ -249,12 +280,32 @@ export class State {
    *  Clamped at this single choke point: the safety accumulator can only GROW. A negative or
    *  non-finite total_cost_usd (corrupt jsonl, bad parse) must never SUBTRACT from the daily
    *  sum and erode the hard cap (gate② PR #41 P3 — defense-in-depth; no worker-reachable
-   *  write path is known, since workers get no --add-dir data). */
-  recordSpend(worker: string, issue: number, usd: number, at: string): void {
+   *  write path is known, since workers get no --add-dir data).
+   *
+   *  #47: `models` is one row per (lane, model) — usually a single entry (the common case:
+   *  one worker, one model for the whole run). The full clamped `usd` is recorded on the
+   *  FIRST row only; any additional model rows (a fallback-model mid-run switch) get usd=0.
+   *  stream-json's modelUsage map does not reliably carry a per-model cost breakdown across
+   *  CLI versions, so rather than fabricate a split this keeps `SUM(usd)` for the lane exactly
+   *  equal to the previous single-row behavior (the existing daily-cap query is untouched) —
+   *  token counts are still recorded per model either way. Omitted/empty `models` -> one
+   *  'unknown' row with 0 tokens, matching every pre-#47 row's shape. */
+  recordSpend(worker: string, issue: number, usd: number, at: string, models: ModelUsageEntry[] = []): void {
     const safeUsd = Number.isFinite(usd) && usd > 0 ? usd : 0;
-    this.db
-      .prepare("INSERT INTO spend_ledger (ts, worker, issue, usd) VALUES (?, ?, ?, ?)")
-      .run(at, worker, issue, safeUsd);
+    const rows = models.length > 0 ? models : [{ model: "unknown", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }];
+    const safeInt = (n: number): number => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+    const stmt = this.db.prepare(
+      `INSERT INTO spend_ledger
+         (ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    rows.forEach((m, i) => {
+      stmt.run(
+        at, worker, issue, i === 0 ? safeUsd : 0,
+        m.model || "unknown", safeInt(m.inputTokens), safeInt(m.outputTokens),
+        safeInt(m.cacheReadTokens), safeInt(m.cacheCreationTokens),
+      );
+    });
   }
 
   /** Cumulative spend for `now`'s UTC calendar day (spend_ledger sum, ts-prefix match). */

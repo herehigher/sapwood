@@ -13,7 +13,7 @@
 //    (conductor identity), never a worker. The worker is only ever the injected dispatch fn.
 
 import type { IForge, Issue } from "./forge.js";
-import type { State, BoardStatus, PendingRollback } from "./state.js";
+import type { State, BoardStatus, PendingRollback, ModelUsageEntry } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { DriveOutcome } from "./merge-driver.js";
 
@@ -230,6 +230,10 @@ export interface LaneProbe {
    *  or if unknown (e.g. a DEAD lane with no sentinel). Optional for probe fixtures that
    *  predate #14 — treated as 0. */
   costUsd?: number;
+  /** Terminal per-model token usage (stream-json `usage`/`modelUsage`, #47), once
+   *  done/failed/handoff; empty while still running or if unknown. Optional for probe
+   *  fixtures that predate #47 — treated as []. */
+  modelUsage?: ModelUsageEntry[];
 }
 
 /** The conductor's only handle on workers. worker.ts (M2 #11) implements this. */
@@ -261,12 +265,21 @@ export type DrivenOutcome =
   | { kind: "queued"; worker: string; issue: number; pr: number; reason: string }
   | { kind: "stopped"; worker: string; issue: number; pr: number; reason: string };
 
+// #47: every TERMINAL reclaim outcome carries the same {costUsd, modelUsage} the tick just
+// recorded into spend_ledger for that lane — groundwork for the #15 `status --cost` table and
+// the v0.2 dashboard, without a separate query. "kept" (still running) has neither: stream-json
+// carries no in-progress cost/usage (only the terminal result line does).
+interface TerminalSpend {
+  costUsd: number;
+  modelUsage: ModelUsageEntry[];
+}
+
 export type ReclaimOutcome =
   | { kind: "kept"; worker: string; issue: number }
-  | { kind: "done"; worker: string; issue: number; next: ReclaimDone }
-  | { kind: "failed"; worker: string; issue: number; next: ReclaimFailed }
-  | { kind: "handoff"; worker: string; issue: number }
-  | { kind: "dead"; worker: string; issue: number; rescued: boolean };
+  | ({ kind: "done"; worker: string; issue: number; next: ReclaimDone } & TerminalSpend)
+  | ({ kind: "failed"; worker: string; issue: number; next: ReclaimFailed } & TerminalSpend)
+  | ({ kind: "handoff"; worker: string; issue: number } & TerminalSpend)
+  | ({ kind: "dead"; worker: string; issue: number; rescued: boolean } & TerminalSpend);
 
 export type DispatchOutcome =
   | { kind: "dispatched"; issue: number; worker: string }
@@ -413,6 +426,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // ── RECLAIM: classify each in-flight lane from its 4 completion signals ──
   for (const w of state.runningWorkers()) {
     const p = await supervisor.probe(w.name);
+    // #47: the same {costUsd, modelUsage} pair feeds BOTH state.recordSpend (the #14 ledger)
+    // and the reclaimed[] outcome pushed below, for every terminal transition this loop can
+    // take (handoff/done/failed/dead) — computed once so the two never drift apart.
+    const costUsd = p.costUsd ?? 0;
+    const modelUsage = p.modelUsage ?? [];
     if (p.handoff) {
       // Soft-budget graceful handoff: terminal-but-resumable. Never killed; the conductor
       // may --resume later. Checked before classifyLane (a handoff is not a failure).
@@ -423,9 +441,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // its terminal transition double-counts the pre-handoff portion — fail-SAFE for the
       // cap (over-counts) but corrupts accounting. Whoever wires --resume (M4) must record
       // the delta, or verify claude's resume cost semantics first.
-      state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
+      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
       state.appendEvent("handoff", { worker: w.name, issue: w.issue });
-      reclaimed.push({ kind: "handoff", worker: w.name, issue: w.issue });
+      reclaimed.push({ kind: "handoff", worker: w.name, issue: w.issue, costUsd, modelUsage });
       continue;
     }
     const cls = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive);
@@ -444,9 +462,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       // Completed-run cost becomes known exactly once, here — record it into the #14
       // engine-ceiling ledger regardless of which branch (DRIVING or ESCALATE_NOPR) fired.
-      state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
+      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
       state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next });
-      reclaimed.push({ kind: "done", worker: w.name, issue: w.issue, next });
+      reclaimed.push({ kind: "done", worker: w.name, issue: w.issue, next, costUsd, modelUsage });
     } else if (cls === "FAILED") {
       const next = laneOnReclaimFailed(p.hasPr);
       if (next === "DRIVING") {
@@ -457,9 +475,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
         await forge.addLabel(w.issue, cfg.labels.needsHuman);
       }
-      state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
+      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
       state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next });
-      reclaimed.push({ kind: "failed", worker: w.name, issue: w.issue, next });
+      reclaimed.push({ kind: "failed", worker: w.name, issue: w.issue, next, costUsd, modelUsage });
     } else {
       // DEAD: stale heartbeat or confirmed-dead wrapper with no sentinel. Always tear the
       // lane down (process-tree kill + cleanup). If a PR was already opened, rescue it to
@@ -489,9 +507,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       // Usually 0 (a DEAD lane has no terminal sentinel to parse a cost from) but record
       // whatever the probe knows — harmless, and future probes may recover a partial cost.
-      state.recordSpend(w.name, w.issue, p.costUsd ?? 0, iso());
+      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
       state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
-      reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued });
+      reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
     }
   }
 

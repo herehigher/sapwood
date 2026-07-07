@@ -15,7 +15,14 @@ export {
   type PRReaction,
   type PRReviewData,
 } from "./forge.js";
-export { State, SCHEMA_VERSION, type WorkerRow, type WorkerState } from "./state.js";
+export {
+  State,
+  SCHEMA_VERSION,
+  type WorkerRow,
+  type WorkerState,
+  type ModelUsageEntry,
+  type CategorizedTokenUsage,
+} from "./state.js";
 export {
   tick,
   orderForDispatch,
@@ -72,6 +79,7 @@ export {
 export {
   WorkerSupervisor,
   parseCostUsd,
+  parseModelUsage,
   discoverClaudeBin,
   claudeArgs,
   guardSettings,

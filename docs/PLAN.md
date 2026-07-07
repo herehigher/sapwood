@@ -281,6 +281,11 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   `requestHandoff()` drain, and only after the bounded `drainWindowSec` escalates to
   process-tree kill + needs-human. The per-worker *soft* budget stays a graceful
   handoff, never a mid-work kill (#33, still open — needs a live cost signal).
+- **Cost telemetry (#47)** — `spend_ledger` also records model id + categorized token
+  usage (input/output/cache-read/cache-creation) per (lane, model), parsed from the
+  same stream-json result the USD figure already came from. The ledger records
+  **loop/worker spend only** — Codex-review and human-session usage happen outside
+  stream-json and are not captured here.
 - **Guard boundary extended (#43)** — the merge path is now inside the worker-unwritable
   boundary: `merge-driver.ts` source and the *running* `engine/dist/reviewer.js` /
   `merge-driver.js` artifacts (same vector class as the guard artifact, closed in #26 R3).

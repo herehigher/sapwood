@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { State, SCHEMA_VERSION } from "./state.js";
+import { DatabaseSync } from "node:sqlite";
+import { State, SCHEMA_VERSION, type ModelUsageEntry } from "./state.js";
 
 // In-memory DB keeps tests hermetic (no disk, no cleanup). WAL pragma is a no-op on
 // :memory: but the migration/version logic is identical.
@@ -279,6 +280,126 @@ test("pending_rollbacks persists across close/reopen (an engine restart mid-reco
     assert.equal(rows[0]?.issue, 9);
     assert.equal(rows[0]?.reason, "dead-lane-requeue");
     assert.equal(rows[0]?.attempts, 0);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #47: cost telemetry — model + categorized token usage in spend_ledger ─────────────────
+
+/** Raw spend_ledger rows for a worker, read via a second connection (WAL allows concurrent
+ *  reads) — asserts the on-disk columns directly rather than adding a State query method
+ *  purely for test introspection. */
+function rawSpendRows(path: string, worker: string): Array<{
+  usd: number; model: string; input_tokens: number; output_tokens: number;
+  cache_read_tokens: number; cache_creation_tokens: number;
+}> {
+  const raw = new DatabaseSync(path);
+  try {
+    return raw.prepare("SELECT * FROM spend_ledger WHERE worker = ? ORDER BY id").all(worker) as unknown as Array<{
+      usd: number; model: string; input_tokens: number; output_tokens: number;
+      cache_read_tokens: number; cache_creation_tokens: number;
+    }>;
+  } finally {
+    raw.close();
+  }
+}
+
+test("schema v5 adds model + token columns to spend_ledger (#47)", () => {
+  const s = mem();
+  assert.ok(SCHEMA_VERSION >= 5);
+  assert.equal(s.userVersion(), SCHEMA_VERSION);
+  s.close();
+});
+
+test("recordSpend: omitted models -> single 'unknown' row with 0 tokens (pre-#47 callers unaffected)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s = new State(path);
+    s.recordSpend("lane-a", 1, 5, "2026-07-06T00:00:00.000Z"); // no 5th arg — legacy call shape
+    const rows = rawSpendRows(path, "lane-a");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.usd, 5);
+    assert.equal(rows[0]?.model, "unknown");
+    assert.equal(rows[0]?.input_tokens, 0);
+    assert.equal(rows[0]?.output_tokens, 0);
+    assert.equal(rows[0]?.cache_read_tokens, 0);
+    assert.equal(rows[0]?.cache_creation_tokens, 0);
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recordSpend: one row per model, full usd on the first row, 0 on the rest — daily-cap SUM unaffected", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s = new State(path);
+    const models: ModelUsageEntry[] = [
+      { model: "claude-opus-4-6", inputTokens: 100, outputTokens: 200, cacheReadTokens: 30, cacheCreationTokens: 10 },
+      { model: "claude-sonnet-4-6", inputTokens: 5, outputTokens: 7, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    ];
+    s.recordSpend("lane-multi", 1, 12.5, "2026-07-06T00:00:00.000Z", models);
+    const rows = rawSpendRows(path, "lane-multi");
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0]?.model, "claude-opus-4-6");
+    assert.equal(rows[0]?.usd, 12.5);
+    assert.equal(rows[0]?.input_tokens, 100);
+    assert.equal(rows[0]?.cache_read_tokens, 30);
+    assert.equal(rows[1]?.model, "claude-sonnet-4-6");
+    assert.equal(rows[1]?.usd, 0); // no fabricated per-model split — the total lands on row 0
+    assert.equal(rows[1]?.output_tokens, 7);
+    // The existing daily-cap query is a straight SUM(usd) — untouched by the extra rows/columns.
+    assert.equal(s.dailySpendUsd(new Date("2026-07-06T12:00:00Z")), 12.5);
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recordSpend: negative/non-finite token counts clamp to 0 (same defense-in-depth as usd)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s = new State(path);
+    s.recordSpend("lane-bad", 1, 1, "2026-07-06T00:00:00.000Z", [
+      { model: "m", inputTokens: -5, outputTokens: NaN, cacheReadTokens: Infinity, cacheCreationTokens: 3.9 },
+    ]);
+    const rows = rawSpendRows(path, "lane-bad");
+    assert.equal(rows[0]?.input_tokens, 0);
+    assert.equal(rows[0]?.output_tokens, 0);
+    assert.equal(rows[0]?.cache_read_tokens, 0);
+    assert.equal(rows[0]?.cache_creation_tokens, 3); // floored, not rounded
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("spend_ledger model/token columns persist across close/reopen (schema-migration + data survive an engine restart)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s1 = new State(path);
+    s1.recordSpend("lane-a", 1, 8, "2026-07-06T00:00:00.000Z", [
+      { model: "claude-sonnet-4-6", inputTokens: 40, outputTokens: 60, cacheReadTokens: 15, cacheCreationTokens: 5 },
+    ]);
+    s1.close();
+
+    const s2 = new State(path); // re-migrating an already-current DB must be a no-op (idempotent)
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    const rows = rawSpendRows(path, "lane-a");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.model, "claude-sonnet-4-6");
+    assert.equal(rows[0]?.usd, 8);
+    assert.equal(rows[0]?.input_tokens, 40);
+    assert.equal(rows[0]?.output_tokens, 60);
+    assert.equal(rows[0]?.cache_read_tokens, 15);
+    assert.equal(rows[0]?.cache_creation_tokens, 5);
+    assert.equal(s2.dailySpendUsd(new Date("2026-07-06T12:00:00Z")), 8);
     s2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

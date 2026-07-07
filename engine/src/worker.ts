@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
 import type { Supervisor, LaneProbe } from "./conductor.js";
+import type { ModelUsageEntry } from "./state.js";
 
 /** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). */
 export function parseCostUsd(jsonl: string): number {
@@ -39,6 +40,62 @@ export function parseCostUsd(jsonl: string): number {
   }
   return cost;
 }
+
+/** Per-model token usage from the last stream-json result line (#47). Mirrors parseCostUsd's
+ *  tolerance exactly: a missing result line, a malformed `usage`/`modelUsage`, or a garbage
+ *  line never throws — it just yields zeros. Cost accounting (parseCostUsd) must keep working
+ *  on ANY CLI version regardless of what this function finds.
+ *
+ *  Prefers the newer CLI's per-model `modelUsage` map. When that's absent, falls back to
+ *  attributing the flat top-level `usage` block to the session's reported model id
+ *  (`model` or `modelName` on the result object) — or "unknown" if neither is present. */
+export function parseModelUsage(jsonl: string): ModelUsageEntry[] {
+  let usage: ModelUsageEntry[] = [];
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      const obj = JSON.parse(t) as Record<string, unknown>;
+      if (obj.type === "result") usage = extractModelUsage(obj);
+    } catch {
+      // partial/garbage line — ignore (stream may be mid-write)
+    }
+  }
+  return usage;
+}
+
+function extractModelUsage(obj: Record<string, unknown>): ModelUsageEntry[] {
+  const modelUsage = obj.modelUsage;
+  if (modelUsage && typeof modelUsage === "object" && !Array.isArray(modelUsage)) {
+    const entries = Object.entries(modelUsage as Record<string, unknown>)
+      .filter(([model]) => typeof model === "string" && model.length > 0)
+      .map(([model, u]) => ({ model, ...toCategorized(u) }));
+    if (entries.length > 0) return entries;
+  }
+  // Fallback: no (usable) modelUsage map — attribute the flat top-level usage to the
+  // session's main model id, or "unknown" if the result line carries no model identifier.
+  const model =
+    (typeof obj.model === "string" && obj.model) ||
+    (typeof obj.modelName === "string" && obj.modelName) ||
+    "unknown";
+  return [{ model, ...toCategorized(obj.usage) }];
+}
+
+/** Normalizes a stream-json usage block (either snake_case, e.g. top-level `usage`, or
+ *  camelCase, e.g. a `modelUsage` entry) into token counts. Missing/non-numeric/negative
+ *  fields become 0 — never a parse failure. */
+function toCategorized(u: unknown): CategorizedTokenUsageRaw {
+  const r = (u && typeof u === "object" ? u : {}) as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+  return {
+    inputTokens: num(r.input_tokens ?? r.inputTokens),
+    outputTokens: num(r.output_tokens ?? r.outputTokens),
+    cacheCreationTokens: num(r.cache_creation_input_tokens ?? r.cacheCreationInputTokens),
+    cacheReadTokens: num(r.cache_read_input_tokens ?? r.cacheReadInputTokens),
+  };
+}
+
+type CategorizedTokenUsageRaw = Omit<ModelUsageEntry, "model">;
 
 /** CLAUDE_BIN env override, else `claude` on PATH. */
 export function discoverClaudeBin(env: Record<string, string | undefined>): string {
@@ -318,9 +375,14 @@ export class WorkerSupervisor implements Supervisor {
     try { closeSync(lane.jsonlFd); } catch { /* already closed */ }
     // reclaim() owns the lane's terminal state — don't also write a sentinel.
     if (!lane.reclaiming) {
-      const cost = parseCostUsd(this.readJsonl(lane.jsonlPath));
+      const jsonl = this.readJsonl(lane.jsonlPath);
+      const cost = parseCostUsd(jsonl);
+      const modelUsage = parseModelUsage(jsonl);
       const endedAt = this.now().toISOString();
-      const base = { name, issue: lane.issue, session_id: lane.sessionId, total_cost_usd: cost, ended_at: endedAt };
+      const base = {
+        name, issue: lane.issue, session_id: lane.sessionId, total_cost_usd: cost,
+        model_usage: modelUsage, ended_at: endedAt,
+      };
       // .handoff means "resumable, work preserved" — claim it ONLY when the worker exited
       // cleanly (code 0) AFTER a handoff request, i.e. it caught SIGTERM and completed its
       // commit/checkpoint. A handoff-requested worker that died by signal/non-zero was aborted
@@ -357,7 +419,11 @@ export class WorkerSupervisor implements Supervisor {
       }
     }
     const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
-    return { done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd, ...(prNumber != null ? { prNumber } : {}) };
+    const modelUsage = this.terminalModelUsage({ done, failed, handoff }, name);
+    return {
+      done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd, modelUsage,
+      ...(prNumber != null ? { prNumber } : {}),
+    };
   }
 
   /** The terminal sentinel (whichever is present) carries the parsed stream-json
@@ -378,6 +444,17 @@ export class WorkerSupervisor implements Supervisor {
       if (typeof r?.total_cost_usd === "number") return r.total_cost_usd;
     }
     return parseCostUsd(this.readJsonl(this.path(name, "jsonl")));
+  }
+
+  /** #47: same terminal-sentinel-first, jsonl-fallback shape as terminalCostUsd (see its
+   *  comment for why the fallback is needed — an engine-restart orphan never gets a sentinel). */
+  private terminalModelUsage(flags: { done: boolean; failed: boolean; handoff: boolean }, name: string): ModelUsageEntry[] {
+    const ext = flags.done ? "done.json" : flags.failed ? "failed.json" : flags.handoff ? "handoff.json" : null;
+    if (ext) {
+      const r = this.readJson(this.path(name, ext));
+      if (Array.isArray(r?.model_usage)) return r.model_usage as ModelUsageEntry[];
+    }
+    return parseModelUsage(this.readJsonl(this.path(name, "jsonl")));
   }
 
   async reclaim(name: string): Promise<void> {
