@@ -218,6 +218,61 @@ test("CodexReviewer: cfg trustedReviewers EXTENDS the allowlist (never replaces 
 const TRIGGER_AT = "2026-07-07T07:40:00Z"; // engine-recorded trigger time (the pin)
 const PIN = { head: "HEAD", at: TRIGGER_AT };
 
+// Post-#55 P2: Codex's clean verdict can ALSO be a plain conversation comment — no review
+// object, no +1 reaction. Same rules: trusted non-author login, engine-pin freshness.
+
+const CLEAN = "Codex Review: Didn't find any major issues. More of your lovely PRs please.";
+
+test("CodexReviewer: comment-ONLY clean verdict (no review, no 👍) -> MERGE_OK — post-#55 P2 wedge shape", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
+  });
+  assert.deepEqual(r.verdictFromData(data, PIN), { action: "MERGE_OK", headOid: "HEAD" });
+});
+
+test("CodexReviewer: clean comment BEFORE the trigger pin is stale -> WAIT_REVIEW", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:39:59Z", body: CLEAN }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: an UNTRUSTED account posting the clean phrase never satisfies gate②", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    comments: [{ login: "random-account", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: the PR AUTHOR posting the clean phrase never counts (producer≠reviewer), even when trusted", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    author: "chatgpt-codex-connector",
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: a trusted comment WITHOUT the clean phrase keeps waiting (narrow match, fail-closed)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: "Codex Review: still looking 👀" }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: clean comment + unresolved threads -> HANDLE_THREADS (findings still outrank)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    unresolvedThreads: 1,
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "HANDLE_THREADS");
+});
+
 test("CodexReviewer: comment+👍 verdict (NO formal review) -> MERGE_OK — the live #46 wedge shape", () => {
   const r = new CodexReviewer();
   const data = mkData({

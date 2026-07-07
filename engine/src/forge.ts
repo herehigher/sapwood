@@ -34,6 +34,13 @@ export interface PRReaction {
   login: string;
 }
 
+/** One top-level PR conversation comment (`gh api .../issues/<pr>/comments`). */
+export interface PRComment {
+  login: string;
+  createdAt: string; // ISO
+  body: string;
+}
+
 /** One review on the PR (`gh pr view --json reviews`). */
 export interface PRReview {
   author: string;
@@ -53,6 +60,10 @@ export interface PRReviewData {
   state: "OPEN" | "CLOSED" | "MERGED";
   reactions: PRReaction[];
   reviews: PRReview[];
+  /** Top-level conversation comments — Codex sometimes delivers its CLEAN verdict as a plain
+   *  comment with NO review object and NO +1 reaction (post-#55 P2). Optional: absent ⇒ the
+   *  comment-verdict signal simply never fires (fail-closed), older fixtures keep working. */
+  comments?: PRComment[] | undefined;
   unresolvedThreads: number;
 }
 
@@ -254,6 +265,12 @@ export class GithubForge implements IForge {
       // single document); --slurp wraps pages in an outer array parsePRReactions flattens.
       "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/reactions`, "--paginate", "--slurp",
     ]);
+    const commentsJson = await this.gh([
+      // Same pagination discipline. Conversation comments carry Codex's comment-shaped clean
+      // verdict ("Didn't find any major issues") — post-#55 P2: that shape has no review
+      // object and no +1 reaction, so without this fetch it wedges at WAIT_REVIEW.
+      "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/comments`, "--paginate", "--slurp",
+    ]);
     const unresolvedThreads = await countUnresolvedThreads((after) =>
       this.gh([
         "api", "graphql", "-f", `query=${REVIEW_THREADS_QUERY}`,
@@ -262,7 +279,7 @@ export class GithubForge implements IForge {
         ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
       ]),
     );
-    return assemblePRReviewData(viewJson, reactionsJson, unresolvedThreads);
+    return assemblePRReviewData(viewJson, reactionsJson, unresolvedThreads, commentsJson);
   }
 
   private repo(): string {
@@ -635,7 +652,16 @@ export function parsePRReactions(json: string): PRReaction[] {
 /** Assemble the raw gh responses into one PRReviewData. `unresolvedThreads` arrives as an
  *  already-paged total (countUnresolvedThreads) — never a single-page count. Exported for
  *  offline testing; GithubForge.getPRReviewData is the only impure caller. */
-export function assemblePRReviewData(viewJson: string, reactionsJson: string, unresolvedThreads: number): PRReviewData {
+/** Pure parse of `gh api .../issues/<pr>/comments --paginate --slurp` (same page shapes as
+ *  parsePRReactions). Malformed/missing fields degrade to ""/empty — never a throw. */
+export function parsePRComments(json: string): PRComment[] {
+  type Raw = { body?: string; created_at?: string; user?: { login?: string } };
+  const parsed = JSON.parse(json) as Raw[] | Raw[][];
+  const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
+  return arr.map((c) => ({ login: c.user?.login ?? "", createdAt: c.created_at ?? "", body: c.body ?? "" }));
+}
+
+export function assemblePRReviewData(viewJson: string, reactionsJson: string, unresolvedThreads: number, commentsJson = "[]"): PRReviewData {
   const view = parsePRReviewView(viewJson);
   return {
     headOid: view.headOid,
@@ -646,6 +672,7 @@ export function assemblePRReviewData(viewJson: string, reactionsJson: string, un
     state: view.state,
     reviews: view.reviews,
     reactions: parsePRReactions(reactionsJson),
+    comments: parsePRComments(commentsJson),
     unresolvedThreads,
   };
 }

@@ -14,6 +14,7 @@ import {
   parsePageInfo,
   projectQuery,
   parsePRReviewView,
+  parsePRComments,
   parsePRReactions,
   parseReviewThreadsPage,
   countUnresolvedThreads,
@@ -485,6 +486,19 @@ test("parsePRReactions: maps GitHub reaction rows to {content, createdAt, login}
   assert.deepEqual(r, [
     { content: "+1", createdAt: "2026-06-17T13:00:00Z", login: "alice" },
     { content: "eyes", createdAt: "2026-06-17T13:30:00Z", login: "" },
+  ]);
+});
+
+test("parsePRComments: multi-page slurp flattens; missing fields degrade to empty strings", () => {
+  const r = parsePRComments(
+    JSON.stringify([
+      [{ body: "Codex Review: Didn't find any major issues.", created_at: "t1", user: { login: "chatgpt-codex-connector[bot]" } }],
+      [{ user: {} }],
+    ]),
+  );
+  assert.deepEqual(r, [
+    { login: "chatgpt-codex-connector[bot]", createdAt: "t1", body: "Codex Review: Didn't find any major issues." },
+    { login: "", createdAt: "", body: "" },
   ]);
 });
 
