@@ -453,6 +453,82 @@ test("tick DRIVE: a driving lane with no known PR number fails safe to needs-hum
   st.close();
 });
 
+// ── #59: kill switch must freeze the DRIVE loop's merge path too, not just new dispatch ──
+
+test("tick DRIVE: kill switch active -> driveOne is NEVER called, lane queued with reason kill-switch, stays driving", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-a", 2);
+    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" }; // would merge if driveOne were called
+    writeFileSync(join(dir, "KILL_SWITCH"), ""); // a human flips it — no config touched
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    assert.equal(gate.calls.length, 0); // driveOne never invoked — no possibility of forge.mergePR firing
+    assert.deepEqual(forge.boardSet, []); // never set to done
+    assert.equal(st.getWorker("lane-a")?.state, "driving"); // stays driving, not done
+    assert.deepEqual(r.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "kill-switch" }]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE: kill switch NOT active -> driveOne called normally (no regression)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-a", 2);
+    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+    // No KILL_SWITCH file written — sentinel absent.
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    assert.equal(gate.calls.length, 1);
+    assert.equal(st.getWorker("lane-a")?.state, "done");
+    assert.deepEqual(forge.boardSet, [[2, "done"]]);
+    assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE: kill switch active then cleared -> next tick resumes normal driving/merging", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
+  try {
+    const switchPath = join(dir, "KILL_SWITCH");
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-a", 2);
+    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+
+    writeFileSync(switchPath, "");
+    const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    assert.equal(gate.calls.length, 0);
+    assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "kill-switch" }]);
+    assert.equal(st.getWorker("lane-a")?.state, "driving");
+
+    rmSync(switchPath, { force: true }); // human clears the switch
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    assert.equal(gate.calls.length, 1); // driveOne now called
+    assert.deepEqual(r2.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+    assert.equal(st.getWorker("lane-a")?.state, "done");
+    assert.deepEqual(forge.boardSet, [[2, "done"]]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick reclaim: handoff sentinel -> resumable, not killed", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

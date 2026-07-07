@@ -528,6 +528,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   mergeGate -> driving lanes stay driving with no gate/merge activity (pre-#13 behavior).
   const driven: DrivenOutcome[] = [];
   const gate = deps.mergeGate;
+  // #59: the kill switch is a hard "stop ALL outward autonomous action" signal, not just a
+  // dispatch freeze. Read it once up front (cheap sync file-existence check; it can't change
+  // mid-tick) so every driving lane this tick sees the same snapshot.
+  const killSwitchActive = state.isKillSwitchActive();
   if (gate) {
     for (const w of state.drivingWorkers()) {
       if (w.pr == null) {
@@ -541,6 +545,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       const pr = w.pr;
+      if (killSwitchActive) {
+        // #59 (live #46 scope-4 finding): with the kill switch set, the DRIVE loop must never
+        // reach gate.driveOne — that's the only path that can call forge.mergePR. Hold the lane
+        // driving (not done) and queue it, same shape as the gate-pending "queued" outcome below,
+        // so it resumes normal driving/merging the moment the switch clears.
+        state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
+        driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
+        continue;
+      }
       // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
       // that knows the LIVE current head) — tick() just threads the lane's State-recorded pin
       // in and wires driveOne's recordTrigger callback straight back into State.
