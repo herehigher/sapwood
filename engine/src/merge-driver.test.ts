@@ -150,8 +150,10 @@ class FakeReviewer implements Reviewer {
   readonly kind = "different-model-codex" as const;
   triggered: number[] = [];
   triggeredWith: Array<[number, number]> = [];
+  triggerErr: Error | null = null;
   verdict: ReviewVerdict = { action: "MERGE_OK", headOid: "HEAD" };
   async triggerReview(_forge: IForge, pr: number, issue: number): Promise<void> {
+    if (this.triggerErr) throw this.triggerErr;
     this.triggered.push(pr);
     this.triggeredWith.push([pr, issue]);
   }
@@ -360,6 +362,19 @@ test("MergeDriver.driveOne: pin matches the CURRENT head -> no re-trigger, proce
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.deepEqual(reviewer.triggered, []); // no fresh trigger posted
   assert.equal(outcome.kind, "merged"); // gate ran normally and merged
+});
+
+test("MergeDriver.driveOne: a trigger-post failure (rate-limit/network) -> queued, never throws, and NO pin is recorded (round-2 P2)", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.triggerErr = new Error("gh: API rate limit exceeded");
+  const recorded: Array<[string, string]> = [];
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, { head: null, at: null }, (h, a) => recorded.push([h, a]));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /review-trigger-failed/);
+  assert.deepEqual(recorded, []); // no pin recorded for a trigger that never posted
+  assert.deepEqual(forge.merged, []);
 });
 
 test("MergeDriver.driveOne: head change mid-drive re-triggers exactly once per new head, one drive call at a time", async () => {

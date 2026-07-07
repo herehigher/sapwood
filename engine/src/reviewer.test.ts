@@ -35,6 +35,19 @@ test("freshThumbCount: all-stale -> 0", () => {
   assert.equal(freshThumbCount([{ content: "+1", createdAt: "2026-06-17T09:00:00Z" }], "2026-06-17T12:00:00Z"), 0);
 });
 
+test("freshThumbCount: mixed precision compares NUMERICALLY — a same-second reaction before a millisecond cutoff is stale (round-2 P2)", () => {
+  // Lexicographically "…00Z" > "…00.999Z" (Z sorts after '.'), which would wrongly count a
+  // reaction that predates the trigger within the same second. Numeric compare rejects it.
+  assert.equal(freshThumbCount([{ content: "+1", createdAt: "2026-07-07T08:00:00Z" }], "2026-07-07T08:00:00.999Z"), 0);
+  // Sanity: one full second later IS fresh against the same millisecond cutoff.
+  assert.equal(freshThumbCount([{ content: "+1", createdAt: "2026-07-07T08:00:01Z" }], "2026-07-07T08:00:00.999Z"), 1);
+});
+
+test("freshThumbCount: unparseable cutoff or createdAt never counts (fail-closed)", () => {
+  assert.equal(freshThumbCount([{ content: "+1", createdAt: "2026-07-07T08:00:01Z" }], "not-a-date"), 0);
+  assert.equal(freshThumbCount([{ content: "+1", createdAt: "garbage" }], "2026-07-07T08:00:00Z"), 0);
+});
+
 const mkReview = (author: string, commitOid: string, state: string): PRReview => ({ author, commitOid, state });
 
 test("freshHeadReviewCount: only non-author reviews on the CURRENT head, in an accepted state, count (0day #101)", () => {

@@ -29,13 +29,24 @@ export interface ReviewVerdict {
 }
 
 /**
- * Fresh (post-PR-activity) PR-level `+1` reactions — 0day pr_gate.sh's `fresh_thumb_count`.
- * A reaction created at/before `cutoffIso` (the PR's last-activity timestamp) is stale: it
- * predates a push, so it cannot have been a response to the current head (#92). ISO-8601
- * `Z`-suffixed timestamps compare correctly as strings (lexicographic == chronological).
+ * Fresh (post-cutoff) PR-level `+1` reactions — 0day pr_gate.sh's `fresh_thumb_count`.
+ * A reaction created at/before `cutoffIso` is stale: it predates the engine's review trigger,
+ * so it cannot have been a response to it (#92, #55 P1-B). Compared NUMERICALLY (epoch ms),
+ * not lexicographically (round-2 P2): the engine pin carries millisecond precision
+ * (`...00.999Z`) while GitHub reaction timestamps are second-granularity (`...00Z`), and as
+ * raw strings `"...00Z" > "...00.999Z"` — a same-second reaction that actually PREDATES the
+ * trigger would have counted as fresh. Numeric compare truncates that same-second reaction to
+ * `.000` and rejects it (fail-closed; the genuine thumb arrives minutes after the trigger).
+ * An unparseable cutoff or createdAt never counts (fail-closed).
  */
 export function freshThumbCount(reactions: { content: string; createdAt: string }[], cutoffIso: string): number {
-  return reactions.filter((r) => r.content === "+1" && r.createdAt > cutoffIso).length;
+  const cutoff = Date.parse(cutoffIso);
+  if (!Number.isFinite(cutoff)) return 0;
+  return reactions.filter((r) => {
+    if (r.content !== "+1") return false;
+    const t = Date.parse(r.createdAt);
+    return Number.isFinite(t) && t > cutoff;
+  }).length;
 }
 
 /**

@@ -201,9 +201,18 @@ export class MergeDriver {
     // path must not evaluate against this head yet: post a fresh trigger, record it, and queue
     // this tick rather than deriving a verdict a push may have invalidated mid-flight.
     if (triggerPin.head !== status.headOid) {
-      await reviewer.triggerReview(forge, pr, issue);
-      const now = this.deps.now ?? (() => new Date());
-      recordTrigger(status.headOid, now().toISOString());
+      try {
+        await reviewer.triggerReview(forge, pr, issue);
+        const now = this.deps.now ?? (() => new Date());
+        recordTrigger(status.headOid, now().toISOString());
+      } catch (e) {
+        // never-throws contract (round-2 P2): a transient comment-post (or pin-write) failure
+        // must QUEUE — the conductor's tick calls driveOne unguarded, so a throw here would
+        // crash the whole tick loop. Retried next tick. If the trigger comment DID post but the
+        // pin write failed, the retry re-posts a duplicate trigger comment (harmless) rather
+        // than ever counting thumbs against an unrecorded pin — fail-closed either way.
+        return { kind: "queued", pr, reason: `review-trigger-failed: ${String(e)}` };
+      }
       return { kind: "queued", pr, reason: "review-triggered" };
     }
 
