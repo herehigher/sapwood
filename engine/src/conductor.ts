@@ -62,6 +62,11 @@ export function budgetExceeded(total: number, cap: number): boolean {
 // plus an out-of-band kill switch (a file sentinel only the engine can write — see
 // State.isKillSwitchActive). Any one of the three freezes ALL new dispatch and starts a
 // bounded drain (graceful handoff of running workers) before escalating to a hard kill.
+// #59/#61: the kill switch ALSO freezes the DRIVE loop's review-gate/merge path (below,
+// in tick()) — a lane already past gate①/gate② holds `queued` instead of autonomously
+// merging, and this is checked fresh per driving lane / per dispatched issue (not just
+// once per tick via this section's ceilingBreached snapshot), so the switch takes effect
+// mid-tick, not only on the next tick.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
