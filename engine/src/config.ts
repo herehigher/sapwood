@@ -179,8 +179,10 @@ export function parseConfig(text: string): SapwoodConfig {
 }
 
 // Default lookup order when no explicit path is given. The YAML parser handles all
-// three (YAML ⊃ JSON), so .json is real support, not just advertised.
-const DEFAULT_CONFIG_PATHS = ["sapwood.config.yaml", "sapwood.config.yml", "sapwood.config.json"];
+// three (YAML ⊃ JSON), so .json is real support, not just advertised. Exported so
+// callers (e.g. `sapwood validate`) can report which path was actually probed/used
+// without re-implementing the lookup.
+export const DEFAULT_CONFIG_PATHS = ["sapwood.config.yaml", "sapwood.config.yml", "sapwood.config.json"];
 
 /**
  * Load and validate a config file. With no argument, probes the default names in order

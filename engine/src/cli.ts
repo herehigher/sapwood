@@ -2,9 +2,10 @@
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) lands here; status/stop
 // and the rest of the command surface are follow-ups.
 import { createRequire } from "node:module";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.js";
+import { ZodError } from "zod";
+import { loadConfig, DEFAULT_CONFIG_PATHS } from "./config.js";
 import { init, InitError } from "./init.js";
 import { State } from "./state.js";
 import { GithubForge } from "./forge.js";
@@ -25,9 +26,23 @@ Commands:
   run           Run the engine loop (tick on a fixed cadence)
     --once         Run exactly one tick, then exit (exit 1 if the tick failed)
     --until-idle   Keep ticking until no lanes are in flight, then exit
+  validate [path]  Load + validate a sapwood config file, report OK or the issues
 
 Flags:
   --version, -v  Print version and exit
+  --help, -h     Print this help and exit
+`;
+
+const VALIDATE_USAGE = `\
+usage: sapwood validate [path]
+
+Load a sapwood config (defaults to the same probe order as init/run:
+${DEFAULT_CONFIG_PATHS.join(", ")}), validate it, and report:
+  - valid   -> a one-line OK summary (path + key effective values), exit 0
+  - invalid -> the validation issues, one per line, exit 1
+  - missing -> a clear error naming the path tried, exit 1
+
+Flags:
   --help, -h     Print this help and exit
 `;
 
@@ -47,6 +62,34 @@ Flags:
  *  dispatches workers is the exact failure Codex PR #50 flagged (thread on cli.ts:46). */
 const RUN_FLAGS = ["--once", "--until-idle"] as const;
 
+/** `sapwood validate [path]`: reuses config.ts's own loader (no parsing duplicated here) —
+ *  ZodError -> issues one per line, exit 1; anything else (missing/unreadable file, already
+ *  naming the path per Node's own ENOENT message, or loadConfig's own "no config found"
+ *  message) -> exit 1; success -> one-line OK summary. Fully synchronous (loadConfig is sync
+ *  fs + Zod), so unlike init/run it never needs the async engine-wiring fallthrough. */
+export function runValidate(argv: string[]): { stdout: string; stderr: string; code: number } {
+  const args = argv.slice(3);
+  if (args.includes("--help") || args.includes("-h")) {
+    return { stdout: VALIDATE_USAGE, stderr: "", code: 0 };
+  }
+  const path = args[0];
+  try {
+    const cfg = loadConfig(path);
+    const resolvedPath = path ?? DEFAULT_CONFIG_PATHS.find(existsSync);
+    return {
+      stdout: `sapwood validate: OK — ${resolvedPath} (lanes.max=${cfg.lanes.max}, guard.mode=${cfg.guard.mode}, merge.mode=${cfg.merge.mode})\n`,
+      stderr: "",
+      code: 0,
+    };
+  } catch (e) {
+    if (e instanceof ZodError) {
+      const issues = e.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n");
+      return { stdout: "", stderr: `sapwood validate: invalid config:\n${issues}\n`, code: 1 };
+    }
+    return { stdout: "", stderr: `sapwood validate: ${(e as Error).message}\n`, code: 1 };
+  }
+}
+
 export function runCli(argv: string[]): { stdout: string; stderr: string; code: number } {
   const arg = argv[2];
   if (arg === "--version" || arg === "-v") {
@@ -54,6 +97,9 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
   }
   if (arg === "--help" || arg === "-h" || arg === undefined) {
     return { stdout: USAGE, stderr: "", code: 0 };
+  }
+  if (arg === "validate") {
+    return runValidate(argv);
   }
   if (arg !== "init" && arg !== "run") {
     return { stdout: "", stderr: USAGE, code: 2 };
