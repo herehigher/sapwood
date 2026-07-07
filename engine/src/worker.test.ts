@@ -776,6 +776,60 @@ test("#60: a stale index.lock left behind by the just-killed process is cleared 
   }
 });
 
+test("#60 P1 (Codex review): supervisor WIP commit+push disables the worktree's own git hooks — a worker-planted pre-commit/pre-push (or a worker-set core.hooksPath pointing at its own directory) must NOT run with the supervisor's privileges", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-60-hooks";
+    const worktreePath = join(worktreeRoot, name);
+    const remoteDir = makeWorktreeWithRemote(worktreePath);
+    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n");
+
+    // Simulate a compromised/malicious worker: it had full filesystem access to its OWN
+    // worktree while alive (outside the PreToolUse guard's reach once it's dead). Each hook,
+    // if it ran, writes an observable sentinel AND aborts (exit 1) — so an unbypassed hook
+    // would visibly break the commit/push.
+    const defaultHookSentinel = join(dir, "default-hook-ran");
+    writeFileSync(
+      join(worktreePath, ".git", "hooks", "pre-commit"),
+      `#!/usr/bin/env bash\ntouch "${defaultHookSentinel}"\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    // The named threat from the review: a worker pointing core.hooksPath at a directory IT
+    // controls. Command-line -c must win over this local worktree config.
+    const customHooksDir = join(dir, "worker-controlled-hooks");
+    mkdirSync(customHooksDir, { recursive: true });
+    const customHookSentinel = join(dir, "custom-hook-ran");
+    writeFileSync(
+      join(customHooksDir, "pre-push"),
+      `#!/usr/bin/env bash\ntouch "${customHookSentinel}"\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    gitIn(worktreePath, ["config", "core.hooksPath", customHooksDir]);
+
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 66, title: "t", labels: [] }, name);
+    await sleep(200);
+    assert.equal(s.requestHandoff(laneName), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "hostile hooks must not block the handoff commit/push");
+
+    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
+    assert.match(log, /sapwood: WIP handoff \(drain\)/, "commit succeeded despite the hostile pre-commit hook");
+    const remoteLog = execFileSync("git", ["log", "--oneline", "main"], { cwd: remoteDir, encoding: "utf8" });
+    assert.match(remoteLog, /sapwood: WIP handoff \(drain\)/, "push succeeded despite the hostile core.hooksPath pre-push hook");
+
+    assert.ok(!existsSync(defaultHookSentinel), "the worktree's own .git/hooks/pre-commit must NOT have run");
+    assert.ok(!existsSync(customHookSentinel), "the worker-set core.hooksPath pre-push must NOT have run");
+
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);

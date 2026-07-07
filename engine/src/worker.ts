@@ -19,6 +19,7 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
@@ -231,6 +232,15 @@ export class WorkerSupervisor implements Supervisor {
   // worker kept running) already asked to hand off. Keeps requestHandoff idempotent-per-tick
   // for lanes we can only reach by persisted pid (Codex PR #41 P1).
   private readonly detachedHandoffRequested = new Set<string>();
+  // #60 P1 (Codex review): a nonexistent, per-process-random directory used to override
+  // core.hooksPath on every git call preserveHandoffWip makes. A handoff-requested lane's
+  // worktree is under the FULL filesystem control of the (possibly compromised) worker while
+  // it was alive — outside the PreToolUse guard's reach once it's dead — so it could have
+  // planted a pre-commit/pre-push hook, or pointed core.hooksPath at a directory it controls.
+  // A command-line `-c core.hooksPath=...` always wins over any config value (local worktree
+  // config included), so this can't be overridden by anything the worker set. The directory
+  // deliberately never exists: git treats a missing hooksPath as "no hooks to run", no error.
+  private readonly noHooksDir = join(tmpdir(), `sapwood-no-hooks-${randomUUID()}`);
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -526,7 +536,10 @@ export class WorkerSupervisor implements Supervisor {
    *    remote push didn't land. Logged, never thrown.
    *  - A stale `index.lock` (left behind by the just-killed process; onExit only runs after
    *    the child has actually exited, so its owner is confirmed dead) is cleared and the
-   *    failing command retried once. */
+   *    failing command retried once.
+   *  - Every git call disables hooks (see `noHooksDir`) and `commit`/`push` also pass
+   *    `--no-verify` as defense in depth — this worktree was under the worker's full control
+   *    and must not get to run code as the supervisor via a planted hook (Codex #60 P1). */
   private preserveHandoffWip(name: string): void {
     const worktreePath = join(this.worktreeRoot, name);
     if (!existsSync(worktreePath)) return; // never checked out (or already cleaned up) — nothing to preserve
@@ -536,9 +549,9 @@ export class WorkerSupervisor implements Supervisor {
     if (status.stdout.trim().length === 0) return; // clean — nothing to commit
 
     if (!this.runGit(["add", "-A"], worktreePath).ok) return;
-    if (!this.runGit(["commit", "-m", "sapwood: WIP handoff (drain)"], worktreePath).ok) return;
+    if (!this.runGit(["commit", "--no-verify", "-m", "sapwood: WIP handoff (drain)"], worktreePath).ok) return;
 
-    const push = this.runGit(["push"], worktreePath);
+    const push = this.runGit(["push", "--no-verify"], worktreePath);
     if (!push.ok) {
       console.error(
         `[sapwood:worker] lane ${name}: handoff commit landed locally but 'git push' failed ` +
@@ -562,9 +575,13 @@ export class WorkerSupervisor implements Supervisor {
     return this.tryGit(args, cwd);
   }
 
+  /** Every git invocation from preserveHandoffWip goes through here, so the `-c
+   *  core.hooksPath=...` override (see `noHooksDir`) is never accidentally skipped for one
+   *  call. Harmless on commands with no hooks of their own (status/add/rev-parse). */
   private tryGit(args: string[], cwd: string): { ok: boolean; stdout: string; stderr: string } {
+    const fullArgs = ["-c", `core.hooksPath=${this.noHooksDir}`, ...args];
     try {
-      const stdout = execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      const stdout = execFileSync("git", fullArgs, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
       return { ok: true, stdout, stderr: "" };
     } catch (e) {
       const err = e as { stdout?: string; stderr?: string };
