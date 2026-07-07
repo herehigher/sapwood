@@ -493,7 +493,14 @@ function normalizePath(p: string, cwd: string): string {
   return "/" + out.join("/");
 }
 
-const PROTECTED_SUFFIXES = ["/engine/src/guard.ts", "/engine/src/guard-hook.ts", "/engine/src/reviewer.ts"];
+// merge-driver.ts is the merge path itself (gate①/② + the --match-head-commit TOCTOU pin):
+// a worker rewriting it could gut the gate the same way it could gut reviewer.ts (#13).
+const PROTECTED_SUFFIXES = [
+  "/engine/src/guard.ts",
+  "/engine/src/guard-hook.ts",
+  "/engine/src/reviewer.ts",
+  "/engine/src/merge-driver.ts",
+];
 
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
@@ -505,8 +512,12 @@ function protectedPathLabel(abs: string): string | null {
   // The COMPILED guard artifacts are what each PreToolUse invocation actually executes — a
   // worker overwriting dist/guard-hook.js (or the guard.js it loads) with a no-op would disable
   // hard-mode enforcement for the next tool call. Protect the artifact, not just src (Codex #26 R3).
-  if (/\/engine\/dist\/guard(-hook)?\.js$/.test(abs)) return "engine/dist/guard*.js (compiled guard artifact)";
-  if (PROTECTED_SUFFIXES.some((s) => abs.endsWith(s))) return "guard/reviewer source";
+  // ... and the same for the review/merge path: the conductor executes reviewer.js /
+  // merge-driver.js from dist, so protecting only their src would leave the running gate
+  // overwritable (same vector as the guard artifact above).
+  if (/\/engine\/dist\/(guard(-hook)?|reviewer|merge-driver)\.js$/.test(abs))
+    return "engine/dist gate artifact (compiled guard/reviewer/merge-driver)";
+  if (PROTECTED_SUFFIXES.some((s) => abs.endsWith(s))) return "guard/reviewer/merge-driver source";
   return null;
 }
 
