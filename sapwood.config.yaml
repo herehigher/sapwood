@@ -24,7 +24,7 @@ lanes:
   frictionMin: 0 # min minutes between dispatches (rate limit; 0 = off)
 
 worker:
-  model: sonnet # ponytail: local, uncommitted — live-run #46 only, revert after
+  model: opus
   effort: high # low | medium | high
   timeoutSec: 3600 # wall-clock hard cap (safety bound)
   budgetUsdSoft: 10 # SOFT per-worker budget: DECLARED here as the intended graceful-handoff
