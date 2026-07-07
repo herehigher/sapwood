@@ -230,8 +230,15 @@ export class WorkerSupervisor implements Supervisor {
   private readonly lanes = new Map<string, Lane>();
   // Detached lanes (persisted running.json, no in-memory handle — engine restarted while the
   // worker kept running) already asked to hand off. Keeps requestHandoff idempotent-per-tick
-  // for lanes we can only reach by persisted pid (Codex PR #41 P1).
+  // for lanes we can only reach by persisted pid (Codex PR #41 P1). Also consulted by
+  // probe()'s detached-confirm-death finalize (#63) — see finalizeDetachedHandoffIfConfirmedDead.
   private readonly detachedHandoffRequested = new Set<string>();
+  // #63: detached lanes this supervisor has reclaim()'d (DEAD or ceiling-escalation teardown —
+  // going FAILED, not resumable). Guards finalizeDetachedHandoffIfConfirmedDead: a lane torn
+  // down via reclaim() must never ALSO be finalized as a resumable .handoff just because it
+  // also happens to match "handoff was requested, pid now confirmed dead" — reclaim() already
+  // decided its fate.
+  private readonly detachedReclaiming = new Set<string>();
   // #60 P1 (Codex review): a nonexistent, per-process-random directory used to override
   // core.hooksPath (see tryGit, which also disables core.fsmonitor alongside it) on every git
   // call preserveHandoffWip makes. A handoff-requested lane's worktree is under the FULL
@@ -445,16 +452,23 @@ export class WorkerSupervisor implements Supervisor {
     // drain would silently no-op on such lanes — no SIGTERM for the whole drain window, the
     // worker keeps spending, then gets hard-killed instead of the intended graceful handoff
     // (Codex PR #41 P1). Signal the persisted process group with SIGTERM only (graceful —
-    // never the KILL escalation reclaim() adds). Caveat: with no attached onExit handler
-    // neither the .handoff sentinel NOR the supervisor-side commit+push (preserveHandoffWip,
-    // #60) can run for this detached path — only the in-process onExit (the lane-in-map
-    // branch above) gets that guarantee. A detached lane's WIP preservation still depends on
-    // whatever the model itself managed before dying; this remains a known gap, not fixed here.
-    if (this.detachedHandoffRequested.has(name)) return false;
+    // never the KILL escalation reclaim() adds). There's no attached onExit handler for this
+    // path (no live ChildProcess), so the WIP preserve + .handoff sentinel can't be triggered
+    // by a process-exit callback the way the in-process branch above gets it for free — #63
+    // instead confirms death (and runs preserveHandoffWip + writes .handoff) from INSIDE
+    // probe(), the next time it's called for this lane; see finalizeDetachedHandoffIfConfirmedDead.
+    if (this.detachedHandoffRequested.has(name) || this.detachedReclaiming.has(name)) return false;
     const pid = this.persistedPid(name);
     if (pid == null || this.wrapperAlive(name) !== 1) return false;
     this.detachedHandoffRequested.add(name);
     this.signalGroup(pid, "SIGTERM");
+    // #63: also persist the request onto running.json itself (not just this process's
+    // in-memory set) so a SECOND engine restart — before probe() ever confirms the pid is
+    // dead — doesn't forget the request. The in-memory set alone only survives one restart
+    // (it's how THIS instance learned to send the SIGTERM); a fresh instance after another
+    // restart has an empty set but can still read this field back off disk.
+    const running = this.readJson(this.path(name, "running.json"));
+    if (running) this.writeJsonAtomic(this.path(name, "running.json"), { ...running, handoff_requested: true });
     return true;
   }
 
@@ -497,14 +511,6 @@ export class WorkerSupervisor implements Supervisor {
       if (lane.handoffRequested && !lane.timedOut) {
         this.preserveHandoffWip(name);
       }
-      const jsonl = this.readJsonl(lane.jsonlPath);
-      const cost = parseCostUsd(jsonl);
-      const modelUsage = parseModelUsage(jsonl);
-      const endedAt = this.now().toISOString();
-      const base = {
-        name, issue: lane.issue, session_id: lane.sessionId, total_cost_usd: cost,
-        model_usage: modelUsage, ended_at: endedAt,
-      };
       // .handoff means "resumable, work preserved" — the supervisor-side commit+push above
       // (preserveHandoffWip) is what guarantees that now, not the child's exit code. A
       // handoff-requested lane is .handoff regardless of how it died. timedOut is always
@@ -516,10 +522,30 @@ export class WorkerSupervisor implements Supervisor {
           : code === 0
             ? "done"
             : "failed";
-      this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: code });
-      this.removeIfExists(this.path(name, "running.json"));
+      this.writeTerminalSentinel(name, lane.issue, lane.sessionId, lane.jsonlPath, tag, code);
     }
     this.lanes.delete(name);
+  }
+
+  /** The ~10 lines every terminal-transition path (onExit here, and #63's detached-lane
+   *  finalize below) needs: parse the jsonl for cost/model usage, write the tagged sentinel,
+   *  clear the running marker. Extracted so the detached path — which has no live `Lane` (no
+   *  ChildProcess, no lane.jsonlPath/issue/sessionId to read off an object) — can reuse the
+   *  exact same write shape onExit's real exit callback uses, just fed its issue/sessionId
+   *  from the persisted running.json instead. */
+  private writeTerminalSentinel(
+    name: string, issue: number, sessionId: string, jsonlPath: string,
+    tag: "done" | "failed" | "handoff", exitCode: number | null,
+  ): void {
+    const jsonl = this.readJsonl(jsonlPath);
+    const cost = parseCostUsd(jsonl);
+    const modelUsage = parseModelUsage(jsonl);
+    const base = {
+      name, issue, session_id: sessionId, total_cost_usd: cost,
+      model_usage: modelUsage, ended_at: this.now().toISOString(),
+    };
+    this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: exitCode });
+    this.removeIfExists(this.path(name, "running.json"));
   }
 
   /** #60: the supervisor-side half of the drain contract — GUARANTEE "WIP preserved" for a
@@ -620,7 +646,64 @@ export class WorkerSupervisor implements Supervisor {
     }
   }
 
+  /** #63: the detached-lane counterpart to onExit's in-process preserve+finalize. A detached
+   *  lane (persisted running.json, no in-memory Lane — the engine restarted while the worker
+   *  kept running) has no live ChildProcess to attach an `exit` handler to, so requestHandoff's
+   *  detached branch can only SIGTERM the persisted pid — nothing ever ran preserveHandoffWip
+   *  or wrote .handoff for it, even once the worker actually died. This is the fix: check for
+   *  CONFIRMED death (wrapperAlive() === 0 — a stale heartbeat is NOT a death signal for a
+   *  detached lane; its heartbeat only ever advanced via the dead engine's own setInterval)
+   *  every time probe() is called, and finalize right here if so.
+   *
+   *  Placement matters: this runs from INSIDE probe(), ahead of the sentinel reads below and
+   *  ahead of the conductor's classifyLane call that follows probe() — never a separate poll
+   *  loop. The conductor probes every running lane every tick before classifying it, so a
+   *  poller racing that classification could lose: it might see wrapperAlive===0 with no
+   *  sentinel yet and get DEAD-reclaimed (killByPid, no preserve) before a separate poller
+   *  fires. Running the check inside probe() wins that race by construction — the write always
+   *  lands before this same call's classification-feeding flags are read.
+   *
+   *  A request is "known" via EITHER the in-memory detachedHandoffRequested set (this
+   *  process's own request) OR running.json's persisted `handoff_requested` field (a request
+   *  survives a SECOND engine restart, which wipes the in-memory set but not the file) — either
+   *  is sufficient. Skipped entirely for a lane this supervisor has already reclaim()'d
+   *  (detachedReclaiming) — that lane is going FAILED, not resumable; see reclaim(). Never
+   *  throws: preserveHandoffWip and writeTerminalSentinel are already best-effort/non-throwing
+   *  (same guarantees onExit relies on). */
+  private finalizeDetachedHandoffIfConfirmedDead(name: string): void {
+    if (this.detachedReclaiming.has(name)) return;
+    if (
+      existsSync(this.path(name, "done.json")) ||
+      existsSync(this.path(name, "failed.json")) ||
+      existsSync(this.path(name, "handoff.json"))
+    ) {
+      return; // already terminal — nothing to finalize
+    }
+    const running = this.readJson(this.path(name, "running.json"));
+    if (!running) return; // no persisted lane at all — nothing to finalize
+    const requested = this.detachedHandoffRequested.has(name) || running.handoff_requested === true;
+    if (!requested) return;
+    // wrapperAlive: 1 alive (still draining — wait) | -1 unknown/unreadable pid (per the
+    // advisory: just stop checking, never treat as dead, never throw) | 0 confirmed dead.
+    if (this.wrapperAlive(name) !== 0) return;
+    this.preserveHandoffWip(name);
+    const issue = typeof running.issue === "number" ? running.issue : -1;
+    const sessionId = typeof running.session_id === "string" ? running.session_id : "";
+    // Unconditionally "handoff" — no timedOut/code branching (there's no exit code at all
+    // here, no live process to report one for). cost will often parse to 0 since a SIGTERM'd
+    // claude usually never writes its terminal stream-json result line — the same pre-existing
+    // #60 ceiling as the in-process path, not a new gap introduced here.
+    this.writeTerminalSentinel(name, issue, sessionId, this.path(name, "jsonl"), "handoff", null);
+    this.detachedHandoffRequested.delete(name);
+  }
+
   async probe(name: string): Promise<LaneProbe> {
+    // #63: run BEFORE the sentinel existsSync reads below, so a freshly-confirmed-dead
+    // detached lane's just-written .handoff.json is observed by THIS SAME probe() call —
+    // no separate poll loop, no extra tick lag. See the method comment for why this placement
+    // (inside probe, ahead of classification) is what wins the race against the conductor's
+    // own DEAD reclassification.
+    this.finalizeDetachedHandoffIfConfirmedDead(name);
     const done = existsSync(this.path(name, "done.json"));
     const failed = existsSync(this.path(name, "failed.json"));
     const handoff = existsSync(this.path(name, "handoff.json"));
@@ -684,7 +767,13 @@ export class WorkerSupervisor implements Supervisor {
       clearInterval(lane.hb);
       await this.killTree(lane.child);
     } else {
-      // Cross-process / post-restart: no in-memory handle — kill by the persisted pid.
+      // Cross-process / post-restart: no in-memory handle — kill by the persisted pid. Mark
+      // this lane as reclaiming FIRST, before the kill — #63's detached-confirm-death check in
+      // probe() must never finalize a lane reclaim() has already decided is going FAILED (a
+      // DEAD reclassification or a ceiling-escalation kill), even if it also happens to match
+      // "handoff was requested, pid now confirmed dead". reclaim() always wins that race.
+      this.detachedReclaiming.add(name);
+      this.detachedHandoffRequested.delete(name);
       const pid = this.persistedPid(name);
       if (pid != null) await this.killByPid(pid);
     }
