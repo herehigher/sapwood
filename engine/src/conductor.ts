@@ -534,6 +534,21 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const killSwitchActive = state.isKillSwitchActive();
   if (gate) {
     for (const w of state.drivingWorkers()) {
+      if (killSwitchActive) {
+        // #59 (live #46 scope-4 finding): with the kill switch set, the DRIVE loop must never
+        // take ANY outward autonomous action for a driving lane — not just the gate.driveOne/
+        // mergePR path below, but also the missing-PR fail-safe just past this branch (it calls
+        // forge.addLabel + marks the worker failed, which is itself an outward action under a
+        // stop signal). So this check comes FIRST, ahead of the `w.pr == null` fail-safe —
+        // Codex review on PR #61 caught that ordering gap. `pr` falls back to -1 for a
+        // malformed/legacy lane with no PR number, matching the sentinel the missing-PR
+        // fail-safe below already uses. Every driving lane — PR or not — just queues and holds
+        // driving, resuming normal driving/merging the moment the switch clears.
+        const pr = w.pr ?? -1;
+        state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
+        driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
+        continue;
+      }
       if (w.pr == null) {
         // Fail-safe: a driving lane MUST carry a PR number (set at the reclaim transition
         // above) to be driven through gates. Its absence here (only checked once a mergeGate
@@ -545,15 +560,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       const pr = w.pr;
-      if (killSwitchActive) {
-        // #59 (live #46 scope-4 finding): with the kill switch set, the DRIVE loop must never
-        // reach gate.driveOne — that's the only path that can call forge.mergePR. Hold the lane
-        // driving (not done) and queue it, same shape as the gate-pending "queued" outcome below,
-        // so it resumes normal driving/merging the moment the switch clears.
-        state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
-        driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
-        continue;
-      }
       // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
       // that knows the LIVE current head) — tick() just threads the lane's State-recorded pin
       // in and wires driveOne's recordTrigger callback straight back into State.

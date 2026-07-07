@@ -477,6 +477,28 @@ test("tick DRIVE: kill switch active -> driveOne is NEVER called, lane queued wi
   }
 });
 
+test("tick DRIVE: kill switch active + a malformed/legacy driving lane with pr==null -> queued kill-switch, NOT the missing-PR escalation (Codex PR #61 review)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    // Seed a driving lane directly with pr=null (as if rescued from a probe with no prNumber) —
+    // the same shape the pre-existing "fails safe to needs-human" test above uses.
+    st.upsertWorker({ name: "lane-a", issue: 2, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: null });
+    const gate = new FakeMergeGate();
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    assert.equal(gate.calls.length, 0);
+    assert.deepEqual(forge.labelsAdded, []); // NOT the missing-PR fail-safe's needs-human label
+    assert.equal(st.getWorker("lane-a")?.state, "driving"); // NOT marked failed
+    assert.deepEqual(r.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: -1, reason: "kill-switch" }]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick DRIVE: kill switch NOT active -> driveOne called normally (no regression)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
   try {
