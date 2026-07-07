@@ -177,6 +177,39 @@ test("MergeDriver.driveOne: SPLIT-HEAD observation (CI read saw one head, review
   assert.deepEqual(forge.merged, []);
 });
 
+test("MergeDriver.driveOne: PR already MERGED (by a human) -> merged outcome, not needs-human (Codex PR #42 P2)", async () => {
+  // produce-pr-and-stop's designed happy path: lane stays driving, human merges, next tick
+  // must classify the lane as done — not mark the worker failed with a needs-human label.
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, state: "MERGED" };
+  forge.reviewData = { ...forge.reviewData, state: "MERGED" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7);
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.deepEqual(forge.merged, []); // recognized as merged; no second merge attempt
+});
+
+test("MergeDriver.driveOne: merge raced — only ONE read saw MERGED yet -> still merged, wins over head-mismatch queue", async () => {
+  const forge = new FakeForge();
+  // Status read landed after the human merge (MERGED, head moved to the merge result);
+  // review read predates it (OPEN, old head). Must resolve merged, not queue forever.
+  forge.status = { ...forge.status, state: "MERGED", headOid: "MERGE_RESULT" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7);
+  assert.equal(outcome.kind, "merged");
+  assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne: PR CLOSED without merge -> still needs-human (genuinely human territory)", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, state: "CLOSED" };
+  forge.reviewData = { ...forge.reviewData, state: "CLOSED" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7);
+  assert.equal(outcome.kind, "needs-human");
+  assert.deepEqual(forge.merged, []);
+});
+
 test("MergeDriver.driveOne: CONFLICTING PR -> needs-human WITHOUT a merge attempt (Codex PR #42 P2)", async () => {
   const forge = new FakeForge();
   forge.status = { ...forge.status, mergeable: "CONFLICTING" };

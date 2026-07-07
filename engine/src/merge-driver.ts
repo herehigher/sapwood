@@ -160,6 +160,18 @@ export class MergeDriver {
       return { kind: "queued", pr, reason: `gate-data-unavailable: ${String(e)}` };
     }
 
+    // An ALREADY-MERGED PR is terminal success, not human work (Codex PR #42 P2): in
+    // produce-pr-and-stop mode the lane deliberately stays driving until a human merges, so
+    // the next gate read seeing MERGED is the designed happy path — collapsing it to HUMAN
+    // (via deriveGate's non-OPEN rule) marked the worker failed and labelled the issue
+    // needs-human on success. Same for a manual merge racing conductor-merge mode. CLOSED
+    // without merge still falls through to deriveGate -> HUMAN, which is genuinely human
+    // territory. Checked on EITHER read: one may predate the merge, and this must win over
+    // the head-mismatch queue below (a merged PR never re-gates).
+    if (status.state === "MERGED" || data.state === "MERGED") {
+      return { kind: "merged", pr, headOid: status.headOid };
+    }
+
     // Both gate inputs MUST observe the SAME head (Codex PR #42 P1): the two reads above can
     // race a push — the CI read seeing old-green commit A while the review read sees
     // newly-reviewed commit B whose CI hasn't run would otherwise merge B on A's CI result.
