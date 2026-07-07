@@ -13,7 +13,7 @@
 //    (conductor identity), never a worker. The worker is only ever the injected dispatch fn.
 
 import type { IForge, Issue } from "./forge.js";
-import type { State } from "./state.js";
+import type { State, BoardStatus, PendingRollback } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { DriveOutcome } from "./merge-driver.js";
 
@@ -276,6 +276,15 @@ export type DispatchOutcome =
       reason: "cap" | "no-lane" | "in-flight" | "over-budget" | "meta-floor" | "ceiling";
     };
 
+/** #31: outcome of one durably-persisted recovery-path board mutation this tick (retried from
+ *  a prior tick's pending_rollbacks row, or created inline by a fresh dispatch/dead-lane
+ *  failure this tick). Never a silent swallow — every attempt, success or not, lands here AND
+ *  in the event log. */
+export type RollbackOutcome =
+  | { kind: "recovered"; issue: number; target: BoardStatus; reason: string }
+  | { kind: "retrying"; issue: number; attempts: number; reason: string }
+  | { kind: "escalated"; issue: number; attempts: number; reason: string };
+
 export interface TickResult {
   reclaimed: ReclaimOutcome[];
   dispatched: DispatchOutcome[];
@@ -296,6 +305,10 @@ export interface TickResult {
   /** #13: driving lanes run through gate①/gate② this tick (only when deps.mergeGate is
    *  provided). Empty when mergeGate is omitted, or when there were no driving lanes. */
   driven: DrivenOutcome[];
+  /** #31: every pending rollback (persisted this tick or a prior one) attempted this tick —
+   *  recovered / still-retrying / escalated-to-needs-human. Empty when nothing was pending
+   *  and no new recovery-path failure occurred this tick. */
+  rollbacks: RollbackOutcome[];
 }
 
 export interface TickDeps {
@@ -339,11 +352,62 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
     .map((x) => x.i);
 }
 
+/**
+ * One attempt at a durably-persisted recovery-path board mutation (#31). `row` may be a
+ * freshly-inserted pending_rollbacks row (attempts: 0, its own attempt not yet made) or one
+ * read back via state.pendingRollbacks() on a later tick — either way this makes exactly one
+ * forge.setBoardStatus attempt and resolves the row: cleared on success, bumped (retried next
+ * tick) on failure under the cap, or cleared + escalated (needs-human label attempt, never a
+ * silent swallow) once attempts hit cfg.recovery.rollbackRetryCap. Never throws — the whole
+ * point is that a repeated forge failure here must not propagate and must not go unrecorded.
+ */
+async function attemptRollback(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  row: Pick<PendingRollback, "id" | "issue" | "target" | "reason" | "attempts">,
+  iso: () => string,
+): Promise<RollbackOutcome> {
+  try {
+    await forge.setBoardStatus(row.issue, row.target);
+    state.clearPendingRollback(row.id);
+    state.appendEvent("rollback-recovered", { issue: row.issue, target: row.target, reason: row.reason });
+    return { kind: "recovered", issue: row.issue, target: row.target, reason: row.reason };
+  } catch (e) {
+    const attempts = row.attempts + 1;
+    if (attempts >= cfg.recovery.rollbackRetryCap) {
+      state.clearPendingRollback(row.id);
+      // Best-effort last-mile notification — its own failure is not re-persisted (this is
+      // already the bounded-retry escalation path, not another recovery loop to harden) but
+      // the structured event + returned outcome below always fire regardless, so the
+      // escalation itself is never silently swallowed even if the label call is.
+      await forge.addLabel(row.issue, cfg.labels.needsHuman).catch(() => {});
+      state.appendEvent("rollback-escalated", {
+        issue: row.issue, target: row.target, reason: row.reason, attempts, error: String(e),
+      });
+      return { kind: "escalated", issue: row.issue, attempts, reason: row.reason };
+    }
+    state.bumpPendingRollback(row.id, iso());
+    state.appendEvent("rollback-retry-failed", {
+      issue: row.issue, target: row.target, reason: row.reason, attempts, error: String(e),
+    });
+    return { kind: "retrying", issue: row.issue, attempts, reason: row.reason };
+  }
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now ?? (() => new Date());
   const iso = () => now().toISOString();
   const threshold = cfg.worker.heartbeatStaleSecs;
+
+  // ── ROLLBACK RETRY (#31): retry every board mutation still pending from a prior tick's
+  //   recovery-path failure, BEFORE this tick does anything else. Never throws (see
+  //   attemptRollback) — a still-failing forge only bumps the retry count or escalates.
+  const rollbacks: RollbackOutcome[] = [];
+  for (const pending of state.pendingRollbacks()) {
+    rollbacks.push(await attemptRollback(forge, state, cfg, pending, iso));
+  }
   const reclaimed: ReclaimOutcome[] = [];
 
   // ── RECLAIM: classify each in-flight lane from its 4 completion signals ──
@@ -407,7 +471,21 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
       } else {
         state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-        await forge.setBoardStatus(w.issue, "ready");
+        // #31 (finding 2): persist the requeue BEFORE attempting it. The old code awaited
+        // this unguarded AFTER the row above already went terminal — a transient forge
+        // failure here used to propagate straight out of tick() with the worker row already
+        // `failed` and the board still "In Progress": unreclaimable (runningWorkers() no
+        // longer sees it) and un-requeueable (nothing ever retried the board mutation).
+        // Persisting first + attempting via attemptRollback (never throws) means a failure
+        // here is retried by a later tick's ROLLBACK RETRY phase instead of stranding it.
+        const rollbackId = state.addPendingRollback(w.issue, "ready", "dead-lane-requeue", iso());
+        rollbacks.push(
+          await attemptRollback(
+            forge, state, cfg,
+            { id: rollbackId, issue: w.issue, target: "ready", reason: "dead-lane-requeue", attempts: 0 },
+            iso,
+          ),
+        );
       }
       // Usually 0 (a DEAD lane has no terminal sentinel to parse a cost from) but record
       // whatever the probe knows — harmless, and future probes may recover a partial cost.
@@ -581,8 +659,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     try {
       dispatchRes = await supervisor.dispatch(issue);
     } catch (e) {
-      await forge.setBoardStatus(issue.number, "ready").catch(() => {});
       state.appendEvent("dispatch-failed", { issue: issue.number, error: String(e) });
+      // #31 (finding 1): persist the rollback BEFORE attempting it. The dispatch error `e` is
+      // the one that propagates (unchanged contract — this tick rejects), but the rollback
+      // itself must never be a bare `.catch(() => {})` swallow: if it also fails, the durable
+      // pending_rollbacks row (not the discarded catch) is what lets a later tick's ROLLBACK
+      // RETRY phase notice and keep retrying, instead of the issue being stranded In Progress
+      // with no worker row and no trace of the failed recovery attempt.
+      const rollbackId = state.addPendingRollback(issue.number, "ready", "dispatch-rollback", iso());
+      await attemptRollback(
+        forge, state, cfg,
+        { id: rollbackId, issue: issue.number, target: "ready", reason: "dispatch-rollback", attempts: 0 },
+        iso,
+      );
       throw e;
     }
     const { name, sessionId } = dispatchRes;
@@ -598,5 +687,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     dispatched.push({ kind: "dispatched", issue: issue.number, worker: name });
   }
 
-  return { reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated, driven };
+  return {
+    reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated,
+    driven, rollbacks,
+  };
 }

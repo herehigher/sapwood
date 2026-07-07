@@ -127,6 +127,110 @@ test("tick dispatch: a launch failure rolls the board back to Ready", async () =
   assert.deepEqual(forge.claimed, [7]); // claimed first
   assert.ok(forge.boardSet.some(([n, s]) => n === 7 && s === "ready")); // then rolled back
   assert.equal(st.runningWorkers().length, 0);
+  // The rollback succeeded on the first attempt -> no durable retry marker left behind.
+  assert.equal(st.pendingRollbacks().length, 0);
+  st.close();
+});
+
+// ── #31: double-failure rollback/requeue hardening ──────────────────────────────────────
+
+test("tick dispatch: dispatch AND rollback both fail -> pending rollback persisted, tick still rejects with the dispatch error, retried + recovered next tick", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
+  sup.dispatch = async () => { throw new Error("spawn failed"); };
+  let boardFails = true;
+  forge.setBoardStatus = async (n, s) => {
+    if (boardFails) throw new Error("board transiently unreachable");
+    forge.boardSet.push([n, s]);
+  };
+
+  // Tick 1: dispatch throws; the rollback attempt (also transient-failing) is caught and
+  // durably persisted instead of a bare `.catch(() => {})` swallow — but the ORIGINAL
+  // dispatch error is still what propagates (existing contract, unchanged).
+  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }), /spawn failed/);
+  assert.deepEqual(forge.boardSet, []); // rollback attempt failed -> no successful mutation
+  const pending = st.pendingRollbacks();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.issue, 7);
+  assert.equal(pending[0]?.target, "ready");
+  assert.equal(pending[0]?.reason, "dispatch-rollback");
+  assert.equal(pending[0]?.attempts, 1);
+
+  // Tick 2: forge recovers; no Ready issues this time (isolates the retry phase from a
+  // repeat dispatch attempt). The ROLLBACK RETRY phase (runs before dispatch) picks the
+  // persisted row up and clears it on success.
+  boardFails = false;
+  forge.ready = [];
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(r2.rollbacks, [{ kind: "recovered", issue: 7, target: "ready", reason: "dispatch-rollback" }]);
+  assert.equal(st.pendingRollbacks().length, 0);
+  assert.deepEqual(forge.boardSet, [[7, "ready"]]);
+  st.close();
+});
+
+test("tick dispatch: rollback keeps failing past the retry cap -> bounded escalation (needs-human + structured event), never a silent swallow", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
+  sup.dispatch = async () => { throw new Error("spawn failed"); };
+  forge.setBoardStatus = async () => { throw new Error("board unreachable"); };
+  const cfg = mkCfg({ recovery: { rollbackRetryCap: 2 } });
+
+  // Tick 1: dispatch fails; rollback attempt #1 fails -> persisted, attempts=1 (under cap=2).
+  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg }));
+  assert.equal(st.pendingRollbacks().length, 1);
+  assert.equal(st.pendingRollbacks()[0]?.attempts, 1);
+
+  // Tick 2: no Ready issues (isolates the retry). Attempt #2 hits the cap -> escalate: cleared,
+  // needs-human label attempted, a structured "escalated" outcome — no zombie retry loop.
+  forge.ready = [];
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(r2.rollbacks, [{ kind: "escalated", issue: 7, attempts: 2, reason: "dispatch-rollback" }]);
+  assert.equal(st.pendingRollbacks().length, 0);
+  assert.deepEqual(forge.labelsAdded, [[7, "needs-human"]]);
+  st.close();
+});
+
+test("tick reclaim: DEAD lane no-PR requeue failure does not throw or strand the row — persisted + retried next tick and recovers", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dead", 4);
+  sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
+  forge.setBoardStatus = async () => { throw new Error("board unreachable"); };
+
+  // Unlike the dispatch-rollback path, this one must NOT throw (there's no analogous existing
+  // "tick rejects" contract here) — a throw would abort the whole tick over an unrelated dead
+  // lane's board mutation, and the worker row is already terminal (`failed`) either way.
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getWorker("lane-dead")?.state, "failed");
+  assert.equal(st.pendingRollbacks().length, 1);
+  assert.deepEqual(r.rollbacks, [{ kind: "retrying", issue: 4, attempts: 1, reason: "dead-lane-requeue" }]);
+  assert.deepEqual(forge.boardSet, []);
+
+  // Next tick: forge recovers -> the persisted row is retried and cleared.
+  forge.setBoardStatus = async (n, s) => { forge.boardSet.push([n, s]); };
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(r2.rollbacks, [{ kind: "recovered", issue: 4, target: "ready", reason: "dead-lane-requeue" }]);
+  assert.equal(st.pendingRollbacks().length, 0);
+  assert.deepEqual(forge.boardSet, [[4, "ready"]]);
+  st.close();
+});
+
+test("tick reclaim: DEAD lane no-PR requeue succeeding on the first try leaves no pending rollback (pre-existing path unchanged)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dead", 4);
+  sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4, rescued: false });
+  assert.deepEqual(r.rollbacks, [{ kind: "recovered", issue: 4, target: "ready", reason: "dead-lane-requeue" }]);
+  assert.deepEqual(forge.boardSet, [[4, "ready"]]);
+  assert.equal(st.pendingRollbacks().length, 0);
   st.close();
 });
 
