@@ -849,6 +849,47 @@ test("tick ceiling: out-of-band kill switch (file sentinel, engine data dir) fre
   }
 });
 
+test("tick DISPATCH: kill switch created MID-LOOP (during an in-flight supervisor.dispatch) -> a later ready issue in the SAME DISPATCH phase is skipped 'ceiling', never reaches claimIssue/dispatch (independent review of PR #61, issue #64 F1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-dispatch-killswitch-"));
+  try {
+    const switchPath = join(dir, "KILL_SWITCH");
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    forge.ready = [
+      { number: 2, title: "", labels: ["prio:1-high"] },
+      { number: 3, title: "", labels: ["prio:1-high"] },
+    ];
+
+    // A supervisor whose FIRST dispatch call (issue #2, first in dispatch order) simulates an
+    // operator hitting the kill switch WHILE that async dispatch (spawning a brand-new
+    // autonomous worker process) is in flight, by creating the sentinel file synchronously
+    // before resolving. No KILL_SWITCH exists when the DISPATCH loop starts.
+    class KillSwitchOnFirstDispatch extends FakeSupervisor {
+      override async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
+        if (this.dispatched.length === 0) writeFileSync(switchPath, "");
+        return super.dispatch(issue);
+      }
+    }
+    const sup = new KillSwitchOnFirstDispatch();
+
+    assert.equal(st.isKillSwitchActive(), false); // absent when the tick (and DISPATCH loop) starts
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { roundDispatchCap: 2, max: 3 } }) });
+
+    // Issue #2's claimIssue + dispatch DID run (switch was absent when its iteration reached
+    // the outward-action checks).
+    assert.deepEqual(forge.claimed, [2]); // issue #3's claimIssue was NEVER reached
+    assert.deepEqual(sup.dispatched.map((i) => i.number), [2]); // issue #3's dispatch was NEVER reached
+    assert.deepEqual(r.dispatched, [
+      { kind: "dispatched", issue: 2, worker: "lane-1" },
+      { kind: "skipped", issue: 3, reason: "ceiling" },
+    ]);
+    assert.equal(st.runningWorkers().length, 1); // only #2 actually launched
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick ceiling: escalates to a hard kill only after the bounded drain window elapses", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-ceiling-"));
   try {

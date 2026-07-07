@@ -701,6 +701,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
     }
+    // #61 F1 (independent second-opinion review, issue #64 filed for a separate follow-up):
+    // the DISPATCH loop has the same staleness gap the DRIVE loop was fixed for above.
+    // forge.claimIssue (board mutation) and supervisor.dispatch just below are real async
+    // outward actions — dispatch spawns a brand-new autonomous worker process, and multiple
+    // issues can dispatch in one tick (up to roundDispatchCap). The `ceilingBreached` snapshot
+    // above only catches a kill switch already set when DISPATCH started; re-read fresh here,
+    // immediately before the outward actions, so a switch dropped mid-loop still stops issues
+    // reached later in this same pass instead of letting them dispatch anyway.
+    if (state.isKillSwitchActive()) {
+      dispatched.push({ kind: "skipped", issue: issue.number, reason: "ceiling" });
+      continue;
+    }
     // Claim BEFORE launching (matches 0day claim_issue.sh order). The board transition
     // takes the issue out of the Ready lane first, so a launch failure can't leave an
     // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
