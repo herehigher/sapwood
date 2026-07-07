@@ -203,6 +203,31 @@ function freshTrustedThumbCount(
   return freshThumbCount(trusted, pin.at);
 }
 
+/**
+ * Codex's clean verdict is sometimes a plain conversation COMMENT ("Codex Review: Didn't find
+ * any major issues") with NO review object and NO +1 reaction (post-#55 P2) — count it under
+ * the exact same rules as trusted thumbs: trusted non-author login only, and created after the
+ * ENGINE-recorded trigger pin for the CURRENT head. The phrase match is deliberately narrow
+ * (Codex's canonical clean phrasing); an unmatched comment simply keeps waiting — fail-closed.
+ * Identity-gating makes the text non-spoofable: only the trusted bot's own comments are read.
+ */
+const CLEAN_VERDICT_RE = /didn't find any major issues/i;
+function freshTrustedCleanComments(
+  data: PRReviewData,
+  trustedLogin?: (login: string) => boolean,
+  pin?: ReviewTriggerPin,
+): number {
+  if (!trustedLogin || !pin?.at || pin.head !== data.headOid) return 0;
+  const author = normalizeLogin(data.author);
+  return (data.comments ?? []).filter(
+    (c) =>
+      normalizeLogin(c.login) !== author &&
+      trustedLogin(normalizeLogin(c.login)) &&
+      c.createdAt > pin.at! &&
+      CLEAN_VERDICT_RE.test(c.body),
+  ).length;
+}
+
 function verdictFrom(
   data: PRReviewData,
   acceptStates: readonly string[],
@@ -215,7 +240,11 @@ function verdictFrom(
   const action = deriveReviewAction({
     hasEyesReaction: data.reactions.some((r) => r.content === "eyes"),
     freshApprovingReviews: fresh,
-    freshTrustedThumbs: freshTrustedThumbCount(data, trustedReactionLogin, pin),
+    // Thumbs and comment-shaped clean verdicts share one signal: both are "the trusted
+    // reviewer said done-no-findings" under identical identity/pin rules.
+    freshTrustedThumbs:
+      freshTrustedThumbCount(data, trustedReactionLogin, pin) +
+      freshTrustedCleanComments(data, trustedReactionLogin, pin),
     unresolvedThreads: data.unresolvedThreads,
     changesRequestedOnHead: changesRequestedOnHead(data.reviews, data.headOid, data.author),
   });
