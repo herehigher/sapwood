@@ -227,7 +227,7 @@ test("tick reclaim: DEAD lane no-PR requeue succeeding on the first try leaves n
   seedRunning(st, "lane-dead", 4);
   sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
-  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4, rescued: false });
+  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4, rescued: false, costUsd: 0, modelUsage: [] });
   assert.deepEqual(r.rollbacks, [{ kind: "recovered", issue: 4, target: "ready", reason: "dead-lane-requeue" }]);
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
   assert.equal(st.pendingRollbacks().length, 0);
@@ -248,8 +248,8 @@ test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+n
 
   const byWorker = Object.fromEntries(r.reclaimed.map((o) => [o.worker, o]));
   assert.equal(byWorker["lane-keep"]!.kind, "kept");
-  assert.deepEqual(byWorker["lane-donepr"], { kind: "done", worker: "lane-donepr", issue: 2, next: "DRIVING" });
-  assert.deepEqual(byWorker["lane-donenopr"], { kind: "done", worker: "lane-donenopr", issue: 3, next: "ESCALATE_NOPR" });
+  assert.deepEqual(byWorker["lane-donepr"], { kind: "done", worker: "lane-donepr", issue: 2, next: "DRIVING", costUsd: 0, modelUsage: [] });
+  assert.deepEqual(byWorker["lane-donenopr"], { kind: "done", worker: "lane-donenopr", issue: 3, next: "ESCALATE_NOPR", costUsd: 0, modelUsage: [] });
   assert.deepEqual(forge.labelsAdded, [[3, "needs-human"]]); // only the no-PR done escalates
   assert.equal(st.getWorker("lane-keep")?.state, "running");
   assert.equal(st.getWorker("lane-donepr")?.state, "driving"); // PR -> lane held for the review gate
@@ -264,7 +264,7 @@ test("tick reclaim: DEAD lane with NO PR is torn down, board handed back to read
   seedRunning(st, "lane-dead", 4);
   sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
-  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4, rescued: false });
+  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dead", issue: 4, rescued: false, costUsd: 0, modelUsage: [] });
   assert.deepEqual(sup.reclaimed, ["lane-dead"]);
   assert.deepEqual(forge.boardSet, [[4, "ready"]]);
   assert.equal(st.getWorker("lane-dead")?.state, "failed");
@@ -278,7 +278,7 @@ test("tick reclaim: DEAD lane WITH a PR is rescued to driving, not requeued (Cod
   seedRunning(st, "lane-deadpr", 6);
   sup.probes["lane-deadpr"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
-  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-deadpr", issue: 6, rescued: true });
+  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-deadpr", issue: 6, rescued: true, costUsd: 0, modelUsage: [] });
   assert.deepEqual(sup.reclaimed, ["lane-deadpr"]); // orphan still killed
   assert.deepEqual(forge.boardSet, []); // NOT handed back to Ready (would race the open PR)
   assert.equal(st.getWorker("lane-deadpr")?.state, "driving");

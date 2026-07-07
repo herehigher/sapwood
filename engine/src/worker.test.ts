@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
-import { parseCostUsd, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote, WorkerSupervisor } from "./worker.js";
+import { parseCostUsd, parseModelUsage, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote, WorkerSupervisor } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
@@ -24,6 +24,89 @@ test("parseCostUsd: multiple results -> last wins; none -> 0; junk lines ignored
   assert.equal(parseCostUsd(`no json here\n{"type":"assistant"}`), 0);
   assert.equal(parseCostUsd(""), 0);
   assert.equal(parseCostUsd(`garbage{{{\n{"type":"result","total_cost_usd":0.2}`), 0.2);
+});
+
+// ── #47: per-model token usage capture (parseModelUsage) ──
+test("parseModelUsage: full modelUsage map capture (newer CLI)", () => {
+  const jsonl = [
+    `{"type":"system","subtype":"init"}`,
+    JSON.stringify({
+      type: "result", subtype: "success", total_cost_usd: 0.5,
+      usage: { input_tokens: 999 }, // top-level usage ignored when modelUsage is present
+      modelUsage: {
+        "claude-opus-4-6": { inputTokens: 100, outputTokens: 200, cacheReadInputTokens: 30, cacheCreationInputTokens: 10 },
+        "claude-sonnet-4-6": { inputTokens: 5, outputTokens: 7, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+      },
+    }),
+  ].join("\n");
+  assert.deepEqual(parseModelUsage(jsonl), [
+    { model: "claude-opus-4-6", inputTokens: 100, outputTokens: 200, cacheReadTokens: 30, cacheCreationTokens: 10 },
+    { model: "claude-sonnet-4-6", inputTokens: 5, outputTokens: 7, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ]);
+});
+
+test("parseModelUsage: modelUsage absent -> falls back to top-level usage attributed to the result's model id", () => {
+  const jsonl = JSON.stringify({
+    type: "result", subtype: "success", total_cost_usd: 0.1, model: "claude-sonnet-4-6",
+    usage: { input_tokens: 40, output_tokens: 60, cache_creation_input_tokens: 5, cache_read_input_tokens: 15 },
+  });
+  assert.deepEqual(parseModelUsage(jsonl), [
+    { model: "claude-sonnet-4-6", inputTokens: 40, outputTokens: 60, cacheReadTokens: 15, cacheCreationTokens: 5 },
+  ]);
+});
+
+test("parseModelUsage: modelUsage absent + no model field -> falls back to modelName, else 'unknown'", () => {
+  const withModelName = JSON.stringify({
+    type: "result", total_cost_usd: 0.1, modelName: "claude-haiku-4-6",
+    usage: { input_tokens: 1, output_tokens: 2 },
+  });
+  assert.deepEqual(parseModelUsage(withModelName), [
+    { model: "claude-haiku-4-6", inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ]);
+  const withNeither = JSON.stringify({ type: "result", total_cost_usd: 0.1, usage: { input_tokens: 3 } });
+  assert.deepEqual(parseModelUsage(withNeither), [
+    { model: "unknown", inputTokens: 3, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ]);
+});
+
+test("parseModelUsage: malformed/missing usage -> zeros, never a parse failure (cost still recovers separately)", () => {
+  // usage is entirely absent.
+  const noUsage = JSON.stringify({ type: "result", total_cost_usd: 0.2 });
+  assert.deepEqual(parseModelUsage(noUsage), [
+    { model: "unknown", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ]);
+  assert.equal(parseCostUsd(noUsage), 0.2); // USD recording must keep working regardless
+
+  // usage is the wrong shape (a string, not an object).
+  const wrongShape = `{"type":"result","total_cost_usd":0.3,"usage":"not-an-object"}`;
+  assert.deepEqual(parseModelUsage(wrongShape), [
+    { model: "unknown", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ]);
+  assert.equal(parseCostUsd(wrongShape), 0.3);
+
+  // usage fields are negative/non-numeric — clamp to 0, not NaN or negative.
+  const badFields = JSON.stringify({
+    type: "result", total_cost_usd: 0.4,
+    usage: { input_tokens: -5, output_tokens: "oops", cache_read_input_tokens: null },
+  });
+  assert.deepEqual(parseModelUsage(badFields), [
+    { model: "unknown", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ]);
+
+  // no result line at all / garbage-only stream -> empty, no throw.
+  assert.deepEqual(parseModelUsage("no json here\n{\"type\":\"assistant\"}"), []);
+  assert.deepEqual(parseModelUsage(""), []);
+  assert.deepEqual(parseModelUsage("garbage{{{"), []);
+});
+
+test("parseModelUsage: multiple result lines -> last one wins (same as parseCostUsd)", () => {
+  const jsonl = [
+    JSON.stringify({ type: "result", total_cost_usd: 0.1, model: "m1", usage: { input_tokens: 1 } }),
+    JSON.stringify({ type: "result", total_cost_usd: 0.2, model: "m2", usage: { input_tokens: 2 } }),
+  ].join("\n");
+  assert.deepEqual(parseModelUsage(jsonl), [
+    { model: "m2", inputTokens: 2, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ]);
 });
 
 test("discoverClaudeBin: env CLAUDE_BIN wins, else 'claude'", () => {
@@ -59,7 +142,7 @@ const mkStub = (dir: string, body: string): string => {
   chmodSync(p, 0o755);
   return p;
 };
-const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001}'\nexit 0\n`;
+const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001,"model":"claude-stub","usage":{"input_tokens":12,"output_tokens":34}}'\nexit 0\n`;
 
 // A present (dummy) guard hook so hard-mode dispatch doesn't fail closed; the stub `claude`
 // ignores --settings, so its contents don't matter here (the hook mode is unit-tested separately).
@@ -100,6 +183,11 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
     // #14: the terminal sentinel's total_cost_usd feeds the conductor's engine-ceiling
     // ledger (state.recordSpend) — probe() must surface it.
     assert.equal(probe.costUsd, 0.0001);
+    // #47: the sentinel also carries model_usage (from the stub's flat "usage" — no
+    // modelUsage map, so it's the fallback-attributed single entry) — probe() surfaces it too.
+    assert.deepEqual(probe.modelUsage, [
+      { model: "claude-stub", inputTokens: 12, outputTokens: 34, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    ]);
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -174,10 +262,17 @@ test("probe: recovers costUsd from the jsonl when a restart-orphaned lane has NO
     // result line to the jsonl, but no attached onExit handler existed to write a sentinel.
     // The probe must not report 0 — that would omit real spend from the daily-cap ledger.
     writeFileSync(join(dir, "lane-orphan.running.json"), JSON.stringify({ issue: 5, wrapper_pid: 999999999 }));
-    writeFileSync(join(dir, "lane-orphan.jsonl"), `{"type":"system"}\n{"type":"result","subtype":"success","total_cost_usd":1.25}\n`);
+    writeFileSync(
+      join(dir, "lane-orphan.jsonl"),
+      `{"type":"system"}\n{"type":"result","subtype":"success","total_cost_usd":1.25,"model":"claude-opus-4-6","usage":{"input_tokens":7}}\n`,
+    );
     const probe = await s.probe("lane-orphan");
     assert.equal(probe.done, false); // no sentinel — classifyLane will call this DEAD (pid gone)
     assert.equal(probe.costUsd, 1.25); // but the real cost is still recovered from the jsonl
+    // #47: same fallback recovery applies to model usage — no sentinel, so it's reparsed too.
+    assert.deepEqual(probe.modelUsage, [
+      { model: "claude-opus-4-6", inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    ]);
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
