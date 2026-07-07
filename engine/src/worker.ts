@@ -461,26 +461,32 @@ export class WorkerSupervisor implements Supervisor {
     const pid = this.persistedPid(name);
     if (pid == null || this.wrapperAlive(name) !== 1) return false;
     this.detachedHandoffRequested.add(name);
-    this.signalGroup(pid, "SIGTERM");
-    // #63: also persist the request onto running.json itself (not just this process's
-    // in-memory set) so a SECOND engine restart — before probe() ever confirms the pid is
-    // dead — doesn't forget the request. The in-memory set alone only survives one restart
-    // (it's how THIS instance learned to send the SIGTERM); a fresh instance after another
-    // restart has an empty set but can still read this field back off disk.
+    // #63: persist the request onto running.json itself (not just this process's in-memory
+    // set) so a SECOND engine restart — before probe() ever confirms the pid is dead — doesn't
+    // forget the request. The in-memory set alone only survives one restart (it's how THIS
+    // instance learned to send the SIGTERM below); a fresh instance after another restart has
+    // an empty set but can still read this field back off disk.
     //
-    // Best-effort, NEVER throws: requestHandoff is documented on the Supervisor interface as
-    // never throwing, and it's called unguarded from the conductor's CEILING drain loop — a
+    // Ordering matters (Codex second-opinion review, PR #67 P2): this write happens BEFORE the
+    // SIGTERM, not after. If the engine died in the gap between "signal sent" and "flag
+    // persisted", the durable record would never land — the exact restart this field exists to
+    // survive could be the one that kills the write. Persisting first closes that gap: by the
+    // time the signal (and whatever it triggers) is in flight, the durable record already
+    // exists, best-effort though it is.
+    //
+    // Still best-effort, NEVER throws: requestHandoff is documented on the Supervisor interface
+    // as never throwing, and it's called unguarded from the conductor's CEILING drain loop — a
     // write failure here (ENOSPC/EACCES/EROFS/...) must not abort a kill-switch/ceiling drain
-    // mid-tick. The in-memory set above already covers this process's lifetime regardless; the
-    // persisted field is purely an enhancement for surviving a SECOND restart, so silently
-    // degrading here (same "best-effort" contract preserveHandoffWip's git push already uses)
-    // is an acceptable trade-off (Codex second-opinion review, PR #67 F1).
+    // mid-tick, and must not block the SIGTERM that follows regardless of whether the persist
+    // succeeded. The in-memory set above already covers this process's lifetime regardless; the
+    // persisted field is purely an enhancement for surviving a second restart.
     try {
       const running = this.readJson(this.path(name, "running.json"));
       if (running) this.writeJsonAtomic(this.path(name, "running.json"), { ...running, handoff_requested: true });
     } catch (e) {
       console.error(`[sapwood:worker] lane ${name}: failed to persist handoff_requested (non-fatal — SIGTERM still sent): ${String(e)}`);
     }
+    this.signalGroup(pid, "SIGTERM");
     return true;
   }
 

@@ -1030,6 +1030,53 @@ test("#63 F1: a failure persisting handoff_requested onto running.json is swallo
   }
 });
 
+test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE sending the SIGTERM, not after (Codex second-opinion review, PR #67 — closes the gap where the engine could die between 'signal sent' and 'flag persisted', losing the very record the flag exists to survive)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const s1 = sup(dir, bin);
+    const { name } = await s1.dispatch({ number: 67, title: "t", labels: [] });
+    await sleep(600); // let bash install its TERM trap
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
+
+    const s2 = sup(dir, bin);
+    // A shared call-order log — wrap (not replace) the real private writeJsonAtomic/signalGroup
+    // so the actual persist + actual SIGTERM still happen (this test also verifies the
+    // end-to-end outcome), while recording which one ran first.
+    const order: string[] = [];
+    const proto = WorkerSupervisor.prototype as unknown as {
+      writeJsonAtomic: (p: string, obj: unknown) => void;
+      signalGroup: (pid: number, sig: NodeJS.Signals) => void;
+    };
+    const s2Hooks = s2 as unknown as {
+      writeJsonAtomic: (p: string, obj: unknown) => void;
+      signalGroup: (pid: number, sig: NodeJS.Signals) => void;
+    };
+    s2Hooks.writeJsonAtomic = (p, obj) => {
+      order.push("persist");
+      proto.writeJsonAtomic.call(s2, p, obj);
+    };
+    s2Hooks.signalGroup = (targetPid, sig) => {
+      order.push("signal");
+      proto.signalGroup.call(s2, targetPid, sig);
+    };
+
+    assert.equal(s2.requestHandoff(name), true);
+    assert.deepEqual(order, ["persist", "signal"], "the persisted flag write must happen before the SIGTERM is sent");
+
+    const running = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8"));
+    assert.equal(running.handoff_requested, true, "persist actually landed on disk");
+
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "SIGTERM still reached the detached process");
+
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
