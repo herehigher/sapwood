@@ -20,6 +20,17 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.cost.drainWindowSec, 300);
 });
 
+test("engine.tickIntervalSec (#46 loop driver): defaults to 60s, positive-int-guarded, overridable", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.engine.tickIntervalSec, 60);
+  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 30 }");
+  assert.equal(over.engine.tickIntervalSec, 30);
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 0 }"),
+    /tickIntervalSec/i,
+  );
+});
+
 test("cost: #14 ceiling fields are finite-guarded and overridable", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\ncost: { dailyBudgetUsd: 5, maxWallClockSec: 60, drainWindowSec: 10 }",

@@ -129,6 +129,16 @@ const Guard = z.object({
   mode: z.enum(["hard", "soft"]).default("hard"),
 }).strict();
 
+const Engine = z.object({
+  // The M4 loop driver's tick cadence (#46): how often `driver.ts` calls tick(). Threaded
+  // straight into TickDeps.tickIntervalSec so the wall-clock ceiling's session-gap scaling
+  // (conductor.ts engineSessionGapSec: max(900, 2x cadence)) sees the REAL cadence instead of
+  // silently falling back to the 900s floor (gate② PR #41 P2 — a legal slow cadence could
+  // otherwise make every tick look "stale" and void the wall-clock tier). Conservative default:
+  // 1 minute (0day's loop ticks minutes apart, PLAN.md).
+  tickIntervalSec: z.number().int().positive().default(60),
+}).strict();
+
 const Recovery = z.object({
   // #31: bounded retry count for a durably-persisted rollback/requeue (a recovery-path board
   // mutation, e.g. rolling a dispatch-failed claim back to Ready, or requeuing a dead lane).
@@ -140,6 +150,7 @@ const Recovery = z.object({
 
 export const ConfigSchema = z.object({
   board: Board,
+  engine: Engine.default({}),
   lanes: Lanes.default({}),
   worker: Worker.default({}),
   guard: Guard.default({}),

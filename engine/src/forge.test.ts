@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ConfigSchema } from "./config.js";
 import {
+  GithubForge,
   parsePRStatus,
   parseProject,
   selectReadyIssues,
   findOptionId,
   findItemId,
   hasVerificationPlan,
+  extractVerificationPlan,
+  findOpenPrNumber,
   parsePageInfo,
   projectQuery,
   parsePRReviewView,
@@ -125,6 +129,118 @@ test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section
   assert.equal(hasVerificationPlan("no plan here", ["verify:n/a"], "verify:n/a"), true); // doc-gate path
   assert.equal(hasVerificationPlan("no plan here", ["type:feature"], "verify:n/a"), false); // fail-closed
   assert.equal(hasVerificationPlan("", [], "verify:n/a"), false);
+});
+
+// ── extractVerificationPlan (#46: the section text hasVerificationPlan/gate②'s trigger share) ──
+
+test("extractVerificationPlan: returns the heading through the next same-or-shallower heading", () => {
+  const body = [
+    "# Title",
+    "Some intro text.",
+    "## Verification",
+    "1. run `npm test`",
+    "2. run `npm run typecheck`",
+    "## Notes",
+    "irrelevant",
+  ].join("\n");
+  const plan = extractVerificationPlan(body);
+  assert.match(plan!, /^## Verification/);
+  assert.match(plan!, /npm test/);
+  assert.match(plan!, /npm run typecheck/);
+  assert.ok(!plan!.includes("irrelevant")); // stops before the next heading
+  assert.ok(!plan!.includes("Some intro text")); // doesn't leak content before the heading
+});
+
+test("extractVerificationPlan: a plan section that runs to the end of the body (no trailing heading)", () => {
+  const plan = extractVerificationPlan("### Acceptance criteria\n- it works");
+  assert.match(plan!, /^### Acceptance criteria/);
+  assert.match(plan!, /it works/);
+});
+
+test("extractVerificationPlan: no Verification/Acceptance heading -> null (fail-closed, matches hasVerificationPlan)", () => {
+  assert.equal(extractVerificationPlan("no plan here"), null);
+  assert.equal(extractVerificationPlan(""), null);
+});
+
+test("hasVerificationPlan and extractVerificationPlan agree on every case (shared parser, not duplicated)", () => {
+  const cases = ["## Verification\nrun tests", "### Acceptance criteria", "no plan here", ""];
+  for (const body of cases) {
+    assert.equal(hasVerificationPlan(body, [], "verify:n/a"), extractVerificationPlan(body) != null);
+  }
+});
+
+// ── findOpenPrNumber (#46: the live findOpenPr wiring's pure match; PR #50 P2 #2 hardening —
+//   this selects gate②'s MERGE target, so ambiguity is fail-closed, never guessed) ──────────
+
+test("findOpenPrNumber: a single bare #<issue> mention is still found (the unambiguous fallback)", () => {
+  const prs = [{ number: 10, body: "unrelated" }, { number: 11, body: "Part of #46" }];
+  assert.equal(findOpenPrNumber(prs, 46), 11);
+});
+
+test("findOpenPrNumber: no match -> null", () => {
+  assert.equal(findOpenPrNumber([{ number: 10, body: "Part of #45" }], 46), null);
+});
+
+test("findOpenPrNumber: does not match a longer number containing the issue as a prefix (#460 != #46)", () => {
+  assert.equal(findOpenPrNumber([{ number: 10, body: "Part of #460" }], 46), null);
+  assert.equal(findOpenPrNumber([{ number: 10, body: "Fixes #460" }], 46), null);
+});
+
+test("findOpenPrNumber: a closing keyword outranks a newer PR's bare mention (never merge the wrong PR)", () => {
+  // Newest-first order: the newer PR (20) merely mentions #46 in passing; the older PR (21)
+  // declares it closes #46. First-match-wins would pick 20 — the exact wrong-merge-target
+  // hazard PR #50 P2 #2 flagged. Closing semantics must win regardless of recency.
+  const prs = [
+    { number: 20, body: "related to #46, but this PR is for issue #12" },
+    { number: 21, body: "Fixes #46" },
+  ];
+  assert.equal(findOpenPrNumber(prs, 46), 21);
+});
+
+test("findOpenPrNumber: all GitHub closing-keyword inflections count, case-insensitive, optional colon", () => {
+  for (const kw of ["Fixes", "fixed", "fix", "Closes", "closed", "close", "Resolves", "resolved", "resolve", "Fixes:"]) {
+    assert.equal(findOpenPrNumber([{ number: 9, body: `${kw} #46` }], 46), 9, kw);
+  }
+  // Word-bounded: "unfixes"/"prefixes" are not closing keywords.
+  assert.equal(findOpenPrNumber([{ number: 9, body: "unfixes #46" }, { number: 8, body: "also #46" }], 46), null);
+});
+
+test("findOpenPrNumber: several closing-keyword matches -> the OLDEST wins (the lane's original PR, not a newer duplicate)", () => {
+  // Newest-first order: 30 is a newer duplicate/rescue PR also claiming to close #46;
+  // 31 is the original. The original must keep the merge target.
+  const prs = [
+    { number: 30, body: "Closes #46 (superseding attempt)" },
+    { number: 31, body: "Fixes #46" },
+  ];
+  assert.equal(findOpenPrNumber(prs, 46), 31);
+});
+
+test("findOpenPrNumber: multiple bare-mention-only candidates are ambiguous -> null (queued, never a guessed merge target)", () => {
+  const prs = [{ number: 20, body: "Part of #46" }, { number: 21, body: "Part of #46" }];
+  assert.equal(findOpenPrNumber(prs, 46), null);
+});
+
+test("findOpenPrForIssue: passes an explicit high --limit (gh's default 30 would drop later PRs) and finds a PR past the 30th (Codex PR #50)", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  // 40 open PRs, newest-first; the ONLY match ("Fixes #46") is the 35th — a page gh's default
+  // --limit 30 would drop, making probe() report hasPr=false and wrongly escalate the lane.
+  const prs = Array.from({ length: 40 }, (_, i) => ({
+    number: 100 - i,
+    body: i === 34 ? "Fixes #46" : `unrelated PR body ${i}`,
+  }));
+  // Stub the one gh choke point (instance property shadows the private prototype method) —
+  // no real gh call; we assert on the exact argv findOpenPrForIssue builds.
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify(prs);
+  };
+  assert.equal(await forge.findOpenPrForIssue(46), 100 - 34); // the 35th PR is found, not dropped
+  assert.equal(seen.length, 1);
+  const limitIdx = seen[0]!.indexOf("--limit");
+  assert.ok(limitIdx >= 0, "an explicit --limit is passed (never gh's default 30)");
+  assert.ok(Number(seen[0]![limitIdx + 1]) >= 200, "limit is high enough to cover deep PR lists");
 });
 
 test("projectQuery: no line is a // comment (GraphQL uses #, not //) — Codex R5 P1 guard", () => {

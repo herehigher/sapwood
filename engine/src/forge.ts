@@ -70,6 +70,11 @@ export interface IForge {
   addPRComment(pr: number, body: string): Promise<void>;
   /** Fetch gate②'s raw review signals for a PR. #13 reviewer.ts. */
   getPRReviewData(pr: number): Promise<PRReviewData>;
+  /** Raw issue body text (#46, Decision #8's gate② re-check): reviewer.ts extracts the
+   *  verification-plan section from this to carry into the review trigger. Read-only;
+   *  "" for an issue with no body rather than throwing (extractVerificationPlan treats an
+   *  empty body as "no plan", the same fail-closed outcome as a genuinely planless issue). */
+  getIssueBody(issue: number): Promise<string>;
 }
 
 export class GithubForge implements IForge {
@@ -199,6 +204,40 @@ export class GithubForge implements IForge {
     // The `@codex review` trigger (default reviewer) rides this same call — a plain PR
     // comment, never a review/approval/merge call (producer != reviewer != merger).
     await this.gh(["pr", "comment", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
+  }
+
+  async getIssueBody(issue: number): Promise<string> {
+    const out = await this.gh([
+      "issue", "view", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "--json", "body",
+    ]);
+    const parsed = JSON.parse(out) as { body?: string };
+    return parsed.body ?? "";
+  }
+
+  /** #46: maps an issue to its already-open PR, for the live `sapwood run` wiring
+   *  (WorkerDeps.hasOpenPr/findOpenPr) — the "live findOpenPr forge wiring" PLAN.md's M3
+   *  deferred list flagged. The selected PR becomes the driving lane's gate/MERGE target, so
+   *  selection is fail-closed on ambiguity — see findOpenPrNumber for the full precedence
+   *  (closing keywords > oldest-among-closing > a single unambiguous bare `#N` mention;
+   *  multiple bare mentions -> null, the lane queues rather than gating a guessed PR). */
+  async findOpenPrForIssue(issue: number): Promise<number | null> {
+    const out = await this.gh([
+      "pr", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      // gh's default --limit is 30 (Codex PR #50, forge.ts thread): a worker's PR beyond the
+      // first page would probe hasPr=false and wrongly escalate a completed lane to
+      // needs-human. 200 comfortably covers any repo this loop realistically operates on
+      // (lanes.max caps concurrent PRs in single digits). A targeted `--search "#N"` was
+      // considered and rejected: GitHub's search tokenizer doesn't reliably exact-match
+      // issue-reference tokens (fuzzy hits on similar numbers), which would reintroduce the
+      // ambiguity findOpenPrNumber exists to fail closed on. RESIDUAL: a repo with >200 open
+      // PRs could still hide the target past the page — accepted for v1 trusted repos;
+      // fail direction is the conductor's existing no-PR fail-safe (escalate), never a
+      // wrong-PR merge.
+      "--state", "open", "--limit", "200", "--json", "number,body",
+    ]);
+    const prs = JSON.parse(out) as { number: number; body?: string }[];
+    return findOpenPrNumber(prs.map((p) => ({ number: p.number, body: p.body ?? "" })), issue);
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
@@ -356,11 +395,56 @@ function statusValue(item: RawItem, statusField: string): string | null {
   return null;
 }
 
+/**
+ * Extract the Verification/Acceptance section's raw text from an issue body (Decision #8's
+ * plan) — the SAME fail-closed heading match `hasVerificationPlan` uses to gate dispatch,
+ * shared here (not duplicated) so gate②'s reviewer trigger (#46, reviewer.ts) carries exactly
+ * the section the `Ready` gate already required to exist. Returns the heading line through
+ * (exclusive) the next heading of equal-or-shallower level, or the rest of the body if there is
+ * none. null when no such section exists — callers MUST supply an explicit fallback text, never
+ * silently omit the plan (verify:n/a issues have no section and are expected to hit this null).
+ */
+export function extractVerificationPlan(body: string): string | null {
+  const heading = /^(#{1,6})\s*(verification|acceptance)[^\n]*$/im.exec(body);
+  if (!heading) return null;
+  const level = heading[1]!.length;
+  const afterHeading = body.slice(heading.index + heading[0].length);
+  const nextHeading = new RegExp(`^#{1,${level}}\\s`, "m").exec(afterHeading);
+  const section = nextHeading ? afterHeading.slice(0, nextHeading.index) : afterHeading;
+  return (heading[0] + section).trim();
+}
+
 /** True if the issue carries a verification plan (Decision #8): verify:n/a label OR a
  *  Verification/Acceptance section in the body. Fail-closed: no signal -> false. */
 export function hasVerificationPlan(body: string, labels: string[], verifyNaLabel: string): boolean {
   if (labels.includes(verifyNaLabel)) return true;
-  return /(^|\n)#{1,6}\s*(verification|acceptance)/i.test(body);
+  return extractVerificationPlan(body) != null;
+}
+
+/**
+ * Pure match for GithubForge.findOpenPrForIssue. Selecting a lane's PR here decides gate②'s
+ * MERGE TARGET, so ambiguity must never be guessed away (gate② PR #50 P2 #2 — a newer PR
+ * merely *mentioning* the issue must not out-rank / silently replace the issue's own PR):
+ *
+ *  1. PREFERRED: closing-keyword semantics — `Fixes/Closes/Resolves #N` (all GitHub-recognized
+ *     inflections, case-insensitive, word-bounded, optional colon). A PR that declares it
+ *     closes the issue is claiming to BE its PR, not just referencing it.
+ *  2. Tiebreak among several closing-keyword matches: the OLDEST open PR (the last element —
+ *     the caller passes gh's default newest-first order). Rationale: the issue's original PR
+ *     is the one the lane's worker opened first; any newer PR also carrying a closing keyword
+ *     for the same issue is a duplicate/rescue attempt and must not silently steal the merge
+ *     target from the PR already being driven.
+ *  3. FALLBACK: a bare `#N` token (not part of a longer number — `#460` never matches issue
+ *     46), accepted ONLY when exactly one candidate matches. Multiple bare-mention candidates
+ *     are ambiguous -> null (the lane stays undrivable/queued rather than gating a guessed PR).
+ */
+export function findOpenPrNumber(prs: { number: number; body: string }[], issue: number): number | null {
+  const closing = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\\s+#${issue}(?!\\d)`, "i");
+  const closingMatches = prs.filter((pr) => closing.test(pr.body));
+  if (closingMatches.length > 0) return closingMatches[closingMatches.length - 1]!.number; // oldest
+  const mention = new RegExp(`(^|[^0-9])#${issue}(?!\\d)`);
+  const mentions = prs.filter((pr) => mention.test(pr.body));
+  return mentions.length === 1 ? mentions[0]!.number : null;
 }
 
 type ReadyCfg = {

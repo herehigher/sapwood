@@ -135,9 +135,10 @@ export class MergeDriver {
 
   /** Post the review trigger (e.g. `@codex review`) once per PR. Idempotent to call more than
    *  once (a plain comment); the caller (conductor.ts) tracks "already triggered" per lane so it
-   *  calls this at most once per driving lane, not every tick. */
-  async ensureTriggered(pr: number): Promise<void> {
-    await this.deps.reviewer.triggerReview(this.deps.forge, pr);
+   *  calls this at most once per driving lane, not every tick. `issue` (#46) lets the reviewer
+   *  pull the driving lane's verification plan into the trigger (Decision #8). */
+  async ensureTriggered(pr: number, issue: number): Promise<void> {
+    await this.deps.reviewer.triggerReview(this.deps.forge, pr, issue);
   }
 
   /** One gate + merge attempt for `pr`. Never throws — every forge failure resolves to

@@ -7,6 +7,8 @@ export {
   parseReviewThreadsPage,
   countUnresolvedThreads,
   assemblePRReviewData,
+  extractVerificationPlan,
+  findOpenPrNumber,
   type IForge,
   type Issue,
   type OwnerKind,
@@ -63,6 +65,7 @@ export {
   deriveReviewAction,
   normalizeLogin,
   CODEX_REVIEWER_LOGINS,
+  buildReviewTriggerComment,
   type Reviewer,
   type ReviewAction,
   type ReviewVerdict,
@@ -86,6 +89,13 @@ export {
   type WorkerDeps,
   type ClaudeArgsOpts,
 } from "./worker.js";
+export {
+  runDriver,
+  type DriverDeps,
+  type DriverResult,
+  type StopMode,
+  type StopReason,
+} from "./driver.js";
 export { gh, ghText, type GhRunner } from "./gh.js";
 export { guardDecision, safeSplit, type Decision, type GuardInput } from "./guard.js";
 export {
