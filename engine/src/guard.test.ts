@@ -227,6 +227,9 @@ const WRITE_BLOCK: [string, string][] = [
   ["sapwood.config.json", "write-path"],
   ["/repo/engine/dist/guard-hook.js", "write-path"], // compiled hook artifact -> can't overwrite the live hook (#26 R3)
   ["engine/dist/guard.js", "write-path"],
+  ["engine/src/merge-driver.ts", "write-path"], // merge path source (gates + TOCTOU pin) (#13 follow-up)
+  ["/repo/engine/dist/merge-driver.js", "write-path"], // running merge-path artifact
+  ["engine/dist/reviewer.js", "write-path"], // running gate② artifact
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
