@@ -77,6 +77,37 @@ test("activeWorkers returns running + driving (occupied lanes), not terminal sta
   s.close();
 });
 
+test("drivingWorkers returns only state=driving rows (#13 merge-driver targets)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "driving", started_at: "t", ended_at: "t2", pr: 21 });
+  s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "driving", started_at: "t", ended_at: "t2", pr: 22 });
+  s.upsertWorker({ name: "d", issue: 4, session_id: "s4", state: "done", started_at: "t", ended_at: "t2" });
+  assert.deepEqual(s.drivingWorkers().map((w) => w.name), ["b", "c"]);
+  s.close();
+});
+
+test("worker.pr and review_triggered round-trip (#13): default null/0, persisted across upserts", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  const fresh = s.getWorker("a");
+  assert.equal(fresh?.pr, null);
+  assert.equal(fresh?.review_triggered, 0);
+
+  s.upsertWorker({ ...fresh!, state: "driving", ended_at: "t2", pr: 42 });
+  assert.equal(s.getWorker("a")?.pr, 42);
+  assert.equal(s.getWorker("a")?.review_triggered, 0); // untouched -> still 0
+
+  // Spreading a previously-read row (conductor.ts's pattern) preserves pr/review_triggered
+  // across an update that only touches unrelated fields.
+  const driving = s.getWorker("a")!;
+  s.upsertWorker({ ...driving, review_triggered: 1 });
+  const after = s.getWorker("a");
+  assert.equal(after?.pr, 42); // preserved via spread, not clobbered
+  assert.equal(after?.review_triggered, 1);
+  s.close();
+});
+
 test("events append in order", () => {
   const s = mem();
   s.appendEvent("dispatched", { issue: 2 });

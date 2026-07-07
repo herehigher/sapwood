@@ -28,10 +28,12 @@ import {
   ENGINE_SESSION_GAP_SEC,
   type Supervisor,
   type LaneProbe,
+  type MergeGate,
 } from "./conductor.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
-import type { IForge, Issue, PRStatus } from "./forge.js";
+import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
+import type { DriveOutcome } from "./merge-driver.js";
 
 // ── tick test doubles (real State, fake forge + supervisor — no claude, no gh) ──
 const DEFAULT_PROBE: LaneProbe = { done: false, failed: false, handoff: false, hbAge: 10, wrapperAlive: 1, hasPr: false };
@@ -47,8 +49,15 @@ class FakeForge implements IForge {
   async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> { this.boardSet.push([n, s]); }
   async addLabel(n: number, l: string): Promise<void> { this.labelsAdded.push([n, l]); }
   async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: true, ciGreen: true }; }
+  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}
+  async addPRComment(): Promise<void> {}
+  async getPRReviewData(): Promise<PRReviewData> {
+    return {
+      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
+      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+    };
+  }
 }
 
 class FakeSupervisor implements Supervisor {
@@ -184,6 +193,118 @@ test("tick capacity: a reclaimed DONE+PR (driving) lane still occupies a lane (C
   assert.equal(st.getWorker("lane-driving")?.state, "driving");
   assert.deepEqual(sup.dispatched, []); // the driving lane keeps capacity full -> #9 not launched
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 9 && d.reason === "no-lane"));
+  st.close();
+});
+
+// ── #13: DRIVE wiring (deps.mergeGate drives `driving` lanes through gates) ──────────────
+
+class FakeMergeGate implements MergeGate {
+  triggered: number[] = [];
+  outcomes: Record<number, DriveOutcome> = {};
+  defaultOutcome: DriveOutcome = { kind: "queued", pr: 0, reason: "default" };
+  async ensureTriggered(pr: number): Promise<void> { this.triggered.push(pr); }
+  async driveOne(pr: number): Promise<DriveOutcome> { return this.outcomes[pr] ?? { ...this.defaultOutcome, pr }; }
+}
+
+test("tick DRIVE: omitted mergeGate -> driving lanes stay driving untouched, driven=[] (pre-#13 behavior)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+  assert.equal(st.getWorker("lane-a")?.pr, 55);
+  assert.deepEqual(r.driven, []);
+  st.close();
+});
+
+test("tick DRIVE: merged -> worker done, board set to done, driven records it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "done");
+  assert.deepEqual(forge.boardSet, [[2, "done"]]);
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  st.close();
+});
+
+test("tick DRIVE: needs-human -> worker failed + needs-human label", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "needs-human", pr: 55, reason: "gate:HUMAN" };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "gate:HUMAN" }]);
+  st.close();
+});
+
+test("tick DRIVE: queued -> stays driving (retried next tick), no board/label side effects", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "driving"); // untouched
+  assert.deepEqual(forge.boardSet, []);
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(r.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "gate-pending:WAIT_REVIEW" }]);
+  st.close();
+});
+
+test("tick DRIVE: stopped (produce-pr-and-stop) -> stays driving, never treated as merged", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "stopped", pr: 55, reason: "gates-passed:MERGE_OK" };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+  assert.deepEqual(r.driven, [{ kind: "stopped", worker: "lane-a", issue: 2, pr: 55, reason: "gates-passed:MERGE_OK" }]);
+  st.close();
+});
+
+test("tick DRIVE: review trigger posted at most once per PR, not every tick", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: DONE -> driving
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 2nd tick: still driving
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 3rd tick: still driving
+  assert.deepEqual(gate.triggered, [55]); // triggered exactly once across 3 ticks
+  st.close();
+});
+
+test("tick DRIVE: a driving lane with no known PR number fails safe to needs-human (only when mergeGate is configured)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  // Seed a driving lane directly with pr=null (as if rescued from a probe with no prNumber).
+  st.upsertWorker({ name: "lane-a", issue: 2, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: null });
+  const gate = new FakeMergeGate();
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-a", issue: 2, pr: -1, reason: "driving-lane-missing-pr" }]);
   st.close();
 });
 

@@ -70,6 +70,17 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       );
     `);
   },
+  // 2 -> 3: review gate + merge driver (#13). A `driving` lane holds a PR awaiting gate①/gate②;
+  // it needs the PR NUMBER (not just the boolean "has a PR" the probe already carried) so the
+  // merge driver knows which PR to gate/merge, plus a flag so the review trigger (e.g.
+  // `@codex review`) is posted once per PR, not every tick. Both nullable/defaulted — NULL/0
+  // for every pre-existing row (append-only migration, no backfill needed).
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN pr INTEGER;
+      ALTER TABLE workers ADD COLUMN review_triggered INTEGER NOT NULL DEFAULT 0;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -85,6 +96,15 @@ export interface WorkerRow {
   state: WorkerState;
   started_at: string;
   ended_at: string | null;
+  /** PR number once a `driving` lane has one (the merge driver's gate/merge target, #13).
+   *  Optional (not `null`-required) so every pre-#13 upsertWorker call site — which never set
+   *  a PR — still type-checks; the DB column defaults to NULL. */
+  pr?: number | null;
+  /** Whether the review trigger (e.g. `@codex review`) has been posted for this lane's PR
+   *  (#13) — posted at most once, not every tick. SQLite INTEGER (0/1), matching every other
+   *  raw-column field on this row (session_id/started_at/ended_at are snake_case too).
+   *  Optional; defaults to 0. */
+  review_triggered?: number;
 }
 
 export class State {
@@ -137,14 +157,18 @@ export class State {
   upsertWorker(row: WorkerRow): void {
     this.db
       .prepare(
-        `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, review_triggered)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
-           ended_at = excluded.ended_at`,
+           ended_at = excluded.ended_at, pr = excluded.pr,
+           review_triggered = excluded.review_triggered`,
       )
-      .run(row.name, row.issue, row.session_id, row.state, row.started_at, row.ended_at);
+      .run(
+        row.name, row.issue, row.session_id, row.state, row.started_at, row.ended_at,
+        row.pr ?? null, row.review_triggered ?? 0,
+      );
   }
 
   getWorker(name: string): WorkerRow | undefined {
@@ -165,6 +189,14 @@ export class State {
   activeWorkers(): WorkerRow[] {
     return this.db
       .prepare("SELECT * FROM workers WHERE state IN ('running', 'driving') ORDER BY name")
+      .all() as unknown as WorkerRow[];
+  }
+
+  /** Lanes holding a PR awaiting the review gate (#13's merge driver). No live worker process —
+   *  just a lane occupying capacity until gate①/gate② resolve it to merged/needs-human/queued. */
+  drivingWorkers(): WorkerRow[] {
+    return this.db
+      .prepare("SELECT * FROM workers WHERE state = 'driving' ORDER BY name")
       .all() as unknown as WorkerRow[];
   }
 

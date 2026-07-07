@@ -20,11 +20,43 @@ export interface PRStatus {
   number: number;
   headOid: string;
   state: "OPEN" | "CLOSED" | "MERGED";
-  mergeable: boolean;
+  // Tri-state, not boolean (Codex PR #42 P2): CONFLICTING must route to needs-human
+  // BEFORE a merge attempt, while UNKNOWN (GitHub still computing) only queues — a
+  // boolean would either retry conflicts forever or escalate a transient UNKNOWN.
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   ciGreen: boolean;
 }
 
-/** The only surface the conductor uses to touch the code host. ~8 methods. */
+/** One reaction on the PR's top-level issue-comment thread (`gh api .../reactions`). */
+export interface PRReaction {
+  content: string; // "+1" | "eyes" | ...
+  createdAt: string; // ISO
+  login: string;
+}
+
+/** One review on the PR (`gh pr view --json reviews`). */
+export interface PRReview {
+  author: string;
+  commitOid: string; // the head this review was submitted against
+  state: string; // APPROVED | COMMENTED | CHANGES_REQUESTED | DISMISSED | PENDING
+}
+
+/** Everything reviewer.ts needs to derive gate②'s ACTION (0day's pr_gate.sh, review half —
+ *  CI/gate① stays on PRStatus.ciGreen). Assembled from 3 read-only gh calls (reactions, pr
+ *  view, review threads) — see GithubForge.getPRReviewData. */
+export interface PRReviewData {
+  headOid: string;
+  author: string;
+  updatedAt: string; // ISO — the freshness cutoff for reactions (0day pr_gate.sh #92)
+  isDraft: boolean;
+  labels: string[];
+  state: "OPEN" | "CLOSED" | "MERGED";
+  reactions: PRReaction[];
+  reviews: PRReview[];
+  unresolvedThreads: number;
+}
+
+/** The only surface the conductor uses to touch the code host. */
 export interface IForge {
   detectOwnerKind(owner: string): Promise<OwnerKind>;
   getReadyIssues(): Promise<Issue[]>;
@@ -34,6 +66,10 @@ export interface IForge {
   openPR(branch: string, title: string, body: string): Promise<number>;
   getPRStatus(pr: number): Promise<PRStatus>;
   mergePR(pr: number, headOid: string): Promise<void>;
+  /** Post a PR comment (e.g. the `@codex review` trigger). #13 reviewer.ts. */
+  addPRComment(pr: number, body: string): Promise<void>;
+  /** Fetch gate②'s raw review signals for a PR. #13 reviewer.ts. */
+  getPRReviewData(pr: number): Promise<PRReviewData>;
 }
 
 export class GithubForge implements IForge {
@@ -157,6 +193,37 @@ export class GithubForge implements IForge {
       "pr", "merge", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
       "--squash", "--delete-branch", "--match-head-commit", headOid,
     ]);
+  }
+
+  async addPRComment(pr: number, body: string): Promise<void> {
+    // The `@codex review` trigger (default reviewer) rides this same call — a plain PR
+    // comment, never a review/approval/merge call (producer != reviewer != merger).
+    await this.gh(["pr", "comment", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
+  }
+
+  async getPRReviewData(pr: number): Promise<PRReviewData> {
+    // Read-only gh calls (0day pr_gate.sh): PR metadata + reviews, reactions (--paginate), and
+    // the review-threads connection PAGED TO EXHAUSTION (Codex PR #42 P2 — a first-100-only
+    // fetch could report zero findings while an unresolved thread sits on a later page).
+    // Never touches merge/approve/ready — this is a read surface only.
+    const viewJson = await this.gh([
+      "pr", "view", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "--json", "headRefOid,author,updatedAt,isDraft,labels,state,reviews",
+    ]);
+    const reactionsJson = await this.gh([
+      // --slurp: --paginate alone concatenates one JSON doc per page (unparseable as a
+      // single document); --slurp wraps pages in an outer array parsePRReactions flattens.
+      "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/reactions`, "--paginate", "--slurp",
+    ]);
+    const unresolvedThreads = await countUnresolvedThreads((after) =>
+      this.gh([
+        "api", "graphql", "-f", `query=${REVIEW_THREADS_QUERY}`,
+        "-f", `owner=${this.cfg.board.owner}`, "-f", `repo=${this.repo()}`, "-F", `number=${pr}`,
+        // Same -F null / -f cursor split as fetchProject: an opaque cursor must go raw.
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ]),
+    );
+    return assemblePRReviewData(viewJson, reactionsJson, unresolvedThreads);
   }
 
   private repo(): string {
@@ -362,7 +429,134 @@ export function parsePRStatus(json: string): PRStatus {
     number: d.number,
     headOid: d.headRefOid,
     state: d.state as PRStatus["state"],
-    mergeable: d.mergeable === "MERGEABLE",
+    mergeable: d.mergeable === "MERGEABLE" || d.mergeable === "CONFLICTING" ? d.mergeable : "UNKNOWN",
     ciGreen,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Review-gate data (#13 reviewer.ts / merge-driver.ts). Pure parse + assembly; the only
+// impure part is GithubForge.getPRReviewData's 3 gh calls above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const REVIEW_THREADS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id isResolved }
+      }
+    }
+  }
+}`;
+
+/** One page of the reviewThreads connection: unresolved count + cursor. Absent/malformed
+ *  pageInfo -> terminal (no infinite loop on a bad response). */
+export function parseReviewThreadsPage(json: string): {
+  unresolved: number;
+  hasNextPage: boolean;
+  endCursor: string | null;
+} {
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          reviewThreads?: {
+            pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+            nodes?: { isResolved: boolean }[];
+          };
+        };
+      };
+    };
+  };
+  const conn = d.data?.repository?.pullRequest?.reviewThreads;
+  return {
+    unresolved: (conn?.nodes ?? []).filter((n) => !n.isResolved).length,
+    hasNextPage: conn?.pageInfo?.hasNextPage ?? false,
+    endCursor: conn?.pageInfo?.endCursor ?? null,
+  };
+}
+
+/**
+ * Total unresolved threads across the WHOLE connection, paging to exhaustion (Codex PR #42
+ * P2: a first-100 fetch with all first-page threads resolved would report 0 findings while an
+ * unresolved thread sits on page 2 — a fail-open in gate②). Same pattern + page ceiling as
+ * fetchProject's items paging. `fetchPage` is injected so the loop is testable offline.
+ */
+export async function countUnresolvedThreads(fetchPage: (after: string | null) => Promise<string>): Promise<number> {
+  let unresolved = 0;
+  let after: string | null = null;
+  // ponytail: hard page ceiling (50 pages = 5000 threads) so a cursor bug can't spin forever.
+  for (let page = 0; page < 50; page++) {
+    const p = parseReviewThreadsPage(await fetchPage(after));
+    unresolved += p.unresolved;
+    if (!p.hasNextPage || !p.endCursor) return unresolved;
+    after = p.endCursor;
+  }
+  return unresolved; // page ceiling hit; return what we counted rather than loop unbounded
+}
+
+/** Pure parse of `gh pr view --json headRefOid,author,updatedAt,isDraft,labels,state,reviews`. */
+export function parsePRReviewView(json: string): {
+  headOid: string;
+  author: string;
+  updatedAt: string;
+  isDraft: boolean;
+  labels: string[];
+  state: PRStatus["state"];
+  reviews: PRReview[];
+} {
+  const d = JSON.parse(json) as {
+    headRefOid: string;
+    author?: { login?: string };
+    updatedAt: string;
+    isDraft: boolean;
+    labels?: { name: string }[];
+    state: string;
+    reviews?: { author?: { login?: string }; commit?: { oid?: string }; state: string }[];
+  };
+  return {
+    headOid: d.headRefOid,
+    author: d.author?.login ?? "",
+    updatedAt: d.updatedAt,
+    isDraft: d.isDraft,
+    labels: (d.labels ?? []).map((l) => l.name),
+    state: d.state as PRStatus["state"],
+    reviews: (d.reviews ?? []).map((r) => ({
+      author: r.author?.login ?? "",
+      commitOid: r.commit?.oid ?? "",
+      state: r.state,
+    })),
+  };
+}
+
+/** Pure parse of `gh api .../issues/<pr>/reactions --paginate --slurp`. `--paginate` alone
+ *  emits ONE JSON document PER PAGE — a single JSON.parse throws on any PR whose reactions
+ *  span pages, wedging the merge gate at "queued" forever (Codex PR #42 P2). `--slurp` wraps
+ *  the pages in one array; accept both that (array-of-page-arrays) and the legacy single
+ *  flat array so pre-slurp fixtures/callers keep parsing. */
+export function parsePRReactions(json: string): PRReaction[] {
+  type Raw = { content: string; created_at: string; user?: { login?: string } };
+  const parsed = JSON.parse(json) as Raw[] | Raw[][];
+  const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
+  return arr.map((r) => ({ content: r.content, createdAt: r.created_at, login: r.user?.login ?? "" }));
+}
+
+/** Assemble the raw gh responses into one PRReviewData. `unresolvedThreads` arrives as an
+ *  already-paged total (countUnresolvedThreads) — never a single-page count. Exported for
+ *  offline testing; GithubForge.getPRReviewData is the only impure caller. */
+export function assemblePRReviewData(viewJson: string, reactionsJson: string, unresolvedThreads: number): PRReviewData {
+  const view = parsePRReviewView(viewJson);
+  return {
+    headOid: view.headOid,
+    author: view.author,
+    updatedAt: view.updatedAt,
+    isDraft: view.isDraft,
+    labels: view.labels,
+    state: view.state,
+    reviews: view.reviews,
+    reactions: parsePRReactions(reactionsJson),
+    unresolvedThreads,
   };
 }

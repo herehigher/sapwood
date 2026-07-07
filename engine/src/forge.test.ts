@@ -9,6 +9,11 @@ import {
   hasVerificationPlan,
   parsePageInfo,
   projectQuery,
+  parsePRReviewView,
+  parsePRReactions,
+  parseReviewThreadsPage,
+  countUnresolvedThreads,
+  assemblePRReviewData,
 } from "./forge.js";
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —
@@ -222,7 +227,7 @@ test("parsePRStatus: clean mergeable PR with passing checks", () => {
       statusCheckRollup: [{ conclusion: "SUCCESS" }],
     }),
   );
-  assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: true, ciGreen: true });
+  assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true });
 });
 
 test("parsePRStatus: an empty rollup fails closed (checks may not be created yet)", () => {
@@ -295,5 +300,136 @@ test("parsePRStatus: a failing check is not green", () => {
     }),
   );
   assert.equal(s.ciGreen, false);
-  assert.equal(s.mergeable, false);
+  assert.equal(s.mergeable, "CONFLICTING");
+});
+
+test("parsePRStatus: unrecognized mergeable value normalizes to UNKNOWN (queue, not escalate)", () => {
+  const s = parsePRStatus(
+    JSON.stringify({ number: 3, headRefOid: "abc", state: "OPEN", mergeable: "UNKNOWN", statusCheckRollup: [] }),
+  );
+  assert.equal(s.mergeable, "UNKNOWN");
+});
+
+// ── #13 review-gate data: parsePRReviewView / parsePRReactions / parseUnresolvedThreads ──
+
+test("parsePRReviewView: parses headRefOid/author/updatedAt/isDraft/labels/state/reviews", () => {
+  const v = parsePRReviewView(
+    JSON.stringify({
+      headRefOid: "HEAD123",
+      author: { login: "producer" },
+      updatedAt: "2026-06-17T12:00:00Z",
+      isDraft: false,
+      labels: [{ name: "type:feature" }, { name: "needs-human" }],
+      state: "OPEN",
+      reviews: [
+        { author: { login: "codex" }, commit: { oid: "HEAD123" }, state: "COMMENTED" },
+        { author: {}, commit: {}, state: "PENDING" }, // missing login/oid -> "" not a crash
+      ],
+    }),
+  );
+  assert.equal(v.headOid, "HEAD123");
+  assert.equal(v.author, "producer");
+  assert.deepEqual(v.labels, ["type:feature", "needs-human"]);
+  assert.deepEqual(v.reviews, [
+    { author: "codex", commitOid: "HEAD123", state: "COMMENTED" },
+    { author: "", commitOid: "", state: "PENDING" },
+  ]);
+});
+
+test("parsePRReviewView: absent labels/reviews arrays default to empty (no crash)", () => {
+  const v = parsePRReviewView(
+    JSON.stringify({ headRefOid: "H", updatedAt: "t", isDraft: true, state: "OPEN" }),
+  );
+  assert.deepEqual(v.labels, []);
+  assert.deepEqual(v.reviews, []);
+  assert.equal(v.author, "");
+});
+
+test("parsePRReactions: maps GitHub reaction rows to {content, createdAt, login}", () => {
+  const r = parsePRReactions(
+    JSON.stringify([
+      { content: "+1", created_at: "2026-06-17T13:00:00Z", user: { login: "alice" } },
+      { content: "eyes", created_at: "2026-06-17T13:30:00Z", user: null },
+    ]),
+  );
+  assert.deepEqual(r, [
+    { content: "+1", createdAt: "2026-06-17T13:00:00Z", login: "alice" },
+    { content: "eyes", createdAt: "2026-06-17T13:30:00Z", login: "" },
+  ]);
+});
+
+test("parsePRReactions: --slurp multi-page output (array of page arrays) flattens in order (Codex PR #42 P2)", () => {
+  // gh api --paginate --slurp wraps each page's array in one outer array; a reaction list
+  // spanning pages previously threw on JSON.parse and wedged the merge gate at "queued".
+  const r = parsePRReactions(
+    JSON.stringify([
+      [{ content: "+1", created_at: "t1", user: { login: "a" } }],
+      [{ content: "eyes", created_at: "t2", user: { login: "b" } }, { content: "+1", created_at: "t3", user: {} }],
+    ]),
+  );
+  assert.deepEqual(r.map((x) => [x.content, x.login]), [["+1", "a"], ["eyes", "b"], ["+1", ""]]);
+});
+
+test("parsePRReactions: empty slurp output parses to []", () => {
+  assert.deepEqual(parsePRReactions("[]"), []);
+  assert.deepEqual(parsePRReactions("[[]]"), []);
+});
+
+const threadsPage = (
+  resolved: boolean[],
+  pageInfo?: { hasNextPage: boolean; endCursor: string | null },
+): string =>
+  JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            ...(pageInfo ? { pageInfo } : {}),
+            nodes: resolved.map((r) => ({ isResolved: r })),
+          },
+        },
+      },
+    },
+  });
+
+test("parseReviewThreadsPage: counts only isResolved=false nodes + surfaces the page cursor", () => {
+  const p = parseReviewThreadsPage(threadsPage([false, true, false], { hasNextPage: true, endCursor: "CUR" }));
+  assert.deepEqual(p, { unresolved: 2, hasNextPage: true, endCursor: "CUR" });
+});
+
+test("parseReviewThreadsPage: absent/malformed shape -> 0 + terminal, never throws or loops", () => {
+  assert.deepEqual(parseReviewThreadsPage(JSON.stringify({})), { unresolved: 0, hasNextPage: false, endCursor: null });
+});
+
+test("countUnresolvedThreads: pages to exhaustion — an unresolved thread PAST page 1 is still counted (Codex PR #42 P2)", async () => {
+  // Page 1: all resolved, more pages remain. Page 2: one unresolved. A first-100-only fetch
+  // would have declared zero findings here — the exact fail-open the pagination closes.
+  const pages: Record<string, string> = {
+    "": threadsPage(Array(100).fill(true) as boolean[], { hasNextPage: true, endCursor: "P2" }),
+    P2: threadsPage([true, false], { hasNextPage: false, endCursor: null }),
+  };
+  const fetched: (string | null)[] = [];
+  const n = await countUnresolvedThreads(async (after) => {
+    fetched.push(after);
+    return pages[after ?? ""]!;
+  });
+  assert.equal(n, 1);
+  assert.deepEqual(fetched, [null, "P2"]); // followed the cursor exactly once
+});
+
+test("countUnresolvedThreads: single page (no pageInfo) -> one fetch, its count", async () => {
+  const n = await countUnresolvedThreads(async () => threadsPage([false, false, true]));
+  assert.equal(n, 2);
+});
+
+test("assemblePRReviewData: combines the raw gh responses + the paged thread total", () => {
+  const view = JSON.stringify({
+    headRefOid: "H", author: { login: "producer" }, updatedAt: "t", isDraft: false,
+    labels: [], state: "OPEN", reviews: [],
+  });
+  const reactions = JSON.stringify([{ content: "eyes", created_at: "t", user: { login: "codex" } }]);
+  const data = assemblePRReviewData(view, reactions, 1);
+  assert.equal(data.headOid, "H");
+  assert.equal(data.reactions.length, 1);
+  assert.equal(data.unresolvedThreads, 1);
 });

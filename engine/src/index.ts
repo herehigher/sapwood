@@ -2,10 +2,18 @@ export { ConfigSchema, loadConfig, parseConfig, type SapwoodConfig } from "./con
 export {
   GithubForge,
   parsePRStatus,
+  parsePRReviewView,
+  parsePRReactions,
+  parseReviewThreadsPage,
+  countUnresolvedThreads,
+  assemblePRReviewData,
   type IForge,
   type Issue,
   type OwnerKind,
   type PRStatus,
+  type PRReview,
+  type PRReaction,
+  type PRReviewData,
 } from "./forge.js";
 export { State, SCHEMA_VERSION, type WorkerRow, type WorkerState } from "./state.js";
 export {
@@ -34,7 +42,33 @@ export {
   type ReclaimOutcome,
   type DispatchOutcome,
   type CeilingReason,
+  type MergeGate,
+  type DrivenOutcome,
 } from "./conductor.js";
+export {
+  CodexReviewer,
+  HumanReviewer,
+  SameModelTrustedReviewer,
+  makeReviewer,
+  freshThumbCount,
+  freshHeadReviewCount,
+  changesRequestedOnHead,
+  deriveReviewAction,
+  normalizeLogin,
+  CODEX_REVIEWER_LOGINS,
+  type Reviewer,
+  type ReviewAction,
+  type ReviewVerdict,
+  type ReviewSignals,
+} from "./reviewer.js";
+export {
+  MergeDriver,
+  deriveGate,
+  mergeDecision,
+  type Gate,
+  type DriveOutcome,
+  type MergeDriverDeps,
+} from "./merge-driver.js";
 export {
   WorkerSupervisor,
   parseCostUsd,

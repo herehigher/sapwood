@@ -106,6 +106,48 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
   }
 });
 
+test("probe: #13 findOpenPr (when provided) supplies prNumber and derives hasPr from it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg, stateDir: dir, claudeBin: bin,
+      hasOpenPr: async () => { throw new Error("legacy path must not be used when findOpenPr is provided"); },
+      findOpenPr: async (issue) => (issue === 8 ? 42 : null),
+      renderPrompt: () => "test prompt", heartbeatMs: 50, guardHookPath: mkHook(dir),
+    });
+    const { name } = await s.dispatch({ number: 8, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    const probe = await s.probe(name);
+    assert.equal(probe.hasPr, true);
+    assert.equal(probe.prNumber, 42);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probe: #13 findOpenPr returning null -> hasPr false, prNumber undefined (no legacy fallback call)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg, stateDir: dir, claudeBin: bin,
+      hasOpenPr: async () => { throw new Error("legacy path must not be used when findOpenPr is provided"); },
+      findOpenPr: async () => null,
+      renderPrompt: () => "test prompt", heartbeatMs: 50, guardHookPath: mkHook(dir),
+    });
+    const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    const probe = await s.probe(name);
+    assert.equal(probe.hasPr, false);
+    assert.equal(probe.prNumber, undefined);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("probe: costUsd is 0 while a lane is still running (no terminal sentinel yet)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
