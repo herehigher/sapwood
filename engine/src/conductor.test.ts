@@ -52,6 +52,7 @@ class FakeForge implements IForge {
   async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
+  async getIssueBody(): Promise<string> { return ""; }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
@@ -304,9 +305,13 @@ test("tick capacity: a reclaimed DONE+PR (driving) lane still occupies a lane (C
 
 class FakeMergeGate implements MergeGate {
   triggered: number[] = [];
+  triggeredWith: Array<[number, number]> = []; // [pr, issue] — #46: proves issue flows through
   outcomes: Record<number, DriveOutcome> = {};
   defaultOutcome: DriveOutcome = { kind: "queued", pr: 0, reason: "default" };
-  async ensureTriggered(pr: number): Promise<void> { this.triggered.push(pr); }
+  async ensureTriggered(pr: number, issue: number): Promise<void> {
+    this.triggered.push(pr);
+    this.triggeredWith.push([pr, issue]);
+  }
   async driveOne(pr: number): Promise<DriveOutcome> { return this.outcomes[pr] ?? { ...this.defaultOutcome, pr }; }
 }
 
@@ -395,6 +400,19 @@ test("tick DRIVE: review trigger posted at most once per PR, not every tick", as
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 2nd tick: still driving
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 3rd tick: still driving
   assert.deepEqual(gate.triggered, [55]); // triggered exactly once across 3 ticks
+  st.close();
+});
+
+test("tick DRIVE: ensureTriggered receives the driving lane's issue number (#46, Decision #8 plan-in-trigger)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(gate.triggeredWith, [[55, 2]]); // [pr, issue] — issue 2 is lane-a's issue
   st.close();
 });
 

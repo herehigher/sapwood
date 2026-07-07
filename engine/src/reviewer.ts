@@ -13,6 +13,7 @@
 // posts a plain PR comment (the trigger). It has no merge method and never will — merging is
 // merge-driver.ts's alone, invoked only from the Conductor (conductor.ts), never a worker.
 import type { IForge, PRReview, PRReviewData } from "./forge.js";
+import { extractVerificationPlan } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
 
 export type ReviewAction =
@@ -103,8 +104,10 @@ export function deriveReviewAction(s: ReviewSignals): ReviewAction {
 export interface Reviewer {
   readonly kind: "different-model-codex" | "same-model-trusted" | "human";
   /** Post the review trigger (e.g. `@codex review`). A no-op for modes with no bot to ping
-   *  (same-model-trusted, human) — those wait for an out-of-band review to land. */
-  triggerReview(forge: IForge, pr: number): Promise<void>;
+   *  (same-model-trusted, human) — those wait for an out-of-band review to land. `issue` is the
+   *  driving lane's issue number (#46, Decision #8): a reviewer that pings a bot uses it to pull
+   *  the issue's verification plan into the trigger, so gate② re-checks the PR against it. */
+  triggerReview(forge: IForge, pr: number, issue: number): Promise<void>;
   /** This tick's verdict from ALREADY-FETCHED review data (merge-driver.ts fetches it fresh
    *  every call against the LIVE current head — never a cached one; a review of a stale head
    *  counts as no review, #101, since freshHeadReviewCount filters on data.headOid). */
@@ -120,6 +123,22 @@ export function normalizeLogin(login: string): string {
 
 /** The Codex review bot's login (normalized form — see normalizeLogin). */
 export const CODEX_REVIEWER_LOGINS = ["chatgpt-codex-connector"] as const;
+
+/**
+ * Build the review-trigger comment body (#46, Decision #8): `@codex review` plus the issue's
+ * verification plan, so gate② re-checks the finished PR against the SAME plan the `Ready` gate
+ * required at dispatch (getReadyIssues / hasVerificationPlan) — until now gate② only checked
+ * "fresh non-author review + CI", not plan conformance (PLAN.md M3 deferred list). `planText`
+ * null (no extractable Verification/Acceptance section — e.g. a verify:n/a issue, or a
+ * malformed body) still gets an EXPLICIT fallback sentence, never a silently plan-less trigger.
+ * Pure + exported so the shape is unit-testable without a fake IForge.
+ */
+export function buildReviewTriggerComment(issue: number, planText: string | null): string {
+  const instruction = planText
+    ? `Verify this PR against issue #${issue}'s verification plan below:\n\n${planText}`
+    : `No extractable verification plan was found on issue #${issue} — review this PR on its own merits.`;
+  return `@codex review\n\n${instruction}`;
+}
 
 /**
  * Verdict core. `countableReview` restricts WHOSE reviews may satisfy gate② (Codex PR #42 P1:
@@ -160,8 +179,13 @@ export class CodexReviewer implements Reviewer {
     this.allowedLogins = [...CODEX_REVIEWER_LOGINS, ...extraTrustedLogins].map(normalizeLogin);
   }
 
-  async triggerReview(forge: IForge, pr: number): Promise<void> {
-    await forge.addPRComment(pr, "@codex review");
+  async triggerReview(forge: IForge, pr: number, issue: number): Promise<void> {
+    // A body-fetch hiccup (rate-limit/timeout) must not block the trigger itself — gate②
+    // still has to fire; it just falls back to the explicit "no plan" text below rather than
+    // silently retrying forever or skipping the comment (#46 Decision #8: the trigger always
+    // posts, never a swallowed no-op).
+    const body = await forge.getIssueBody(issue).catch(() => "");
+    await forge.addPRComment(pr, buildReviewTriggerComment(issue, extractVerificationPlan(body)));
   }
 
   verdictFromData(data: PRReviewData): ReviewVerdict {

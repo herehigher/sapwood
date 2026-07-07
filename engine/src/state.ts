@@ -292,6 +292,21 @@ export class State {
    *  'unknown' row with 0 tokens, matching every pre-#47 row's shape. */
   recordSpend(worker: string, issue: number, usd: number, at: string, models: ModelUsageEntry[] = []): void {
     const safeUsd = Number.isFinite(usd) && usd > 0 ? usd : 0;
+    // #46 resume cost-delta (gate② PR #41 P3 TRAP): a resumed lane reuses the SAME worker
+    // name across multiple terminal transitions (handoff -> --resume -> done/failed/handoff
+    // again). Claude Code's `--resume` continues the SAME session, so its terminal
+    // total_cost_usd is the whole session's cumulative cost, not just the new leg — recording
+    // it again in full here would double-count the pre-handoff portion already ledgered under
+    // this worker name. Recording only the amount ABOVE what this worker name has already
+    // banked makes every recordSpend call safe regardless of how many times it fires for the
+    // same name: the first call (nothing banked yet) records the full total unchanged; a
+    // resume's call records only the incremental delta. Floored at 0 (never negative) so a
+    // lower/equal report — a short/corrupt read, or a CLI whose resume semantics turn out to
+    // be non-cumulative after all (unverified here; see #46 scope 3's live run) — just adds
+    // nothing further rather than eroding the ledger. DB-backed (not in-memory), so this is
+    // correct across an engine restart between the handoff and the resume, too.
+    const priorUsd = this.spentUsdForWorker(worker);
+    const deltaUsd = Math.max(0, safeUsd - priorUsd);
     const rows = models.length > 0 ? models : [{ model: "unknown", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }];
     const safeInt = (n: number): number => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
     const stmt = this.db.prepare(
@@ -299,13 +314,29 @@ export class State {
          (ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    // ponytail: token counts are NOT delta-adjusted here (only usd, the flagged double-count
+    // risk) — a resumed lane's token counts will over-count on re-terminal, same residual #47
+    // already accepts for the model-usage breakdown (see its migration comment). Tracked as a
+    // known follow-up, not silently swept: the daily USD cap (the actual safety boundary) is
+    // exact; token telemetry for a resumed lane is approximate until that's worth the added
+    // per-model bookkeeping.
     rows.forEach((m, i) => {
       stmt.run(
-        at, worker, issue, i === 0 ? safeUsd : 0,
+        at, worker, issue, i === 0 ? deltaUsd : 0,
         m.model || "unknown", safeInt(m.inputTokens), safeInt(m.outputTokens),
         safeInt(m.cacheReadTokens), safeInt(m.cacheCreationTokens),
       );
     });
+  }
+
+  /** Cumulative usd already ledgered under this worker NAME (across every prior terminal
+   *  transition for it — normally one, but a resumed lane can have more). The resume
+   *  cost-delta baseline (#46): see recordSpend's comment. */
+  spentUsdForWorker(worker: string): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE worker = ?")
+      .get(worker) as { total: number };
+    return row.total;
   }
 
   /** Cumulative spend for `now`'s UTC calendar day (spend_ledger sum, ts-prefix match). */

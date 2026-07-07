@@ -112,6 +112,11 @@ export interface ClaudeArgsOpts {
   sessionId: string;
   addDir?: string;
   settings?: string; // --settings value: inline JSON string (or path); omitted -> no --settings (#26)
+  /** #46: resume a prior session (`--resume <id>`) instead of starting a fresh one
+   *  (`--session-id <id>`) — the handoff-resume path. Omitted -> the normal fresh-dispatch
+   *  `--session-id` flag, unchanged. `--resume` reuses the SAME session (no --fork-session),
+   *  so `sessionId` above should equal this value when both are set. */
+  resumeSessionId?: string;
 }
 
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
@@ -125,7 +130,7 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     "--fallback-model", "sonnet",
     "--worktree", o.worktree,
     "--name", o.name,
-    "--session-id", o.sessionId,
+    ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : ["--session-id", o.sessionId]),
     "--permission-mode", "auto",
     // Coarse noise-reduction only — the real boundary is the guard hook (#26).
     "--allowedTools", "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)",
@@ -314,6 +319,87 @@ export class WorkerSupervisor implements Supervisor {
       lane.hb = setInterval(() => this.heartbeatTick(laneName), this.hbMs);
     }
     return { name: laneName, sessionId };
+  }
+
+  /**
+   * #46: resume a lane the wrapper handed off (`.handoff` sentinel) via `claude --resume`,
+   * reusing the ORIGINAL session id (no --fork-session) so claude continues the same
+   * conversation — the "M4 --resume" PLAN.md/#41 flagged. Fail-closed: throws if `name` has no
+   * `.handoff` sentinel (nothing resumable — never resume a lane that's still running, already
+   * terminal done/failed, or was never confirmed handed off) or the sentinel carries no
+   * session_id. The jsonl is APPENDED, not truncated: the pre-handoff stream stays as an audit
+   * trail, and parseCostUsd/parseModelUsage already take the LAST "result" line, so a resumed
+   * run's terminal line — expected to be the whole session's cumulative total (State.recordSpend
+   * handles the double-count risk that assumption carries) — is picked up exactly the same way
+   * a fresh single-run jsonl would be.
+   *
+   * Note: nothing in this engine calls resume() automatically yet. Deciding WHEN a handed-off
+   * lane should be resumed (an auto-resume scheduling policy in the conductor/driver) is a
+   * separate, not-yet-scoped question — this method is the callable mechanism a future
+   * scheduler (or an operator) invokes; #46 only asked for the mechanism + the cost-delta
+   * protection it depends on, not the scheduling policy.
+   */
+  async resume(issue: Issue, name: string): Promise<{ name: string; sessionId: string }> {
+    const handoffPath = this.path(name, "handoff.json");
+    if (!existsSync(handoffPath)) {
+      throw new Error(`resume: ${name} has no .handoff sentinel — nothing to resume`);
+    }
+    const handoff = this.readJson(handoffPath);
+    const sessionId = typeof handoff?.session_id === "string" ? handoff.session_id : null;
+    if (!sessionId) {
+      throw new Error(`resume: ${name}'s handoff sentinel carries no session_id`);
+    }
+    const guardMode = this.deps.cfg.guard.mode;
+    if (guardMode === "hard" && !existsSync(this.guardHookPath)) {
+      throw new Error(
+        `guard hook not found at ${this.guardHookPath} — build the engine (npm run build) before ` +
+          `resuming; refusing to resume an unguarded worker in hard mode`,
+      );
+    }
+    const prompt = (this.deps.renderPrompt ?? defaultPrompt)(issue);
+    const jsonlPath = this.path(name, "jsonl");
+    const jsonlFd = openSync(jsonlPath, "a"); // append: preserve the pre-handoff stream
+    const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
+    const args = claudeArgs({
+      prompt, model: this.deps.cfg.worker.model, effort: this.deps.cfg.worker.effort,
+      worktree: name, name, sessionId, resumeSessionId: sessionId, settings: settingsJson,
+    });
+    const child = spawn(this.bin, args, {
+      detached: true,
+      stdio: ["ignore", jsonlFd, jsonlFd],
+      env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
+    });
+    const lane: Lane = {
+      child, issue: issue.number, sessionId, jsonlFd, jsonlPath,
+      hb: undefined, handoffRequested: false, reclaiming: false,
+      startedMs: this.now().getTime(), timedOut: false,
+    };
+    this.lanes.set(name, lane);
+    child.on("exit", (code) => this.onExit(name, code));
+
+    let spawnErr: unknown;
+    await new Promise<void>((resolve) => {
+      child.once("spawn", () => resolve());
+      child.once("error", (e) => { spawnErr = e; resolve(); });
+    });
+    if (spawnErr) {
+      this.lanes.delete(name);
+      try { closeSync(jsonlFd); } catch { /* noop */ }
+      throw new Error(`worker resume-spawn failed (${this.bin}): ${String(spawnErr)}`);
+    }
+    child.on("error", () => this.onExit(name, 1));
+    // Clear the handoff sentinel now that the lane is live again — a probe() racing this
+    // resume must not still read the lane as terminally handed-off.
+    this.removeIfExists(handoffPath);
+    if (this.lanes.has(name) && child.exitCode === null && child.signalCode === null) {
+      this.writeJsonAtomic(this.path(name, "running.json"), {
+        name, issue: issue.number, session_id: sessionId,
+        wrapper_pid: child.pid, started_at: new Date(lane.startedMs).toISOString(),
+      });
+      this.touchHeartbeat(name);
+      lane.hb = setInterval(() => this.heartbeatTick(name), this.hbMs);
+    }
+    return { name, sessionId };
   }
 
   /** Operator/drain-initiated graceful handoff: SIGTERM (not SIGKILL) so the worker wraps up

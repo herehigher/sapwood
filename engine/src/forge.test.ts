@@ -7,6 +7,8 @@ import {
   findOptionId,
   findItemId,
   hasVerificationPlan,
+  extractVerificationPlan,
+  findOpenPrNumber,
   parsePageInfo,
   projectQuery,
   parsePRReviewView,
@@ -125,6 +127,64 @@ test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section
   assert.equal(hasVerificationPlan("no plan here", ["verify:n/a"], "verify:n/a"), true); // doc-gate path
   assert.equal(hasVerificationPlan("no plan here", ["type:feature"], "verify:n/a"), false); // fail-closed
   assert.equal(hasVerificationPlan("", [], "verify:n/a"), false);
+});
+
+// ── extractVerificationPlan (#46: the section text hasVerificationPlan/gate②'s trigger share) ──
+
+test("extractVerificationPlan: returns the heading through the next same-or-shallower heading", () => {
+  const body = [
+    "# Title",
+    "Some intro text.",
+    "## Verification",
+    "1. run `npm test`",
+    "2. run `npm run typecheck`",
+    "## Notes",
+    "irrelevant",
+  ].join("\n");
+  const plan = extractVerificationPlan(body);
+  assert.match(plan!, /^## Verification/);
+  assert.match(plan!, /npm test/);
+  assert.match(plan!, /npm run typecheck/);
+  assert.ok(!plan!.includes("irrelevant")); // stops before the next heading
+  assert.ok(!plan!.includes("Some intro text")); // doesn't leak content before the heading
+});
+
+test("extractVerificationPlan: a plan section that runs to the end of the body (no trailing heading)", () => {
+  const plan = extractVerificationPlan("### Acceptance criteria\n- it works");
+  assert.match(plan!, /^### Acceptance criteria/);
+  assert.match(plan!, /it works/);
+});
+
+test("extractVerificationPlan: no Verification/Acceptance heading -> null (fail-closed, matches hasVerificationPlan)", () => {
+  assert.equal(extractVerificationPlan("no plan here"), null);
+  assert.equal(extractVerificationPlan(""), null);
+});
+
+test("hasVerificationPlan and extractVerificationPlan agree on every case (shared parser, not duplicated)", () => {
+  const cases = ["## Verification\nrun tests", "### Acceptance criteria", "no plan here", ""];
+  for (const body of cases) {
+    assert.equal(hasVerificationPlan(body, [], "verify:n/a"), extractVerificationPlan(body) != null);
+  }
+});
+
+// ── findOpenPrNumber (#46: the live findOpenPr wiring's pure match) ──────────────────────────
+
+test("findOpenPrNumber: matches a bare #<issue> token in a PR body", () => {
+  const prs = [{ number: 10, body: "unrelated" }, { number: 11, body: "Part of #46" }];
+  assert.equal(findOpenPrNumber(prs, 46), 11);
+});
+
+test("findOpenPrNumber: no match -> null", () => {
+  assert.equal(findOpenPrNumber([{ number: 10, body: "Part of #45" }], 46), null);
+});
+
+test("findOpenPrNumber: does not match a longer number containing the issue as a prefix (#460 != #46)", () => {
+  assert.equal(findOpenPrNumber([{ number: 10, body: "Part of #460" }], 46), null);
+});
+
+test("findOpenPrNumber: first match wins (caller passes gh's most-recent-first order)", () => {
+  const prs = [{ number: 20, body: "Part of #46" }, { number: 21, body: "Part of #46" }];
+  assert.equal(findOpenPrNumber(prs, 46), 20);
 });
 
 test("projectQuery: no line is a // comment (GraphQL uses #, not //) — Codex R5 P1 guard", () => {

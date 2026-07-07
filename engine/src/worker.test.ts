@@ -129,6 +129,15 @@ test("claudeArgs: headless flags, stream-json, worktree/session; no --max-budget
   assert.ok(!args.includes("--max-budget-usd")); // soft budget: monitored + graceful handoff, never a hard kill
 });
 
+test("claudeArgs: resumeSessionId (#46) uses --resume instead of --session-id, reusing the id", () => {
+  const args = claudeArgs({
+    prompt: "p", model: "m", effort: "high", worktree: "w", name: "w",
+    sessionId: "sess-1", resumeSessionId: "sess-1",
+  });
+  assert.deepEqual(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2), ["--resume", "sess-1"]);
+  assert.ok(!args.includes("--session-id"));
+});
+
 test("claudeArgs: --settings only when given (guard hook wiring lands in #26)", () => {
   assert.ok(!claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s" }).includes("--settings"));
   const withSettings = claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s", settings: "/tmp/guard.json" });
@@ -371,6 +380,86 @@ test("requestHandoff but the worker dies by signal (no clean wrap-up) -> .failed
     assert.ok(existsSync(join(dir, `${name}.failed.json`)), "aborted (signal-killed) drain is .failed");
     assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "NOT a false resumable handoff");
     s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #46: resume() — --resume after a .handoff ────────────────────────────────────────────────
+
+test("resume: fails closed when the lane has no .handoff sentinel (nothing to resume)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = sup(dir, bin);
+    await assert.rejects(
+      () => s.resume({ number: 1, title: "t", labels: [] }, "lane-never-handed-off"),
+      /no \.handoff sentinel|nothing to resume/i,
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the resumed run's terminal cost is probed normally", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    // Cooperative stub: a fresh dispatch sleeps and hands off cleanly on TERM. A --resume
+    // invocation instead prints ONE more (higher, "cumulative") result line and exits 0 —
+    // standing in for claude continuing the same session after --resume.
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        '  echo \'{"type":"result","subtype":"success","total_cost_usd":0.05,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}\'',
+        "  exit 0",
+        "fi",
+        "trap 'exit 0' TERM",
+        "sleep 30",
+        "",
+      ].join("\n"),
+    );
+    const s = sup(dir, bin);
+    const { name, sessionId } = await s.dispatch({ number: 3, title: "t", labels: [] });
+    await sleep(600); // let bash install its TERM trap before draining
+    assert.equal(s.requestHandoff(name), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handed off before resuming");
+
+    const resumed = await s.resume({ number: 3, title: "t", labels: [] }, name);
+    assert.equal(resumed.name, name);
+    assert.equal(resumed.sessionId, sessionId); // SAME session — no --fork-session
+    assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "handoff sentinel cleared once live again");
+
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)), "resumed run reached a fresh terminal sentinel");
+    const probe = await s.probe(name);
+    assert.equal(probe.done, true);
+    // probe() surfaces the resumed run's raw reported cost as-is (0.05) — the double-count
+    // PROTECTION lives one level up, in State.recordSpend (see state.test.ts), not here.
+    assert.equal(probe.costUsd, 0.05);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: fails closed in hard mode when the guard hook is missing (no unguarded resume)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
+    await sleep(600);
+    s.requestHandoff(name);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    // A supervisor whose guard hook path doesn't exist, same as dispatch()'s hard-mode guard.
+    const s2 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, guardHookPath: join(dir, "nonexistent-hook.js") });
+    await assert.rejects(() => s2.resume({ number: 3, title: "t", labels: [] }, name), /guard hook not found|unguarded/i);
+    s.dispose();
+    s2.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

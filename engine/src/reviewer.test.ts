@@ -13,6 +13,7 @@ import {
   HumanReviewer,
   SameModelTrustedReviewer,
   makeReviewer,
+  buildReviewTriggerComment,
 } from "./reviewer.js";
 import { ConfigSchema } from "./config.js";
 import type { IForge, PRReview, PRReviewData } from "./forge.js";
@@ -136,6 +137,22 @@ test("changesRequestedOnHead: a DISMISSED review never blocks (state is DISMISSE
   assert.equal(changesRequestedOnHead([mkReview("rev", "HEAD", "DISMISSED")], "HEAD", "author"), false);
 });
 
+// ── buildReviewTriggerComment (#46, Decision #8: plan-in-trigger) ────────────────────────────
+
+test("buildReviewTriggerComment: includes the extracted plan and asks the reviewer to verify against it", () => {
+  const body = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
+  assert.match(body, /^@codex review/);
+  assert.match(body, /issue #46/);
+  assert.match(body, /run the test suite/);
+});
+
+test("buildReviewTriggerComment: null plan -> an explicit fallback sentence, never a silent omission", () => {
+  const body = buildReviewTriggerComment(46, null);
+  assert.match(body, /^@codex review/);
+  assert.match(body, /No extractable verification plan/i);
+  assert.match(body, /issue #46/);
+});
+
 // ── Reviewer implementations ───────────────────────────────────────────────────────────────
 
 const mkData = (over: Partial<PRReviewData> = {}): PRReviewData => ({
@@ -215,11 +232,42 @@ test("CodexReviewer: unresolved threads -> HANDLE_THREADS even with an approving
   assert.equal(r.verdictFromData(data).action, "HANDLE_THREADS");
 });
 
-test("CodexReviewer: triggerReview posts a plain `@codex review` PR comment (never a merge/approve call)", async () => {
+test("CodexReviewer: triggerReview posts `@codex review` plus the issue's extracted verification plan (#46 Decision #8)", async () => {
   const calls: Array<[number, string]> = [];
-  const forge = { addPRComment: async (pr: number, body: string) => void calls.push([pr, body]) } as unknown as IForge;
-  await new CodexReviewer().triggerReview(forge, 42);
-  assert.deepEqual(calls, [[42, "@codex review"]]);
+  const forge = {
+    addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
+    getIssueBody: async () => "## Verification\nrun `npm test`",
+  } as unknown as IForge;
+  await new CodexReviewer().triggerReview(forge, 42, 46);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]![0], 42);
+  assert.match(calls[0]![1], /^@codex review/);
+  assert.match(calls[0]![1], /issue #46/);
+  assert.match(calls[0]![1], /run `npm test`/);
+});
+
+test("CodexReviewer: triggerReview falls back to explicit text when the issue has no extractable plan (never a silent omission)", async () => {
+  const calls: Array<[number, string]> = [];
+  const forge = {
+    addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
+    getIssueBody: async () => "no plan section here",
+  } as unknown as IForge;
+  await new CodexReviewer().triggerReview(forge, 42, 46);
+  assert.match(calls[0]![1], /^@codex review/);
+  assert.match(calls[0]![1], /No extractable verification plan/i);
+  assert.match(calls[0]![1], /issue #46/);
+});
+
+test("CodexReviewer: triggerReview still fires (with the fallback text) when getIssueBody itself fails", async () => {
+  const calls: Array<[number, string]> = [];
+  const forge = {
+    addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
+    getIssueBody: async () => { throw new Error("rate limited"); },
+  } as unknown as IForge;
+  await new CodexReviewer().triggerReview(forge, 42, 46);
+  assert.equal(calls.length, 1); // the trigger still posts — never silently skipped
+  assert.match(calls[0]![1], /^@codex review/);
+  assert.match(calls[0]![1], /No extractable verification plan/i);
 });
 
 test("HumanReviewer: only an explicit APPROVED state counts — a mere COMMENTED does not", () => {
@@ -232,7 +280,7 @@ test("HumanReviewer: triggerReview is a no-op (nothing to ping)", async () => {
   let called = false;
   const forge = { addPRComment: async () => { called = true; } } as unknown as IForge;
   const r: Reviewer = new HumanReviewer();
-  await r.triggerReview(forge, 1);
+  await r.triggerReview(forge, 1, 46);
   assert.equal(called, false);
 });
 

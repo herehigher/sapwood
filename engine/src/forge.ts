@@ -70,6 +70,11 @@ export interface IForge {
   addPRComment(pr: number, body: string): Promise<void>;
   /** Fetch gate②'s raw review signals for a PR. #13 reviewer.ts. */
   getPRReviewData(pr: number): Promise<PRReviewData>;
+  /** Raw issue body text (#46, Decision #8's gate② re-check): reviewer.ts extracts the
+   *  verification-plan section from this to carry into the review trigger. Read-only;
+   *  "" for an issue with no body rather than throwing (extractVerificationPlan treats an
+   *  empty body as "no plan", the same fail-closed outcome as a genuinely planless issue). */
+  getIssueBody(issue: number): Promise<string>;
 }
 
 export class GithubForge implements IForge {
@@ -199,6 +204,33 @@ export class GithubForge implements IForge {
     // The `@codex review` trigger (default reviewer) rides this same call — a plain PR
     // comment, never a review/approval/merge call (producer != reviewer != merger).
     await this.gh(["pr", "comment", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
+  }
+
+  async getIssueBody(issue: number): Promise<string> {
+    const out = await this.gh([
+      "issue", "view", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "--json", "body",
+    ]);
+    const parsed = JSON.parse(out) as { body?: string };
+    return parsed.body ?? "";
+  }
+
+  /** #46: best-effort mapping from an issue to an already-open PR that references it, for the
+   *  live `sapwood run` wiring (WorkerDeps.hasOpenPr/findOpenPr) — the "live findOpenPr forge
+   *  wiring" PLAN.md's M3 deferred list flagged. A first-pass heuristic, not exhaustive: matches
+   *  any open PR whose body contains a bare `#<issue>` reference (this repo's own PRs use
+   *  exactly that convention, e.g. "Part of #46" — see CLAUDE.md-generated PR bodies). Multiple
+   *  matches -> the first (gh's default order, most-recently-updated first); no match -> null.
+   *  Hardening (matching "Closes #N"/"Fixes #N" keywords specifically, disambiguating multiple
+   *  candidate PRs, etc.) is deferred to the live merge-gate run (#46 scope 3) that exercises
+   *  this against a real repo. */
+  async findOpenPrForIssue(issue: number): Promise<number | null> {
+    const out = await this.gh([
+      "pr", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "--state", "open", "--json", "number,body",
+    ]);
+    const prs = JSON.parse(out) as { number: number; body?: string }[];
+    return findOpenPrNumber(prs.map((p) => ({ number: p.number, body: p.body ?? "" })), issue);
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
@@ -356,11 +388,38 @@ function statusValue(item: RawItem, statusField: string): string | null {
   return null;
 }
 
+/**
+ * Extract the Verification/Acceptance section's raw text from an issue body (Decision #8's
+ * plan) — the SAME fail-closed heading match `hasVerificationPlan` uses to gate dispatch,
+ * shared here (not duplicated) so gate②'s reviewer trigger (#46, reviewer.ts) carries exactly
+ * the section the `Ready` gate already required to exist. Returns the heading line through
+ * (exclusive) the next heading of equal-or-shallower level, or the rest of the body if there is
+ * none. null when no such section exists — callers MUST supply an explicit fallback text, never
+ * silently omit the plan (verify:n/a issues have no section and are expected to hit this null).
+ */
+export function extractVerificationPlan(body: string): string | null {
+  const heading = /^(#{1,6})\s*(verification|acceptance)[^\n]*$/im.exec(body);
+  if (!heading) return null;
+  const level = heading[1]!.length;
+  const afterHeading = body.slice(heading.index + heading[0].length);
+  const nextHeading = new RegExp(`^#{1,${level}}\\s`, "m").exec(afterHeading);
+  const section = nextHeading ? afterHeading.slice(0, nextHeading.index) : afterHeading;
+  return (heading[0] + section).trim();
+}
+
 /** True if the issue carries a verification plan (Decision #8): verify:n/a label OR a
  *  Verification/Acceptance section in the body. Fail-closed: no signal -> false. */
 export function hasVerificationPlan(body: string, labels: string[], verifyNaLabel: string): boolean {
   if (labels.includes(verifyNaLabel)) return true;
-  return /(^|\n)#{1,6}\s*(verification|acceptance)/i.test(body);
+  return extractVerificationPlan(body) != null;
+}
+
+/** Pure match for GithubForge.findOpenPrForIssue — a bare `#<issue>` token in the PR body
+ *  (not part of a longer number, e.g. `#460` must not match issue 46). Exported for offline
+ *  testing; the first match wins (caller passes PRs in gh's default most-recent-first order). */
+export function findOpenPrNumber(prs: { number: number; body: string }[], issue: number): number | null {
+  const needle = new RegExp(`(^|[^0-9])#${issue}(?!\\d)`);
+  return prs.find((pr) => needle.test(pr.body))?.number ?? null;
 }
 
 type ReadyCfg = {

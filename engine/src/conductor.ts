@@ -253,8 +253,9 @@ export interface Supervisor {
  *  no path to acquire one). Optional in TickDeps: omitted -> driving lanes stay driving with no
  *  gate/merge activity (pre-#13 behavior, preserved for callers not yet configuring a reviewer). */
 export interface MergeGate {
-  /** Post the review trigger at most once per PR; idempotent to call again (a plain comment). */
-  ensureTriggered(pr: number): Promise<void>;
+  /** Post the review trigger at most once per PR; idempotent to call again (a plain comment).
+   *  `issue` (#46) is threaded to the reviewer so it can carry the issue's verification plan. */
+  ensureTriggered(pr: number, issue: number): Promise<void>;
   /** One gate + merge attempt for `pr`. Never throws (see merge-driver.ts). */
   driveOne(pr: number): Promise<DriveOutcome>;
 }
@@ -533,7 +534,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       const pr = w.pr;
       if (!w.review_triggered) {
-        await gate.ensureTriggered(pr);
+        await gate.ensureTriggered(pr, w.issue);
         state.upsertWorker({ ...w, review_triggered: 1 });
       }
       const outcome = await gate.driveOne(pr);

@@ -142,14 +142,19 @@ class FakeForge implements IForge {
     this.merged.push([pr, headOid]);
   }
   async addPRComment(): Promise<void> {}
+  async getIssueBody(): Promise<string> { return ""; }
   async getPRReviewData(): Promise<PRReviewData> { return this.reviewData; }
 }
 
 class FakeReviewer implements Reviewer {
   readonly kind = "different-model-codex" as const;
   triggered: number[] = [];
+  triggeredWith: Array<[number, number]> = [];
   verdict: ReviewVerdict = { action: "MERGE_OK", headOid: "HEAD" };
-  async triggerReview(_forge: IForge, pr: number): Promise<void> { this.triggered.push(pr); }
+  async triggerReview(_forge: IForge, pr: number, issue: number): Promise<void> {
+    this.triggered.push(pr);
+    this.triggeredWith.push([pr, issue]);
+  }
   verdictFromData(): ReviewVerdict { return this.verdict; }
 }
 
@@ -318,8 +323,9 @@ test("MergeDriver.driveOne: ensureTriggered posts the review trigger via the rev
   const forge = new FakeForge();
   const reviewer = new FakeReviewer();
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
-  await driver.ensureTriggered(9);
+  await driver.ensureTriggered(9, 46);
   assert.deepEqual(reviewer.triggered, [9]);
+  assert.deepEqual(reviewer.triggeredWith, [[9, 46]]); // #46: issue threaded through to the reviewer
 });
 
 // A helper type check so the reason field is always present on non-merged/stopped outcomes.

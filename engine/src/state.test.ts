@@ -158,6 +158,80 @@ test("recordSpend clamps negative/non-finite cost: the safety accumulator can on
   s.close();
 });
 
+// ── #46: resume cost-delta (a resumed lane reuses the SAME worker name; `--resume`'s
+//   total_cost_usd is the whole session's cumulative cost, so recording it again in full at
+//   the resumed run's terminal transition would double-count the pre-handoff portion) ──
+
+test("spentUsdForWorker: 0 for a name with no ledger rows yet", () => {
+  const s = mem();
+  assert.equal(s.spentUsdForWorker("lane-fresh"), 0);
+  s.close();
+});
+
+test("recordSpend: a SECOND call for the SAME worker name records only the delta above what's already ledgered", () => {
+  const s = mem();
+  const day = "2026-07-06T12:00:00.000Z";
+  s.recordSpend("lane-a", 1, 3, day); // pre-handoff: $3
+  assert.equal(s.spentUsdForWorker("lane-a"), 3);
+  // Resumed run's terminal total_cost_usd is $3 (pre-handoff) + $2 (new leg) = $5 cumulative.
+  s.recordSpend("lane-a", 1, 5, day);
+  assert.equal(s.spentUsdForWorker("lane-a"), 5); // NOT 8 — the delta ($2), not the full $5, was added
+  assert.equal(s.dailySpendUsd(new Date(day)), 5); // the daily cap sees the true total once, not twice
+  s.close();
+});
+
+test("recordSpend: a THIRD resume on the same name keeps recording only the newest delta", () => {
+  const s = mem();
+  const day = "2026-07-06T12:00:00.000Z";
+  s.recordSpend("lane-a", 1, 3, day);
+  s.recordSpend("lane-a", 1, 5, day); // +2
+  s.recordSpend("lane-a", 1, 9, day); // +4
+  assert.equal(s.spentUsdForWorker("lane-a"), 9);
+  assert.equal(s.dailySpendUsd(new Date(day)), 9);
+  s.close();
+});
+
+test("recordSpend: a lower/equal report on a resumed name never subtracts from the ledger (floored at 0)", () => {
+  const s = mem();
+  const day = "2026-07-06T12:00:00.000Z";
+  s.recordSpend("lane-a", 1, 5, day);
+  s.recordSpend("lane-a", 1, 5, day); // equal report -> +0
+  s.recordSpend("lane-a", 1, 2, day); // lower report (e.g. a corrupt/short read) -> +0, never negative
+  assert.equal(s.spentUsdForWorker("lane-a"), 5);
+  assert.equal(s.dailySpendUsd(new Date(day)), 5);
+  s.close();
+});
+
+test("recordSpend: different worker names never share a baseline (each lane's delta is independent)", () => {
+  const s = mem();
+  const day = "2026-07-06T12:00:00.000Z";
+  s.recordSpend("lane-a", 1, 10, day);
+  s.recordSpend("lane-b", 2, 4, day); // a fresh name -> full amount, unaffected by lane-a's ledger
+  assert.equal(s.spentUsdForWorker("lane-b"), 4);
+  assert.equal(s.dailySpendUsd(new Date(day)), 14);
+  s.close();
+});
+
+test("resume cost-delta survives an engine restart between the handoff and the resume (DB-backed baseline)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const day = "2026-07-06T12:00:00.000Z";
+    const s1 = new State(path);
+    s1.recordSpend("lane-a", 1, 3, day); // pre-handoff, then the engine restarts
+    s1.close();
+
+    const s2 = new State(path); // "restart": a brand-new State instance, same on-disk ledger
+    assert.equal(s2.spentUsdForWorker("lane-a"), 3); // baseline recovered from disk, not memory
+    s2.recordSpend("lane-a", 1, 5, day); // resumed run's cumulative total
+    assert.equal(s2.spentUsdForWorker("lane-a"), 5); // delta ($2) recorded, not the full $5 again
+    assert.equal(s2.dailySpendUsd(new Date(day)), 5);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("engineSessionStart: continuous ticking keeps the original session start", () => {
   const s = mem();
   const gap = 900;

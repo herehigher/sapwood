@@ -297,18 +297,34 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   Invariant: a transient forge failure during recovery can no longer strand an issue
   In Progress with no worker row. No `.catch(() => {})` swallows remain in tick paths.
 - **Scope boundaries / deferred:** fixup-worker auto-dispatch (review findings fold to
-  needs-human for now — 0day's FIXABLE/fix-rounds loop is a follow-up subsystem);
-  live `findOpenPr` forge wiring and the **live end-to-end merge-gate run move to M4**
+  needs-human for now — 0day's FIXABLE/fix-rounds loop is a follow-up subsystem).
+  #33 unchanged (no in-flight cost signal). Review evidence: #42 survived 3 Codex
+  rounds (3 P1 + 3 P2 fail-open finds, all fixed + regression-tested); #41 survived 4
+  rounds (3 Codex + 1 fresh non-author stand-in when Codex rate-limited) — the
+  gate②-when-reviewer-unavailable policy was exercised *on the PR that implements it*.
+  ~~live `findOpenPr` forge wiring and the live end-to-end merge-gate run move to M4
   with the loop driver (which MUST pass `tickIntervalSec` into `tick()` and handle the
-  `--resume` cost-delta — both flagged in code). #33 unchanged (no in-flight cost
-  signal). **The gate② verification-plan re-check (Decision #8) is NOT yet wired:** the
-  plan gate holds at *dispatch* (`getReadyIssues` refuses issues without a verification
-  plan, fail-closed), but the M3 gate data carries no issue body, so no code path yet
-  re-checks the finished PR against the plan — that lands with the M4 reviewer-prompt
-  work. Until then gate② = fresh non-author review + CI, not plan conformance. Review evidence: #42 survived 3 Codex rounds (3 P1 + 3 P2 fail-open finds,
-  all fixed + regression-tested); #41 survived 4 rounds (3 Codex + 1 fresh non-author
-  stand-in when Codex rate-limited) — the gate②-when-reviewer-unavailable policy was
-  exercised *on the PR that implements it*.
+  `--resume` cost-delta — both flagged in code)~~ **→ #46 (M4): the loop driver
+  (`driver.ts`) now passes `tickIntervalSec` into every `tick()`; `State.recordSpend`
+  now records only the incremental delta above what's already ledgered for a worker
+  name, so a `--resume`d lane (`WorkerSupervisor.resume()`) can't double-count its
+  pre-handoff cost; `GithubForge.findOpenPrForIssue` gives `sapwood run` a first-pass
+  (not yet hardened) live wiring.** ~~**The gate② verification-plan re-check (Decision
+  #8) is NOT yet wired:** the plan gate holds at *dispatch* (`getReadyIssues` refuses
+  issues without a verification plan, fail-closed), but the M3 gate data carries no
+  issue body, so no code path yet re-checks the finished PR against the plan — that
+  lands with the M4 reviewer-prompt work. Until then gate② = fresh non-author review +
+  CI, not plan conformance.~~ **→ #46: `reviewer.ts`'s `@codex review` trigger now
+  carries the driving lane's extracted verification-plan section (`IForge.getIssueBody`
+  + `forge.ts`'s `extractVerificationPlan`, shared with the `Ready`-gate parser) as
+  explicit reviewer instructions, with a fail-closed fallback sentence when no plan is
+  extractable — never a silent omission. The verdict mechanics are unchanged (Codex's
+  review IS the re-check); this only gives it the plan.** Still deferred: the **live**
+  merge-gate run and the **live** ceiling/kill-switch run on a real repo (#46 scope
+  3/4) — everything above ships covered by fakes only, no real `claude`/`gh` in the
+  loop yet; an auto-resume *scheduling* policy (deciding WHEN a handed-off lane should
+  be resumed during `tick()`) is also not wired — `resume()` is a callable mechanism,
+  not yet an automatic one.
 
 ## Security & trust model (trusted-first, designed toward public)
 
@@ -413,10 +429,18 @@ rewrite.** v1 requirements:
   (different-model Codex / same-model-trusted-only / human), engine cost ceiling + kill
   switch (#14), rollback hardening (#31). 23-case parity vs `test_loop_merge_driver.sh`;
   `--match-head-commit` TOCTOU pin. Key decisions + deferrals in "M3 review gate + merge
-  modes" above. Live end-to-end merge-gate run moves to M4 with the loop driver.
-- **M4 — UX surface + CLI:** skills/commands (`/sapwood-run`, `/sapwood-status`,
-  `/sapwood-stop`, supervised "watch one issue" mode), `sapwood` status CLI,
-  first-run trust ramp, docs set.
+  modes" above. ~~Live end-to-end merge-gate run moves to M4 with the loop driver.~~
+- **M4 — UX surface + CLI:** ✅ **loop driver delivered (#46, PR TBD):** `driver.ts`
+  runs `tick()` on `cfg.engine.tickIntervalSec`'s cadence (wired into `TickDeps` so the
+  wall-clock ceiling sees the real cadence, not its floor default), stops cleanly on
+  SIGINT/SIGTERM after the in-flight tick (never mid-tick), and supports `--once` /
+  `--until-idle` alongside the daemon default — `sapwood run [--once|--until-idle]` in
+  `cli.ts`. Resume cost-delta protected in `State.recordSpend` (see M3 section above).
+  gate② now carries the issue's verification plan into the review trigger (Decision
+  #8, see M3 section above). **Still open:** skills/commands (`/sapwood-run`,
+  `/sapwood-status`, `/sapwood-stop`, supervised "watch one issue" mode), `sapwood`
+  status CLI, first-run trust ramp, docs set, and the **live** merge-gate + kill-switch
+  runs on a real repo (#46 scope 3/4).
 - **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`
