@@ -35,6 +35,19 @@ test("freshThumbCount: all-stale -> 0", () => {
   assert.equal(freshThumbCount([{ content: "+1", createdAt: "2026-06-17T09:00:00Z" }], "2026-06-17T12:00:00Z"), 0);
 });
 
+test("freshThumbCount: mixed precision compares NUMERICALLY — a same-second reaction before a millisecond cutoff is stale (round-2 P2)", () => {
+  // Lexicographically "…00Z" > "…00.999Z" (Z sorts after '.'), which would wrongly count a
+  // reaction that predates the trigger within the same second. Numeric compare rejects it.
+  assert.equal(freshThumbCount([{ content: "+1", createdAt: "2026-07-07T08:00:00Z" }], "2026-07-07T08:00:00.999Z"), 0);
+  // Sanity: one full second later IS fresh against the same millisecond cutoff.
+  assert.equal(freshThumbCount([{ content: "+1", createdAt: "2026-07-07T08:00:01Z" }], "2026-07-07T08:00:00.999Z"), 1);
+});
+
+test("freshThumbCount: unparseable cutoff or createdAt never counts (fail-closed)", () => {
+  assert.equal(freshThumbCount([{ content: "+1", createdAt: "2026-07-07T08:00:01Z" }], "not-a-date"), 0);
+  assert.equal(freshThumbCount([{ content: "+1", createdAt: "garbage" }], "2026-07-07T08:00:00Z"), 0);
+});
+
 const mkReview = (author: string, commitOid: string, state: string): PRReview => ({ author, commitOid, state });
 
 test("freshHeadReviewCount: only non-author reviews on the CURRENT head, in an accepted state, count (0day #101)", () => {
@@ -69,32 +82,32 @@ test("freshHeadReviewCount: acceptStates restricts which states count (human rev
 
 test("deriveReviewAction: unresolved threads outrank a fresh approving review (findings first)", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 2, changesRequestedOnHead: false }),
+    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 2, changesRequestedOnHead: false }),
     "HANDLE_THREADS",
   );
 });
 
 test("deriveReviewAction: a standing change request outranks a fresh approving review (Codex PR #42 P1)", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: true }),
+    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: true }),
     "HANDLE_THREADS",
   );
 });
 
 test("deriveReviewAction: a fresh approving review with no threads -> MERGE_OK", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "MERGE_OK",
   );
 });
 
 test("deriveReviewAction: nothing yet (no review, no eyes) -> WAIT_REVIEW, never a silent MERGE_OK", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "WAIT_REVIEW",
   );
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: true, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({ hasEyesReaction: true, freshTrustedThumbs: 0, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
     "WAIT_REVIEW",
   );
 });
@@ -193,6 +206,101 @@ test("CodexReviewer: cfg trustedReviewers EXTENDS the allowlist (never replaces 
   assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("extra-trusted-bot", "HEAD", "COMMENTED")] })).action, "MERGE_OK");
   assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("chatgpt-codex-connector", "HEAD", "COMMENTED")] })).action, "MERGE_OK");
   assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("still-random", "HEAD", "COMMENTED")] })).action, "WAIT_REVIEW");
+});
+
+// ── Thumb (👍) verdicts — the live #46 wedge: Codex's clean verdict is comment+reaction, NO
+// formal review object; the engine sat at WAIT_REVIEW forever until this path was wired.
+// PR #55 P1-B: the freshness cutoff is the ENGINE-recorded trigger pin (ReviewTriggerPin), not
+// a git commit timestamp — a thumb only counts when it postdates `pin.at` AND `pin.head`
+// still equals the CURRENT head. PR #55 P1-A: the reacting login must never be the PR author,
+// even if the author is itself in the trusted set. ──
+
+const TRIGGER_AT = "2026-07-07T07:40:00Z"; // engine-recorded trigger time (the pin)
+const PIN = { head: "HEAD", at: TRIGGER_AT };
+
+test("CodexReviewer: comment+👍 verdict (NO formal review) -> MERGE_OK — the live #46 wedge shape", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.deepEqual(r.verdictFromData(data, PIN), { action: "MERGE_OK", headOid: "HEAD" });
+});
+
+test("CodexReviewer: a RANDOM account's 👍 never satisfies gate② (identity is part of the gate)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "random-account" }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: a 👍 OLDER than the engine-recorded trigger time is stale (#55 P1-B — the trigger, not a push, is the pin)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:39:59Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: no trigger pin at all -> thumbs never count (fail-closed)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data).action, "WAIT_REVIEW"); // pin omitted entirely
+  assert.equal(r.verdictFromData(data, { head: null, at: null }).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: a trigger pin recorded for a DIFFERENT head -> thumbs never count (#55 P1-B — a push invalidates the pin)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data, { head: "OLD_HEAD_BEFORE_PUSH", at: TRIGGER_AT }).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer: the PR AUTHOR's own 👍 never counts, even when the author's login is itself trusted (#55 P1-A, producer != reviewer)", () => {
+  const r = new CodexReviewer(["chatgpt-codex-connector"]); // author is also the codex bot login
+  const data = mkData({
+    author: "chatgpt-codex-connector",
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("SameModelTrustedReviewer: the PR AUTHOR's own 👍 never counts, even when the producer is in the trusted list (#55 P1-A)", () => {
+  const r = new SameModelTrustedReviewer(["producer-bot"]);
+  const data = mkData({
+    author: "producer-bot",
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "producer-bot" }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("SameModelTrustedReviewer: a DIFFERENT trusted login's 👍 still counts (author-exclusion doesn't over-block)", () => {
+  const r = new SameModelTrustedReviewer(["producer-bot", "trusted-reviewer-bot"]);
+  const data = mkData({
+    author: "producer-bot",
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "trusted-reviewer-bot" }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "MERGE_OK");
+});
+
+test("CodexReviewer: unresolved threads outrank a fresh trusted 👍 (findings first)", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    unresolvedThreads: 1,
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "HANDLE_THREADS");
+});
+
+test("HumanReviewer: thumbs do NOT satisfy gate② in human mode (approval = a real review)", () => {
+  const r = new HumanReviewer();
+  const data = mkData({
+    reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "some-human" }],
+  });
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
 });
 
 test("CodexReviewer: approve-then-CHANGES_REQUESTED on the same head blocks — never MERGE_OK (Codex PR #42 P1)", () => {

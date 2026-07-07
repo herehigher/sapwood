@@ -581,7 +581,12 @@ export async function countUnresolvedThreads(fetchPage: (after: string | null) =
   return unresolved; // page ceiling hit; return what we counted rather than loop unbounded
 }
 
-/** Pure parse of `gh pr view --json headRefOid,author,updatedAt,isDraft,labels,state,reviews`. */
+/** Pure parse of `gh pr view --json headRefOid,author,updatedAt,isDraft,labels,state,reviews`.
+ *  No commit-date plumbing here (see PR #55 P1-B): a commit's own committedDate is NOT tied to
+ *  when it became the PR's head — forgeable via GIT_COMMITTER_DATE / cherry-picks, and (worse)
+ *  didn't move on a later push, so a stale 👍 could out-live a legitimate re-trigger. The
+ *  thumb-verdict freshness pin now lives in engine State (workers.review_triggered_head/at,
+ *  set by MergeDriver.driveOne the instant it posts a fresh trigger) — reviewer.ts. */
 export function parsePRReviewView(json: string): {
   headOid: string;
   author: string;

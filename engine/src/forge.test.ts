@@ -461,6 +461,20 @@ test("parsePRReviewView: absent labels/reviews arrays default to empty (no crash
   assert.equal(v.author, "");
 });
 
+// PR #55 P1-B removed the headCommittedAt/commits plumbing entirely: the thumb-verdict
+// freshness pin now lives in engine State (workers.review_triggered_head/at), not anything
+// read off a commit's own (forgeable, non-push-bound) committedDate. See reviewer.test.ts's
+// ReviewTriggerPin-based tests for the freshness-cutoff coverage that replaces these two.
+test("parsePRReviewView: no commit-date fields are parsed at all (#55 P1-B — deleted, not just unused)", () => {
+  const v = parsePRReviewView(
+    JSON.stringify({
+      headRefOid: "H2", updatedAt: "t", isDraft: false, state: "OPEN",
+      commits: [{ oid: "H1", committedDate: "2026-07-07T07:00:00Z" }, { oid: "H2", committedDate: "2026-07-07T07:40:00Z" }],
+    }),
+  );
+  assert.ok(!("headCommittedAt" in v));
+});
+
 test("parsePRReactions: maps GitHub reaction rows to {content, createdAt, login}", () => {
   const r = parsePRReactions(
     JSON.stringify([

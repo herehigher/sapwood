@@ -150,8 +150,10 @@ class FakeReviewer implements Reviewer {
   readonly kind = "different-model-codex" as const;
   triggered: number[] = [];
   triggeredWith: Array<[number, number]> = [];
+  triggerErr: Error | null = null;
   verdict: ReviewVerdict = { action: "MERGE_OK", headOid: "HEAD" };
   async triggerReview(_forge: IForge, pr: number, issue: number): Promise<void> {
+    if (this.triggerErr) throw this.triggerErr;
     this.triggered.push(pr);
     this.triggeredWith.push([pr, issue]);
   }
@@ -161,11 +163,20 @@ class FakeReviewer implements Reviewer {
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, ...over });
 
+// #55 P1-B: driveOne now takes (pr, issue, triggerPin, recordTrigger). Most of the tests below
+// are about the GATE/MERGE machinery downstream of the trigger check, not the trigger check
+// itself — so they pass a pin that already matches FakeForge's default head ("HEAD"), which
+// skips straight past the trigger branch exactly like the pre-#55 tests (that always assumed
+// an already-triggered lane). The trigger-pin behavior itself is covered in its own section
+// below ("review-trigger pin (#55 P1-B)").
+const ALREADY_TRIGGERED = { head: "HEAD", at: "2020-01-01T00:00:00Z" };
+const noopRecord = (_head: string, _at: string): void => {};
+
 test("MergeDriver.driveOne: gates pass (CI green + MERGE_OK) -> merges with the PINNED head oid", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer();
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
   assert.deepEqual(forge.merged, [[7, "HEAD"]]);
 });
@@ -176,7 +187,7 @@ test("MergeDriver.driveOne: SPLIT-HEAD observation (CI read saw one head, review
   // newly-reviewed commit HEAD whose CI hasn't run — merging would apply A's CI result to HEAD.
   forge.status = { ...forge.status, headOid: "OLD_GREEN_A", ciGreen: true };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "queued");
   assert.match((outcome as { reason: string }).reason, /gate-head-mismatch/);
   assert.deepEqual(forge.merged, []);
@@ -189,7 +200,7 @@ test("MergeDriver.driveOne: PR already MERGED (by a human) -> merged outcome, no
   forge.status = { ...forge.status, state: "MERGED" };
   forge.reviewData = { ...forge.reviewData, state: "MERGED" };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
   assert.deepEqual(forge.merged, []); // recognized as merged; no second merge attempt
 });
@@ -200,7 +211,7 @@ test("MergeDriver.driveOne: merge raced — only ONE read saw MERGED yet -> stil
   // review read predates it (OPEN, old head). Must resolve merged, not queue forever.
   forge.status = { ...forge.status, state: "MERGED", headOid: "MERGE_RESULT" };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "merged");
   assert.deepEqual(forge.merged, []);
 });
@@ -210,7 +221,7 @@ test("MergeDriver.driveOne: PR CLOSED without merge -> still needs-human (genuin
   forge.status = { ...forge.status, state: "CLOSED" };
   forge.reviewData = { ...forge.reviewData, state: "CLOSED" };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "needs-human");
   assert.deepEqual(forge.merged, []);
 });
@@ -219,7 +230,7 @@ test("MergeDriver.driveOne: CONFLICTING PR -> needs-human WITHOUT a merge attemp
   const forge = new FakeForge();
   forge.status = { ...forge.status, mergeable: "CONFLICTING" };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "needs-human");
   assert.match((outcome as { reason: string }).reason, /merge-conflict/);
   assert.deepEqual(forge.merged, []); // routed to human BEFORE calling mergePR
@@ -229,7 +240,7 @@ test("MergeDriver.driveOne: mergeability UNKNOWN (GitHub still computing) -> que
   const forge = new FakeForge();
   forge.status = { ...forge.status, mergeable: "UNKNOWN" };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "queued");
   assert.match((outcome as { reason: string }).reason, /mergeability-unknown/);
   assert.deepEqual(forge.merged, []);
@@ -239,7 +250,7 @@ test("MergeDriver.driveOne: TOCTOU merge failure (head moved) -> queued for re-g
   const forge = new FakeForge();
   forge.mergeErr = new Error("GraphQL: Head branch was modified. Review and try the merge again.");
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "queued");
   assert.match((outcome as { reason: string }).reason, /merge-failed-retry/);
 });
@@ -249,7 +260,7 @@ test("MergeDriver.driveOne: deterministic 'not mergeable' merge failure -> needs
   // Conflict surfaced between our status read (MERGEABLE) and the merge call.
   forge.mergeErr = new Error("Pull Request is not mergeable");
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "needs-human");
   assert.match((outcome as { reason: string }).reason, /merge-failed-deterministic/);
 });
@@ -258,7 +269,7 @@ test("MergeDriver.driveOne: CI not green -> queued (WAIT), never merges", async 
   const forge = new FakeForge();
   forge.status = { ...forge.status, ciGreen: false };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "queued");
   assert.deepEqual(forge.merged, []);
 });
@@ -268,7 +279,7 @@ test("MergeDriver.driveOne: review verdict REVIEW_UNAVAILABLE -> queued, never e
   const reviewer = new FakeReviewer();
   reviewer.verdict = { action: "REVIEW_UNAVAILABLE", headOid: null };
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "queued");
   assert.deepEqual(forge.merged, []);
   assert.deepEqual(forge.labelsAdded, []); // never escalated to human either
@@ -278,7 +289,7 @@ test("MergeDriver.driveOne: a review-data fetch failure (rate-limit/timeout) -> 
   const forge = new FakeForge();
   forge.statusErr = new Error("rate limited");
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "queued");
   assert.match((outcome as { reason: string }).reason, /gate-data-unavailable/);
 });
@@ -288,7 +299,7 @@ test("MergeDriver.driveOne: unresolved findings (HANDLE_THREADS) -> needs-human,
   const reviewer = new FakeReviewer();
   reviewer.verdict = { action: "HANDLE_THREADS", headOid: "HEAD" };
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "needs-human");
   assert.deepEqual(forge.merged, []);
 });
@@ -297,7 +308,7 @@ test("MergeDriver.driveOne: a risk/human-triage label on the PR blocks merge eve
   const forge = new FakeForge();
   forge.reviewData = { ...forge.reviewData, labels: ["needs-human"] };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "needs-human");
   assert.deepEqual(forge.merged, []);
 });
@@ -305,7 +316,7 @@ test("MergeDriver.driveOne: a risk/human-triage label on the PR blocks merge eve
 test("MergeDriver.driveOne: merge.mode=produce-pr-and-stop reports gates but NEVER calls forge.mergePR", async () => {
   const forge = new FakeForge();
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg({ merge: { mode: "produce-pr-and-stop" } }) });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "stopped");
   assert.deepEqual(forge.merged, []);
 });
@@ -314,18 +325,82 @@ test("MergeDriver.driveOne: TOCTOU — head moved between the gate check and the
   const forge = new FakeForge();
   forge.mergeErr = new Error("failed to merge: head branch was modified"); // gh's own --match-head-commit rejection
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
-  const outcome = await driver.driveOne(7);
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "queued");
   assert.match((outcome as { reason: string }).reason, /merge-failed-retry/);
 });
 
-test("MergeDriver.driveOne: ensureTriggered posts the review trigger via the reviewer, not directly", async () => {
+// ── review-trigger pin (#55 P1-B): the trigger decision now lives IN driveOne, at the point
+// the head is known, replacing the old once-per-lane MergeDriver.ensureTriggered (removed) ──
+
+test("MergeDriver.driveOne: no trigger recorded yet (pin.head === null) -> posts the trigger, records {head, now}, and queues (never gates this tick)", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  const recorded: Array<[string, string]> = [];
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg(), now: () => new Date("2026-07-07T08:00:00Z") });
+  const outcome = await driver.driveOne(7, 46, { head: null, at: null }, (h, a) => recorded.push([h, a]));
+  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(reviewer.triggeredWith, [[7, 46]]); // issue #46 threaded through
+  assert.deepEqual(recorded, [["HEAD", "2026-07-07T08:00:00.000Z"]]);
+  assert.deepEqual(forge.merged, []); // never gates/merges on the SAME tick as the trigger
+});
+
+test("MergeDriver.driveOne: trigger pin recorded for a DIFFERENT (older) head -> re-triggers on the NEW head, queues", async () => {
+  const forge = new FakeForge(); // forge.status/reviewData default headOid: "HEAD"
+  const reviewer = new FakeReviewer();
+  const recorded: Array<[string, string]> = [];
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg(), now: () => new Date("2026-07-07T09:00:00Z") });
+  const outcome = await driver.driveOne(7, 46, { head: "OLD_HEAD", at: "2026-07-07T07:00:00Z" }, (h, a) => recorded.push([h, a]));
+  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(recorded, [["HEAD", "2026-07-07T09:00:00.000Z"]]);
+});
+
+test("MergeDriver.driveOne: pin matches the CURRENT head -> no re-trigger, proceeds straight to gating", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer();
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
-  await driver.ensureTriggered(9, 46);
-  assert.deepEqual(reviewer.triggered, [9]);
-  assert.deepEqual(reviewer.triggeredWith, [[9, 46]]); // #46: issue threaded through to the reviewer
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.deepEqual(reviewer.triggered, []); // no fresh trigger posted
+  assert.equal(outcome.kind, "merged"); // gate ran normally and merged
+});
+
+test("MergeDriver.driveOne: a trigger-post failure (rate-limit/network) -> queued, never throws, and NO pin is recorded (round-2 P2)", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.triggerErr = new Error("gh: API rate limit exceeded");
+  const recorded: Array<[string, string]> = [];
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, { head: null, at: null }, (h, a) => recorded.push([h, a]));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /review-trigger-failed/);
+  assert.deepEqual(recorded, []); // no pin recorded for a trigger that never posted
+  assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne: head change mid-drive re-triggers exactly once per new head, one drive call at a time", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg(), now: () => new Date("2026-07-07T10:00:00Z") });
+  let pin = { head: null as string | null, at: null as string | null };
+  const record = (h: string, a: string) => { pin = { head: h, at: a }; };
+
+  // Tick 1: never triggered -> triggers for "HEAD", queues.
+  const t1 = await driver.driveOne(7, 46, pin, record);
+  assert.deepEqual(t1, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(pin, { head: "HEAD", at: "2026-07-07T10:00:00.000Z" });
+
+  // Tick 2: pin matches -> no re-trigger, gates through to merge.
+  const t2 = await driver.driveOne(7, 46, pin, record);
+  assert.equal(t2.kind, "merged");
+  assert.equal(reviewer.triggered.length, 1); // still exactly once
+
+  // A push moves the head; tick 3 must re-trigger exactly once for the NEW head, then queue.
+  forge.status = { ...forge.status, headOid: "HEAD2" };
+  forge.reviewData = { ...forge.reviewData, headOid: "HEAD2" };
+  const t3 = await driver.driveOne(7, 46, pin, record);
+  assert.deepEqual(t3, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(pin, { head: "HEAD2", at: "2026-07-07T10:00:00.000Z" });
+  assert.equal(reviewer.triggered.length, 2); // one more trigger, not a flood
 });
 
 // A helper type check so the reason field is always present on non-merged/stopped outcomes.

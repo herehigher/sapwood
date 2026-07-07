@@ -115,6 +115,24 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE spend_ledger ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
     `);
   },
+  // 5 -> 6: engine-recorded review-trigger pin (PR #55 P1-B). The old `review_triggered`
+  // 0/1 flag let a lane's thumb-verdict freshness cutoff be pinned to the head COMMIT's own
+  // committedDate (forge.ts headCommittedAt) — forgeable via GIT_COMMITTER_DATE or a
+  // cherry-pick, and never re-armed on a later push (a new head reused the first trigger
+  // forever). These two columns replace that semantics with an ENGINE clock pin: the head the
+  // trigger was posted for, and the engine's own wall-clock time it posted at — neither
+  // derivable from git metadata a worker/producer controls. `review_triggered` stays in the
+  // table (append-only migration; dropping a SQLite column needs a table rebuild this fix
+  // doesn't need) but is no longer read for gating. Nullable, no default: every pre-existing
+  // row (including review_triggered=1 ones) gets NULL head/at, which the merge driver reads as
+  // "no trigger recorded for the current head" -> it fires one fresh trigger next tick before
+  // any thumb can count. Fail-closed, never a silently-honored stale pin.
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN review_triggered_head TEXT;
+      ALTER TABLE workers ADD COLUMN review_triggered_at TEXT;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -134,11 +152,23 @@ export interface WorkerRow {
    *  Optional (not `null`-required) so every pre-#13 upsertWorker call site — which never set
    *  a PR — still type-checks; the DB column defaults to NULL. */
   pr?: number | null;
-  /** Whether the review trigger (e.g. `@codex review`) has been posted for this lane's PR
-   *  (#13) — posted at most once, not every tick. SQLite INTEGER (0/1), matching every other
-   *  raw-column field on this row (session_id/started_at/ended_at are snake_case too).
-   *  Optional; defaults to 0. */
+  /** Legacy 0/1 "has a trigger ever been posted" flag (#13). No longer consulted for gating
+   *  (superseded by review_triggered_head/at, #55 P1-B) — kept only so the column can stay in
+   *  the table without a rebuild migration. Optional; defaults to 0. */
   review_triggered?: number;
+  /** The head oid this lane's review trigger (e.g. `@codex review`) was last posted for — the
+   *  ENGINE-recorded pin (#55 P1-B), set by MergeDriver.driveOne via the recordTrigger callback
+   *  the conductor supplies from State (see recordReviewTrigger). NULL/undefined means no
+   *  trigger has been recorded for this lane yet (or the DB row predates this column) — the
+   *  merge driver treats that as "post one now", and reviewer.ts's thumb verdict treats it as
+   *  "no thumb can count yet" (fail-closed on both ends). */
+  review_triggered_head?: string | null;
+  /** ISO-8601 engine wall-clock timestamp the trigger above was posted at — the thumb-verdict
+   *  freshness cutoff (reviewer.ts): a `+1` reaction only counts if `createdAt` is AFTER this
+   *  AND review_triggered_head still equals the PR's CURRENT head. Not a git/commit timestamp
+   *  (that was the P1-B bug: committedDate is forgeable via GIT_COMMITTER_DATE / cherry-picks
+   *  and isn't tied to when the commit actually became the PR's head). */
+  review_triggered_at?: string | null;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -224,18 +254,34 @@ export class State {
   upsertWorker(row: WorkerRow): void {
     this.db
       .prepare(
-        `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, review_triggered)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO workers
+           (name, issue, session_id, state, started_at, ended_at, pr, review_triggered,
+            review_triggered_head, review_triggered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
            ended_at = excluded.ended_at, pr = excluded.pr,
-           review_triggered = excluded.review_triggered`,
+           review_triggered = excluded.review_triggered,
+           review_triggered_head = excluded.review_triggered_head,
+           review_triggered_at = excluded.review_triggered_at`,
       )
       .run(
         row.name, row.issue, row.session_id, row.state, row.started_at, row.ended_at,
         row.pr ?? null, row.review_triggered ?? 0,
+        row.review_triggered_head ?? null, row.review_triggered_at ?? null,
       );
+  }
+
+  /** Persist the ENGINE-recorded review-trigger pin for `name`'s lane (#55 P1-B) — called ONLY
+   *  from MergeDriver.driveOne's recordTrigger callback (conductor.ts wires this method in),
+   *  the instant a fresh `@codex review` trigger is posted for a NEW head. A worker/producer
+   *  has no path to this method (no reference to State) and posting extra comments themselves
+   *  cannot move this pin — it is written exclusively by the engine's own gate loop. */
+  recordReviewTrigger(name: string, head: string, at: string): void {
+    this.db
+      .prepare("UPDATE workers SET review_triggered_head = ?, review_triggered_at = ? WHERE name = ?")
+      .run(head, at, name);
   }
 
   getWorker(name: string): WorkerRow | undefined {
