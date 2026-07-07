@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { runCli, parseRunStopMode, runExitCode } from "./cli.js";
 
@@ -101,4 +104,60 @@ test("runExitCode: --once with a failed-only attempt exits 1; success exits 0 (C
 test("runExitCode: daemon/until-idle runs exit 0 even with contained tick errors (retry design, not terminal failure)", () => {
   assert.equal(runExitCode({ ticks: 0, tickErrors: 5 }, "forever"), 0);
   assert.equal(runExitCode({ ticks: 3, tickErrors: 2 }, "until-idle"), 0);
+});
+
+// ── #49: `sapwood validate` ───────────────────────────────────────────────────────────────
+
+test("validate: appears in top-level --help usage", () => {
+  const r = runCli(["node", "sapwood", "--help"]);
+  assert.match(r.stdout, /validate/);
+});
+
+test("validate: valid config prints OK summary with path + key effective values, exits 0", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const path = join(dir, "sapwood.config.yaml");
+  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
+  try {
+    const r = runCli(["node", "sapwood", "validate", path]);
+    assert.equal(r.code, 0);
+    assert.equal(r.stderr, "");
+    assert.match(r.stdout, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(r.stdout, /lanes\.max=3/);
+    assert.match(r.stdout, /guard\.mode=hard/);
+    assert.match(r.stdout, /merge\.mode=conductor-merge/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("validate: invalid config (wrong type) prints Zod issues one per line, exits 1", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const path = join(dir, "sapwood.config.yaml");
+  writeFileSync(
+    path,
+    "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nlanes:\n  max: three\n",
+  );
+  try {
+    const r = runCli(["node", "sapwood", "validate", path]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /lanes\.max/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("validate: missing file names the path tried, exits 1", () => {
+  const r = runCli(["node", "sapwood", "validate", "/tmp/does-not-exist-sapwood.config.yaml"]);
+  assert.equal(r.code, 1);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /does-not-exist-sapwood\.config\.yaml/);
+});
+
+test("validate --help / -h prints validate usage and exits 0", () => {
+  for (const flag of ["--help", "-h"]) {
+    const r = runCli(["node", "sapwood", "validate", flag]);
+    assert.equal(r.code, 0, flag);
+    assert.match(r.stdout, /usage: sapwood validate/);
+  }
 });
