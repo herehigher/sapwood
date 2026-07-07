@@ -102,6 +102,21 @@ const Reviewer = z.object({
   // merge driver treats it as REVIEW_UNAVAILABLE (rate-limit/timeout) and QUEUES the PR —
   // gate② must never be skipped or softened on an unavailable review (#13).
   pollTimeoutSec: z.number().int().positive().default(1200),
+  // #54: EXPLICIT, ordered opt-in list of reviewer modes to fail over to when the primary
+  // (reviewer.mode) is unavailable for longer than failoverAfterSec. Each entry keeps its OWN
+  // mode semantics (identity allowlist for bot modes; any-non-author-approval for human) —
+  // reused unchanged from the mode implementations above, never forked. DEFAULT EMPTY: no
+  // fallback configured means exactly today's behavior — an unavailable primary queues the PR
+  // forever. This is a deliberate no-silent-degradation default (PLAN.md security model):
+  // falling from a different-model review to same-model/human changes gate②'s trust
+  // properties, so it never happens unless an operator explicitly opts in.
+  fallback: z.array(z.enum(["different-model-codex", "same-model-trusted", "human"])).default([]),
+  // How long (seconds, wall-clock since the last review trigger for the current head) the
+  // primary reviewer may stay non-decisive (WAIT_REVIEW / REVIEW_UNAVAILABLE) before
+  // merge-driver.ts's resolveReviewVerdict hands gate② to the first fallback entry that itself
+  // reaches a decisive verdict. Irrelevant when `fallback` is empty. Conservative default: 20
+  // minutes — same order of magnitude as the (separate, still-unwired) pollTimeoutSec above.
+  failoverAfterSec: z.number().int().positive().default(1200),
 }).strict();
 
 const Merge = z.object({

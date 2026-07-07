@@ -10,7 +10,7 @@ import { init, InitError } from "./init.js";
 import { State } from "./state.js";
 import { GithubForge } from "./forge.js";
 import { WorkerSupervisor } from "./worker.js";
-import { makeReviewer } from "./reviewer.js";
+import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
 import { runDriver, type StopMode, type DriverResult } from "./driver.js";
 
@@ -146,7 +146,10 @@ async function runEngine(argv: string[]): Promise<number> {
   const state = new State();
   const forge = new GithubForge(cfg);
   const reviewer = makeReviewer(cfg);
-  const mergeGate = new MergeDriver({ forge, reviewer, cfg });
+  // #54: the ordered reviewer-failover chain (cfg.reviewer.fallback) — empty by default, in
+  // which case MergeDriver.driveOne behaves exactly as before this existed.
+  const fallbackReviewers = makeFallbackReviewers(cfg);
+  const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
   const supervisor = new WorkerSupervisor({
     cfg,
     // #46: a first-pass live findOpenPr wiring (GithubForge.findOpenPrForIssue) — see its

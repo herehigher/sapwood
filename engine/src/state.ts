@@ -133,6 +133,21 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN review_triggered_at TEXT;
     `);
   },
+  // 6 -> 7: reviewer failover lock (#54). Once a FALLBACK reviewer (cfg.reviewer.fallback)
+  // reaches MERGE_OK for a lane's head while the primary is unavailable, that verdict must
+  // stay valid for that exact head even if the primary later reports something else
+  // (recovery semantics, #54 design) — these two columns are that lock: the head it was
+  // recorded for, and which fallback reviewer kind produced it. Read/written exclusively by
+  // MergeDriver.driveOne's recordFallback callback (conductor.ts wires it in), same pattern as
+  // review_triggered_head/at above. Nullable, no default: every pre-existing row gets NULL
+  // (no lock held), which resolveReviewVerdict (reviewer.ts) reads as "nothing to stay valid
+  // for" — fail-closed to the primary/no-fallback path, never a spuriously-honored lock.
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN review_fallback_head TEXT;
+      ALTER TABLE workers ADD COLUMN review_fallback_kind TEXT;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -169,6 +184,13 @@ export interface WorkerRow {
    *  (that was the P1-B bug: committedDate is forgeable via GIT_COMMITTER_DATE / cherry-picks
    *  and isn't tied to when the commit actually became the PR's head). */
   review_triggered_at?: string | null;
+  /** The head oid a FALLBACK reviewer's MERGE_OK verdict is locked in for (#54) — see the
+   *  schema v6->v7 migration comment. NULL/undefined means no fallback lock is held (the
+   *  lane is on the primary reviewer, or the fallback chain is unconfigured). */
+  review_fallback_head?: string | null;
+  /** Which fallback reviewer kind (Reviewer["kind"]) produced the locked verdict above. Always
+   *  set together with review_fallback_head (both null, or both non-null). */
+  review_fallback_kind?: string | null;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -256,20 +278,23 @@ export class State {
       .prepare(
         `INSERT INTO workers
            (name, issue, session_id, state, started_at, ended_at, pr, review_triggered,
-            review_triggered_head, review_triggered_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            review_triggered_head, review_triggered_at, review_fallback_head, review_fallback_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
            ended_at = excluded.ended_at, pr = excluded.pr,
            review_triggered = excluded.review_triggered,
            review_triggered_head = excluded.review_triggered_head,
-           review_triggered_at = excluded.review_triggered_at`,
+           review_triggered_at = excluded.review_triggered_at,
+           review_fallback_head = excluded.review_fallback_head,
+           review_fallback_kind = excluded.review_fallback_kind`,
       )
       .run(
         row.name, row.issue, row.session_id, row.state, row.started_at, row.ended_at,
         row.pr ?? null, row.review_triggered ?? 0,
         row.review_triggered_head ?? null, row.review_triggered_at ?? null,
+        row.review_fallback_head ?? null, row.review_fallback_kind ?? null,
       );
   }
 
@@ -282,6 +307,18 @@ export class State {
     this.db
       .prepare("UPDATE workers SET review_triggered_head = ?, review_triggered_at = ? WHERE name = ?")
       .run(head, at, name);
+  }
+
+  /** Persist `name`'s lane's reviewer-failover lock (#54) — called from MergeDriver.driveOne's
+   *  recordFallback callback (conductor.ts wires it in) the instant resolveReviewVerdict
+   *  (reviewer.ts) returns a lock that differs from the one it was given. `head`/`kind` both
+   *  null clears the lock (the primary recovered, or there was never one); both non-null
+   *  records a fallback reviewer's MERGE_OK for that head. A worker/producer has no reference
+   *  to State and cannot reach this method — same structural guarantee as recordReviewTrigger. */
+  recordReviewFallback(name: string, head: string | null, kind: string | null): void {
+    this.db
+      .prepare("UPDATE workers SET review_fallback_head = ?, review_fallback_kind = ? WHERE name = ?")
+      .run(head, kind, name);
   }
 
   getWorker(name: string): WorkerRow | undefined {

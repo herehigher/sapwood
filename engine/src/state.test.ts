@@ -145,6 +145,60 @@ test("worker.review_triggered_head/at survives an upsert that spreads a previous
   s.close();
 });
 
+// ── #54: reviewer-failover lock (review_fallback_head/kind) ───────────────────────────────
+
+test("worker.review_fallback_head/kind round-trip: default null, persisted via recordReviewFallback", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: "t2", pr: 42 });
+  const fresh = s.getWorker("a");
+  assert.equal(fresh?.review_fallback_head, null);
+  assert.equal(fresh?.review_fallback_kind, null);
+
+  s.recordReviewFallback("a", "HEAD1", "same-model-trusted");
+  const after = s.getWorker("a");
+  assert.equal(after?.review_fallback_head, "HEAD1");
+  assert.equal(after?.review_fallback_kind, "same-model-trusted");
+  assert.equal(after?.pr, 42); // untouched by recordReviewFallback
+
+  // Clearing (primary recovered) sets both back to null.
+  s.recordReviewFallback("a", null, null);
+  const cleared = s.getWorker("a");
+  assert.equal(cleared?.review_fallback_head, null);
+  assert.equal(cleared?.review_fallback_kind, null);
+  s.close();
+});
+
+test("worker.review_fallback_head/kind survives an upsert that spreads a previously-read row (conductor.ts's pattern)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: "t2", pr: 42 });
+  s.recordReviewFallback("a", "HEAD1", "human");
+  const driving = s.getWorker("a")!;
+  s.upsertWorker({ ...driving, ended_at: "t3" });
+  const after = s.getWorker("a");
+  assert.equal(after?.review_fallback_head, "HEAD1"); // preserved, not clobbered to NULL
+  assert.equal(after?.review_fallback_kind, "human");
+  s.close();
+});
+
+test("migration close/reopen: review_fallback_head/kind persist across an engine restart (DB-backed, not memory)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s1 = new State(path);
+    s1.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: "t2", pr: 42 });
+    s1.recordReviewFallback("a", "HEAD1", "same-model-trusted");
+    s1.close();
+
+    const s2 = new State(path);
+    const row = s2.getWorker("a");
+    assert.equal(row?.review_fallback_head, "HEAD1");
+    assert.equal(row?.review_fallback_kind, "same-model-trusted");
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("migration close/reopen: review_triggered_head/at persist across an engine restart (DB-backed, not memory)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
   try {

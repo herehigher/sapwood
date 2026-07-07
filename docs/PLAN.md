@@ -442,7 +442,17 @@ rewrite.** v1 requirements:
   `--until-idle` alongside the daemon default — `sapwood run [--once|--until-idle]` in
   `cli.ts`. Resume cost-delta protected in `State.recordSpend` (see M3 section above).
   gate② now carries the issue's verification plan into the review trigger (Decision
-  #8, see M3 section above). **Still open:** skills/commands (`/sapwood-run`,
+  #8, see M3 section above). **Reviewer failover (#54):** an explicit, ordered,
+  opt-in `reviewer.fallback` list (e.g. `[same-model-trusted, human]`) + a
+  `reviewer.failoverAfterSec` threshold — when the primary reviewer stays
+  non-decisive/unavailable past that threshold, gate② hands off to the first
+  fallback reviewer whose OWN mode semantics reaches a decisive verdict (reused,
+  never forked), reports a structured event + PR comment naming which mode is now
+  gating, and reverts to the primary for new verdicts once it recovers — while a
+  fallback-obtained verdict already locked in for the current head stays valid.
+  Empty `fallback` (the default) is byte-for-byte the pre-#54 behavior: an
+  unavailable primary queues the PR forever, no silent degradation. **Still open:**
+  skills/commands (`/sapwood-run`,
   `/sapwood-status`, `/sapwood-stop`, supervised "watch one issue" mode), `sapwood`
   status CLI, first-run trust ramp, docs set, and the **live** merge-gate + kill-switch
   runs on a real repo (#46 scope 3/4).

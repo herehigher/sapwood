@@ -16,6 +16,7 @@ import type { IForge, Issue } from "./forge.js";
 import type { State, BoardStatus, PendingRollback, ModelUsageEntry } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { DriveOutcome } from "./merge-driver.js";
+import type { ReviewFallbackLock } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -270,6 +271,13 @@ export interface MergeGate {
     issue: number,
     triggerPin: { head: string | null; at: string | null },
     recordTrigger: (head: string, at: string) => void,
+    /** #54: the lane's State-recorded reviewer-failover lock + a callback to persist a new one.
+     *  Optional — a MergeGate fake that predates #54 (this whole test file) still satisfies
+     *  this type without implementing it. */
+    fallback?: {
+      lock: ReviewFallbackLock;
+      recordFallback: (lock: ReviewFallbackLock) => void;
+    },
   ): Promise<DriveOutcome>;
 }
 
@@ -567,13 +575,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       const pr = w.pr;
       // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
       // that knows the LIVE current head) — tick() just threads the lane's State-recorded pin
-      // in and wires driveOne's recordTrigger callback straight back into State.
+      // in and wires driveOne's recordTrigger callback straight back into State. #54: same
+      // pattern for the reviewer-failover lock (state.ts workers.review_fallback_head/kind).
       const outcome = await gate.driveOne(
         pr,
         w.issue,
         { head: w.review_triggered_head ?? null, at: w.review_triggered_at ?? null },
         (head, at) => state.recordReviewTrigger(w.name, head, at),
+        {
+          // State (state.ts) stores review_fallback_kind as a plain TEXT column — it never
+          // validates the string against Reviewer["kind"] itself (same as every other
+          // engine/reviewer.ts type boundary state.ts crosses). The value only ever originates
+          // from resolveReviewVerdict's own ReviewerKind, via recordFallback below, so this
+          // narrowing is safe.
+          lock: { head: w.review_fallback_head ?? null, kind: (w.review_fallback_kind ?? null) as ReviewFallbackLock["kind"] },
+          recordFallback: (lock) => state.recordReviewFallback(w.name, lock.head, lock.kind),
+        },
       );
+      // #54: a switch/revert this tick gets its structured-event audit trail here (the PR
+      // comment itself was already posted by driveOne — see merge-driver.ts).
+      if (outcome.reviewerTransition) {
+        state.appendEvent(`reviewer-fallback-${outcome.reviewerTransition.kind}`, {
+          worker: w.name, issue: w.issue, pr, mode: outcome.reviewerTransition.mode,
+        });
+      }
       switch (outcome.kind) {
         case "merged":
           state.upsertWorker({ ...w, state: "done", ended_at: iso() });

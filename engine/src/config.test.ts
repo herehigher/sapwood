@@ -146,6 +146,31 @@ test("#13: rejects an unknown merge mode", () => {
   );
 });
 
+test("#54: reviewer.fallback defaults empty, failoverAfterSec defaults sane (no silent degradation)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.deepEqual(cfg.reviewer.fallback, []);
+  assert.equal(cfg.reviewer.failoverAfterSec, 1200);
+});
+
+test("#54: reviewer.fallback accepts an ordered list of the same three reviewer kinds", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { fallback: [same-model-trusted, human] }",
+  );
+  assert.deepEqual(cfg.reviewer.fallback, ["same-model-trusted", "human"]);
+});
+
+test("#54: reviewer.fallback rejects an unknown kind", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { fallback: [yolo] }"),
+    /reviewer/,
+  );
+});
+
+test("#54: reviewer.failoverAfterSec accepts a custom positive integer", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { failoverAfterSec: 300 }");
+  assert.equal(cfg.reviewer.failoverAfterSec, 300);
+});
+
 test("overrides survive validation", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 9 }\nworker: { effort: low }",
