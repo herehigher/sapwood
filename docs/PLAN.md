@@ -237,13 +237,68 @@ domain (no reserve/SLA/eval-report/HTML machinery).
   carry). **⚠️ M2 has no live cost cap:** the worker does not monitor in-flight cost and the
   conductor only checks `roundSpendUsd` *before* dispatching, so a running worker is bounded only
   by wall-clock `worker.timeoutSec` — the dollar cost ceiling (per-worker soft + engine hard)
-  arrives with **M3 (#14)**. Also **#37** (`init` ProjectV2 option-update wipes item status — a
-  real board hazard found during dogfood).
+  arrives with **M3 (#14)** *(since landed — see the M3 section below)*. Also **#37** (`init`
+  ProjectV2 option-update wipes item status — a real board hazard found during dogfood;
+  fixed in PR #40 via ID-preserving option updates).
 - **Dogfood proven (#12):** ran the loop end-to-end on a real issue (#35, a `cli --version/--help`
   feature) with a live **sonnet** worker — claim → worktree → TDD → PR (#36) — guard **live in
   hard mode** (PreToolUse firing on every tool call, zero bypass), and the worker **never
   self-merged**. The producer≠reviewer gate then caught two real defects in the autonomous PR
   before merge. *sapwood builds sapwood* is now demonstrated, not just claimed.
+
+**M3 review gate + merge modes (locked, delivered in PRs #41 / #42 / #43 / #44; hardening #39 / #40)**
+
+The gates + the ceiling: the engine can now *finish* work autonomously — review-gate a
+PR, merge it under the locked two-gate policy, and stop itself when spend or a human
+says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.sh`.
+
+- **`reviewer.ts` (#13)** — pluggable gate②: **different-model Codex** (default) /
+  same-model-trusted-only / human. A verdict is pinned to a **specific head oid** — a
+  review of a stale head counts as *no review*. Only the Codex bot (or a configured
+  `trustedReviewers` allowlist) can *satisfy* gate②, but a `CHANGES_REQUESTED` from
+  **anyone** on the current head blocks until that same reviewer later approves.
+  **Review-unavailable (rate-limit/timeout) queues the PR — it never skips or softens
+  gate②.** gate② re-checks the PR against the issue's verification plan (Decision #8).
+- **`merge-driver.ts` (#13)** — gate① (CI green, fail-closed: an empty check rollup is
+  NOT green) + gate② → squash-merge pinned by **`--match-head-commit`** (TOCTOU: a push
+  after the gates fails the merge command itself). `mergeDecision` is a **23-case
+  row-for-row parity port** of `test_loop_merge_driver.sh`. Both gate reads must observe
+  the **same head** (split observation → requeue). An already-**MERGED** PR resolves as
+  done (the designed happy path of `produce-pr-and-stop`, where a human merges);
+  **CONFLICTING** → needs-human *before* any merge attempt; deterministic merge failures
+  escalate while transient/TOCTOU ones requeue. Two merge modes: **conductor-merges**
+  (default) and **produce-PR-and-stop** (gates report, never merges). The conductor is
+  the *only* merger — structurally, `tick()` never calls `mergePR`; only
+  `merge-driver.driveOne` does, and no worker can reach it.
+- **Cost ceiling + kill switch (#14)** — engine-enforced, worker-unforgeable: a
+  `spend_ledger` in SQLite (restart-safe; a mid-run engine restart recovers lane cost
+  from the worker jsonl) feeds a **daily USD cap** checked every tick, plus a
+  **wall-clock cap** over an active engine session (session gap derived from tick
+  cadence — a legal slow cadence cannot silently disable the tier). A **`KILL_SWITCH`
+  file sentinel** in the engine's own data dir (human `touch`/`rm`; workers have no
+  write path) freezes all new dispatch, sends running workers the graceful
+  `requestHandoff()` drain, and only after the bounded `drainWindowSec` escalates to
+  process-tree kill + needs-human. The per-worker *soft* budget stays a graceful
+  handoff, never a mid-work kill (#33, still open — needs a live cost signal).
+- **Guard boundary extended (#43)** — the merge path is now inside the worker-unwritable
+  boundary: `merge-driver.ts` source and the *running* `engine/dist/reviewer.js` /
+  `merge-driver.js` artifacts (same vector class as the guard artifact, closed in #26 R3).
+  Also **#39**: the hook's direct-invocation check now compares realpaths — symlink
+  invocation can no longer silently no-op the guard.
+- **Rollback hardening (#31 → PR #44)** — recovery-path board mutations are persisted to
+  a `pending_rollbacks` table *before* being attempted and retried each tick until they
+  succeed; bounded retries escalate to needs-human with a structured tick-result entry.
+  Invariant: a transient forge failure during recovery can no longer strand an issue
+  In Progress with no worker row. No `.catch(() => {})` swallows remain in tick paths.
+- **Scope boundaries / deferred:** fixup-worker auto-dispatch (review findings fold to
+  needs-human for now — 0day's FIXABLE/fix-rounds loop is a follow-up subsystem);
+  live `findOpenPr` forge wiring and the **live end-to-end merge-gate run move to M4**
+  with the loop driver (which MUST pass `tickIntervalSec` into `tick()` and handle the
+  `--resume` cost-delta — both flagged in code). #33 unchanged (no in-flight cost
+  signal). Review evidence: #42 survived 3 Codex rounds (3 P1 + 3 P2 fail-open finds,
+  all fixed + regression-tested); #41 survived 4 rounds (3 Codex + 1 fresh non-author
+  stand-in when Codex rate-limited) — the gate②-when-reviewer-unavailable policy was
+  exercised *on the PR that implements it*.
 
 ## Security & trust model (trusted-first, designed toward public)
 
@@ -341,13 +396,14 @@ rewrite.** v1 requirements:
   (`test_loop_conductor.sh`); **dogfooded end-to-end** (claim→worktree→TDD→PR, guard live, no
   self-merge). Key decisions + deferrals (#31/#33/#37) in "M2 engine core" above.
   `merge_decision` + parity vs `test_loop_merge_driver.sh` move to M3 with the merge-driver.
-- **M3 — Review gate + merge modes:** `reviewer.ts` + `merge-driver.ts` with the
-  **0day-style default**: autonomous-merge gated on a fresh non-author Codex review
-  (gate②) + CI green (gate①), merged by the Conductor. Pluggable reviewer
-  (different-model Codex / same-model-trusted-only / human) and a produce-PR-and-stop
-  mode; engine cost ceiling + kill switch. gate② also checks the PR against the
-  issue's verification plan (Decision #8). Port 0day's `pr_gate.sh` ACTION protocol +
-  `loop_merge_driver.sh` (incl. `--match-head-commit` TOCTOU pin).
+- **M3 — Review gate + merge modes:** ✅ **delivered (PRs #41, #42, #43, #44; hardening
+  #39, #40).** `reviewer.ts` + `merge-driver.ts` with the **0day-style default**:
+  autonomous-merge gated on a fresh non-author Codex review (gate②) + CI green (gate①),
+  merged by the Conductor; produce-PR-and-stop selectable. Pluggable reviewer
+  (different-model Codex / same-model-trusted-only / human), engine cost ceiling + kill
+  switch (#14), rollback hardening (#31). 23-case parity vs `test_loop_merge_driver.sh`;
+  `--match-head-commit` TOCTOU pin. Key decisions + deferrals in "M3 review gate + merge
+  modes" above. Live end-to-end merge-gate run moves to M4 with the loop driver.
 - **M4 — UX surface + CLI:** skills/commands (`/sapwood-run`, `/sapwood-status`,
   `/sapwood-stop`, supervised "watch one issue" mode), `sapwood` status CLI,
   first-run trust ramp, docs set.

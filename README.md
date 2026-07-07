@@ -60,7 +60,7 @@ GitHub issue (Ready)
 | M0.5 ✅ | Turnkey onboarding (`sapwood init`: board/labels/milestones) — **shipped** |
 | M1 ✅ | Guard port — the fail-closed safety core (ships green first) — **shipped** |
 | M2 ✅ | Engine core (conductor + worker + guard wired live) — dogfooded end-to-end; **sapwood now builds sapwood** — **shipped** |
-| M3 | Review gate + opt-in autonomous-merge + cost ceiling |
+| M3 ✅ | Review gate + opt-in autonomous-merge + cost ceiling + kill switch — the engine can now finish work under the two-gate policy — **shipped** |
 | M4 | Commands, status CLI, first-run trust ramp, docs |
 | v0.2 | Dashboard — built *by* sapwood itself, as the flagship dogfood |
 
