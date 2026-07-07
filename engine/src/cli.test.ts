@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
   runCli,
@@ -15,7 +16,7 @@ import {
   type StatusSnapshot,
 } from "./cli.js";
 import { parseConfig } from "./config.js";
-import { State } from "./state.js";
+import { State, SCHEMA_VERSION } from "./state.js";
 import type { Issue } from "./forge.js";
 
 test("--version prints package version and exits 0", () => {
@@ -191,11 +192,36 @@ test("computeDryRunPreview: candidates capped at lanes.roundDispatchCap, cost = 
   ];
   const preview = computeDryRunPreview(ready, cfg);
   assert.equal(preview.readyCount, 3);
+  assert.equal(preview.dispatchableCount, 3);
   assert.equal(preview.candidates.length, 2); // capped at roundDispatchCap
   assert.deepEqual(preview.candidates.map((i) => i.number), [1, 2]);
   assert.equal(preview.perWorkerUsd, 5);
   assert.equal(preview.previewUsd, 10); // 2 x $5
   assert.equal(preview.dailyBudgetUsd, 40);
+});
+
+test("computeDryRunPreview: uses the REAL dispatch eligibility filter — reserve/needs-human/blocked/blocked-by issues never appear as candidates or spend (Codex PR #70 P2)", () => {
+  const ready: Issue[] = [
+    { number: 1, title: "held for human", labels: ["needs-human"] },
+    { number: 2, title: "blocked", labels: ["blocked"] },
+    { number: 3, title: "reserve", labels: ["reserve"] },
+    { number: 4, title: "waiting on 9", labels: ["blocked-by:9"] },
+    { number: 5, title: "actually dispatchable", labels: [] },
+  ];
+  const preview = computeDryRunPreview(ready, baseCfg);
+  assert.equal(preview.readyCount, 5);
+  assert.equal(preview.dispatchableCount, 1);
+  assert.deepEqual(preview.candidates.map((i) => i.number), [5]);
+  assert.equal(preview.previewUsd, baseCfg.worker.budgetUsdSoft); // 1 candidate, not 5
+});
+
+test("computeDryRunPreview: candidates follow orderForDispatch's priority ordering, not board order", () => {
+  const ready: Issue[] = [
+    { number: 10, title: "default prio", labels: [] }, // prio 3 (no label)
+    { number: 11, title: "urgent", labels: ["prio:0"] },
+  ];
+  const preview = computeDryRunPreview(ready, baseCfg); // roundDispatchCap default = 2
+  assert.deepEqual(preview.candidates.map((i) => i.number), [11, 10]); // prio:0 first
 });
 
 test("computeDryRunPreview: fewer ready issues than the cap -> candidates = all of them", () => {
@@ -328,7 +354,9 @@ test("status: seeded DB with a running worker, a driving/gated PR, spend, and ki
     name: "lane-9-efgh", issue: 9, session_id: "s2", state: "driving",
     started_at: "2026-07-05T09:00:00.000Z", ended_at: null, pr: 101,
   });
-  seed.recordSpend("lane-9-efgh", 9, 12.5, "2026-07-07T00:00:00.000Z");
+  // Spend ts must be TODAY (runStatus queries dailySpendUsd(new Date())) — a hard-coded date
+  // would silently rot this test the day after it was written (Codex PR #70 P2).
+  seed.recordSpend("lane-9-efgh", 9, 12.5, new Date().toISOString());
   seed.close();
   try {
     const r = runCli(["node", "sapwood", "status", dbPath, "--config", configPath]);
@@ -387,4 +415,76 @@ test("runStatus: exported directly (not just via runCli) for the same result", (
   const r = runStatus(["node", "sapwood", "status", "/tmp/does-not-exist-sapwood-status.sqlite"]);
   assert.equal(r.code, 0);
   assert.match(r.stdout, /no state DB/);
+});
+
+test("status: truly read-only — DB file bytes, user_version, and journal_mode all unchanged (Codex PR #70 P2)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const seed = new State(dbPath);
+  seed.upsertWorker({
+    name: "lane-1-ro", issue: 1, session_id: "s1", state: "running",
+    started_at: "2026-07-07T09:00:00.000Z", ended_at: null,
+  });
+  seed.close();
+  try {
+    const before = readFileSync(dbPath);
+    const r = runStatus(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /lane-1-ro/);
+    const after = readFileSync(dbPath);
+    assert.ok(before.equals(after), "status must not modify a single byte of the DB file");
+    // Belt-and-braces on the two specific mutations the normal State constructor performs:
+    const check = new DatabaseSync(dbPath, { readOnly: true });
+    assert.equal(
+      (check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+      SCHEMA_VERSION,
+    );
+    assert.equal(
+      (check.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode,
+      "wal", // what the engine set at seed time — status didn't switch it (or anything else)
+    );
+    check.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status: DB schema NEWER than this engine -> clear upgrade message, exit 1, never migrated (Codex PR #70 P2)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  new State(dbPath).close();
+  const raw = new DatabaseSync(dbPath);
+  raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 3}`);
+  raw.close();
+  try {
+    const r = runStatus(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, new RegExp(`DB schema v${SCHEMA_VERSION + 3}.*newer.*upgrade sapwood`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status: DB schema OLDER than this engine -> clear 'run the engine to migrate' message, exit 1, still not migrated by status", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  new State(dbPath).close();
+  const raw = new DatabaseSync(dbPath);
+  raw.exec("PRAGMA user_version = 1");
+  raw.close();
+  try {
+    const r = runStatus(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /DB schema v1.*older.*status never migrates/);
+    // status must have left the old version exactly as it found it.
+    const check = new DatabaseSync(dbPath, { readOnly: true });
+    assert.equal(
+      (check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+      1,
+    );
+    check.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

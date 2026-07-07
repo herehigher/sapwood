@@ -9,12 +9,13 @@ import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.js";
 import { init, InitError } from "./init.js";
-import { State, type WorkerRow } from "./state.js";
+import { State, SCHEMA_VERSION, type WorkerRow } from "./state.js";
 import { GithubForge, type Issue } from "./forge.js";
 import { WorkerSupervisor } from "./worker.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
 import { runDriver, type StopMode, type DriverResult } from "./driver.js";
+import { orderForDispatch } from "./conductor.js";
 
 const require = createRequire(import.meta.url);
 // ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
@@ -118,14 +119,18 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
 
 // ── #15: `sapwood run --dry-run` — cost preview, no dispatch ────────────────────────────────
 
-/** Preview data for `sapwood run --dry-run`. Deliberately a rough estimate, not a replay of
- *  conductor.ts's real dispatch loop (priority ordering, meta-floor anti-starvation, in-flight
- *  dedup, live lane occupancy): this is the first-run trust ramp's "roughly what would happen
- *  and roughly what it would cost" preview, not a dry-run of the exact tick outcome. Candidate
- *  count is bounded the same way the round IS bounded (cfg.lanes.roundDispatchCap) — the one
- *  cap simple enough to reuse here without re-deriving live lane occupancy. */
+/** Preview data for `sapwood run --dry-run`. Candidates go through the REAL dispatch
+ *  eligibility filter + ordering (conductor.ts orderForDispatch: drops reserve /
+ *  needs-human/blocked / blocked-by issues, sorts by priority) — an issue the engine would
+ *  never dispatch must never appear in the trust-ramp preview as spend (Codex PR #70 P2).
+ *  Still a rough estimate beyond that: live lane occupancy, in-flight dedup, and the
+ *  meta-floor anti-starvation accounting need engine state a dry run doesn't touch, so the
+ *  candidate count is bounded by the one static cap (cfg.lanes.roundDispatchCap), not a
+ *  replay of the exact next tick. */
 export interface DryRunPreview {
   readyCount: number;
+  /** After orderForDispatch's eligibility filter — the pool candidates are drawn from. */
+  dispatchableCount: number;
   candidates: Issue[];
   perWorkerUsd: number;
   previewUsd: number;
@@ -134,10 +139,12 @@ export interface DryRunPreview {
 
 /** Pure: no forge/network access, so this is fully unit-testable without mocking `gh`. */
 export function computeDryRunPreview(ready: Issue[], cfg: SapwoodConfig): DryRunPreview {
-  const candidates = ready.slice(0, cfg.lanes.roundDispatchCap);
+  const dispatchable = orderForDispatch(ready, cfg);
+  const candidates = dispatchable.slice(0, cfg.lanes.roundDispatchCap);
   const perWorkerUsd = cfg.worker.budgetUsdSoft;
   return {
     readyCount: ready.length,
+    dispatchableCount: dispatchable.length,
     candidates,
     perWorkerUsd,
     previewUsd: perWorkerUsd * candidates.length,
@@ -147,7 +154,8 @@ export function computeDryRunPreview(ready: Issue[], cfg: SapwoodConfig): DryRun
 
 export function formatDryRunPreview(preview: DryRunPreview): string {
   const lines = [
-    `sapwood run --dry-run: ${preview.readyCount} ready issue(s), ${preview.candidates.length} candidate(s) this round`,
+    `sapwood run --dry-run: ${preview.readyCount} ready issue(s), ` +
+      `${preview.dispatchableCount} dispatchable, ${preview.candidates.length} candidate(s) this round`,
     ...preview.candidates.map((i) => `  would dispatch: #${i.number} ${i.title}`),
     `sapwood run --dry-run: cost preview ~$${preview.previewUsd.toFixed(2)} ` +
       `(${preview.candidates.length} x $${preview.perWorkerUsd.toFixed(2)} soft budget/worker), ` +
@@ -246,7 +254,12 @@ export function formatStatus(s: StatusSnapshot): string {
 /** Fully synchronous (node:sqlite's DatabaseSync + loadConfig are both sync) — like `validate`,
  *  no async engine-wiring fallthrough needed. Never creates a DB: a missing file means "the
  *  engine has never run here", reported as such, NOT silently initialized by opening a fresh
- *  State() (which would create data/ + an empty schema as a side effect of just checking status). */
+ *  State() (which would create data/ + an empty schema as a side effect of just checking status).
+ *
+ *  The DB is opened TRULY read-only (Codex PR #70 P2): SQLITE_OPEN_READONLY, no migrations,
+ *  no journal-mode switch — status must never mutate/upgrade a DB an engine process (possibly
+ *  an older engine) is still using. A schema version this engine's queries don't understand —
+ *  newer OR older — is reported as a clear message instead of migrated over. */
 export function runStatus(argv: string[]): { stdout: string; stderr: string; code: number } {
   const parsed = parseStatusArgs(argv);
   if (parsed.help) return { stdout: STATUS_USAGE, stderr: "", code: 0 };
@@ -263,11 +276,23 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
   } catch {
     cfg = undefined; // reported as "unknown" fields, never fatal — the DB read is the point
   }
-  const state = new State(dbPath);
+  const state = new State(dbPath, { readOnly: true });
   try {
+    const dbVersion = state.userVersion();
+    if (dbVersion !== SCHEMA_VERSION) {
+      const hint =
+        dbVersion > SCHEMA_VERSION
+          ? "newer than this sapwood understands — upgrade sapwood"
+          : "older than this sapwood — run the engine (sapwood run) to migrate it; status never migrates";
+      return {
+        stdout: "",
+        stderr: `sapwood status: DB schema v${dbVersion} at ${dbPath} is ${hint} (engine schema v${SCHEMA_VERSION})\n`,
+        code: 1,
+      };
+    }
     const snapshot: StatusSnapshot = {
       dbPath,
-      schemaVersion: state.userVersion(),
+      schemaVersion: dbVersion,
       active: state.activeWorkers(),
       driving: state.drivingWorkers(),
       killSwitchActive: state.isKillSwitchActive(),

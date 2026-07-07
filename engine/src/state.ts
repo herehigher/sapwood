@@ -237,11 +237,23 @@ export class State {
   // always inactive there (tests inject their own via a real tmp-dir State instead).
   private readonly dataDir: string | null;
 
-  constructor(path = "data/sapwood.sqlite") {
+  /** readOnly (#15, Codex PR #70 P2): open the DB truly read-only (SQLITE_OPEN_READONLY) and
+   *  run NO side effects — no parent-dir mkdir, no journal_mode/foreign_keys pragma writes,
+   *  and crucially NO migrations. `sapwood status` inspects a DB an engine (possibly an OLDER
+   *  engine) may still be using; silently upgrading its schema from a status command would be
+   *  a mutation the "read-only inspection" contract forbids. Callers of a read-only handle
+   *  must check userVersion() themselves before querying (cli.ts runStatus does) — the
+   *  schema may be ahead of or behind what this engine's queries expect. Write methods on a
+   *  read-only handle throw at the SQLite layer (attempt to write a readonly database). */
+  constructor(path = "data/sapwood.sqlite", opts: { readOnly?: boolean } = {}) {
     // SQLite won't create missing parent dirs, and data/ is gitignored (absent on a
     // fresh checkout). Create it first. (Codex P2, PR #22.) Skip for special handles.
     const isMemory = path === ":memory:" || path.startsWith("file::memory:");
     this.dataDir = isMemory ? null : dirname(path);
+    if (opts.readOnly) {
+      this.db = new DatabaseSync(path, { readOnly: true });
+      return;
+    }
     if (this.dataDir) {
       mkdirSync(this.dataDir, { recursive: true });
     }
