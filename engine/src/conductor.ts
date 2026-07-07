@@ -528,22 +528,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   mergeGate -> driving lanes stay driving with no gate/merge activity (pre-#13 behavior).
   const driven: DrivenOutcome[] = [];
   const gate = deps.mergeGate;
-  // #59: the kill switch is a hard "stop ALL outward autonomous action" signal, not just a
-  // dispatch freeze. Read it once up front (cheap sync file-existence check; it can't change
-  // mid-tick) so every driving lane this tick sees the same snapshot.
-  const killSwitchActive = state.isKillSwitchActive();
   if (gate) {
     for (const w of state.drivingWorkers()) {
-      if (killSwitchActive) {
-        // #59 (live #46 scope-4 finding): with the kill switch set, the DRIVE loop must never
-        // take ANY outward autonomous action for a driving lane — not just the gate.driveOne/
-        // mergePR path below, but also the missing-PR fail-safe just past this branch (it calls
-        // forge.addLabel + marks the worker failed, which is itself an outward action under a
-        // stop signal). So this check comes FIRST, ahead of the `w.pr == null` fail-safe —
-        // Codex review on PR #61 caught that ordering gap. `pr` falls back to -1 for a
-        // malformed/legacy lane with no PR number, matching the sentinel the missing-PR
-        // fail-safe below already uses. Every driving lane — PR or not — just queues and holds
-        // driving, resuming normal driving/merging the moment the switch clears.
+      // #59: the kill switch is a hard "stop ALL outward autonomous action" signal, not just a
+      // dispatch freeze. Re-read it FRESH on every iteration (not once before the loop) —
+      // gate.driveOne below does real async GitHub work (CI status, review verdicts, the merge
+      // call itself), so a single DRIVE phase iterating several driving lanes can span real
+      // wall-clock time. An operator dropping the sentinel mid-loop must stop lanes processed
+      // LATER in this same pass too, not just the next tick. It's a cheap sync file-existence
+      // check (see isKillSwitchActive), so per-lane cost is a non-issue — Codex review on PR
+      // #61 caught both this staleness gap and, separately, that the check needs to run BEFORE
+      // the missing-PR fail-safe just past this branch (it calls forge.addLabel + marks the
+      // worker failed, itself an outward action under a stop signal).
+      if (state.isKillSwitchActive()) {
+        // `pr` falls back to -1 for a malformed/legacy lane with no PR number, matching the
+        // sentinel the missing-PR fail-safe below already uses. Every driving lane — PR or not —
+        // just queues and holds driving, resuming normal driving/merging once the switch clears.
         const pr = w.pr ?? -1;
         state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
         driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "kill-switch" });

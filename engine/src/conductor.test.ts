@@ -499,6 +499,49 @@ test("tick DRIVE: kill switch active + a malformed/legacy driving lane with pr==
   }
 });
 
+test("tick DRIVE: kill switch created MID-LOOP (during an in-flight driveOne) -> a later lane in the SAME DRIVE phase is queued kill-switch, never reaches driveOne (Codex PR #61 re-review: stale up-front snapshot)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
+  try {
+    const switchPath = join(dir, "KILL_SWITCH");
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    // Two driving lanes, processed in `name` order (lane-a then lane-b — see
+    // State.drivingWorkers' ORDER BY name).
+    seedRunning(st, "lane-a", 2);
+    seedRunning(st, "lane-b", 3);
+    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    sup.probes["lane-b"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 56 };
+
+    // A fake gate whose FIRST driveOne call (lane-a/PR 55) simulates an operator hitting the
+    // kill switch WHILE that async GitHub work is in flight, by creating the sentinel file
+    // synchronously before resolving. No KILL_SWITCH exists when the DRIVE loop starts.
+    const calls: number[] = [];
+    const gate: MergeGate = {
+      async driveOne(pr) {
+        calls.push(pr);
+        if (calls.length === 1) writeFileSync(switchPath, "");
+        return { kind: "queued", pr, reason: "in-flight" };
+      },
+    };
+
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+    // lane-a's driveOne DID run (switch was absent when its iteration started).
+    assert.deepEqual(calls, [55]); // lane-b's driveOne (56) was NEVER called
+    const laneA = r.driven.find((d) => d.worker === "lane-a");
+    const laneB = r.driven.find((d) => d.worker === "lane-b");
+    assert.deepEqual(laneA, { kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "in-flight" });
+    // lane-b, reached AFTER the sentinel appeared, gets the fresh-read kill-switch queue instead
+    // of proceeding to gate.driveOne.
+    assert.deepEqual(laneB, { kind: "queued", worker: "lane-b", issue: 3, pr: 56, reason: "kill-switch" });
+    assert.equal(st.getWorker("lane-b")?.state, "driving");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick DRIVE: kill switch NOT active -> driveOne called normally (no regression)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
   try {
