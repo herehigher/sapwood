@@ -838,6 +838,245 @@ test("#60 P1 (Codex review + follow-up second-opinion review): supervisor WIP co
   }
 });
 
+// ── #63: detached-lane handoff — probe() confirms death and finalizes (no onExit callback
+// exists for a lane the engine only knows via a persisted running.json) ──────────────────────
+
+test("#63: detached handoff-requested lane confirmed dead -> probe() preserves WIP, writes .handoff, clears running.json (and persists handoff_requested on request)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-63-a";
+    const worktreePath = join(worktreeRoot, name);
+    const remoteDir = makeWorktreeWithRemote(worktreePath);
+    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n"); // WIP at kill time
+
+    // No TERM trap -> the real CLI's empirically-confirmed shape (#60): dies by signal.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s1 = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s1.dispatch({ number: 63, title: "t", labels: [] }, name);
+    await sleep(200);
+    const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
+    assert.equal(alive(pid), true);
+    s1.dispose(); // "restart": s2 has no in-memory lane handle for this name — only the persisted file
+
+    const s2 = sup(dir, bin, false, worktreeRoot);
+    assert.equal(s2.requestHandoff(laneName), true); // detached branch: SIGTERM via the persisted pid
+    const runningAfterRequest = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8"));
+    assert.equal(runningAfterRequest.handoff_requested, true, "request persisted onto running.json");
+
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "SIGTERM reached the detached process");
+
+    // probe() is what wins the race against DEAD-reclassification (#63) — it must confirm
+    // death, preserve WIP, and finalize as .handoff right here, not via any onExit callback.
+    const probe = await s2.probe(laneName);
+    assert.equal(probe.handoff, true);
+    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), ".handoff sentinel written by probe()");
+    assert.ok(!existsSync(join(dir, `${laneName}.running.json`)), "running marker cleared");
+
+    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
+    assert.match(log, /sapwood: WIP handoff \(drain\)/);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: worktreePath, encoding: "utf8" }).trim(), "");
+    const remoteLog = execFileSync("git", ["log", "--oneline", "main"], { cwd: remoteDir, encoding: "utf8" });
+    assert.match(remoteLog, /sapwood: WIP handoff \(drain\)/, "pushed to origin");
+
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#63: a SECOND engine restart before death is confirmed still finalizes — the persisted running.json handoff_requested field survives even though the fresh instance's in-memory set is empty", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-63-b";
+    const worktreePath = join(worktreeRoot, name);
+    const remoteDir = makeWorktreeWithRemote(worktreePath);
+    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n");
+
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`); // no trap -> dies on SIGTERM
+    const s1 = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s1.dispatch({ number: 64, title: "t", labels: [] }, name);
+    await sleep(200);
+    const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
+    s1.dispose(); // restart #1: engine forgets the in-process lane
+
+    const sMid = sup(dir, bin, false, worktreeRoot);
+    assert.equal(sMid.requestHandoff(laneName), true); // detached SIGTERM sent + persisted
+    // Simulate restart #2 landing before anyone ever calls probe() on sMid (i.e. before death
+    // is confirmed): a brand-new instance whose in-memory detachedHandoffRequested is empty.
+    const s2 = sup(dir, bin, false, worktreeRoot);
+
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "the SIGTERM sent before restart #2 still killed it");
+
+    const probe = await s2.probe(laneName);
+    assert.equal(probe.handoff, true, "persisted handoff_requested field alone is enough to finalize");
+    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)));
+    assert.ok(!existsSync(join(dir, `${laneName}.running.json`)));
+
+    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
+    assert.match(log, /sapwood: WIP handoff \(drain\)/);
+    const remoteLog = execFileSync("git", ["log", "--oneline", "main"], { cwd: remoteDir, encoding: "utf8" });
+    assert.match(remoteLog, /sapwood: WIP handoff \(drain\)/);
+
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#63: wrapperAlive() === -1 (unreadable pid) -> probe() does not throw, does not finalize, lane stays as-is", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const s = sup(dir, bin);
+    // A persisted lane that claims a handoff was requested but carries no readable wrapper_pid
+    // (garbage/missing) -> persistedPid() is null -> wrapperAlive() is -1 (unknown), not 0.
+    writeFileSync(
+      join(dir, "lane-63-c.running.json"),
+      JSON.stringify({ issue: 1, session_id: "s", handoff_requested: true }),
+    );
+    const probe = await s.probe("lane-63-c");
+    assert.equal(probe.wrapperAlive, -1);
+    assert.equal(probe.handoff, false, "an unknown pid is never treated as confirmed-dead");
+    assert.equal(probe.done, false);
+    assert.equal(probe.failed, false);
+    assert.ok(!existsSync(join(dir, "lane-63-c.handoff.json")));
+    assert.ok(existsSync(join(dir, "lane-63-c.running.json")), "running marker untouched — still just 'unknown'");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#63: a lane already reclaim()'d must never also be finalized as .handoff, even if it still matches detached-requested + dead-pid", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-63-d";
+    const worktreePath = join(worktreeRoot, name);
+    makeWorktreeWithRemote(worktreePath);
+    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n");
+
+    // Ignores TERM -> survives requestHandoff's SIGTERM; only reclaim()'s SIGKILL stops it —
+    // mirroring the "reclaim kills a stubborn claude subtree via SIGKILL" pattern above.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
+    const s1 = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s1.dispatch({ number: 65, title: "t", labels: [] }, name);
+    await sleep(200);
+    const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
+    s1.dispose();
+
+    const s2 = sup(dir, bin, false, worktreeRoot);
+    assert.equal(s2.requestHandoff(laneName), true); // detached SIGTERM sent (ignored by the stub)
+    assert.equal(alive(pid), true, "stub ignores TERM — still alive right after the drain request");
+
+    // The conductor's escalation path (ceiling drain window elapsed, or a DEAD reclassification)
+    // reaches this same lane and reclaims it — it's going FAILED, not resumable.
+    await s2.reclaim(laneName);
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "reclaim()'s SIGKILL escalation tore it down");
+
+    const probe = await s2.probe(laneName);
+    assert.equal(probe.handoff, false, "a reclaimed lane must never be finalized as resumable");
+    assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)), "no .handoff written");
+
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#63 F1: a failure persisting handoff_requested onto running.json is swallowed — requestHandoff still returns true and the SIGTERM still lands (Codex second-opinion review, PR #67: it's called unguarded from the conductor's CEILING drain loop, which must never abort mid-tick)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const s1 = sup(dir, bin);
+    const { name } = await s1.dispatch({ number: 66, title: "t", labels: [] });
+    await sleep(600); // let bash install its TERM trap
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
+
+    const s2 = sup(dir, bin);
+    // Force the persist write to fail exactly like an ENOSPC/EACCES/EROFS would — stubbing
+    // the private writeJsonAtomic is the most portable way to force this (a chmod-based
+    // fixture would be a no-op when the test runs as root). requestHandoff must swallow it.
+    (s2 as unknown as { writeJsonAtomic: (p: string, obj: unknown) => void }).writeJsonAtomic = () => {
+      throw new Error("simulated disk failure");
+    };
+
+    let result: boolean | undefined;
+    assert.doesNotThrow(() => {
+      result = s2.requestHandoff(name);
+    });
+    assert.equal(result, true, "SIGTERM still gets sent even though the persist write failed");
+
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "SIGTERM reached the detached process despite the persist failure");
+
+    // Confirms this actually exercised the failing write path (not a silent no-op): the field
+    // never landed, because the stubbed writeJsonAtomic threw instead of writing.
+    const running = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8"));
+    assert.notEqual(running.handoff_requested, true);
+
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE sending the SIGTERM, not after (Codex second-opinion review, PR #67 — closes the gap where the engine could die between 'signal sent' and 'flag persisted', losing the very record the flag exists to survive)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const s1 = sup(dir, bin);
+    const { name } = await s1.dispatch({ number: 67, title: "t", labels: [] });
+    await sleep(600); // let bash install its TERM trap
+    const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
+
+    const s2 = sup(dir, bin);
+    // A shared call-order log — wrap (not replace) the real private writeJsonAtomic/signalGroup
+    // so the actual persist + actual SIGTERM still happen (this test also verifies the
+    // end-to-end outcome), while recording which one ran first.
+    const order: string[] = [];
+    const proto = WorkerSupervisor.prototype as unknown as {
+      writeJsonAtomic: (p: string, obj: unknown) => void;
+      signalGroup: (pid: number, sig: NodeJS.Signals) => void;
+    };
+    const s2Hooks = s2 as unknown as {
+      writeJsonAtomic: (p: string, obj: unknown) => void;
+      signalGroup: (pid: number, sig: NodeJS.Signals) => void;
+    };
+    s2Hooks.writeJsonAtomic = (p, obj) => {
+      order.push("persist");
+      proto.writeJsonAtomic.call(s2, p, obj);
+    };
+    s2Hooks.signalGroup = (targetPid, sig) => {
+      order.push("signal");
+      proto.signalGroup.call(s2, targetPid, sig);
+    };
+
+    assert.equal(s2.requestHandoff(name), true);
+    assert.deepEqual(order, ["persist", "signal"], "the persisted flag write must happen before the SIGTERM is sent");
+
+    const running = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8"));
+    assert.equal(running.handoff_requested, true, "persist actually landed on disk");
+
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "SIGTERM still reached the detached process");
+
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
