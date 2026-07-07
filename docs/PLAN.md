@@ -254,11 +254,12 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
 
 - **`reviewer.ts` (#13)** — pluggable gate②: **different-model Codex** (default) /
   same-model-trusted-only / human. A verdict is pinned to a **specific head oid** — a
-  review of a stale head counts as *no review*. Only the Codex bot (or a configured
-  `trustedReviewers` allowlist) can *satisfy* gate②, but a `CHANGES_REQUESTED` from
-  **anyone** on the current head blocks until that same reviewer later approves.
-  **Review-unavailable (rate-limit/timeout) queues the PR — it never skips or softens
-  gate②.** gate② re-checks the PR against the issue's verification plan (Decision #8).
+  review of a stale head counts as *no review*. In the Codex / same-model modes, only
+  the Codex bot (or a configured `trustedReviewers` allowlist) can *satisfy* gate②
+  (`human` mode accepts any non-author approval — no allowlist there); in every mode a
+  `CHANGES_REQUESTED` from **anyone** on the current head blocks until that same
+  reviewer later approves. **Review-unavailable (rate-limit/timeout) queues the PR — it
+  never skips or softens gate②.**
 - **`merge-driver.ts` (#13)** — gate① (CI green, fail-closed: an empty check rollup is
   NOT green) + gate② → squash-merge pinned by **`--match-head-commit`** (TOCTOU: a push
   after the gates fails the merge command itself). `mergeDecision` is a **23-case
@@ -295,7 +296,11 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   live `findOpenPr` forge wiring and the **live end-to-end merge-gate run move to M4**
   with the loop driver (which MUST pass `tickIntervalSec` into `tick()` and handle the
   `--resume` cost-delta — both flagged in code). #33 unchanged (no in-flight cost
-  signal). Review evidence: #42 survived 3 Codex rounds (3 P1 + 3 P2 fail-open finds,
+  signal). **The gate② verification-plan re-check (Decision #8) is NOT yet wired:** the
+  plan gate holds at *dispatch* (`getReadyIssues` refuses issues without a verification
+  plan, fail-closed), but the M3 gate data carries no issue body, so no code path yet
+  re-checks the finished PR against the plan — that lands with the M4 reviewer-prompt
+  work. Until then gate② = fresh non-author review + CI, not plan conformance. Review evidence: #42 survived 3 Codex rounds (3 P1 + 3 P2 fail-open finds,
   all fixed + regression-tested); #41 survived 4 rounds (3 Codex + 1 fresh non-author
   stand-in when Codex rate-limited) — the gate②-when-reviewer-unavailable policy was
   exercised *on the PR that implements it*.
