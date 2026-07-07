@@ -102,6 +102,17 @@ export function deriveReviewAction(s: ReviewSignals): ReviewAction {
   return "WAIT_REVIEW"; // covers both "👀 in progress" and "nothing yet" — both mean keep polling
 }
 
+/** The ENGINE-recorded review-trigger pin (PR #55 P1-B) — the thumb-verdict freshness cutoff.
+ *  Sourced from state.ts's workers.review_triggered_head/at, threaded in by merge-driver.ts's
+ *  driveOne (which is the only place that knows BOTH the pin and the live current head). `head`
+ *  is the head oid the LAST trigger was posted for; `at` is the engine wall-clock ISO timestamp
+ *  it was posted at. Either null means "no trigger recorded for this lane yet" — thumbs must
+ *  never count in that case (fail-closed), matching a lane whose first trigger hasn't fired. */
+export interface ReviewTriggerPin {
+  head: string | null;
+  at: string | null;
+}
+
 /** The pluggable review-gate seam. Read-only + comment-only; no merge method (structural
  *  producer != reviewer != merger — see module header). merge-driver.ts owns the one impure
  *  read (forge.getPRReviewData) and its failure handling (-> REVIEW_UNAVAILABLE), so
@@ -115,8 +126,10 @@ export interface Reviewer {
   triggerReview(forge: IForge, pr: number, issue: number): Promise<void>;
   /** This tick's verdict from ALREADY-FETCHED review data (merge-driver.ts fetches it fresh
    *  every call against the LIVE current head — never a cached one; a review of a stale head
-   *  counts as no review, #101, since freshHeadReviewCount filters on data.headOid). */
-  verdictFromData(data: PRReviewData): ReviewVerdict;
+   *  counts as no review, #101, since freshHeadReviewCount filters on data.headOid). `pin` (#55
+   *  P1-B) is the engine-recorded trigger pin for this lane; omitted/undefined behaves like
+   *  {head: null, at: null} — no thumb can count (fail-closed), same as a lane never triggered. */
+  verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict;
 }
 
 /** GitHub bot logins vary by API surface: REST reactions report `foo[bot]`, GraphQL/pr-view
@@ -153,17 +166,30 @@ export function buildReviewTriggerComment(issue: number, planText: string | null
  * threads always block — the filter can only shrink what approves, never what blocks.
  */
 /**
- * Trusted-thumb verdict signal: `+1` reactions count ONLY when (a) the reacting login passes
- * the same identity filter as countable reviews (a random account's 👍 must never satisfy
- * gate② — same P1 class as PR #42's reviewer-identity finding), and (b) the reaction is newer
- * than the CURRENT head commit's own timestamp (reactions aren't commit-pinned like reviews,
- * so a push invalidates all prior thumbs — the stale-review rule, transposed). No
- * headCommittedAt in the data ⇒ 0, fail-closed.
+ * Trusted-thumb verdict signal: `+1` reactions count ONLY when (a) the reacting login is NOT
+ * the PR author, even when the author's login is itself in the trusted set (Codex PR #55 P1-A:
+ * producer != reviewer — an author's own 👍 must never be gate②-satisfying, formal reviews
+ * already exclude data.author via freshHeadReviewCount and this path must match); (b) the login
+ * passes the same identity filter as countable reviews (a random account's 👍 must never satisfy
+ * gate② — same P1 class as PR #42's reviewer-identity finding); and (c) the reaction is newer
+ * than the ENGINE-recorded trigger time (`pin.at`) for the SAME head the trigger was posted
+ * against (`pin.head === data.headOid`) — PR #55 P1-B: a commit's own committedDate is not
+ * push-bound (forgeable via GIT_COMMITTER_DATE / cherry-picks, and doesn't move on a later
+ * push), so the freshness cutoff is the engine's own trigger clock, not anything read off git.
+ * No pin, or a pin for a different head, ⇒ 0, fail-closed (no trigger recorded for this head
+ * yet ⇒ no thumb can have been a response to it).
  */
-function freshTrustedThumbCount(data: PRReviewData, trustedLogin?: (login: string) => boolean): number {
-  if (!trustedLogin || !data.headCommittedAt) return 0;
-  const trusted = data.reactions.filter((r) => trustedLogin(normalizeLogin(r.login)));
-  return freshThumbCount(trusted, data.headCommittedAt);
+function freshTrustedThumbCount(
+  data: PRReviewData,
+  trustedLogin?: (login: string) => boolean,
+  pin?: ReviewTriggerPin,
+): number {
+  if (!trustedLogin || !pin?.at || pin.head !== data.headOid) return 0;
+  const author = normalizeLogin(data.author);
+  const trusted = data.reactions.filter(
+    (r) => normalizeLogin(r.login) !== author && trustedLogin(normalizeLogin(r.login)),
+  );
+  return freshThumbCount(trusted, pin.at);
 }
 
 function verdictFrom(
@@ -171,13 +197,14 @@ function verdictFrom(
   acceptStates: readonly string[],
   countableReview?: (r: PRReview) => boolean,
   trustedReactionLogin?: (login: string) => boolean,
+  pin?: ReviewTriggerPin,
 ): ReviewVerdict {
   const countable = countableReview ? data.reviews.filter(countableReview) : data.reviews;
   const fresh = freshHeadReviewCount(countable, data.headOid, data.author, acceptStates);
   const action = deriveReviewAction({
     hasEyesReaction: data.reactions.some((r) => r.content === "eyes"),
     freshApprovingReviews: fresh,
-    freshTrustedThumbs: freshTrustedThumbCount(data, trustedReactionLogin),
+    freshTrustedThumbs: freshTrustedThumbCount(data, trustedReactionLogin, pin),
     unresolvedThreads: data.unresolvedThreads,
     changesRequestedOnHead: changesRequestedOnHead(data.reviews, data.headOid, data.author),
   });
@@ -209,9 +236,9 @@ export class CodexReviewer implements Reviewer {
     await forge.addPRComment(pr, buildReviewTriggerComment(issue, extractVerificationPlan(body)));
   }
 
-  verdictFromData(data: PRReviewData): ReviewVerdict {
+  verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict {
     const trusted = (login: string) => this.allowedLogins.includes(login);
-    return verdictFrom(data, CodexReviewer.ACCEPT, (r) => trusted(normalizeLogin(r.author)), trusted);
+    return verdictFrom(data, CodexReviewer.ACCEPT, (r) => trusted(normalizeLogin(r.author)), trusted, pin);
   }
 }
 
@@ -227,6 +254,8 @@ export class HumanReviewer implements Reviewer {
   }
 
   verdictFromData(data: PRReviewData): ReviewVerdict {
+    // No trustedReactionLogin passed -> freshTrustedThumbCount always 0; the pin is irrelevant
+    // to human mode (a human's approval is a real review, never a 👍) so it's not accepted here.
     return verdictFrom(data, HumanReviewer.ACCEPT);
   }
 }
@@ -245,13 +274,16 @@ export class SameModelTrustedReviewer implements Reviewer {
     // No-op: the trusted reviewer is expected to act out of band (e.g. its own automation).
   }
 
-  verdictFromData(data: PRReviewData): ReviewVerdict {
+  verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict {
     if (this.trustedLogins.length === 0) return { action: "WAIT_REVIEW", headOid: data.headOid };
     const trusted = this.trustedLogins.map(normalizeLogin);
     // Filter what can APPROVE only — blocking signals (change requests, threads) intentionally
     // still see every review (verdictFrom's contract).
     // Thumbs count here too, from the same trusted list — mode symmetry with CodexReviewer.
-    return verdictFrom(data, SameModelTrustedReviewer.ACCEPT, (r) => trusted.includes(normalizeLogin(r.author)), (l) => trusted.includes(l));
+    return verdictFrom(
+      data, SameModelTrustedReviewer.ACCEPT,
+      (r) => trusted.includes(normalizeLogin(r.author)), (l) => trusted.includes(l), pin,
+    );
   }
 }
 

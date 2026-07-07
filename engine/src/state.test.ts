@@ -109,6 +109,62 @@ test("worker.pr and review_triggered round-trip (#13): default null/0, persisted
   s.close();
 });
 
+// ── #55 P1-B: the engine-recorded review-trigger pin (review_triggered_head/at) ────────────
+
+test("worker.review_triggered_head/at round-trip: default null, persisted via recordReviewTrigger", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: "t2", pr: 42 });
+  const fresh = s.getWorker("a");
+  assert.equal(fresh?.review_triggered_head, null);
+  assert.equal(fresh?.review_triggered_at, null);
+
+  s.recordReviewTrigger("a", "HEAD1", "2026-07-07T08:00:00.000Z");
+  const after = s.getWorker("a");
+  assert.equal(after?.review_triggered_head, "HEAD1");
+  assert.equal(after?.review_triggered_at, "2026-07-07T08:00:00.000Z");
+  assert.equal(after?.pr, 42); // untouched by recordReviewTrigger
+  assert.equal(after?.state, "driving");
+
+  // A later push re-records a NEW head/time — recordReviewTrigger overwrites, not appends.
+  s.recordReviewTrigger("a", "HEAD2", "2026-07-07T09:00:00.000Z");
+  const after2 = s.getWorker("a");
+  assert.equal(after2?.review_triggered_head, "HEAD2");
+  assert.equal(after2?.review_triggered_at, "2026-07-07T09:00:00.000Z");
+  s.close();
+});
+
+test("worker.review_triggered_head/at survives an upsert that spreads a previously-read row (conductor.ts's pattern)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: "t2", pr: 42 });
+  s.recordReviewTrigger("a", "HEAD1", "2026-07-07T08:00:00.000Z");
+  const driving = s.getWorker("a")!;
+  s.upsertWorker({ ...driving, ended_at: "t3" }); // an unrelated field update via spread
+  const after = s.getWorker("a");
+  assert.equal(after?.review_triggered_head, "HEAD1"); // preserved, not clobbered to NULL
+  assert.equal(after?.review_triggered_at, "2026-07-07T08:00:00.000Z");
+  s.close();
+});
+
+test("migration close/reopen: review_triggered_head/at persist across an engine restart (DB-backed, not memory)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s1 = new State(path);
+    s1.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: "t2", pr: 42 });
+    s1.recordReviewTrigger("a", "HEAD1", "2026-07-07T08:00:00.000Z");
+    s1.close();
+
+    const s2 = new State(path); // "restart": a brand-new State instance, same on-disk DB
+    const row = s2.getWorker("a");
+    assert.equal(row?.review_triggered_head, "HEAD1");
+    assert.equal(row?.review_triggered_at, "2026-07-07T08:00:00.000Z");
+    assert.equal(row?.pr, 42);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("events append in order", () => {
   const s = mem();
   s.appendEvent("dispatched", { issue: 2 });

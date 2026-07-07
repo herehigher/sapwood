@@ -253,11 +253,19 @@ export interface Supervisor {
  *  no path to acquire one). Optional in TickDeps: omitted -> driving lanes stay driving with no
  *  gate/merge activity (pre-#13 behavior, preserved for callers not yet configuring a reviewer). */
 export interface MergeGate {
-  /** Post the review trigger at most once per PR; idempotent to call again (a plain comment).
-   *  `issue` (#46) is threaded to the reviewer so it can carry the issue's verification plan. */
-  ensureTriggered(pr: number, issue: number): Promise<void>;
-  /** One gate + merge attempt for `pr`. Never throws (see merge-driver.ts). */
-  driveOne(pr: number): Promise<DriveOutcome>;
+  /** One gate + merge attempt for `pr` (#13; trigger folded in per #55 P1-B). `issue` (#46) is
+   *  threaded to the reviewer so a fresh trigger can carry the issue's verification plan.
+   *  `triggerPin` is the lane's State-recorded {head, at} from its last posted trigger (null
+   *  fields when none has ever been recorded — tick() below reads this straight off the
+   *  WorkerRow); `recordTrigger` is tick()'s callback into State.recordReviewTrigger, invoked by
+   *  driveOne the instant it posts a fresh trigger for a new/never-triggered head. Never throws
+   *  (see merge-driver.ts). */
+  driveOne(
+    pr: number,
+    issue: number,
+    triggerPin: { head: string | null; at: string | null },
+    recordTrigger: (head: string, at: string) => void,
+  ): Promise<DriveOutcome>;
 }
 
 export type DrivenOutcome =
@@ -533,11 +541,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       const pr = w.pr;
-      if (!w.review_triggered) {
-        await gate.ensureTriggered(pr, w.issue);
-        state.upsertWorker({ ...w, review_triggered: 1 });
-      }
-      const outcome = await gate.driveOne(pr);
+      // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
+      // that knows the LIVE current head) — tick() just threads the lane's State-recorded pin
+      // in and wires driveOne's recordTrigger callback straight back into State.
+      const outcome = await gate.driveOne(
+        pr,
+        w.issue,
+        { head: w.review_triggered_head ?? null, at: w.review_triggered_at ?? null },
+        (head, at) => state.recordReviewTrigger(w.name, head, at),
+      );
       switch (outcome.kind) {
         case "merged":
           state.upsertWorker({ ...w, state: "done", ended_at: iso() });
@@ -552,9 +564,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           break;
         case "queued":
-          // Stays driving — retried next tick. Covers gate-pending (WAIT) AND a
-          // review-unavailable (rate-limit/timeout) signal: #13 requires the latter to queue,
-          // never skip/soften gate②.
+          // Stays driving — retried next tick. Covers gate-pending (WAIT), a review-unavailable
+          // (rate-limit/timeout) signal (#13 requires the latter to queue, never skip/soften
+          // gate②), and a freshly-posted review trigger (#55 P1-B "review-triggered" — the pin
+          // was just recorded into State above; next tick re-reads it and proceeds to gating).
           state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           break;

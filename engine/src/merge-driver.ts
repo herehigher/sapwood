@@ -19,7 +19,7 @@
 // defense-in-depth on top of the guard hook's fail-closed Category-C block (guard.ts).
 import type { IForge, PRStatus, PRReviewData } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
-import type { Reviewer, ReviewAction } from "./reviewer.js";
+import type { Reviewer, ReviewAction, ReviewTriggerPin } from "./reviewer.js";
 
 export type Gate = "MERGE" | "WAIT" | "HUMAN";
 
@@ -123,6 +123,9 @@ export interface MergeDriverDeps {
   forge: IForge;
   reviewer: Reviewer;
   cfg: SapwoodConfig;
+  /** Clock seed (#55 P1-B), injectable for tests — the wall-clock the trigger pin's `at` is
+   *  stamped with. Defaults to the real clock. */
+  now?: () => Date;
 }
 
 /**
@@ -133,18 +136,28 @@ export interface MergeDriverDeps {
 export class MergeDriver {
   constructor(private readonly deps: MergeDriverDeps) {}
 
-  /** Post the review trigger (e.g. `@codex review`) once per PR. Idempotent to call more than
-   *  once (a plain comment); the caller (conductor.ts) tracks "already triggered" per lane so it
-   *  calls this at most once per driving lane, not every tick. `issue` (#46) lets the reviewer
-   *  pull the driving lane's verification plan into the trigger (Decision #8). */
-  async ensureTriggered(pr: number, issue: number): Promise<void> {
-    await this.deps.reviewer.triggerReview(this.deps.forge, pr, issue);
-  }
-
   /** One gate + merge attempt for `pr`. Never throws — every forge failure resolves to
    *  "queued" (retried next tick) rather than propagating, so a transient gh hiccup can never
-   *  crash the Conductor's tick loop or silently drop the PR from the driving lane. */
-  async driveOne(pr: number): Promise<DriveOutcome> {
+   *  crash the Conductor's tick loop or silently drop the PR from the driving lane.
+   *
+   *  `issue` (#46) lets the reviewer pull the driving lane's verification plan into the trigger
+   *  comment. `triggerPin` is the lane's ENGINE-recorded last trigger (state.ts
+   *  workers.review_triggered_head/at), supplied by the conductor; `recordTrigger` persists a
+   *  NEW pin the instant this call posts one (also supplied by the conductor, backed by
+   *  State.recordReviewTrigger) — MergeDriver never touches storage directly.
+   *
+   *  #55 P1-B: the review trigger now fires HERE, once the head is KNOWN to be consistent
+   *  (below), rather than once-per-lane in the conductor. Any head the pin doesn't match —
+   *  including the very first drive of a lane (pin.head === null) AND a later push that moves
+   *  the PR to a new head mid-drive — gets a fresh `@codex review` and a freshly-recorded pin
+   *  BEFORE any gate verdict is derived for that head; this also fixes a latent bug where a
+   *  push after the lane's first trigger never got re-triggered at all. */
+  async driveOne(
+    pr: number,
+    issue: number,
+    triggerPin: ReviewTriggerPin,
+    recordTrigger: (head: string, at: string) => void,
+  ): Promise<DriveOutcome> {
     const { forge, reviewer, cfg } = this.deps;
 
     let status: PRStatus;
@@ -181,7 +194,20 @@ export class MergeDriver {
       return { kind: "queued", pr, reason: `gate-head-mismatch: ci-head=${status.headOid} review-head=${data.headOid}` };
     }
 
-    const verdict = reviewer.verdictFromData(data);
+    // #55 P1-B: the head is now KNOWN (both reads agree) — this is the one place that can
+    // correctly decide whether the recorded trigger pin still applies. A mismatch covers BOTH
+    // "never triggered" (triggerPin.head === null) and "triggered, but the PR was pushed since"
+    // (triggerPin.head !== the live head) — either way, a stale/absent pin means gate②'s thumb
+    // path must not evaluate against this head yet: post a fresh trigger, record it, and queue
+    // this tick rather than deriving a verdict a push may have invalidated mid-flight.
+    if (triggerPin.head !== status.headOid) {
+      await reviewer.triggerReview(forge, pr, issue);
+      const now = this.deps.now ?? (() => new Date());
+      recordTrigger(status.headOid, now().toISOString());
+      return { kind: "queued", pr, reason: "review-triggered" };
+    }
+
+    const verdict = reviewer.verdictFromData(data, triggerPin);
     const gate = deriveGate({
       ciGreen: status.ciGreen,
       reviewAction: verdict.action,

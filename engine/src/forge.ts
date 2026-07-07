@@ -48,11 +48,6 @@ export interface PRReviewData {
   headOid: string;
   author: string;
   updatedAt: string; // ISO — the freshness cutoff for reactions (0day pr_gate.sh #92)
-  // ISO commit date of the CURRENT head commit — the freshness pin for reaction verdicts
-  // (reviewer.ts): a 👍 is not tied to a commit like a review is, so only reactions newer
-  // than the head itself may count; any push invalidates prior thumbs. Optional + absent ⇒
-  // reaction verdicts never fire (fail-closed), formal-review verdicts unaffected.
-  headCommittedAt?: string | undefined;
   isDraft: boolean;
   labels: string[];
   state: "OPEN" | "CLOSED" | "MERGED";
@@ -252,7 +247,7 @@ export class GithubForge implements IForge {
     // Never touches merge/approve/ready — this is a read surface only.
     const viewJson = await this.gh([
       "pr", "view", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--json", "headRefOid,author,updatedAt,isDraft,labels,state,reviews,commits",
+      "--json", "headRefOid,author,updatedAt,isDraft,labels,state,reviews",
     ]);
     const reactionsJson = await this.gh([
       // --slurp: --paginate alone concatenates one JSON doc per page (unparseable as a
@@ -586,15 +581,16 @@ export async function countUnresolvedThreads(fetchPage: (after: string | null) =
   return unresolved; // page ceiling hit; return what we counted rather than loop unbounded
 }
 
-/** Pure parse of `gh pr view --json headRefOid,author,updatedAt,isDraft,labels,state,reviews,commits`.
- *  `commits` is used only for the LAST entry's committedDate (the head's reaction-freshness pin);
- *  gh caps the list at 250 — on a longer PR the tail may be missing, in which case we emit no
- *  headCommittedAt and reaction verdicts simply stay fail-closed (WAIT), never a wrong pin. */
+/** Pure parse of `gh pr view --json headRefOid,author,updatedAt,isDraft,labels,state,reviews`.
+ *  No commit-date plumbing here (see PR #55 P1-B): a commit's own committedDate is NOT tied to
+ *  when it became the PR's head — forgeable via GIT_COMMITTER_DATE / cherry-picks, and (worse)
+ *  didn't move on a later push, so a stale 👍 could out-live a legitimate re-trigger. The
+ *  thumb-verdict freshness pin now lives in engine State (workers.review_triggered_head/at,
+ *  set by MergeDriver.driveOne the instant it posts a fresh trigger) — reviewer.ts. */
 export function parsePRReviewView(json: string): {
   headOid: string;
   author: string;
   updatedAt: string;
-  headCommittedAt?: string | undefined;
   isDraft: boolean;
   labels: string[];
   state: PRStatus["state"];
@@ -608,17 +604,11 @@ export function parsePRReviewView(json: string): {
     labels?: { name: string }[];
     state: string;
     reviews?: { author?: { login?: string }; commit?: { oid?: string }; state: string }[];
-    commits?: { oid?: string; committedDate?: string }[];
   };
-  // The head's commit date: trust the entry matching headRefOid; a truncated/mismatched list
-  // (gh caps at 250 commits) yields undefined -> reaction verdicts fail closed in reviewer.ts.
-  const headCommit = (d.commits ?? []).find((c) => c.oid === d.headRefOid) ?? (d.commits ?? []).slice(-1)[0];
-  const headCommittedAt = headCommit?.oid === d.headRefOid ? headCommit?.committedDate : undefined;
   return {
     headOid: d.headRefOid,
     author: d.author?.login ?? "",
     updatedAt: d.updatedAt,
-    headCommittedAt,
     isDraft: d.isDraft,
     labels: (d.labels ?? []).map((l) => l.name),
     state: d.state as PRStatus["state"],
@@ -651,7 +641,6 @@ export function assemblePRReviewData(viewJson: string, reactionsJson: string, un
     headOid: view.headOid,
     author: view.author,
     updatedAt: view.updatedAt,
-    headCommittedAt: view.headCommittedAt,
     isDraft: view.isDraft,
     labels: view.labels,
     state: view.state,

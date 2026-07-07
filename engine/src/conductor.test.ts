@@ -304,15 +304,24 @@ test("tick capacity: a reclaimed DONE+PR (driving) lane still occupies a lane (C
 // ── #13: DRIVE wiring (deps.mergeGate drives `driving` lanes through gates) ──────────────
 
 class FakeMergeGate implements MergeGate {
-  triggered: number[] = [];
-  triggeredWith: Array<[number, number]> = []; // [pr, issue] — #46: proves issue flows through
+  // Every call's (pr, issue, triggerPin) — #55 P1-B: proves the conductor threads the lane's
+  // State-recorded pin (and its issue number, #46) into driveOne every tick.
+  calls: Array<{ pr: number; issue: number; triggerPin: { head: string | null; at: string | null } }> = [];
   outcomes: Record<number, DriveOutcome> = {};
   defaultOutcome: DriveOutcome = { kind: "queued", pr: 0, reason: "default" };
-  async ensureTriggered(pr: number, issue: number): Promise<void> {
-    this.triggered.push(pr);
-    this.triggeredWith.push([pr, issue]);
+  /** When set, driveOne invokes the caller-supplied recordTrigger with these values before
+   *  returning — simulates MergeDriver posting a fresh trigger and persisting its pin. */
+  recordOnCall: [string, string] | null = null;
+  async driveOne(
+    pr: number,
+    issue: number,
+    triggerPin: { head: string | null; at: string | null },
+    recordTrigger: (head: string, at: string) => void,
+  ): Promise<DriveOutcome> {
+    this.calls.push({ pr, issue, triggerPin });
+    if (this.recordOnCall) recordTrigger(...this.recordOnCall);
+    return this.outcomes[pr] ?? { ...this.defaultOutcome, pr };
   }
-  async driveOne(pr: number): Promise<DriveOutcome> { return this.outcomes[pr] ?? { ...this.defaultOutcome, pr }; }
 }
 
 test("tick DRIVE: omitted mergeGate -> driving lanes stay driving untouched, driven=[] (pre-#13 behavior)", async () => {
@@ -388,7 +397,7 @@ test("tick DRIVE: stopped (produce-pr-and-stop) -> stays driving, never treated 
   st.close();
 });
 
-test("tick DRIVE: review trigger posted at most once per PR, not every tick", async () => {
+test("tick DRIVE: driveOne is called every tick with the lane's issue number (#46, Decision #8 plan-in-trigger) and its State-recorded trigger pin (#55 P1-B)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -399,20 +408,34 @@ test("tick DRIVE: review trigger posted at most once per PR, not every tick", as
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: DONE -> driving
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 2nd tick: still driving
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 3rd tick: still driving
-  assert.deepEqual(gate.triggered, [55]); // triggered exactly once across 3 ticks
+  // Called once per tick (the trigger-once invariant now lives INSIDE MergeDriver.driveOne,
+  // covered by merge-driver.test.ts) — every call carries issue #2 and a null pin (never
+  // triggered, per this test's fresh lane).
+  assert.equal(gate.calls.length, 3);
+  for (const c of gate.calls) {
+    assert.equal(c.pr, 55);
+    assert.equal(c.issue, 2);
+    assert.deepEqual(c.triggerPin, { head: null, at: null });
+  }
   st.close();
 });
 
-test("tick DRIVE: ensureTriggered receives the driving lane's issue number (#46, Decision #8 plan-in-trigger)", async () => {
+test("tick DRIVE: driveOne's recordTrigger callback persists the pin into State, which the NEXT tick reads back", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-a", 2);
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
-  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting" };
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "review-triggered" };
+  gate.recordOnCall = ["HEAD1", "2026-07-07T08:00:00.000Z"];
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: records the pin
+  assert.equal(st.getWorker("lane-a")?.review_triggered_head, "HEAD1");
+  assert.equal(st.getWorker("lane-a")?.review_triggered_at, "2026-07-07T08:00:00.000Z");
+
+  gate.recordOnCall = null; // 2nd tick: driveOne doesn't re-record (simulating a matched pin)
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-  assert.deepEqual(gate.triggeredWith, [[55, 2]]); // [pr, issue] — issue 2 is lane-a's issue
+  assert.deepEqual(gate.calls[1]!.triggerPin, { head: "HEAD1", at: "2026-07-07T08:00:00.000Z" }); // read back
   st.close();
 });
 
