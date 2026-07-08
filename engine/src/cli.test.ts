@@ -200,6 +200,23 @@ test("computeDryRunPreview: candidates capped at lanes.roundDispatchCap, cost = 
   assert.equal(preview.dailyBudgetUsd, 40);
 });
 
+test("computeDryRunPreview: caps by min(roundDispatchCap, lanes.max) — max:1 + cap:2 + 2 ready => 1 candidate, cost for 1 (Codex PR #70 round-5 P2)", () => {
+  const cfg = parseConfig(
+    "board: { owner: acme, repo: widgets, projectNumber: 7 }\n" +
+      "lanes: { max: 1, roundDispatchCap: 2 }\nworker: { budgetUsdSoft: 8 }\n",
+  );
+  const ready: Issue[] = [
+    { number: 1, title: "one", labels: [] },
+    { number: 2, title: "two", labels: [] },
+  ];
+  const preview = computeDryRunPreview(ready, cfg);
+  assert.equal(preview.dispatchableCount, 2);
+  assert.equal(preview.effectiveLaneLimit, 1); // min(2, 1) — lanes.max is the binding limit
+  assert.equal(preview.candidates.length, 1); // real loop stops at lanesUsed >= lanes.max
+  assert.deepEqual(preview.candidates.map((i) => i.number), [1]);
+  assert.equal(preview.previewUsd, 8); // 1 x $8, NOT 2 x $8
+});
+
 test("computeDryRunPreview: uses the REAL dispatch eligibility filter — reserve/needs-human/blocked/blocked-by issues never appear as candidates or spend (Codex PR #70 P2)", () => {
   const ready: Issue[] = [
     { number: 1, title: "held for human", labels: ["needs-human"] },
@@ -472,7 +489,7 @@ test("status: truly read-only — DB file bytes, user_version, and journal_mode 
   }
 });
 
-test("status: creates ZERO -wal/-shm sidecars against a checkpointed WAL DB, dir byte-stable (Codex PR #70 round-4 P2)", () => {
+test("status: against a stopped/checkpointed WAL DB works and mutates no sapwood STATE — main file + user_version stable, SQLite coordination sidecars allowed (Codex PR #70 round-5 P2)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
   const dbPath = join(dir, "sapwood.sqlite");
   const seed = new State(dbPath); // WAL mode
@@ -480,24 +497,50 @@ test("status: creates ZERO -wal/-shm sidecars against a checkpointed WAL DB, dir
     name: "lane-1-wal", issue: 1, session_id: "s1", state: "running",
     started_at: "2026-07-07T09:00:00.000Z", ended_at: null,
   });
-  seed.close();
-  // Simulate a cleanly stopped engine: no -wal/-shm on disk (checkpointed away). A plain
-  // readOnly open would RE-CREATE them on first read — the bug this test pins.
+  seed.close(); // checkpoints + drops sidecars: a cleanly stopped engine
   for (const suffix of ["-wal", "-shm"]) {
     if (existsSync(dbPath + suffix)) rmSync(dbPath + suffix);
   }
-  const listBefore = readdirSync(dir).sort();
-  assert.deepEqual(listBefore, ["sapwood.sqlite"], "precondition: only the main DB file on disk");
   const mainBefore = readFileSync(dbPath);
   try {
     const r = runStatus(["node", "sapwood", "status", dbPath]);
     assert.equal(r.code, 0);
-    assert.match(r.stdout, /lane-1-wal/); // still read the data correctly (immutable read)
-    const listAfter = readdirSync(dir).sort();
-    assert.deepEqual(listAfter, ["sapwood.sqlite"], "status must create no -wal/-shm sidecars");
-    assert.ok(existsSync(dbPath + "-wal") === false && existsSync(dbPath + "-shm") === false);
+    assert.match(r.stdout, /lane-1-wal/); // read the data correctly
+    // The contract is "mutate no sapwood STATE", NOT "create zero files": a normal read-only
+    // open (needed to read live WAL frames — see the live-WAL test below) may create SQLite's
+    // own -wal/-shm coordination sidecars, which are not sapwood state (Codex PR #70 round-5).
     assert.ok(readFileSync(dbPath).equals(mainBefore), "main DB file must be byte-stable");
+    const check = new DatabaseSync(dbPath, { readOnly: true });
+    assert.equal(
+      (check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+      SCHEMA_VERSION,
+      "status must not migrate/alter the schema version",
+    );
+    check.close();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status: against a LIVE engine (rows committed only in the -wal) reads them correctly, NOT stale/v0 (Codex PR #70 round-5 P2)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  // Keep the "engine" connection OPEN so its committed rows stay in the -wal, un-checkpointed
+  // to the main file — exactly the live-engine state where an immutable open would see v0.
+  const engine = new State(dbPath);
+  engine.upsertWorker({
+    name: "lane-42-live", issue: 42, session_id: "s-live", state: "running",
+    started_at: "2026-07-08T09:00:00.000Z", ended_at: null,
+  });
+  assert.ok(existsSync(dbPath + "-wal"), "precondition: rows are in the live -wal, not the main file");
+  try {
+    const r = runStatus(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 0); // NOT the schema-mismatch exit 1 an immutable v0 read would give
+    assert.doesNotMatch(r.stderr, /schema v0/);
+    assert.match(r.stdout, /lane-42-live/); // saw the live WAL-only worker row
+    assert.match(r.stdout, /issue #42/);
+  } finally {
+    engine.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

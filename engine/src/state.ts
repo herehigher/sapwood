@@ -155,6 +155,56 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
+/** True when a SQLite error means "can't write to this location because the FILESYSTEM is
+ *  read-only" — i.e. the normal read-only open can't create the -shm it needs to read WAL
+ *  frames. node:sqlite surfaces the extended result code on `.errcode`; the SQLITE_READONLY
+ *  (primary 8) and SQLITE_CANTOPEN (primary 14) families both cover this, across their
+ *  extended variants (e.g. SQLITE_READONLY_DIRECTORY = 1544). Falls back to a message match
+ *  only if no numeric code is present. Deliberately narrow: a genuine corruption/format error
+ *  must propagate, not be silently masked as a "stale snapshot" (Codex PR #70 round-5). */
+function isReadOnlyFsError(e: unknown): boolean {
+  const code = (e as { errcode?: unknown }).errcode;
+  if (typeof code === "number") {
+    const primary = code & 0xff;
+    return primary === 8 /* SQLITE_READONLY */ || primary === 14 /* SQLITE_CANTOPEN */;
+  }
+  return /readonly|read-only|unable to open/i.test(String((e as { message?: unknown }).message ?? ""));
+}
+
+/** Open a DB read-only for `sapwood status`. See the State constructor's readOnly doc for the
+ *  full rationale; this is factored out so the normal-open-then-immutable-fallback control
+ *  flow reads cleanly. Never mutates sapwood state (query_only, no migrations). */
+function openReadOnly(path: string, isMemory: boolean): DatabaseSync {
+  // In-memory handles (tests) have no on-disk file and no WAL sidecar concern.
+  if (isMemory) {
+    const db = new DatabaseSync(path, { readOnly: true });
+    db.exec("PRAGMA query_only = ON");
+    return db;
+  }
+  try {
+    const db = new DatabaseSync(path, { readOnly: true });
+    db.exec("PRAGMA query_only = ON");
+    // Probe: forces the -shm access a WAL DB needs, so a read-only-FS failure lands HERE
+    // (where we can fall back) rather than later mid-status. On a writable FS this may
+    // create SQLite's own -wal/-shm coordination files — acceptable (not sapwood state).
+    db.prepare("PRAGMA user_version").get();
+    return db;
+  } catch (e) {
+    if (!isReadOnlyFsError(e)) throw e;
+    // Read-only filesystem: SQLite can't create the -shm needed to read live WAL frames.
+    // Fall back to immutable (reads the main DB directly, zero file creation) and warn that
+    // a running engine's uncommitted-to-main rows won't be visible.
+    process.stderr.write(
+      `sapwood: state DB at ${path} is on a read-only filesystem — reading it immutably. ` +
+        `If the engine is currently running, this snapshot may be stale (uncommitted WAL ` +
+        `frames are not visible).\n`,
+    );
+    const db = new DatabaseSync(`${pathToFileURL(path).href}?immutable=1`, { readOnly: true });
+    db.exec("PRAGMA query_only = ON");
+    return db;
+  }
+}
+
 // running = live worker (probed each reclaim). driving = produced a PR, lane held awaiting
 // the review gate (M3) — no live worker, but still occupies a lane. done/failed/handoff = terminal.
 export type WorkerState = "running" | "driving" | "done" | "failed" | "handoff";
@@ -238,35 +288,31 @@ export class State {
   // always inactive there (tests inject their own via a real tmp-dir State instead).
   private readonly dataDir: string | null;
 
-  /** readOnly (#15, Codex PR #70 P2): open the DB with ZERO side effects on disk — no
-   *  parent-dir mkdir, no journal_mode/foreign_keys pragma writes, no migrations, and
-   *  crucially NO WAL sidecar creation. `sapwood status` inspects a DB an engine (possibly
-   *  an OLDER engine) may still be using; any file mutation from a status command violates
-   *  the "read-only inspection" contract and outright fails on a read-only filesystem.
+  /** readOnly (#15, Codex PR #70): open the DB for inspection by `sapwood status` WITHOUT
+   *  mutating sapwood STATE — no parent-dir mkdir, no journal_mode/foreign_keys pragma
+   *  writes, no migrations, and `PRAGMA query_only` so no SQL can write schema/data. The DB
+   *  may belong to an engine (possibly an OLDER engine) still running; the caller re-checks
+   *  userVersion() itself (cli.ts runStatus) since the schema may be ahead/behind.
    *
-   *  A plain `{ readOnly: true }` handle (SQLITE_OPEN_READONLY) is NOT enough: for a
-   *  WAL-mode DB whose -wal/-shm sidecars were checkpointed away (the normal state of a
-   *  cleanly stopped engine), the first read through such a handle RE-CREATES both sidecars
-   *  (Codex PR #70 round-4 P2). So we open the file via an `immutable=1` file: URI, which
-   *  tells SQLite the file cannot change under it — it reads the main DB directly and never
-   *  touches (or creates) the WAL/SHM files. Trade-off: immutable makes SQLite ignore any
-   *  live -wal content, so against an engine mid-write status reads the last-checkpointed
-   *  snapshot rather than the newest uncommitted-to-main rows — an acceptable, arguably
-   *  desirable staleness for a read-only inspector that must never perturb the live engine's
-   *  files. Callers still check userVersion() themselves (cli.ts runStatus) since the schema
-   *  may be ahead of/behind what this engine understands; write methods throw at the SQLite
-   *  layer (readonly database). */
+   *  Open strategy (Codex PR #70 round-5 P2 — live-correctness wins over zero-sidecars):
+   *  status's PRIMARY job is inspecting a LIVE engine, whose newest committed rows can exist
+   *  only in the `-wal` sidecar. So we do a NORMAL read-only open first (SQLITE_OPEN_READONLY,
+   *  NOT immutable): it reads live WAL frames correctly. SQLite may create its own `-wal`/
+   *  `-shm` COORDINATION sidecars to do so — those are SQLite's, not sapwood state, and are
+   *  explicitly acceptable here. A probe read in this constructor forces that `-shm` access
+   *  now, so the ONE case where a normal open can't work — a read-only FILESYSTEM, where
+   *  SQLite can't create the `-shm` it needs (SQLITE_READONLY* / SQLITE_CANTOPEN) — surfaces
+   *  here instead of mid-status. Only then do we fall back to an `immutable=1` file: URI
+   *  (reads the main DB directly, ZERO file creation) AND warn on stderr that a running
+   *  engine's uncommitted-to-main WAL frames won't be visible (a possibly-stale snapshot is
+   *  the honest best a read-only FS allows). Write methods throw at the SQLite layer. */
   constructor(path = "data/sapwood.sqlite", opts: { readOnly?: boolean } = {}) {
     // SQLite won't create missing parent dirs, and data/ is gitignored (absent on a
     // fresh checkout). Create it first. (Codex P2, PR #22.) Skip for special handles.
     const isMemory = path === ":memory:" || path.startsWith("file::memory:");
     this.dataDir = isMemory ? null : dirname(path);
     if (opts.readOnly) {
-      // pathToFileURL URL-encodes spaces/specials so the URI parser gets a clean path; the
-      // in-memory case has no on-disk file to make immutable, so it falls back to a plain
-      // read-only open. readOnly:true is kept alongside immutable as belt-and-braces.
-      const uri = isMemory ? path : `${pathToFileURL(path).href}?immutable=1`;
-      this.db = new DatabaseSync(uri, { readOnly: true });
+      this.db = openReadOnly(path, isMemory);
       return;
     }
     if (this.dataDir) {

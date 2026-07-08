@@ -123,14 +123,20 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
  *  eligibility filter + ordering (conductor.ts orderForDispatch: drops reserve /
  *  needs-human/blocked / blocked-by issues, sorts by priority) — an issue the engine would
  *  never dispatch must never appear in the trust-ramp preview as spend (Codex PR #70 P2).
- *  Still a rough estimate beyond that: live lane occupancy, in-flight dedup, and the
- *  meta-floor anti-starvation accounting need engine state a dry run doesn't touch, so the
- *  candidate count is bounded by the one static cap (cfg.lanes.roundDispatchCap), not a
- *  replay of the exact next tick. */
+ *  Candidates are then bounded by the SAME effective per-round lane limit the real dispatch
+ *  loop enforces: min(cfg.lanes.roundDispatchCap, cfg.lanes.max) — the real loop stops
+ *  dispatching both at roundDispatchCap AND at lanesUsed >= lanes.max, so with e.g. max:1 /
+ *  cap:2 only ONE worker can start and the preview must say so, not two (Codex PR #70
+ *  round-5 P2). The preview assumes an empty lane set (a fresh round — the first-run
+ *  trust-ramp context); it doesn't read live occupancy, in-flight dedup, or the meta-floor
+ *  anti-starvation accounting, which need engine state a dry run deliberately doesn't touch,
+ *  so it stays a rough upper bound, not a replay of the exact next tick. */
 export interface DryRunPreview {
   readyCount: number;
   /** After orderForDispatch's eligibility filter — the pool candidates are drawn from. */
   dispatchableCount: number;
+  /** min(roundDispatchCap, lanes.max) — the effective per-round dispatch limit applied. */
+  effectiveLaneLimit: number;
   candidates: Issue[];
   perWorkerUsd: number;
   previewUsd: number;
@@ -140,11 +146,13 @@ export interface DryRunPreview {
 /** Pure: no forge/network access, so this is fully unit-testable without mocking `gh`. */
 export function computeDryRunPreview(ready: Issue[], cfg: SapwoodConfig): DryRunPreview {
   const dispatchable = orderForDispatch(ready, cfg);
-  const candidates = dispatchable.slice(0, cfg.lanes.roundDispatchCap);
+  const effectiveLaneLimit = Math.min(cfg.lanes.roundDispatchCap, cfg.lanes.max);
+  const candidates = dispatchable.slice(0, effectiveLaneLimit);
   const perWorkerUsd = cfg.worker.budgetUsdSoft;
   return {
     readyCount: ready.length,
     dispatchableCount: dispatchable.length,
+    effectiveLaneLimit,
     candidates,
     perWorkerUsd,
     previewUsd: perWorkerUsd * candidates.length,
