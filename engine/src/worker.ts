@@ -943,17 +943,19 @@ const PROMPT_VARS: Record<string, (issue: Issue) => string> = {
 /** Simple `{{var}}` substitution (#74) — no template engine. FAILS CLOSED on any `{{...}}`
  *  placeholder outside PROMPT_VARS: a typo'd/unsupported var must not silently pass through as
  *  literal `{{...}}` text in the dispatched prompt (the whole point of a configurable prompt is
- *  knowing exactly what gets sent to the worker). Malformed (unclosed) `{{` is left untouched —
- *  only well-formed `{{name}}` tokens are recognized as variables at all. */
+ *  knowing exactly what gets sent to the worker). Every well-formed `{{...}}` token is checked —
+ *  the name pattern is deliberately broad and the lookup is own-key only, so neither a typo like
+ *  `{{issue-title}}` nor a prototype name like `{{constructor}}` can slip through. Malformed
+ *  (unclosed) `{{` is left untouched. */
 export function renderPromptTemplate(template: string, issue: Issue): string {
-  return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, name: string) => {
-    const resolve = PROMPT_VARS[name];
-    if (!resolve) {
+  return template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => {
+    const name = raw.trim();
+    if (!Object.hasOwn(PROMPT_VARS, name)) {
       throw new Error(
         `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(PROMPT_VARS).join(", ")}`,
       );
     }
-    return resolve(issue);
+    return PROMPT_VARS[name]!(issue);
   });
 }
 

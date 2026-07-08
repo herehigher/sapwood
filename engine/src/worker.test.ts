@@ -1148,6 +1148,17 @@ test("renderPromptTemplate: fails closed on an unknown {{var}} — no silent lit
   assert.throws(() => renderPromptTemplate("hello {{issue.author}}", issue), /unknown variable.*issue\.author/i);
 });
 
+test("renderPromptTemplate: fails closed on names outside [\\w.] — {{issue-title}} is not literal passthrough", () => {
+  const issue = { number: 1, title: "t", labels: [] };
+  assert.throws(() => renderPromptTemplate("hello {{issue-title}}", issue), /unknown variable.*issue-title/i);
+});
+
+test("renderPromptTemplate: fails closed on prototype-chain names — {{constructor}} never resolves", () => {
+  const issue = { number: 1, title: "t", labels: [] };
+  assert.throws(() => renderPromptTemplate("hello {{constructor}}", issue), /unknown variable.*constructor/i);
+  assert.throws(() => renderPromptTemplate("hello {{toString}}", issue), /unknown variable.*toString/i);
+});
+
 test("defaultPromptPath: resolves to the shipped prompts/worker.md, which exists and mentions the vars", () => {
   const p = defaultPromptPath();
   assert.ok(existsSync(p), `expected shipped default prompt at ${p}`);
