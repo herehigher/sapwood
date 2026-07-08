@@ -148,6 +148,7 @@ class FakeForge implements IForge {
   async addIssueComment(): Promise<void> {}
   async getIssueBody(): Promise<string> { return ""; }
   async getPRReviewData(): Promise<PRReviewData> { return this.reviewData; }
+  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
 }
 
 class FakeReviewer implements Reviewer {

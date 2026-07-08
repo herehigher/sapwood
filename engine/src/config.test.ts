@@ -219,3 +219,49 @@ test("worker.promptFile: a typo'd key under worker.* is rejected, not silently d
     /promptFiel|[Uu]nrecognized/,
   );
 });
+
+// ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
+
+test("stop: absent by default — every field undefined, no behavior change (#76 regression contract)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.stop.afterIssuesMerged, undefined);
+  assert.equal(cfg.stop.afterPRsOpened, undefined);
+  assert.equal(cfg.stop.onMilestoneComplete, undefined);
+});
+
+test("stop: all three fields overridable", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+      "stop: { afterIssuesMerged: 3, afterPRsOpened: 5, onMilestoneComplete: M4 }",
+  );
+  assert.equal(cfg.stop.afterIssuesMerged, 3);
+  assert.equal(cfg.stop.afterPRsOpened, 5);
+  assert.equal(cfg.stop.onMilestoneComplete, "M4");
+});
+
+test("stop.afterIssuesMerged / afterPRsOpened: zero and negative are rejected (positive int only)", () => {
+  for (const bad of [0, -1, 1.5]) {
+    assert.throws(
+      () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nstop: { afterIssuesMerged: ${bad} }`),
+      /afterIssuesMerged/,
+    );
+    assert.throws(
+      () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nstop: { afterPRsOpened: ${bad} }`),
+      /afterPRsOpened/,
+    );
+  }
+});
+
+test("stop.onMilestoneComplete: an empty string is rejected (a name is required once the key is set)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nstop: { onMilestoneComplete: '' }"),
+    /onMilestoneComplete/,
+  );
+});
+
+test("stop: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nstop: { afterIssuesMerge: 3 }"),
+    /afterIssuesMerge|[Uu]nrecognized/,
+  );
+});

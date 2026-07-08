@@ -389,6 +389,11 @@ export interface TickDeps {
    *  no gate/merge activity this tick (pre-#13 behavior — M2 dogfood / callers that haven't
    *  wired a reviewer yet keep working unchanged). */
   mergeGate?: MergeGate;
+  /** #76 goal-based stop conditions: OR'd into the #75 PAUSE check below — same DISPATCH-only
+   *  skip, just driven by the driver's stop-condition wind-down instead of the data/PAUSE file
+   *  sentinel. Reclaim/drive (in-flight lanes, PR review/merge progression) are untouched either
+   *  way; only new-lane dispatch is suppressed. Default false (today's behavior unchanged). */
+  forceDispatchPause?: boolean;
 }
 
 /**
@@ -634,17 +639,21 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     };
   }
 
-  // ── PAUSE (#75): the gentle tier. Read ONCE here, at the tick boundary (never mid-phase) —
-  //   the exact same "check next to the kill-switch gate, before anything else runs" rule the
-  //   comment above documents, just without KILL's drain+freeze consequence. Unlike the kill
-  //   switch, a paused tick does NOT return early: rollback retry, reclaim, and DRIVE (PR
-  //   review/merge progression of lanes already in flight) all proceed exactly as normal below
-  //   — only the DISPATCH phase (bottom of tick(), new-lane creation) is skipped when `paused`
-  //   is true. Removing data/PAUSE restores dispatch on the very next tick with no restart,
-  //   since this is a fresh existsSync check every call, never cached. Both sentinels present
-  //   -> KILL_SWITCH already returned above, so this line is never reached — the stricter gate
-  //   wins, unconditionally.
-  const paused = state.isPauseActive();
+  // ── PAUSE (#75) / stop-condition wind-down (#76): the gentle tier. Read ONCE here, at the
+  //   tick boundary (never mid-phase) — the exact same "check next to the kill-switch gate,
+  //   before anything else runs" rule the comment above documents, just without KILL's
+  //   drain+freeze consequence. Unlike the kill switch, a paused tick does NOT return early:
+  //   rollback retry, reclaim, and DRIVE (PR review/merge progression of lanes already in
+  //   flight) all proceed exactly as normal below — only the DISPATCH phase (bottom of tick(),
+  //   new-lane creation) is skipped when `paused` is true. Removing data/PAUSE restores
+  //   dispatch on the very next tick with no restart, since this is a fresh existsSync check
+  //   every call, never cached. `deps.forceDispatchPause` ORs into the same flag — the #76 loop
+  //   driver sets it once a configured stop condition (afterIssuesMerged/afterPRsOpened/
+  //   onMilestoneComplete) fires, converting the rest of the run into exactly this same
+  //   dispatch-frozen wind-down until state.activeWorkers() drains to empty. Both sentinels
+  //   present -> KILL_SWITCH already returned above, so this line is never reached — the
+  //   stricter gate wins, unconditionally.
+  const paused = state.isPauseActive() || (deps.forceDispatchPause ?? false);
 
   // ── ROLLBACK RETRY (#31): retry every board mutation still pending from a prior tick's
   //   recovery-path failure, BEFORE this tick does anything else. Never throws (see

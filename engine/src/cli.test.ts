@@ -7,6 +7,9 @@ import { test } from "node:test";
 import {
   runCli,
   parseRunStopMode,
+  parseStopFlags,
+  resolveStopConfig,
+  formatStopConditionLine,
   runExitCode,
   computeDryRunPreview,
   formatDryRunPreview,
@@ -118,6 +121,114 @@ test("runExitCode: --once with a failed-only attempt exits 1; success exits 0 (C
 test("runExitCode: daemon/until-idle runs exit 0 even with contained tick errors (retry design, not terminal failure)", () => {
   assert.equal(runExitCode({ ticks: 0, tickErrors: 5 }, "forever"), 0);
   assert.equal(runExitCode({ ticks: 3, tickErrors: 2 }, "until-idle"), 0);
+});
+
+// ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
+
+test("run: --stop-* flags appear in --help usage", () => {
+  const r = runCli(["node", "sapwood", "run", "--help"]);
+  assert.match(r.stdout, /--stop-after-issues/);
+  assert.match(r.stdout, /--stop-after-prs/);
+  assert.match(r.stdout, /--stop-on-milestone/);
+});
+
+test("parseStopFlags: parses all three flags, leaving non-stop tokens in `rest`", () => {
+  const { rest, stop, error } = parseStopFlags([
+    "run", "--once", "--stop-after-issues", "3", "--stop-after-prs", "5", "--stop-on-milestone", "M4",
+  ]);
+  assert.equal(error, undefined);
+  assert.deepEqual(stop, { afterIssuesMerged: 3, afterPRsOpened: 5, onMilestoneComplete: "M4" });
+  assert.deepEqual(rest, ["run", "--once"]);
+});
+
+test("parseStopFlags: tolerates the full process.argv (like parseRunStopMode) — leading tokens just pass through", () => {
+  const { rest, stop } = parseStopFlags(["node", "sapwood", "run", "--stop-after-issues", "1"]);
+  assert.deepEqual(stop, { afterIssuesMerged: 1 });
+  assert.deepEqual(rest, ["node", "sapwood", "run"]);
+});
+
+test("parseStopFlags: no --stop-* flags -> empty stop, rest unchanged", () => {
+  const { rest, stop, error } = parseStopFlags(["run", "--until-idle"]);
+  assert.equal(error, undefined);
+  assert.deepEqual(stop, {});
+  assert.deepEqual(rest, ["run", "--until-idle"]);
+});
+
+test("parseStopFlags: a missing value, or a value that looks like another flag, is a clear error", () => {
+  assert.match(parseStopFlags(["--stop-after-issues"]).error ?? "", /--stop-after-issues requires a value/);
+  assert.match(parseStopFlags(["--stop-after-issues", "--once"]).error ?? "", /--stop-after-issues requires a value/);
+  assert.match(parseStopFlags(["--stop-on-milestone"]).error ?? "", /--stop-on-milestone requires a value/);
+});
+
+test("parseStopFlags: zero and non-integer values for the two count flags are rejected", () => {
+  for (const bad of ["0", "1.5", "nope"]) {
+    assert.match(
+      parseStopFlags(["--stop-after-issues", bad]).error ?? "",
+      /--stop-after-issues requires a positive integer/,
+      bad,
+    );
+    assert.match(
+      parseStopFlags(["--stop-after-prs", bad]).error ?? "",
+      /--stop-after-prs requires a positive integer/,
+      bad,
+    );
+  }
+});
+
+test("parseStopFlags: a negative value (e.g. -1) is caught by the same 'looks like another flag' guard as a missing value (same convention as --config elsewhere)", () => {
+  assert.match(parseStopFlags(["--stop-after-issues", "-1"]).error ?? "", /--stop-after-issues requires a value/);
+});
+
+test("parseStopFlags: --stop-on-milestone accepts any non-flag string, including one that looks numeric", () => {
+  assert.deepEqual(parseStopFlags(["--stop-on-milestone", "42"]).stop, { onMilestoneComplete: "42" });
+});
+
+test("run: an invalid --stop-* value is rejected before the engine starts (fail closed, exit 1)", () => {
+  const r = runCli(["node", "sapwood", "run", "--stop-after-issues", "0"]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--stop-after-issues requires a positive integer/);
+  assert.match(r.stderr, /usage: sapwood run/);
+});
+
+test("run: a --stop-* flag's value is never mistaken for an unknown bare flag", () => {
+  const r = runCli(["node", "sapwood", "run", "--stop-after-issues", "3", "--stop-on-milestone", "M4"]);
+  assert.equal(r.code, -1); // falls through to the engine path, same as any other valid invocation
+});
+
+test("run: --stop-* combined with --dry-run is rejected (dry-run never runs the loop)", () => {
+  const r = runCli(["node", "sapwood", "run", "--dry-run", "--stop-after-issues", "1"]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--dry-run cannot combine with --stop-\*/);
+});
+
+test("run: --stop-* combines fine with --once/--until-idle (falls through to the engine path)", () => {
+  assert.equal(runCli(["node", "sapwood", "run", "--once", "--stop-after-issues", "1"]).code, -1);
+  assert.equal(runCli(["node", "sapwood", "run", "--until-idle", "--stop-after-prs", "2"]).code, -1);
+});
+
+test("resolveStopConfig: CLI flags override config values, field by field", () => {
+  const cfg = { stop: { afterIssuesMerged: 10, afterPRsOpened: 20, onMilestoneComplete: "M1" } };
+  // Only afterIssuesMerged is overridden on the CLI — the other two fall back to config.
+  const resolved = resolveStopConfig(["run", "--stop-after-issues", "3"], cfg);
+  assert.deepEqual(resolved, { afterIssuesMerged: 3, afterPRsOpened: 20, onMilestoneComplete: "M1" });
+});
+
+test("resolveStopConfig: no flags -> config values pass through unchanged; no config -> all undefined (no key present)", () => {
+  const cfg = { stop: { afterIssuesMerged: 10, afterPRsOpened: 20, onMilestoneComplete: "M1" } };
+  assert.deepEqual(resolveStopConfig(["run"], cfg), { afterIssuesMerged: 10, afterPRsOpened: 20, onMilestoneComplete: "M1" });
+  const resolved = resolveStopConfig(["run"], { stop: {} });
+  assert.deepEqual(resolved, {}); // no field present at all — same shape as "no stop config" (#76 regression contract)
+});
+
+test("formatStopConditionLine: names the condition, its threshold, and the count/state detail", () => {
+  assert.equal(
+    formatStopConditionLine({ name: "afterIssuesMerged", threshold: 3, detail: "merged 3" }),
+    "sapwood run: stop condition hit — afterIssuesMerged=3 (merged 3)",
+  );
+  assert.equal(
+    formatStopConditionLine({ name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" }),
+    "sapwood run: stop condition hit — onMilestoneComplete=M4 (0 open issues left)",
+  );
 });
 
 // ── #49: `sapwood validate` ───────────────────────────────────────────────────────────────

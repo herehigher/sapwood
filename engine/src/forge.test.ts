@@ -579,3 +579,29 @@ test("assemblePRReviewData: combines the raw gh responses + the paged thread tot
   assert.equal(data.reactions.length, 1);
   assert.equal(data.unresolvedThreads, 1);
 });
+
+// ── #76: countOpenIssuesInMilestone — the onMilestoneComplete stop condition's forge read ──
+
+test("countOpenIssuesInMilestone: counts the open issues gh reports for that milestone, scoped to this repo/state via the right flags", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify([{ number: 10 }, { number: 11 }, { number: 12 }]);
+  };
+  assert.equal(await forge.countOpenIssuesInMilestone("M4"), 3);
+  assert.equal(seen.length, 1);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
+  assert.ok(args.includes("--repo") && args.includes("o/r"));
+  assert.ok(args.includes("--milestone") && args.includes("M4"));
+  assert.ok(args.includes("--state") && args.includes("open"));
+});
+
+test("countOpenIssuesInMilestone: zero open issues -> 0 (the condition's fire signal)", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => JSON.stringify([]);
+  assert.equal(await forge.countOpenIssuesInMilestone("M4"), 0);
+});

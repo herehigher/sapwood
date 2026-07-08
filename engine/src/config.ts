@@ -179,6 +179,26 @@ const Engine = z.object({
   tickIntervalSec: z.number().int().positive().default(60),
 }).strict();
 
+// #76: goal-based stop conditions — the loop driver's FINAL break conditions ("when is this run
+// complete"). All optional; absent = today's behavior exactly (the driver only stops on a signal,
+// --once, or --until-idle idleness). CLI --stop-after-issues/--stop-after-prs/--stop-on-milestone
+// override these per invocation (cli.ts). OR semantics: the first condition to be satisfied wins
+// and converts the rest of the run into an until-idle wind-down (driver.ts) — never a mid-work
+// kill of an in-flight lane.
+const Stop = z.object({
+  // Counted from THIS run's tick results (driver.ts): DrivenOutcome "merged" entries, summed
+  // across ticks. Scope = process lifetime, not cumulative history — a restarted engine starts
+  // this counter back at 0.
+  afterIssuesMerged: z.number().int().positive().optional(),
+  // Counted from THIS run's tick results: reclaim transitions into the `driving` state (a lane's
+  // PR becomes known to the engine for the first time) — see driver.ts's prsOpenedThisTick for
+  // why that's the simplest accurate signal without a new SQLite table.
+  afterPRsOpened: z.number().int().positive().optional(),
+  // Milestone TITLE (as GitHub displays it, matching `gh issue list --milestone`). Condition =
+  // zero OPEN issues remain in it (forge.countOpenIssuesInMilestone), checked at tick boundaries.
+  onMilestoneComplete: z.string().min(1).optional(),
+}).strict();
+
 const Recovery = z.object({
   // #31: bounded retry count for a durably-persisted rollback/requeue (a recovery-path board
   // mutation, e.g. rolling a dispatch-failed claim back to Ready, or requeuing a dead lane).
@@ -195,6 +215,7 @@ export const ConfigSchema = z.object({
   worker: Worker.default({}),
   guard: Guard.default({}),
   cost: Cost.default({}),
+  stop: Stop.default({}),
   recovery: Recovery.default({}),
   reviewer: Reviewer.default({}),
   merge: Merge.default({}),

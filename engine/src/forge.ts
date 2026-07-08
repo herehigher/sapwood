@@ -100,6 +100,13 @@ export interface IForge {
    *  "" for an issue with no body rather than throwing (extractVerificationPlan treats an
    *  empty body as "no plan", the same fail-closed outcome as a genuinely planless issue). */
   getIssueBody(issue: number): Promise<string>;
+  /** #76: open (state OPEN) issue count in the named milestone — the `stop.onMilestoneComplete`
+   *  condition's "is this milestone done" signal. The driver evaluates this at tick boundaries
+   *  only (never mid-tick); zero means the milestone has no open issues left, so the condition
+   *  fires. A milestone name that doesn't exist in the repo also returns 0 (gh's own query
+   *  behavior) — same fail-direction as an already-complete milestone, since either way there is
+   *  nothing left to wait for. */
+  countOpenIssuesInMilestone(milestone: string): Promise<number>;
 }
 
 export class GithubForge implements IForge {
@@ -304,6 +311,20 @@ export class GithubForge implements IForge {
       ]),
     );
     return assemblePRReviewData(viewJson, reactionsJson, unresolvedThreads, commentsJson);
+  }
+
+  async countOpenIssuesInMilestone(milestone: string): Promise<number> {
+    // `gh issue list --milestone` takes the milestone TITLE (not a number) and already scopes to
+    // this repo + state:open via the flags below — no GraphQL needed. --limit generously above
+    // any realistic milestone size (ponytail: a repo with >1000 open issues in one milestone is
+    // not this loop's use case); undercounting past that would only delay the stop condition,
+    // never fire it early.
+    const out = await this.gh([
+      "issue", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "--milestone", milestone, "--state", "open", "--json", "number", "--limit", "1000",
+    ]);
+    const issues = JSON.parse(out) as { number: number }[];
+    return issues.length;
   }
 
   private repo(): string {

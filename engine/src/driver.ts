@@ -23,11 +23,38 @@ import { tick, type TickDeps, type TickResult } from "./conductor.js";
  *  first. */
 export type StopMode = "forever" | "once" | "until-idle";
 
+/** #76 goal-based stop conditions — resolved values (config defaults already overridden by any
+ *  CLI --stop-* flag, cli.ts's job), all optional. Absent field = that condition never fires;
+ *  an entirely-absent/undefined `stop` on DriverDeps = today's behavior exactly (this is the
+ *  SAME shape as config.ts's Stop section — driver.ts intentionally doesn't import SapwoodConfig
+ *  here so it stays testable with a bare object, same style as the rest of DriverDeps). */
+export interface StopConfig {
+  afterIssuesMerged?: number;
+  afterPRsOpened?: number;
+  onMilestoneComplete?: string;
+}
+
+export type StopConditionName = "afterIssuesMerged" | "afterPRsOpened" | "onMilestoneComplete";
+
+/** Which configured stop condition fired first (OR semantics: first hit wins, never
+ *  overwritten once wind-down starts). `threshold` echoes the configured value (the N, or the
+ *  milestone name) and `detail` is a short human-readable count/state for the exit log line —
+ *  see cli.ts's formatStopConditionLine. */
+export interface StopConditionHit {
+  name: StopConditionName;
+  threshold: number | string;
+  detail: string;
+}
+
 export interface DriverDeps extends TickDeps {
   /** The driver's tick cadence in seconds. Unlike TickDeps.tickIntervalSec (optional there,
    *  for callers with no fixed schedule), the driver itself IS the cadence source — required. */
   tickIntervalSec: number;
   stopMode?: StopMode; // default "forever"
+  /** #76: optional goal-based stop conditions, OR'd with each other (first hit wins) and layered
+   *  on top of whatever stopMode is running — see runDriver's wind-down logic below. Omitted
+   *  (or every field omitted) -> no behavior change from pre-#76 sapwood. */
+  stop?: StopConfig;
   /** Injected sleep so tests can drive the loop without real wall-clock waits. Default: a
    *  cancelable setTimeout wait. Either way the inter-tick wait is SIGNAL-ABORTABLE — a stop
    *  signal resolves it immediately rather than waiting out the cadence (see interTickWait in
@@ -43,7 +70,7 @@ export interface DriverDeps extends TickDeps {
   registerSignals?: (requestStop: () => void) => () => void;
 }
 
-export type StopReason = "signal" | "once" | "idle";
+export type StopReason = "signal" | "once" | "idle" | "stop-condition";
 
 export interface DriverResult {
   /** Completed (successful) ticks. */
@@ -53,6 +80,36 @@ export interface DriverResult {
    *  forge is unreachable while the daemon keeps (correctly) retrying. */
   tickErrors: number;
   stoppedBy: StopReason;
+  /** Present iff stoppedBy === "stop-condition": which configured condition fired first, for the
+   *  exit log line (cli.ts) and telemetry. Never present otherwise — no `stop` config keeps the
+   *  DriverResult shape byte-for-byte identical to pre-#76 sapwood (regression tests rely on this
+   *  via assert.deepEqual against a plain {ticks,tickErrors,stoppedBy} object). */
+  stopCondition?: StopConditionHit;
+}
+
+/** #76: how many of this tick's DrivenOutcome entries are a completed merge — the
+ *  `afterIssuesMerged` counting source (DrivenOutcome "merged", conductor.ts's DRIVE phase). */
+function issuesMergedThisTick(result: TickResult): number {
+  return result.driven.filter((d) => d.kind === "merged").length;
+}
+
+/** #76: how many of this tick's ReclaimOutcome entries are a lane's FIRST transition into
+ *  `driving` — the `afterPRsOpened` counting source. A PR is opened by the worker asynchronously
+ *  (tick() never calls forge.openPR itself), so the tick can't see the open happen; what it CAN
+ *  see, exactly once per lane, is the reclaim that first discovers the PR and moves the lane to
+ *  `driving` (conductor.ts's laneOnReclaimDone/laneOnReclaimFailed -> "DRIVING", or a DEAD lane
+ *  rescued because it already has a PR). That transition happens once and only once per lane
+ *  (a lane already `driving` never re-enters this loop), so summing it across this run's ticks
+ *  is an exact, no-new-table count of "PRs this run has caused the engine to start tracking" —
+ *  the simplest accurate proxy for "PRs opened this run" available from TickResult alone. */
+function prsOpenedThisTick(result: TickResult): number {
+  let n = 0;
+  for (const r of result.reclaimed) {
+    if (r.kind === "done" && r.next === "DRIVING") n++;
+    else if (r.kind === "failed" && r.next === "DRIVING") n++;
+    else if (r.kind === "dead" && r.rescued) n++;
+  }
+  return n;
 }
 
 function defaultRegisterSignals(requestStop: () => void): () => void {
@@ -67,7 +124,10 @@ function defaultRegisterSignals(requestStop: () => void): () => void {
 
 /** "Nothing left to do" for --until-idle: no running/driving lane occupies a slot AND this
  *  tick's dispatch phase launched nothing new (an empty or fully-blocked Ready queue). Either
- *  condition failing means there's more work the next tick could still make progress on. */
+ *  condition failing means there's more work the next tick could still make progress on.
+ *  #76: also the exit gate for the stop-condition wind-down — once forceDispatchPause is set,
+ *  `dispatchedAny` is trivially false (the DISPATCH phase never runs), so this reduces to "no
+ *  in-flight lanes left", i.e. every lane has finished rather than been killed. */
 function isIdle(deps: DriverDeps, result: TickResult): boolean {
   const activeLanes = deps.state.activeWorkers().length; // running + driving
   const dispatchedAny = result.dispatched.some((d) => d.kind === "dispatched");
@@ -130,13 +190,28 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
       // not sleep at all — it already missed its wake call.
       if (signalled) wakeFromSleep?.();
     });
+  // #76: cumulative run-lifetime counters (process lifetime — a restarted engine starts these
+  // back at 0) feeding the count-based stop conditions. Updated only from a SUCCESSFUL tick's
+  // result (a thrown tick produced no TickResult to count from).
+  let issuesMerged = 0;
+  let prsOpened = 0;
+  // Set once, the first time any configured stop condition is satisfied (OR semantics — first
+  // hit wins, never overwritten by a later condition). From that tick onward every subsequent
+  // tick() call is forced dispatch-paused (see the merged tickDeps below): no new lane is
+  // dispatched, but reclaim/rollback/DRIVE keep running exactly as normal so in-flight lanes are
+  // never killed, only allowed to finish — the same wind-down machinery --until-idle already
+  // uses (isIdle below), just entered by a goal firing instead of the Ready queue draining.
+  let stopConditionHit: StopConditionHit | undefined;
   try {
     let ticks = 0;
     let tickErrors = 0;
     for (;;) {
       let result: TickResult | null = null;
+      const tickDeps: TickDeps = stopConditionHit
+        ? { ...deps, forceDispatchPause: true }
+        : deps;
       try {
-        result = await tick(deps);
+        result = await tick(tickDeps);
         ticks++;
         deps.onTick?.(result);
       } catch (e) {
@@ -148,8 +223,41 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
           deps.state.appendEvent("tick-error", { error: String(e) });
         } catch { /* state write failed too — tickErrors still counts it */ }
       }
+      if (result && !stopConditionHit) {
+        issuesMerged += issuesMergedThisTick(result);
+        prsOpened += prsOpenedThisTick(result);
+        const stop = deps.stop;
+        if (stop?.afterIssuesMerged !== undefined && issuesMerged >= stop.afterIssuesMerged) {
+          stopConditionHit = {
+            name: "afterIssuesMerged", threshold: stop.afterIssuesMerged, detail: `merged ${issuesMerged}`,
+          };
+        } else if (stop?.afterPRsOpened !== undefined && prsOpened >= stop.afterPRsOpened) {
+          stopConditionHit = {
+            name: "afterPRsOpened", threshold: stop.afterPRsOpened, detail: `opened ${prsOpened}`,
+          };
+        } else if (stop?.onMilestoneComplete) {
+          // Evaluated at tick boundaries only (never mid-tick), per #76's scope — one extra
+          // forge read per tick while configured, same cost class as the DISPATCH phase's own
+          // getReadyIssues call.
+          const openLeft = await deps.forge.countOpenIssuesInMilestone(stop.onMilestoneComplete);
+          if (openLeft === 0) {
+            stopConditionHit = {
+              name: "onMilestoneComplete", threshold: stop.onMilestoneComplete, detail: "0 open issues left",
+            };
+          }
+        }
+      }
       if (signalled) return { ticks, tickErrors, stoppedBy: "signal" };
       if (stopMode === "once") return { ticks, tickErrors, stoppedBy: "once" };
+      // A stop condition fired (this tick or an earlier one) and in-flight lanes have now
+      // drained -> clean exit, naming the condition. Checked BEFORE the --until-idle idle exit
+      // below so a configured stop condition that happens to coincide with natural idleness is
+      // still reported by name (more informative than a bare "idle"). A failed tick (result ===
+      // null) can't be judged idle — keep looping, same fail-toward-more-ticks stance as
+      // --until-idle already takes.
+      if (stopConditionHit && result && isIdle(deps, result)) {
+        return { ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: stopConditionHit };
+      }
       // A failed tick produced no result — idleness is unknowable this round; keep looping
       // (fail toward "more ticks", the direction drain/escalation progress needs).
       if (stopMode === "until-idle" && result && isIdle(deps, result)) {

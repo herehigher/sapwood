@@ -500,7 +500,20 @@ rewrite.** v1 requirements:
   `commands/` that shell out to the CLI (`/sapwood-stop` flips the documented
   kill-switch file sentinel — see Security model). Supervised "watch one issue" is the
   existing `--once` mode plus leaving a single issue `Ready` on the board, not a new
-  subsystem. **Still open:** docs set (usage/config guide beyond this plan doc), and
+  subsystem. **Goal-based stop conditions (#76):** optional `stop.afterIssuesMerged` /
+  `stop.afterPRsOpened` / `stop.onMilestoneComplete` config (each overridable by a
+  matching `--stop-after-issues` / `--stop-after-prs` / `--stop-on-milestone` CLI flag)
+  are FINAL break conditions — "when is this run complete" — not a change to the loop's
+  unit (still one issue = one lane). Hitting any one (OR semantics, first hit wins)
+  converts the rest of the run into the same until-idle wind-down `--until-idle` already
+  uses: stop dispatching new lanes, let every in-flight lane finish on its own (never a
+  mid-work kill), then exit, naming the condition that fired. Applies on top of
+  `--once`/`--until-idle`/the daemon default; standalone from `--dry-run`. Counted from
+  *this run's* tick results only (a restart starts every counter back at 0), with no new
+  SQLite table: issues merged and PRs opened (a lane's first reclaim into `driving`, the
+  earliest point the engine can see a PR exists) both come straight off `TickResult`;
+  milestone completion is one small `IForge.countOpenIssuesInMilestone` read per tick.
+  **Still open:** docs set (usage/config guide beyond this plan doc), and
   the **live** merge-gate + kill-switch runs on a real repo (#46 scope 3/4).
 - **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
