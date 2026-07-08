@@ -239,6 +239,11 @@ export interface StatusSnapshot {
   active: WorkerRow[]; // running + driving (occupied lanes)
   driving: WorkerRow[]; // driving lanes: PRs awaiting the review gate
   killSwitchActive: boolean;
+  /** #75: the gentle-tier PAUSE sentinel (data/PAUSE) — true means new dispatch is skipped
+   *  this tick, but reclaim/drive (in-flight lanes, PR review/merge) proceed normally. Distinct
+   *  from killSwitchActive above (which also drains + freezes); both can be true at once, in
+   *  which case the kill switch's reporting/behavior is the one that actually governs the tick. */
+  pauseActive: boolean;
   ceilingBreach: { reasons: string[]; at: Date } | null;
   dailySpendUsd: number;
   /** null when no config could be loaded — reported as "unknown", never a fabricated default. */
@@ -267,6 +272,7 @@ export function formatStatus(s: StatusSnapshot): string {
     "",
     `spend: $${s.dailySpendUsd.toFixed(2)} / ${dailyBudget} daily ceiling`,
     `kill switch: ${s.killSwitchActive ? "ACTIVE" : "inactive"}`,
+    `pause: ${s.pauseActive ? "PAUSED (no new dispatch; in-flight lanes proceed normally)" : "inactive"}`,
     s.ceilingBreach
       ? `ceiling breach: ${s.ceilingBreach.reasons.join(", ")} (since ${s.ceilingBreach.at.toISOString()})`
       : "ceiling breach: none",
@@ -319,6 +325,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       active: state.activeWorkers(),
       driving: state.drivingWorkers(),
       killSwitchActive: state.isKillSwitchActive(),
+      pauseActive: state.isPauseActive(),
       ceilingBreach: state.ceilingBreach(),
       dailySpendUsd: state.dailySpendUsd(new Date()),
       lanesMax: cfg?.lanes.max ?? null,

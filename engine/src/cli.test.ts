@@ -483,6 +483,7 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
     active: [],
     driving: [],
     killSwitchActive: true,
+    pauseActive: false,
     ceilingBreach: { reasons: ["daily-budget", "kill-switch"], at: new Date("2026-07-07T00:00:00.000Z") },
     dailySpendUsd: 0,
     lanesMax: 3,
@@ -490,7 +491,26 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
   };
   const out = formatStatus(snapshot);
   assert.match(out, /kill switch: ACTIVE/);
+  assert.match(out, /pause: inactive/);
   assert.match(out, /ceiling breach: daily-budget, kill-switch \(since 2026-07-07T00:00:00\.000Z\)/);
+});
+
+test("formatStatus: PAUSE active renders distinctly from kill switch, both can be reported independently", () => {
+  const snapshot: StatusSnapshot = {
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: 7,
+    active: [],
+    driving: [],
+    killSwitchActive: false,
+    pauseActive: true,
+    ceilingBreach: null,
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
+  };
+  const out = formatStatus(snapshot);
+  assert.match(out, /kill switch: inactive/);
+  assert.match(out, /pause: PAUSED/);
 });
 
 test("runStatus: exported directly (not just via runCli) for the same result", () => {

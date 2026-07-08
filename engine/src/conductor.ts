@@ -634,6 +634,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     };
   }
 
+  // ── PAUSE (#75): the gentle tier. Read ONCE here, at the tick boundary (never mid-phase) —
+  //   the exact same "check next to the kill-switch gate, before anything else runs" rule the
+  //   comment above documents, just without KILL's drain+freeze consequence. Unlike the kill
+  //   switch, a paused tick does NOT return early: rollback retry, reclaim, and DRIVE (PR
+  //   review/merge progression of lanes already in flight) all proceed exactly as normal below
+  //   — only the DISPATCH phase (bottom of tick(), new-lane creation) is skipped when `paused`
+  //   is true. Removing data/PAUSE restores dispatch on the very next tick with no restart,
+  //   since this is a fresh existsSync check every call, never cached. Both sentinels present
+  //   -> KILL_SWITCH already returned above, so this line is never reached — the stricter gate
+  //   wins, unconditionally.
+  const paused = state.isPauseActive();
+
   // ── ROLLBACK RETRY (#31): retry every board mutation still pending from a prior tick's
   //   recovery-path failure, BEFORE this tick does anything else. Never throws (see
   //   attemptRollback) — a still-failing forge only bumps the retry count or escalates.
@@ -844,91 +856,99 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   }
 
   // ── DISPATCH: fill free lanes from the Ready queue, by priority, within caps + budget ──
+  //   #75: skipped entirely while `paused` — no new lane dispatch, not even "skipped" rows
+  //   (mirrors the kill-switch tick's dispatched: [] — see its test comment). overBudget is
+  //   still reported (cheap, dispatch-independent — just deps.roundSpendUsd vs. the cap), but
+  //   nothing below it runs: no Ready-queue read, no claim, no worker spawn.
   const dispatched: DispatchOutcome[] = [];
   const overBudget = budgetExceeded(deps.roundSpendUsd ?? 0, cfg.cost.roundBudgetUsd);
-  // Capacity counts running + driving lanes: a driving lane holds a PR awaiting the review
-  // gate and must keep occupying a lane, else reclaiming a PR-producing worker would free a
-  // slot and over-fill past cfg.lanes.max (Codex R2 P2). Re-read post-reclaim.
-  const active = state.activeWorkers();
-  const inFlightIssues = new Set(active.map((w) => w.issue));
-  let lanesUsed = active.length;
-  let dispatchedThisTick = 0;
-  let metaUsed = 0; // meta-rank (<=2) lanes taken this tick — anti-starvation accounting
+  if (!paused) {
+    // Capacity counts running + driving lanes: a driving lane holds a PR awaiting the review
+    // gate and must keep occupying a lane, else reclaiming a PR-producing worker would free a
+    // slot and over-fill past cfg.lanes.max (Codex R2 P2). Re-read post-reclaim.
+    const active = state.activeWorkers();
+    const inFlightIssues = new Set(active.map((w) => w.issue));
+    let lanesUsed = active.length;
+    let dispatchedThisTick = 0;
+    let metaUsed = 0; // meta-rank (<=2) lanes taken this tick — anti-starvation accounting
 
-  const order = orderForDispatch(await forge.getReadyIssues(), cfg);
-  for (const issue of order) {
-    // The #14 engine ceiling outranks every other dispatch reason: a breach freezes ALL new
-    // dispatch, not just the ones that happen to also be over the (separate) round budget.
-    if (ceilingBreached) {
-      dispatched.push({ kind: "skipped", issue: issue.number, reason: "ceiling" });
-      continue;
-    }
-    if (inFlightIssues.has(issue.number)) {
-      dispatched.push({ kind: "skipped", issue: issue.number, reason: "in-flight" });
-      continue;
-    }
-    if (overBudget) {
-      dispatched.push({ kind: "skipped", issue: issue.number, reason: "over-budget" });
-      continue;
-    }
-    if (dispatchedThisTick >= cfg.lanes.roundDispatchCap) {
-      dispatched.push({ kind: "skipped", issue: issue.number, reason: "cap" });
-      continue;
-    }
-    if (lanesUsed >= cfg.lanes.max) {
-      dispatched.push({ kind: "skipped", issue: issue.number, reason: "no-lane" });
-      continue;
-    }
-    // Anti-starvation: a meta-rank issue must yield a reserved coding lane while coding
-    // work is still waiting (codingFloor of cfg.lanes.max lanes are reserved for coding).
-    const rank = issuePriority(issue.labels);
-    if (!isCodingRank(rank)) {
-      const codingWaiting = order.filter(
-        (o) => isCodingRank(issuePriority(o.labels)) && !inFlightIssues.has(o.number),
-      ).length;
-      if (!metaLaneAllowed(cfg.lanes.max, metaUsed, codingWaiting)) {
-        dispatched.push({ kind: "skipped", issue: issue.number, reason: "meta-floor" });
+    const order = orderForDispatch(await forge.getReadyIssues(), cfg);
+    for (const issue of order) {
+      // The #14 engine ceiling outranks every other dispatch reason: a breach freezes ALL new
+      // dispatch, not just the ones that happen to also be over the (separate) round budget.
+      if (ceilingBreached) {
+        dispatched.push({ kind: "skipped", issue: issue.number, reason: "ceiling" });
         continue;
       }
+      if (inFlightIssues.has(issue.number)) {
+        dispatched.push({ kind: "skipped", issue: issue.number, reason: "in-flight" });
+        continue;
+      }
+      if (overBudget) {
+        dispatched.push({ kind: "skipped", issue: issue.number, reason: "over-budget" });
+        continue;
+      }
+      if (dispatchedThisTick >= cfg.lanes.roundDispatchCap) {
+        dispatched.push({ kind: "skipped", issue: issue.number, reason: "cap" });
+        continue;
+      }
+      if (lanesUsed >= cfg.lanes.max) {
+        dispatched.push({ kind: "skipped", issue: issue.number, reason: "no-lane" });
+        continue;
+      }
+      // Anti-starvation: a meta-rank issue must yield a reserved coding lane while coding
+      // work is still waiting (codingFloor of cfg.lanes.max lanes are reserved for coding).
+      const rank = issuePriority(issue.labels);
+      if (!isCodingRank(rank)) {
+        const codingWaiting = order.filter(
+          (o) => isCodingRank(issuePriority(o.labels)) && !inFlightIssues.has(o.number),
+        ).length;
+        if (!metaLaneAllowed(cfg.lanes.max, metaUsed, codingWaiting)) {
+          dispatched.push({ kind: "skipped", issue: issue.number, reason: "meta-floor" });
+          continue;
+        }
+      }
+      // #69: no per-issue kill-switch re-check here (the #61/#64 mid-loop guard) — an active
+      // switch never reaches this loop; see the global gate at the top of tick(). #75: same
+      // reasoning applies to pause — `paused` is captured once at the top of tick(), not
+      // re-read per issue.
+      // Claim BEFORE launching (matches 0day claim_issue.sh order). The board transition
+      // takes the issue out of the Ready lane first, so a launch failure can't leave an
+      // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
+      // the launch fails after the claim, roll the board back to Ready so it's reclaimable.
+      await forge.claimIssue(issue.number);
+      let dispatchRes: { name: string; sessionId: string };
+      try {
+        dispatchRes = await supervisor.dispatch(issue);
+      } catch (e) {
+        state.appendEvent("dispatch-failed", { issue: issue.number, error: String(e) });
+        // #31 (finding 1): persist the rollback BEFORE attempting it. The dispatch error `e` is
+        // the one that propagates (unchanged contract — this tick rejects), but the rollback
+        // itself must never be a bare `.catch(() => {})` swallow: if it also fails, the durable
+        // pending_rollbacks row (not the discarded catch) is what lets a later tick's ROLLBACK
+        // RETRY phase notice and keep retrying, instead of the issue being stranded In Progress
+        // with no worker row and no trace of the failed recovery attempt.
+        const rollbackId = state.addPendingRollback(issue.number, "ready", "dispatch-rollback", iso());
+        await attemptRollback(
+          forge, state, cfg,
+          { id: rollbackId, issue: issue.number, target: "ready", reason: "dispatch-rollback", attempts: 0 },
+          iso,
+        );
+        throw e;
+      }
+      const { name, sessionId } = dispatchRes;
+      state.upsertWorker({
+        name, issue: issue.number, session_id: sessionId, state: "running",
+        started_at: iso(), ended_at: null,
+      });
+      state.appendEvent("dispatched", { worker: name, issue: issue.number });
+      inFlightIssues.add(issue.number);
+      lanesUsed++;
+      dispatchedThisTick++;
+      if (!isCodingRank(rank)) metaUsed++;
+      dispatched.push({ kind: "dispatched", issue: issue.number, worker: name });
     }
-    // #69: no per-issue kill-switch re-check here (the #61/#64 mid-loop guard) — an active
-    // switch never reaches this loop; see the global gate at the top of tick().
-    // Claim BEFORE launching (matches 0day claim_issue.sh order). The board transition
-    // takes the issue out of the Ready lane first, so a launch failure can't leave an
-    // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
-    // the launch fails after the claim, roll the board back to Ready so it's reclaimable.
-    await forge.claimIssue(issue.number);
-    let dispatchRes: { name: string; sessionId: string };
-    try {
-      dispatchRes = await supervisor.dispatch(issue);
-    } catch (e) {
-      state.appendEvent("dispatch-failed", { issue: issue.number, error: String(e) });
-      // #31 (finding 1): persist the rollback BEFORE attempting it. The dispatch error `e` is
-      // the one that propagates (unchanged contract — this tick rejects), but the rollback
-      // itself must never be a bare `.catch(() => {})` swallow: if it also fails, the durable
-      // pending_rollbacks row (not the discarded catch) is what lets a later tick's ROLLBACK
-      // RETRY phase notice and keep retrying, instead of the issue being stranded In Progress
-      // with no worker row and no trace of the failed recovery attempt.
-      const rollbackId = state.addPendingRollback(issue.number, "ready", "dispatch-rollback", iso());
-      await attemptRollback(
-        forge, state, cfg,
-        { id: rollbackId, issue: issue.number, target: "ready", reason: "dispatch-rollback", attempts: 0 },
-        iso,
-      );
-      throw e;
-    }
-    const { name, sessionId } = dispatchRes;
-    state.upsertWorker({
-      name, issue: issue.number, session_id: sessionId, state: "running",
-      started_at: iso(), ended_at: null,
-    });
-    state.appendEvent("dispatched", { worker: name, issue: issue.number });
-    inFlightIssues.add(issue.number);
-    lanesUsed++;
-    dispatchedThisTick++;
-    if (!isCodingRank(rank)) metaUsed++;
-    dispatched.push({ kind: "dispatched", issue: issue.number, worker: name });
-  }
+  } // !paused (#75)
 
   return {
     reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated,
