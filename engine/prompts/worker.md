@@ -7,9 +7,12 @@ immediately and work the issue to completion.
 - Number: #{{issue.number}}
 - Title: {{issue.title}}
 
-```
+The full issue body follows between the issue-body tags. It routinely contains
+markdown code fences of its own — the tags, not any fence, mark where it ends.
+
+<issue-body>
 {{issue.body}}
-```
+</issue-body>
 
 ## Non-negotiables (do not deviate)
 
