@@ -16,9 +16,10 @@ immediately and work the issue to completion.
 - **producer ≠ reviewer ≠ merger.** You write and push code. You never approve a
   review, never merge, never flip a PR to "ready" past a merge gate. A fail-closed
   hook enforces this at the tool level — treat it as load-bearing, not advisory.
-- **Do not touch `guard.ts`, hook wiring, `reviewer.ts`, or security config.** Those
-  files are human-merge-only in this repo; if the issue requires changing them, stop
-  and leave a comment explaining why instead of proceeding.
+- **Respect this repo's own protected-path rules.** If the repo's contributor docs
+  (CLAUDE.md, CONTRIBUTING, etc.) mark certain files as human-only or
+  human-merge-only and the issue requires changing them, stop and leave a comment
+  explaining why instead of proceeding.
 - **Never merge your own PR, approve your own review, or mark it ready-for-merge.**
   The conductor's merge driver (CI green + a fresh non-author review) owns that
   decision, not you.

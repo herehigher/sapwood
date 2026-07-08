@@ -959,14 +959,14 @@ export function renderPromptTemplate(template: string, issue: Issue): string {
   });
 }
 
-/** Resolves the shipped default prompt — `prompts/worker.md` at the PLUGIN/repo root, NOT
- *  relative to the target repo the engine is orchestrating. Same convention init.ts's
- *  sampleConfig() uses for the checked-in sample config: this compiled module lives at
- *  `<plugin>/engine/dist/worker.js` (or `engine/src/worker.ts` under tsx), so two directories up
- *  is the plugin root regardless of the engine's cwd. */
+/** Resolves the shipped default prompt — `engine/prompts/worker.md` inside the engine
+ *  package, NOT relative to the target repo the engine is orchestrating. */
 export function defaultPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  return join(here, "..", "..", "prompts", "worker.md");
+  // engine/src (tsx) and engine/dist (built) are both one level below engine/ —
+  // the prompt lives INSIDE the engine package so `npm pack --workspace engine`
+  // ships it (a repo-root prompts/ would be absent from packaged installs).
+  return join(here, "..", "prompts", "worker.md");
 }
 
 /** Load the worker prompt TEMPLATE, raw and un-substituted, exactly ONCE. Either the operator's
