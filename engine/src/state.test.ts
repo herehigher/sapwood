@@ -428,6 +428,30 @@ test("kill switch: a file sentinel in the engine's own data dir flips it, human-
   }
 });
 
+test("pause (#75): in-memory State has no data dir -> always inactive", () => {
+  const s = mem();
+  assert.equal(s.pausePath(), null);
+  assert.equal(s.isPauseActive(), false);
+  s.close();
+});
+
+test("pause (#75): a file sentinel in the engine's own data dir flips it, human-flippable, no config touched; independent of the kill switch", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const s = new State(join(dir, "sapwood.sqlite"));
+    assert.equal(s.isPauseActive(), false);
+    const p = s.pausePath();
+    assert.ok(p && p.startsWith(dir)); // lives in the engine's OWN data dir
+    assert.notEqual(p, s.killSwitchPath()); // distinct sentinel from KILL_SWITCH
+    writeFileSync(p!, "");
+    assert.equal(s.isPauseActive(), true);
+    assert.equal(s.isKillSwitchActive(), false); // pause never implies kill
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #31: double-failure rollback/requeue hardening — pending_rollbacks ─────────────────────
 
 test("schema v4 adds pending_rollbacks (#31)", () => {

@@ -830,6 +830,109 @@ test("tick: kill switch records a DONE+PR lane's terminal state under the switch
   }
 });
 
+// ── #75: PAUSE — the gentle tier. Unlike the kill switch, a paused tick does NOT drain or
+// freeze: reclaim + DRIVE (existing lanes' PR review/merge progression) proceed exactly as
+// normal. Only the DISPATCH phase (new-lane creation) is skipped. ──
+
+test("#75 tick: PAUSE active -> dispatch skipped entirely (no new lane, not even a 'skipped' row); reclaim + drive of existing lanes proceed normally", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-pause-gate-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    // A still-running (KEEP) lane: must NOT be drained/touched (unlike the kill switch).
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    // A driving lane with a mergeable PR: DRIVE must still merge it under pause.
+    st.upsertWorker({ name: "lane-drv", issue: 3, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 56 });
+    const gate = new FakeMergeGate();
+    gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H" };
+    // A Ready issue that would normally dispatch.
+    forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
+    writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE — no config touched
+
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+    // Dispatch: nothing happened, no "skipped" rows either — the phase never ran.
+    assert.deepEqual(r.dispatched, []);
+    assert.deepEqual(forge.claimed, []);
+    assert.deepEqual(sup.dispatched, []);
+    // Not a ceiling/kill-switch condition: pause is invisible to those fields.
+    assert.equal(r.ceilingBreached, false);
+    assert.deepEqual(r.ceilingReasons, []);
+    assert.deepEqual(r.drainRequested, []);
+    assert.deepEqual(r.escalated, []);
+    // The still-running lane was left alone — no drain/handoff request under pause.
+    assert.deepEqual(sup.handoffRequested, []);
+    assert.equal(st.getWorker("lane-run")?.state, "running");
+    // DRIVE still ran and merged the driving lane's PR.
+    assert.equal(gate.calls.length, 1);
+    assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-drv", issue: 3, pr: 56 }]);
+    assert.equal(st.getWorker("lane-drv")?.state, "done");
+    assert.deepEqual(forge.boardSet, [[3, "done"]]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#75 tick: PAUSE + KILL_SWITCH together behaves exactly as KILL alone (stricter wins)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-pause-kill-gate-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    st.upsertWorker({ name: "lane-drv", issue: 3, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 56 });
+    const gate = new FakeMergeGate();
+    gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H" };
+    forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
+    writeFileSync(join(dir, "PAUSE"), "");
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+    // Identical to the kill-switch-alone behavior: drain + terminal-reclaim only.
+    assert.equal(r.ceilingBreached, true);
+    assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
+    assert.deepEqual(r.drainRequested, ["lane-run"]);
+    assert.deepEqual(sup.handoffRequested, ["lane-run"]);
+    assert.deepEqual(r.driven, []); // DRIVE did NOT run — kill switch, not pause, governs
+    assert.equal(gate.calls.length, 0);
+    assert.equal(st.getWorker("lane-drv")?.state, "driving"); // unmerged — kill switch blocks DRIVE too
+    assert.deepEqual(r.dispatched, []);
+    assert.deepEqual(forge.claimed, []);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#75 tick: removing the PAUSE sentinel restores dispatch on the very next tick, no restart / cache needed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-pause-resume-"));
+  try {
+    const pausePath = join(dir, "PAUSE");
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
+
+    writeFileSync(pausePath, "");
+    const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.deepEqual(r1.dispatched, []);
+    assert.equal(st.runningWorkers().length, 0);
+
+    rmSync(pausePath, { force: true }); // human resumes
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.deepEqual(r2.dispatched.map((d) => d.kind), ["dispatched"]);
+    assert.equal(st.runningWorkers().length, 1);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tick reclaim: handoff sentinel -> resumable, not killed", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
