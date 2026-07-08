@@ -102,6 +102,9 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
   const path = args[0];
   try {
     const cfg = loadConfig(path);
+    // Validate the prompt template too (#74) — `sapwood validate` must reject everything the
+    // real run would reject at startup, including a missing promptFile or unknown {{var}}.
+    buildRenderPrompt(cfg);
     const resolvedPath = path ?? DEFAULT_CONFIG_PATHS.find(existsSync);
     return {
       stdout: `sapwood validate: OK — ${resolvedPath} (lanes.max=${cfg.lanes.max}, guard.mode=${cfg.guard.mode}, merge.mode=${cfg.merge.mode})\n`,
