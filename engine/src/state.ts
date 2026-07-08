@@ -592,9 +592,11 @@ export class State {
   }
 
   /** Out-of-band PAUSE sentinel (#75): same file-sentinel pattern as KILL_SWITCH above — a
-   *  human-flippable file in the engine's OWN data dir (workers get no --add-dir data, so
-   *  they cannot see or forge it either). Strictly gentler than the kill switch: see
-   *  conductor.tick()'s DISPATCH-only skip, which is the only place this is consulted.
+   *  human-flippable file in the engine's OWN data dir. NOTE: that dir sits outside worker
+   *  worktrees as a permission-layer boundary (no --add-dir data), not an OS sandbox — the
+   *  same (pre-existing) residual write vector as KILL_SWITCH applies; guard defense-in-depth
+   *  for both sentinel paths is tracked as a follow-up. Strictly gentler than the kill switch:
+   *  see conductor.tick()'s DISPATCH-only skip, which is the only place this is consulted.
    *  null dir (in-memory State, tests) -> never active, same as killSwitchPath. */
   pausePath(): string | null {
     return this.dataDir ? join(this.dataDir, "PAUSE") : null;

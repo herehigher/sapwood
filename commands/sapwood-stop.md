@@ -21,6 +21,12 @@ state DB (`engine/src/state.ts`) — no config edit needed for either:
 If both sentinels are present, the kill switch wins — pause adds no further restriction
 beyond what the kill switch already does.
 
+Note for `sapwood run --until-idle`: a paused engine dispatches nothing, so once its
+in-flight lanes finish it counts as idle and the run EXITS ("finish the round, then
+stop"). Removing `data/PAUSE` afterwards resumes nothing by itself — start a new
+`sapwood run`. Under `forever` mode the engine keeps ticking and `--resume` takes
+effect on the next tick as described below.
+
 If the argument is `--lift`, resume the engine from the kill switch by removing that
 sentinel:
 
