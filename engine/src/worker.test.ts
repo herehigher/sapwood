@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, chmodSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, lstatSync, chmodSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -852,6 +852,46 @@ test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still rea
     const r = await s.reclaim(laneName);
     assert.equal(r.worktreeRetained, true, "ctime still exceeds the baseline -> retained despite backdated mtime");
     assert.ok(existsSync(wip), "backdated WIP survives");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#69 (Codex PR #72 round-2): a WIP entry whose mtime EQUALS dispatched_at exactly (same coarse-fs tick) reads dirty -> RETAINED, never deleted as clean (inclusive >= boundary)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-69-sametick";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(worktreePath, { recursive: true });
+
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 76, title: "t", labels: [] }, name);
+    await sleep(50);
+    const wip = join(worktreePath, "wip.txt");
+    writeFileSync(wip, "same-tick WIP\n");
+
+    // Simulate the exact-equality tick deterministically. Pick a WHOLE-SECOND baseline in the
+    // FUTURE and set the WIP file's mtime to exactly it. Whole-second matters: a modern-epoch
+    // ms value loses sub-ms precision as a float (statMs = ns/1e6), so an arbitrary integer ms
+    // reads back as e.g. …601.999 — never exactly equal to an integer baseline. A whole-second
+    // instant has no sub-second part, so lstat's mtimeMs is an exact integer that round-trips
+    // through the ISO dispatched_at. FUTURE so every ctime (pinned at write time, unsettable by
+    // utimes) stays BELOW it, ruling out the ctime path. Under `>=` the file reads dirty
+    // (mtime == baseline); under a strict `>` nothing exceeds the baseline -> deleted as clean.
+    const baselineMs = (Math.floor(Date.now() / 1000) + 100) * 1000; // whole-second ms, future
+    utimesSync(wip, new Date(baselineMs), new Date(baselineMs));
+    assert.equal(lstatSync(wip).mtimeMs, baselineMs, "fs stored the exact whole-second mtime");
+    const running = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8"));
+    running.dispatched_at = new Date(baselineMs).toISOString();
+    writeFileSync(join(dir, `${laneName}.running.json`), JSON.stringify(running));
+
+    const r = await s.reclaim(laneName);
+    assert.equal(r.worktreeRetained, true, "mtime == baseline must be treated as dirty (>=), not clean");
+    assert.ok(existsSync(wip), "same-tick WIP survives — not deleted as clean");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -769,14 +769,19 @@ export class WorkerSupervisor implements Supervisor {
    *  checked too (a deleted file is also an uncommitted change, visible only as its parent
    *  dir's bumped timestamp), `lstatSync` never follows symlinks (a planted broken/absolute
    *  link is judged by the link itself), and BOTH mtime and ctime are compared (ctime can't be
-   *  backdated by unprivileged code — fable P2-b). Fails safe (dirty) on any unreadable/
-   *  unstatable path or an unknown baseline — the caller only ever deletes on an explicit
-   *  `false`. */
+   *  backdated by unprivileged code — fable P2-b). The baseline comparison is INCLUSIVE (`>=`,
+   *  Codex PR #72 round-2 P2): on a coarse-resolution filesystem a worker can write WIP in the
+   *  SAME timestamp tick as dispatch, landing an entry exactly equal to sinceMs — a strict `>`
+   *  would read that as clean and DELETE it (a WIP-loss false-negative the degrade-to-human
+   *  policy forbids). `>=` widens the fail-safe-dirty window by one tick, the correct direction
+   *  (the policy accepts false-positive-dirty, never false-negative-clean). Fails safe (dirty)
+   *  on any unreadable/unstatable path or an unknown baseline — the caller only ever deletes on
+   *  an explicit `false`. */
   private worktreeMaybeDirty(worktreePath: string, sinceMs: number): boolean {
     if (!Number.isFinite(sinceMs)) return true; // unknown baseline -> can't prove clean
     const touchedSince = (p: string): boolean => {
       const s = lstatSync(p);
-      return s.mtimeMs > sinceMs || s.ctimeMs > sinceMs;
+      return s.mtimeMs >= sinceMs || s.ctimeMs >= sinceMs;
     };
     const stack: string[] = [worktreePath];
     while (stack.length > 0) {
