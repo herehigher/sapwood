@@ -1216,6 +1216,21 @@ test("buildRenderPrompt: loads once, eagerly (fail-fast happens at build time, n
   assert.throws(() => buildRenderPrompt(scfg), /\/nonexistent\/does-not-exist\.md/);
 });
 
+test("buildRenderPrompt: unknown {{var}} in the template throws at BUILD time, before any issue is claimed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "bad-var.md");
+    writeFileSync(p, "work on {{issue.url}}");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+    });
+    assert.throws(() => buildRenderPrompt(scfg), /unknown variable.*issue\.url/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals the rendered template file (fake supervisor)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

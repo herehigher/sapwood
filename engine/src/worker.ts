@@ -993,12 +993,22 @@ export function loadWorkerPromptTemplate(cfg: SapwoodConfig): string {
 }
 
 /** Builds the `WorkerDeps.renderPrompt` closure (#74): loads the template ONCE, eagerly —
- *  fail-fast on a missing/unreadable `worker.promptFile` happens here, at call time, not lazily
- *  on first dispatch — then returns a pure per-issue renderer (renderPromptTemplate). The real
- *  `sapwood run` entry point (cli.ts) calls this immediately after loadConfig(), before
- *  constructing the WorkerSupervisor, so a bad promptFile aborts startup with no dispatch ever
- *  happening. */
+ *  fail-fast on a missing/unreadable `worker.promptFile` AND on any unknown `{{var}}` in it
+ *  happens here, at call time, not lazily on first dispatch — a bad template discovered at
+ *  render time would fire AFTER the dispatch loop already claimed the issue (Ready → In
+ *  Progress), forcing a rollback on every tick. Then returns a pure per-issue renderer
+ *  (renderPromptTemplate). The real `sapwood run` entry point (cli.ts) calls this immediately
+ *  after loadConfig(), before constructing the WorkerSupervisor, so a bad promptFile aborts
+ *  startup with no dispatch ever happening. */
 export function buildRenderPrompt(cfg: SapwoodConfig): (issue: Issue) => string {
   const template = loadWorkerPromptTemplate(cfg);
+  for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
+    const name = raw!.trim();
+    if (!Object.hasOwn(PROMPT_VARS, name)) {
+      throw new Error(
+        `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(PROMPT_VARS).join(", ")}`,
+      );
+    }
+  }
   return (issue: Issue) => renderPromptTemplate(template, issue);
 }
