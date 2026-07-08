@@ -327,18 +327,197 @@ export class SameModelTrustedReviewer implements Reviewer {
   }
 }
 
-/** Construct the configured reviewer (reviewer.mode). Default = CodexReviewer, matching the
- *  locked decision (0day-style fresh different-model review). */
-export function makeReviewer(cfg: SapwoodConfig): Reviewer {
-  switch (cfg.reviewer.mode) {
+/** A Reviewer implementation's discriminant (#54: shared by primary + fallback construction). */
+export type ReviewerKind = Reviewer["kind"];
+
+/** Build a Reviewer instance for a given KIND (#54) — the shared factory `makeReviewer` (below)
+ *  and the reviewer-fallback chain (cfg.reviewer.fallback) both call, so a fallback entry gets
+ *  the EXACT SAME mode implementation/semantics as picking that kind as the primary
+ *  (reviewer.mode) would — reused, never forked. */
+export function buildReviewerByKind(kind: ReviewerKind, trustedReviewers: readonly string[]): Reviewer {
+  switch (kind) {
     case "human":
       return new HumanReviewer();
     case "same-model-trusted":
-      return new SameModelTrustedReviewer(cfg.reviewer.trustedReviewers);
+      return new SameModelTrustedReviewer(trustedReviewers);
     case "different-model-codex":
     default:
       // trustedReviewers EXTENDS the Codex-bot allowlist in this mode (public-repo hardening:
       // gate② acceptance is identity-checked, not merely non-author — Codex PR #42 P1).
-      return new CodexReviewer(cfg.reviewer.trustedReviewers);
+      return new CodexReviewer(trustedReviewers);
   }
+}
+
+/** Construct the configured PRIMARY reviewer (reviewer.mode). Default = CodexReviewer, matching
+ *  the locked decision (0day-style fresh different-model review). */
+export function makeReviewer(cfg: SapwoodConfig): Reviewer {
+  return buildReviewerByKind(cfg.reviewer.mode, cfg.reviewer.trustedReviewers);
+}
+
+/** Construct the configured FALLBACK chain (cfg.reviewer.fallback, #54) — one Reviewer per
+ *  entry, in the SAME order as configured (resolveReviewVerdict below preserves that order:
+ *  priority, not a retry escalation — the first entry whose OWN mode semantics reaches a
+ *  decisive verdict wins). Empty by default -> resolveReviewVerdict behaves identically to
+ *  calling the primary reviewer directly (no #54 behavior change from before this existed). */
+export function makeFallbackReviewers(cfg: SapwoodConfig): Reviewer[] {
+  return cfg.reviewer.fallback.map((kind) => buildReviewerByKind(kind, cfg.reviewer.trustedReviewers));
+}
+
+// ── Reviewer failover (#54) ──────────────────────────────────────────────────────────────────
+//
+// Motivated by the live #46 run: Codex (the default primary) failed three distinct ways in one
+// day — a bogus refusal, hard rate-limiting, usage-limit exhaustion — and gate② correctly
+// queued every PR indefinitely (fail-closed is right, but availability shouldn't depend on a
+// single external reviewer). `resolveReviewVerdict` is the pure decision core: which reviewer's
+// verdict gates THIS tick, given the primary's own verdict, an optional ordered fallback chain,
+// and how long the primary has had a chance to respond (the engine-recorded trigger pin,
+// reused — no separate timer). No fallback configured (the default) -> byte-for-byte the same
+// outcome as calling `primary.verdictFromData` directly: no silent degradation, ever.
+
+/** A verdict is decisive (something a human/bot actually said about this head) vs. WAIT_REVIEW
+ *  ("nothing yet, keep polling") or REVIEW_UNAVAILABLE ("the query itself failed") — the two
+ *  actions #54 treats as "the primary isn't currently giving gate② anything to act on". */
+function isDecisive(action: ReviewAction): boolean {
+  return action === "MERGE_OK" || action === "HANDLE_THREADS";
+}
+
+/** Every legal Reviewer kind — the single validation source for any kind string read back from
+ *  OUTSIDE the guard write boundary (#54 R2, fable-review P2: the state DB is not guard-
+ *  protected, so a persisted `review_fallback_kind` must be validated on read, never cast). */
+export const REVIEWER_KINDS = ["different-model-codex", "same-model-trusted", "human"] as const;
+
+export function isReviewerKind(v: unknown): v is ReviewerKind {
+  return typeof v === "string" && (REVIEWER_KINDS as readonly string[]).includes(v);
+}
+
+/** The per-lane failover marker (#54): "fallback reviewer `kind` obtained MERGE_OK on `head`".
+ *  It shields the PR from the PRIMARY's unavailability or non-decisive verdicts — nothing else.
+ *
+ *  ADVISORY, never verdict-bearing (#54 R2, fable-review P2): `data/sapwood.sqlite` lives
+ *  OUTSIDE the guard write boundary, so this row is never trusted on its own. At every use,
+ *  resolveReviewVerdict re-derives the verdict from LIVE PR data through the recorded kind's
+ *  own mode implementation (identity allowlist / non-author-approval rules, and the always-
+ *  blocking signals — unresolved threads / a standing CHANGES_REQUESTED — which outrank any
+ *  lock, fable-review P1). A forged or corrupt row therefore synthesizes nothing: no matching
+ *  approval artifact on the current head ⇒ no MERGE_OK, and an unknown `kind` string fails
+ *  isReviewerKind validation at the State read boundary (conductor.ts) ⇒ NO_FALLBACK_LOCK.
+ *
+ *  Lifetime (Codex PR #71 P2 + fable-review P2 on premature clearing): cleared ONLY on a head
+ *  change (driveOne's re-trigger branch — the lock is head-scoped, so a push ends the episode)
+ *  or with the lane itself on a confirmed merge (terminal row). NEVER cleared at verdict-
+ *  resolution time — a transient non-merge tick (CI pending, mergeability UNKNOWN, merge
+ *  retry, produce-pr-and-stop, engine restart) must leave the episode intact for the next
+ *  tick. A lock for a non-current head is simply ignored wherever read. Persisted by the
+ *  caller (State.recordReviewFallback); this module never touches storage. */
+export interface ReviewFallbackLock {
+  head: string | null;
+  kind: ReviewerKind | null;
+}
+
+export const NO_FALLBACK_LOCK: ReviewFallbackLock = { head: null, kind: null };
+
+/** Audit-trail signal for THIS tick (#54: "emit a structured event AND post a PR comment
+ *  stating which reviewer mode is now gating"). STATELESS: reported on every tick the
+ *  condition holds ("switch": a fallback's verdict is gating; "revert": the primary is
+ *  decisive again while a failover episode's lock is still held for this head) — the caller
+ *  (conductor.ts tick()) deduplicates against the durable event log before announcing, since
+ *  this pure function has no memory of what was already announced. */
+export interface ReviewFailoverTransition {
+  kind: "switch" | "revert";
+  mode: ReviewerKind;
+  /** The head the transition applies to — part of the announce-dedup key (a new head is a new
+   *  episode, so the same transition on a different head announces again). */
+  head: string;
+}
+
+export interface ReviewFailoverResult {
+  verdict: ReviewVerdict;
+  /** Which reviewer's verdict is gating this tick — the primary's kind, or a fallback's. */
+  sourceKind: ReviewerKind;
+  /** The lock to persist for the NEXT call. Changes ONLY when a fallback reaches MERGE_OK on
+   *  this head (recording/refreshing the episode) — never cleared here (see ReviewFallbackLock
+   *  lifetime: head change / lane end are the only clears, both outside this function). */
+  lock: ReviewFallbackLock;
+  transition: ReviewFailoverTransition | null;
+}
+
+/**
+ * Reviewer failover (#54): decide which reviewer's verdict gates THIS tick. Every verdict is
+ * derived from LIVE PR data — the persisted lock is advisory (see ReviewFallbackLock) and can
+ * only ever point at which mode to re-verify, never inject an outcome.
+ *
+ *  - `fallbacks` empty (config default) -> always the primary's own verdict, `lock` untouched,
+ *    no transition — IDENTICAL to calling `primary.verdictFromData(data, triggerPin)` directly.
+ *  - Primary decisive -> its verdict gates, ALWAYS. MERGE_OK is simply gate② satisfied by the
+ *    primary again. HANDLE_THREADS blocks REGARDLESS of any lock (fable-review P1): it can only
+ *    arise from the always-blocking, identity-UNfiltered signals (unresolved threads / a
+ *    standing CHANGES_REQUESTED from anyone — usually a human's explicit block), which are
+ *    independent gate inputs, not "the primary's opinion" — and "failover must never weaken
+ *    gate② silently" outranks "verdict stays valid". A held lock only adds the "revert"
+ *    audit signal (primary is gating again); it is not cleared (see lifetime).
+ *  - Primary NOT decisive (WAIT_REVIEW / REVIEW_UNAVAILABLE) -> once `triggerPin.at` is at
+ *    least `failoverAfterSec` old, evaluate `fallbacks` IN ORDER and use the first one whose
+ *    OWN mode semantics reaches a decisive verdict on the live data — reported as a "switch",
+ *    with a MERGE_OK recorded as the episode lock for this head. Below the threshold, a held
+ *    lock is still honored — but ONLY by re-verifying it: the recorded kind must be among the
+ *    CURRENTLY configured fallbacks (an operator removing it from config revokes the episode,
+ *    and a forged kind matches nothing) and that mode's own fresh verdict on the live data
+ *    must be MERGE_OK (the approval artifact must actually exist on this head; blocking
+ *    signals re-checked by construction, since every mode's verdictFrom puts them first).
+ *    Nothing decisive anywhere -> the primary's non-decisive verdict, unchanged (queue).
+ */
+export function resolveReviewVerdict(input: {
+  primary: Reviewer;
+  fallbacks: readonly Reviewer[];
+  data: PRReviewData;
+  triggerPin: ReviewTriggerPin;
+  now: Date;
+  failoverAfterSec: number;
+  lock: ReviewFallbackLock;
+}): ReviewFailoverResult {
+  const { primary, fallbacks, data, triggerPin, now, failoverAfterSec, lock } = input;
+  const primaryVerdict = primary.verdictFromData(data, triggerPin);
+  // A lock only ever REFERS to a re-verifiable episode: current head + a kind that is still an
+  // explicitly configured fallback. Anything else (stale head, forged/unknown kind, kind
+  // removed from config) is ignored — never an error, never a verdict.
+  const lockReviewer =
+    lock.head === data.headOid && lock.kind != null ? (fallbacks.find((f) => f.kind === lock.kind) ?? null) : null;
+
+  if (isDecisive(primaryVerdict.action)) {
+    // Primary gates — including a blocking HANDLE_THREADS, lock or no lock (fable-review P1).
+    // The lock stays untouched (cleared only on head change / lane end); a held one is
+    // reported as "revert" so the audit trail records that the primary is gating again.
+    return {
+      verdict: primaryVerdict,
+      sourceKind: primary.kind,
+      lock,
+      transition: lockReviewer ? { kind: "revert", mode: primary.kind, head: data.headOid } : null,
+    };
+  }
+
+  // Primary not decisive (WAIT_REVIEW, or an explicit REVIEW_UNAVAILABLE).
+  const sinceTriggerSec = triggerPin.at != null ? (now.getTime() - Date.parse(triggerPin.at)) / 1000 : null;
+  const pastThreshold = fallbacks.length > 0 && sinceTriggerSec !== null && sinceTriggerSec >= failoverAfterSec;
+  if (pastThreshold) {
+    for (const fb of fallbacks) {
+      const v = fb.verdictFromData(data, triggerPin);
+      if (isDecisive(v.action)) {
+        // MERGE_OK records/refreshes the episode lock; HANDLE_THREADS gates (block) without
+        // touching the lock. Note the chain subsumes a held lock's re-verification: the lock's
+        // kind is one of these fallbacks, so its approval artifact is found right here.
+        const newLock: ReviewFallbackLock = v.action === "MERGE_OK" ? { head: data.headOid, kind: fb.kind } : lock;
+        return { verdict: v, sourceKind: fb.kind, lock: newLock, transition: { kind: "switch", mode: fb.kind, head: data.headOid } };
+      }
+    }
+  } else if (lockReviewer) {
+    // Below the threshold (e.g. the operator raised failoverAfterSec mid-episode) a held lock
+    // is still honored — by RE-VERIFICATION only: the recorded mode's own fresh verdict on the
+    // live data must be MERGE_OK. A forged lock with no matching approval artifact yields
+    // nothing (#54 R2), and blocking signals block here too (verdictFrom evaluates them first).
+    const v = lockReviewer.verdictFromData(data, triggerPin);
+    if (v.action === "MERGE_OK") {
+      return { verdict: v, sourceKind: lockReviewer.kind, lock, transition: { kind: "switch", mode: lockReviewer.kind, head: data.headOid } };
+    }
+  }
+  return { verdict: primaryVerdict, sourceKind: primary.kind, lock, transition: null };
 }

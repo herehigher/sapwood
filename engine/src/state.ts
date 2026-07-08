@@ -133,6 +133,23 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN review_triggered_at TEXT;
     `);
   },
+  // 6 -> 7: reviewer failover lock (#54). Once a FALLBACK reviewer (cfg.reviewer.fallback)
+  // reaches MERGE_OK for a lane's head while the primary is unavailable, these two columns
+  // record that episode: the head it was obtained for, and which fallback reviewer kind
+  // produced it. ADVISORY, never verdict-bearing (#54 R2, fable-review P2): this DB is outside
+  // the guard write boundary, so the row is re-validated at the conductor read boundary
+  // (isReviewerKind — an unknown kind string fails closed to no-lock) AND re-verified against
+  // LIVE PR data at every use (resolveReviewVerdict re-runs the recorded mode's own verdict;
+  // no matching approval artifact on the current head => no MERGE_OK). Forging this row
+  // synthesizes nothing. Written exclusively by MergeDriver.driveOne's recordFallback callback
+  // (conductor.ts wires it in), same pattern as review_triggered_head/at above. Nullable, no
+  // default: every pre-existing row gets NULL (no episode) — fail-closed.
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN review_fallback_head TEXT;
+      ALTER TABLE workers ADD COLUMN review_fallback_kind TEXT;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -169,6 +186,15 @@ export interface WorkerRow {
    *  (that was the P1-B bug: committedDate is forgeable via GIT_COMMITTER_DATE / cherry-picks
    *  and isn't tied to when the commit actually became the PR's head). */
   review_triggered_at?: string | null;
+  /** The head oid a FALLBACK reviewer's MERGE_OK was obtained on (#54) — ADVISORY episode
+   *  marker, re-validated + re-verified against live PR data at every use (see the schema
+   *  v6->v7 migration comment). NULL/undefined means no episode (the lane is on the primary
+   *  reviewer, or the fallback chain is unconfigured). */
+  review_fallback_head?: string | null;
+  /** Which fallback reviewer kind (Reviewer["kind"]) produced the approval above. Plain TEXT
+   *  here; validated with isReviewerKind at the conductor read boundary — an unknown string
+   *  fails closed to no-lock. Always set together with review_fallback_head. */
+  review_fallback_kind?: string | null;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -256,20 +282,23 @@ export class State {
       .prepare(
         `INSERT INTO workers
            (name, issue, session_id, state, started_at, ended_at, pr, review_triggered,
-            review_triggered_head, review_triggered_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            review_triggered_head, review_triggered_at, review_fallback_head, review_fallback_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
            ended_at = excluded.ended_at, pr = excluded.pr,
            review_triggered = excluded.review_triggered,
            review_triggered_head = excluded.review_triggered_head,
-           review_triggered_at = excluded.review_triggered_at`,
+           review_triggered_at = excluded.review_triggered_at,
+           review_fallback_head = excluded.review_fallback_head,
+           review_fallback_kind = excluded.review_fallback_kind`,
       )
       .run(
         row.name, row.issue, row.session_id, row.state, row.started_at, row.ended_at,
         row.pr ?? null, row.review_triggered ?? 0,
         row.review_triggered_head ?? null, row.review_triggered_at ?? null,
+        row.review_fallback_head ?? null, row.review_fallback_kind ?? null,
       );
   }
 
@@ -282,6 +311,19 @@ export class State {
     this.db
       .prepare("UPDATE workers SET review_triggered_head = ?, review_triggered_at = ? WHERE name = ?")
       .run(head, at, name);
+  }
+
+  /** Persist `name`'s lane's reviewer-failover episode marker (#54) — called from
+   *  MergeDriver.driveOne's recordFallback callback (conductor.ts wires it in). Both non-null
+   *  records a fallback reviewer's MERGE_OK for that head; both null clears it, which happens
+   *  ONLY on a head change (driveOne's re-trigger branch — Codex PR #71 P2: never cleared at
+   *  verdict-resolution time). Advisory either way: the row is re-verified against live PR
+   *  data at every use (see the v6->v7 migration comment). A worker/producer has no reference
+   *  to State and cannot reach this method — same structural guarantee as recordReviewTrigger. */
+  recordReviewFallback(name: string, head: string | null, kind: string | null): void {
+    this.db
+      .prepare("UPDATE workers SET review_fallback_head = ?, review_fallback_kind = ? WHERE name = ?")
+      .run(head, kind, name);
   }
 
   getWorker(name: string): WorkerRow | undefined {
@@ -317,6 +359,26 @@ export class State {
     this.db
       .prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)")
       .run(new Date().toISOString(), kind, JSON.stringify(payload));
+  }
+
+  /** The most recent reviewer-failover announcement for `worker`'s lane (#54 R2) — tick()'s
+   *  dedup source: driveOne reports the switch/revert signal STATELESSLY on every tick the
+   *  condition holds (resolveReviewVerdict is pure and has no memory), so the durable event
+   *  log itself is the memory of what was already announced. Announce only when the incoming
+   *  (kind, mode, pr, head) differs from this row — one announcement per episode transition,
+   *  restart-safe, and a NEW head (a new episode) announces again. */
+  lastReviewerFallbackEvent(worker: string): { kind: string; mode: string; pr: number; head: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT kind, payload FROM events
+         WHERE kind IN ('reviewer-fallback-switch', 'reviewer-fallback-revert')
+           AND json_extract(payload, '$.worker') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker) as { kind: string; payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { mode?: string; pr?: number; head?: string };
+    return { kind: row.kind, mode: p.mode ?? "", pr: p.pr ?? -1, head: p.head ?? "" };
   }
 
   // ── Engine cost ceiling + kill switch (#14) ───────────────────────────────────────────

@@ -43,6 +43,18 @@ reviewer:
   # same-model-trusted | human | produce-pr-and-stop are the other modes.
   mode: different-model-codex
   trustedReviewers: [] # allowlisted reviewer logins (public-repo hardening, v1.1)
+  # fallback: ordered, opt-in reviewer failover (empty by default = queue forever, unchanged
+  # behavior — falling back to a weaker trust mode is NEVER silent). Each entry keeps its own
+  # mode semantics (identity allowlist / any-non-author-approval), and the always-blocking
+  # signals (unresolved threads, a standing CHANGES_REQUESTED) block regardless of failover.
+  # NOTE: same-model-trusted here REQUIRES a non-empty trustedReviewers list above — the
+  # combination with an empty list is rejected at parse (it could never produce a verdict).
+  # Example:
+  # fallback: [same-model-trusted, human]
+  fallback: []
+  # How long (seconds, since the last review trigger) the primary may stay unavailable before
+  # gate② hands off to the first fallback entry that itself reaches a decisive verdict.
+  failoverAfterSec: 1200
 
 labels: # taxonomy used by the loop
   inProgress: in-progress

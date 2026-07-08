@@ -19,7 +19,8 @@
 // defense-in-depth on top of the guard hook's fail-closed Category-C block (guard.ts).
 import type { IForge, PRStatus, PRReviewData } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
-import type { Reviewer, ReviewAction, ReviewTriggerPin } from "./reviewer.js";
+import type { Reviewer, ReviewAction, ReviewTriggerPin, ReviewFallbackLock, ReviewFailoverTransition } from "./reviewer.js";
+import { resolveReviewVerdict, NO_FALLBACK_LOCK } from "./reviewer.js";
 
 export type Gate = "MERGE" | "WAIT" | "HUMAN";
 
@@ -113,16 +114,28 @@ export function mergeDecision(
   return "MERGE";
 }
 
-export type DriveOutcome =
+export type DriveOutcome = (
   | { kind: "merged"; pr: number; headOid: string }
   | { kind: "needs-human"; pr: number; reason: string }
   | { kind: "queued"; pr: number; reason: string }
-  | { kind: "stopped"; pr: number; reason: string }; // produce-pr-and-stop: gates report, never merges
+  | { kind: "stopped"; pr: number; reason: string } // produce-pr-and-stop: gates report, never merges
+) & {
+  /** The reviewer-failover audit signal for this tick (#54), when one applies. STATELESS —
+   *  reported on every tick the condition holds (see ReviewFailoverTransition); the caller
+   *  (conductor.ts tick()) dedups against the durable event log, then emits the structured
+   *  event and posts the PR comment. Announcement lives with the caller because dedup needs
+   *  the event log (State), which MergeDriver deliberately never touches. */
+  reviewerTransition?: ReviewFailoverTransition;
+};
 
 export interface MergeDriverDeps {
   forge: IForge;
   reviewer: Reviewer;
   cfg: SapwoodConfig;
+  /** Ordered reviewer-failover chain (cfg.reviewer.fallback, #54) — Reviewer instances, one per
+   *  configured kind, built by the caller (reviewer.ts's makeFallbackReviewers). Empty/omitted
+   *  -> resolveReviewVerdict always uses `reviewer`'s own verdict (today's behavior, unchanged). */
+  fallbackReviewers?: readonly Reviewer[];
   /** Clock seed (#55 P1-B), injectable for tests — the wall-clock the trigger pin's `at` is
    *  stamped with. Defaults to the real clock. */
   now?: () => Date;
@@ -151,12 +164,21 @@ export class MergeDriver {
    *  including the very first drive of a lane (pin.head === null) AND a later push that moves
    *  the PR to a new head mid-drive — gets a fresh `@codex review` and a freshly-recorded pin
    *  BEFORE any gate verdict is derived for that head; this also fixes a latent bug where a
-   *  push after the lane's first trigger never got re-triggered at all. */
+   *  push after the lane's first trigger never got re-triggered at all.
+   *
+   *  `fallback` (#54) is optional so every pre-#54 call site (this whole test file) keeps
+   *  working unchanged: omitted -> no lock, no reviewer-failover chain consulted, byte-for-byte
+   *  the old behavior. When supplied, `lock` is the lane's State-recorded reviewer-failover
+   *  lock (state.ts workers.review_fallback_head/kind) and `recordFallback` persists a NEW
+   *  lock the instant resolveReviewVerdict (reviewer.ts) returns one that differs from it —
+   *  same recordTrigger-callback pattern as above, so MergeDriver still never touches storage
+   *  directly. */
   async driveOne(
     pr: number,
     issue: number,
     triggerPin: ReviewTriggerPin,
     recordTrigger: (head: string, at: string) => void,
+    fallback?: { lock: ReviewFallbackLock; recordFallback: (lock: ReviewFallbackLock) => void },
   ): Promise<DriveOutcome> {
     const { forge, reviewer, cfg } = this.deps;
 
@@ -202,6 +224,13 @@ export class MergeDriver {
     // this tick rather than deriving a verdict a push may have invalidated mid-flight.
     if (triggerPin.head !== status.headOid) {
       try {
+        // #54 R2: a head change ends any failover episode — the fallback lock is head-scoped,
+        // so a lock recorded for a previous head is cleared HERE, the one place that detects
+        // the head moving. This is the ONLY drive-path clear (Codex PR #71 P2: never cleared
+        // at verdict-resolution time); a confirmed merge ends the lane, taking the row with it.
+        if (fallback && fallback.lock.head != null && fallback.lock.head !== status.headOid) {
+          fallback.recordFallback(NO_FALLBACK_LOCK);
+        }
         await reviewer.triggerReview(forge, pr, issue);
         const now = this.deps.now ?? (() => new Date());
         recordTrigger(status.headOid, now().toISOString());
@@ -216,7 +245,35 @@ export class MergeDriver {
       return { kind: "queued", pr, reason: "review-triggered" };
     }
 
-    const verdict = reviewer.verdictFromData(data, triggerPin);
+    // #54: which reviewer's verdict gates THIS tick — the primary's, or (only once explicitly
+    // opted into via cfg.reviewer.fallback, and only past cfg.reviewer.failoverAfterSec of
+    // primary unavailability) a fallback's. `fallback` omitted -> identical to the pre-#54
+    // `reviewer.verdictFromData(data, triggerPin)` call this replaces.
+    const resolved = resolveReviewVerdict({
+      primary: reviewer,
+      fallbacks: this.deps.fallbackReviewers ?? [],
+      data,
+      triggerPin,
+      now: (this.deps.now ?? (() => new Date()))(),
+      failoverAfterSec: cfg.reviewer.failoverAfterSec,
+      lock: fallback?.lock ?? NO_FALLBACK_LOCK,
+    });
+    const verdict = resolved.verdict;
+
+    // Persist the lock only when it actually changed — which, post-R2, is only ever "a
+    // fallback reached MERGE_OK on this head" (resolveReviewVerdict never clears; the head-
+    // change clear lives in the trigger branch above).
+    if (fallback && (resolved.lock.head !== fallback.lock.head || resolved.lock.kind !== fallback.lock.kind)) {
+      fallback.recordFallback(resolved.lock);
+    }
+
+    // Audit trail (#54): the switch/revert signal rides the outcome; conductor.ts tick()
+    // dedups it against the durable event log, emits the structured event, and posts the PR
+    // comment (see DriveOutcome.reviewerTransition). Not announced here: the signal is
+    // stateless-per-tick and MergeDriver has no event-log access to dedup with.
+    const withTransition = (outcome: DriveOutcome): DriveOutcome =>
+      resolved.transition ? { ...outcome, reviewerTransition: resolved.transition } : outcome;
+
     const gate = deriveGate({
       ciGreen: status.ciGreen,
       reviewAction: verdict.action,
@@ -226,25 +283,25 @@ export class MergeDriver {
       humanLabels: cfg.escalation.humanLabels,
     });
 
-    if (gate === "WAIT") return { kind: "queued", pr, reason: `gate-pending:${verdict.action}` };
-    if (gate === "HUMAN") return { kind: "needs-human", pr, reason: `gate:${gate}:${verdict.action}` };
+    if (gate === "WAIT") return withTransition({ kind: "queued", pr, reason: `gate-pending:${verdict.action}` });
+    if (gate === "HUMAN") return withTransition({ kind: "needs-human", pr, reason: `gate:${gate}:${verdict.action}` });
 
     // gate === "MERGE" from here on.
     if (cfg.merge.mode === "produce-pr-and-stop") {
-      return { kind: "stopped", pr, reason: `gates-passed:${verdict.action}` };
+      return withTransition({ kind: "stopped", pr, reason: `gates-passed:${verdict.action}` });
     }
 
     // Final safety net (0day's actual pre-merge re-check), evaluated on the SAME
     // freshly-fetched action/labels/state as the gate above — defense in depth, not a
     // duplicate: this is the function unit-tested for row-for-row bash parity.
     const decision = mergeDecision(verdict.action, data.labels.join(","), data.state, false, cfg.escalation.humanLabels);
-    if (decision === "WAIT") return { kind: "queued", pr, reason: `merge-decision:${decision}` };
-    if (decision === "ESCALATE") return { kind: "needs-human", pr, reason: `merge-decision:${decision}` };
+    if (decision === "WAIT") return withTransition({ kind: "queued", pr, reason: `merge-decision:${decision}` });
+    if (decision === "ESCALATE") return withTransition({ kind: "needs-human", pr, reason: `merge-decision:${decision}` });
 
     if (verdict.headOid == null) {
       // Should not happen when gate === MERGE (a verdict only reaches MERGE_OK with a headOid
       // attached) — fail-safe: refuse an unpinned merge rather than guess.
-      return { kind: "needs-human", pr, reason: "refuse-unpinned-merge-no-head-oid" };
+      return withTransition({ kind: "needs-human", pr, reason: "refuse-unpinned-merge-no-head-oid" });
     }
 
     // Deterministic un-mergeability is HUMAN work, not a retry (Codex PR #42 P2): a
@@ -252,10 +309,10 @@ export class MergeDriver {
     // in `driving` re-attempting every tick. UNKNOWN means GitHub is still computing
     // mergeability (transient, normal right after a push) — that one queues.
     if (status.mergeable === "CONFLICTING") {
-      return { kind: "needs-human", pr, reason: "merge-conflict" };
+      return withTransition({ kind: "needs-human", pr, reason: "merge-conflict" });
     }
     if (status.mergeable === "UNKNOWN") {
-      return { kind: "queued", pr, reason: "mergeability-unknown" };
+      return withTransition({ kind: "queued", pr, reason: "mergeability-unknown" });
     }
 
     try {
@@ -271,10 +328,10 @@ export class MergeDriver {
       // call) must escalate instead of retrying forever.
       const msg = String(e);
       if (/not mergeable|merge conflict/i.test(msg)) {
-        return { kind: "needs-human", pr, reason: `merge-failed-deterministic: ${msg}` };
+        return withTransition({ kind: "needs-human", pr, reason: `merge-failed-deterministic: ${msg}` });
       }
-      return { kind: "queued", pr, reason: `merge-failed-retry: ${msg}` };
+      return withTransition({ kind: "queued", pr, reason: `merge-failed-retry: ${msg}` });
     }
-    return { kind: "merged", pr, headOid: verdict.headOid };
+    return withTransition({ kind: "merged", pr, headOid: verdict.headOid });
   }
 }

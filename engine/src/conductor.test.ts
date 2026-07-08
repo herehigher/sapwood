@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   nextRoundId,
   classifyLane,
@@ -43,6 +44,7 @@ class FakeForge implements IForge {
   labelsAdded: Array<[number, string]> = [];
   boardSet: Array<[number, string]> = [];
   claimed: number[] = [];
+  prComments: Array<[number, string]> = [];
   async detectOwnerKind(): Promise<"user"> { return "user"; }
   async getReadyIssues(): Promise<Issue[]> { return this.ready; }
   async claimIssue(n: number): Promise<void> { this.claimed.push(n); }
@@ -51,7 +53,7 @@ class FakeForge implements IForge {
   async openPR(): Promise<number> { return 1; }
   async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}
-  async addPRComment(): Promise<void> {}
+  async addPRComment(pr: number, body: string): Promise<void> { this.prComments.push([pr, body]); }
   async getIssueBody(): Promise<string> { return ""; }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
@@ -304,22 +306,36 @@ test("tick capacity: a reclaimed DONE+PR (driving) lane still occupies a lane (C
 // ── #13: DRIVE wiring (deps.mergeGate drives `driving` lanes through gates) ──────────────
 
 class FakeMergeGate implements MergeGate {
-  // Every call's (pr, issue, triggerPin) — #55 P1-B: proves the conductor threads the lane's
-  // State-recorded pin (and its issue number, #46) into driveOne every tick.
-  calls: Array<{ pr: number; issue: number; triggerPin: { head: string | null; at: string | null } }> = [];
+  // Every call's (pr, issue, triggerPin, fallback lock) — #55 P1-B / #54: proves the conductor
+  // threads the lane's State-recorded pin/lock (and its issue number, #46) into driveOne every
+  // tick.
+  calls: Array<{
+    pr: number;
+    issue: number;
+    triggerPin: { head: string | null; at: string | null };
+    fallbackLock?: { head: string | null; kind: string | null };
+  }> = [];
   outcomes: Record<number, DriveOutcome> = {};
   defaultOutcome: DriveOutcome = { kind: "queued", pr: 0, reason: "default" };
   /** When set, driveOne invokes the caller-supplied recordTrigger with these values before
    *  returning — simulates MergeDriver posting a fresh trigger and persisting its pin. */
   recordOnCall: [string, string] | null = null;
+  /** When set, driveOne invokes the caller-supplied recordFallback with this lock (#54) —
+   *  simulates resolveReviewVerdict returning a new lock. */
+  recordFallbackOnCall: { head: string | null; kind: string | null } | null = null;
   async driveOne(
     pr: number,
     issue: number,
     triggerPin: { head: string | null; at: string | null },
     recordTrigger: (head: string, at: string) => void,
+    fallback?: {
+      lock: { head: string | null; kind: string | null };
+      recordFallback: (lock: { head: string | null; kind: string | null }) => void;
+    },
   ): Promise<DriveOutcome> {
-    this.calls.push({ pr, issue, triggerPin });
+    this.calls.push({ pr, issue, triggerPin, fallbackLock: fallback?.lock });
     if (this.recordOnCall) recordTrigger(...this.recordOnCall);
+    if (this.recordFallbackOnCall) fallback?.recordFallback(this.recordFallbackOnCall);
     return this.outcomes[pr] ?? { ...this.defaultOutcome, pr };
   }
 }
@@ -436,6 +452,145 @@ test("tick DRIVE: driveOne's recordTrigger callback persists the pin into State,
   gate.recordOnCall = null; // 2nd tick: driveOne doesn't re-record (simulating a matched pin)
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(gate.calls[1]!.triggerPin, { head: "HEAD1", at: "2026-07-07T08:00:00.000Z" }); // read back
+  st.close();
+});
+
+// ── #54: reviewer-failover lock wiring + audit-trail event ────────────────────────────────
+
+test("tick DRIVE: driveOne's recordFallback callback persists the reviewer-failover lock into State, which the NEXT tick reads back", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting" };
+  assert.equal(gate.calls.length, 0);
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: no lock yet
+  assert.deepEqual(gate.calls[0]!.fallbackLock, { head: null, kind: null });
+
+  gate.recordFallbackOnCall = { head: "HEAD1", kind: "same-model-trusted" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 2nd tick: records the lock
+  assert.equal(st.getWorker("lane-a")?.review_fallback_head, "HEAD1");
+  assert.equal(st.getWorker("lane-a")?.review_fallback_kind, "same-model-trusted");
+
+  gate.recordFallbackOnCall = null; // 3rd tick: driveOne doesn't re-record
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(gate.calls[2]!.fallbackLock, { head: "HEAD1", kind: "same-model-trusted" }); // read back
+  st.close();
+});
+
+/** Raw `events` rows, read via a second connection (WAL allows concurrent reads) — asserts
+ *  the on-disk table directly rather than adding a State query method purely for test
+ *  introspection (same convention as state.test.ts's rawSpendRows, #47). */
+function rawEventKinds(path: string): string[] {
+  const raw = new DatabaseSync(path);
+  try {
+    return (raw.prepare("SELECT kind FROM events ORDER BY id").all() as unknown as Array<{ kind: string }>).map(
+      (r) => r.kind,
+    );
+  } finally {
+    raw.close();
+  }
+}
+
+test("tick DRIVE: reviewerTransition -> structured switch/revert events + PR comments, DEDUPED across ticks (#54 R2: driveOne reports statelessly, tick announces once per episode transition)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-failover-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const st = new State(path);
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-a", 2);
+    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = {
+      kind: "queued", pr: 55, reason: "waiting",
+      reviewerTransition: { kind: "switch", mode: "same-model-trusted", head: "H1" },
+    };
+    const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    assert.equal(st.getWorker("lane-a")?.state, "driving"); // an audit-only announcement, no state change
+    assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "waiting" }]);
+    assert.equal(forge.prComments.length, 1);
+    assert.match(forge.prComments[0]![1], /same-model-trusted/);
+
+    // Tick 2: the SAME transition reported again (stateless per-tick signal) -> deduped, no
+    // second event, no second comment (a produce-pr-and-stop lane would otherwise spam one
+    // comment per tick forever).
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    assert.equal(forge.prComments.length, 1);
+    assert.equal(rawEventKinds(path).filter((k) => k === "reviewer-fallback-switch").length, 1);
+
+    // Tick 3: a DIFFERENT transition (revert) -> announced (event + comment).
+    gate.outcomes[55] = {
+      kind: "queued", pr: 55, reason: "waiting",
+      reviewerTransition: { kind: "revert", mode: "different-model-codex", head: "H1" },
+    };
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    assert.equal(forge.prComments.length, 2);
+    assert.match(forge.prComments[1]![1], /available again/);
+
+    // Tick 4: the revert reported again -> deduped.
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    st.close();
+
+    const kinds = rawEventKinds(path);
+    assert.equal(kinds.filter((k) => k === "reviewer-fallback-switch").length, 1);
+    assert.equal(kinds.filter((k) => k === "reviewer-fallback-revert").length, 1);
+    assert.equal(forge.prComments.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE: a NEW head re-announces the same transition kind (a new episode is not deduped against the old one)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-failover-head-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const st = new State(path);
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-a", 2);
+    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = {
+      kind: "queued", pr: 55, reason: "waiting",
+      reviewerTransition: { kind: "switch", mode: "human", head: "H1" },
+    };
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    gate.outcomes[55] = {
+      kind: "queued", pr: 55, reason: "waiting",
+      reviewerTransition: { kind: "switch", mode: "human", head: "H2" }, // pushed -> new episode
+    };
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+    st.close();
+    assert.equal(rawEventKinds(path).filter((k) => k === "reviewer-fallback-switch").length, 2);
+    assert.equal(forge.prComments.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE: a forged/unknown review_fallback_kind in the state DB fails closed to NO lock at the read boundary (#54 R2, fable-review P2)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // 1st tick: lane -> driving
+
+  // Simulate a forged/corrupt row: the TEXT column holds a kind no Reviewer implements.
+  st.recordReviewFallback("lane-a", "HEAD", "totally-bogus-kind");
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  // The gate must see NO lock at all — head nulled too, never a half-valid lock.
+  assert.deepEqual(gate.calls[1]!.fallbackLock, { head: null, kind: null });
+
+  // Sanity: a VALID kind round-trips (validation rejects unknowns, not legitimate episodes).
+  st.recordReviewFallback("lane-a", "HEAD", "same-model-trusted");
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(gate.calls[2]!.fallbackLock, { head: "HEAD", kind: "same-model-trusted" });
   st.close();
 });
 
