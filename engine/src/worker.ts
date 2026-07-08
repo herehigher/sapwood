@@ -938,6 +938,9 @@ const PROMPT_VARS: Record<string, (issue: Issue) => string> = {
   "issue.number": (issue) => String(issue.number),
   "issue.title": (issue) => issue.title,
   "issue.body": (issue) => issue.body ?? "",
+  // Labels drive the prompt's own branching (e.g. the verify:n/a doc-gate path) — the worker
+  // can't check a label the template never shows it.
+  "issue.labels": (issue) => issue.labels.join(", "),
 };
 
 /** Simple `{{var}}` substitution (#74) — no template engine. FAILS CLOSED on any `{{...}}`

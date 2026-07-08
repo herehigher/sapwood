@@ -1132,10 +1132,10 @@ test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE
 
 // ── #74: file-based worker prompt ──
 
-test("renderPromptTemplate: substitutes issue.number/title/body", () => {
-  const issue = { number: 42, title: "Fix the thing", labels: [], body: "do X and Y" };
-  const out = renderPromptTemplate("Issue #{{issue.number}}: {{issue.title}}\n\n{{issue.body}}", issue);
-  assert.equal(out, "Issue #42: Fix the thing\n\ndo X and Y");
+test("renderPromptTemplate: substitutes issue.number/title/body/labels", () => {
+  const issue = { number: 42, title: "Fix the thing", labels: ["type:docs", "verify:n/a"], body: "do X and Y" };
+  const out = renderPromptTemplate("Issue #{{issue.number}}: {{issue.title}} [{{issue.labels}}]\n\n{{issue.body}}", issue);
+  assert.equal(out, "Issue #42: Fix the thing [type:docs, verify:n/a]\n\ndo X and Y");
 });
 
 test("renderPromptTemplate: absent issue.body substitutes as empty string, never throws", () => {
