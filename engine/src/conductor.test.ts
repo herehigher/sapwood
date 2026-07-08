@@ -73,6 +73,7 @@ class FakeForge implements IForge {
     };
   }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
+  async listMilestoneTitles(): Promise<string[]> { return []; }
 }
 
 class FakeSupervisor implements Supervisor {

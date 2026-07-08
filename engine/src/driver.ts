@@ -80,10 +80,11 @@ export interface DriverResult {
    *  forge is unreachable while the daemon keeps (correctly) retrying. */
   tickErrors: number;
   stoppedBy: StopReason;
-  /** Present iff stoppedBy === "stop-condition": which configured condition fired first, for the
-   *  exit log line (cli.ts) and telemetry. Never present otherwise — no `stop` config keeps the
-   *  DriverResult shape byte-for-byte identical to pre-#76 sapwood (regression tests rely on this
-   *  via assert.deepEqual against a plain {ticks,tickErrors,stoppedBy} object). */
+  /** Present when a configured condition fired: always with stoppedBy === "stop-condition", and
+   *  also with "once" when the single tick happened to satisfy a goal (once-mode never waits for
+   *  wind-down, but the exit line still names the hit). Never present without `stop` config —
+   *  that keeps the DriverResult shape byte-for-byte identical to pre-#76 sapwood (regression
+   *  tests rely on this via assert.deepEqual against a plain {ticks,tickErrors,stoppedBy}). */
   stopCondition?: StopConditionHit;
 }
 
@@ -235,20 +236,41 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
           stopConditionHit = {
             name: "afterPRsOpened", threshold: stop.afterPRsOpened, detail: `opened ${prsOpened}`,
           };
-        } else if (stop?.onMilestoneComplete) {
+        } else if (stop?.onMilestoneComplete && !signalled) {
           // Evaluated at tick boundaries only (never mid-tick), per #76's scope — one extra
           // forge read per tick while configured, same cost class as the DISPATCH phase's own
-          // getReadyIssues call.
-          const openLeft = await deps.forge.countOpenIssuesInMilestone(stop.onMilestoneComplete);
-          if (openLeft === 0) {
-            stopConditionHit = {
-              name: "onMilestoneComplete", threshold: stop.onMilestoneComplete, detail: "0 open issues left",
-            };
+          // getReadyIssues call. Skipped once `signalled` — a Ctrl-C shutdown must not wait on
+          // one more network round-trip.
+          //
+          // CONTAINED like tick() itself (fable gate② P1): this await sits outside the tick
+          // try/catch, so an uncaught gh failure here (transient 5xx, rate limit, expired auth)
+          // would escape runDriver's loop and kill the daemon — including mid kill-switch drain,
+          // exactly the operator's worst moment. A failed read is a tick-error + "milestone not
+          // complete" (fail toward MORE ticks, the same stance the containment docblock above
+          // commits to), never a crash and never a fired condition.
+          try {
+            const openLeft = await deps.forge.countOpenIssuesInMilestone(stop.onMilestoneComplete);
+            if (openLeft === 0) {
+              stopConditionHit = {
+                name: "onMilestoneComplete", threshold: stop.onMilestoneComplete, detail: "0 open issues left",
+              };
+            }
+          } catch (e) {
+            tickErrors++;
+            try {
+              deps.state.appendEvent("tick-error", { error: `stop-condition milestone check failed: ${String(e)}` });
+            } catch { /* state write failed too — tickErrors still counts it */ }
           }
         }
       }
       if (signalled) return { ticks, tickErrors, stoppedBy: "signal" };
-      if (stopMode === "once") return { ticks, tickErrors, stoppedBy: "once" };
+      // #76: --once still reports a condition that fired on its single tick (the exit line names
+      // it) — stoppedBy stays "once" because once-mode never waits for wind-down.
+      if (stopMode === "once") {
+        return stopConditionHit
+          ? { ticks, tickErrors, stoppedBy: "once", stopCondition: stopConditionHit }
+          : { ticks, tickErrors, stoppedBy: "once" };
+      }
       // A stop condition fired (this tick or an earlier one) and in-flight lanes have now
       // drained -> clean exit, naming the condition. Checked BEFORE the --until-idle idle exit
       // below so a configured stop condition that happens to coincide with natural idleness is

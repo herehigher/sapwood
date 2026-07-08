@@ -34,10 +34,19 @@ class FakeForge implements IForge {
       labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
     };
   }
+  /** Set to make countOpenIssuesInMilestone throw ONCE (then clear) — the P1 containment test. */
+  milestoneErrOnce: Error | null = null;
   async countOpenIssuesInMilestone(milestone: string): Promise<number> {
     this.milestoneQueries.push(milestone);
+    if (this.milestoneErrOnce) {
+      const e = this.milestoneErrOnce;
+      this.milestoneErrOnce = null;
+      throw e;
+    }
     return this.milestoneOpenCounts.length > 1 ? this.milestoneOpenCounts.shift()! : this.milestoneOpenCounts[0]!;
   }
+  milestoneTitles: string[] = [];
+  async listMilestoneTitles(): Promise<string[]> { return this.milestoneTitles; }
 }
 
 class FakeSupervisor implements Supervisor {
@@ -393,6 +402,34 @@ test("runDriver stop.onMilestoneComplete: evaluated at tick boundaries, fires on
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
   assert.equal(result.ticks, 3); // checked every tick boundary — 2 misses, then the hit
   assert.deepEqual(forge.milestoneQueries, ["M4", "M4", "M4"]);
+  deps.state.close();
+});
+
+test("runDriver stop.onMilestoneComplete: a THROWING forge read is contained — tick-error + keep looping, never a daemon crash, never a fired condition (fable gate② P1)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.milestoneErrOnce = new Error("gh: HTTP 502 from GitHub"); // transient outage on tick 1
+  forge.milestoneOpenCounts = [0]; // tick 2's read succeeds and reports complete
+  const deps = baseDeps({ forge, sleep, stop: { onMilestoneComplete: "M4" } });
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps); // must NOT reject
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition"); // survived the failure, stopped on the retry
+  assert.equal(result.ticks, 2);
+  assert.equal(result.tickErrors, 1); // the failed read was recorded, not swallowed
+  deps.state.close();
+});
+
+test("runDriver stop conditions: --once still NAMES a condition that fired on its single tick (stoppedBy stays 'once')", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.milestoneOpenCounts = [0];
+  const deps = baseDeps({ forge, sleep, stopMode: "once" as const, stop: { onMilestoneComplete: "M4" } });
+  const result = await runDriver(deps);
+  assert.equal(result.stoppedBy, "once");
+  assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
   deps.state.close();
 });
 

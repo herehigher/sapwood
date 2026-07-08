@@ -107,6 +107,13 @@ export interface IForge {
    *  behavior) — same fail-direction as an already-complete milestone, since either way there is
    *  nothing left to wait for. */
   countOpenIssuesInMilestone(milestone: string): Promise<number>;
+  /** #76: every milestone TITLE in the repo (open and closed — an already-closed milestone is a
+   *  legitimate "instantly complete" stop target). Startup validation for `onMilestoneComplete`:
+   *  `gh issue list --milestone` silently returns [] for a title that doesn't match EXACTLY
+   *  (probed: "M4" does not match "M4 — UX surface + CLI"), so a typo'd goal would otherwise
+   *  fire the stop condition on the first tick — after dispatching a full wave of workers.
+   *  cli.ts fails closed against this list BEFORE any dispatch. */
+  listMilestoneTitles(): Promise<string[]>;
 }
 
 export class GithubForge implements IForge {
@@ -325,6 +332,17 @@ export class GithubForge implements IForge {
     ]);
     const issues = JSON.parse(out) as { number: number }[];
     return issues.length;
+  }
+
+  async listMilestoneTitles(): Promise<string[]> {
+    // state=all: a closed milestone is a valid (instantly-complete) stop target. per_page=100 —
+    // ponytail: >100 milestones in one repo is not this loop's use case; validation would only
+    // false-reject, visibly, at startup.
+    const out = await this.gh([
+      "api", `repos/${this.cfg.board.owner}/${this.repo()}/milestones?state=all&per_page=100`,
+    ]);
+    const milestones = JSON.parse(out) as { title: string }[];
+    return milestones.map((m) => m.title);
   }
 
   private repo(): string {

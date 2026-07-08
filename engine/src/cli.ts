@@ -10,7 +10,7 @@ import { ZodError } from "zod";
 import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.js";
 import { init, InitError } from "./init.js";
 import { State, SCHEMA_VERSION, type WorkerRow } from "./state.js";
-import { GithubForge, type Issue } from "./forge.js";
+import { GithubForge, type IForge, type Issue } from "./forge.js";
 import { WorkerSupervisor, buildRenderPrompt } from "./worker.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
@@ -73,6 +73,13 @@ the loop at all).
   --stop-after-issues N     Stop once N issues have been merged this run
   --stop-after-prs N        Stop once N PRs have been opened this run
   --stop-on-milestone NAME  Stop once milestone NAME has zero open issues left
+                            (NAME must match the milestone title EXACTLY — validated
+                            against the repo at startup, before any dispatch)
+
+N is a floor, not an exact bound: the tick that crosses N has already dispatched its own
+wave (up to lanes.roundDispatchCap lanes), and those finish during the wind-down. With
+--once, a condition hit on the single tick is named in the exit line but never waits for
+wind-down (stoppedBy stays "once").
 
   --help, -h     Print this help and exit
 `;
@@ -489,6 +496,26 @@ export function resolveStopConfig(argv: string[], cfg: Pick<SapwoodConfig, "stop
   return resolved;
 }
 
+/** #76 (fable gate② P2): fail-closed startup validation for --stop-on-milestone. `gh issue
+ *  list --milestone` matches the EXACT title only and silently returns [] otherwise, so a typo
+ *  ("M4" vs the real "M4 — UX surface + CLI") would fire the stop condition on the first tick —
+ *  after dispatching a full wave of workers. Called by runEngine BEFORE runDriver: unknown
+ *  title = a thrown error naming the available titles, no dispatch ever happens. Pure given the
+ *  forge — exported for testing with a fake. */
+export async function assertStopMilestoneExists(
+  forge: Pick<IForge, "listMilestoneTitles">,
+  stop: StopConfig,
+): Promise<void> {
+  if (stop.onMilestoneComplete === undefined) return;
+  const titles = await forge.listMilestoneTitles();
+  if (!titles.includes(stop.onMilestoneComplete)) {
+    throw new Error(
+      `stop.onMilestoneComplete: no milestone titled "${stop.onMilestoneComplete}" in this repo ` +
+      `(exact match required). Available: ${titles.length > 0 ? titles.map((t) => `"${t}"`).join(", ") : "(none)"}`,
+    );
+  }
+}
+
 /** #76: the exit log line naming whichever stop condition fired — e.g. "sapwood run: stop
  *  condition hit — afterIssuesMerged=3 (merged 3)". Pure + exported for testing; only called
  *  when result.stopCondition is set (stoppedBy === "stop-condition"). */
@@ -522,6 +549,9 @@ async function runEngine(argv: string[]): Promise<number> {
   });
   const stopMode = parseRunStopMode(argv);
   const stop = resolveStopConfig(argv, cfg);
+  // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
+  // startup with zero dispatch, not silently stop the run after the first wave of workers.
+  await assertStopMilestoneExists(forge, stop);
   console.log(`sapwood run: tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
   // NOTE: roundSpendUsd (the per-round hard budget gate, cfg.cost.roundBudgetUsd) is left at
   // its TickDeps default (0, i.e. never over-budget) — computing a live "this round's spend"

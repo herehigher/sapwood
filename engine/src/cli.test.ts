@@ -10,6 +10,7 @@ import {
   parseStopFlags,
   resolveStopConfig,
   formatStopConditionLine,
+  assertStopMilestoneExists,
   runExitCode,
   computeDryRunPreview,
   formatDryRunPreview,
@@ -218,6 +219,20 @@ test("resolveStopConfig: no flags -> config values pass through unchanged; no co
   assert.deepEqual(resolveStopConfig(["run"], cfg), { afterIssuesMerged: 10, afterPRsOpened: 20, onMilestoneComplete: "M1" });
   const resolved = resolveStopConfig(["run"], { stop: {} });
   assert.deepEqual(resolved, {}); // no field present at all — same shape as "no stop config" (#76 regression contract)
+});
+
+test("assertStopMilestoneExists: unknown/partial title fails CLOSED at startup, naming the available exact titles (fable gate② P2)", async () => {
+  const forge = { listMilestoneTitles: async () => ["M4 — UX surface + CLI", "v0.2 — Dashboard (dogfood)"] };
+  // Exact match passes.
+  await assertStopMilestoneExists(forge, { onMilestoneComplete: "M4 — UX surface + CLI" });
+  // The exact footgun probed live: "M4" is a prefix, not a match — gh would silently return []
+  // and fire the condition on tick 1. Must throw BEFORE any dispatch, listing what IS valid.
+  await assert.rejects(
+    () => assertStopMilestoneExists(forge, { onMilestoneComplete: "M4" }),
+    /no milestone titled "M4".*M4 — UX surface \+ CLI/s,
+  );
+  // No milestone goal configured -> no forge call needed, resolves silently.
+  await assertStopMilestoneExists({ listMilestoneTitles: async () => { throw new Error("must not be called"); } }, {});
 });
 
 test("formatStopConditionLine: names the condition, its threshold, and the count/state detail", () => {
