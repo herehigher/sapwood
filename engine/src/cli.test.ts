@@ -302,6 +302,29 @@ test("parseStatusArgs: unknown flag is an error", () => {
   assert.equal(parsed.error, "unknown flag: --bogus");
 });
 
+test("parseStatusArgs: --config with no operand is an error, never a silent default-config read (Codex PR #70 P2)", () => {
+  const parsed = parseStatusArgs(["node", "sapwood", "status", "--config"]);
+  assert.equal(parsed.error, "--config requires a path");
+});
+
+test("parseStatusArgs: --config followed by a flag is an error, never consumed as a path (Codex PR #70 P2)", () => {
+  const parsed = parseStatusArgs(["node", "sapwood", "status", "--config", "--bogus", "data/db.sqlite"]);
+  assert.equal(parsed.error, "--config requires a path");
+});
+
+test("status: --config with a missing/flag operand exits 1 with the clear error via runCli", () => {
+  for (const argv of [
+    ["node", "sapwood", "status", "--config"],
+    ["node", "sapwood", "status", "--config", "--bogus", "data/db.sqlite"],
+  ]) {
+    const r = runCli(argv);
+    assert.equal(r.code, 1, argv.join(" "));
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /--config requires a path/);
+    assert.match(r.stderr, /usage: sapwood status/);
+  }
+});
+
 test("parseStatusArgs: --help / -h wins", () => {
   assert.equal(parseStatusArgs(["node", "sapwood", "status", "--help"]).help, true);
   assert.equal(parseStatusArgs(["node", "sapwood", "status", "-h"]).help, true);

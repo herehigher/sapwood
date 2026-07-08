@@ -195,7 +195,15 @@ export function parseStatusArgs(argv: string[]): StatusArgs {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--config") {
-      configPath = args[i + 1];
+      // Value-taking flag: the operand must exist and not be another flag — `--config` at the
+      // end of the line (silently loading the DEFAULT config) or `--config --bogus` (silently
+      // consuming the flag as a "path") would both report status from the wrong config with
+      // exit 0 (Codex PR #70 P2). Fail closed instead.
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        return { help: false, error: "--config requires a path", dbPath: "data/sapwood.sqlite" };
+      }
+      configPath = next;
       i++;
       continue;
     }
