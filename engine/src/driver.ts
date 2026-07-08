@@ -75,9 +75,10 @@ export type StopReason = "signal" | "once" | "idle" | "stop-condition";
 export interface DriverResult {
   /** Completed (successful) ticks. */
   ticks: number;
-  /** tick() attempts that threw and were contained (see runDriver's catch). Always 0 on a
-   *  healthy run; a persistently non-zero, growing count is the operator's signal that the
-   *  forge is unreachable while the daemon keeps (correctly) retrying. */
+  /** Contained failures: tick() attempts that threw, plus failed #76 milestone stop-condition
+   *  reads (see runDriver's two catches — mutually exclusive per tick). Always 0 on a healthy
+   *  run; a persistently non-zero, growing count is the operator's signal that the forge is
+   *  unreachable while the daemon keeps (correctly) retrying. */
   tickErrors: number;
   stoppedBy: StopReason;
   /** Present when a configured condition fired: always with stoppedBy === "stop-condition", and

@@ -518,7 +518,8 @@ export async function assertStopMilestoneExists(
 
 /** #76: the exit log line naming whichever stop condition fired — e.g. "sapwood run: stop
  *  condition hit — afterIssuesMerged=3 (merged 3)". Pure + exported for testing; only called
- *  when result.stopCondition is set (stoppedBy === "stop-condition"). */
+ *  when result.stopCondition is set (stoppedBy "stop-condition", or "once" when the single
+ *  tick satisfied a goal). */
 export function formatStopConditionLine(hit: StopConditionHit): string {
   return `sapwood run: stop condition hit — ${hit.name}=${hit.threshold} (${hit.detail})`;
 }
