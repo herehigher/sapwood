@@ -1003,13 +1003,23 @@ export function loadWorkerPromptTemplate(cfg: SapwoodConfig): string {
  *  (renderPromptTemplate). The real `sapwood run` entry point (cli.ts) calls this immediately
  *  after loadConfig(), before constructing the WorkerSupervisor, so a bad promptFile aborts
  *  startup with no dispatch ever happening. */
+/** Config-level `{{var}}`s — substituted ONCE at build time (they don't vary per issue). The
+ *  shipped prompt references the verify-label by var, not literal, so a repo that customizes
+ *  `labels.verifyNa` gets a prompt that names ITS label. */
+const CONFIG_VARS: Record<string, (cfg: SapwoodConfig) => string> = {
+  "labels.verifyNa": (cfg) => cfg.labels.verifyNa,
+};
+
 export function buildRenderPrompt(cfg: SapwoodConfig): (issue: Issue) => string {
-  const template = loadWorkerPromptTemplate(cfg);
+  const template = loadWorkerPromptTemplate(cfg).replace(/\{\{([^{}]*)\}\}/g, (match, raw: string) => {
+    const name = raw.trim();
+    return Object.hasOwn(CONFIG_VARS, name) ? CONFIG_VARS[name]!(cfg) : match;
+  });
   for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
     const name = raw!.trim();
     if (!Object.hasOwn(PROMPT_VARS, name)) {
       throw new Error(
-        `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(PROMPT_VARS).join(", ")}`,
+        `worker prompt template: unknown variable {{${name}}} — supported: ${[...Object.keys(PROMPT_VARS), ...Object.keys(CONFIG_VARS)].join(", ")}`,
       );
     }
   }

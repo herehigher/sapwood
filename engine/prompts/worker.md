@@ -32,7 +32,7 @@ markdown code fences of its own — the tags, not any fence, mark where it ends.
 
 1. **Read the issue's verification plan first.** The acceptance criteria and how to
    prove them (tests to write/run, commands, observable outcomes) live in the issue
-   body above. If the issue is labelled `verify:n/a` (docs/chore, inherently
+   body above. If the issue is labelled `{{labels.verifyNa}}` (docs/chore, inherently
    unverifiable by tests), skip step 2's red/green cycle and instead make the
    durable-knowledge doc change described, following this repo's documentation
    principle (durable knowledge in docs, not issue transcripts).

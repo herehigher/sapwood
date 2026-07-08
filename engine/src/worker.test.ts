@@ -1216,6 +1216,30 @@ test("buildRenderPrompt: loads once, eagerly (fail-fast happens at build time, n
   assert.throws(() => buildRenderPrompt(scfg), /\/nonexistent\/does-not-exist\.md/);
 });
 
+test("buildRenderPrompt: config vars substitute at build time — customized labels.verifyNa reaches the prompt", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "cfg-var.md");
+    writeFileSync(p, "skip red/green if labelled {{labels.verifyNa}} on #{{issue.number}}");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+      labels: { verifyNa: "no-verify" },
+    });
+    const rendered = buildRenderPrompt(scfg)({ number: 7, title: "t", labels: [] });
+    assert.equal(rendered, "skip red/green if labelled no-verify on #7");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: the shipped default prompt builds clean (all its vars are known)", () => {
+  const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: ["verify:n/a"], body: "b" });
+  assert.match(rendered, /labelled `verify:n\/a`/);
+  assert.doesNotMatch(rendered, /\{\{/);
+});
+
 test("buildRenderPrompt: unknown {{var}} in the template throws at BUILD time, before any issue is claimed", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
   try {
