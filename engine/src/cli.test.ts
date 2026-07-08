@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -467,6 +467,36 @@ test("status: truly read-only — DB file bytes, user_version, and journal_mode 
       "wal", // what the engine set at seed time — status didn't switch it (or anything else)
     );
     check.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status: creates ZERO -wal/-shm sidecars against a checkpointed WAL DB, dir byte-stable (Codex PR #70 round-4 P2)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const seed = new State(dbPath); // WAL mode
+  seed.upsertWorker({
+    name: "lane-1-wal", issue: 1, session_id: "s1", state: "running",
+    started_at: "2026-07-07T09:00:00.000Z", ended_at: null,
+  });
+  seed.close();
+  // Simulate a cleanly stopped engine: no -wal/-shm on disk (checkpointed away). A plain
+  // readOnly open would RE-CREATE them on first read — the bug this test pins.
+  for (const suffix of ["-wal", "-shm"]) {
+    if (existsSync(dbPath + suffix)) rmSync(dbPath + suffix);
+  }
+  const listBefore = readdirSync(dir).sort();
+  assert.deepEqual(listBefore, ["sapwood.sqlite"], "precondition: only the main DB file on disk");
+  const mainBefore = readFileSync(dbPath);
+  try {
+    const r = runStatus(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /lane-1-wal/); // still read the data correctly (immutable read)
+    const listAfter = readdirSync(dir).sort();
+    assert.deepEqual(listAfter, ["sapwood.sqlite"], "status must create no -wal/-shm sidecars");
+    assert.ok(existsSync(dbPath + "-wal") === false && existsSync(dbPath + "-shm") === false);
+    assert.ok(readFileSync(dbPath).equals(mainBefore), "main DB file must be byte-stable");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
