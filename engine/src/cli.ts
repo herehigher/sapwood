@@ -175,6 +175,10 @@ export function formatDryRunPreview(preview: DryRunPreview): string {
 
 async function runDryRun(): Promise<number> {
   const cfg = loadConfig();
+  // Same fail-fast the real run does (#74): a broken worker.promptFile must surface in the
+  // preview too — dry-run exists to predict the real run, not to green-light a config the
+  // real run would reject at startup. Renderer is discarded; only validation matters here.
+  buildRenderPrompt(cfg);
   const forge = new GithubForge(cfg);
   const preview = computeDryRunPreview(await forge.getReadyIssues(), cfg);
   process.stdout.write(formatDryRunPreview(preview));
