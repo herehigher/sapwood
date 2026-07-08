@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "sapwood orchestration engine (conductor, worker, forge, guard, state)",
   "type": "module",
-  "engines": { "node": ">=22.13.0" },
+  "engines": { "node": ">=24.0.0" },
   "main": "dist/index.js",
   "bin": { "sapwood": "dist/cli.js" },
   "scripts": {
