@@ -134,6 +134,7 @@ class FakeForge implements IForge {
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(n: number, l: string): Promise<void> { this.labelsAdded.push([n, l]); }
+  async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> { return 1; }
   async getPRStatus(): Promise<PRStatus> {
     if (this.statusErr) throw this.statusErr;
@@ -144,6 +145,7 @@ class FakeForge implements IForge {
     this.merged.push([pr, headOid]);
   }
   async addPRComment(pr: number, body: string): Promise<void> { this.comments.push([pr, body]); }
+  async addIssueComment(): Promise<void> {}
   async getIssueBody(): Promise<string> { return ""; }
   async getPRReviewData(): Promise<PRReviewData> { return this.reviewData; }
 }

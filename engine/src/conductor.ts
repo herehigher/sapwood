@@ -13,7 +13,7 @@
 //    (conductor identity), never a worker. The worker is only ever the injected dispatch fn.
 
 import type { IForge, Issue } from "./forge.js";
-import type { State, BoardStatus, PendingRollback, ModelUsageEntry } from "./state.js";
+import type { State, BoardStatus, PendingRollback, ModelUsageEntry, WorkerRow } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { DriveOutcome } from "./merge-driver.js";
 import type { ReviewFallbackLock } from "./reviewer.js";
@@ -57,18 +57,23 @@ export function budgetExceeded(total: number, cap: number): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Engine cost ceiling + kill switch (#14, M3 Security model "hard engine ceiling").
-// Two-tier cost control: worker.budgetUsdSoft is a per-worker graceful handoff (never a
-// mid-work kill, see worker.ts requestHandoff). This is the OTHER tier — an engine-wide,
-// aggregate-across-workers safety boundary: a cumulative daily USD cap + a wall-clock cap,
-// plus an out-of-band kill switch (a file sentinel only the engine can write — see
-// State.isKillSwitchActive). Any one of the three freezes ALL new dispatch and starts a
-// bounded drain (graceful handoff of running workers) before escalating to a hard kill.
-// #59/#61: the kill switch ALSO freezes the DRIVE loop's review-gate/merge path (below,
-// in tick()) — a lane already past gate①/gate② holds `queued` instead of autonomously
-// merging, and this is checked fresh per driving lane / per dispatched issue (not just
-// once per tick via this section's ceilingBreached snapshot), so the switch takes effect
-// mid-tick, not only on the next tick.
+// Engine cost ceiling (#14, M3 Security model "hard engine ceiling"). Two-tier cost
+// control: worker.budgetUsdSoft is a per-worker graceful handoff (never a mid-work kill,
+// see worker.ts requestHandoff). This is the OTHER tier — an engine-wide,
+// aggregate-across-workers safety boundary: a cumulative daily USD cap + a wall-clock cap.
+// Either freezes ALL new dispatch and starts a bounded drain (graceful handoff of running
+// workers) before escalating to a hard kill.
+//
+// #69: the out-of-band KILL SWITCH (a file sentinel only a human/engine can write — see
+// State.isKillSwitchActive) used to be a THIRD ceiling reason here, plus two separate
+// per-phase re-checks inside the DRIVE and DISPATCH loops below (#59/#61) added to catch an
+// operator flipping it mid-tick. All three are replaced by ONE global gate at the very top
+// of tick() (see there): active -> drain-only, tick returns before anything else runs — no
+// ceiling evaluation, no rollback retry, no reclaim, no drive, no dispatch. The trade-off
+// (accepted per the #69 CTO policy — rare edges degrade to less machinery, not more): a
+// switch flipped mid-tick, after tick() already passed the top-of-tick check, is no longer
+// caught until the NEXT tick, not the same one. Given tick cadence is normally minutes at
+// most, this is a small, documented gap in exchange for deleting 3 separate check sites.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
@@ -92,17 +97,18 @@ export function engineSessionGapSec(tickIntervalSec: number): number {
   return Math.max(ENGINE_SESSION_GAP_SEC, 2 * tickIntervalSec);
 }
 
-/** Pure ceiling check. Order is fixed (kill-switch, daily-budget, wall-clock) so multiple
- *  simultaneous breaches report deterministically; empty array = no breach. */
+/** Pure ceiling check — daily USD cap + wall-clock cap ONLY. #69: the kill switch is no
+ *  longer one of these reasons; it's checked once, at the very top of tick(), before this
+ *  (or anything else) ever runs — see the section comment above. Order is fixed
+ *  (daily-budget, wall-clock) so multiple simultaneous breaches report deterministically;
+ *  empty array = no breach. */
 export function evaluateCeiling(input: {
   dailySpendUsd: number;
   dailyBudgetUsd: number;
   wallClockElapsedSec: number;
   maxWallClockSec: number;
-  killSwitchActive: boolean;
 }): CeilingReason[] {
   const reasons: CeilingReason[] = [];
-  if (input.killSwitchActive) reasons.push("kill-switch");
   if (budgetExceeded(input.dailySpendUsd, input.dailyBudgetUsd)) reasons.push("daily-budget");
   if (input.wallClockElapsedSec > input.maxWallClockSec) reasons.push("wall-clock");
   return reasons;
@@ -243,11 +249,27 @@ export interface LaneProbe {
   modelUsage?: ModelUsageEntry[];
 }
 
+/** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
+ *  automation never deletes a worktree that may hold uncommitted work — it reports
+ *  `worktreeRetained: true` and the CONDUCTOR (which owns the forge) escalates to a human
+ *  (issue comment with the absolute path + needs-human label). Clean worktree -> deleted as
+ *  before, `worktreeRetained: false`. `worktreePath` is null when no worktree ever existed. */
+export interface ReclaimResult {
+  worktreePath: string | null;
+  worktreeRetained: boolean;
+}
+
 /** The conductor's only handle on workers. worker.ts (M2 #11) implements this. */
 export interface Supervisor {
   probe(worker: string): Promise<LaneProbe>;
   dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
-  reclaim(worker: string): Promise<void>; // tear down a dead/stale lane (process-tree kill + cleanup)
+  /** Tear down a dead/stale lane (process-tree kill + worktree retention/cleanup, #69). */
+  reclaim(worker: string): Promise<ReclaimResult>;
+  /** #69 (fable P3-b): report a lane's worktree dirtiness WITHOUT any teardown — no kill, no
+   *  delete. For a terminal-sentinel lane (`.done`/`.failed`) rescued to `driving`, which is
+   *  never reclaim()'d, so its worktree is never dirtiness-checked. `worktreeRetained: true`
+   *  == possibly-dirty ⇒ the conductor escalates to needs-human instead of auto-driving. */
+  inspectWorktree(worker: string): ReclaimResult;
   /** Graceful drain (SIGTERM, not SIGKILL): the #14 engine-ceiling drain path reuses this —
    *  same mechanism as a worker's own soft-budget handoff. Returns false if not applicable
    *  (already reclaiming/requested, or unknown lane) — never throws. */
@@ -325,9 +347,10 @@ export interface TickResult {
   reclaimed: ReclaimOutcome[];
   dispatched: DispatchOutcome[];
   overBudget: boolean;
-  /** #14 engine ceiling: daily USD cap / wall-clock cap / kill switch. Any breach freezes
-   *  ALL new dispatch this tick (every ready issue skipped with reason "ceiling") regardless
-   *  of lanes/caps/budget below. */
+  /** #14 engine ceiling (daily USD cap / wall-clock cap): a breach freezes ALL new dispatch
+   *  this tick (every ready issue skipped with reason "ceiling") regardless of
+   *  lanes/caps/budget below. #69: also true (reasons = ["kill-switch"]) when the global
+   *  kill-switch gate short-circuited the whole tick to drain-only. */
   ceilingBreached: boolean;
   ceilingReasons: CeilingReason[];
   /** Running-worker names asked to gracefully hand off (SIGTERM) this tick because of the
@@ -431,11 +454,185 @@ async function attemptRollback(
   }
 }
 
+/** #69 dirty-worktree retention: tell a human where the preserved worktree lives. Best-effort
+ *  and never throws (this runs on recovery paths that must not gain new failure modes) — the
+ *  structured event always lands even if both forge calls fail. The needs-human LABEL is the
+ *  caller's job (every retention call site already applies it on its own escalation branch). */
+async function reportRetainedWorktree(
+  forge: IForge, state: State, worker: string, issue: number, worktreePath: string | null,
+): Promise<void> {
+  state.appendEvent("worktree-retained", { worker, issue, worktreePath });
+  await forge
+    .addIssueComment(
+      issue,
+      `sapwood: lane \`${worker}\` was torn down with possibly-uncommitted changes in its ` +
+        `worktree. Automation never deletes work it can't prove is clean (#69) — the worktree ` +
+        `was left on disk at:\n\n\`${worktreePath}\`\n\nSalvage or discard it by hand, then ` +
+        `remove the \`needs-human\` label.`,
+    )
+    .catch(() => {});
+}
+
+/** The bounded drain (PLAN.md Security model: drain before kill, always). Shared by the #69
+ *  global kill-switch gate and the #14 cost-ceiling breach path in tick(): record the breach
+ *  (first detection only — see State.recordCeilingBreach's INSERT OR IGNORE), ask every
+ *  running worker to hand off gracefully (idempotent per tick), and only once
+ *  cfg.cost.drainWindowSec has elapsed since first detection escalate to the hard
+ *  process-tree kill + needs-human. No PR-aware rescue on escalation — this is a safety
+ *  boundary, not a liveness classification, so fail-safe to human triage. */
+async function drainThenEscalate(
+  forge: IForge, state: State, supervisor: Supervisor, cfg: SapwoodConfig,
+  reasons: CeilingReason[], nowDate: Date, iso: () => string,
+): Promise<{ drainRequested: string[]; escalated: string[] }> {
+  state.recordCeilingBreach(reasons, nowDate);
+  const drainRequested: string[] = [];
+  const escalated: string[] = [];
+  const stillRunning = state.runningWorkers();
+  for (const w of stillRunning) {
+    if (supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
+  }
+  const breach = state.ceilingBreach();
+  if (breach && drainEscalationDue(breach.at.toISOString(), nowDate.getTime(), cfg.cost.drainWindowSec)) {
+    for (const w of stillRunning) {
+      // Probe BEFORE reclaim (which kills the process) so an open PR is still discoverable for
+      // the belt-and-suspenders PR-label below.
+      const p = await supervisor.probe(w.name);
+      const r = await supervisor.reclaim(w.name);
+      // #69 (fable P2a): do ALL forge work BEFORE the terminal `upsertWorker(failed)`, and make
+      // the label calls best-effort. Ordering matters — once the row goes `failed` it leaves
+      // runningWorkers() and no later tick re-escalates it; if a forge call had thrown between
+      // the terminal upsert and the retained-worktree report, a possibly-WIP-bearing worktree
+      // would sit on disk with zero trace (no label, no comment, no event) and the drain tick
+      // would abort mid-loop. Best-effort labels + report guarantee the structured event and
+      // the terminal transition always land, exactly as attemptRollback does elsewhere.
+      await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});
+      // Parity with the DEAD path's P1 fix: land needs-human on the PR too (where the merge
+      // gate reads labels), for a dirty-WIP lane that happens to have an open PR.
+      if (r.worktreeRetained && p.hasPr && p.prNumber != null) {
+        await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman).catch(() => {});
+      }
+      if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
+      state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons });
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      escalated.push(w.name);
+    }
+  }
+  return { drainRequested, escalated };
+}
+
+/** Reclaim a lane that has reached a TERMINAL sentinel (handoff / done / failed) — record its
+ *  real outcome and transition the worker row out of `running`. Returns the outcome, or `null`
+ *  when the lane is NOT terminal (KEEP still-running, or DEAD with no sentinel) so the caller
+ *  handles those (KEEP/DEAD live in the main reclaim loop; the kill-switch gate leaves them for
+ *  the drain). Extracted so the #69 kill-switch gate can reclaim terminal lanes without
+ *  duplicating this logic (Codex PR #72 P2) — a graceful drain that already wrote .handoff/.done
+ *  must be recorded as such, never rotted as `running` until drainThenEscalate mislabels it
+ *  failed. Touches no process/worktree (terminal lanes have sentinels — nothing to kill). */
+async function reclaimTerminalLane(
+  forge: IForge, state: State, supervisor: Supervisor, cfg: SapwoodConfig,
+  w: WorkerRow, p: LaneProbe, threshold: number, iso: () => string,
+): Promise<ReclaimOutcome | null> {
+  const costUsd = p.costUsd ?? 0;
+  const modelUsage = p.modelUsage ?? [];
+  if (p.handoff) {
+    // Soft-budget graceful handoff: terminal-but-resumable. Never killed; the conductor may
+    // --resume later. Checked before classifyLane (a handoff is not a failure).
+    state.upsertWorker({ ...w, state: "handoff", ended_at: iso() });
+    // M4 --resume TRAP (gate② PR #41 P3): this records the handed-off run's total_cost_usd. If
+    // this lane is later resumed and claude reports CUMULATIVE total_cost_usd for the resumed
+    // session, recording the resumed run's total again at its terminal transition double-counts
+    // the pre-handoff portion — fail-SAFE for the cap (over-counts) but corrupts accounting.
+    // Whoever wires --resume (M4) must record the delta, or verify claude's resume cost first.
+    state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+    state.appendEvent("handoff", { worker: w.name, issue: w.issue });
+    return { kind: "handoff", worker: w.name, issue: w.issue, costUsd, modelUsage };
+  }
+  const cls = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive);
+  if (cls === "DONE") {
+    const next = laneOnReclaimDone(p.hasPr);
+    if (next === "DRIVING") {
+      // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
+      // gate resolves it). No requeue, no human escalation.
+      state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
+    } else {
+      // ESCALATE_NOPR: done but no PR -> nothing to drive; free the lane, escalate to human.
+      state.upsertWorker({ ...w, state: "done", ended_at: iso() });
+      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+    }
+    state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+    state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next });
+    return { kind: "done", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
+  }
+  if (cls === "FAILED") {
+    let next = laneOnReclaimFailed(p.hasPr);
+    // #69 (fable P3-b): a `.failed`-sentinel lane with a PR is rescued to `driving` — but the
+    // worker exited NON-ZERO, so it may have left uncommitted WIP alongside its PR. Apply the
+    // DEAD-path dirty ⇒ needs-human policy here too: inspect the worktree (no teardown — the
+    // process already exited) and, if possibly-dirty, escalate to a human instead of
+    // auto-driving an incomplete PR toward merge.
+    let retained: ReclaimResult | null = null;
+    if (next === "DRIVING") {
+      retained = supervisor.inspectWorktree(w.name);
+      if (retained.worktreeRetained) next = "ESCALATE";
+    }
+    if (next === "DRIVING") {
+      // Failed but a clean PR exists (e.g. budget-exhausted after opening it): rescue — hold
+      // the lane driving for the review gate rather than escalating.
+      state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
+    } else {
+      // Forge work BEFORE the terminal upsert (parity with the DEAD path's ordering). needs-human
+      // lands on the PR too, where the merge gate reads labels, when the escalation is dirty-WIP.
+      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      if (retained?.worktreeRetained) {
+        if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
+        await reportRetainedWorktree(forge, state, w.name, w.issue, retained.worktreePath);
+      }
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+    }
+    state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+    state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next });
+    return { kind: "failed", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
+  }
+  return null; // KEEP or DEAD — not a terminal sentinel; caller handles it
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now ?? (() => new Date());
   const iso = () => now().toISOString();
   const threshold = cfg.worker.heartbeatStaleSecs;
+
+  // ── KILL SWITCH (#69): ONE global gate, checked before anything else runs. Active ->
+  //   this tick is DRAIN + TERMINAL-RECLAIM ONLY. Replaces the per-phase gates from #59/#61/#64
+  //   (a DRIVE-loop check, a DISPATCH-loop check, and the kill-switch tier of evaluateCeiling).
+  //   Two things run; everything else is blocked:
+  //     1. TERMINAL-state reclaim (Codex PR #72 P2): a lane that already wrote .handoff/.done/
+  //        .failed has FINISHED draining — record its real outcome (via reclaimTerminalLane) so
+  //        it isn't rotted as `running` and then mislabeled `failed`/`needs-human` by the drain
+  //        escalation below. This is part of draining, not new work.
+  //     2. DRAIN of the still-running (KEEP) / crashed (DEAD, no sentinel) lanes: request
+  //        handoffs and, past the bounded window, hard-kill + escalate (drainThenEscalate).
+  //   Blocked: rollback retry, DRIVE/merge, DISPATCH, and the kill+requeue of DEAD lanes (all
+  //   "new work"). Accepted trade-off (#69 policy: rare edges degrade to less machinery): a
+  //   switch flipped MID-tick, after this check passed, takes effect at the next tick's gate.
+  if (state.isKillSwitchActive()) {
+    const reclaimed: ReclaimOutcome[] = [];
+    for (const w of state.runningWorkers()) {
+      const p = await supervisor.probe(w.name);
+      const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
+      if (terminal) reclaimed.push(terminal); // KEEP/DEAD lanes stay running -> drained below
+    }
+    // drainThenEscalate re-reads runningWorkers() AFTER the terminal reclaim above transitioned
+    // those lanes out of `running`, so a just-recorded handoff/done lane is never re-touched.
+    const { drainRequested, escalated } = await drainThenEscalate(
+      forge, state, supervisor, cfg, ["kill-switch"], now(), iso,
+    );
+    return {
+      reclaimed, dispatched: [], overBudget: false,
+      ceilingBreached: true, ceilingReasons: ["kill-switch"],
+      drainRequested, escalated, driven: [], rollbacks: [],
+    };
+  }
 
   // ── ROLLBACK RETRY (#31): retry every board mutation still pending from a prior tick's
   //   recovery-path failure, BEFORE this tick does anything else. Never throws (see
@@ -449,91 +646,69 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // ── RECLAIM: classify each in-flight lane from its 4 completion signals ──
   for (const w of state.runningWorkers()) {
     const p = await supervisor.probe(w.name);
-    // #47: the same {costUsd, modelUsage} pair feeds BOTH state.recordSpend (the #14 ledger)
-    // and the reclaimed[] outcome pushed below, for every terminal transition this loop can
-    // take (handoff/done/failed/dead) — computed once so the two never drift apart.
-    const costUsd = p.costUsd ?? 0;
-    const modelUsage = p.modelUsage ?? [];
-    if (p.handoff) {
-      // Soft-budget graceful handoff: terminal-but-resumable. Never killed; the conductor
-      // may --resume later. Checked before classifyLane (a handoff is not a failure).
-      state.upsertWorker({ ...w, state: "handoff", ended_at: iso() });
-      // M4 --resume TRAP (gate② PR #41 P3): this records the handed-off run's
-      // total_cost_usd. If this lane is later resumed and claude reports CUMULATIVE
-      // total_cost_usd for the resumed session, recording the resumed run's total again at
-      // its terminal transition double-counts the pre-handoff portion — fail-SAFE for the
-      // cap (over-counts) but corrupts accounting. Whoever wires --resume (M4) must record
-      // the delta, or verify claude's resume cost semantics first.
-      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
-      state.appendEvent("handoff", { worker: w.name, issue: w.issue });
-      reclaimed.push({ kind: "handoff", worker: w.name, issue: w.issue, costUsd, modelUsage });
+    // Terminal sentinel (handoff/done/failed) -> record + transition out of `running`. Shared
+    // with the kill-switch gate above; returns null for KEEP/DEAD, handled below.
+    const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
+    if (terminal) {
+      reclaimed.push(terminal);
       continue;
     }
-    const cls = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive);
-    if (cls === "KEEP") {
+    // #47: the same {costUsd, modelUsage} pair feeds BOTH state.recordSpend (the #14 ledger)
+    // and the reclaimed[] outcome — computed once so the two never drift apart.
+    const costUsd = p.costUsd ?? 0;
+    const modelUsage = p.modelUsage ?? [];
+    if (classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive) === "KEEP") {
       reclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
-    } else if (cls === "DONE") {
-      const next = laneOnReclaimDone(p.hasPr);
-      if (next === "DRIVING") {
-        // PR produced: hold the lane in `driving` (it still occupies a lane until the #13
-        // review gate resolves it). No requeue, no human escalation.
-        state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
-      } else {
-        // ESCALATE_NOPR: done but no PR -> nothing to drive; free the lane, escalate to human.
-        state.upsertWorker({ ...w, state: "done", ended_at: iso() });
-        await forge.addLabel(w.issue, cfg.labels.needsHuman);
-      }
-      // Completed-run cost becomes known exactly once, here — record it into the #14
-      // engine-ceiling ledger regardless of which branch (DRIVING or ESCALATE_NOPR) fired.
-      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
-      state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next });
-      reclaimed.push({ kind: "done", worker: w.name, issue: w.issue, next, costUsd, modelUsage });
-    } else if (cls === "FAILED") {
-      const next = laneOnReclaimFailed(p.hasPr);
-      if (next === "DRIVING") {
-        // Failed but a clean PR exists (e.g. budget-exhausted after opening it): rescue —
-        // hold the lane driving for the review gate rather than escalating.
-        state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
-      } else {
-        state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-        await forge.addLabel(w.issue, cfg.labels.needsHuman);
-      }
-      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
-      state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next });
-      reclaimed.push({ kind: "failed", worker: w.name, issue: w.issue, next, costUsd, modelUsage });
-    } else {
-      // DEAD: stale heartbeat or confirmed-dead wrapper with no sentinel. Always tear the
-      // lane down (process-tree kill + cleanup). If a PR was already opened, rescue it to
-      // `driving` rather than requeuing — requeuing would let a second worker race the open
-      // PR (Codex R2 P1). Only a dead lane with NO PR is handed back to Ready.
-      await supervisor.reclaim(w.name);
-      const rescued = p.hasPr;
-      if (rescued) {
-        state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
-      } else {
-        state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-        // #31 (finding 2): persist the requeue BEFORE attempting it. The old code awaited
-        // this unguarded AFTER the row above already went terminal — a transient forge
-        // failure here used to propagate straight out of tick() with the worker row already
-        // `failed` and the board still "In Progress": unreclaimable (runningWorkers() no
-        // longer sees it) and un-requeueable (nothing ever retried the board mutation).
-        // Persisting first + attempting via attemptRollback (never throws) means a failure
-        // here is retried by a later tick's ROLLBACK RETRY phase instead of stranding it.
-        const rollbackId = state.addPendingRollback(w.issue, "ready", "dead-lane-requeue", iso());
-        rollbacks.push(
-          await attemptRollback(
-            forge, state, cfg,
-            { id: rollbackId, issue: w.issue, target: "ready", reason: "dead-lane-requeue", attempts: 0 },
-            iso,
-          ),
-        );
-      }
-      // Usually 0 (a DEAD lane has no terminal sentinel to parse a cost from) but record
-      // whatever the probe knows — harmless, and future probes may recover a partial cost.
-      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
-      state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
-      reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
+      continue;
     }
+    // DEAD: stale heartbeat or confirmed-dead wrapper with no sentinel. Always tear the lane
+    // down (process-tree kill). If a PR was already opened, rescue it to `driving` rather than
+    // requeuing — requeuing would let a second worker race the open PR (Codex R2 P1). Only a
+    // dead lane with NO PR is handed back to Ready.
+    // #69 dirty-worktree retention: reclaim() deletes the worktree ONLY when it's provably
+    // clean; a possibly-dirty one survives on disk and is escalated to a human here.
+    const r = await supervisor.reclaim(w.name);
+    // #69 P1 (Codex PR #72): a retained (possibly-dirty) worktree means INCOMPLETE work that
+    // needs human salvage — the lane must leave the auto-drive path ENTIRELY, even with an
+    // open PR. The merge gate reads the PR's OWN labels (getPRReviewData), not the source
+    // issue's, so a `driving` rescue would let that incomplete PR auto-merge while the WIP
+    // waits for a human. So a retained worktree OVERRIDES the has-PR rescue: mark the lane
+    // failed (never driving -> DRIVE never sees it) and land `needs-human` where the gate
+    // looks — on the PR too, when its number is known.
+    const rescued = p.hasPr && !r.worktreeRetained;
+    if (r.worktreeRetained) {
+      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
+      await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      // No requeue to Ready: an open PR must not be raced by a fresh worker, and a no-PR dirty
+      // lane is a human-salvage case (needs-human already blocks re-dispatch), not a clean
+      // re-dispatch. The retained worktree + needs-human hold it for human triage.
+    } else if (rescued) {
+      state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
+    } else {
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      // #31 (finding 2): persist the requeue BEFORE attempting it. The old code awaited this
+      // unguarded AFTER the row above already went terminal — a transient forge failure here
+      // used to propagate straight out of tick() with the worker row already `failed` and the
+      // board still "In Progress": unreclaimable (runningWorkers() no longer sees it) and
+      // un-requeueable (nothing ever retried the board mutation). Persisting first + attempting
+      // via attemptRollback (never throws) means a failure here is retried by a later tick's
+      // ROLLBACK RETRY phase instead of stranding it.
+      const rollbackId = state.addPendingRollback(w.issue, "ready", "dead-lane-requeue", iso());
+      rollbacks.push(
+        await attemptRollback(
+          forge, state, cfg,
+          { id: rollbackId, issue: w.issue, target: "ready", reason: "dead-lane-requeue", attempts: 0 },
+          iso,
+        ),
+      );
+    }
+    // Usually 0 (a DEAD lane has no terminal sentinel to parse a cost from) but record whatever
+    // the probe knows — harmless, and future probes may recover a partial cost.
+    state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+    state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
+    reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
 
   // ── DRIVE (#13): a DONE+PR lane is "driving" (awaiting gate①/gate②). producer != merger is
@@ -543,26 +718,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const driven: DrivenOutcome[] = [];
   const gate = deps.mergeGate;
   if (gate) {
+    // #69: no per-lane kill-switch re-check here — an active switch never reaches this loop
+    // at all (the global gate at the top of tick() returns first). See the gate's comment for
+    // the accepted mid-tick trade-off.
     for (const w of state.drivingWorkers()) {
-      // #59: the kill switch is a hard "stop ALL outward autonomous action" signal, not just a
-      // dispatch freeze. Re-read it FRESH on every iteration (not once before the loop) —
-      // gate.driveOne below does real async GitHub work (CI status, review verdicts, the merge
-      // call itself), so a single DRIVE phase iterating several driving lanes can span real
-      // wall-clock time. An operator dropping the sentinel mid-loop must stop lanes processed
-      // LATER in this same pass too, not just the next tick. It's a cheap sync file-existence
-      // check (see isKillSwitchActive), so per-lane cost is a non-issue — Codex review on PR
-      // #61 caught both this staleness gap and, separately, that the check needs to run BEFORE
-      // the missing-PR fail-safe just past this branch (it calls forge.addLabel + marks the
-      // worker failed, itself an outward action under a stop signal).
-      if (state.isKillSwitchActive()) {
-        // `pr` falls back to -1 for a malformed/legacy lane with no PR number, matching the
-        // sentinel the missing-PR fail-safe below already uses. Every driving lane — PR or not —
-        // just queues and holds driving, resuming normal driving/merging once the switch clears.
-        const pr = w.pr ?? -1;
-        state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
-        driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
-        continue;
-      }
       if (w.pr == null) {
         // Fail-safe: a driving lane MUST carry a PR number (set at the reclaim transition
         // above) to be driven through gates. Its absence here (only checked once a mergeGate
@@ -653,11 +812,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   }
 
   // ── CEILING (#14): engine-wide hard safety boundary, orthogonal to the per-round
-  //   overBudget check below. Any breach (daily USD cap / wall-clock cap / kill switch)
-  //   freezes ALL new dispatch this tick and starts (or continues) a bounded drain: running
-  //   workers are asked to hand off gracefully; only after cfg.cost.drainWindowSec with no
-  //   resolution does the conductor escalate to the hard process-tree kill. Drain before
-  //   kill, always (PLAN.md Security model).
+  //   overBudget check below. Any breach (daily USD cap / wall-clock cap) freezes ALL new
+  //   dispatch this tick and starts (or continues) the bounded drain -> escalate sequence
+  //   (see drainThenEscalate). The kill switch is NOT evaluated here anymore — it's the
+  //   global gate at the top of tick() (#69).
   //   NOTE the daily cap is POST-HOC, not a real-time cutoff: spend is only known at worker
   //   completion (stream-json carries no in-flight cost), so still-running lanes contribute
   //   nothing until they finish and the cap trips on the completion that crosses it. Max
@@ -671,37 +829,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       (nowDate.getTime() -
         state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec ?? 0)).getTime()) / 1000,
     maxWallClockSec: cfg.cost.maxWallClockSec,
-    killSwitchActive: state.isKillSwitchActive(),
   });
   const ceilingBreached = ceilingReasons.length > 0;
-  const drainRequested: string[] = [];
-  const escalated: string[] = [];
+  let drainRequested: string[] = [];
+  let escalated: string[] = [];
   if (ceilingBreached) {
-    // INSERT OR IGNORE: only the FIRST detection sets "at" — a still-breached engine must
-    // not keep resetting its own drain-window clock tick after tick.
-    state.recordCeilingBreach(ceilingReasons, nowDate);
-    const stillRunning = state.runningWorkers();
-    for (const w of stillRunning) {
-      // Idempotent (worker.ts guards re-requests) — safe to call every tick while breached.
-      if (supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
-    }
-    const breach = state.ceilingBreach();
-    if (breach && drainEscalationDue(breach.at.toISOString(), nowDate.getTime(), cfg.cost.drainWindowSec)) {
-      // Bounded drain window elapsed with no resolution -> escalate to the hard kill
-      // (reuses the same process-tree kill the DEAD-lane reclaim path uses above). Treated
-      // like a dead lane: no PR-aware rescue here — this is a safety-ceiling breach, not a
-      // liveness classification, so fail-safe to escalate + human triage.
-      for (const w of stillRunning) {
-        await supervisor.reclaim(w.name);
-        state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-        await forge.addLabel(w.issue, cfg.labels.needsHuman);
-        state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons: ceilingReasons });
-        escalated.push(w.name);
-      }
-    }
+    ({ drainRequested, escalated } = await drainThenEscalate(
+      forge, state, supervisor, cfg, ceilingReasons, nowDate, iso,
+    ));
   } else {
-    // Resolved (kill switch lifted / daily cap rolled to a fresh day / wall-clock cfg
-    // raised) -> clear so a future re-breach starts its own fresh drain window.
+    // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / kill switch
+    // lifted before this tick) -> clear so a future re-breach starts a fresh drain window.
     state.clearCeilingBreach();
   }
 
@@ -753,18 +891,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
     }
-    // #61 F1 (independent second-opinion review, issue #64 filed for a separate follow-up):
-    // the DISPATCH loop has the same staleness gap the DRIVE loop was fixed for above.
-    // forge.claimIssue (board mutation) and supervisor.dispatch just below are real async
-    // outward actions — dispatch spawns a brand-new autonomous worker process, and multiple
-    // issues can dispatch in one tick (up to roundDispatchCap). The `ceilingBreached` snapshot
-    // above only catches a kill switch already set when DISPATCH started; re-read fresh here,
-    // immediately before the outward actions, so a switch dropped mid-loop still stops issues
-    // reached later in this same pass instead of letting them dispatch anyway.
-    if (state.isKillSwitchActive()) {
-      dispatched.push({ kind: "skipped", issue: issue.number, reason: "ceiling" });
-      continue;
-    }
+    // #69: no per-issue kill-switch re-check here (the #61/#64 mid-loop guard) — an active
+    // switch never reaches this loop; see the global gate at the top of tick().
     // Claim BEFORE launching (matches 0day claim_issue.sh order). The board transition
     // takes the issue out of the Ready lane first, so a launch failure can't leave an
     // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If

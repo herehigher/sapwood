@@ -74,11 +74,19 @@ export interface IForge {
   claimIssue(issue: number): Promise<void>;
   setBoardStatus(issue: number, status: "ready" | "inProgress" | "done"): Promise<void>;
   addLabel(issue: number, label: string): Promise<void>;
+  /** Add a label to a PULL REQUEST. #69 P1: the merge gate reads a PR's OWN labels
+   *  (getPRReviewData → deriveGate's humanLabels check), not the source issue's, so escalating
+   *  a crashed-with-WIP lane to `needs-human` must land here to actually gate the PR. */
+  addPRLabel(pr: number, label: string): Promise<void>;
   openPR(branch: string, title: string, body: string): Promise<number>;
   getPRStatus(pr: number): Promise<PRStatus>;
   mergePR(pr: number, headOid: string): Promise<void>;
   /** Post a PR comment (e.g. the `@codex review` trigger). #13 reviewer.ts. */
   addPRComment(pr: number, body: string): Promise<void>;
+  /** Post an ISSUE comment (distinct from addPRComment — a reclaimed lane's retained
+   *  worktree may have no PR at all yet). #69: the dirty-worktree-retention escalation path
+   *  uses this to tell a human where the preserved worktree lives. */
+  addIssueComment(issue: number, body: string): Promise<void>;
   /** Fetch gate②'s raw review signals for a PR. #13 reviewer.ts. */
   getPRReviewData(pr: number): Promise<PRReviewData>;
   /** Raw issue body text (#46, Decision #8's gate② re-check): reviewer.ts extracts the
@@ -215,6 +223,16 @@ export class GithubForge implements IForge {
     // The `@codex review` trigger (default reviewer) rides this same call — a plain PR
     // comment, never a review/approval/merge call (producer != reviewer != merger).
     await this.gh(["pr", "comment", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
+  }
+
+  async addIssueComment(issue: number, body: string): Promise<void> {
+    await this.gh(["issue", "comment", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
+  }
+
+  async addPRLabel(pr: number, label: string): Promise<void> {
+    // `gh pr edit` (not `gh issue edit`) so a PR number is never mis-resolved to a same-number
+    // issue on repos where the two namespaces overlap.
+    await this.gh(["pr", "edit", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--add-label", label]);
   }
 
   async getIssueBody(issue: number): Promise<string> {

@@ -16,10 +16,12 @@ class FakeForge implements IForge {
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
+  async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> { return 1; }
   async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
+  async addIssueComment(): Promise<void> {}
   async getIssueBody(): Promise<string> { return ""; }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
@@ -39,7 +41,12 @@ class FakeSupervisor implements Supervisor {
     const name = `lane-${issue.number}-${++this.n}`;
     return { name, sessionId: `sess-${name}` };
   }
-  async reclaim(): Promise<void> {}
+  async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
+    return { worktreePath: null, worktreeRetained: false };
+  }
+  inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
+    return { worktreePath: null, worktreeRetained: false };
+  }
   requestHandoff(): boolean { return true; }
 }
 

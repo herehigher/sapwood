@@ -15,23 +15,25 @@
 // SECURITY: spawn uses an argv array + detached process group — never a shell. The coarse
 // allowed/disallowedTools below are noise-reduction only; the real boundary is the
 // fail-closed PreToolUse guard hook wired in via --settings (#26).
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync,
+  rmSync, statSync, utimesSync, writeFileSync, type Dirent,
+} from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
-import type { Supervisor, LaneProbe } from "./conductor.js";
+import type { Supervisor, LaneProbe, ReclaimResult } from "./conductor.js";
 import type { ModelUsageEntry } from "./state.js";
 
-/** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60: a lane
- *  that's hard-killed (escalated past drain, or never resumed after a handoff) before ever
+/** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60/#69: a
+ *  lane that's hard-killed (escalated past drain, or never resumed after a handoff) before ever
  *  producing a terminal "result" line has genuinely unrecoverable cost here — total_cost_usd
- *  only ever appears on that line, never mid-stream. That's a known ceiling, not a bug; making
- *  the .handoff sentinel reliable (onExit's preserveHandoffWip) is what keeps the common drain
- *  case from hitting it, since a later `claude --resume` produces a real result line normally. */
+ *  only ever appears on that line, never mid-stream. That's a known ceiling, not a bug; the
+ *  common drain case avoids it because a later `claude --resume` (reusing the untouched
+ *  worktree in place) produces a real result line normally. */
 export function parseCostUsd(jsonl: string): number {
   let cost = 0;
   for (const line of jsonl.split("\n")) {
@@ -239,16 +241,6 @@ export class WorkerSupervisor implements Supervisor {
   // also happens to match "handoff was requested, pid now confirmed dead" — reclaim() already
   // decided its fate.
   private readonly detachedReclaiming = new Set<string>();
-  // #60 P1 (Codex review): a nonexistent, per-process-random directory used to override
-  // core.hooksPath (see tryGit, which also disables core.fsmonitor alongside it) on every git
-  // call preserveHandoffWip makes. A handoff-requested lane's worktree is under the FULL
-  // filesystem control of the (possibly compromised) worker while it was alive — outside the
-  // PreToolUse guard's reach once it's dead — so it could have planted a pre-commit/pre-push
-  // hook, an fsmonitor script, or pointed core.hooksPath at a directory it controls. A
-  // command-line `-c core.hooksPath=...` always wins over any config value (local worktree
-  // config included), so this can't be overridden by anything the worker set. The directory
-  // deliberately never exists: git treats a missing hooksPath as "no hooks to run", no error.
-  private readonly noHooksDir = join(tmpdir(), `sapwood-no-hooks-${randomUUID()}`);
 
   constructor(private readonly deps: WorkerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
@@ -343,9 +335,15 @@ export class WorkerSupervisor implements Supervisor {
     // Only set up the running marker + heartbeat if the child is still alive — a very fast
     // exit during the await is already handled by onExit (lane removed); don't resurrect it.
     if (this.lanes.has(laneName) && child.exitCode === null && child.signalCode === null) {
+      const startedIso = new Date(lane.startedMs).toISOString();
       this.writeJsonAtomic(this.path(laneName, "running.json"), {
         name: laneName, issue: issue.number, session_id: sessionId,
-        wrapper_pid: child.pid, started_at: new Date(lane.startedMs).toISOString(),
+        wrapper_pid: child.pid, started_at: startedIso,
+        // #69 (fable P1): the IMMUTABLE first-dispatch time, the dirty-worktree retention
+        // baseline. Distinct from started_at, which resume() resets to resume-time for the
+        // wall-clock timeout — baselining retention on that would judge pre-handoff WIP (older
+        // than the new start) CLEAN and delete it. dispatched_at never moves once set.
+        dispatched_at: startedIso,
       });
       this.touchHeartbeat(laneName);
       lane.hb = setInterval(() => this.heartbeatTick(laneName), this.hbMs);
@@ -381,6 +379,11 @@ export class WorkerSupervisor implements Supervisor {
     if (!sessionId) {
       throw new Error(`resume: ${name}'s handoff sentinel carries no session_id`);
     }
+    // #69 (fable P1): carry the IMMUTABLE first-dispatch time across the handoff -> resume
+    // boundary. The retention baseline must stay the original dispatch time so pre-handoff WIP
+    // (older than this resumed run's start) is still judged possibly-dirty. Absent on a legacy
+    // sentinel -> omitted below -> the baseline resolves to NaN -> fail-safe dirty (retain).
+    const dispatchedAt = typeof handoff?.dispatched_at === "string" ? handoff.dispatched_at : null;
     const guardMode = this.deps.cfg.guard.mode;
     if (guardMode === "hard" && !existsSync(this.guardHookPath)) {
       throw new Error(
@@ -427,6 +430,8 @@ export class WorkerSupervisor implements Supervisor {
       this.writeJsonAtomic(this.path(name, "running.json"), {
         name, issue: issue.number, session_id: sessionId,
         wrapper_pid: child.pid, started_at: new Date(lane.startedMs).toISOString(),
+        // Preserve the original first-dispatch baseline (not this resume's start).
+        ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
       });
       this.touchHeartbeat(name);
       lane.hb = setInterval(() => this.heartbeatTick(name), this.hbMs);
@@ -453,10 +458,10 @@ export class WorkerSupervisor implements Supervisor {
     // worker keeps spending, then gets hard-killed instead of the intended graceful handoff
     // (Codex PR #41 P1). Signal the persisted process group with SIGTERM only (graceful —
     // never the KILL escalation reclaim() adds). There's no attached onExit handler for this
-    // path (no live ChildProcess), so the WIP preserve + .handoff sentinel can't be triggered
-    // by a process-exit callback the way the in-process branch above gets it for free — #63
-    // instead confirms death (and runs preserveHandoffWip + writes .handoff) from INSIDE
-    // probe(), the next time it's called for this lane; see finalizeDetachedHandoffIfConfirmedDead.
+    // path (no live ChildProcess), so the .handoff sentinel can't be triggered by a
+    // process-exit callback the way the in-process branch above gets it for free — #63
+    // instead confirms death (and writes .handoff) from INSIDE probe(), the next time it's
+    // called for this lane; see finalizeDetachedHandoffIfConfirmedDead.
     if (this.detachedHandoffRequested.has(name) || this.detachedReclaiming.has(name)) return false;
     const pid = this.persistedPid(name);
     if (pid == null || this.wrapperAlive(name) !== 1) return false;
@@ -519,20 +524,17 @@ export class WorkerSupervisor implements Supervisor {
     try { closeSync(lane.jsonlFd); } catch { /* already closed */ }
     // reclaim() owns the lane's terminal state — don't also write a sentinel.
     if (!lane.reclaiming) {
-      // #60: the real `claude` CLI has no SIGTERM trap — a handoff-requested process dies by
-      // signal (code null) or a non-zero exit, NEVER code 0. So "code === 0 after SIGTERM" is
-      // unreachable in practice, and .handoff could never be earned by the old logic (Codex
-      // R3 P2's original concern was false-positive resumability; empirically the failure
-      // mode is the opposite — a real, already-resumable lane getting tagged .failed). The
-      // supervisor now GUARANTEES "resumable" itself: it commits+pushes the worktree's WIP
-      // here, independent of the child's exit status, before deciding the tag.
-      if (lane.handoffRequested && !lane.timedOut) {
-        this.preserveHandoffWip(name);
-      }
-      // .handoff means "resumable, work preserved" — the supervisor-side commit+push above
-      // (preserveHandoffWip) is what guarantees that now, not the child's exit code. A
-      // handoff-requested lane is .handoff regardless of how it died. timedOut is always
-      // .failed — a wall-clock timeout is a distinct, non-drain-requested hard kill.
+      // #60/#69: the real `claude` CLI has no SIGTERM trap — a handoff-requested process dies
+      // by signal (code null) or a non-zero exit, NEVER code 0. So "code === 0 after SIGTERM"
+      // is unreachable in practice, and .handoff could never be earned by exit-code-gated logic
+      // (Codex R3 P2's original concern was false-positive resumability; empirically the
+      // failure mode is the opposite — a real, already-resumable lane getting tagged .failed).
+      // #69 drain contract: the supervisor never touches the worktree at all — no commit, no
+      // push, nothing. It's left exactly as the worker last left it. Resumability comes
+      // entirely from `claude --resume <session_id>` reusing that worktree in place (see
+      // resume() above); a handoff-requested lane is tagged .handoff regardless of how it
+      // died or what state its worktree is in. timedOut is always .failed — a wall-clock
+      // timeout is a distinct, non-drain-requested hard kill.
       const tag = lane.timedOut
         ? "failed"
         : lane.handoffRequested
@@ -558,117 +560,26 @@ export class WorkerSupervisor implements Supervisor {
     const jsonl = this.readJsonl(jsonlPath);
     const cost = parseCostUsd(jsonl);
     const modelUsage = parseModelUsage(jsonl);
+    // #69 (fable P1): carry the immutable first-dispatch baseline out of running.json (still
+    // present here — removed only at the tail below) into the terminal sentinel, so resume()
+    // and the terminal-lane dirty check (inspectWorktree) can recover it after running.json
+    // is gone. Omitted when absent (legacy) -> the baseline resolves to NaN -> fail-safe dirty.
+    const running = this.readJson(this.path(name, "running.json"));
+    const dispatchedAt = typeof running?.dispatched_at === "string" ? running.dispatched_at : null;
     const base = {
       name, issue, session_id: sessionId, total_cost_usd: cost,
       model_usage: modelUsage, ended_at: this.now().toISOString(),
+      ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
     };
     this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: exitCode });
     this.removeIfExists(this.path(name, "running.json"));
   }
 
-  /** #60: the supervisor-side half of the drain contract — GUARANTEE "WIP preserved" for a
-   *  handoff-requested lane, independent of whether the killed `claude` process happened to
-   *  commit/push anything itself. Best-effort and NEVER throws: onExit must still write a
-   *  terminal sentinel even if every git call here fails. Runs synchronously (execFileSync)
-   *  because onExit itself is synchronous (a Node `exit` event handler).
-   *
-   *  - No worktree on disk (lane never got far enough to check one out) -> nothing to do.
-   *  - Clean worktree (nothing to commit) -> nothing to do; no empty commit is created.
-   *  - Uncommitted changes -> `git add -A && git commit` in the worktree ONLY (never the repo
-   *    root — sapwood.config.yaml may carry an uncommitted local override there).
-   *  - `git push` failure is non-fatal/best-effort: the LOCAL commit alone already makes the
-   *    lane resumable via `claude --resume` (worker.ts's resume(), ~line 325), even if the
-   *    remote push didn't land. Logged, never thrown.
-   *  - A stale `index.lock` (left behind by the just-killed process; onExit only runs after
-   *    the child has actually exited, so its owner is confirmed dead) is cleared and the
-   *    failing command retried once.
-   *  - Every git call disables hooks + fsmonitor (see `noHooksDir`) and `commit`/`push` also
-   *    pass `--no-verify` as defense in depth — this worktree was under the worker's full
-   *    control and must not get to run code as the supervisor via a planted hook, fsmonitor
-   *    script, or credential/ssh override (Codex #60 P1 + follow-up second-opinion review).
-   *  - Every git call is timeout-bounded (see tryGit) — this all runs synchronously inside
-   *    onExit, a Node `exit` handler, so a hung git process (e.g. a network-partitioned push
-   *    during the kill-switch drain, of all times) must not block the whole engine forever. */
-  private preserveHandoffWip(name: string): void {
-    const worktreePath = join(this.worktreeRoot, name);
-    if (!existsSync(worktreePath)) return; // never checked out (or already cleaned up) — nothing to preserve
-
-    const status = this.runGit(["status", "--porcelain"], worktreePath);
-    if (!status.ok) return; // can't even inspect status — best-effort, give up quietly
-    if (status.stdout.trim().length === 0) return; // clean — nothing to commit
-
-    // ponytail: `git add -A` can still execute a worker-committed .gitattributes'
-    // filter.<name>.clean program (content filters have no blanket `-c` disable, unlike hooks
-    // — confirmed, no equivalent override exists). Closing this needs plumbing (hash-object
-    // --no-filters + manual tree/commit-tree) instead of porcelain add/commit — deliberately
-    // NOT done here; tracked in #65. Known, documented gap, not an oversight.
-    if (!this.runGit(["add", "-A"], worktreePath).ok) return;
-    if (!this.runGit(["commit", "--no-verify", "-m", "sapwood: WIP handoff (drain)"], worktreePath).ok) return;
-
-    // push is the one step that talks to credential/transport config, so it gets two more
-    // overrides on top of the hooks/fsmonitor ones every call gets: a worker-set
-    // credential.helper could run arbitrary code to "provide" credentials, and core.sshCommand
-    // could point at a worker-controlled binary. Disabling a legitimate one just means the push
-    // fails — already handled as non-fatal below (local commit + .handoff still stand).
-    const push = this.runGit(["push", "--no-verify"], worktreePath, ["credential.helper=", "core.sshCommand=ssh"]);
-    if (!push.ok) {
-      console.error(
-        `[sapwood:worker] lane ${name}: handoff commit landed locally but 'git push' failed ` +
-          `(non-fatal — resumable via claude --resume regardless): ${push.stderr.trim()}`,
-      );
-    }
-  }
-
-  /** Runs `git <args>` in `cwd`, retrying ONCE if the failure looks like a stale index.lock
-   *  from the process onExit just confirmed dead (the owning claude subprocess has already
-   *  exited by the time onExit fires — a lock file at this point can only be stale). Never
-   *  throws: failures are reported via the returned `ok` flag. `extraConfig` entries are
-   *  additional `-c key=value` overrides layered on top of the always-on ones (see tryGit) —
-   *  used by the push step for credential/transport-specific overrides. */
-  private runGit(args: string[], cwd: string, extraConfig: string[] = []): { ok: boolean; stdout: string; stderr: string } {
-    const first = this.tryGit(args, cwd, extraConfig);
-    if (first.ok || !/index\.lock/i.test(first.stderr)) return first;
-    const gitDir = this.tryGit(["rev-parse", "--absolute-git-dir"], cwd);
-    if (!gitDir.ok) return first;
-    const lockPath = join(gitDir.stdout.trim(), "index.lock");
-    if (!existsSync(lockPath)) return first;
-    this.removeIfExists(lockPath);
-    return this.tryGit(args, cwd, extraConfig);
-  }
-
-  /** Every git invocation from preserveHandoffWip goes through here. Two things are unconditional
-   *  on every call, never skippable per-call: the `-c core.hooksPath=...` / `-c
-   *  core.fsmonitor=false` overrides (worker-controlled config that could otherwise run code
-   *  with the supervisor's privileges — Codex #60 P1 + follow-up review; harmless on commands
-   *  with nothing to filter, e.g. status/rev-parse), and a bounded timeout — this runs
-   *  synchronously inside onExit, a Node `exit` handler, so a hung git process (a
-   *  network-partitioned push, most plausibly, mid kill-switch-drain) must not hang the whole
-   *  engine. On timeout the process is SIGKILLed and this reports it as an ordinary failure
-   *  (`ok: false`), same as any other git error — callers already treat that as non-fatal. */
-  private tryGit(args: string[], cwd: string, extraConfig: string[] = []): { ok: boolean; stdout: string; stderr: string } {
-    const fullArgs = [
-      "-c", `core.hooksPath=${this.noHooksDir}`,
-      "-c", "core.fsmonitor=false",
-      ...extraConfig.flatMap((c) => ["-c", c]),
-      ...args,
-    ];
-    try {
-      const stdout = execFileSync("git", fullArgs, {
-        cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-        timeout: 30_000, killSignal: "SIGKILL",
-      });
-      return { ok: true, stdout, stderr: "" };
-    } catch (e) {
-      const err = e as { stdout?: string; stderr?: string };
-      return { ok: false, stdout: err.stdout ?? "", stderr: err.stderr ?? String(e) };
-    }
-  }
-
-  /** #63: the detached-lane counterpart to onExit's in-process preserve+finalize. A detached
-   *  lane (persisted running.json, no in-memory Lane — the engine restarted while the worker
-   *  kept running) has no live ChildProcess to attach an `exit` handler to, so requestHandoff's
-   *  detached branch can only SIGTERM the persisted pid — nothing ever ran preserveHandoffWip
-   *  or wrote .handoff for it, even once the worker actually died. This is the fix: check for
+  /** #63: the detached-lane counterpart to onExit's in-process finalize. A detached lane
+   *  (persisted running.json, no in-memory Lane — the engine restarted while the worker kept
+   *  running) has no live ChildProcess to attach an `exit` handler to, so requestHandoff's
+   *  detached branch can only SIGTERM the persisted pid — nothing ever wrote .handoff for it,
+   *  even once the worker actually died. This is the fix: check for
    *  CONFIRMED death (wrapperAlive() === 0 — a stale heartbeat is NOT a death signal for a
    *  detached lane; its heartbeat only ever advanced via the dead engine's own setInterval)
    *  every time probe() is called, and finalize right here if so.
@@ -677,17 +588,17 @@ export class WorkerSupervisor implements Supervisor {
    *  ahead of the conductor's classifyLane call that follows probe() — never a separate poll
    *  loop. The conductor probes every running lane every tick before classifying it, so a
    *  poller racing that classification could lose: it might see wrapperAlive===0 with no
-   *  sentinel yet and get DEAD-reclaimed (killByPid, no preserve) before a separate poller
-   *  fires. Running the check inside probe() wins that race by construction — the write always
-   *  lands before this same call's classification-feeding flags are read.
+   *  sentinel yet and get DEAD-reclaimed (killByPid, no .handoff written) before a separate
+   *  poller fires. Running the check inside probe() wins that race by construction — the write
+   *  always lands before this same call's classification-feeding flags are read.
    *
    *  A request is "known" via EITHER the in-memory detachedHandoffRequested set (this
    *  process's own request) OR running.json's persisted `handoff_requested` field (a request
    *  survives a SECOND engine restart, which wipes the in-memory set but not the file) — either
    *  is sufficient. Skipped entirely for a lane this supervisor has already reclaim()'d
    *  (detachedReclaiming) — that lane is going FAILED, not resumable; see reclaim(). Never
-   *  throws: preserveHandoffWip and writeTerminalSentinel are already best-effort/non-throwing
-   *  (same guarantees onExit relies on). */
+   *  throws: writeTerminalSentinel is already best-effort/non-throwing (same guarantee onExit
+   *  relies on). */
   private finalizeDetachedHandoffIfConfirmedDead(name: string): void {
     if (this.detachedReclaiming.has(name)) return;
     if (
@@ -704,7 +615,9 @@ export class WorkerSupervisor implements Supervisor {
     // wrapperAlive: 1 alive (still draining — wait) | -1 unknown/unreadable pid (per the
     // advisory: just stop checking, never treat as dead, never throw) | 0 confirmed dead.
     if (this.wrapperAlive(name) !== 0) return;
-    this.preserveHandoffWip(name);
+    // #69: no git call here — the worktree is left exactly as the worker left it. This finalize
+    // exists purely to write the .handoff sentinel for a detached lane (no in-process onExit
+    // ever runs for it); it no longer has any WIP-preservation responsibility.
     const issue = typeof running.issue === "number" ? running.issue : -1;
     const sessionId = typeof running.session_id === "string" ? running.session_id : "";
     // Unconditionally "handoff" — no timedOut/code branching (there's no exit code at all
@@ -778,23 +691,142 @@ export class WorkerSupervisor implements Supervisor {
     return parseModelUsage(this.readJsonl(this.path(name, "jsonl")));
   }
 
-  async reclaim(name: string): Promise<void> {
+  /** #69: tears the lane's process down, THEN decides its worktree's fate — see
+   *  retainOrDeleteWorktree for the dirty/clean policy. The caller (conductor.ts) uses the
+   *  returned ReclaimResult to escalate a retained worktree to a human (issue comment + label);
+   *  worker.ts itself never talks to the forge. */
+  async reclaim(name: string): Promise<ReclaimResult> {
     const lane = this.lanes.get(name);
     if (lane) {
       lane.reclaiming = true;
       clearInterval(lane.hb);
       await this.killTree(lane.child);
-    } else {
-      // Cross-process / post-restart: no in-memory handle — kill by the persisted pid. Mark
-      // this lane as reclaiming FIRST, before the kill — #63's detached-confirm-death check in
-      // probe() must never finalize a lane reclaim() has already decided is going FAILED (a
-      // DEAD reclassification or a ceiling-escalation kill), even if it also happens to match
-      // "handoff was requested, pid now confirmed dead". reclaim() always wins that race.
-      this.detachedReclaiming.add(name);
-      this.detachedHandoffRequested.delete(name);
-      const pid = this.persistedPid(name);
-      if (pid != null) await this.killByPid(pid);
+      return this.retainOrDeleteWorktree(name);
     }
+    // Cross-process / post-restart: no in-memory handle — kill by the persisted pid. Mark
+    // this lane as reclaiming FIRST, before the kill — #63's detached-confirm-death check in
+    // probe() must never finalize a lane reclaim() has already decided is going FAILED (a
+    // DEAD reclassification or a ceiling-escalation kill), even if it also happens to match
+    // "handoff was requested, pid now confirmed dead". reclaim() always wins that race.
+    this.detachedReclaiming.add(name);
+    this.detachedHandoffRequested.delete(name);
+    const pid = this.persistedPid(name);
+    if (pid != null) await this.killByPid(pid);
+    return this.retainOrDeleteWorktree(name);
+  }
+
+  /** #69 (fable P3-b): report a lane's worktree dirtiness WITHOUT any teardown — no kill, no
+   *  delete. A `.done`/`.failed` sentinel lane with an open PR is rescued straight to `driving`
+   *  (its process already exited; reclaim() is never called, so no dirtiness check would run).
+   *  The conductor calls this to apply the same dirty ⇒ needs-human policy the DEAD path uses:
+   *  a crashed worker that left uncommitted WIP alongside its PR is escalated to a human rather
+   *  than auto-driven toward merge. `worktreeRetained: true` == "possibly dirty"; nothing is
+   *  ever deleted here (the terminal path keeps the worktree regardless). */
+  inspectWorktree(name: string): ReclaimResult {
+    const worktreePath = join(this.worktreeRoot, name);
+    if (!existsSync(worktreePath)) return { worktreePath: null, worktreeRetained: false };
+    return { worktreePath, worktreeRetained: this.worktreeMaybeDirty(worktreePath, this.dispatchedBaselineMs(name)) };
+  }
+
+  /** #69: dirty-worktree retention (replaces #60/#62's supervisor-side git commit+push, and the
+   *  #65 RCE class it carried). Automation must never DELETE a worktree that might still hold
+   *  uncommitted work — but it must also never RUN GIT in a worktree the worker fully
+   *  controlled (that's this whole PR's invariant). `git status --porcelain` was considered and
+   *  REJECTED: empirically confirmed (git 2.50.1) to invoke a worker-set `filter.<name>.clean`
+   *  when the working-tree file's mtime races the index's own mtime (the classic "racy git"
+   *  content recompute) — even with `-c core.fsmonitor=false` — and a worker can force that race
+   *  deliberately (`touch -r .git/index <file>` after editing it) with the ordinary Bash access
+   *  it already has to its own worktree. That's the exact #65 clean-filter RCE, just reachable
+   *  via reclaim() instead of the deleted #62 commit+push path. So dirtiness here is a pure
+   *  FILESYSTEM heuristic (worktreeMaybeDirty): any entry under the worktree (except `.git/`)
+   *  whose mtime OR ctime is after the lane's FIRST-dispatch time (dispatchedBaselineMs) is
+   *  "possibly dirty". False positives (a worker that edited-then-committed a file, whose
+   *  timestamps still moved) just cost an extra needs-human retention — the accepted #69 policy
+   *  trade-off. False negatives would silently lose real WIP; checking ctime as well as mtime
+   *  (fable P2-b) closes the mtime-backdating gap, since unprivileged code cannot backdate
+   *  ctime (any write/utimes/chmod bumps it) — never a supervisor-side execution risk. */
+  private retainOrDeleteWorktree(name: string): ReclaimResult {
+    const worktreePath = join(this.worktreeRoot, name);
+    if (!existsSync(worktreePath)) return { worktreePath: null, worktreeRetained: false };
+    if (this.worktreeMaybeDirty(worktreePath, this.dispatchedBaselineMs(name))) {
+      return { worktreePath, worktreeRetained: true }; // left on disk — caller escalates
+    }
+    try {
+      rmSync(worktreePath, { recursive: true, force: true });
+    } catch {
+      // Best-effort: an unremovable clean worktree is a minor disk-hygiene issue, not a data
+      // loss risk (nothing to lose — it was clean) — don't let it fail the whole reclaim.
+    }
+    // NOTE (#69 debt, fable P3): the parent repo's `.git/worktrees/<name>` registration (and
+    // the lane branch) is left dangling — pre-#69 the engine never deleted worktrees. Harmless
+    // for correctness; shows up as a prunable entry in `git worktree list`. A `git worktree
+    // prune` (which runs in the TRUSTED main repo, not a worker tree) is a future operator/
+    // housekeeping step, deliberately not run here to keep this path git-free.
+    return { worktreePath, worktreeRetained: false };
+  }
+
+  /** Recursive `.git`-excluding mtime/ctime scan. Never invokes git. Directory timestamps are
+   *  checked too (a deleted file is also an uncommitted change, visible only as its parent
+   *  dir's bumped timestamp), `lstatSync` never follows symlinks (a planted broken/absolute
+   *  link is judged by the link itself), and BOTH mtime and ctime are compared (ctime can't be
+   *  backdated by unprivileged code — fable P2-b). The baseline comparison is INCLUSIVE (`>=`,
+   *  Codex PR #72 round-2 P2): on a coarse-resolution filesystem a worker can write WIP in the
+   *  SAME timestamp tick as dispatch, landing an entry exactly equal to sinceMs — a strict `>`
+   *  would read that as clean and DELETE it (a WIP-loss false-negative the degrade-to-human
+   *  policy forbids). `>=` widens the fail-safe-dirty window by one tick, the correct direction
+   *  (the policy accepts false-positive-dirty, never false-negative-clean). Fails safe (dirty)
+   *  on any unreadable/unstatable path or an unknown baseline — the caller only ever deletes on
+   *  an explicit `false`. */
+  private worktreeMaybeDirty(worktreePath: string, sinceMs: number): boolean {
+    if (!Number.isFinite(sinceMs)) return true; // unknown baseline -> can't prove clean
+    const touchedSince = (p: string): boolean => {
+      const s = lstatSync(p);
+      return s.mtimeMs >= sinceMs || s.ctimeMs >= sinceMs;
+    };
+    const stack: string[] = [worktreePath];
+    while (stack.length > 0) {
+      const dir = stack.pop()!;
+      let entries: Dirent[];
+      try {
+        if (touchedSince(dir)) return true; // entry added/removed in this dir
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return true; // unreadable -> fail-safe: treat as possibly dirty
+      }
+      for (const e of entries) {
+        if (e.name === ".git") continue;
+        const p = join(dir, e.name);
+        if (e.isDirectory()) {
+          stack.push(p); // its own timestamps are checked when popped
+          continue;
+        }
+        try {
+          if (touchedSince(p)) return true;
+        } catch {
+          return true; // unstatable -> fail-safe dirty
+        }
+      }
+    }
+    return false;
+  }
+
+  /** The IMMUTABLE first-dispatch time (`dispatched_at`) that the dirty-worktree retention
+   *  check baselines on — set once at dispatch, preserved by resume() (never reset to
+   *  resume-time like `started_at`, which drives the wall-clock timeout). Read from whichever
+   *  of running.json / the terminal sentinels currently carries it (running.json for a live or
+   *  DEAD lane; the sentinel for a terminal lane whose running.json was already removed).
+   *  Missing/unparseable everywhere -> NaN, which worktreeMaybeDirty treats as fail-safe dirty
+   *  (covers legacy sentinels predating this field). */
+  private dispatchedBaselineMs(name: string): number {
+    for (const ext of ["running.json", "handoff.json", "done.json", "failed.json"]) {
+      const r = this.readJson(this.path(name, ext));
+      const iso = typeof r?.dispatched_at === "string" ? r.dispatched_at : null;
+      if (iso) {
+        const t = Date.parse(iso);
+        if (!Number.isNaN(t)) return t;
+      }
+    }
+    return NaN;
   }
 
   /** Clear timers/fds so a host process can exit cleanly (tests). Does not kill children. */

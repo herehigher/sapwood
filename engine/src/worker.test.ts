@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, lstatSync, chmodSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { parseCostUsd, parseModelUsage, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote, WorkerSupervisor } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
@@ -586,155 +586,122 @@ test("fast non-zero exit writes .failed (exit handler attached before the await)
   }
 });
 
-// ── #60: drain (SIGTERM) must reliably preserve WIP — supervisor-side commit+push ──────────
-function gitIn(cwd: string, args: string[]): void {
-  execFileSync("git", args, { cwd, stdio: "ignore" });
-}
+// ── #69: the drain contract is sentinel-only — the supervisor NEVER runs git in a worker
+// worktree (that's #65's clean-filter RCE class, deleted at the root). Resumability =
+// `claude --resume <session_id>` reusing the untouched worktree in place. ────────────────
 
-/** Real git worktree + bare "origin" fixture, with the branch already tracking origin (`-u`)
- *  — matching what a real worker's own normal flow would have set up before a drain ever hits
- *  it, so the fix's bare `git push` (no args) succeeds. Returns the bare remote's path. */
-function makeWorktreeWithRemote(worktreePath: string): string {
-  const remoteDir = mkdtempSync(join(tmpdir(), "sapwood-remote-"));
-  execFileSync("git", ["init", "--bare", "-b", "main", remoteDir], { stdio: "ignore" });
-  mkdirSync(worktreePath, { recursive: true });
-  execFileSync("git", ["init", "-b", "main", worktreePath], { stdio: "ignore" });
-  gitIn(worktreePath, ["config", "user.email", "test@sapwood.test"]);
-  gitIn(worktreePath, ["config", "user.name", "sapwood test"]);
-  gitIn(worktreePath, ["config", "commit.gpgsign", "false"]); // local test fixture — no signing key available
-  writeFileSync(join(worktreePath, "a.txt"), "1\n");
-  gitIn(worktreePath, ["add", "-A"]);
-  gitIn(worktreePath, ["commit", "-m", "initial"]);
-  gitIn(worktreePath, ["remote", "add", "origin", remoteDir]);
-  gitIn(worktreePath, ["push", "-u", "origin", "main"]);
-  return remoteDir;
-}
-
-test("#60: handoff-requested lane with uncommitted WIP -> onExit commits+pushes it and writes .handoff, not .failed, even though the real CLI dies by signal (no code-0 SIGTERM trap)", async () => {
+test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git subprocess is spawned, and the worktree is left byte-for-byte untouched", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "sapwood-gitshim-"));
+  const gitLog = join(shimDir, "git-invocations.log");
+  const oldPath = process.env.PATH;
   try {
-    const name = "lane-60-a";
-    const worktreePath = join(worktreeRoot, name);
-    const remoteDir = makeWorktreeWithRemote(worktreePath);
-    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n"); // WIP at kill time
+    // Exec spy: a `git` shim FIRST on PATH — any git subprocess the supervisor (or anything
+    // it spawns) launches during the drain would append here. The invariant: it never does.
+    writeFileSync(join(shimDir, "git"), `#!/usr/bin/env bash\necho "$@" >> "${gitLog}"\nexit 0\n`, { mode: 0o755 });
+    process.env.PATH = `${shimDir}:${oldPath}`;
 
-    // The empirically-confirmed real-world shape (#60): no SIGTERM trap -> dies by signal
-    // (code null), never a clean exit 0.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
-    const s = sup(dir, bin, false, worktreeRoot);
-    const { name: laneName } = await s.dispatch({ number: 60, title: "t", labels: [] }, name);
-    await sleep(200);
-    assert.equal(s.requestHandoff(laneName), true);
-    for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
-    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), ".handoff written despite a signal-killed (non-zero) exit");
-    assert.ok(!existsSync(join(dir, `${laneName}.failed.json`)));
-
-    // The worktree got a new commit carrying the WIP, working tree is clean again, and it
-    // reached the remote.
-    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
-    assert.match(log, /sapwood: WIP handoff \(drain\)/);
-    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: worktreePath, encoding: "utf8" }).trim(), "");
-    const remoteLog = execFileSync("git", ["log", "--oneline", "main"], { cwd: remoteDir, encoding: "utf8" });
-    assert.match(remoteLog, /sapwood: WIP handoff \(drain\)/, "pushed to origin");
-
-    s.dispose();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(worktreeRoot, { recursive: true, force: true });
-  }
-});
-
-test("#60: handoff-requested lane with a CLEAN worktree -> .handoff still written, no empty commit created", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
-  try {
-    const name = "lane-60-b";
-    const worktreePath = join(worktreeRoot, name);
-    makeWorktreeWithRemote(worktreePath); // clean — nothing left uncommitted
-    const before = execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: worktreePath, encoding: "utf8" }).trim();
-
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
-    const s = sup(dir, bin, false, worktreeRoot);
-    const { name: laneName } = await s.dispatch({ number: 61, title: "t", labels: [] }, name);
-    await sleep(200);
-    assert.equal(s.requestHandoff(laneName), true);
-    for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
-    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)));
-
-    const after = execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: worktreePath, encoding: "utf8" }).trim();
-    assert.equal(after, before, "no empty commit created on a clean worktree");
-
-    s.dispose();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(worktreeRoot, { recursive: true, force: true });
-  }
-});
-
-test("#60: git push failure is non-fatal — local commit still lands and .handoff is still written (never demoted to .failed, never throws)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
-  try {
-    const name = "lane-60-c";
+    const name = "lane-69-a";
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(worktreePath, { recursive: true });
-    execFileSync("git", ["init", "-b", "main", worktreePath], { stdio: "ignore" });
-    gitIn(worktreePath, ["config", "user.email", "test@sapwood.test"]);
-    gitIn(worktreePath, ["config", "user.name", "sapwood test"]);
-    gitIn(worktreePath, ["config", "commit.gpgsign", "false"]);
-    writeFileSync(join(worktreePath, "a.txt"), "1\n");
-    gitIn(worktreePath, ["add", "-A"]);
-    gitIn(worktreePath, ["commit", "-m", "initial"]);
-    // NO remote configured — `git push` fails with "No configured push destination".
-    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n");
+    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n"); // WIP at kill time
 
+    // The empirically-confirmed real CLI shape (#60): no SIGTERM trap -> dies by signal.
     const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
     const s = sup(dir, bin, false, worktreeRoot);
-    const { name: laneName } = await s.dispatch({ number: 62, title: "t", labels: [] }, name);
+    const { name: laneName, sessionId } = await s.dispatch({ number: 69, title: "t", labels: [] }, name);
     await sleep(200);
     assert.equal(s.requestHandoff(laneName), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
-    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "push failure does not demote to .failed");
+    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), ".handoff written despite a signal-killed exit");
     assert.ok(!existsSync(join(dir, `${laneName}.failed.json`)));
 
-    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
-    assert.match(log, /sapwood: WIP handoff \(drain\)/, "local commit still landed despite the push failure");
+    const sentinel = JSON.parse(readFileSync(join(dir, `${laneName}.handoff.json`), "utf8"));
+    assert.equal(sentinel.session_id, sessionId, "sentinel carries the resumable session_id");
+
+    assert.ok(!existsSync(gitLog), "NO git subprocess was spawned during the drain");
+    assert.equal(readFileSync(join(worktreePath, "wip.txt"), "utf8"), "uncommitted work\n", "worktree untouched");
 
     s.dispose();
   } finally {
+    process.env.PATH = oldPath;
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
   }
 });
 
-test("#60: lane.timedOut still tags .failed even if a handoff was already requested (timeout is a distinct, non-drain hard-kill path, untouched by this fix)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
-  try {
-    const name = "lane-60-d";
-    const worktreePath = join(worktreeRoot, name);
-    makeWorktreeWithRemote(worktreePath);
-    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n");
+test("#69 grep-invariant (engine-wide, fable P3): the ONLY child_process importers are worker.ts (spawn) and gh.ts (execFile), and no subprocess call site passes a cwd — the engine structurally CANNOT exec git in a worker worktree", () => {
+  const srcDir = new URL(".", import.meta.url);
+  const files = readdirSync(srcDir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  // Sanity: the two known subprocess modules are present in the scan set.
+  assert.ok(files.includes("worker.ts") && files.includes("gh.ts"));
+  for (const f of files) {
+    const src = readFileSync(new URL(f, srcDir), "utf8");
+    const importsChildProcess = /from "node:child_process"/.test(src);
+    if (f === "worker.ts") {
+      // spawn ONLY (the claude CLI launch); every exec-style API (what #62's preserveHandoffWip
+      // used) is banned — this pins the deletion.
+      assert.match(src, /import \{ spawn, type ChildProcess \} from "node:child_process"/, "worker.ts imports spawn only");
+      assert.doesNotMatch(src, /\b(execFileSync|execFile|execSync|spawnSync|exec)\b/, "worker.ts has no exec API");
+      assert.doesNotMatch(src, /["'`]git["'`]/, "worker.ts references no `git` command");
+      assert.doesNotMatch(src, /preserveHandoffWip|runGit|tryGit|noHooksDir/, "deleted helpers not stranded");
+      assert.doesNotMatch(src, /\bcwd:/, "worker.ts passes no cwd to any subprocess");
+    } else if (f === "gh.ts") {
+      // execFile ONLY, no spawn/sync variants, and gh runs in the engine's own cwd (no cwd option).
+      assert.doesNotMatch(src, /\b(execFileSync|execSync|spawnSync|spawn)\b/, "gh.ts uses execFile only");
+      assert.doesNotMatch(src, /\bcwd:/, "gh.ts passes no cwd to execFile");
+    } else {
+      // Every other engine module must not shell out at all.
+      assert.equal(importsChildProcess, false, `${f} must not import node:child_process`);
+    }
+  }
+});
 
+test("#69: timeout still tags .failed even if a handoff was already requested (timeout is a distinct, non-drain hard-kill path)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
     // Ignores TERM so it survives requestHandoff's SIGTERM; only the timeout's SIGKILL stops it.
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     const s = new WorkerSupervisor({
-      cfg: tcfg, stateDir: dir, worktreeRoot, claudeBin: bin,
+      cfg: tcfg, stateDir: dir, claudeBin: bin,
       hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 100, guardHookPath: mkHook(dir),
     });
-    const { name: laneName } = await s.dispatch({ number: 63, title: "t", labels: [] }, name);
+    const { name: laneName } = await s.dispatch({ number: 63, title: "t", labels: [] });
     await sleep(200);
     assert.equal(s.requestHandoff(laneName), true); // sets handoffRequested; the stub ignores this TERM
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${laneName}.failed.json`)), "timeout wins over a pending handoff request");
     assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)));
-    // timeout path is untouched by #60 — no supervisor-side commit runs, WIP stays uncommitted.
-    assert.notEqual(
-      execFileSync("git", ["status", "--porcelain"], { cwd: worktreePath, encoding: "utf8" }).trim(),
-      "",
-    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #69 dirty-worktree retention: reclaim() deletes a worktree ONLY when provably clean
+// (pure filesystem mtime heuristic — never a git call); possibly-dirty survives on disk. ──
+
+test("#69: reclaim RETAINS a worktree with a file written after dispatch (possibly dirty) — left on disk for human salvage", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-69-dirty";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(join(worktreePath, "src"), { recursive: true });
+
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 70, title: "t", labels: [] }, name);
+    await sleep(50); // ensure the WIP write lands strictly after the recorded lane start
+    writeFileSync(join(worktreePath, "src", "wip.txt"), "uncommitted work\n");
+
+    const r = await s.reclaim(laneName);
+    assert.equal(r.worktreeRetained, true);
+    assert.equal(r.worktreePath, worktreePath); // absolute path, for the conductor's escalation
+    assert.ok(existsSync(join(worktreePath, "src", "wip.txt")), "worktree (and its WIP) survives");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -742,33 +709,24 @@ test("#60: lane.timedOut still tags .failed even if a handoff was already reques
   }
 });
 
-test("#60: a stale index.lock left behind by the just-killed process is cleared and the WIP commit still lands", async () => {
+test("#69: reclaim DELETES a clean worktree (no file touched since dispatch) — no retention noise", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   try {
-    const name = "lane-60-e";
+    const name = "lane-69-clean";
     const worktreePath = join(worktreeRoot, name);
-    makeWorktreeWithRemote(worktreePath);
-    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n");
+    mkdirSync(worktreePath, { recursive: true });
+    writeFileSync(join(worktreePath, "checked-out.txt"), "pre-existing\n"); // pre-dispatch content
+    await sleep(20); // strictly before the lane's recorded start
 
     const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
     const s = sup(dir, bin, false, worktreeRoot);
-    const { name: laneName } = await s.dispatch({ number: 64, title: "t", labels: [] }, name);
-    await sleep(200);
+    const { name: laneName } = await s.dispatch({ number: 71, title: "t", labels: [] }, name);
+    await sleep(100);
 
-    // Simulate a stale lock left by the killed process — present BEFORE the SIGTERM, so it's
-    // still there when onExit's preserveHandoffWip runs.
-    const gitDir = execFileSync("git", ["rev-parse", "--absolute-git-dir"], { cwd: worktreePath, encoding: "utf8" }).trim();
-    writeFileSync(join(gitDir, "index.lock"), "");
-
-    assert.equal(s.requestHandoff(laneName), true);
-    for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
-    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "stale lock did not block the handoff");
-
-    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
-    assert.match(log, /sapwood: WIP handoff \(drain\)/, "WIP commit still landed after clearing the stale lock");
-    assert.ok(!existsSync(join(gitDir, "index.lock")), "stale lock was removed");
-
+    const r = await s.reclaim(laneName);
+    assert.equal(r.worktreeRetained, false);
+    assert.ok(!existsSync(worktreePath), "clean worktree removed as before");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -776,61 +734,164 @@ test("#60: a stale index.lock left behind by the just-killed process is cleared 
   }
 });
 
-test("#60 P1 (Codex review + follow-up second-opinion review): supervisor WIP commit+push disables the worktree's own git hooks AND fsmonitor — a worker-planted pre-commit/pre-push (or a worker-set core.hooksPath/core.fsmonitor pointing at its own script) must NOT run with the supervisor's privileges", async () => {
+test("#69: reclaim of a lane with NO worktree on disk -> nothing retained, nothing to report", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s = sup(dir, bin); // default worktreeRoot -> the lane's worktree path never exists
+    const { name } = await s.dispatch({ number: 72, title: "t", labels: [] });
+    await sleep(100);
+    const r = await s.reclaim(name);
+    assert.deepEqual(r, { worktreePath: null, worktreeRetained: false });
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktree using running.json's dispatched_at as the baseline", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   try {
-    const name = "lane-60-hooks";
+    const name = "lane-69-det";
     const worktreePath = join(worktreeRoot, name);
-    const remoteDir = makeWorktreeWithRemote(worktreePath);
-    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n");
+    mkdirSync(worktreePath, { recursive: true });
 
-    // Simulate a compromised/malicious worker: it had full filesystem access to its OWN
-    // worktree while alive (outside the PreToolUse guard's reach once it's dead). Each planted
-    // hook/script, if it ran, writes an observable sentinel — so an unbypassed one is detectable.
-    const defaultHookSentinel = join(dir, "default-hook-ran");
-    writeFileSync(
-      join(worktreePath, ".git", "hooks", "pre-commit"),
-      `#!/usr/bin/env bash\ntouch "${defaultHookSentinel}"\nexit 1\n`,
-      { mode: 0o755 },
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s1 = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s1.dispatch({ number: 73, title: "t", labels: [] }, name);
+    await sleep(50);
+    writeFileSync(join(worktreePath, "wip.txt"), "post-dispatch work\n"); // dirty
+    s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
+
+    const s2 = sup(dir, bin, false, worktreeRoot);
+    const r = await s2.reclaim(laneName);
+    assert.equal(r.worktreeRetained, true);
+    assert.ok(existsSync(join(worktreePath, "wip.txt")), "worktree survives a detached reclaim too");
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP — the retention baseline is the immutable first-dispatch time, not the resume-time started_at", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-69-resume-wip";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(worktreePath, { recursive: true });
+
+    // Cooperative worker: hands off on TERM. A --resume run just prints a result and exits.
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        '  echo \'{"type":"result","subtype":"success","total_cost_usd":0.02}\'',
+        "  exit 0",
+        "fi",
+        "trap 'exit 0' TERM",
+        "sleep 30",
+        "",
+      ].join("\n"),
     );
-    // The named threat from the first review: a worker pointing core.hooksPath at a directory
-    // IT controls. Command-line -c must win over this local worktree config.
-    const customHooksDir = join(dir, "worker-controlled-hooks");
-    mkdirSync(customHooksDir, { recursive: true });
-    const customHookSentinel = join(dir, "custom-hook-ran");
-    writeFileSync(
-      join(customHooksDir, "pre-push"),
-      `#!/usr/bin/env bash\ntouch "${customHookSentinel}"\nexit 1\n`,
-      { mode: 0o755 },
-    );
-    gitIn(worktreePath, ["config", "core.hooksPath", customHooksDir]);
-    // The second, config-driven RCE vector from the follow-up review: a worker-set
-    // core.fsmonitor script, invoked on status/add/commit — a wholly separate config key from
-    // core.hooksPath, closed by its own `-c core.fsmonitor=false` override (confirmed: no
-    // interaction with the hooksPath override needed, each is independent).
-    const fsmonitorSentinel = join(dir, "fsmonitor-ran");
-    const fsmonitorScript = join(dir, "fsmonitor-hook.sh");
-    writeFileSync(fsmonitorScript, `#!/usr/bin/env bash\ntouch "${fsmonitorSentinel}"\nexit 1\n`, { mode: 0o755 });
-    gitIn(worktreePath, ["config", "core.fsmonitor", fsmonitorScript]);
+    const s = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 74, title: "t", labels: [] }, name);
+    await sleep(50);
+    // Pre-handoff WIP: written DURING the first run, mtime after first dispatch.
+    writeFileSync(join(worktreePath, "wip.txt"), "pre-handoff uncommitted work\n");
+    await sleep(600); // let the TERM trap install
+    assert.equal(s.requestHandoff(laneName), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "handed off");
+    // The handoff sentinel carried the immutable first-dispatch baseline forward.
+    const handoff = JSON.parse(readFileSync(join(dir, `${laneName}.handoff.json`), "utf8"));
+    assert.equal(typeof handoff.dispatched_at, "string", "dispatched_at persisted into the sentinel");
+
+    // A long gap, then RESUME — the resumed run's started_at is now, AFTER the WIP's mtime.
+    await sleep(200);
+    const resumed = await s.resume({ number: 74, title: "t", labels: [] }, name);
+    assert.equal(resumed.name, name);
+    // running.json's started_at moved to resume-time, but dispatched_at is the ORIGINAL.
+    const running = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8"));
+    assert.ok(Date.parse(running.dispatched_at) < Date.parse(running.started_at), "dispatched_at predates the resume start");
+
+    // The resumed lane is reclaimed (crash / DEAD / escalation). Pre-handoff WIP has an mtime
+    // BEFORE the resume start — baselining on started_at would judge it clean and DELETE it
+    // (the exact silent loss fable reproduced). Baselining on dispatched_at retains it.
+    const r = await s.reclaim(laneName);
+    assert.equal(r.worktreeRetained, true, "resumed-then-crashed lane RETAINS its pre-handoff WIP");
+    assert.ok(existsSync(join(worktreePath, "wip.txt")), "WIP file survives — not silently deleted");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still reads dirty via ctime — mtime-backdating cannot defeat retention", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-69-backdate";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(worktreePath, { recursive: true });
 
     const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
     const s = sup(dir, bin, false, worktreeRoot);
-    const { name: laneName } = await s.dispatch({ number: 66, title: "t", labels: [] }, name);
-    await sleep(200);
-    assert.equal(s.requestHandoff(laneName), true);
-    for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
-    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "hostile hooks/fsmonitor must not block the handoff commit/push");
+    const { name: laneName } = await s.dispatch({ number: 75, title: "t", labels: [] }, name);
+    await sleep(50);
+    const wip = join(worktreePath, "wip.txt");
+    writeFileSync(wip, "uncommitted work\n"); // written after dispatch -> ctime is now
+    // Backdate mtime+atime to the epoch (what `touch -t`/`touch -r .git/index` does). ctime is
+    // NOT settable by utimes and stays at the write time (after dispatch).
+    utimesSync(wip, new Date(0), new Date(0));
 
-    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
-    assert.match(log, /sapwood: WIP handoff \(drain\)/, "commit succeeded despite the hostile pre-commit hook");
-    const remoteLog = execFileSync("git", ["log", "--oneline", "main"], { cwd: remoteDir, encoding: "utf8" });
-    assert.match(remoteLog, /sapwood: WIP handoff \(drain\)/, "push succeeded despite the hostile core.hooksPath pre-push hook");
+    const r = await s.reclaim(laneName);
+    assert.equal(r.worktreeRetained, true, "ctime still exceeds the baseline -> retained despite backdated mtime");
+    assert.ok(existsSync(wip), "backdated WIP survives");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
 
-    assert.ok(!existsSync(defaultHookSentinel), "the worktree's own .git/hooks/pre-commit must NOT have run");
-    assert.ok(!existsSync(customHookSentinel), "the worker-set core.hooksPath pre-push must NOT have run");
-    assert.ok(!existsSync(fsmonitorSentinel), "the worker-set core.fsmonitor script must NOT have run");
+test("#69 (Codex PR #72 round-2): a WIP entry whose mtime EQUALS dispatched_at exactly (same coarse-fs tick) reads dirty -> RETAINED, never deleted as clean (inclusive >= boundary)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-69-sametick";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(worktreePath, { recursive: true });
 
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 76, title: "t", labels: [] }, name);
+    await sleep(50);
+    const wip = join(worktreePath, "wip.txt");
+    writeFileSync(wip, "same-tick WIP\n");
+
+    // Simulate the exact-equality tick deterministically. Pick a WHOLE-SECOND baseline in the
+    // FUTURE and set the WIP file's mtime to exactly it. Whole-second matters: a modern-epoch
+    // ms value loses sub-ms precision as a float (statMs = ns/1e6), so an arbitrary integer ms
+    // reads back as e.g. …601.999 — never exactly equal to an integer baseline. A whole-second
+    // instant has no sub-second part, so lstat's mtimeMs is an exact integer that round-trips
+    // through the ISO dispatched_at. FUTURE so every ctime (pinned at write time, unsettable by
+    // utimes) stays BELOW it, ruling out the ctime path. Under `>=` the file reads dirty
+    // (mtime == baseline); under a strict `>` nothing exceeds the baseline -> deleted as clean.
+    const baselineMs = (Math.floor(Date.now() / 1000) + 100) * 1000; // whole-second ms, future
+    utimesSync(wip, new Date(baselineMs), new Date(baselineMs));
+    assert.equal(lstatSync(wip).mtimeMs, baselineMs, "fs stored the exact whole-second mtime");
+    const running = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8"));
+    running.dispatched_at = new Date(baselineMs).toISOString();
+    writeFileSync(join(dir, `${laneName}.running.json`), JSON.stringify(running));
+
+    const r = await s.reclaim(laneName);
+    assert.equal(r.worktreeRetained, true, "mtime == baseline must be treated as dirty (>=), not clean");
+    assert.ok(existsSync(wip), "same-tick WIP survives — not deleted as clean");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -839,21 +900,22 @@ test("#60 P1 (Codex review + follow-up second-opinion review): supervisor WIP co
 });
 
 // ── #63: detached-lane handoff — probe() confirms death and finalizes (no onExit callback
-// exists for a lane the engine only knows via a persisted running.json) ──────────────────────
+// exists for a lane the engine only knows via a persisted running.json). #69: the finalize
+// is sentinel-only now — no WIP commit/push, the worktree stays untouched. ──────────────────
 
-test("#63: detached handoff-requested lane confirmed dead -> probe() preserves WIP, writes .handoff, clears running.json (and persists handoff_requested on request)", async () => {
+test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes .handoff (session_id intact), clears running.json, leaves the worktree untouched", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   try {
     const name = "lane-63-a";
     const worktreePath = join(worktreeRoot, name);
-    const remoteDir = makeWorktreeWithRemote(worktreePath);
+    mkdirSync(worktreePath, { recursive: true });
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n"); // WIP at kill time
 
     // No TERM trap -> the real CLI's empirically-confirmed shape (#60): dies by signal.
     const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
     const s1 = sup(dir, bin, false, worktreeRoot);
-    const { name: laneName } = await s1.dispatch({ number: 63, title: "t", labels: [] }, name);
+    const { name: laneName, sessionId } = await s1.dispatch({ number: 63, title: "t", labels: [] }, name);
     await sleep(200);
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
@@ -868,17 +930,15 @@ test("#63: detached handoff-requested lane confirmed dead -> probe() preserves W
     assert.equal(alive(pid), false, "SIGTERM reached the detached process");
 
     // probe() is what wins the race against DEAD-reclassification (#63) — it must confirm
-    // death, preserve WIP, and finalize as .handoff right here, not via any onExit callback.
+    // death and finalize as .handoff right here, not via any onExit callback.
     const probe = await s2.probe(laneName);
     assert.equal(probe.handoff, true);
     assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), ".handoff sentinel written by probe()");
     assert.ok(!existsSync(join(dir, `${laneName}.running.json`)), "running marker cleared");
-
-    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
-    assert.match(log, /sapwood: WIP handoff \(drain\)/);
-    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: worktreePath, encoding: "utf8" }).trim(), "");
-    const remoteLog = execFileSync("git", ["log", "--oneline", "main"], { cwd: remoteDir, encoding: "utf8" });
-    assert.match(remoteLog, /sapwood: WIP handoff \(drain\)/, "pushed to origin");
+    const sentinel = JSON.parse(readFileSync(join(dir, `${laneName}.handoff.json`), "utf8"));
+    assert.equal(sentinel.session_id, sessionId, "resumable session_id carried through the detached path");
+    // #69: sentinel-only — the worktree was not committed, cleaned, or otherwise touched.
+    assert.equal(readFileSync(join(worktreePath, "wip.txt"), "utf8"), "uncommitted work\n");
 
     s2.dispose();
   } finally {
@@ -889,25 +949,19 @@ test("#63: detached handoff-requested lane confirmed dead -> probe() preserves W
 
 test("#63: a SECOND engine restart before death is confirmed still finalizes — the persisted running.json handoff_requested field survives even though the fresh instance's in-memory set is empty", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   try {
-    const name = "lane-63-b";
-    const worktreePath = join(worktreeRoot, name);
-    const remoteDir = makeWorktreeWithRemote(worktreePath);
-    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n");
-
     const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`); // no trap -> dies on SIGTERM
-    const s1 = sup(dir, bin, false, worktreeRoot);
-    const { name: laneName } = await s1.dispatch({ number: 64, title: "t", labels: [] }, name);
+    const s1 = sup(dir, bin);
+    const { name: laneName } = await s1.dispatch({ number: 64, title: "t", labels: [] });
     await sleep(200);
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     s1.dispose(); // restart #1: engine forgets the in-process lane
 
-    const sMid = sup(dir, bin, false, worktreeRoot);
+    const sMid = sup(dir, bin);
     assert.equal(sMid.requestHandoff(laneName), true); // detached SIGTERM sent + persisted
     // Simulate restart #2 landing before anyone ever calls probe() on sMid (i.e. before death
     // is confirmed): a brand-new instance whose in-memory detachedHandoffRequested is empty.
-    const s2 = sup(dir, bin, false, worktreeRoot);
+    const s2 = sup(dir, bin);
 
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "the SIGTERM sent before restart #2 still killed it");
@@ -917,15 +971,9 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
     assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)));
     assert.ok(!existsSync(join(dir, `${laneName}.running.json`)));
 
-    const log = execFileSync("git", ["log", "--oneline"], { cwd: worktreePath, encoding: "utf8" });
-    assert.match(log, /sapwood: WIP handoff \(drain\)/);
-    const remoteLog = execFileSync("git", ["log", "--oneline", "main"], { cwd: remoteDir, encoding: "utf8" });
-    assert.match(remoteLog, /sapwood: WIP handoff \(drain\)/);
-
     s2.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
-    rmSync(worktreeRoot, { recursive: true, force: true });
   }
 });
 
@@ -953,14 +1001,13 @@ test("#63: wrapperAlive() === -1 (unreadable pid) -> probe() does not throw, doe
   }
 });
 
-test("#63: a lane already reclaim()'d must never also be finalized as .handoff, even if it still matches detached-requested + dead-pid", async () => {
+test("#63/#69: a lane already reclaim()'d must never also be finalized as .handoff — and its dirty worktree is RETAINED by that reclaim", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   try {
     const name = "lane-63-d";
     const worktreePath = join(worktreeRoot, name);
-    makeWorktreeWithRemote(worktreePath);
-    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n");
+    mkdirSync(worktreePath, { recursive: true });
 
     // Ignores TERM -> survives requestHandoff's SIGTERM; only reclaim()'s SIGKILL stops it —
     // mirroring the "reclaim kills a stubborn claude subtree via SIGKILL" pattern above.
@@ -968,6 +1015,7 @@ test("#63: a lane already reclaim()'d must never also be finalized as .handoff, 
     const s1 = sup(dir, bin, false, worktreeRoot);
     const { name: laneName } = await s1.dispatch({ number: 65, title: "t", labels: [] }, name);
     await sleep(200);
+    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n"); // post-dispatch WIP -> dirty
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     s1.dispose();
 
@@ -977,9 +1025,11 @@ test("#63: a lane already reclaim()'d must never also be finalized as .handoff, 
 
     // The conductor's escalation path (ceiling drain window elapsed, or a DEAD reclassification)
     // reaches this same lane and reclaims it — it's going FAILED, not resumable.
-    await s2.reclaim(laneName);
+    const r = await s2.reclaim(laneName);
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "reclaim()'s SIGKILL escalation tore it down");
+    assert.equal(r.worktreeRetained, true, "dirty worktree preserved for human salvage (#69)");
+    assert.ok(existsSync(join(worktreePath, "wip.txt")));
 
     const probe = await s2.probe(laneName);
     assert.equal(probe.handoff, false, "a reclaimed lane must never be finalized as resumable");
