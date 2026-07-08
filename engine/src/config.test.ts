@@ -154,7 +154,7 @@ test("#54: reviewer.fallback defaults empty, failoverAfterSec defaults sane (no 
 
 test("#54: reviewer.fallback accepts an ordered list of the same three reviewer kinds", () => {
   const cfg = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { fallback: [same-model-trusted, human] }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { trustedReviewers: [bot], fallback: [same-model-trusted, human] }",
   );
   assert.deepEqual(cfg.reviewer.fallback, ["same-model-trusted", "human"]);
 });
@@ -169,6 +169,30 @@ test("#54: reviewer.fallback rejects an unknown kind", () => {
 test("#54: reviewer.failoverAfterSec accepts a custom positive integer", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { failoverAfterSec: 300 }");
   assert.equal(cfg.reviewer.failoverAfterSec, 300);
+});
+
+test("#54 R2 (fable-review P3): fallback containing same-model-trusted with EMPTY trustedReviewers is rejected at parse — a failover that can never fire must not ship silently", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { fallback: [same-model-trusted] }"),
+    /silently inert|trustedReviewers/,
+  );
+  // Explicit empty list is just as inert as the default.
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { trustedReviewers: [], fallback: [human, same-model-trusted] }",
+      ),
+    /silently inert|trustedReviewers/,
+  );
+});
+
+test("#54 R2: the same fallback parses fine once trustedReviewers is non-empty, and human-only fallback needs no allowlist", () => {
+  const ok = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { trustedReviewers: [bot], fallback: [same-model-trusted] }",
+  );
+  assert.deepEqual(ok.reviewer.fallback, ["same-model-trusted"]);
+  const humanOnly = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { fallback: [human] }");
+  assert.deepEqual(humanOnly.reviewer.fallback, ["human"]);
 });
 
 test("overrides survive validation", () => {

@@ -63,6 +63,8 @@ export {
   makeFallbackReviewers,
   resolveReviewVerdict,
   NO_FALLBACK_LOCK,
+  REVIEWER_KINDS,
+  isReviewerKind,
   freshThumbCount,
   freshHeadReviewCount,
   changesRequestedOnHead,

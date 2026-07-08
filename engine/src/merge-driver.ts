@@ -120,9 +120,11 @@ export type DriveOutcome = (
   | { kind: "queued"; pr: number; reason: string }
   | { kind: "stopped"; pr: number; reason: string } // produce-pr-and-stop: gates report, never merges
 ) & {
-  /** Set only on the tick a reviewer-failover switch/revert happened (#54) — the caller
-   *  (conductor.ts tick()) logs a structured event from this; the PR comment is already
-   *  posted by driveOne itself (co-located with the decision, same as the review trigger). */
+  /** The reviewer-failover audit signal for this tick (#54), when one applies. STATELESS —
+   *  reported on every tick the condition holds (see ReviewFailoverTransition); the caller
+   *  (conductor.ts tick()) dedups against the durable event log, then emits the structured
+   *  event and posts the PR comment. Announcement lives with the caller because dedup needs
+   *  the event log (State), which MergeDriver deliberately never touches. */
   reviewerTransition?: ReviewFailoverTransition;
 };
 
@@ -222,6 +224,13 @@ export class MergeDriver {
     // this tick rather than deriving a verdict a push may have invalidated mid-flight.
     if (triggerPin.head !== status.headOid) {
       try {
+        // #54 R2: a head change ends any failover episode — the fallback lock is head-scoped,
+        // so a lock recorded for a previous head is cleared HERE, the one place that detects
+        // the head moving. This is the ONLY drive-path clear (Codex PR #71 P2: never cleared
+        // at verdict-resolution time); a confirmed merge ends the lane, taking the row with it.
+        if (fallback && fallback.lock.head != null && fallback.lock.head !== status.headOid) {
+          fallback.recordFallback(NO_FALLBACK_LOCK);
+        }
         await reviewer.triggerReview(forge, pr, issue);
         const now = this.deps.now ?? (() => new Date());
         recordTrigger(status.headOid, now().toISOString());
@@ -251,25 +260,17 @@ export class MergeDriver {
     });
     const verdict = resolved.verdict;
 
+    // Persist the lock only when it actually changed — which, post-R2, is only ever "a
+    // fallback reached MERGE_OK on this head" (resolveReviewVerdict never clears; the head-
+    // change clear lives in the trigger branch above).
     if (fallback && (resolved.lock.head !== fallback.lock.head || resolved.lock.kind !== fallback.lock.kind)) {
       fallback.recordFallback(resolved.lock);
     }
 
-    if (resolved.transition) {
-      // Audit trail (#54): "emit a structured event AND post a PR comment stating which
-      // reviewer mode is now gating." The comment posts here (co-located with the decision,
-      // same as the review trigger above); the structured event is the caller's job (tick()
-      // has `state`, MergeDriver never touches storage directly) — see `reviewerTransition`
-      // on the returned outcome below. Best-effort: a comment-post hiccup must not block or
-      // requeue an otherwise-resolved gate decision — the structured event is the durable
-      // record regardless.
-      const note = resolved.transition.kind === "switch"
-        ? `⚠️ Reviewer failover (#54): the primary reviewer has been unavailable past the ` +
-          `configured threshold — gate② is now gated by **${resolved.transition.mode}** until it recovers.`
-        : `✅ Reviewer failover (#54): the primary reviewer is available again — new verdicts ` +
-          `will use it. (A verdict already obtained via the fallback on this head stays valid.)`;
-      await forge.addPRComment(pr, note).catch(() => {});
-    }
+    // Audit trail (#54): the switch/revert signal rides the outcome; conductor.ts tick()
+    // dedups it against the durable event log, emits the structured event, and posts the PR
+    // comment (see DriveOutcome.reviewerTransition). Not announced here: the signal is
+    // stateless-per-tick and MergeDriver has no event-log access to dedup with.
     const withTransition = (outcome: DriveOutcome): DriveOutcome =>
       resolved.transition ? { ...outcome, reviewerTransition: resolved.transition } : outcome;
 

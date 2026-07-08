@@ -117,7 +117,23 @@ const Reviewer = z.object({
   // reaches a decisive verdict. Irrelevant when `fallback` is empty. Conservative default: 20
   // minutes — same order of magnitude as the (separate, still-unwired) pollTimeoutSec above.
   failoverAfterSec: z.number().int().positive().default(1200),
-}).strict();
+}).strict().superRefine((r, ctx) => {
+  // #54 R2 (fable-review P3): same-model-trusted with an empty trustedReviewers list can NEVER
+  // produce a verdict (fail-closed by design, see SameModelTrustedReviewer) — as a fallback
+  // entry that makes the explicitly opted-into failover silently inert: the operator believes
+  // gate② has a fallback, but every PR still queues forever with no signal. Reject at parse
+  // (loud, at `sapwood validate` / engine start) rather than let a dead config ship.
+  if (r.fallback.includes("same-model-trusted") && r.trustedReviewers.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["fallback"],
+      message:
+        "reviewer.fallback contains same-model-trusted but reviewer.trustedReviewers is empty — " +
+        "that fallback can never produce a verdict (fail-closed), so the failover would be " +
+        "silently inert; add trustedReviewers logins or remove the entry",
+    });
+  }
+});
 
 const Merge = z.object({
   // conductor-merge (0day-style default): gate① (CI green) + gate② (fresh non-author review on

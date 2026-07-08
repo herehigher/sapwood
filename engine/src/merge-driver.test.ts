@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { mergeDecision, deriveGate, MergeDriver, type DriveOutcome } from "./merge-driver.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
+import { CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
 import type { Reviewer, ReviewVerdict, ReviewAction } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -451,12 +452,12 @@ test("MergeDriver.driveOne: fallback configured but reviewer.failoverAfterSec no
   assert.deepEqual(forge.comments, []);
 });
 
-test("MergeDriver.driveOne: threshold crossed -> gates via the fallback's OWN verdict, merges, reports a switch transition + PR comment, and records the new lock", async () => {
+test("MergeDriver.driveOne: threshold crossed -> gates via the fallback's OWN verdict, merges, reports a switch transition, and records the new lock (comment/event announcement is the conductor's, deduped there)", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer();
   reviewer.verdict = { action: "WAIT_REVIEW", headOid: "HEAD" }; // primary still down
   const fallbackReviewers = [new ScriptedReviewer("same-model-trusted", "MERGE_OK")];
-  const cfg = mkCfg({ reviewer: { fallback: ["same-model-trusted"], failoverAfterSec: 1200 } }); // 20min, elapsed 1h
+  const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } }); // 20min, elapsed 1h
   const recorded: Array<{ head: string | null; kind: string | null }> = [];
   const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers, now: NOW });
   const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, {
@@ -464,37 +465,113 @@ test("MergeDriver.driveOne: threshold crossed -> gates via the fallback's OWN ve
     recordFallback: (lock) => recorded.push(lock),
   });
   assert.equal(outcome.kind, "merged");
-  assert.deepEqual(outcome.reviewerTransition, { kind: "switch", mode: "same-model-trusted" });
+  assert.deepEqual(outcome.reviewerTransition, { kind: "switch", mode: "same-model-trusted", head: "HEAD" });
   assert.deepEqual(forge.merged, [[7, "HEAD"]]);
-  assert.equal(forge.comments.length, 1);
-  assert.match(forge.comments[0]![1], /same-model-trusted/);
+  assert.deepEqual(forge.comments, []); // announcement moved to the conductor (needs event-log dedup)
   assert.deepEqual(recorded, [{ head: "HEAD", kind: "same-model-trusted" }]);
 });
 
-test("MergeDriver.driveOne: an existing lock on the current head stays valid (merges) even though the primary now reports HANDLE_THREADS", async () => {
+// ── #54 R2 (PR #71 review): the two halves of the corrected lock semantics ──
+
+test("MergeDriver.driveOne R2: the lock SURVIVES primary non-decisiveness — re-verified against the live approval artifact, merges, lock untouched", async () => {
   const forge = new FakeForge();
+  forge.reviewData = {
+    ...forge.reviewData,
+    reviews: [{ author: "trusted-bot", commitOid: "HEAD", state: "APPROVED" }], // the artifact exists
+  };
   const reviewer = new FakeReviewer();
-  reviewer.verdict = { action: "HANDLE_THREADS", headOid: "HEAD" }; // primary "recovered" but conflicting
-  const cfg = mkCfg({ reviewer: { fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
+  reviewer.verdict = { action: "WAIT_REVIEW", headOid: "HEAD" }; // primary down/undecided again
+  // failoverAfterSec 7200 (elapsed 1h) -> BELOW threshold: this exercises the lock re-verify
+  // path specifically, not the ordinary failover chain.
+  const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 7200 } });
   const recorded: Array<{ head: string | null; kind: string | null }> = [];
-  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [], now: NOW });
-  const lock = { head: "HEAD", kind: "same-model-trusted" };
+  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new SameModelTrustedReviewer(["trusted-bot"])], now: NOW });
   const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, {
-    lock,
+    lock: { head: "HEAD", kind: "same-model-trusted" },
     recordFallback: (l) => recorded.push(l),
   });
-  assert.equal(outcome.kind, "merged"); // the locked fallback MERGE_OK wins, not primary's HANDLE_THREADS
-  assert.deepEqual(outcome.reviewerTransition, { kind: "revert", mode: "different-model-codex" });
+  assert.equal(outcome.kind, "merged");
   assert.deepEqual(forge.merged, [[7, "HEAD"]]);
-  assert.equal(forge.comments.length, 1);
-  assert.match(forge.comments[0]![1], /available again/);
-  assert.deepEqual(recorded, [{ head: null, kind: null }]); // lock cleared — primary trusted again
+  assert.deepEqual(recorded, []); // lock unchanged — never re-written, never cleared here
+});
+
+test("MergeDriver.driveOne R2: the lock does NOT override fresh blocking signals — a standing human CHANGES_REQUESTED on the locked head blocks (fable-review P1)", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = {
+    ...forge.reviewData,
+    reviews: [
+      { author: "trusted-bot", commitOid: "HEAD", state: "APPROVED" }, // the fallback approval exists...
+      { author: "some-human", commitOid: "HEAD", state: "CHANGES_REQUESTED" }, // ...but a human blocked since
+    ],
+  };
+  // Real primary mode (not scripted): CodexReviewer derives HANDLE_THREADS from the standing
+  // change request — the exact end-to-end repro from the fable review, now expected to block.
+  const primary = new CodexReviewer();
+  const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
+  const recorded: Array<{ head: string | null; kind: string | null }> = [];
+  const driver = new MergeDriver({ forge, reviewer: primary, cfg, fallbackReviewers: [new SameModelTrustedReviewer(["trusted-bot"])], now: NOW });
+  const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, {
+    lock: { head: "HEAD", kind: "same-model-trusted" },
+    recordFallback: (l) => recorded.push(l),
+  });
+  assert.equal(outcome.kind, "needs-human"); // HANDLE_THREADS gates HUMAN — never merged
+  assert.deepEqual(forge.merged, []);
+  assert.deepEqual(recorded, []); // and the block does not clear the lock either (head unchanged)
+});
+
+test("MergeDriver.driveOne R2: transient non-merge outcomes leave the lock in place — cleared only on merge or head change (Codex PR #71 P2)", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, ciGreen: false }; // gate① pending -> MERGE_OK still queues
+  const reviewer = new FakeReviewer(); // primary decisive MERGE_OK (recovered)
+  const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
+  const recorded: Array<{ head: string | null; kind: string | null }> = [];
+  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new SameModelTrustedReviewer(["trusted-bot"])], now: NOW });
+  const lock = { head: "HEAD", kind: "same-model-trusted" };
+  const t1 = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, { lock, recordFallback: (l) => recorded.push(l) });
+  assert.equal(t1.kind, "queued"); // CI not green — no merge this tick
+  assert.deepEqual(recorded, []); // the lock is NOT cleared on a transient non-merge tick
+  assert.deepEqual(t1.reviewerTransition, { kind: "revert", mode: "different-model-codex", head: "HEAD" });
+
+  forge.status = { ...forge.status, ciGreen: true }; // next tick: CI green
+  const t2 = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, { lock, recordFallback: (l) => recorded.push(l) });
+  assert.equal(t2.kind, "merged");
+  assert.deepEqual(recorded, []); // still never cleared at resolution time
+});
+
+test("MergeDriver.driveOne R2: a FORGED lock row (no matching approval on the PR) synthesizes nothing — the PR just keeps queuing (fable-review P2)", async () => {
+  const forge = new FakeForge(); // reviewData has NO reviews at all
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "WAIT_REVIEW", headOid: "HEAD" };
+  const cfg = mkCfg({ reviewer: { fallback: ["human"], failoverAfterSec: 7200 } }); // below threshold -> lock path
+  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new HumanReviewer()], now: NOW });
+  const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, {
+    lock: { head: "HEAD", kind: "human" }, // forged: claims a human approval that does not exist
+    recordFallback: noopRecordFallback,
+  });
+  assert.equal(outcome.kind, "queued");
+  assert.deepEqual(forge.merged, []); // never a synthesized MERGE_OK
+});
+
+test("MergeDriver.driveOne R2: a head change clears the (now stale) lock in the re-trigger branch — the only drive-path clear", async () => {
+  const forge = new FakeForge(); // live head is "HEAD"
+  const reviewer = new FakeReviewer();
+  const cfg = mkCfg({ reviewer: { fallback: ["human"], failoverAfterSec: 1200 } });
+  const recorded: Array<{ head: string | null; kind: string | null }> = [];
+  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new HumanReviewer()], now: NOW });
+  const outcome = await driver.driveOne(
+    7, 46,
+    { head: "OLD_HEAD", at: "2026-07-07T07:00:00Z" }, // pin for the old head -> re-trigger branch
+    noopRecord,
+    { lock: { head: "OLD_HEAD", kind: "human" }, recordFallback: (l) => recorded.push(l) },
+  );
+  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(recorded, [{ head: null, kind: null }]); // stale episode ended with the old head
 });
 
 test("MergeDriver.driveOne: primary recovers cleanly (MERGE_OK) with NO prior lock -> normal merge, no reviewer-failover machinery involved", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer(); // default verdict: MERGE_OK
-  const cfg = mkCfg({ reviewer: { fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
+  const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
   const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new ScriptedReviewer("same-model-trusted", "WAIT_REVIEW")], now: NOW });
   const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, { lock: NO_LOCK, recordFallback: noopRecordFallback });
   assert.equal(outcome.kind, "merged");

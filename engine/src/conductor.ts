@@ -17,6 +17,7 @@ import type { State, BoardStatus, PendingRollback, ModelUsageEntry } from "./sta
 import type { SapwoodConfig } from "./config.js";
 import type { DriveOutcome } from "./merge-driver.js";
 import type { ReviewFallbackLock } from "./reviewer.js";
+import { isReviewerKind } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -577,27 +578,48 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // that knows the LIVE current head) — tick() just threads the lane's State-recorded pin
       // in and wires driveOne's recordTrigger callback straight back into State. #54: same
       // pattern for the reviewer-failover lock (state.ts workers.review_fallback_head/kind).
+      // The persisted kind is VALIDATED here, at the read boundary (#54 R2, fable-review P2):
+      // the state DB is outside the guard write boundary, so a forged/corrupt kind string must
+      // fail closed to no-lock — it is never cast through. (Defense-in-depth: even a valid
+      // kind is only advisory — resolveReviewVerdict re-verifies the approval artifact against
+      // live PR data before it can gate anything.)
+      const storedKind = w.review_fallback_kind ?? null;
+      const lockKind = isReviewerKind(storedKind) ? storedKind : null;
       const outcome = await gate.driveOne(
         pr,
         w.issue,
         { head: w.review_triggered_head ?? null, at: w.review_triggered_at ?? null },
         (head, at) => state.recordReviewTrigger(w.name, head, at),
         {
-          // State (state.ts) stores review_fallback_kind as a plain TEXT column — it never
-          // validates the string against Reviewer["kind"] itself (same as every other
-          // engine/reviewer.ts type boundary state.ts crosses). The value only ever originates
-          // from resolveReviewVerdict's own ReviewerKind, via recordFallback below, so this
-          // narrowing is safe.
-          lock: { head: w.review_fallback_head ?? null, kind: (w.review_fallback_kind ?? null) as ReviewFallbackLock["kind"] },
+          lock: { head: lockKind ? (w.review_fallback_head ?? null) : null, kind: lockKind },
           recordFallback: (lock) => state.recordReviewFallback(w.name, lock.head, lock.kind),
         },
       );
-      // #54: a switch/revert this tick gets its structured-event audit trail here (the PR
-      // comment itself was already posted by driveOne — see merge-driver.ts).
+      // #54: announce a reviewer-failover switch/revert — structured event + PR comment.
+      // driveOne reports the signal STATELESSLY every tick it holds (resolveReviewVerdict is
+      // pure), so dedup happens here against the durable event log: announce only when
+      // (kind, mode, pr, head) differs from the lane's last announcement. One announcement per
+      // episode transition, restart-safe, no per-tick comment spam (e.g. produce-pr-and-stop
+      // holds a lane driving for many ticks after a revert).
       if (outcome.reviewerTransition) {
-        state.appendEvent(`reviewer-fallback-${outcome.reviewerTransition.kind}`, {
-          worker: w.name, issue: w.issue, pr, mode: outcome.reviewerTransition.mode,
-        });
+        const t = outcome.reviewerTransition;
+        const evKind = `reviewer-fallback-${t.kind}`;
+        const last = state.lastReviewerFallbackEvent(w.name);
+        const alreadyAnnounced =
+          last != null && last.kind === evKind && last.mode === t.mode && last.pr === pr && last.head === t.head;
+        if (!alreadyAnnounced) {
+          state.appendEvent(evKind, { worker: w.name, issue: w.issue, pr, mode: t.mode, head: t.head });
+          const note =
+            t.kind === "switch"
+              ? `⚠️ Reviewer failover (#54): the primary reviewer has been unavailable past the ` +
+                `configured threshold — gate② is now gated by **${t.mode}** until it recovers.`
+              : `✅ Reviewer failover (#54): the primary reviewer is available again — gate② is ` +
+                `gated by **${t.mode}** for new verdicts.`;
+          // Best-effort courtesy copy of the audit trail: the structured event above is the
+          // durable record and has already landed; a comment-post hiccup must not crash the
+          // DRIVE loop or mark the lane failed over an announcement.
+          await forge.addPRComment(pr, note).catch(() => {});
+        }
       }
       switch (outcome.kind) {
         case "merged":

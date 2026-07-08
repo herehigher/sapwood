@@ -447,11 +447,20 @@ rewrite.** v1 requirements:
   `reviewer.failoverAfterSec` threshold — when the primary reviewer stays
   non-decisive/unavailable past that threshold, gate② hands off to the first
   fallback reviewer whose OWN mode semantics reaches a decisive verdict (reused,
-  never forked), reports a structured event + PR comment naming which mode is now
-  gating, and reverts to the primary for new verdicts once it recovers — while a
-  fallback-obtained verdict already locked in for the current head stays valid.
-  Empty `fallback` (the default) is byte-for-byte the pre-#54 behavior: an
-  unavailable primary queues the PR forever, no silent degradation. **Still open:**
+  never forked), announces a structured event + PR comment naming which mode is
+  now gating (deduped against the event log — one announcement per episode
+  transition), and reverts to the primary for new verdicts once it recovers. A
+  fallback-obtained approval stays valid for its exact head across transient
+  non-merge ticks and engine restarts, but it is **advisory, never
+  verdict-bearing**: at every use it is re-verified against live PR data through
+  the recorded mode's own rules (a forged state-DB row synthesizes nothing), and
+  the always-blocking signals — unresolved threads, a standing
+  `CHANGES_REQUESTED` from anyone — block regardless of any failover state
+  (failover never weakens gate②, silently or otherwise). `fallback:
+  [same-model-trusted]` with an empty `trustedReviewers` is rejected at parse
+  (it could never fire). Empty `fallback` (the default) is byte-for-byte the
+  pre-#54 behavior: an unavailable primary queues the PR forever, no silent
+  degradation. **Still open:**
   skills/commands (`/sapwood-run`,
   `/sapwood-status`, `/sapwood-stop`, supervised "watch one issue" mode), `sapwood`
   status CLI, first-run trust ramp, docs set, and the **live** merge-gate + kill-switch

@@ -180,6 +180,24 @@ test("worker.review_fallback_head/kind survives an upsert that spreads a previou
   s.close();
 });
 
+test("lastReviewerFallbackEvent (#54 R2): none -> null; returns the LATEST switch/revert for the right worker only", () => {
+  const s = mem();
+  assert.equal(s.lastReviewerFallbackEvent("lane-a"), null);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", pr: 55 }); // unrelated kinds never match
+  assert.equal(s.lastReviewerFallbackEvent("lane-a"), null);
+
+  s.appendEvent("reviewer-fallback-switch", { worker: "lane-a", issue: 2, pr: 55, mode: "human", head: "H1" });
+  s.appendEvent("reviewer-fallback-switch", { worker: "lane-b", issue: 3, pr: 56, mode: "same-model-trusted", head: "HX" });
+  assert.deepEqual(s.lastReviewerFallbackEvent("lane-a"), { kind: "reviewer-fallback-switch", mode: "human", pr: 55, head: "H1" });
+
+  // A later revert for the same lane supersedes the switch; lane-b's row is untouched.
+  s.appendEvent("reviewer-fallback-revert", { worker: "lane-a", issue: 2, pr: 55, mode: "different-model-codex", head: "H1" });
+  assert.deepEqual(s.lastReviewerFallbackEvent("lane-a"), { kind: "reviewer-fallback-revert", mode: "different-model-codex", pr: 55, head: "H1" });
+  assert.deepEqual(s.lastReviewerFallbackEvent("lane-b"), { kind: "reviewer-fallback-switch", mode: "same-model-trusted", pr: 56, head: "HX" });
+  s.close();
+});
+
 test("migration close/reopen: review_fallback_head/kind persist across an engine restart (DB-backed, not memory)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
   try {
