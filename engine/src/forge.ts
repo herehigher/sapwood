@@ -79,6 +79,10 @@ export interface IForge {
   mergePR(pr: number, headOid: string): Promise<void>;
   /** Post a PR comment (e.g. the `@codex review` trigger). #13 reviewer.ts. */
   addPRComment(pr: number, body: string): Promise<void>;
+  /** Post an ISSUE comment (distinct from addPRComment — a reclaimed lane's retained
+   *  worktree may have no PR at all yet). #69: the dirty-worktree-retention escalation path
+   *  uses this to tell a human where the preserved worktree lives. */
+  addIssueComment(issue: number, body: string): Promise<void>;
   /** Fetch gate②'s raw review signals for a PR. #13 reviewer.ts. */
   getPRReviewData(pr: number): Promise<PRReviewData>;
   /** Raw issue body text (#46, Decision #8's gate② re-check): reviewer.ts extracts the
@@ -215,6 +219,10 @@ export class GithubForge implements IForge {
     // The `@codex review` trigger (default reviewer) rides this same call — a plain PR
     // comment, never a review/approval/merge call (producer != reviewer != merger).
     await this.gh(["pr", "comment", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
+  }
+
+  async addIssueComment(issue: number, body: string): Promise<void> {
+    await this.gh(["issue", "comment", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
   }
 
   async getIssueBody(issue: number): Promise<string> {

@@ -46,6 +46,7 @@ export {
   engineSessionGapSec,
   type Supervisor,
   type LaneProbe,
+  type ReclaimResult,
   type TickDeps,
   type TickResult,
   type ReclaimOutcome,

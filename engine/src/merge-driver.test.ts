@@ -144,6 +144,7 @@ class FakeForge implements IForge {
     this.merged.push([pr, headOid]);
   }
   async addPRComment(pr: number, body: string): Promise<void> { this.comments.push([pr, body]); }
+  async addIssueComment(): Promise<void> {}
   async getIssueBody(): Promise<string> { return ""; }
   async getPRReviewData(): Promise<PRReviewData> { return this.reviewData; }
 }

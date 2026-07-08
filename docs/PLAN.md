@@ -75,6 +75,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
 | 7 | Config format | **YAML default** — `sapwood.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
 | 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. |
+| 9 | Edge-case handling | **Rare edge cases degrade to `needs-human`, never to more machinery** (CTO, 2026-07-07, #69). Automation covers the common path only; when a low-probability edge would require new hardening/persistence/recovery code, the correct handling is: preserve the evidence, label `needs-human`, stop. First application: the drain path never runs git in worker worktrees (the whole #59–#68 issue family collapsed into sentinel-only handoff + dirty-worktree retention). |
 
 ## Architecture (v1)
 
@@ -271,21 +272,37 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   (default) and **produce-PR-and-stop** (gates report, never merges). The conductor is
   the *only* merger — structurally, `tick()` never calls `mergePR`; only
   `merge-driver.driveOne` does, and no worker can reach it.
-- **Cost ceiling + kill switch (#14)** — engine-enforced, worker-unforgeable: a
-  `spend_ledger` in SQLite (restart-safe; a mid-run engine restart recovers lane cost
-  from the worker jsonl) feeds a **daily USD cap** checked every tick, plus a
-  **wall-clock cap** over an active engine session (session gap derived from tick
-  cadence — a legal slow cadence cannot silently disable the tier). A **`KILL_SWITCH`
-  file sentinel** in the engine's own data dir (human `touch`/`rm`; workers have no
-  write path) freezes all new dispatch, sends running workers the graceful
-  `requestHandoff()` drain, and only after the bounded `drainWindowSec` escalates to
-  process-tree kill + needs-human. It also halts the DRIVE phase's review-gate/merge
-  loop (#59/#61): every driving lane and every ready-issue dispatch iteration re-checks
-  the sentinel fresh (not just once per tick), so an operator's stop takes effect
-  mid-tick too — a lane already through gate①/gate② holds queued instead of
-  autonomously merging, and a later ready issue in the same DISPATCH pass is skipped
-  rather than launching a new worker. The per-worker *soft* budget stays a graceful
-  handoff, never a mid-work kill (#33, still open — needs a live cost signal).
+- **Cost ceiling + kill switch (#14, simplified in #69)** — engine-enforced,
+  worker-unforgeable: a `spend_ledger` in SQLite (restart-safe; a mid-run engine
+  restart recovers lane cost from the worker jsonl) feeds a **daily USD cap** checked
+  every tick, plus a **wall-clock cap** over an active engine session (session gap
+  derived from tick cadence — a legal slow cadence cannot silently disable the tier).
+  A **`KILL_SWITCH` file sentinel** in the engine's own data dir (human `touch`/`rm`;
+  workers have no write path) is **one global gate at the very top of the conductor
+  tick** (#69, replacing the #59/#61/#64 per-phase checks): active ⇒ the tick is
+  **drain-only** — running workers get the graceful `requestHandoff()` drain (and,
+  past the bounded `drainWindowSec`, the process-tree kill + needs-human escalation),
+  and *nothing else runs* — no dispatch, no drive/merge, no reclaim, no rollback
+  retry. Accepted trade-off: a switch flipped mid-tick takes effect at the next
+  tick's gate, not within the same tick. The per-worker *soft* budget stays a
+  graceful handoff, never a mid-work kill (#33, still open — needs a live cost
+  signal).
+- **Drain contract is sentinel-only; the supervisor never runs git in a worker
+  worktree (#69, superseding #60/#62/#63's supervisor-side commit+push)** — a
+  drain SIGTERM ends with the supervisor writing the `.handoff` sentinel
+  (session_id + cost) and *leaving the worktree untouched*; resume =
+  `claude --resume <session_id>` reusing that worktree in place. The #62 approach
+  (supervisor commits+pushes the dead worker's WIP) executed git inside a
+  worker-controlled worktree — worker-writable git config is attacker-controlled
+  input with unclosable code-execution vectors (#65: `.gitattributes` clean filters
+  have no `-c` disable), so it was deleted at the root, not patched per-vector.
+  **Dirty-worktree retention:** automation never deletes a worktree that may hold
+  uncommitted work — lane reclaim (DEAD teardown, drain-window escalation) deletes a
+  worktree only when a pure-filesystem mtime check proves it untouched since
+  dispatch; otherwise it stays on disk and the conductor posts the absolute path to
+  the issue + applies `needs-human`. Accepted trade-off (Decision #9): WIP is not
+  auto-pushed to the remote, so total machine loss before a human intervenes loses at
+  most one worker's budget-bounded WIP.
 - **Cost telemetry (#47)** — `spend_ledger` also records model id + categorized token
   usage (input/output/cache-read/cache-creation) per (lane, model), parsed from the
   same stream-json result the USD figure already came from. The ledger records

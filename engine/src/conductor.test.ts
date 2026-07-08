@@ -30,6 +30,7 @@ import {
   type Supervisor,
   type LaneProbe,
   type MergeGate,
+  type ReclaimResult,
 } from "./conductor.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -45,6 +46,7 @@ class FakeForge implements IForge {
   boardSet: Array<[number, string]> = [];
   claimed: number[] = [];
   prComments: Array<[number, string]> = [];
+  issueComments: Array<[number, string]> = [];
   async detectOwnerKind(): Promise<"user"> { return "user"; }
   async getReadyIssues(): Promise<Issue[]> { return this.ready; }
   async claimIssue(n: number): Promise<void> { this.claimed.push(n); }
@@ -54,6 +56,7 @@ class FakeForge implements IForge {
   async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}
   async addPRComment(pr: number, body: string): Promise<void> { this.prComments.push([pr, body]); }
+  async addIssueComment(n: number, body: string): Promise<void> { this.issueComments.push([n, body]); }
   async getIssueBody(): Promise<string> { return ""; }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
@@ -68,6 +71,8 @@ class FakeSupervisor implements Supervisor {
   dispatched: Issue[] = [];
   reclaimed: string[] = [];
   handoffRequested: string[] = [];
+  /** #69: per-lane reclaim result. Default: no worktree ever existed (nothing retained). */
+  reclaimResults: Record<string, ReclaimResult> = {};
   private n = 0;
   async probe(w: string): Promise<LaneProbe> { return this.probes[w] ?? DEFAULT_PROBE; }
   async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
@@ -75,7 +80,10 @@ class FakeSupervisor implements Supervisor {
     const name = `lane-${++this.n}`;
     return { name, sessionId: `sess-${name}` };
   }
-  async reclaim(w: string): Promise<void> { this.reclaimed.push(w); }
+  async reclaim(w: string): Promise<ReclaimResult> {
+    this.reclaimed.push(w);
+    return this.reclaimResults[w] ?? { worktreePath: null, worktreeRetained: false };
+  }
   requestHandoff(w: string): boolean { this.handoffRequested.push(w); return true; }
 }
 
@@ -285,6 +293,42 @@ test("tick reclaim: DEAD lane WITH a PR is rescued to driving, not requeued (Cod
   assert.deepEqual(sup.reclaimed, ["lane-deadpr"]); // orphan still killed
   assert.deepEqual(forge.boardSet, []); // NOT handed back to Ready (would race the open PR)
   assert.equal(st.getWorker("lane-deadpr")?.state, "driving");
+  st.close();
+});
+
+// ── #69 dirty-worktree retention: automation never deletes a worktree with possibly-
+// uncommitted work — reclaim() reports it retained, and tick() escalates to a human
+// (issue comment with the absolute path + needs-human label). Clean -> deleted, no noise. ──
+
+test("tick reclaim: DEAD lane whose dirty worktree was RETAINED -> needs-human label + issue comment carrying the absolute path and lane name", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dirty", 7);
+  sup.probes["lane-dirty"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
+  sup.reclaimResults["lane-dirty"] = { worktreePath: "/abs/worktrees/lane-dirty", worktreeRetained: true };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(sup.reclaimed, ["lane-dirty"]);
+  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dirty", issue: 7, rescued: false, costUsd: 0, modelUsage: [] });
+  assert.deepEqual(forge.labelsAdded, [[7, "needs-human"]]); // human salvages or discards
+  assert.equal(forge.issueComments.length, 1);
+  assert.equal(forge.issueComments[0]![0], 7);
+  assert.match(forge.issueComments[0]![1], /\/abs\/worktrees\/lane-dirty/); // the absolute path
+  assert.match(forge.issueComments[0]![1], /lane-dirty/); // the lane name
+  st.close();
+});
+
+test("tick reclaim: DEAD lane whose worktree was clean (deleted by reclaim) -> no comment, no needs-human (unchanged path)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-clean", 8);
+  sup.probes["lane-clean"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
+  sup.reclaimResults["lane-clean"] = { worktreePath: "/abs/worktrees/lane-clean", worktreeRetained: false };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(forge.issueComments, []);
+  assert.deepEqual(forge.labelsAdded, []); // requeued to Ready, nothing to triage
+  assert.deepEqual(forge.boardSet, [[8, "ready"]]);
   st.close();
 });
 
@@ -608,89 +652,50 @@ test("tick DRIVE: a driving lane with no known PR number fails safe to needs-hum
   st.close();
 });
 
-// ── #59: kill switch must freeze the DRIVE loop's merge path too, not just new dispatch ──
+// ── #69: kill switch = ONE global gate at the top of tick() — active means the whole tick
+// is drain-only (no rollback retry, no reclaim, no drive/merge, no dispatch). Replaces the
+// #59/#61/#64 per-phase gates (and their mid-loop re-read semantics: a switch flipped
+// mid-tick now takes effect at the NEXT tick's gate — the documented #69 trade-off). ──
 
-test("tick DRIVE: kill switch active -> driveOne is NEVER called, lane queued with reason kill-switch, stays driving", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
+test("tick: kill switch active -> DRAIN-ONLY: no rollback retry, no reclaim, no drive, no dispatch; running lanes asked to hand off", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-gate-"));
   try {
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
     const sup = new FakeSupervisor();
-    seedRunning(st, "lane-a", 2);
-    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    // One RUNNING lane (would be probed/reclaimed), one DRIVING lane with a mergeable PR
+    // (would merge), one Ready issue (would dispatch), one pending rollback (would retry).
+    seedRunning(st, "lane-run", 2);
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    st.upsertWorker({ name: "lane-drv", issue: 3, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 56 });
+    forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
+    st.addPendingRollback(7, "ready", "dispatch-rollback", "t");
     const gate = new FakeMergeGate();
-    gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" }; // would merge if driveOne were called
+    gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+    gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H" };
     writeFileSync(join(dir, "KILL_SWITCH"), ""); // a human flips it — no config touched
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-    assert.equal(gate.calls.length, 0); // driveOne never invoked — no possibility of forge.mergePR firing
-    assert.deepEqual(forge.boardSet, []); // never set to done
-    assert.equal(st.getWorker("lane-a")?.state, "driving"); // stays driving, not done
-    assert.deepEqual(r.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "kill-switch" }]);
-    st.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("tick DRIVE: kill switch active + a malformed/legacy driving lane with pr==null -> queued kill-switch, NOT the missing-PR escalation (Codex PR #61 review)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
-  try {
-    const st = new State(join(dir, "sapwood.sqlite"));
-    const forge = new FakeForge();
-    const sup = new FakeSupervisor();
-    // Seed a driving lane directly with pr=null (as if rescued from a probe with no prNumber) —
-    // the same shape the pre-existing "fails safe to needs-human" test above uses.
-    st.upsertWorker({ name: "lane-a", issue: 2, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: null });
-    const gate = new FakeMergeGate();
-    writeFileSync(join(dir, "KILL_SWITCH"), "");
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-    assert.equal(gate.calls.length, 0);
-    assert.deepEqual(forge.labelsAdded, []); // NOT the missing-PR fail-safe's needs-human label
-    assert.equal(st.getWorker("lane-a")?.state, "driving"); // NOT marked failed
-    assert.deepEqual(r.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: -1, reason: "kill-switch" }]);
-    st.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("tick DRIVE: kill switch created MID-LOOP (during an in-flight driveOne) -> a later lane in the SAME DRIVE phase is queued kill-switch, never reaches driveOne (Codex PR #61 re-review: stale up-front snapshot)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
-  try {
-    const switchPath = join(dir, "KILL_SWITCH");
-    const st = new State(join(dir, "sapwood.sqlite"));
-    const forge = new FakeForge();
-    const sup = new FakeSupervisor();
-    // Two driving lanes, processed in `name` order (lane-a then lane-b — see
-    // State.drivingWorkers' ORDER BY name).
-    seedRunning(st, "lane-a", 2);
-    seedRunning(st, "lane-b", 3);
-    sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
-    sup.probes["lane-b"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 56 };
-
-    // A fake gate whose FIRST driveOne call (lane-a/PR 55) simulates an operator hitting the
-    // kill switch WHILE that async GitHub work is in flight, by creating the sentinel file
-    // synchronously before resolving. No KILL_SWITCH exists when the DRIVE loop starts.
-    const calls: number[] = [];
-    const gate: MergeGate = {
-      async driveOne(pr) {
-        calls.push(pr);
-        if (calls.length === 1) writeFileSync(switchPath, "");
-        return { kind: "queued", pr, reason: "in-flight" };
-      },
-    };
 
     const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
-    // lane-a's driveOne DID run (switch was absent when its iteration started).
-    assert.deepEqual(calls, [55]); // lane-b's driveOne (56) was NEVER called
-    const laneA = r.driven.find((d) => d.worker === "lane-a");
-    const laneB = r.driven.find((d) => d.worker === "lane-b");
-    assert.deepEqual(laneA, { kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "in-flight" });
-    // lane-b, reached AFTER the sentinel appeared, gets the fresh-read kill-switch queue instead
-    // of proceeding to gate.driveOne.
-    assert.deepEqual(laneB, { kind: "queued", worker: "lane-b", issue: 3, pr: 56, reason: "kill-switch" });
-    assert.equal(st.getWorker("lane-b")?.state, "driving");
+    assert.equal(r.ceilingBreached, true);
+    assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
+    assert.deepEqual(r.drainRequested, ["lane-run"]); // the ONLY action: graceful drain
+    assert.deepEqual(sup.handoffRequested, ["lane-run"]);
+    assert.deepEqual(r.escalated, []); // drain window not elapsed — no hard kill yet
+    // Nothing else ran:
+    assert.deepEqual(r.reclaimed, []); // reclaim phase skipped (lane not even probed)
+    assert.deepEqual(r.driven, []); // drive phase skipped
+    assert.deepEqual(r.dispatched, []); // dispatch phase skipped (not even "skipped" rows)
+    assert.deepEqual(r.rollbacks, []); // rollback retry skipped
+    assert.equal(gate.calls.length, 0); // no possibility of forge.mergePR firing
+    assert.deepEqual(sup.dispatched, []);
+    assert.deepEqual(sup.reclaimed, []);
+    assert.deepEqual(forge.claimed, []);
+    assert.deepEqual(forge.boardSet, []);
+    assert.deepEqual(forge.labelsAdded, []);
+    assert.equal(st.getWorker("lane-run")?.state, "running"); // untouched, resumes next tick
+    assert.equal(st.getWorker("lane-drv")?.state, "driving");
+    assert.equal(st.pendingRollbacks().length, 1); // still pending — retried once the switch clears
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -719,8 +724,8 @@ test("tick DRIVE: kill switch NOT active -> driveOne called normally (no regress
   }
 });
 
-test("tick DRIVE: kill switch active then cleared -> next tick resumes normal driving/merging", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-drive-killswitch-"));
+test("tick: kill switch active then cleared -> next tick runs the FULL tick again (reclaim -> drive -> merge)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-gate-"));
   try {
     const switchPath = join(dir, "KILL_SWITCH");
     const st = new State(join(dir, "sapwood.sqlite"));
@@ -734,15 +739,17 @@ test("tick DRIVE: kill switch active then cleared -> next tick resumes normal dr
     writeFileSync(switchPath, "");
     const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     assert.equal(gate.calls.length, 0);
-    assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "kill-switch" }]);
-    assert.equal(st.getWorker("lane-a")?.state, "driving");
+    assert.deepEqual(r1.driven, []); // drain-only tick: the lane was not even probed
+    assert.deepEqual(r1.drainRequested, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "running"); // held as-is under the switch
 
     rmSync(switchPath, { force: true }); // human clears the switch
     const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-    assert.equal(gate.calls.length, 1); // driveOne now called
+    assert.equal(gate.calls.length, 1); // reclaimed to driving + driven in the same tick
     assert.deepEqual(r2.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
     assert.equal(st.getWorker("lane-a")?.state, "done");
     assert.deepEqual(forge.boardSet, [[2, "done"]]);
+    assert.equal(st.ceilingBreach(), null); // breach record cleared once the switch lifts
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -928,28 +935,25 @@ test("laneOnReclaimFailed: has PR -> DRIVING (rescue), else ESCALATE", () => {
 
 // ── #14: engine cost ceiling + kill switch ──────────────────────────────────────────────
 
-test("evaluateCeiling: no breach when under both caps and kill switch off", () => {
+test("evaluateCeiling: no breach when under both caps", () => {
   const reasons = evaluateCeiling({
     dailySpendUsd: 10, dailyBudgetUsd: 100, wallClockElapsedSec: 100, maxWallClockSec: 14400,
-    killSwitchActive: false,
   });
   assert.deepEqual(reasons, []);
 });
 
-test("evaluateCeiling: daily budget / wall-clock / kill-switch each independently breach", () => {
-  const base = { dailySpendUsd: 10, dailyBudgetUsd: 100, wallClockElapsedSec: 10, maxWallClockSec: 14400, killSwitchActive: false };
+test("evaluateCeiling: daily budget / wall-clock each independently breach (#69: the kill switch is no longer a ceiling reason — it's tick()'s global gate)", () => {
+  const base = { dailySpendUsd: 10, dailyBudgetUsd: 100, wallClockElapsedSec: 10, maxWallClockSec: 14400 };
   assert.deepEqual(evaluateCeiling({ ...base, dailySpendUsd: 101 }), ["daily-budget"]);
   assert.deepEqual(evaluateCeiling({ ...base, wallClockElapsedSec: 14401 }), ["wall-clock"]);
-  assert.deepEqual(evaluateCeiling({ ...base, killSwitchActive: true }), ["kill-switch"]);
   assert.deepEqual(evaluateCeiling({ ...base, dailySpendUsd: 100 }), []); // equal is NOT over
 });
 
-test("evaluateCeiling: multiple simultaneous breaches report in fixed order (kill-switch, daily, wall-clock)", () => {
+test("evaluateCeiling: multiple simultaneous breaches report in fixed order (daily, wall-clock)", () => {
   const reasons = evaluateCeiling({
     dailySpendUsd: 200, dailyBudgetUsd: 100, wallClockElapsedSec: 99999, maxWallClockSec: 14400,
-    killSwitchActive: true,
   });
-  assert.deepEqual(reasons, ["kill-switch", "daily-budget", "wall-clock"]);
+  assert.deepEqual(reasons, ["daily-budget", "wall-clock"]);
 });
 
 test("drainEscalationDue: bounded by drainWindowSec; equal-at-window is NOT yet due", () => {
@@ -982,7 +986,7 @@ test("tick ceiling: daily budget breach freezes ALL new dispatch + drains runnin
   st.close();
 });
 
-test("tick ceiling: out-of-band kill switch (file sentinel, engine data dir) freezes dispatch + drains", async () => {
+test("tick: out-of-band kill switch (file sentinel, engine data dir) -> drain-only tick, nothing dispatched", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-ceiling-"));
   try {
     const st = new State(join(dir, "sapwood.sqlite"));
@@ -996,7 +1000,8 @@ test("tick ceiling: out-of-band kill switch (file sentinel, engine data dir) fre
     const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
     assert.equal(r.ceilingBreached, true);
     assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
-    assert.deepEqual(r.dispatched, [{ kind: "skipped", issue: 5, reason: "ceiling" }]);
+    assert.deepEqual(r.dispatched, []); // #69 global gate: DISPATCH never even ran
+    assert.deepEqual(sup.dispatched, []);
     assert.deepEqual(sup.handoffRequested, ["lane-run"]);
     st.close();
   } finally {
@@ -1004,48 +1009,7 @@ test("tick ceiling: out-of-band kill switch (file sentinel, engine data dir) fre
   }
 });
 
-test("tick DISPATCH: kill switch created MID-LOOP (during an in-flight supervisor.dispatch) -> a later ready issue in the SAME DISPATCH phase is skipped 'ceiling', never reaches claimIssue/dispatch (independent review of PR #61, issue #64 F1)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-dispatch-killswitch-"));
-  try {
-    const switchPath = join(dir, "KILL_SWITCH");
-    const st = new State(join(dir, "sapwood.sqlite"));
-    const forge = new FakeForge();
-    forge.ready = [
-      { number: 2, title: "", labels: ["prio:1-high"] },
-      { number: 3, title: "", labels: ["prio:1-high"] },
-    ];
-
-    // A supervisor whose FIRST dispatch call (issue #2, first in dispatch order) simulates an
-    // operator hitting the kill switch WHILE that async dispatch (spawning a brand-new
-    // autonomous worker process) is in flight, by creating the sentinel file synchronously
-    // before resolving. No KILL_SWITCH exists when the DISPATCH loop starts.
-    class KillSwitchOnFirstDispatch extends FakeSupervisor {
-      override async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
-        if (this.dispatched.length === 0) writeFileSync(switchPath, "");
-        return super.dispatch(issue);
-      }
-    }
-    const sup = new KillSwitchOnFirstDispatch();
-
-    assert.equal(st.isKillSwitchActive(), false); // absent when the tick (and DISPATCH loop) starts
-    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { roundDispatchCap: 2, max: 3 } }) });
-
-    // Issue #2's claimIssue + dispatch DID run (switch was absent when its iteration reached
-    // the outward-action checks).
-    assert.deepEqual(forge.claimed, [2]); // issue #3's claimIssue was NEVER reached
-    assert.deepEqual(sup.dispatched.map((i) => i.number), [2]); // issue #3's dispatch was NEVER reached
-    assert.deepEqual(r.dispatched, [
-      { kind: "dispatched", issue: 2, worker: "lane-1" },
-      { kind: "skipped", issue: 3, reason: "ceiling" },
-    ]);
-    assert.equal(st.runningWorkers().length, 1); // only #2 actually launched
-    st.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("tick ceiling: escalates to a hard kill only after the bounded drain window elapses", async () => {
+test("tick: kill switch escalates to a hard kill only after the bounded drain window elapses; a retained dirty worktree is reported to a human", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-ceiling-"));
   try {
     const dbPath = join(dir, "sapwood.sqlite");
@@ -1054,6 +1018,9 @@ test("tick ceiling: escalates to a hard kill only after the bounded drain window
     const sup = new FakeSupervisor();
     seedRunning(st, "lane-run", 3);
     sup.probes["lane-run"] = { ...DEFAULT_PROBE };
+    // #69: the escalation hard-kill's reclaim finds possibly-uncommitted work — the worktree
+    // must survive and the human must be told where it is.
+    sup.reclaimResults["lane-run"] = { worktreePath: "/wt/lane-run", worktreeRetained: true };
     writeFileSync(join(dir, "KILL_SWITCH"), "");
     const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
     let clock = new Date("2026-07-06T00:00:00Z");
@@ -1071,6 +1038,10 @@ test("tick ceiling: escalates to a hard kill only after the bounded drain window
     assert.deepEqual(sup.reclaimed, ["lane-run"]); // hard process-tree kill (drain exhausted)
     assert.equal(st.getWorker("lane-run")?.state, "failed");
     assert.deepEqual(forge.labelsAdded, [[3, "needs-human"]]); // fail-safe: human triage
+    assert.equal(forge.issueComments.length, 1); // retained-worktree report
+    assert.equal(forge.issueComments[0]![0], 3);
+    assert.match(forge.issueComments[0]![1], /\/wt\/lane-run/);
+    assert.match(forge.issueComments[0]![1], /lane-run/);
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

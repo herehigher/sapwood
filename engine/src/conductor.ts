@@ -57,18 +57,23 @@ export function budgetExceeded(total: number, cap: number): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Engine cost ceiling + kill switch (#14, M3 Security model "hard engine ceiling").
-// Two-tier cost control: worker.budgetUsdSoft is a per-worker graceful handoff (never a
-// mid-work kill, see worker.ts requestHandoff). This is the OTHER tier — an engine-wide,
-// aggregate-across-workers safety boundary: a cumulative daily USD cap + a wall-clock cap,
-// plus an out-of-band kill switch (a file sentinel only the engine can write — see
-// State.isKillSwitchActive). Any one of the three freezes ALL new dispatch and starts a
-// bounded drain (graceful handoff of running workers) before escalating to a hard kill.
-// #59/#61: the kill switch ALSO freezes the DRIVE loop's review-gate/merge path (below,
-// in tick()) — a lane already past gate①/gate② holds `queued` instead of autonomously
-// merging, and this is checked fresh per driving lane / per dispatched issue (not just
-// once per tick via this section's ceilingBreached snapshot), so the switch takes effect
-// mid-tick, not only on the next tick.
+// Engine cost ceiling (#14, M3 Security model "hard engine ceiling"). Two-tier cost
+// control: worker.budgetUsdSoft is a per-worker graceful handoff (never a mid-work kill,
+// see worker.ts requestHandoff). This is the OTHER tier — an engine-wide,
+// aggregate-across-workers safety boundary: a cumulative daily USD cap + a wall-clock cap.
+// Either freezes ALL new dispatch and starts a bounded drain (graceful handoff of running
+// workers) before escalating to a hard kill.
+//
+// #69: the out-of-band KILL SWITCH (a file sentinel only a human/engine can write — see
+// State.isKillSwitchActive) used to be a THIRD ceiling reason here, plus two separate
+// per-phase re-checks inside the DRIVE and DISPATCH loops below (#59/#61) added to catch an
+// operator flipping it mid-tick. All three are replaced by ONE global gate at the very top
+// of tick() (see there): active -> drain-only, tick returns before anything else runs — no
+// ceiling evaluation, no rollback retry, no reclaim, no drive, no dispatch. The trade-off
+// (accepted per the #69 CTO policy — rare edges degrade to less machinery, not more): a
+// switch flipped mid-tick, after tick() already passed the top-of-tick check, is no longer
+// caught until the NEXT tick, not the same one. Given tick cadence is normally minutes at
+// most, this is a small, documented gap in exchange for deleting 3 separate check sites.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type CeilingReason = "kill-switch" | "daily-budget" | "wall-clock";
@@ -92,17 +97,18 @@ export function engineSessionGapSec(tickIntervalSec: number): number {
   return Math.max(ENGINE_SESSION_GAP_SEC, 2 * tickIntervalSec);
 }
 
-/** Pure ceiling check. Order is fixed (kill-switch, daily-budget, wall-clock) so multiple
- *  simultaneous breaches report deterministically; empty array = no breach. */
+/** Pure ceiling check — daily USD cap + wall-clock cap ONLY. #69: the kill switch is no
+ *  longer one of these reasons; it's checked once, at the very top of tick(), before this
+ *  (or anything else) ever runs — see the section comment above. Order is fixed
+ *  (daily-budget, wall-clock) so multiple simultaneous breaches report deterministically;
+ *  empty array = no breach. */
 export function evaluateCeiling(input: {
   dailySpendUsd: number;
   dailyBudgetUsd: number;
   wallClockElapsedSec: number;
   maxWallClockSec: number;
-  killSwitchActive: boolean;
 }): CeilingReason[] {
   const reasons: CeilingReason[] = [];
-  if (input.killSwitchActive) reasons.push("kill-switch");
   if (budgetExceeded(input.dailySpendUsd, input.dailyBudgetUsd)) reasons.push("daily-budget");
   if (input.wallClockElapsedSec > input.maxWallClockSec) reasons.push("wall-clock");
   return reasons;
@@ -243,11 +249,22 @@ export interface LaneProbe {
   modelUsage?: ModelUsageEntry[];
 }
 
+/** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
+ *  automation never deletes a worktree that may hold uncommitted work — it reports
+ *  `worktreeRetained: true` and the CONDUCTOR (which owns the forge) escalates to a human
+ *  (issue comment with the absolute path + needs-human label). Clean worktree -> deleted as
+ *  before, `worktreeRetained: false`. `worktreePath` is null when no worktree ever existed. */
+export interface ReclaimResult {
+  worktreePath: string | null;
+  worktreeRetained: boolean;
+}
+
 /** The conductor's only handle on workers. worker.ts (M2 #11) implements this. */
 export interface Supervisor {
   probe(worker: string): Promise<LaneProbe>;
   dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
-  reclaim(worker: string): Promise<void>; // tear down a dead/stale lane (process-tree kill + cleanup)
+  /** Tear down a dead/stale lane (process-tree kill + worktree retention/cleanup, #69). */
+  reclaim(worker: string): Promise<ReclaimResult>;
   /** Graceful drain (SIGTERM, not SIGKILL): the #14 engine-ceiling drain path reuses this —
    *  same mechanism as a worker's own soft-budget handoff. Returns false if not applicable
    *  (already reclaiming/requested, or unknown lane) — never throws. */
@@ -325,9 +342,10 @@ export interface TickResult {
   reclaimed: ReclaimOutcome[];
   dispatched: DispatchOutcome[];
   overBudget: boolean;
-  /** #14 engine ceiling: daily USD cap / wall-clock cap / kill switch. Any breach freezes
-   *  ALL new dispatch this tick (every ready issue skipped with reason "ceiling") regardless
-   *  of lanes/caps/budget below. */
+  /** #14 engine ceiling (daily USD cap / wall-clock cap): a breach freezes ALL new dispatch
+   *  this tick (every ready issue skipped with reason "ceiling") regardless of
+   *  lanes/caps/budget below. #69: also true (reasons = ["kill-switch"]) when the global
+   *  kill-switch gate short-circuited the whole tick to drain-only. */
   ceilingBreached: boolean;
   ceilingReasons: CeilingReason[];
   /** Running-worker names asked to gracefully hand off (SIGTERM) this tick because of the
@@ -431,11 +449,81 @@ async function attemptRollback(
   }
 }
 
+/** #69 dirty-worktree retention: tell a human where the preserved worktree lives. Best-effort
+ *  and never throws (this runs on recovery paths that must not gain new failure modes) — the
+ *  structured event always lands even if both forge calls fail. The needs-human LABEL is the
+ *  caller's job (every retention call site already applies it on its own escalation branch). */
+async function reportRetainedWorktree(
+  forge: IForge, state: State, worker: string, issue: number, worktreePath: string | null,
+): Promise<void> {
+  state.appendEvent("worktree-retained", { worker, issue, worktreePath });
+  await forge
+    .addIssueComment(
+      issue,
+      `sapwood: lane \`${worker}\` was torn down with possibly-uncommitted changes in its ` +
+        `worktree. Automation never deletes work it can't prove is clean (#69) — the worktree ` +
+        `was left on disk at:\n\n\`${worktreePath}\`\n\nSalvage or discard it by hand, then ` +
+        `remove the \`needs-human\` label.`,
+    )
+    .catch(() => {});
+}
+
+/** The bounded drain (PLAN.md Security model: drain before kill, always). Shared by the #69
+ *  global kill-switch gate and the #14 cost-ceiling breach path in tick(): record the breach
+ *  (first detection only — see State.recordCeilingBreach's INSERT OR IGNORE), ask every
+ *  running worker to hand off gracefully (idempotent per tick), and only once
+ *  cfg.cost.drainWindowSec has elapsed since first detection escalate to the hard
+ *  process-tree kill + needs-human. No PR-aware rescue on escalation — this is a safety
+ *  boundary, not a liveness classification, so fail-safe to human triage. */
+async function drainThenEscalate(
+  forge: IForge, state: State, supervisor: Supervisor, cfg: SapwoodConfig,
+  reasons: CeilingReason[], nowDate: Date, iso: () => string,
+): Promise<{ drainRequested: string[]; escalated: string[] }> {
+  state.recordCeilingBreach(reasons, nowDate);
+  const drainRequested: string[] = [];
+  const escalated: string[] = [];
+  const stillRunning = state.runningWorkers();
+  for (const w of stillRunning) {
+    if (supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
+  }
+  const breach = state.ceilingBreach();
+  if (breach && drainEscalationDue(breach.at.toISOString(), nowDate.getTime(), cfg.cost.drainWindowSec)) {
+    for (const w of stillRunning) {
+      const r = await supervisor.reclaim(w.name);
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
+      state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons });
+      escalated.push(w.name);
+    }
+  }
+  return { drainRequested, escalated };
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now ?? (() => new Date());
   const iso = () => now().toISOString();
   const threshold = cfg.worker.heartbeatStaleSecs;
+
+  // ── KILL SWITCH (#69): ONE global gate, checked before anything else runs. Active ->
+  //   this tick is DRAIN-ONLY: running workers are asked to hand off (and, past the bounded
+  //   drain window, hard-killed + escalated), and nothing else happens — no rollback retry,
+  //   no reclaim classification, no drive/merge, no dispatch. Replaces the per-phase gates
+  //   from #59/#61/#64 (a DRIVE-loop check, a DISPATCH-loop check, and the kill-switch tier
+  //   of evaluateCeiling). Accepted trade-off (#69 policy: rare edges degrade to less
+  //   machinery): a switch flipped MID-tick, after this check already passed, takes effect
+  //   at the next tick's gate rather than within the same tick.
+  if (state.isKillSwitchActive()) {
+    const { drainRequested, escalated } = await drainThenEscalate(
+      forge, state, supervisor, cfg, ["kill-switch"], now(), iso,
+    );
+    return {
+      reclaimed: [], dispatched: [], overBudget: false,
+      ceilingBreached: true, ceilingReasons: ["kill-switch"],
+      drainRequested, escalated, driven: [], rollbacks: [],
+    };
+  }
 
   // ── ROLLBACK RETRY (#31): retry every board mutation still pending from a prior tick's
   //   recovery-path failure, BEFORE this tick does anything else. Never throws (see
@@ -503,11 +591,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       reclaimed.push({ kind: "failed", worker: w.name, issue: w.issue, next, costUsd, modelUsage });
     } else {
       // DEAD: stale heartbeat or confirmed-dead wrapper with no sentinel. Always tear the
-      // lane down (process-tree kill + cleanup). If a PR was already opened, rescue it to
-      // `driving` rather than requeuing — requeuing would let a second worker race the open
-      // PR (Codex R2 P1). Only a dead lane with NO PR is handed back to Ready.
-      await supervisor.reclaim(w.name);
+      // lane down (process-tree kill). If a PR was already opened, rescue it to `driving`
+      // rather than requeuing — requeuing would let a second worker race the open PR (Codex
+      // R2 P1). Only a dead lane with NO PR is handed back to Ready.
+      // #69 dirty-worktree retention: reclaim() deletes the worktree ONLY when it's provably
+      // clean; a possibly-dirty one survives on disk and is escalated to a human here
+      // (needs-human label + an issue comment carrying the absolute path) — automation never
+      // destroys evidence, and never runs git in a worker-controlled worktree to find out.
+      const r = await supervisor.reclaim(w.name);
       const rescued = p.hasPr;
+      if (r.worktreeRetained) {
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+        await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
+      }
       if (rescued) {
         state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
       } else {
@@ -543,26 +639,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const driven: DrivenOutcome[] = [];
   const gate = deps.mergeGate;
   if (gate) {
+    // #69: no per-lane kill-switch re-check here — an active switch never reaches this loop
+    // at all (the global gate at the top of tick() returns first). See the gate's comment for
+    // the accepted mid-tick trade-off.
     for (const w of state.drivingWorkers()) {
-      // #59: the kill switch is a hard "stop ALL outward autonomous action" signal, not just a
-      // dispatch freeze. Re-read it FRESH on every iteration (not once before the loop) —
-      // gate.driveOne below does real async GitHub work (CI status, review verdicts, the merge
-      // call itself), so a single DRIVE phase iterating several driving lanes can span real
-      // wall-clock time. An operator dropping the sentinel mid-loop must stop lanes processed
-      // LATER in this same pass too, not just the next tick. It's a cheap sync file-existence
-      // check (see isKillSwitchActive), so per-lane cost is a non-issue — Codex review on PR
-      // #61 caught both this staleness gap and, separately, that the check needs to run BEFORE
-      // the missing-PR fail-safe just past this branch (it calls forge.addLabel + marks the
-      // worker failed, itself an outward action under a stop signal).
-      if (state.isKillSwitchActive()) {
-        // `pr` falls back to -1 for a malformed/legacy lane with no PR number, matching the
-        // sentinel the missing-PR fail-safe below already uses. Every driving lane — PR or not —
-        // just queues and holds driving, resuming normal driving/merging once the switch clears.
-        const pr = w.pr ?? -1;
-        state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
-        driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "kill-switch" });
-        continue;
-      }
       if (w.pr == null) {
         // Fail-safe: a driving lane MUST carry a PR number (set at the reclaim transition
         // above) to be driven through gates. Its absence here (only checked once a mergeGate
@@ -653,11 +733,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   }
 
   // ── CEILING (#14): engine-wide hard safety boundary, orthogonal to the per-round
-  //   overBudget check below. Any breach (daily USD cap / wall-clock cap / kill switch)
-  //   freezes ALL new dispatch this tick and starts (or continues) a bounded drain: running
-  //   workers are asked to hand off gracefully; only after cfg.cost.drainWindowSec with no
-  //   resolution does the conductor escalate to the hard process-tree kill. Drain before
-  //   kill, always (PLAN.md Security model).
+  //   overBudget check below. Any breach (daily USD cap / wall-clock cap) freezes ALL new
+  //   dispatch this tick and starts (or continues) the bounded drain -> escalate sequence
+  //   (see drainThenEscalate). The kill switch is NOT evaluated here anymore — it's the
+  //   global gate at the top of tick() (#69).
   //   NOTE the daily cap is POST-HOC, not a real-time cutoff: spend is only known at worker
   //   completion (stream-json carries no in-flight cost), so still-running lanes contribute
   //   nothing until they finish and the cap trips on the completion that crosses it. Max
@@ -671,37 +750,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       (nowDate.getTime() -
         state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec ?? 0)).getTime()) / 1000,
     maxWallClockSec: cfg.cost.maxWallClockSec,
-    killSwitchActive: state.isKillSwitchActive(),
   });
   const ceilingBreached = ceilingReasons.length > 0;
-  const drainRequested: string[] = [];
-  const escalated: string[] = [];
+  let drainRequested: string[] = [];
+  let escalated: string[] = [];
   if (ceilingBreached) {
-    // INSERT OR IGNORE: only the FIRST detection sets "at" — a still-breached engine must
-    // not keep resetting its own drain-window clock tick after tick.
-    state.recordCeilingBreach(ceilingReasons, nowDate);
-    const stillRunning = state.runningWorkers();
-    for (const w of stillRunning) {
-      // Idempotent (worker.ts guards re-requests) — safe to call every tick while breached.
-      if (supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
-    }
-    const breach = state.ceilingBreach();
-    if (breach && drainEscalationDue(breach.at.toISOString(), nowDate.getTime(), cfg.cost.drainWindowSec)) {
-      // Bounded drain window elapsed with no resolution -> escalate to the hard kill
-      // (reuses the same process-tree kill the DEAD-lane reclaim path uses above). Treated
-      // like a dead lane: no PR-aware rescue here — this is a safety-ceiling breach, not a
-      // liveness classification, so fail-safe to escalate + human triage.
-      for (const w of stillRunning) {
-        await supervisor.reclaim(w.name);
-        state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-        await forge.addLabel(w.issue, cfg.labels.needsHuman);
-        state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons: ceilingReasons });
-        escalated.push(w.name);
-      }
-    }
+    ({ drainRequested, escalated } = await drainThenEscalate(
+      forge, state, supervisor, cfg, ceilingReasons, nowDate, iso,
+    ));
   } else {
-    // Resolved (kill switch lifted / daily cap rolled to a fresh day / wall-clock cfg
-    // raised) -> clear so a future re-breach starts its own fresh drain window.
+    // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / kill switch
+    // lifted before this tick) -> clear so a future re-breach starts a fresh drain window.
     state.clearCeilingBreach();
   }
 
@@ -753,18 +812,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
     }
-    // #61 F1 (independent second-opinion review, issue #64 filed for a separate follow-up):
-    // the DISPATCH loop has the same staleness gap the DRIVE loop was fixed for above.
-    // forge.claimIssue (board mutation) and supervisor.dispatch just below are real async
-    // outward actions — dispatch spawns a brand-new autonomous worker process, and multiple
-    // issues can dispatch in one tick (up to roundDispatchCap). The `ceilingBreached` snapshot
-    // above only catches a kill switch already set when DISPATCH started; re-read fresh here,
-    // immediately before the outward actions, so a switch dropped mid-loop still stops issues
-    // reached later in this same pass instead of letting them dispatch anyway.
-    if (state.isKillSwitchActive()) {
-      dispatched.push({ kind: "skipped", issue: issue.number, reason: "ceiling" });
-      continue;
-    }
+    // #69: no per-issue kill-switch re-check here (the #61/#64 mid-loop guard) — an active
+    // switch never reaches this loop; see the global gate at the top of tick().
     // Claim BEFORE launching (matches 0day claim_issue.sh order). The board transition
     // takes the issue out of the Ready lane first, so a launch failure can't leave an
     // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
