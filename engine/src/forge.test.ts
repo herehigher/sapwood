@@ -267,6 +267,8 @@ test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (
   // #10 (has plan) and #12 (verify:n/a) pass. #11 no plan, #13 not Ready, #14 other repo, #15 closed -> all out.
   assert.deepEqual(ready.map((i) => i.number).sort((a, b) => a - b), [10, 12]);
   assert.deepEqual(ready.find((i) => i.number === 10)?.labels, ["type:feature", "prio:1-high"]);
+  // #74: body carries through to the public Issue (worker.ts's {{issue.body}} substitution).
+  assert.equal(ready.find((i) => i.number === 10)?.body, "Do the thing.\n## Verification\n- run npm test");
 });
 
 test("findOptionId/findItemId: missing -> undefined (caller fails closed)", () => {

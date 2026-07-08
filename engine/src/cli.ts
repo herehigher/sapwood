@@ -11,7 +11,7 @@ import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.j
 import { init, InitError } from "./init.js";
 import { State, SCHEMA_VERSION, type WorkerRow } from "./state.js";
 import { GithubForge, type Issue } from "./forge.js";
-import { WorkerSupervisor } from "./worker.js";
+import { WorkerSupervisor, buildRenderPrompt } from "./worker.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
 import { runDriver, type StopMode, type DriverResult } from "./driver.js";
@@ -389,6 +389,12 @@ export function runExitCode(result: Pick<DriverResult, "ticks" | "tickErrors">, 
 
 async function runEngine(argv: string[]): Promise<number> {
   const cfg = loadConfig();
+  // #74: build the worker-prompt renderer NOW, before anything else — loadWorkerPromptTemplate
+  // (inside buildRenderPrompt) reads the template file EAGERLY, so a configured
+  // `worker.promptFile` that's missing/unreadable throws here and aborts startup. Never a lazy
+  // load deferred to first dispatch: that would let the engine claim issues / churn ticks before
+  // failing, instead of a clean fail-fast with no dispatch ever happening.
+  const renderPrompt = buildRenderPrompt(cfg);
   const state = new State();
   const forge = new GithubForge(cfg);
   const reviewer = makeReviewer(cfg);
@@ -403,6 +409,7 @@ async function runEngine(argv: string[]): Promise<number> {
     // merge-gate run (#46 scope 3), not this PR.
     hasOpenPr: async (issue) => (await forge.findOpenPrForIssue(issue)) != null,
     findOpenPr: (issue) => forge.findOpenPrForIssue(issue),
+    renderPrompt,
   });
   const stopMode = parseRunStopMode(argv);
   console.log(`sapwood run: tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);

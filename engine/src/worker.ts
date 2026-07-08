@@ -21,7 +21,7 @@ import {
   existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync,
   rmSync, statSync, utimesSync, writeFileSync, type Dirent,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
@@ -918,11 +918,85 @@ export function shellSingleQuote(s: string): string {
 }
 
 function defaultPrompt(issue: Issue): string {
-  // Imperative — headless has no human to confirm; the worker starts immediately. The TDD /
-  // two-gate method lives in the dev-round skill (M4); this is the minimal dispatch skeleton.
+  // Imperative — headless has no human to confirm; the worker starts immediately. This is the
+  // internal last-resort skeleton used ONLY when a caller constructs WorkerSupervisor with no
+  // renderPrompt at all (e.g. a test, or a future embedder). The real `sapwood run` entry point
+  // (cli.ts) always wires deps.renderPrompt via buildRenderPrompt(cfg) below, which loads the
+  // full TDD/two-gate method from the shipped prompts/worker.md (or an operator override) — #74.
   return [
     `You are an autonomous worker. Implement GitHub issue #${issue.number}: ${issue.title}.`,
     `Work on a feature branch, follow the repo's tests-first method, and open a pull request when done.`,
     `Do not merge. Commit and push your work; the conductor handles review and merge.`,
   ].join("\n");
+}
+
+// ── #74: file-based worker prompt (config.ts's worker.promptFile + the shipped default) ──
+
+/** Supported `{{var}}` substitutions — deliberately tiny (no template engine, no new
+ *  dependency): just the 3 fields a worker prompt needs to address a specific issue. */
+const PROMPT_VARS: Record<string, (issue: Issue) => string> = {
+  "issue.number": (issue) => String(issue.number),
+  "issue.title": (issue) => issue.title,
+  "issue.body": (issue) => issue.body ?? "",
+};
+
+/** Simple `{{var}}` substitution (#74) — no template engine. FAILS CLOSED on any `{{...}}`
+ *  placeholder outside PROMPT_VARS: a typo'd/unsupported var must not silently pass through as
+ *  literal `{{...}}` text in the dispatched prompt (the whole point of a configurable prompt is
+ *  knowing exactly what gets sent to the worker). Malformed (unclosed) `{{` is left untouched —
+ *  only well-formed `{{name}}` tokens are recognized as variables at all. */
+export function renderPromptTemplate(template: string, issue: Issue): string {
+  return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, name: string) => {
+    const resolve = PROMPT_VARS[name];
+    if (!resolve) {
+      throw new Error(
+        `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(PROMPT_VARS).join(", ")}`,
+      );
+    }
+    return resolve(issue);
+  });
+}
+
+/** Resolves the shipped default prompt — `prompts/worker.md` at the PLUGIN/repo root, NOT
+ *  relative to the target repo the engine is orchestrating. Same convention init.ts's
+ *  sampleConfig() uses for the checked-in sample config: this compiled module lives at
+ *  `<plugin>/engine/dist/worker.js` (or `engine/src/worker.ts` under tsx), so two directories up
+ *  is the plugin root regardless of the engine's cwd. */
+export function defaultPromptPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "..", "prompts", "worker.md");
+}
+
+/** Load the worker prompt TEMPLATE, raw and un-substituted, exactly ONCE. Either the operator's
+ *  `worker.promptFile` (a path relative to the REPO ROOT the engine is orchestrating — same
+ *  relative-to-cwd convention `sapwood.config.yaml` itself resolves against; an absolute path
+ *  also works, since fs calls accept one unchanged) or, when unset, the shipped default at
+ *  `prompts/worker.md` (see defaultPromptPath — resolved relative to the PLUGIN install, never
+ *  this repo).
+ *
+ *  FAIL-FAST (#74): an explicitly configured `promptFile` that's missing or unreadable throws
+ *  here, NAMING THE PATH — never a silent fallback to the shipped default. Meant to be called
+ *  once at startup (buildRenderPrompt), before any dispatch. */
+export function loadWorkerPromptTemplate(cfg: SapwoodConfig): string {
+  const configured = cfg.worker.promptFile;
+  if (configured === undefined) return readFileSync(defaultPromptPath(), "utf8");
+  if (!existsSync(configured)) {
+    throw new Error(`worker.promptFile not found: ${configured} — refusing to dispatch`);
+  }
+  try {
+    return readFileSync(configured, "utf8");
+  } catch (e) {
+    throw new Error(`worker.promptFile unreadable: ${configured} (${String(e)}) — refusing to dispatch`);
+  }
+}
+
+/** Builds the `WorkerDeps.renderPrompt` closure (#74): loads the template ONCE, eagerly —
+ *  fail-fast on a missing/unreadable `worker.promptFile` happens here, at call time, not lazily
+ *  on first dispatch — then returns a pure per-issue renderer (renderPromptTemplate). The real
+ *  `sapwood run` entry point (cli.ts) calls this immediately after loadConfig(), before
+ *  constructing the WorkerSupervisor, so a bad promptFile aborts startup with no dispatch ever
+ *  happening. */
+export function buildRenderPrompt(cfg: SapwoodConfig): (issue: Issue) => string {
+  const template = loadWorkerPromptTemplate(cfg);
+  return (issue: Issue) => renderPromptTemplate(template, issue);
 }

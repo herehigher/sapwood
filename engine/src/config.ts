@@ -57,6 +57,14 @@ const Worker = z.object({
   // safety boundary). requestHandoff() is the live drain path today.
   budgetUsdSoft: z.number().finite().positive().default(10),
   heartbeatStaleSecs: z.number().int().positive().default(180),
+  // #74: file-based worker prompt. Path RELATIVE TO THE REPO ROOT the engine is orchestrating
+  // (same convention as sapwood.config.yaml itself — a plain relative fs path, resolved by
+  // Node against cwd). Unset (default) -> the shipped preset at the PLUGIN's `prompts/worker.md`
+  // (resolved relative to the engine's own install location, not this repo — see
+  // worker.ts's defaultPromptPath). Set-but-missing/unreadable is a fail-fast startup error
+  // (buildRenderPrompt loads it once, eagerly, before any dispatch) — never a silent fallback
+  // to the shipped default.
+  promptFile: z.string().optional(),
 }).strict();
 
 const Cost = z.object({
