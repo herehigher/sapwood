@@ -1216,6 +1216,38 @@ test("buildRenderPrompt: loads once, eagerly (fail-fast happens at build time, n
   assert.throws(() => buildRenderPrompt(scfg), /\/nonexistent\/does-not-exist\.md/);
 });
 
+test("buildRenderPrompt: empty/whitespace template throws at build time — never dispatch an undirected worker", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "empty.md");
+    writeFileSync(p, "  \n\n\t");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+    });
+    assert.throws(() => buildRenderPrompt(scfg), /empty/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: substituted config values are literal — a {{issue.body}}-valued config var is NOT re-expanded", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "inject.md");
+    writeFileSync(p, "label: {{labels.verifyNa}}");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+      labels: { verifyNa: "{{issue.body}}" },
+    });
+    const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [], body: "SECRET" });
+    assert.equal(rendered, "label: {{issue.body}}");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("buildRenderPrompt: config vars substitute at build time — customized labels.verifyNa reaches the prompt", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
   try {

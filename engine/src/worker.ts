@@ -933,7 +933,8 @@ function defaultPrompt(issue: Issue): string {
 // ── #74: file-based worker prompt (config.ts's worker.promptFile + the shipped default) ──
 
 /** Supported `{{var}}` substitutions — deliberately tiny (no template engine, no new
- *  dependency): just the 3 fields a worker prompt needs to address a specific issue. */
+ *  dependency): just the per-issue fields a worker prompt needs to address a specific issue
+ *  (config-level vars like {{labels.verifyNa}} live in CONFIG_VARS, merged by buildRenderPrompt). */
 const PROMPT_VARS: Record<string, (issue: Issue) => string> = {
   "issue.number": (issue) => String(issue.number),
   "issue.title": (issue) => issue.title,
@@ -973,11 +974,10 @@ export function defaultPromptPath(): string {
 }
 
 /** Load the worker prompt TEMPLATE, raw and un-substituted, exactly ONCE. Either the operator's
- *  `worker.promptFile` (a path relative to the REPO ROOT the engine is orchestrating — same
- *  relative-to-cwd convention `sapwood.config.yaml` itself resolves against; an absolute path
- *  also works, since fs calls accept one unchanged) or, when unset, the shipped default at
- *  `prompts/worker.md` (see defaultPromptPath — resolved relative to the PLUGIN install, never
- *  this repo).
+ *  `worker.promptFile` (loadConfig has already resolved a relative path against the CONFIG
+ *  FILE's directory, so by here it is effectively absolute) or, when unset, the shipped default
+ *  at `engine/prompts/worker.md` (see defaultPromptPath — resolved inside the engine package,
+ *  never the orchestrated repo).
  *
  *  FAIL-FAST (#74): an explicitly configured `promptFile` that's missing or unreadable throws
  *  here, NAMING THE PATH — never a silent fallback to the shipped default. Meant to be called
@@ -995,33 +995,41 @@ export function loadWorkerPromptTemplate(cfg: SapwoodConfig): string {
   }
 }
 
-/** Builds the `WorkerDeps.renderPrompt` closure (#74): loads the template ONCE, eagerly —
- *  fail-fast on a missing/unreadable `worker.promptFile` AND on any unknown `{{var}}` in it
- *  happens here, at call time, not lazily on first dispatch — a bad template discovered at
- *  render time would fire AFTER the dispatch loop already claimed the issue (Ready → In
- *  Progress), forcing a rollback on every tick. Then returns a pure per-issue renderer
- *  (renderPromptTemplate). The real `sapwood run` entry point (cli.ts) calls this immediately
- *  after loadConfig(), before constructing the WorkerSupervisor, so a bad promptFile aborts
- *  startup with no dispatch ever happening. */
-/** Config-level `{{var}}`s — substituted ONCE at build time (they don't vary per issue). The
- *  shipped prompt references the verify-label by var, not literal, so a repo that customizes
- *  `labels.verifyNa` gets a prompt that names ITS label. */
+/** Config-level `{{var}}`s — they don't vary per issue. The shipped prompt references the
+ *  verify-label by var, not literal, so a repo that customizes `labels.verifyNa` gets a prompt
+ *  that names ITS label. */
 const CONFIG_VARS: Record<string, (cfg: SapwoodConfig) => string> = {
   "labels.verifyNa": (cfg) => cfg.labels.verifyNa,
 };
 
+/** Builds the `WorkerDeps.renderPrompt` closure (#74): loads the template ONCE, eagerly —
+ *  fail-fast on a missing/unreadable/EMPTY `worker.promptFile` AND on any unknown `{{var}}`
+ *  happens here, at call time, not lazily on first dispatch — a bad template discovered at
+ *  render time would fire AFTER the dispatch loop already claimed the issue (Ready → In
+ *  Progress), forcing a rollback on every tick. The real `sapwood run` entry point (cli.ts)
+ *  calls this immediately after loadConfig(), before constructing the WorkerSupervisor, so a
+ *  bad promptFile aborts startup with no dispatch ever happening.
+ *
+ *  Rendering is a SINGLE pass over the original template with one combined var map — a
+ *  substituted value is literal output, never re-scanned for `{{...}}`, so a config value like
+ *  `{{issue.body}}` cannot smuggle in a second expansion. */
 export function buildRenderPrompt(cfg: SapwoodConfig): (issue: Issue) => string {
-  const template = loadWorkerPromptTemplate(cfg).replace(/\{\{([^{}]*)\}\}/g, (match, raw: string) => {
-    const name = raw.trim();
-    return Object.hasOwn(CONFIG_VARS, name) ? CONFIG_VARS[name]!(cfg) : match;
-  });
+  const template = loadWorkerPromptTemplate(cfg);
+  if (template.trim() === "") {
+    throw new Error(
+      `worker prompt template is empty${cfg.worker.promptFile !== undefined ? `: ${cfg.worker.promptFile}` : ""} — refusing to dispatch an undirected worker`,
+    );
+  }
+  const vars: Record<string, (issue: Issue) => string> = { ...PROMPT_VARS };
+  for (const [name, fromCfg] of Object.entries(CONFIG_VARS)) vars[name] = () => fromCfg(cfg);
   for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
     const name = raw!.trim();
-    if (!Object.hasOwn(PROMPT_VARS, name)) {
+    if (!Object.hasOwn(vars, name)) {
       throw new Error(
-        `worker prompt template: unknown variable {{${name}}} — supported: ${[...Object.keys(PROMPT_VARS), ...Object.keys(CONFIG_VARS)].join(", ")}`,
+        `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`,
       );
     }
   }
-  return (issue: Issue) => renderPromptTemplate(template, issue);
+  return (issue: Issue) =>
+    template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issue));
 }
