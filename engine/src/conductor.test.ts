@@ -43,6 +43,7 @@ const DEFAULT_PROBE: LaneProbe = { done: false, failed: false, handoff: false, h
 class FakeForge implements IForge {
   ready: Issue[] = [];
   labelsAdded: Array<[number, string]> = [];
+  prLabelsAdded: Array<[number, string]> = [];
   boardSet: Array<[number, string]> = [];
   claimed: number[] = [];
   prComments: Array<[number, string]> = [];
@@ -52,6 +53,7 @@ class FakeForge implements IForge {
   async claimIssue(n: number): Promise<void> { this.claimed.push(n); }
   async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> { this.boardSet.push([n, s]); }
   async addLabel(n: number, l: string): Promise<void> { this.labelsAdded.push([n, l]); }
+  async addPRLabel(n: number, l: string): Promise<void> { this.prLabelsAdded.push([n, l]); }
   async openPR(): Promise<number> { return 1; }
   async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}
@@ -384,6 +386,32 @@ class FakeMergeGate implements MergeGate {
   }
 }
 
+test("#69 P1 (Codex PR #72): DEAD lane with an open PR AND a retained dirty worktree is NOT auto-driven — lane failed (never driving), needs-human on BOTH the issue and the PR, driveOne never called", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-wip", 4);
+  // Crashed after opening PR #77, with uncommitted WIP still in the worktree.
+  sup.probes["lane-wip"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true, prNumber: 77 };
+  sup.reclaimResults["lane-wip"] = { worktreePath: "/abs/worktrees/lane-wip", worktreeRetained: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[77] = { kind: "merged", pr: 77, headOid: "H" }; // would auto-merge if driven
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+  // The lane is taken OUT of the auto-drive path: failed, not driving.
+  assert.equal(st.getWorker("lane-wip")?.state, "failed");
+  assert.equal(gate.calls.length, 0); // driveOne never invoked -> no possibility of merge
+  assert.deepEqual(r.driven, []);
+  // needs-human lands where the merge gate actually reads labels: on the PR (getPRReviewData),
+  // not only the source issue.
+  assert.deepEqual(forge.prLabelsAdded, [[77, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, [[4, "needs-human"]]);
+  assert.equal(forge.issueComments.length, 1); // retained-worktree report
+  assert.deepEqual(forge.boardSet, []); // NOT requeued to Ready (would race the open PR)
+  assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-wip", issue: 4, rescued: false, costUsd: 0, modelUsage: [] });
+  st.close();
+});
+
 test("tick DRIVE: omitted mergeGate -> driving lanes stay driving untouched, driven=[] (pre-#13 behavior)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -657,21 +685,20 @@ test("tick DRIVE: a driving lane with no known PR number fails safe to needs-hum
 // #59/#61/#64 per-phase gates (and their mid-loop re-read semantics: a switch flipped
 // mid-tick now takes effect at the NEXT tick's gate — the documented #69 trade-off). ──
 
-test("tick: kill switch active -> DRAIN-ONLY: no rollback retry, no reclaim, no drive, no dispatch; running lanes asked to hand off", async () => {
+test("tick: kill switch active -> DRAIN + TERMINAL-RECLAIM only: no rollback retry, no drive, no dispatch; a still-running lane is drained, not touched", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-gate-"));
   try {
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
     const sup = new FakeSupervisor();
-    // One RUNNING lane (would be probed/reclaimed), one DRIVING lane with a mergeable PR
+    // One still-RUNNING (KEEP) lane (would drain), one DRIVING lane with a mergeable PR
     // (would merge), one Ready issue (would dispatch), one pending rollback (would retry).
     seedRunning(st, "lane-run", 2);
-    sup.probes["lane-run"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE }; // KEEP: alive, no terminal sentinel
     st.upsertWorker({ name: "lane-drv", issue: 3, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 56 });
     forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
     st.addPendingRollback(7, "ready", "dispatch-rollback", "t");
     const gate = new FakeMergeGate();
-    gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
     gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H" };
     writeFileSync(join(dir, "KILL_SWITCH"), ""); // a human flips it — no config touched
 
@@ -679,11 +706,11 @@ test("tick: kill switch active -> DRAIN-ONLY: no rollback retry, no reclaim, no 
 
     assert.equal(r.ceilingBreached, true);
     assert.deepEqual(r.ceilingReasons, ["kill-switch"]);
-    assert.deepEqual(r.drainRequested, ["lane-run"]); // the ONLY action: graceful drain
+    assert.deepEqual(r.drainRequested, ["lane-run"]); // still-running lane drained
     assert.deepEqual(sup.handoffRequested, ["lane-run"]);
     assert.deepEqual(r.escalated, []); // drain window not elapsed — no hard kill yet
-    // Nothing else ran:
-    assert.deepEqual(r.reclaimed, []); // reclaim phase skipped (lane not even probed)
+    assert.deepEqual(r.reclaimed, []); // KEEP lane isn't a terminal reclaim
+    // Nothing but drain + terminal-reclaim ran:
     assert.deepEqual(r.driven, []); // drive phase skipped
     assert.deepEqual(r.dispatched, []); // dispatch phase skipped (not even "skipped" rows)
     assert.deepEqual(r.rollbacks, []); // rollback retry skipped
@@ -693,9 +720,40 @@ test("tick: kill switch active -> DRAIN-ONLY: no rollback retry, no reclaim, no 
     assert.deepEqual(forge.claimed, []);
     assert.deepEqual(forge.boardSet, []);
     assert.deepEqual(forge.labelsAdded, []);
-    assert.equal(st.getWorker("lane-run")?.state, "running"); // untouched, resumes next tick
+    assert.equal(st.getWorker("lane-run")?.state, "running"); // drained, still running next tick
     assert.equal(st.getWorker("lane-drv")?.state, "driving");
     assert.equal(st.pendingRollbacks().length, 1); // still pending — retried once the switch clears
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#69 P2 (Codex PR #72): kill switch active + a lane that already wrote .handoff -> its terminal state IS recorded (handoff), NOT drained or mislabeled failed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-gate-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    // A worker that drained gracefully mid-window: it wrote .handoff (terminal, resumable).
+    seedRunning(st, "lane-ho", 5);
+    sup.probes["lane-ho"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 0.4 };
+    // A genuinely still-running lane alongside it, to prove drain still happens for non-terminal.
+    seedRunning(st, "lane-keep", 6);
+    sup.probes["lane-keep"] = { ...DEFAULT_PROBE };
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+
+    const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    // The handed-off lane's real terminal state is recorded — not left running, not failed.
+    assert.equal(st.getWorker("lane-ho")?.state, "handoff");
+    assert.deepEqual(r.reclaimed, [{ kind: "handoff", worker: "lane-ho", issue: 5, costUsd: 0.4, modelUsage: [] }]);
+    assert.ok(!r.drainRequested.includes("lane-ho")); // terminal -> not re-drained
+    assert.ok(!r.escalated.includes("lane-ho")); // never escalated to failed/needs-human
+    assert.deepEqual(forge.labelsAdded, []); // no needs-human for a clean graceful handoff
+    // The still-running lane is still drained normally.
+    assert.deepEqual(r.drainRequested, ["lane-keep"]);
+    assert.equal(st.getWorker("lane-keep")?.state, "running");
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -724,7 +782,7 @@ test("tick DRIVE: kill switch NOT active -> driveOne called normally (no regress
   }
 });
 
-test("tick: kill switch active then cleared -> next tick runs the FULL tick again (reclaim -> drive -> merge)", async () => {
+test("tick: kill switch records a DONE+PR lane's terminal state under the switch (driving), then DRIVE merges it once cleared", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-gate-"));
   try {
     const switchPath = join(dir, "KILL_SWITCH");
@@ -738,14 +796,17 @@ test("tick: kill switch active then cleared -> next tick runs the FULL tick agai
 
     writeFileSync(switchPath, "");
     const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-    assert.equal(gate.calls.length, 0);
-    assert.deepEqual(r1.driven, []); // drain-only tick: the lane was not even probed
-    assert.deepEqual(r1.drainRequested, ["lane-a"]);
-    assert.equal(st.getWorker("lane-a")?.state, "running"); // held as-is under the switch
+    assert.equal(gate.calls.length, 0); // DRIVE skipped under the switch — never merges
+    assert.deepEqual(r1.driven, []);
+    // #69 P2: the DONE+PR lane's terminal state IS recorded (reclaimed to driving), not drained.
+    assert.equal(r1.reclaimed[0]?.kind, "done");
+    assert.equal(st.getWorker("lane-a")?.state, "driving");
+    assert.deepEqual(r1.drainRequested, []); // terminal lane, not a drain target
+    assert.deepEqual(forge.boardSet, []); // not merged yet
 
     rmSync(switchPath, { force: true }); // human clears the switch
     const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-    assert.equal(gate.calls.length, 1); // reclaimed to driving + driven in the same tick
+    assert.equal(gate.calls.length, 1); // the driving lane is now driven -> merged
     assert.deepEqual(r2.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
     assert.equal(st.getWorker("lane-a")?.state, "done");
     assert.deepEqual(forge.boardSet, [[2, "done"]]);

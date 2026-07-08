@@ -16,6 +16,7 @@ class FakeForge implements IForge {
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
+  async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> { return 1; }
   async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}

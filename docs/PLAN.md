@@ -280,13 +280,17 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   A **`KILL_SWITCH` file sentinel** in the engine's own data dir (human `touch`/`rm`;
   workers have no write path) is **one global gate at the very top of the conductor
   tick** (#69, replacing the #59/#61/#64 per-phase checks): active ⇒ the tick is
-  **drain-only** — running workers get the graceful `requestHandoff()` drain (and,
-  past the bounded `drainWindowSec`, the process-tree kill + needs-human escalation),
-  and *nothing else runs* — no dispatch, no drive/merge, no reclaim, no rollback
-  retry. Accepted trade-off: a switch flipped mid-tick takes effect at the next
-  tick's gate, not within the same tick. The per-worker *soft* budget stays a
-  graceful handoff, never a mid-work kill (#33, still open — needs a live cost
-  signal).
+  **drain + terminal-reclaim only** — running workers get the graceful
+  `requestHandoff()` drain (and, past the bounded `drainWindowSec`, the process-tree
+  kill + needs-human escalation), **and** a lane that has *already* written a
+  terminal sentinel (`.handoff`/`.done`/`.failed`) still gets its real outcome
+  recorded — finishing a graceful drain is part of draining, not new work, so a
+  handed-off lane is never rotted as `running` and then mislabeled `failed`. Everything
+  else is blocked: no dispatch, no drive/merge, no rollback retry, and no kill+requeue
+  of crashed (no-sentinel) lanes. Accepted trade-off: a switch flipped mid-tick takes
+  effect at the next tick's gate, not within the same tick. The per-worker *soft*
+  budget stays a graceful handoff, never a mid-work kill (#33, still open — needs a
+  live cost signal).
 - **Drain contract is sentinel-only; the supervisor never runs git in a worker
   worktree (#69, superseding #60/#62/#63's supervisor-side commit+push)** — a
   drain SIGTERM ends with the supervisor writing the `.handoff` sentinel
@@ -300,9 +304,13 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   uncommitted work — lane reclaim (DEAD teardown, drain-window escalation) deletes a
   worktree only when a pure-filesystem mtime check proves it untouched since
   dispatch; otherwise it stays on disk and the conductor posts the absolute path to
-  the issue + applies `needs-human`. Accepted trade-off (Decision #9): WIP is not
-  auto-pushed to the remote, so total machine loss before a human intervenes loses at
-  most one worker's budget-bounded WIP.
+  the issue + applies `needs-human`. A retained worktree also **removes its lane from
+  the auto-drive path entirely** — even a lane that had opened a PR is marked `failed`
+  (never `driving`) and `needs-human` is applied to **the PR itself**, because the
+  merge gate reads a PR's own labels (`getPRReviewData`), not the source issue's; a
+  crash-with-WIP must not auto-merge its incomplete PR while the WIP awaits salvage.
+  Accepted trade-off (Decision #9): WIP is not auto-pushed to the remote, so total
+  machine loss before a human intervenes loses at most one worker's budget-bounded WIP.
 - **Cost telemetry (#47)** — `spend_ledger` also records model id + categorized token
   usage (input/output/cache-read/cache-creation) per (lane, model), parsed from the
   same stream-json result the USD figure already came from. The ledger records
