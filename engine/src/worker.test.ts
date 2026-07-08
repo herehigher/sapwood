@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
-import { parseCostUsd, parseModelUsage, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote, WorkerSupervisor } from "./worker.js";
+import {
+  parseCostUsd, parseModelUsage, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote,
+  WorkerSupervisor, renderPromptTemplate, defaultPromptPath, loadWorkerPromptTemplate, buildRenderPrompt,
+} from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
@@ -1122,6 +1125,191 @@ test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE
     assert.equal(alive(pid), false, "SIGTERM still reached the detached process");
 
     s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #74: file-based worker prompt ──
+
+test("renderPromptTemplate: substitutes issue.number/title/body/labels", () => {
+  const issue = { number: 42, title: "Fix the thing", labels: ["type:docs", "verify:n/a"], body: "do X and Y" };
+  const out = renderPromptTemplate("Issue #{{issue.number}}: {{issue.title}} [{{issue.labels}}]\n\n{{issue.body}}", issue);
+  assert.equal(out, "Issue #42: Fix the thing [type:docs, verify:n/a]\n\ndo X and Y");
+});
+
+test("renderPromptTemplate: absent issue.body substitutes as empty string, never throws", () => {
+  const issue = { number: 1, title: "t", labels: [] }; // no body field
+  assert.equal(renderPromptTemplate("body=[{{issue.body}}]", issue), "body=[]");
+});
+
+test("renderPromptTemplate: fails closed on an unknown {{var}} — no silent literal passthrough", () => {
+  const issue = { number: 1, title: "t", labels: [] };
+  assert.throws(() => renderPromptTemplate("hello {{issue.author}}", issue), /unknown variable.*issue\.author/i);
+});
+
+test("renderPromptTemplate: fails closed on names outside [\\w.] — {{issue-title}} is not literal passthrough", () => {
+  const issue = { number: 1, title: "t", labels: [] };
+  assert.throws(() => renderPromptTemplate("hello {{issue-title}}", issue), /unknown variable.*issue-title/i);
+});
+
+test("renderPromptTemplate: fails closed on prototype-chain names — {{constructor}} never resolves", () => {
+  const issue = { number: 1, title: "t", labels: [] };
+  assert.throws(() => renderPromptTemplate("hello {{constructor}}", issue), /unknown variable.*constructor/i);
+  assert.throws(() => renderPromptTemplate("hello {{toString}}", issue), /unknown variable.*toString/i);
+});
+
+test("defaultPromptPath: resolves to the shipped prompts/worker.md, which exists and mentions the vars", () => {
+  const p = defaultPromptPath();
+  assert.ok(existsSync(p), `expected shipped default prompt at ${p}`);
+  const text = readFileSync(p, "utf8");
+  assert.match(text, /\{\{issue\.number\}\}/);
+  assert.match(text, /\{\{issue\.title\}\}/);
+  assert.match(text, /\{\{issue\.body\}\}/);
+});
+
+test("loadWorkerPromptTemplate: unset promptFile -> the shipped default (byte-identical)", () => {
+  const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  assert.equal(loadWorkerPromptTemplate(scfg), readFileSync(defaultPromptPath(), "utf8"));
+});
+
+test("loadWorkerPromptTemplate: promptFile set -> loads that file's raw content", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "custom.md");
+    writeFileSync(p, "Custom prompt for #{{issue.number}}");
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { promptFile: p } });
+    assert.equal(loadWorkerPromptTemplate(scfg), "Custom prompt for #{{issue.number}}");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkerPromptTemplate: fails fast, naming the path, when promptFile is missing (never silently falls back)", () => {
+  const scfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    worker: { promptFile: "/nonexistent/does-not-exist.md" },
+  });
+  assert.throws(() => loadWorkerPromptTemplate(scfg), /\/nonexistent\/does-not-exist\.md/);
+});
+
+test("loadWorkerPromptTemplate: fails fast when promptFile exists but is unreadable (permission denied)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "unreadable.md");
+    writeFileSync(p, "secret template");
+    chmodSync(p, 0o000);
+    if (process.getuid && process.getuid() === 0) return; // root ignores perms — skip under root
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { promptFile: p } });
+    assert.throws(() => loadWorkerPromptTemplate(scfg), /unreadable/i);
+  } finally {
+    chmodSync(join(dir, "unreadable.md"), 0o644);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: loads once, eagerly (fail-fast happens at build time, not on first render)", () => {
+  const scfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    worker: { promptFile: "/nonexistent/does-not-exist.md" },
+  });
+  assert.throws(() => buildRenderPrompt(scfg), /\/nonexistent\/does-not-exist\.md/);
+});
+
+test("buildRenderPrompt: empty/whitespace template throws at build time — never dispatch an undirected worker", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "empty.md");
+    writeFileSync(p, "  \n\n\t");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+    });
+    assert.throws(() => buildRenderPrompt(scfg), /empty/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: substituted config values are literal — a {{issue.body}}-valued config var is NOT re-expanded", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "inject.md");
+    writeFileSync(p, "label: {{labels.verifyNa}}");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+      labels: { verifyNa: "{{issue.body}}" },
+    });
+    const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [], body: "SECRET" });
+    assert.equal(rendered, "label: {{issue.body}}");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: config vars substitute at build time — customized labels.verifyNa reaches the prompt", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "cfg-var.md");
+    writeFileSync(p, "skip red/green if labelled {{labels.verifyNa}} on #{{issue.number}}");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+      labels: { verifyNa: "no-verify" },
+    });
+    const rendered = buildRenderPrompt(scfg)({ number: 7, title: "t", labels: [] });
+    assert.equal(rendered, "skip red/green if labelled no-verify on #7");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: the shipped default prompt builds clean (all its vars are known)", () => {
+  const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: ["verify:n/a"], body: "b" });
+  assert.match(rendered, /labelled `verify:n\/a`/);
+  assert.doesNotMatch(rendered, /\{\{/);
+});
+
+test("buildRenderPrompt: unknown {{var}} in the template throws at BUILD time, before any issue is claimed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "bad-var.md");
+    writeFileSync(p, "work on {{issue.url}}");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+    });
+    assert.throws(() => buildRenderPrompt(scfg), /unknown variable.*issue\.url/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals the rendered template file (fake supervisor)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const templatePath = join(dir, "e2e-worker.md");
+    writeFileSync(templatePath, "Do issue #{{issue.number}} (\"{{issue.title}}\"):\n{{issue.body}}");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: templatePath },
+    });
+    const renderPrompt = buildRenderPrompt(scfg);
+    const hook = mkHook(dir);
+    // stub records its argv so we can inspect exactly what -p carried (same trick as the
+    // #26 inline-settings test above).
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\nexit 0\n`);
+    const s = new WorkerSupervisor({ cfg: scfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt, heartbeatMs: 50, guardHookPath: hook });
+    await s.dispatch({ number: 74, title: "File-based worker prompt", labels: [], body: "wire promptFile through renderPrompt" });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    const expected = renderPromptTemplate(readFileSync(templatePath, "utf8"), {
+      number: 74, title: "File-based worker prompt", labels: [], body: "wire promptFile through renderPrompt",
+    });
+    assert.ok(args.includes(expected), `expected the rendered template in the spawned argv, got:\n${args}`);
+    s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

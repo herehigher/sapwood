@@ -18,6 +18,7 @@
 //   LOOP_FRICTION_MIN     -> lanes.frictionMin
 //   LOOP_OPTIM_RECUR      -> optimize.recur
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
@@ -57,6 +58,14 @@ const Worker = z.object({
   // safety boundary). requestHandoff() is the live drain path today.
   budgetUsdSoft: z.number().finite().positive().default(10),
   heartbeatStaleSecs: z.number().int().positive().default(180),
+  // #74: file-based worker prompt. A relative path is resolved against the CONFIG FILE's
+  // directory (see loadConfig), so the same config works no matter what cwd the CLI runs
+  // from. Unset (default) -> the shipped preset at the engine package's `prompts/worker.md`
+  // (resolved relative to the engine's own install location, not this repo — see
+  // worker.ts's defaultPromptPath). Set-but-missing/unreadable/empty is a fail-fast startup
+  // error (buildRenderPrompt loads it once, eagerly, before any dispatch) — never a silent
+  // fallback to the shipped default.
+  promptFile: z.string().optional(),
 }).strict();
 
 const Cost = z.object({
@@ -225,5 +234,12 @@ export function loadConfig(path?: string): SapwoodConfig {
   if (file === undefined) {
     throw new Error(`no config found; looked for ${DEFAULT_CONFIG_PATHS.join(", ")}`);
   }
-  return parseConfig(readFileSync(file, "utf8"));
+  const cfg = parseConfig(readFileSync(file, "utf8"));
+  // A relative worker.promptFile means "relative to the config file" (#74), not to whatever
+  // cwd the CLI happens to run from — `sapwood validate repo/sapwood.config.yaml` must judge
+  // the same config the engine would run inside `repo/`.
+  if (cfg.worker.promptFile !== undefined && !isAbsolute(cfg.worker.promptFile)) {
+    cfg.worker.promptFile = resolve(dirname(file), cfg.worker.promptFile);
+  }
+  return cfg;
 }

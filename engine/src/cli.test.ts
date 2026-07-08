@@ -144,6 +144,48 @@ test("validate: valid config prints OK summary with path + key effective values,
   }
 });
 
+test("validate: worker.promptFile pointing nowhere fails validation, exits 1 (#74)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const path = join(dir, "sapwood.config.yaml");
+  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  promptFile: /nonexistent/nope.md\n");
+  try {
+    const r = runCli(["node", "sapwood", "validate", path]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /\/nonexistent\/nope\.md/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("validate: worker.promptFile with an unknown {{var}} fails validation, exits 1 (#74)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const cfgPath = join(dir, "sapwood.config.yaml");
+  const promptPath = join(dir, "bad.md");
+  writeFileSync(promptPath, "do {{issue.url}}");
+  writeFileSync(cfgPath, `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  promptFile: ${promptPath}\n`);
+  try {
+    const r = runCli(["node", "sapwood", "validate", cfgPath]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /unknown variable.*issue\.url/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("validate: relative worker.promptFile resolves against the CONFIG's directory, not cwd (#74)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const cfgPath = join(dir, "sapwood.config.yaml");
+  writeFileSync(join(dir, "my-prompt.md"), "do #{{issue.number}}");
+  writeFileSync(cfgPath, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  promptFile: my-prompt.md\n");
+  try {
+    // cwd is the repo, NOT `dir` — validation must still find dir/my-prompt.md.
+    const r = runCli(["node", "sapwood", "validate", cfgPath]);
+    assert.equal(r.code, 0, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("validate: invalid config (wrong type) prints Zod issues one per line, exits 1", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
   const path = join(dir, "sapwood.config.yaml");

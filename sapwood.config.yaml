@@ -33,6 +33,13 @@ worker:
   #                   worker has no live in-flight cost signal to compare against this value.
   #                   Tracked as issue #33.
   heartbeatStaleSecs: 180 # heartbeat older than this => worker considered dead
+  # promptFile: prompts/my-worker.md
+  #                   #74: override the worker prompt with your own template file. Relative
+  #                   paths resolve against THIS config file's directory. Supported {{vars}}:
+  #                   issue.number, issue.title, issue.body, issue.labels, labels.verifyNa.
+  #                   Missing/unreadable/empty file or an unknown {{var}} = startup error,
+  #                   never a silent fallback. Unset = the engine's shipped prompts/worker.md
+  #                   (TDD + two-gate method).
 
 cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
   roundBudgetUsd: 30

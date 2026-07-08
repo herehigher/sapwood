@@ -21,7 +21,7 @@ import {
   existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync,
   rmSync, statSync, utimesSync, writeFileSync, type Dirent,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
@@ -918,11 +918,118 @@ export function shellSingleQuote(s: string): string {
 }
 
 function defaultPrompt(issue: Issue): string {
-  // Imperative — headless has no human to confirm; the worker starts immediately. The TDD /
-  // two-gate method lives in the dev-round skill (M4); this is the minimal dispatch skeleton.
+  // Imperative — headless has no human to confirm; the worker starts immediately. This is the
+  // internal last-resort skeleton used ONLY when a caller constructs WorkerSupervisor with no
+  // renderPrompt at all (e.g. a test, or a future embedder). The real `sapwood run` entry point
+  // (cli.ts) always wires deps.renderPrompt via buildRenderPrompt(cfg) below, which loads the
+  // full TDD/two-gate method from the shipped prompts/worker.md (or an operator override) — #74.
   return [
     `You are an autonomous worker. Implement GitHub issue #${issue.number}: ${issue.title}.`,
     `Work on a feature branch, follow the repo's tests-first method, and open a pull request when done.`,
     `Do not merge. Commit and push your work; the conductor handles review and merge.`,
   ].join("\n");
+}
+
+// ── #74: file-based worker prompt (config.ts's worker.promptFile + the shipped default) ──
+
+/** Supported `{{var}}` substitutions — deliberately tiny (no template engine, no new
+ *  dependency): just the per-issue fields a worker prompt needs to address a specific issue
+ *  (config-level vars like {{labels.verifyNa}} live in CONFIG_VARS, merged by buildRenderPrompt). */
+const PROMPT_VARS: Record<string, (issue: Issue) => string> = {
+  "issue.number": (issue) => String(issue.number),
+  "issue.title": (issue) => issue.title,
+  "issue.body": (issue) => issue.body ?? "",
+  // Labels drive the prompt's own branching (e.g. the verify:n/a doc-gate path) — the worker
+  // can't check a label the template never shows it.
+  "issue.labels": (issue) => issue.labels.join(", "),
+};
+
+/** Simple `{{var}}` substitution (#74) — no template engine. FAILS CLOSED on any `{{...}}`
+ *  placeholder outside PROMPT_VARS: a typo'd/unsupported var must not silently pass through as
+ *  literal `{{...}}` text in the dispatched prompt (the whole point of a configurable prompt is
+ *  knowing exactly what gets sent to the worker). Every well-formed `{{...}}` token is checked —
+ *  the name pattern is deliberately broad and the lookup is own-key only, so neither a typo like
+ *  `{{issue-title}}` nor a prototype name like `{{constructor}}` can slip through. Malformed
+ *  (unclosed) `{{` is left untouched. */
+export function renderPromptTemplate(template: string, issue: Issue): string {
+  return template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => {
+    const name = raw.trim();
+    if (!Object.hasOwn(PROMPT_VARS, name)) {
+      throw new Error(
+        `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(PROMPT_VARS).join(", ")}`,
+      );
+    }
+    return PROMPT_VARS[name]!(issue);
+  });
+}
+
+/** Resolves the shipped default prompt — `engine/prompts/worker.md` inside the engine
+ *  package, NOT relative to the target repo the engine is orchestrating. */
+export function defaultPromptPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  // engine/src (tsx) and engine/dist (built) are both one level below engine/ —
+  // the prompt lives INSIDE the engine package so `npm pack --workspace engine`
+  // ships it (a repo-root prompts/ would be absent from packaged installs).
+  return join(here, "..", "prompts", "worker.md");
+}
+
+/** Load the worker prompt TEMPLATE, raw and un-substituted, exactly ONCE. Either the operator's
+ *  `worker.promptFile` (loadConfig has already resolved a relative path against the CONFIG
+ *  FILE's directory, so by here it is effectively absolute) or, when unset, the shipped default
+ *  at `engine/prompts/worker.md` (see defaultPromptPath — resolved inside the engine package,
+ *  never the orchestrated repo).
+ *
+ *  FAIL-FAST (#74): an explicitly configured `promptFile` that's missing or unreadable throws
+ *  here, NAMING THE PATH — never a silent fallback to the shipped default. Meant to be called
+ *  once at startup (buildRenderPrompt), before any dispatch. */
+export function loadWorkerPromptTemplate(cfg: SapwoodConfig): string {
+  const configured = cfg.worker.promptFile;
+  if (configured === undefined) return readFileSync(defaultPromptPath(), "utf8");
+  if (!existsSync(configured)) {
+    throw new Error(`worker.promptFile not found: ${configured} — refusing to dispatch`);
+  }
+  try {
+    return readFileSync(configured, "utf8");
+  } catch (e) {
+    throw new Error(`worker.promptFile unreadable: ${configured} (${String(e)}) — refusing to dispatch`);
+  }
+}
+
+/** Config-level `{{var}}`s — they don't vary per issue. The shipped prompt references the
+ *  verify-label by var, not literal, so a repo that customizes `labels.verifyNa` gets a prompt
+ *  that names ITS label. */
+const CONFIG_VARS: Record<string, (cfg: SapwoodConfig) => string> = {
+  "labels.verifyNa": (cfg) => cfg.labels.verifyNa,
+};
+
+/** Builds the `WorkerDeps.renderPrompt` closure (#74): loads the template ONCE, eagerly —
+ *  fail-fast on a missing/unreadable/EMPTY `worker.promptFile` AND on any unknown `{{var}}`
+ *  happens here, at call time, not lazily on first dispatch — a bad template discovered at
+ *  render time would fire AFTER the dispatch loop already claimed the issue (Ready → In
+ *  Progress), forcing a rollback on every tick. The real `sapwood run` entry point (cli.ts)
+ *  calls this immediately after loadConfig(), before constructing the WorkerSupervisor, so a
+ *  bad promptFile aborts startup with no dispatch ever happening.
+ *
+ *  Rendering is a SINGLE pass over the original template with one combined var map — a
+ *  substituted value is literal output, never re-scanned for `{{...}}`, so a config value like
+ *  `{{issue.body}}` cannot smuggle in a second expansion. */
+export function buildRenderPrompt(cfg: SapwoodConfig): (issue: Issue) => string {
+  const template = loadWorkerPromptTemplate(cfg);
+  if (template.trim() === "") {
+    throw new Error(
+      `worker prompt template is empty${cfg.worker.promptFile !== undefined ? `: ${cfg.worker.promptFile}` : ""} — refusing to dispatch an undirected worker`,
+    );
+  }
+  const vars: Record<string, (issue: Issue) => string> = { ...PROMPT_VARS };
+  for (const [name, fromCfg] of Object.entries(CONFIG_VARS)) vars[name] = () => fromCfg(cfg);
+  for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
+    const name = raw!.trim();
+    if (!Object.hasOwn(vars, name)) {
+      throw new Error(
+        `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`,
+      );
+    }
+  }
+  return (issue: Issue) =>
+    template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issue));
 }

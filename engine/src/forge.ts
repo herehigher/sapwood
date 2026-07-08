@@ -14,6 +14,12 @@ export interface Issue {
   number: number;
   title: string;
   labels: string[];
+  // #74: raw issue body, for worker.ts's {{issue.body}} prompt-template substitution. Optional
+  // (additive) — already fetched by the board GraphQL query (ProjectItem.body) and threaded
+  // through selectReadyIssues below; older call sites/fixtures that construct an Issue without
+  // it keep typechecking, and renderPromptTemplate treats an absent body as "" (Decision #8's
+  // getIssueBody uses the same empty-string-not-throw convention for a bodyless issue).
+  body?: string;
 }
 
 export interface PRStatus {
@@ -495,7 +501,7 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
     .filter((it) => it.state === "OPEN")
     .filter((it) => it.status === cfg.board.status.ready)
     .filter((it) => hasVerificationPlan(it.body, it.labels, cfg.labels.verifyNa))
-    .map((it) => ({ number: it.number, title: it.title, labels: it.labels }));
+    .map((it) => ({ number: it.number, title: it.title, labels: it.labels, body: it.body }));
 }
 
 export function findOptionId(project: ParsedProject, name: string): string | undefined {

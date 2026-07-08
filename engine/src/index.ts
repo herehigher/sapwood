@@ -97,6 +97,10 @@ export {
   discoverClaudeBin,
   claudeArgs,
   guardSettings,
+  renderPromptTemplate,
+  defaultPromptPath,
+  loadWorkerPromptTemplate,
+  buildRenderPrompt,
   type WorkerDeps,
   type ClaudeArgsOpts,
 } from "./worker.js";

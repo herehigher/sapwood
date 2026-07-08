@@ -202,3 +202,20 @@ test("overrides survive validation", () => {
   assert.equal(cfg.lanes.max, 9);
   assert.equal(cfg.worker.effort, "low");
 });
+
+// ── #74: worker.promptFile ──
+test("worker.promptFile: unset by default, overridable, strict schema", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.promptFile, undefined);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { promptFile: prompts/custom-worker.md }",
+  );
+  assert.equal(over.worker.promptFile, "prompts/custom-worker.md");
+});
+
+test("worker.promptFile: a typo'd key under worker.* is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { promptFiel: x.md }"),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});

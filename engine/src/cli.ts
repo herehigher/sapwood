@@ -11,7 +11,7 @@ import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.j
 import { init, InitError } from "./init.js";
 import { State, SCHEMA_VERSION, type WorkerRow } from "./state.js";
 import { GithubForge, type Issue } from "./forge.js";
-import { WorkerSupervisor } from "./worker.js";
+import { WorkerSupervisor, buildRenderPrompt } from "./worker.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
 import { runDriver, type StopMode, type DriverResult } from "./driver.js";
@@ -102,6 +102,9 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
   const path = args[0];
   try {
     const cfg = loadConfig(path);
+    // Validate the prompt template too (#74) — `sapwood validate` must reject everything the
+    // real run would reject at startup, including a missing promptFile or unknown {{var}}.
+    buildRenderPrompt(cfg);
     const resolvedPath = path ?? DEFAULT_CONFIG_PATHS.find(existsSync);
     return {
       stdout: `sapwood validate: OK — ${resolvedPath} (lanes.max=${cfg.lanes.max}, guard.mode=${cfg.guard.mode}, merge.mode=${cfg.merge.mode})\n`,
@@ -175,6 +178,10 @@ export function formatDryRunPreview(preview: DryRunPreview): string {
 
 async function runDryRun(): Promise<number> {
   const cfg = loadConfig();
+  // Same fail-fast the real run does (#74): a broken worker.promptFile must surface in the
+  // preview too — dry-run exists to predict the real run, not to green-light a config the
+  // real run would reject at startup. Renderer is discarded; only validation matters here.
+  buildRenderPrompt(cfg);
   const forge = new GithubForge(cfg);
   const preview = computeDryRunPreview(await forge.getReadyIssues(), cfg);
   process.stdout.write(formatDryRunPreview(preview));
@@ -389,6 +396,12 @@ export function runExitCode(result: Pick<DriverResult, "ticks" | "tickErrors">, 
 
 async function runEngine(argv: string[]): Promise<number> {
   const cfg = loadConfig();
+  // #74: build the worker-prompt renderer NOW, before anything else — loadWorkerPromptTemplate
+  // (inside buildRenderPrompt) reads the template file EAGERLY, so a configured
+  // `worker.promptFile` that's missing/unreadable throws here and aborts startup. Never a lazy
+  // load deferred to first dispatch: that would let the engine claim issues / churn ticks before
+  // failing, instead of a clean fail-fast with no dispatch ever happening.
+  const renderPrompt = buildRenderPrompt(cfg);
   const state = new State();
   const forge = new GithubForge(cfg);
   const reviewer = makeReviewer(cfg);
@@ -403,6 +416,7 @@ async function runEngine(argv: string[]): Promise<number> {
     // merge-gate run (#46 scope 3), not this PR.
     hasOpenPr: async (issue) => (await forge.findOpenPrForIssue(issue)) != null,
     findOpenPr: (issue) => forge.findOpenPrForIssue(issue),
+    renderPrompt,
   });
   const stopMode = parseRunStopMode(argv);
   console.log(`sapwood run: tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
