@@ -302,15 +302,20 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   have no `-c` disable), so it was deleted at the root, not patched per-vector.
   **Dirty-worktree retention:** automation never deletes a worktree that may hold
   uncommitted work — lane reclaim (DEAD teardown, drain-window escalation) deletes a
-  worktree only when a pure-filesystem mtime check proves it untouched since
-  dispatch; otherwise it stays on disk and the conductor posts the absolute path to
-  the issue + applies `needs-human`. A retained worktree also **removes its lane from
-  the auto-drive path entirely** — even a lane that had opened a PR is marked `failed`
-  (never `driving`) and `needs-human` is applied to **the PR itself**, because the
-  merge gate reads a PR's own labels (`getPRReviewData`), not the source issue's; a
-  crash-with-WIP must not auto-merge its incomplete PR while the WIP awaits salvage.
-  Accepted trade-off (Decision #9): WIP is not auto-pushed to the remote, so total
-  machine loss before a human intervenes loses at most one worker's budget-bounded WIP.
+  worktree only when a pure-filesystem check proves it untouched, comparing every
+  entry's **mtime *and* ctime** (ctime can't be backdated by unprivileged code)
+  against the lane's **immutable first-dispatch time** (`dispatched_at`, carried
+  across a `--resume` so pre-handoff WIP is never re-baselined and silently deleted);
+  otherwise it stays on disk and the conductor posts the absolute path to the issue +
+  applies `needs-human`. A retained worktree also **removes its lane from the
+  auto-drive path entirely** — even a lane that opened a PR (whether reclaimed while
+  DEAD, escalated during drain, or terminating via a `.failed` sentinel) is marked
+  `failed` (never `driving`) and `needs-human` is applied to **the PR itself**,
+  because the merge gate reads a PR's own labels (`getPRReviewData`), not the source
+  issue's; a crash-with-WIP must not auto-merge its incomplete PR while the WIP awaits
+  salvage. Accepted trade-off (Decision #9): WIP is not auto-pushed to the remote, so
+  total machine loss before a human intervenes loses at most one worker's
+  budget-bounded WIP.
 - **Cost telemetry (#47)** — `spend_ledger` also records model id + categorized token
   usage (input/output/cache-read/cache-creation) per (lane, model), parsed from the
   same stream-json result the USD figure already came from. The ledger records

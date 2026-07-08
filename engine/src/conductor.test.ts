@@ -48,11 +48,17 @@ class FakeForge implements IForge {
   claimed: number[] = [];
   prComments: Array<[number, string]> = [];
   issueComments: Array<[number, string]> = [];
+  /** #69 (fable P2a): when true, addLabel throws — proves the drain-escalation still lands its
+   *  structured event + terminal transition (best-effort forge, ordered before the upsert). */
+  throwOnAddLabel = false;
   async detectOwnerKind(): Promise<"user"> { return "user"; }
   async getReadyIssues(): Promise<Issue[]> { return this.ready; }
   async claimIssue(n: number): Promise<void> { this.claimed.push(n); }
   async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> { this.boardSet.push([n, s]); }
-  async addLabel(n: number, l: string): Promise<void> { this.labelsAdded.push([n, l]); }
+  async addLabel(n: number, l: string): Promise<void> {
+    if (this.throwOnAddLabel) throw new Error("simulated forge failure");
+    this.labelsAdded.push([n, l]);
+  }
   async addPRLabel(n: number, l: string): Promise<void> { this.prLabelsAdded.push([n, l]); }
   async openPR(): Promise<number> { return 1; }
   async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
@@ -75,6 +81,9 @@ class FakeSupervisor implements Supervisor {
   handoffRequested: string[] = [];
   /** #69: per-lane reclaim result. Default: no worktree ever existed (nothing retained). */
   reclaimResults: Record<string, ReclaimResult> = {};
+  /** #69 (fable P3-b): per-lane inspectWorktree result for terminal-sentinel lanes. */
+  inspectResults: Record<string, ReclaimResult> = {};
+  inspected: string[] = [];
   private n = 0;
   async probe(w: string): Promise<LaneProbe> { return this.probes[w] ?? DEFAULT_PROBE; }
   async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
@@ -85,6 +94,10 @@ class FakeSupervisor implements Supervisor {
   async reclaim(w: string): Promise<ReclaimResult> {
     this.reclaimed.push(w);
     return this.reclaimResults[w] ?? { worktreePath: null, worktreeRetained: false };
+  }
+  inspectWorktree(w: string): ReclaimResult {
+    this.inspected.push(w);
+    return this.inspectResults[w] ?? { worktreePath: null, worktreeRetained: false };
   }
   requestHandoff(w: string): boolean { this.handoffRequested.push(w); return true; }
 }
@@ -1107,6 +1120,79 @@ test("tick: kill switch escalates to a hard kill only after the bounded drain wi
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("#69 P2a (fable): drain-escalation of a retained-dirty lane with a PR -> needs-human on issue AND PR + retained report; a throwing addLabel does NOT orphan it (event lands, still marked failed)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-ceiling-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(st, "lane-run", 3);
+    // A drained lane that crashed with WIP + an open PR; probe surfaces the PR number.
+    sup.probes["lane-run"] = { ...DEFAULT_PROBE, hasPr: true, prNumber: 88 };
+    sup.reclaimResults["lane-run"] = { worktreePath: "/wt/lane-run", worktreeRetained: true };
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    let clock = new Date("2026-07-06T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window -> escalate
+    // addLabel throws on the escalation — the lane must STILL be recorded failed + event landed.
+    forge.throwOnAddLabel = true;
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+
+    assert.deepEqual(r2.escalated, ["lane-run"]); // the loop ran to completion past the throw
+    assert.equal(st.getWorker("lane-run")?.state, "failed"); // terminal transition still happened
+    // needs-human landed on the PR (best-effort survives the issue-label throw), and the
+    // retained-worktree comment landed too — the throw never orphaned the lane.
+    assert.deepEqual(forge.prLabelsAdded, [[88, "needs-human"]]);
+    assert.equal(forge.issueComments.length, 1);
+    assert.match(forge.issueComments[0]![1], /\/wt\/lane-run/);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#69 P3b (fable): a .failed-sentinel lane with an open PR AND a dirty worktree is NOT auto-driven — inspected, escalated to needs-human (issue + PR), never rescued to driving", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-fail-wip", 9);
+  // .failed sentinel + open PR would normally rescue to driving; but the worktree is dirty.
+  sup.probes["lane-fail-wip"] = { ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 91 };
+  sup.inspectResults["lane-fail-wip"] = { worktreePath: "/wt/lane-fail-wip", worktreeRetained: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[91] = { kind: "merged", pr: 91, headOid: "H" }; // would merge if driven
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+  assert.deepEqual(sup.inspected, ["lane-fail-wip"]); // dirty check ran on the terminal lane
+  assert.equal(st.getWorker("lane-fail-wip")?.state, "failed"); // NOT driving
+  assert.equal(gate.calls.length, 0); // never driven -> never merged
+  assert.deepEqual(r.driven, []);
+  assert.deepEqual(forge.labelsAdded, [[9, "needs-human"]]);
+  assert.deepEqual(forge.prLabelsAdded, [[91, "needs-human"]]); // where the merge gate reads labels
+  assert.equal(forge.issueComments.length, 1);
+  assert.equal(r.reclaimed[0]?.kind, "failed");
+  st.close();
+});
+
+test("#69 P3b (fable): a .failed-sentinel lane with an open PR and a CLEAN worktree still rescues to driving (no regression)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-fail-clean", 9);
+  sup.probes["lane-fail-clean"] = { ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 92 };
+  sup.inspectResults["lane-fail-clean"] = { worktreePath: "/wt/lane-fail-clean", worktreeRetained: false };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(sup.inspected, ["lane-fail-clean"]);
+  assert.equal(st.getWorker("lane-fail-clean")?.state, "driving"); // clean -> rescued as before
+  assert.equal(st.getWorker("lane-fail-clean")?.pr, 92);
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.prLabelsAdded, []);
+  st.close();
 });
 
 test("tick ceiling: wall-clock breaches on continuous ticking but RECOVERS after an operator pause (Codex R2 P1)", async () => {

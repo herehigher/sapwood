@@ -335,9 +335,15 @@ export class WorkerSupervisor implements Supervisor {
     // Only set up the running marker + heartbeat if the child is still alive — a very fast
     // exit during the await is already handled by onExit (lane removed); don't resurrect it.
     if (this.lanes.has(laneName) && child.exitCode === null && child.signalCode === null) {
+      const startedIso = new Date(lane.startedMs).toISOString();
       this.writeJsonAtomic(this.path(laneName, "running.json"), {
         name: laneName, issue: issue.number, session_id: sessionId,
-        wrapper_pid: child.pid, started_at: new Date(lane.startedMs).toISOString(),
+        wrapper_pid: child.pid, started_at: startedIso,
+        // #69 (fable P1): the IMMUTABLE first-dispatch time, the dirty-worktree retention
+        // baseline. Distinct from started_at, which resume() resets to resume-time for the
+        // wall-clock timeout — baselining retention on that would judge pre-handoff WIP (older
+        // than the new start) CLEAN and delete it. dispatched_at never moves once set.
+        dispatched_at: startedIso,
       });
       this.touchHeartbeat(laneName);
       lane.hb = setInterval(() => this.heartbeatTick(laneName), this.hbMs);
@@ -373,6 +379,11 @@ export class WorkerSupervisor implements Supervisor {
     if (!sessionId) {
       throw new Error(`resume: ${name}'s handoff sentinel carries no session_id`);
     }
+    // #69 (fable P1): carry the IMMUTABLE first-dispatch time across the handoff -> resume
+    // boundary. The retention baseline must stay the original dispatch time so pre-handoff WIP
+    // (older than this resumed run's start) is still judged possibly-dirty. Absent on a legacy
+    // sentinel -> omitted below -> the baseline resolves to NaN -> fail-safe dirty (retain).
+    const dispatchedAt = typeof handoff?.dispatched_at === "string" ? handoff.dispatched_at : null;
     const guardMode = this.deps.cfg.guard.mode;
     if (guardMode === "hard" && !existsSync(this.guardHookPath)) {
       throw new Error(
@@ -419,6 +430,8 @@ export class WorkerSupervisor implements Supervisor {
       this.writeJsonAtomic(this.path(name, "running.json"), {
         name, issue: issue.number, session_id: sessionId,
         wrapper_pid: child.pid, started_at: new Date(lane.startedMs).toISOString(),
+        // Preserve the original first-dispatch baseline (not this resume's start).
+        ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
       });
       this.touchHeartbeat(name);
       lane.hb = setInterval(() => this.heartbeatTick(name), this.hbMs);
@@ -547,9 +560,16 @@ export class WorkerSupervisor implements Supervisor {
     const jsonl = this.readJsonl(jsonlPath);
     const cost = parseCostUsd(jsonl);
     const modelUsage = parseModelUsage(jsonl);
+    // #69 (fable P1): carry the immutable first-dispatch baseline out of running.json (still
+    // present here — removed only at the tail below) into the terminal sentinel, so resume()
+    // and the terminal-lane dirty check (inspectWorktree) can recover it after running.json
+    // is gone. Omitted when absent (legacy) -> the baseline resolves to NaN -> fail-safe dirty.
+    const running = this.readJson(this.path(name, "running.json"));
+    const dispatchedAt = typeof running?.dispatched_at === "string" ? running.dispatched_at : null;
     const base = {
       name, issue, session_id: sessionId, total_cost_usd: cost,
       model_usage: modelUsage, ended_at: this.now().toISOString(),
+      ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
     };
     this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: exitCode });
     this.removeIfExists(this.path(name, "running.json"));
@@ -681,7 +701,7 @@ export class WorkerSupervisor implements Supervisor {
       lane.reclaiming = true;
       clearInterval(lane.hb);
       await this.killTree(lane.child);
-      return this.retainOrDeleteWorktree(name, lane.startedMs);
+      return this.retainOrDeleteWorktree(name);
     }
     // Cross-process / post-restart: no in-memory handle — kill by the persisted pid. Mark
     // this lane as reclaiming FIRST, before the kill — #63's detached-confirm-death check in
@@ -692,7 +712,20 @@ export class WorkerSupervisor implements Supervisor {
     this.detachedHandoffRequested.delete(name);
     const pid = this.persistedPid(name);
     if (pid != null) await this.killByPid(pid);
-    return this.retainOrDeleteWorktree(name, this.persistedStartedMs(name));
+    return this.retainOrDeleteWorktree(name);
+  }
+
+  /** #69 (fable P3-b): report a lane's worktree dirtiness WITHOUT any teardown — no kill, no
+   *  delete. A `.done`/`.failed` sentinel lane with an open PR is rescued straight to `driving`
+   *  (its process already exited; reclaim() is never called, so no dirtiness check would run).
+   *  The conductor calls this to apply the same dirty ⇒ needs-human policy the DEAD path uses:
+   *  a crashed worker that left uncommitted WIP alongside its PR is escalated to a human rather
+   *  than auto-driven toward merge. `worktreeRetained: true` == "possibly dirty"; nothing is
+   *  ever deleted here (the terminal path keeps the worktree regardless). */
+  inspectWorktree(name: string): ReclaimResult {
+    const worktreePath = join(this.worktreeRoot, name);
+    if (!existsSync(worktreePath)) return { worktreePath: null, worktreeRetained: false };
+    return { worktreePath, worktreeRetained: this.worktreeMaybeDirty(worktreePath, this.dispatchedBaselineMs(name)) };
   }
 
   /** #69: dirty-worktree retention (replaces #60/#62's supervisor-side git commit+push, and the
@@ -705,18 +738,17 @@ export class WorkerSupervisor implements Supervisor {
    *  deliberately (`touch -r .git/index <file>` after editing it) with the ordinary Bash access
    *  it already has to its own worktree. That's the exact #65 clean-filter RCE, just reachable
    *  via reclaim() instead of the deleted #62 commit+push path. So dirtiness here is a pure
-   *  FILESYSTEM heuristic (worktreeMaybeDirty): any file under the worktree (except `.git/`)
-   *  with an mtime after the lane's recorded start time is "possibly dirty". False positives
-   *  (a worker that edited-then-committed a file, whose mtime still moved) just cost an extra
-   *  needs-human retention — the accepted #69 policy trade-off. False negatives would silently
-   *  lose real WIP, which this heuristic structurally can't produce from ordinary work (any
-   *  content write bumps mtime); only a worker deliberately backdating its own timestamps
-   *  (anti-forensic, not accidental) could defeat it, a documented residual gap, never a
-   *  supervisor-side execution risk. */
-  private retainOrDeleteWorktree(name: string, startedMs: number): ReclaimResult {
+   *  FILESYSTEM heuristic (worktreeMaybeDirty): any entry under the worktree (except `.git/`)
+   *  whose mtime OR ctime is after the lane's FIRST-dispatch time (dispatchedBaselineMs) is
+   *  "possibly dirty". False positives (a worker that edited-then-committed a file, whose
+   *  timestamps still moved) just cost an extra needs-human retention — the accepted #69 policy
+   *  trade-off. False negatives would silently lose real WIP; checking ctime as well as mtime
+   *  (fable P2-b) closes the mtime-backdating gap, since unprivileged code cannot backdate
+   *  ctime (any write/utimes/chmod bumps it) — never a supervisor-side execution risk. */
+  private retainOrDeleteWorktree(name: string): ReclaimResult {
     const worktreePath = join(this.worktreeRoot, name);
     if (!existsSync(worktreePath)) return { worktreePath: null, worktreeRetained: false };
-    if (this.worktreeMaybeDirty(worktreePath, startedMs)) {
+    if (this.worktreeMaybeDirty(worktreePath, this.dispatchedBaselineMs(name))) {
       return { worktreePath, worktreeRetained: true }; // left on disk — caller escalates
     }
     try {
@@ -725,22 +757,33 @@ export class WorkerSupervisor implements Supervisor {
       // Best-effort: an unremovable clean worktree is a minor disk-hygiene issue, not a data
       // loss risk (nothing to lose — it was clean) — don't let it fail the whole reclaim.
     }
+    // NOTE (#69 debt, fable P3): the parent repo's `.git/worktrees/<name>` registration (and
+    // the lane branch) is left dangling — pre-#69 the engine never deleted worktrees. Harmless
+    // for correctness; shows up as a prunable entry in `git worktree list`. A `git worktree
+    // prune` (which runs in the TRUSTED main repo, not a worker tree) is a future operator/
+    // housekeeping step, deliberately not run here to keep this path git-free.
     return { worktreePath, worktreeRetained: false };
   }
 
-  /** Recursive `.git`-excluding mtime scan. Never invokes git. Directory mtimes are checked
-   *  too (a deleted file is also an uncommitted change, visible only as its parent dir's
-   *  mtime bump), and `lstatSync` never follows symlinks (a planted broken/absolute link is
-   *  judged by the link itself). Fails safe (dirty) on any unreadable/unstatable path or an
-   *  unknown baseline — the caller only ever deletes on an explicit `false`. */
+  /** Recursive `.git`-excluding mtime/ctime scan. Never invokes git. Directory timestamps are
+   *  checked too (a deleted file is also an uncommitted change, visible only as its parent
+   *  dir's bumped timestamp), `lstatSync` never follows symlinks (a planted broken/absolute
+   *  link is judged by the link itself), and BOTH mtime and ctime are compared (ctime can't be
+   *  backdated by unprivileged code — fable P2-b). Fails safe (dirty) on any unreadable/
+   *  unstatable path or an unknown baseline — the caller only ever deletes on an explicit
+   *  `false`. */
   private worktreeMaybeDirty(worktreePath: string, sinceMs: number): boolean {
     if (!Number.isFinite(sinceMs)) return true; // unknown baseline -> can't prove clean
+    const touchedSince = (p: string): boolean => {
+      const s = lstatSync(p);
+      return s.mtimeMs > sinceMs || s.ctimeMs > sinceMs;
+    };
     const stack: string[] = [worktreePath];
     while (stack.length > 0) {
       const dir = stack.pop()!;
       let entries: Dirent[];
       try {
-        if (lstatSync(dir).mtimeMs > sinceMs) return true; // entry added/removed in this dir
+        if (touchedSince(dir)) return true; // entry added/removed in this dir
         entries = readdirSync(dir, { withFileTypes: true });
       } catch {
         return true; // unreadable -> fail-safe: treat as possibly dirty
@@ -749,11 +792,11 @@ export class WorkerSupervisor implements Supervisor {
         if (e.name === ".git") continue;
         const p = join(dir, e.name);
         if (e.isDirectory()) {
-          stack.push(p); // its own mtime is checked when popped
+          stack.push(p); // its own timestamps are checked when popped
           continue;
         }
         try {
-          if (lstatSync(p).mtimeMs > sinceMs) return true;
+          if (touchedSince(p)) return true;
         } catch {
           return true; // unstatable -> fail-safe dirty
         }
@@ -762,13 +805,23 @@ export class WorkerSupervisor implements Supervisor {
     return false;
   }
 
-  /** Baseline for the detached (no in-memory Lane) reclaim path: the dispatch-time
-   *  `started_at` persisted onto running.json. Missing/unparseable -> NaN, which
-   *  worktreeMaybeDirty treats as fail-safe dirty. */
-  private persistedStartedMs(name: string): number {
-    const r = this.readJson(this.path(name, "running.json"));
-    const iso = typeof r?.started_at === "string" ? r.started_at : null;
-    return iso ? Date.parse(iso) : NaN;
+  /** The IMMUTABLE first-dispatch time (`dispatched_at`) that the dirty-worktree retention
+   *  check baselines on — set once at dispatch, preserved by resume() (never reset to
+   *  resume-time like `started_at`, which drives the wall-clock timeout). Read from whichever
+   *  of running.json / the terminal sentinels currently carries it (running.json for a live or
+   *  DEAD lane; the sentinel for a terminal lane whose running.json was already removed).
+   *  Missing/unparseable everywhere -> NaN, which worktreeMaybeDirty treats as fail-safe dirty
+   *  (covers legacy sentinels predating this field). */
+  private dispatchedBaselineMs(name: string): number {
+    for (const ext of ["running.json", "handoff.json", "done.json", "failed.json"]) {
+      const r = this.readJson(this.path(name, ext));
+      const iso = typeof r?.dispatched_at === "string" ? r.dispatched_at : null;
+      if (iso) {
+        const t = Date.parse(iso);
+        if (!Number.isNaN(t)) return t;
+      }
+    }
+    return NaN;
   }
 
   /** Clear timers/fds so a host process can exit cleanly (tests). Does not kill children. */

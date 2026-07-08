@@ -265,6 +265,11 @@ export interface Supervisor {
   dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
   /** Tear down a dead/stale lane (process-tree kill + worktree retention/cleanup, #69). */
   reclaim(worker: string): Promise<ReclaimResult>;
+  /** #69 (fable P3-b): report a lane's worktree dirtiness WITHOUT any teardown — no kill, no
+   *  delete. For a terminal-sentinel lane (`.done`/`.failed`) rescued to `driving`, which is
+   *  never reclaim()'d, so its worktree is never dirtiness-checked. `worktreeRetained: true`
+   *  == possibly-dirty ⇒ the conductor escalates to needs-human instead of auto-driving. */
+  inspectWorktree(worker: string): ReclaimResult;
   /** Graceful drain (SIGTERM, not SIGKILL): the #14 engine-ceiling drain path reuses this —
    *  same mechanism as a worker's own soft-budget handoff. Returns false if not applicable
    *  (already reclaiming/requested, or unknown lane) — never throws. */
@@ -489,11 +494,26 @@ async function drainThenEscalate(
   const breach = state.ceilingBreach();
   if (breach && drainEscalationDue(breach.at.toISOString(), nowDate.getTime(), cfg.cost.drainWindowSec)) {
     for (const w of stillRunning) {
+      // Probe BEFORE reclaim (which kills the process) so an open PR is still discoverable for
+      // the belt-and-suspenders PR-label below.
+      const p = await supervisor.probe(w.name);
       const r = await supervisor.reclaim(w.name);
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      // #69 (fable P2a): do ALL forge work BEFORE the terminal `upsertWorker(failed)`, and make
+      // the label calls best-effort. Ordering matters — once the row goes `failed` it leaves
+      // runningWorkers() and no later tick re-escalates it; if a forge call had thrown between
+      // the terminal upsert and the retained-worktree report, a possibly-WIP-bearing worktree
+      // would sit on disk with zero trace (no label, no comment, no event) and the drain tick
+      // would abort mid-loop. Best-effort labels + report guarantee the structured event and
+      // the terminal transition always land, exactly as attemptRollback does elsewhere.
+      await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});
+      // Parity with the DEAD path's P1 fix: land needs-human on the PR too (where the merge
+      // gate reads labels), for a dirty-WIP lane that happens to have an open PR.
+      if (r.worktreeRetained && p.hasPr && p.prNumber != null) {
+        await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman).catch(() => {});
+      }
       if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
       state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons });
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
       escalated.push(w.name);
     }
   }
@@ -509,7 +529,7 @@ async function drainThenEscalate(
  *  must be recorded as such, never rotted as `running` until drainThenEscalate mislabels it
  *  failed. Touches no process/worktree (terminal lanes have sentinels — nothing to kill). */
 async function reclaimTerminalLane(
-  forge: IForge, state: State, cfg: SapwoodConfig,
+  forge: IForge, state: State, supervisor: Supervisor, cfg: SapwoodConfig,
   w: WorkerRow, p: LaneProbe, threshold: number, iso: () => string,
 ): Promise<ReclaimOutcome | null> {
   const costUsd = p.costUsd ?? 0;
@@ -544,14 +564,30 @@ async function reclaimTerminalLane(
     return { kind: "done", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
   if (cls === "FAILED") {
-    const next = laneOnReclaimFailed(p.hasPr);
+    let next = laneOnReclaimFailed(p.hasPr);
+    // #69 (fable P3-b): a `.failed`-sentinel lane with a PR is rescued to `driving` — but the
+    // worker exited NON-ZERO, so it may have left uncommitted WIP alongside its PR. Apply the
+    // DEAD-path dirty ⇒ needs-human policy here too: inspect the worktree (no teardown — the
+    // process already exited) and, if possibly-dirty, escalate to a human instead of
+    // auto-driving an incomplete PR toward merge.
+    let retained: ReclaimResult | null = null;
+    if (next === "DRIVING") {
+      retained = supervisor.inspectWorktree(w.name);
+      if (retained.worktreeRetained) next = "ESCALATE";
+    }
     if (next === "DRIVING") {
       // Failed but a clean PR exists (e.g. budget-exhausted after opening it): rescue — hold
       // the lane driving for the review gate rather than escalating.
       state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
     } else {
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      // Forge work BEFORE the terminal upsert (parity with the DEAD path's ordering). needs-human
+      // lands on the PR too, where the merge gate reads labels, when the escalation is dirty-WIP.
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      if (retained?.worktreeRetained) {
+        if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
+        await reportRetainedWorktree(forge, state, w.name, w.issue, retained.worktreePath);
+      }
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
     }
     state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
     state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next });
@@ -583,7 +619,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     const reclaimed: ReclaimOutcome[] = [];
     for (const w of state.runningWorkers()) {
       const p = await supervisor.probe(w.name);
-      const terminal = await reclaimTerminalLane(forge, state, cfg, w, p, threshold, iso);
+      const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
       if (terminal) reclaimed.push(terminal); // KEEP/DEAD lanes stay running -> drained below
     }
     // drainThenEscalate re-reads runningWorkers() AFTER the terminal reclaim above transitioned
@@ -612,7 +648,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     const p = await supervisor.probe(w.name);
     // Terminal sentinel (handoff/done/failed) -> record + transition out of `running`. Shared
     // with the kill-switch gate above; returns null for KEEP/DEAD, handled below.
-    const terminal = await reclaimTerminalLane(forge, state, cfg, w, p, threshold, iso);
+    const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
     if (terminal) {
       reclaimed.push(terminal);
       continue;

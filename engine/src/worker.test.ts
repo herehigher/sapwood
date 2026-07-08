@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, chmodSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -632,16 +632,31 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
   }
 });
 
-test("#69 grep-invariant: worker.ts contains no exec API and no git invocation — the supervisor structurally CANNOT run git in a worker worktree", () => {
-  const src = readFileSync(new URL("./worker.ts", import.meta.url), "utf8");
-  // The one-and-only child_process import is `spawn` (the claude CLI launch). Every exec-
-  // style API (what #62's preserveHandoffWip used) is banned — this pins the deletion.
-  assert.match(src, /import \{ spawn, type ChildProcess \} from "node:child_process"/);
-  assert.doesNotMatch(src, /execFileSync|execFile|execSync|spawnSync/);
-  // No `git` is referenced as a command anywhere (string-literal adjacency; comments and the
-  // coarse --allowedTools list like "Bash(git *)" don't match).
-  assert.doesNotMatch(src, /["'`]git["'`]/);
-  assert.doesNotMatch(src, /preserveHandoffWip|runGit|tryGit|noHooksDir/); // fully deleted, not stranded
+test("#69 grep-invariant (engine-wide, fable P3): the ONLY child_process importers are worker.ts (spawn) and gh.ts (execFile), and no subprocess call site passes a cwd — the engine structurally CANNOT exec git in a worker worktree", () => {
+  const srcDir = new URL(".", import.meta.url);
+  const files = readdirSync(srcDir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  // Sanity: the two known subprocess modules are present in the scan set.
+  assert.ok(files.includes("worker.ts") && files.includes("gh.ts"));
+  for (const f of files) {
+    const src = readFileSync(new URL(f, srcDir), "utf8");
+    const importsChildProcess = /from "node:child_process"/.test(src);
+    if (f === "worker.ts") {
+      // spawn ONLY (the claude CLI launch); every exec-style API (what #62's preserveHandoffWip
+      // used) is banned — this pins the deletion.
+      assert.match(src, /import \{ spawn, type ChildProcess \} from "node:child_process"/, "worker.ts imports spawn only");
+      assert.doesNotMatch(src, /\b(execFileSync|execFile|execSync|spawnSync|exec)\b/, "worker.ts has no exec API");
+      assert.doesNotMatch(src, /["'`]git["'`]/, "worker.ts references no `git` command");
+      assert.doesNotMatch(src, /preserveHandoffWip|runGit|tryGit|noHooksDir/, "deleted helpers not stranded");
+      assert.doesNotMatch(src, /\bcwd:/, "worker.ts passes no cwd to any subprocess");
+    } else if (f === "gh.ts") {
+      // execFile ONLY, no spawn/sync variants, and gh runs in the engine's own cwd (no cwd option).
+      assert.doesNotMatch(src, /\b(execFileSync|execSync|spawnSync|spawn)\b/, "gh.ts uses execFile only");
+      assert.doesNotMatch(src, /\bcwd:/, "gh.ts passes no cwd to execFile");
+    } else {
+      // Every other engine module must not shell out at all.
+      assert.equal(importsChildProcess, false, `${f} must not import node:child_process`);
+    }
+  }
 });
 
 test("#69: timeout still tags .failed even if a handoff was already requested (timeout is a distinct, non-drain hard-kill path)", async () => {
@@ -734,7 +749,7 @@ test("#69: reclaim of a lane with NO worktree on disk -> nothing retained, nothi
   }
 });
 
-test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktree using running.json's started_at as the baseline", async () => {
+test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktree using running.json's dispatched_at as the baseline", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   try {
@@ -754,6 +769,90 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
     assert.equal(r.worktreeRetained, true);
     assert.ok(existsSync(join(worktreePath, "wip.txt")), "worktree survives a detached reclaim too");
     s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP — the retention baseline is the immutable first-dispatch time, not the resume-time started_at", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-69-resume-wip";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(worktreePath, { recursive: true });
+
+    // Cooperative worker: hands off on TERM. A --resume run just prints a result and exits.
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        '  echo \'{"type":"result","subtype":"success","total_cost_usd":0.02}\'',
+        "  exit 0",
+        "fi",
+        "trap 'exit 0' TERM",
+        "sleep 30",
+        "",
+      ].join("\n"),
+    );
+    const s = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 74, title: "t", labels: [] }, name);
+    await sleep(50);
+    // Pre-handoff WIP: written DURING the first run, mtime after first dispatch.
+    writeFileSync(join(worktreePath, "wip.txt"), "pre-handoff uncommitted work\n");
+    await sleep(600); // let the TERM trap install
+    assert.equal(s.requestHandoff(laneName), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "handed off");
+    // The handoff sentinel carried the immutable first-dispatch baseline forward.
+    const handoff = JSON.parse(readFileSync(join(dir, `${laneName}.handoff.json`), "utf8"));
+    assert.equal(typeof handoff.dispatched_at, "string", "dispatched_at persisted into the sentinel");
+
+    // A long gap, then RESUME — the resumed run's started_at is now, AFTER the WIP's mtime.
+    await sleep(200);
+    const resumed = await s.resume({ number: 74, title: "t", labels: [] }, name);
+    assert.equal(resumed.name, name);
+    // running.json's started_at moved to resume-time, but dispatched_at is the ORIGINAL.
+    const running = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8"));
+    assert.ok(Date.parse(running.dispatched_at) < Date.parse(running.started_at), "dispatched_at predates the resume start");
+
+    // The resumed lane is reclaimed (crash / DEAD / escalation). Pre-handoff WIP has an mtime
+    // BEFORE the resume start — baselining on started_at would judge it clean and DELETE it
+    // (the exact silent loss fable reproduced). Baselining on dispatched_at retains it.
+    const r = await s.reclaim(laneName);
+    assert.equal(r.worktreeRetained, true, "resumed-then-crashed lane RETAINS its pre-handoff WIP");
+    assert.ok(existsSync(join(worktreePath, "wip.txt")), "WIP file survives — not silently deleted");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still reads dirty via ctime — mtime-backdating cannot defeat retention", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-69-backdate";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(worktreePath, { recursive: true });
+
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const s = sup(dir, bin, false, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 75, title: "t", labels: [] }, name);
+    await sleep(50);
+    const wip = join(worktreePath, "wip.txt");
+    writeFileSync(wip, "uncommitted work\n"); // written after dispatch -> ctime is now
+    // Backdate mtime+atime to the epoch (what `touch -t`/`touch -r .git/index` does). ctime is
+    // NOT settable by utimes and stays at the write time (after dispatch).
+    utimesSync(wip, new Date(0), new Date(0));
+
+    const r = await s.reclaim(laneName);
+    assert.equal(r.worktreeRetained, true, "ctime still exceeds the baseline -> retained despite backdated mtime");
+    assert.ok(existsSync(wip), "backdated WIP survives");
+    s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });

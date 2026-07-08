@@ -44,6 +44,9 @@ class FakeSupervisor implements Supervisor {
   async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
     return { worktreePath: null, worktreeRetained: false };
   }
+  inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
+    return { worktreePath: null, worktreeRetained: false };
+  }
   requestHandoff(): boolean { return true; }
 }
 
