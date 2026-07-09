@@ -15,9 +15,11 @@ them itself or leaves the merge for a human.
 ## Slash commands
 
 - **`/sapwood-run [--once|--until-idle|--dry-run]`** — run the engine. No flags = daemon
-  mode (ticks forever). `--once` = a single tick (good for watching one issue go through
-  end-to-end). `--until-idle` = drain the current `Ready` queue, then stop. `--dry-run` =
-  preview what would dispatch + a cost estimate, no worker spawned, no state written.
+  mode (ticks forever). `--once` = a single tick; dispatched workers keep running
+  detached after it returns, so follow with `/sapwood-status` and further ticks.
+  `--until-idle` = keep ticking until nothing is in flight (the "watch one issue
+  end-to-end" mode). `--dry-run` = preview what would dispatch + a cost estimate, no
+  worker spawned, no state written.
 - **`/sapwood-status [db-path]`** — read engine state (active lanes, PRs awaiting
   review, spend vs. the daily ceiling, kill-switch/pause state) directly from
   `data/sapwood.sqlite`. Works with no engine session currently running.

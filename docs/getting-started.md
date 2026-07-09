@@ -22,7 +22,19 @@ Add sapwood as a Claude Code plugin (see the
 plugins — e.g. `claude plugin add` or a marketplace entry pointing at this repo).
 Once installed, the slash commands `/sapwood-run`, `/sapwood-status`, and
 `/sapwood-stop` are available inside any Claude Code session opened in the target
-repo, and the `sapwood` CLI binary ships with the plugin's engine package.
+repo — they invoke the engine for you, no PATH setup needed.
+
+**About the bare `sapwood` command**: installing the plugin does NOT put a `sapwood`
+binary on your PATH. Throughout these docs, `sapwood <cmd>` is shorthand for running
+the engine's CLI directly from the plugin checkout:
+
+```
+npm ci && npm --workspace engine run build   # once
+node <plugin-root>/engine/dist/cli.js <cmd>  # every "sapwood <cmd>" in these docs
+```
+
+or put it on PATH yourself with `npm link --workspace engine` from the plugin root.
+If you only ever use the slash commands, you can skip this entirely.
 
 ## `sapwood init`
 
@@ -74,25 +86,30 @@ Don't point sapwood at a live backlog and walk away. Ramp up in stages:
    ```
    sapwood run --dry-run
    ```
-   Resolves config, lists the `Ready` issues that would be dispatched this round (after
-   the same eligibility filter and lane-limit math the real dispatch uses), and prints a
-   cost estimate (candidates × `worker.budgetUsdSoft`, against `cost.dailyBudgetUsd`).
-   No worker is spawned and no state is written — safe to run repeatedly.
+   Resolves config, lists the `Ready` issues that would be dispatch candidates (a rough
+   upper bound — it assumes empty lanes and skips the in-flight/anti-starvation checks a
+   real tick applies), and prints a cost estimate (candidates × `worker.budgetUsdSoft`,
+   against `cost.dailyBudgetUsd`). No worker is spawned and no state is written — safe
+   to run repeatedly.
 
-3. **`sapwood run --once`** — the supervised "watch one issue" mode. Leave exactly one
-   issue `Ready` on the board and run:
+3. **`sapwood run --once`** — dispatch one wave, then hand back the terminal. Leave
+   exactly one issue `Ready` on the board and run:
    ```
    sapwood run --once
    ```
-   This runs a single tick (claim → worktree → TDD → PR → review gate) and exits, so you
-   can watch the whole lifecycle of one issue before trusting the loop with more.
+   This runs a single tick (reclaim → drive → dispatch) and exits. Note what that does
+   NOT mean: the dispatched worker keeps running **detached in the background** after the
+   CLI returns — its TDD work, the PR, and the review gate all happen later, driven by
+   subsequent ticks. Watch it with `sapwood status`, and run `sapwood run --once` again
+   (or move to `--until-idle`) to drive the resulting PR through the gate.
 
-4. **`sapwood run --until-idle`** — drain the current `Ready` queue and stop:
+4. **`sapwood run --until-idle`** — the actual "watch one issue end-to-end" mode:
    ```
    sapwood run --until-idle
    ```
    Keeps ticking until nothing is in flight and nothing new dispatches, then exits
-   cleanly. Good for a bounded batch run.
+   cleanly — with one `Ready` issue this is claim → worker → PR → review gate → merge,
+   supervised to completion. Also good for a bounded batch run.
 
 5. **`sapwood run`** (daemon / "forever" mode) — ticks on `cfg.engine.tickIntervalSec`'s
    cadence indefinitely, until a signal (Ctrl-C / SIGTERM) or a configured

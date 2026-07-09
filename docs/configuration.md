@@ -47,9 +47,9 @@ Concurrency and dispatch shape.
 |---|---|---|
 | `max` | `3` | Max concurrent workers (occupied lanes). |
 | `roundDispatchCap` | `2` | Max new dispatches in a single round/tick (conservative by design). |
-| `reserveCap` | `1` | Lanes held back as reserve, not used for normal dispatch. |
-| `prFixCap` | `2` | Max PR-fix iterations before a lane escalates instead of retrying. |
-| `frictionMin` | `0` | Minimum minutes between dispatches (rate limit; `0` = off). |
+| `reserveCap` | `1` | **Accepted, not yet wired** — parsed and validated, but no engine code reads it yet. |
+| `prFixCap` | `2` | **Accepted, not yet wired** — the PR-fix iteration loop it will bound doesn't exist yet (review findings currently escalate to `needs-human`). |
+| `frictionMin` | `0` | **Accepted, not yet wired** — no dispatch rate-limit is enforced from it yet. |
 
 ## `worker`
 
@@ -84,7 +84,7 @@ of the soft per-worker budget above.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `roundBudgetUsd` | `30` | Soft per-round throttle (not the hard safety boundary — see `dailyBudgetUsd`). |
+| `roundBudgetUsd` | `30` | Soft per-round throttle (not the hard safety boundary — see `dailyBudgetUsd`). The gate mechanism exists in the tick, but the live `sapwood run` currently always reports round spend as `0`, so it never triggers in a real run yet — live round-spend tracking is future wiring. |
 | `dailyBudgetUsd` | `100` | Cumulative daily USD cap, summed from completed workers' actual cost and persisted across restarts. Breaching it freezes new dispatch/merges engine-wide and drains in-flight workers. |
 | `maxWallClockSec` | `14400` (4h) | Aggregate wall-clock ceiling over the engine's *active* session (a stop/crash/pause longer than the stale gap resets the session). Independent of `worker.timeoutSec`, which bounds one worker. |
 | `drainWindowSec` | `300` (5min) | Bounded grace window after a ceiling breach (daily budget / wall-clock / kill switch) during which running workers are asked to hand off gracefully before the conductor escalates to a hard process-tree kill. |
@@ -117,7 +117,8 @@ not wait for a wind-down.
 the repo's real milestone titles before the run starts dispatching anything; an unknown
 title is a hard startup error, not a condition that silently never fires.
 
-`stop.*` cannot combine with `--dry-run` (which never runs the loop at all).
+The `--stop-*` CLI flags cannot combine with `--dry-run` (which never runs the loop at
+all); config-file `stop.*` keys are simply ignored by a dry run.
 
 ## `recovery`
 
@@ -134,7 +135,7 @@ Gate② — who reviews a PR before it can merge.
 | `mode` | `different-model-codex` | The reviewer kind: `different-model-codex` (0day-style fresh non-author Codex review), `same-model-trusted` (allowlisted reviewers only), or `human` (any non-author approval). |
 | `trustedReviewers` | `[]` | Allowlisted reviewer logins, used by `same-model-trusted`. |
 | `pollIntervalSec` | `120` | Documents the operational review re-poll cadence (the actual cadence is driven by the tick loop). |
-| `pollTimeoutSec` | `1200` | How long a triggered review may sit unresolved before it's treated as unavailable (rate-limit/timeout) — an unavailable review **queues** the PR, it never skips or softens gate②. |
+| `pollTimeoutSec` | `1200` | **Accepted, not yet wired** — the timeout it describes isn't enforced yet. Today `REVIEW_UNAVAILABLE` (which queues the PR — never skips or softens gate②) arises only from review-data read failures. |
 | `fallback` | `[]` | Ordered, opt-in list of reviewer modes to fail over to when the primary is unavailable past `failoverAfterSec`. Each entry keeps its own mode semantics (identity allowlist for bot modes, any-non-author-approval for `human`). Empty (the default) is byte-for-byte pre-failover behavior: an unavailable primary queues the PR forever, no silent degradation. `same-model-trusted` in `fallback` with an empty `trustedReviewers` is rejected at parse — it could never produce a verdict, so the failover would be silently inert. |
 | `failoverAfterSec` | `1200` (20min) | How long the primary reviewer may stay non-decisive before gate② hands off to the first fallback entry that itself reaches a decisive verdict. Irrelevant when `fallback` is empty. |
 
@@ -179,13 +180,13 @@ individually configurable).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `minPercent` | `0` | Test-coverage gate (`0` = off). |
+| `minPercent` | `0` | **Accepted, not yet wired** — no coverage gate is enforced from it yet; setting it does not add a merge check. |
 
 ## `optimize`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `recur` | `false` | Enable the recurring optimization round. |
+| `recur` | `false` | **Accepted, not yet wired** — the recurring optimization round doesn't exist yet. |
 
 ## `milestones`
 
