@@ -690,6 +690,56 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
   }
 });
 
+test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NOT instantly re-handoff — the soft budget bounds spend PER RUN; new post-resume usage crossing it again MUST", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-33-resume";
+    // Fabricate a budget-triggered handed-off lane: a .handoff sentinel + a preserved jsonl
+    // whose PRE-EXISTING assistant lines already exceed the $0.01 budget (1000 in + 1000 out
+    // on opus ≈ $0.03). resume() appends to this same file — without a baseline, the first
+    // heartbeat tick after resume would read ≥ budget and hand off again, forever.
+    writeFileSync(
+      join(dir, `${name}.handoff.json`),
+      JSON.stringify({ name, issue: 33, session_id: "11111111-1111-1111-1111-111111111111", total_cost_usd: 0 }),
+    );
+    const preExisting = `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n`;
+    writeFileSync(join(dir, `${name}.jsonl`), preExisting);
+    // The resumed stub: quiet for ~1s (many heartbeat ticks at 50ms — the must-NOT-trigger
+    // window), then emits NEW usage that crosses the budget again, then sleeps with no TERM
+    // trap (the real CLI shape) so the budget-triggered SIGTERM ends it -> .handoff.
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `sleep 1`,
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `sleep 30`,
+        ``,
+      ].join("\n"),
+    );
+    const tcfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { budgetUsdSoft: 0.01 },
+    });
+    const s = new WorkerSupervisor({
+      cfg: tcfg, stateDir: dir, claudeBin: bin,
+      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: mkHook(dir),
+    });
+    await s.resume({ number: 33, title: "t", labels: [] }, name);
+    // Must-NOT window: ~10 heartbeat ticks pass while the jsonl holds only pre-handoff usage.
+    await sleep(500);
+    assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "pre-handoff spend alone must NOT re-trigger a handoff after resume");
+    assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
+    // Then the stub's NEW post-resume usage lands and crosses the budget again -> handoff.
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "new post-resume spend crossing the budget triggers a fresh graceful handoff");
+    assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("fast non-zero exit writes .failed (exit handler attached before the await) — Codex R2 P2", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

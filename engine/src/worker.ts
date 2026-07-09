@@ -251,7 +251,16 @@ interface Lane {
   reclaiming: boolean;
   startedMs: number; // wall-clock start, for the timeoutSec ceiling
   timedOut: boolean;
-  estimatedCostUsd: number; // #33: live token-estimation running total (see pricing.ts)
+  estimatedCostUsd: number; // #33: live token-estimation total for THIS RUN (see pricing.ts)
+  /** #33 (gate② P1): the estimated USD already in the jsonl at the moment this run started —
+   *  0 on a fresh dispatch, and the pre-handoff stream's estimated total on a resume() (which
+   *  APPENDS to the preserved jsonl). checkSoftBudget compares (whole-file total − this
+   *  baseline) against worker.budgetUsdSoft: the soft budget bounds spend PER RUN, not per
+   *  issue lifetime — without the baseline, a lane that handed off AT the budget would re-cross
+   *  it on the first heartbeat tick after resume and hand off again instantly, forever (an
+   *  unresumable handoff loop). The estimator-side mirror of State.recordSpend's resume
+   *  cost-delta baseline. */
+  estimateBaselineUsd: number;
 }
 
 export class WorkerSupervisor implements Supervisor {
@@ -342,7 +351,7 @@ export class WorkerSupervisor implements Supervisor {
     const lane: Lane = {
       child, issue: issue.number, sessionId, jsonlFd, jsonlPath,
       hb: undefined, handoffRequested: false, reclaiming: false,
-      startedMs: this.now().getTime(), timedOut: false, estimatedCostUsd: 0,
+      startedMs: this.now().getTime(), timedOut: false, estimatedCostUsd: 0, estimateBaselineUsd: 0,
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -424,6 +433,13 @@ export class WorkerSupervisor implements Supervisor {
     }
     const prompt = (this.deps.renderPrompt ?? defaultPrompt)(issue);
     const jsonlPath = this.path(name, "jsonl");
+    // #33 (gate② P1): snapshot the pre-handoff stream's estimated total ONCE, before the
+    // resumed run appends anything, so checkSoftBudget can compare only THIS RUN's new spend
+    // against worker.budgetUsdSoft. Without this, a lane that handed off AT the budget would
+    // re-cross it on the first heartbeat tick after resume — an unresumable handoff loop.
+    // The estimator-side mirror of State.recordSpend's resume cost-delta baseline.
+    const estimateBaselineUsd = parseAssistantUsageDeltas(this.readJsonl(jsonlPath))
+      .reduce((sum, d) => sum + estimateUsd(d), 0);
     const jsonlFd = openSync(jsonlPath, "a"); // append: preserve the pre-handoff stream
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     const args = claudeArgs({
@@ -438,7 +454,7 @@ export class WorkerSupervisor implements Supervisor {
     const lane: Lane = {
       child, issue: issue.number, sessionId, jsonlFd, jsonlPath,
       hb: undefined, handoffRequested: false, reclaiming: false,
-      startedMs: this.now().getTime(), timedOut: false, estimatedCostUsd: 0,
+      startedMs: this.now().getTime(), timedOut: false, estimatedCostUsd: 0, estimateBaselineUsd,
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
@@ -568,11 +584,16 @@ export class WorkerSupervisor implements Supervisor {
   private checkSoftBudget(name: string, lane: Lane): void {
     if (lane.handoffRequested) return;
     const deltas = parseAssistantUsageDeltas(this.readJsonl(lane.jsonlPath));
-    lane.estimatedCostUsd = deltas.reduce((sum, d) => sum + estimateUsd(d), 0);
+    const wholeFileUsd = deltas.reduce((sum, d) => sum + estimateUsd(d), 0);
+    // PER-RUN spend: the whole-file total minus what was already in the jsonl when this run
+    // started (0 on a fresh dispatch; the pre-handoff stream's total on a resume — see
+    // Lane.estimateBaselineUsd). The soft budget bounds spend per run, not per issue lifetime;
+    // comparing the whole file would instantly re-trigger on any resumed budget handoff.
+    lane.estimatedCostUsd = Math.max(0, wholeFileUsd - lane.estimateBaselineUsd);
     if (lane.estimatedCostUsd >= this.deps.cfg.worker.budgetUsdSoft) {
       console.error(
-        `[sapwood:worker] lane ${name}: estimated spend $${lane.estimatedCostUsd.toFixed(4)} crossed ` +
-          `the soft budget $${this.deps.cfg.worker.budgetUsdSoft} — requesting graceful handoff`,
+        `[sapwood:worker] lane ${name}: estimated spend $${lane.estimatedCostUsd.toFixed(4)} this run ` +
+          `crossed the soft budget $${this.deps.cfg.worker.budgetUsdSoft} — requesting graceful handoff`,
       );
       this.requestHandoff(name);
     }
@@ -628,7 +649,10 @@ export class WorkerSupervisor implements Supervisor {
     // #33: reconcile the live estimate against the REAL terminal total_cost_usd and log the gap
     // — this is how the pricing.ts rate table's known drift (see its module doc) is made
     // visible instead of silent, per the estimate-vs-real divergence requirement. Never fatal,
-    // never gates anything — logging only.
+    // never gates anything — logging only. NB: the estimate is RUN-scoped (post-resume spend
+    // only — see Lane.estimateBaselineUsd) while a resumed session's total_cost_usd is expected
+    // to be session-CUMULATIVE, so a resumed lane's logged divergence is structurally larger;
+    // that's a known semantic mismatch of the log line, not rate-table drift.
     if (estimatedCostUsd !== undefined && cost > 0) {
       const divergence = estimatedCostUsd - cost;
       console.error(
