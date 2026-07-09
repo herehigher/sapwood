@@ -474,6 +474,11 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null 
   const w = checkBashWritePath(tokens, cwd);
   if (w) return w;
 
+  // #81: control sentinel referenced as a literal arg to any command (e.g. a node script
+  // invoked with the sentinel path), scanned on the original tokens same as the write check.
+  const cs = checkControlSentinelArg(tokens, cwd);
+  if (cs) return cs;
+
   // gh overreach, scanned at any position on both the stripped and the original tokens.
   return scanGhOverreach(stripped) ?? scanGhOverreach(tokens);
 }
@@ -502,8 +507,18 @@ const PROTECTED_SUFFIXES = [
   "/engine/src/merge-driver.ts",
 ];
 
+// Out-of-band control sentinels (#81, fable gate② follow-up to #80): data/KILL_SWITCH and
+// data/PAUSE live in the engine's OWN data dir (state.ts killSwitchPath()/pausePath()) —
+// outside worker worktrees (no --add-dir data) as a permission-layer boundary, not an OS
+// sandbox (docs/security.md's isolation-boundary note). A worker has zero legitimate reason
+// to touch either path: forging PAUSE starves competing dispatch, deleting KILL_SWITCH
+// defeats the hard-stop escape hatch. Matched on the normalized absolute path, so relative
+// traversal (`../../data/PAUSE`) resolves to the same block as the direct path.
+const CONTROL_SENTINEL_RE = /\/data\/(KILL_SWITCH|PAUSE)$/;
+
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
+  if (CONTROL_SENTINEL_RE.test(abs)) return "data/KILL_SWITCH or data/PAUSE (control sentinel)";
   if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
   if (/\/\.github\/workflows(\/|$)/.test(abs)) return ".github/workflows/** (CI integrity)";
   // The engine config carries guard.mode + reviewer/security settings — a worker editing it to
@@ -533,7 +548,8 @@ const REDIR_OP_RE = /^&?[0-9]*>>?&?\|?$/;
 // A redirection glued to its target: >file, 2>>file, &>file, >&file (target captured).
 const REDIR_GLUED_RE = /^&?[0-9]*>>?&?\|?(.+)$/;
 // Commands that create/modify/delete a file at a path argument (write or destructive).
-const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "install", "mv", "rm", "git"]);
+// `touch` is here for #81: it's the most direct way to forge the PAUSE/KILL_SWITCH sentinels.
+const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "install", "mv", "rm", "git", "touch"]);
 
 /** Evaluate one write/destructive command's path args; return a block reason or null. */
 function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null {
@@ -552,6 +568,8 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
     const inPlace = args.some((a) => a === "-i" || a.startsWith("-i") || a === "--in-place" || a.startsWith("--in-place"));
     return inPlace ? blockAny(`${cmd} -i edits`) : null;
   }
+  // touch creates (#81: the most direct way to forge a sentinel file).
+  if (cmd === "touch") return blockAny("touch creates");
   // rm deletes, and mv moving a boundary file away deletes it from its location — so for
   // both, ANY protected path arg (source or dest) is blocked.
   if (cmd === "rm") return blockAny("rm deletes");
@@ -580,6 +598,27 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
   }
   // tee: every non-flag arg is a write target
   return blockAny("tee writes");
+}
+
+/**
+ * #81: a control sentinel path (data/KILL_SWITCH, data/PAUSE) appearing as a literal
+ * argument to ANY command — not just the recognized WRITE_CMDS verbs. Unlike guard.ts /
+ * workflows (legitimately read by cat/cp-source), a worker has no legitimate reason to
+ * reference either sentinel at all, so mere appearance is enough. This closes the
+ * `node some-script.js ../../data/PAUSE`-style indirection where the script's own write is
+ * opaque to the guard but the path argument on the Bash command line is not. (A script that
+ * hardcodes the path internally, with no CLI argument, remains an open residual — see
+ * docs/security.md's isolation-boundary note.)
+ */
+function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
+  for (const t of tokens) {
+    if (!t || t.startsWith("-")) continue;
+    const abs = normalizePath(t, cwd);
+    if (CONTROL_SENTINEL_RE.test(abs)) {
+      return `BLOCK [write-path] ${protectedPathLabel(abs)} referenced is human-merge-only`;
+    }
+  }
+  return null;
 }
 
 /**

@@ -534,11 +534,14 @@ rewrite.** v1 requirements:
   `docs/security.md`, `docs/troubleshooting.md`, plus a plugin-facing
   `.claude-plugin/CLAUDE.md` for a calling model, and the `origin:agent` label
   (provisioned by `init`, see the v0.2 chapter and `docs/security.md` for what it's
-  for). **Still open:** the **live** merge-gate + kill-switch runs on a real repo (#46
+  for). Guard defense-in-depth for the `data/KILL_SWITCH` / `data/PAUSE` sentinel write
+  paths (#81): direct `Write`/`Edit` and Bash `touch`/`rm`/`mv`/`git rm`/redirect vectors,
+  plus a sentinel path as a literal argument to any command, are now blocked in
+  `guard.ts`; a script that hardcodes the sentinel path in its own source (no CLI
+  argument) remains an open residual — see `docs/security.md`'s isolation-boundary note.
+  **Still open:** the **live** merge-gate + kill-switch runs on a real repo (#46
   scope 3/4); soft per-worker budget *auto*-enforcement, still needing a live in-flight
-  cost signal (#33); guard defense-in-depth for the `data/KILL_SWITCH` / `data/PAUSE`
-  sentinel write paths, currently a permission-layer boundary rather than a closed one
-  (#81, see `docs/security.md`'s isolation-boundary note).
+  cost signal (#33).
 - **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`

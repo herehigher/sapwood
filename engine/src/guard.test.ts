@@ -134,6 +134,23 @@ const BLOCK: [string, string, string][] = [
   ["gh pr review 149 -r -b nope", CWD, "review"],
   ["git restore --source HEAD^ -- engine/src/guard.ts", CWD, "write-path"],
   ["git checkout HEAD^ -- .github/workflows/ci.yml", CWD, "write-path"],
+  // #81: defense-in-depth for the KILL_SWITCH / PAUSE control sentinels (fable gate② follow-up
+  // to #80) — direct Bash vectors (touch/rm/redirect) plus relative-path traversal.
+  ["touch data/KILL_SWITCH", CWD, "write-path"],
+  ["touch data/PAUSE", CWD, "write-path"],
+  ["touch ../../data/PAUSE", CWD, "write-path"],
+  ["rm data/KILL_SWITCH", CWD, "write-path"],
+  ["rm -f data/PAUSE", CWD, "write-path"],
+  ["rm ../../data/KILL_SWITCH", CWD, "write-path"],
+  ["echo x > data/PAUSE", CWD, "write-path"],
+  ["echo x >> data/KILL_SWITCH", CWD, "write-path"],
+  ["cat foo > ../../data/KILL_SWITCH", CWD, "write-path"],
+  ["mv data/PAUSE /tmp/x", CWD, "write-path"],
+  ["git rm data/KILL_SWITCH", CWD, "write-path"],
+  // node <script.js> indirection where the sentinel target is a literal CLI arg (detectable
+  // by path matching, even though the script's own write is opaque to the guard).
+  ["node kill.js ../../data/KILL_SWITCH", CWD, "write-path"],
+  ["node scripts/unpause.js data/PAUSE", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -198,6 +215,11 @@ const ALLOW: string[] = [
   "git checkout main",
   "git restore src/app.ts",
   "gh api -p corsair repos/o/r/pulls/1",
+  // #81 guardrails: benign touch/paths that merely resemble the sentinels must still pass
+  "touch /tmp/scratch.txt",
+  "touch data/README.md",
+  "node scripts/build.js",
+  "cat data/README.md",
 ];
 
 for (const command of ALLOW) {
@@ -230,6 +252,14 @@ const WRITE_BLOCK: [string, string][] = [
   ["engine/src/merge-driver.ts", "write-path"], // merge path source (gates + TOCTOU pin) (#13 follow-up)
   ["/repo/engine/dist/merge-driver.js", "write-path"], // running merge-path artifact
   ["engine/dist/reviewer.js", "write-path"], // running gate② artifact
+  // #81: control sentinels (data/KILL_SWITCH, data/PAUSE) — direct file-tool writes, plus
+  // relative-path traversal reaching the same absolute target.
+  ["data/KILL_SWITCH", "write-path"],
+  ["data/PAUSE", "write-path"],
+  ["/repo/data/KILL_SWITCH", "write-path"],
+  ["/repo/data/PAUSE", "write-path"],
+  ["../../data/PAUSE", "write-path"],
+  ["../../data/KILL_SWITCH", "write-path"],
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
@@ -239,7 +269,7 @@ for (const [file_path, kw] of WRITE_BLOCK) {
   });
 }
 
-for (const file_path of ["src/app.ts", "README.md", "/repo/engine/src/forge.ts", ".github/ISSUE_TEMPLATE.md"]) {
+for (const file_path of ["src/app.ts", "README.md", "/repo/engine/src/forge.ts", ".github/ISSUE_TEMPLATE.md", "data/README.md"]) {
   test(`WRITE ALLOW: ${file_path}`, () => {
     assert.equal(guardDecision("Edit", { file_path }, CWD).allow, true);
   });
