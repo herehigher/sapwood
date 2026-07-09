@@ -47,6 +47,7 @@ const PROJECT_JSON = JSON.stringify({
                 body: "Do the thing.\n## Verification\n- run npm test",
                 repository: { nameWithOwner: "herehigher/sapwood" },
                 labels: { nodes: [{ name: "type:feature" }, { name: "prio:1-high" }] },
+                milestone: { title: "M4" }, // #86: round.milestone dispatch-candidate filter
               },
               fieldValues: {
                 nodes: [{ name: "Ready", field: { name: "Status" } }],
@@ -261,6 +262,12 @@ test("parseProject: extracts project id, status field id, options, items (owner-
   assert.equal(p.items.length, 6);
 });
 
+test("parseProject: #86 milestone title threads onto ProjectItem, null when the issue has none", () => {
+  const p = parseProject(PROJECT_JSON, "Status");
+  assert.equal(p.items.find((it) => it.number === 10)?.milestone, "M4");
+  assert.equal(p.items.find((it) => it.number === 11)?.milestone, null);
+});
+
 test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (Decision #8)", () => {
   const p = parseProject(PROJECT_JSON, "Status");
   const ready = selectReadyIssues(p, cfg);
@@ -269,6 +276,10 @@ test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (
   assert.deepEqual(ready.find((i) => i.number === 10)?.labels, ["type:feature", "prio:1-high"]);
   // #74: body carries through to the public Issue (worker.ts's {{issue.body}} substitution).
   assert.equal(ready.find((i) => i.number === 10)?.body, "Do the thing.\n## Verification\n- run npm test");
+  // #86: milestone threads through when present...
+  assert.equal(ready.find((i) => i.number === 10)?.milestone, "M4");
+  // ...and is undefined (not null, not "") for an issue with no milestone assigned.
+  assert.equal(ready.find((i) => i.number === 12)?.milestone, undefined);
 });
 
 test("findOptionId/findItemId: missing -> undefined (caller fails closed)", () => {

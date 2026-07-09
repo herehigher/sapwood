@@ -265,3 +265,29 @@ test("stop: a typo'd key is rejected, not silently dropped (.strict())", () => {
     /afterIssuesMerge|[Uu]nrecognized/,
   );
 });
+
+// ── #86: round.milestone — round-level dispatch-candidate filter + stop condition ───────────
+
+test("round.milestone: absent by default — no scoping, no behavior change", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.round.milestone, undefined);
+});
+
+test("round.milestone: overridable to a milestone title", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { milestone: M4 }");
+  assert.equal(cfg.round.milestone, "M4");
+});
+
+test("round.milestone: an empty string is rejected (a name is required once the key is set)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { milestone: '' }"),
+    /milestone/,
+  );
+});
+
+test("round: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { milestne: M4 }"),
+    /milestne|[Uu]nrecognized/,
+  );
+});

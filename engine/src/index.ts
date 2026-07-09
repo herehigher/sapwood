@@ -24,6 +24,9 @@ export {
   type WorkerState,
   type ModelUsageEntry,
   type CategorizedTokenUsage,
+  type RoundPhase,
+  type RoundRow,
+  type RoundStatus,
 } from "./state.js";
 export {
   tick,
@@ -110,7 +113,20 @@ export {
   type DriverResult,
   type StopMode,
   type StopReason,
+  type StopConfig,
+  type StopConditionName,
+  type StopConditionHit,
 } from "./driver.js";
+export {
+  runRounds,
+  noopPeripheralStub,
+  RoundScopedForge,
+  type RoundDeps,
+  type RoundsResult,
+  type PeripheralStub,
+  type PeripheralPhase,
+  type RoundStopHit,
+} from "./round.js";
 export { gh, ghText, type GhRunner } from "./gh.js";
 export { guardDecision, safeSplit, type Decision, type GuardInput } from "./guard.js";
 export {

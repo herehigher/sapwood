@@ -90,8 +90,10 @@ export interface DriverResult {
 }
 
 /** #76: how many of this tick's DrivenOutcome entries are a completed merge — the
- *  `afterIssuesMerged` counting source (DrivenOutcome "merged", conductor.ts's DRIVE phase). */
-function issuesMergedThisTick(result: TickResult): number {
+ *  `afterIssuesMerged` counting source (DrivenOutcome "merged", conductor.ts's DRIVE phase).
+ *  Exported (#86): round.ts reuses this same counting logic for its own FINAL (whole-run)
+ *  stop-condition bookkeeping, so the two loops never drift on what "merged" means. */
+export function issuesMergedThisTick(result: TickResult): number {
   return result.driven.filter((d) => d.kind === "merged").length;
 }
 
@@ -103,8 +105,10 @@ function issuesMergedThisTick(result: TickResult): number {
  *  rescued because it already has a PR). That transition happens once and only once per lane
  *  (a lane already `driving` never re-enters this loop), so summing it across this run's ticks
  *  is an exact, no-new-table count of "PRs this run has caused the engine to start tracking" —
- *  the simplest accurate proxy for "PRs opened this run" available from TickResult alone. */
-function prsOpenedThisTick(result: TickResult): number {
+ *  the simplest accurate proxy for "PRs opened this run" available from TickResult alone.
+ *  Exported (#86): round.ts reuses this for its own FINAL stop-condition bookkeeping — see
+ *  issuesMergedThisTick's export comment above. */
+export function prsOpenedThisTick(result: TickResult): number {
   let n = 0;
   for (const r of result.reclaimed) {
     if (r.kind === "done" && r.next === "DRIVING") n++;

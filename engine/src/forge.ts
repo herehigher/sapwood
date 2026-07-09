@@ -20,6 +20,11 @@ export interface Issue {
   // it keep typechecking, and renderPromptTemplate treats an absent body as "" (Decision #8's
   // getIssueBody uses the same empty-string-not-throw convention for a bodyless issue).
   body?: string;
+  // #86: the issue's GitHub milestone TITLE, when it has one — round.ts's RoundScopedForge
+  // filters dispatch candidates against cfg.round.milestone using this field. Optional
+  // (additive, same pattern as body above): undefined means no milestone assigned, not "no
+  // data fetched" (the project GraphQL query always requests it — see projectQuery).
+  milestone?: string;
 }
 
 export interface PRStatus {
@@ -364,6 +369,7 @@ export interface ProjectItem {
   repo: string; // nameWithOwner
   labels: string[];
   status: string | null; // current Status single-select value, if set
+  milestone: string | null; // #86: GitHub milestone title, or null if unassigned
 }
 
 export interface ParsedProject {
@@ -392,6 +398,7 @@ query($login: String!, $number: Int!, $after: String) {
               number title state body
               repository { nameWithOwner }
               labels(first: 100) { nodes { name } }
+              milestone { title }
             }
           }
           # first:100 — an item has at most one value per project field, and GitHub caps a
@@ -446,6 +453,7 @@ export function parseProject(json: string, statusField: string): ParsedProject {
       repo: n.content.repository?.nameWithOwner ?? "",
       labels: (n.content.labels?.nodes ?? []).map((l) => l.name),
       status: statusValue(n, statusField),
+      milestone: n.content.milestone?.title ?? null,
     }));
   return {
     projectId: proj.id,
@@ -464,6 +472,7 @@ interface RawItem {
     body?: string;
     repository?: { nameWithOwner?: string };
     labels?: { nodes?: { name: string }[] };
+    milestone?: { title?: string } | null;
   };
   fieldValues?: { nodes?: { name?: string; field?: { name?: string } }[] };
 }
@@ -540,7 +549,12 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
     .filter((it) => it.state === "OPEN")
     .filter((it) => it.status === cfg.board.status.ready)
     .filter((it) => hasVerificationPlan(it.body, it.labels, cfg.labels.verifyNa))
-    .map((it) => ({ number: it.number, title: it.title, labels: it.labels, body: it.body }));
+    .map((it) => ({
+      number: it.number, title: it.title, labels: it.labels, body: it.body,
+      // exactOptionalPropertyTypes: an optional field must be OMITTED, not set to explicit
+      // undefined — only include the key when there's a real milestone title.
+      ...(it.milestone != null ? { milestone: it.milestone } : {}),
+    }));
 }
 
 export function findOptionId(project: ParsedProject, name: string): string | undefined {
