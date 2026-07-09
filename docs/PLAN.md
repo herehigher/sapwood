@@ -395,6 +395,17 @@ rewrite.** v1 requirements:
     green step**, not just at exit — so the latest pushed state is itself a handoff.
     This improves on 0day, which passes `--max-budget-usd` as a hard cut
     (`loop_worker.sh:81`) and only has crash-`--resume` (no pre-budget handoff).
+    **Auto-enforced (#33) via live token estimation:** stream-json carries no in-progress
+    `total_cost_usd` (only the terminal result line has it), so `worker.ts` accumulates a
+    running USD estimate from every streamed `assistant` message's token usage — priced by a
+    small, explicitly-marked-as-an-estimate per-model rate table (the shipped `pricing.yaml`,
+    user-overridable via `worker.pricingFile`, loaded fail-closed by `pricing.ts`) — and calls the
+    same `requestHandoff()` the operator/drain path uses once the estimate crosses
+    `worker.budgetUsdSoft`. Cache-read tokens are priced at the cache-read rate, not the input
+    rate, so a cache-heavy run doesn't look artificially expensive and hand off prematurely.
+    The estimate is reconciled against the real terminal `total_cost_usd` when it lands (the
+    divergence is logged, never enforced) — real billing can diverge from the table (repricing,
+    discounts, cache-TTL differences), so the estimate is a trigger signal, not a source of truth.
   - *Engine ceiling is **hard**.* A cumulative/daily USD cap + wall-clock cap in the
     conductor (independent of the drift-prone CLI `--max-budget-usd`), with auto-drain
     on breach + an out-of-band kill switch. This is a **safety boundary** for runaway
@@ -539,9 +550,20 @@ rewrite.** v1 requirements:
   plus a sentinel path as a literal argument to any command, are now blocked in
   `guard.ts`; a script that hardcodes the sentinel path in its own source (no CLI
   argument) remains an open residual — see `docs/security.md`'s isolation-boundary note.
-  **Still open:** the **live** merge-gate + kill-switch runs on a real repo (#46
-  scope 3/4); soft per-worker budget *auto*-enforcement, still needing a live in-flight
-  cost signal (#33).
+  **Soft-budget auto-enforcement via token estimation (#33):** `worker.ts` accumulates a
+  running USD estimate from every streamed `assistant` message's token usage (input/output/
+  cache-write/cache-read — cache reads at the cache-read rate, not the input rate, so a
+  cache-heavy run doesn't over-trigger) and calls the existing `requestHandoff()` graceful path
+  (SIGTERM -> `.handoff`, resumable, never a hard kill) once the estimate crosses
+  `worker.budgetUsdSoft`. Rates are NOT hardcoded in source (PR #85 human review): they live in
+  a user-editable YAML — the engine ships a commented `pricing.yaml` default, overridable via
+  `worker.pricingFile` (relative paths resolve against the config file's directory, the exact
+  #74 promptFile pattern; missing/malformed = fail-fast startup error, never a silent fallback)
+  — loaded once at supervisor construction by `pricing.ts`. The estimate is reconciled against
+  the real terminal `total_cost_usd` when a lane finishes — the divergence is logged, not
+  enforced; the rate table is explicitly a hand-maintained snapshot (see `pricing.yaml`'s
+  header), not a live pricing lookup. **Still open:** the **live** merge-gate + kill-switch
+  runs on a real repo (#46 scope 3/4).
 - **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`

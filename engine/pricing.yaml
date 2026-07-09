@@ -1,0 +1,46 @@
+# sapwood model pricing — the shipped default rate table (#33, PR #85 review).
+#
+# ESTIMATE-only per-model token rates, in USD per MILLION tokens. Used ONLY to estimate a
+# worker's in-flight spend for the SOFT per-worker budget (worker.budgetUsdSoft) — never for
+# the engine's HARD cost ceiling, which is billed off the REAL total_cost_usd the Claude CLI
+# reports when a worker finishes. This table exists because stream-json carries no in-progress
+# cost figure at all — only per-message token counts — so the live soft-budget check has
+# nothing else to price against.
+#
+# Override: set `worker.pricingFile` in sapwood.config.yaml to your own copy of this file
+# (a relative path resolves against the config file's directory, like worker.promptFile).
+# Your file REPLACES this one entirely — no merging — so copy all the models you use.
+# Unknown model aliases are allowed (add your own); every rate must be a positive number.
+#
+# KNOWN ESTIMATE-VS-REAL DIVERGENCE (documented, not a bug — read before "fixing" a mismatch):
+#   - These rates are a hand-maintained snapshot, not a live pricing lookup. They WILL drift
+#     the moment Anthropic reprices a model — that's exactly why this is a user-editable file.
+#   - Real billing may apply batch/priority-tier discounts, promotional intro pricing, or
+#     per-org negotiated rates this table knows nothing about.
+#   - cacheWrite assumes the CLI's default 5-minute ephemeral cache (~1.25x input); a 1-hour
+#     cache bills at 2x input and is not modeled here.
+#   - The estimate accumulates per-message usage as it streams; the real total_cost_usd is
+#     billed once, server-side, at the end of the whole session.
+# The engine logs (estimate - real) every time a worker finishes, so drift is visible.
+#
+# Matching: aliases below are matched case-insensitively as SUBSTRINGS of the model id the
+# CLI reports (e.g. "claude-opus-4-8" matches "opus"). A model that matches nothing is priced
+# at the MOST EXPENSIVE tier in this table — over-estimating only costs an earlier graceful
+# handoff; under-estimating (a soft budget that never fires) is the dangerous direction.
+
+models:
+  opus:
+    input: 5 # USD per million input tokens
+    output: 25 # USD per million output tokens
+    cacheWrite: 6.25 # 5-minute ephemeral cache write premium (~1.25x input)
+    cacheRead: 0.5 # cache READS are ~10x cheaper than input — never price them as input
+  sonnet:
+    input: 3
+    output: 15
+    cacheWrite: 3.75
+    cacheRead: 0.3
+  haiku:
+    input: 1
+    output: 5
+    cacheWrite: 1.25
+    cacheRead: 0.1

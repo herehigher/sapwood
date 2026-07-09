@@ -12,6 +12,7 @@ import { init, InitError } from "./init.js";
 import { State, SCHEMA_VERSION, type WorkerRow } from "./state.js";
 import { GithubForge, type IForge, type Issue } from "./forge.js";
 import { WorkerSupervisor, buildRenderPrompt } from "./worker.js";
+import { loadPricingTable } from "./pricing.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
 import { runDriver, type StopMode, type DriverResult, type StopConfig, type StopConditionHit } from "./driver.js";
@@ -165,6 +166,9 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
     // Validate the prompt template too (#74) — `sapwood validate` must reject everything the
     // real run would reject at startup, including a missing promptFile or unknown {{var}}.
     buildRenderPrompt(cfg);
+    // Same for the soft-budget rate table (#33 follow-up): a missing/malformed
+    // worker.pricingFile aborts the real run at supervisor construction, so validate it here.
+    loadPricingTable(cfg);
     const resolvedPath = path ?? DEFAULT_CONFIG_PATHS.find(existsSync);
     return {
       stdout: `sapwood validate: OK — ${resolvedPath} (lanes.max=${cfg.lanes.max}, guard.mode=${cfg.guard.mode}, merge.mode=${cfg.merge.mode})\n`,
@@ -242,6 +246,7 @@ async function runDryRun(): Promise<number> {
   // preview too — dry-run exists to predict the real run, not to green-light a config the
   // real run would reject at startup. Renderer is discarded; only validation matters here.
   buildRenderPrompt(cfg);
+  loadPricingTable(cfg); // #33 follow-up: a broken worker.pricingFile surfaces here too
   const forge = new GithubForge(cfg);
   const preview = computeDryRunPreview(await forge.getReadyIssues(), cfg);
   process.stdout.write(formatDryRunPreview(preview));

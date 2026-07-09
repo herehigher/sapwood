@@ -129,14 +129,21 @@ worker provably cannot reach here by any means."
 
 Two different things are both called "budget," and they behave differently on purpose:
 
-- **`worker.budgetUsdSoft`** is a **soft** per-worker budget. Reaching it is designed to
-  trigger a graceful handoff — finish the current atomic step, commit + push WIP, write
-  a progress note, drop a `.handoff` sentinel carrying a resumable session id, exit
-  clean — **never** a mid-work `SIGKILL`. A hard kill mid-step both burns the spend and
-  throws away the work; a graceful handoff preserves both. (Live enforcement of this
-  exact threshold is pending a real in-flight cost signal the worker doesn't have yet;
-  today the effective per-worker bound is `worker.timeoutSec` plus the hard ceiling
-  below.)
+- **`worker.budgetUsdSoft`** is a **soft** per-worker budget, auto-enforced via a live
+  token estimate. stream-json carries no in-progress `total_cost_usd` (only the
+  terminal result line has that), so the worker accumulates a running USD estimate
+  from every streamed assistant message's token usage (priced by a small, explicitly
+  approximate per-model rate table — the shipped `pricing.yaml`, overridable via
+  `worker.pricingFile` — with cache reads priced at the cache-read rate, not the
+  input rate, so a cache-heavy run doesn't look artificially expensive). Crossing
+  the threshold triggers a graceful handoff — finish the current atomic step, commit +
+  push WIP, write a progress note, drop a `.handoff` sentinel carrying a resumable
+  session id, exit clean — **never** a mid-work `SIGKILL`. A hard kill mid-step both
+  burns the spend and throws away the work; a graceful handoff preserves both. The
+  estimate is reconciled against the real terminal cost when a lane finishes (the
+  divergence is logged, not enforced) — it is a trigger signal, not a billing source
+  of truth, so `worker.timeoutSec` plus the hard ceiling below remain the actual
+  backstop.
 - **`cost.dailyBudgetUsd` / `cost.maxWallClockSec`** are **hard** engine-wide ceilings —
   the actual runaway-spend safety boundary, independent of any single worker. Breaching
   either freezes new dispatch/merges and starts draining in-flight workers
