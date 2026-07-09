@@ -158,6 +158,24 @@ const Labels = z.object({
   blocked: z.string().default("blocked"),
   reserve: z.string().default("reserve"),
   verifyNa: z.string().default("verify:n/a"), // Decision #8: skips the verification-plan gate
+  // #88 gate⓪ (amends Decision #8 per #77's 2026-07-09 comment): a verification plan must
+  // also pass the plan-reviewer peripheral's quality review before getReadyIssues dispatches
+  // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
+  // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
+  planApproved: z.string().default("plan:approved"),
+}).strict();
+
+// #88: gate⓪ plan-reviewer peripheral config surface. Session wiring (actually loading and
+// rendering this prompt) lands with the peripheral-role-runner issue — same "accepted, not
+// yet wired" shape as lanes.reserveCap/prFixCap/frictionMin below. This issue ships the
+// validated config key + path resolution + the shipped default prompt file only.
+const Roles = z.object({
+  planReviewer: z.object({
+    // Same #74 promptFile pattern as worker.promptFile: unset -> the engine's shipped
+    // `prompts/plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
+    // directory (see loadConfig below), not the CLI's cwd.
+    promptFile: z.string().optional(),
+  }).strict().default({}),
 }).strict();
 
 const Guard = z.object({
@@ -230,6 +248,7 @@ export const ConfigSchema = z.object({
   reviewer: Reviewer.default({}),
   merge: Merge.default({}),
   labels: Labels.default({}),
+  roles: Roles.default({}),
   escalation: z
     .object({ humanLabels: z.array(z.string()).default(["needs-human", "blocked"]) })
     .strict()
@@ -271,6 +290,13 @@ export function loadConfig(path?: string): SapwoodConfig {
   // the same config the engine would run inside `repo/`.
   if (cfg.worker.promptFile !== undefined && !isAbsolute(cfg.worker.promptFile)) {
     cfg.worker.promptFile = resolve(dirname(file), cfg.worker.promptFile);
+  }
+  // #88: same relative-to-config-file resolution for the (not-yet-wired) plan-reviewer prompt.
+  if (
+    cfg.roles.planReviewer.promptFile !== undefined &&
+    !isAbsolute(cfg.roles.planReviewer.promptFile)
+  ) {
+    cfg.roles.planReviewer.promptFile = resolve(dirname(file), cfg.roles.planReviewer.promptFile);
   }
   return cfg;
 }

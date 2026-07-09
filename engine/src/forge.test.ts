@@ -121,7 +121,8 @@ const PROJECT_JSON = JSON.stringify({
 
 const cfg = {
   board: { owner: "herehigher", repo: "sapwood", statusField: "Status", status: { ready: "Ready", inProgress: "In Progress", done: "Done" } },
-  labels: { verifyNa: "verify:n/a" },
+  // #88 gate⓪: selectReadyIssues now also reads planApproved/needsHuman/blocked.
+  labels: { verifyNa: "verify:n/a", planApproved: "plan:approved", needsHuman: "needs-human", blocked: "blocked" },
 } as Parameters<typeof selectReadyIssues>[1];
 
 test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section", () => {
@@ -261,14 +262,101 @@ test("parseProject: extracts project id, status field id, options, items (owner-
   assert.equal(p.items.length, 6);
 });
 
-test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (Decision #8)", () => {
+test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (Decision #8, tightened by #88 gate⓪)", () => {
   const p = parseProject(PROJECT_JSON, "Status");
   const ready = selectReadyIssues(p, cfg);
-  // #10 (has plan) and #12 (verify:n/a) pass. #11 no plan, #13 not Ready, #14 other repo, #15 closed -> all out.
-  assert.deepEqual(ready.map((i) => i.number).sort((a, b) => a - b), [10, 12]);
-  assert.deepEqual(ready.find((i) => i.number === 10)?.labels, ["type:feature", "prio:1-high"]);
+  // #10 has a plan but (post-#88 gate⓪) lacks plan:approved -> now excluded, a legitimate
+  // tightening (presence alone used to be enough; it no longer is). #12 (verify:n/a, no
+  // needs-human) still passes via the doc-gate path. #11 no plan, #13 not Ready, #14 other
+  // repo, #15 closed -> all out, unchanged.
+  assert.deepEqual(ready.map((i) => i.number).sort((a, b) => a - b), [12]);
+  assert.deepEqual(ready.find((i) => i.number === 12)?.labels, ["type:docs", "verify:n/a"]);
   // #74: body carries through to the public Issue (worker.ts's {{issue.body}} substitution).
-  assert.equal(ready.find((i) => i.number === 10)?.body, "Do the thing.\n## Verification\n- run npm test");
+  assert.equal(ready.find((i) => i.number === 12)?.body, "no plan needed");
+});
+
+// ── #88: gate⓪ — plan:approved dispatch requirement (amends Decision #8 per #77's
+//   2026-07-09 comment). Full matrix in one dedicated fixture, separate from PROJECT_JSON
+//   above so this test's item count/shape doesn't perturb the other parseProject-based tests. */
+const GATE0_PROJECT_JSON = JSON.stringify({
+  data: {
+    user: {
+      projectV2: {
+        id: "PVT_gate0",
+        field: { id: "PVTF_status", options: [{ id: "opt_ready", name: "Ready" }] },
+        items: { nodes: [
+          // #40: plan present + plan:approved -> dispatchable.
+          {
+            number: 40, title: "plan approved",
+            labels: ["plan:approved"],
+            body: "## Verification\n- run npm test",
+          },
+          // #41: plan present, no plan:approved -> excluded (presence alone is not enough).
+          {
+            number: 41, title: "plan not yet approved",
+            labels: [],
+            body: "## Verification\n- run npm test",
+          },
+          // #42: no plan, no verify:n/a -> excluded (Decision #8's original floor, unchanged).
+          {
+            number: 42, title: "no plan at all",
+            labels: [],
+            body: "just vibes",
+          },
+          // #43: verify:n/a + needs-human -> excluded (human hasn't adjudicated yet).
+          {
+            number: 43, title: "proposed verify:n/a, pending human",
+            labels: ["verify:n/a", "needs-human"],
+            body: "no plan needed",
+          },
+          // #44: verify:n/a alone (needs-human removed by a human) -> dispatchable, doc-gate path.
+          {
+            number: 44, title: "verify:n/a accepted",
+            labels: ["verify:n/a"],
+            body: "no plan needed",
+          },
+          // #45: plan + plan:approved + needs-human -> excluded (needs-human always blocks).
+          {
+            number: 45, title: "approved plan but escalated",
+            labels: ["plan:approved", "needs-human"],
+            body: "## Verification\n- run npm test",
+          },
+          // #46: plan + plan:approved + blocked -> excluded (blocked always blocks).
+          {
+            number: 46, title: "approved plan but blocked",
+            labels: ["plan:approved", "blocked"],
+            body: "## Verification\n- run npm test",
+          },
+        ].map((it) => ({
+          id: `ITEM_${it.number}`,
+          content: {
+            number: it.number,
+            title: it.title,
+            state: "OPEN",
+            body: it.body,
+            repository: { nameWithOwner: "herehigher/sapwood" },
+            labels: { nodes: it.labels.map((name) => ({ name })) },
+          },
+          fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+        })) },
+      },
+    },
+  },
+});
+
+test("selectReadyIssues: #88 gate⓪ full matrix — needs-human/blocked always block; verify:n/a alone is the doc-gate path; a real plan additionally requires plan:approved", () => {
+  const p = parseProject(GATE0_PROJECT_JSON, "Status");
+  const ready = selectReadyIssues(p, cfg);
+  assert.deepEqual(ready.map((i) => i.number).sort((a, b) => a - b), [40, 44]);
+});
+
+test("getReadyIssues: any gh/API error during the project fetch -> rejects, never a silent partial/empty ready list (fail-closed)", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    throw new Error("gh: rate limited");
+  };
+  await assert.rejects(() => forge.getReadyIssues(), /rate limited/);
 });
 
 test("findOptionId/findItemId: missing -> undefined (caller fails closed)", () => {
