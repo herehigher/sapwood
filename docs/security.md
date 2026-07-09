@@ -188,6 +188,21 @@ never the agent — who actually opens the doc-gate path, by removing `needs-hum
 themselves. `needs-human` and `blocked` block dispatch unconditionally, regardless of
 any other label present.
 
+**A plan below standard self-heals rather than stalls** (#77 Amendment 2): when the
+reviewer finds the plan missing or inadequate beyond its minor-correction latitude, it
+does not park the issue for a human — it posts a comment stating precisely what's
+missing (that comment is the brief), and the loop dispatches a **scoped plan-drafting
+session**: issues-only writes, a session distinct from the reviewer (plan-author ≠
+plan-approver — the reviewer never approves a plan it authored), never a full worker
+lane, and it never implements the issue itself. The draft then comes back through a
+fresh plan-review. The cycle is bounded — at most `roles.planReviewer.maxDraftCycles`
+draft→re-review attempts per issue (default 2) — after which the loop applies
+`needs-human` with the full attempt trail preserved (Decision #9's degrade-to-human).
+Every attempt is externalized as issue edits/comments, so a human can inspect or
+intervene at any point. The Ready-gate enforcement above is unchanged by any of this:
+implementation dispatch still requires `plan:approved` (or adjudicated `verify:n/a`) —
+only the repair path became more autonomous.
+
 Today the enforcement in `getReadyIssues` is real and covered by tests. The
 **plan-reviewer session** that actually applies `plan:approved` is not wired yet — same
 "convention/enforcement now, machinery later" shape as `origin:agent` above; it lands

@@ -185,6 +185,13 @@ const Roles = z.object({
     // `prompts/plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
     // directory (see loadConfig below), not the CLI's cwd.
     promptFile: z.string().optional(),
+    // #77 Amendment 2 (gate⓪ self-heal): max draft→re-review cycles per issue before the
+    // loop gives up and applies needs-human with the attempt trail (Decision #9's
+    // degrade-to-human) — the bound that keeps the self-heal path from livelocking.
+    // Positive int only: 0 would turn every request-a-draft outcome into an instant
+    // needs-human, silently disabling the self-heal path. Enforced by the #87 role
+    // runner's plan_review phase (accepted, not yet wired — like promptFile above).
+    maxDraftCycles: z.number().int().positive().default(2),
   }).strict().default({}),
 }).strict();
 

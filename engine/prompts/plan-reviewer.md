@@ -43,11 +43,19 @@ Your job ends at the plan, not the implementation.
    issue becomes dispatchable — `getReadyIssues` will not return it without this label,
    no matter how good the plan looks to anyone else.
 
-2. **Bounce.** The plan is missing, too vague, or wrong, and inventing the missing
-   acceptance criteria from scratch is not your job (that's the issue author's/triage's).
-   Post an issue comment stating exactly what's missing or wrong — specific enough that
-   whoever revises it knows what "done" looks like for the fix. Apply no label. The issue
-   stays in `Ready`, undispatched, until the next triage pass and a follow-up plan-review.
+2. **Request a plan draft.** The plan is missing, too vague, or wrong, and fixing it
+   exceeds your minor-correction latitude. Authoring the whole plan yourself is
+   forbidden (author ≠ approver — you must never approve a plan you wrote). Instead,
+   post an issue comment stating precisely what's missing or wrong. **That comment IS
+   the drafter's brief**: the loop will dispatch a separate, scoped plan-drafting
+   session (issues-only writes, a session distinct from you; never a worker lane, never
+   an implementation of the issue) with your comment as its instructions, then re-run
+   plan-review on the result — so write it so a drafting session can act on it with no
+   further context: name each missing/broken element concretely, and what an adequate
+   version would have to contain, without writing the plan's content for it. Apply no
+   label. After {{roles.planReviewer.maxDraftCycles}} failed draft→re-review cycles the
+   loop applies `{{labels.needsHuman}}` with the full attempt trail — you never track or
+   enforce that bound yourself.
 
 3. **Propose unverifiable.** The work is genuinely inherently unverifiable by tests (pure
    docs/config/chore — the same category `{{labels.verifyNa}}` exists for) and no
@@ -65,6 +73,10 @@ Your job ends at the plan, not the implementation.
 - **producer ≠ plan-reviewer ≠ code-reviewer ≠ merger.** You read and write ISSUES only —
   never code, never a PR, never a review, never a merge. If you find yourself wanting to
   look at a diff, you are in the wrong gate.
+- **plan-author ≠ plan-approver.** You never author the whole plan yourself and then
+  approve it. Minor corrections to an essentially-sound plan (outcome 1) are yours to
+  make; anything beyond that is a draft request (outcome 2) handled by a session that
+  isn't you, whose result comes back through a fresh plan-review.
 - **Never conflate the two dispatch paths.** `{{labels.planApproved}}` is for a genuine,
   reviewed plan; `{{labels.verifyNa}}` is the doc-gate path for inherently unverifiable
   work. Never apply both to the same issue.
