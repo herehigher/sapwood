@@ -36,7 +36,7 @@ in/out call:
 |---|---|---|---|
 | 1 | Dynamic visual of the whole flow (anime.js) | **IN — the hero.** One animated Loop scene: Backlog → Lanes → Gate ① → Gate ② → Merged. | The promo centerpiece. anime.js (~10 kB) is the single animation dependency, scoped to this scene; all other motion is CSS. |
 | 2 | See the agent roles interacting | **IN, real roles only**: conductor, worker, reviewer, merge driver — as actors in the hero scene and lane cards. | The round-orchestrator roles (PO/architect/harvest/retro) have no data yet (`rounds` ledger is unbuilt). The scene layout reserves labeled slots for them; we never render fake state. |
-| 3 | Per-node status, output summary, cost | **IN**: lane board from `workers` (+ per-lane cost from `spend_ledger`); header status strip with daily-spend meter. | All columns exist in schema v7 today. |
+| 3 | Per-node status, output summary, cost | **IN**: lane board from `workers` (+ per-lane cost from `spend_ledger`); header status strip with daily-spend meter. | All columns exist in schema v7 today. Caveat: spend is recorded **at reclaim** (lane end) — in-flight lanes show cost as "—, settles when the lane ends"; live in-flight cost is gated on #33. |
 | 4 | Browse past loop rounds | **IN via replay, not metrics.** The `events` table is a complete append-only history → a replay player (play/pause/scrub) re-drives the whole UI from any point. | History-*aggregation* metrics (cycle time, merge/rework rate) stay **OUT** — PLAN.md defers them to a later phase gated on GitHub-history work. |
 | 5 | Config panel | **IN as read-only.** Grouped, plain-language view of the resolved config. **Editing is OUT.** | A write path would break the dashboard's read-only security posture, and security-relevant config is human-merge-only territory. Edit via the YAML file, where review applies. |
 | 6 | Avoid jargon | **IN as a copy layer**: one map from the 19 event kinds to plain sentences (§7). UI language is English (repo/launch artifact); the map is a single module, trivially localizable later — no i18n framework. | |
@@ -77,31 +77,38 @@ Single page, no routing. Five modules, one screen:
 ```
 
 - **A — Header.** Wordmark; engine state as one word + dot (`running` /
-  `paused` / `winding down` / `stopped` — derived from sentinels + ceiling
-  breach, §8); daily-spend meter (today vs `cost.dailyBudgetUsd`); the
-  Live ↔ Replay toggle.
+  `stalled` / `paused` / `winding down` / `stopping` / `stopped` — derived
+  from sentinels, ceiling breach, and `lastTickAt` age, §8); daily-spend meter
+  (today vs `cost.dailyBudgetUsd`); the Live ↔ Replay toggle.
 - **B — Hero: the Loop.** The whole pipeline as one horizontal scene (§6).
   Fixed stage; real events move tokens through it. Ends in the **trunk
   cross-section**: every merged PR accretes one growth ring (§5, signature).
 - **C — Lane board.** One card per lane up to `lanes.max`; empty lanes render
   as quiet outlines ("an empty lane is capacity, not absence"). Card: issue
-  number + title, state word, PR link when driving, elapsed time, cost so far.
+  number (linking to GitHub — title enrichment is deferred, §10), state word,
+  PR link when driving, elapsed time, and cost — shown as "—, settles when the
+  lane ends" while in flight, the `spend_ledger` sum once reclaimed (spend is
+  written at reclaim only; live in-flight cost is gated on #33).
 - **D — Activity feed.** The `events` stream through the copy map (§7),
   newest first, relative timestamps; kind-colored dot per entry. Payload
   details (worker, head, mode) collapse behind each entry — never in the
   sentence.
 - **E — Cost strip + Config drawer.** Two small SVG bar groups: today's spend
   by lane, and by model (token split available on hover). `Config ▸` opens a
-  read-only drawer: resolved config grouped as **Board · Lanes · Worker ·
-  Safety · Review & merge · Labels**, each key with its plain-language caption
+  read-only drawer: an **allowlisted subset** of the resolved config (the
+  server serves named keys, never the whole object — the no-secrets guarantee
+  stays structural even if future config grows sensitive keys), grouped as
+  **Board · Lanes · Worker · Safety · Review & merge · Labels**, each key with
+  its plain-language caption
   (e.g. `worker.budgetUsdSoft` → "Budget per worker — reaching it asks the
   worker to wrap up and hand off, never kills it mid-work").
 
 Empty/error states are directions, not moods: fresh DB → hero idles with
 "Waiting for the first dispatch — point sapwood at a Ready issue"; API
 unreachable → header flips to `disconnected` with the command to restart;
-`needs-human` events pin to the top of the feed until newer than any
-escalation.
+config unreadable (`lanes.max` null) → hero draws a single placeholder channel
+captioned "lane count unknown — config unreadable"; `needs-human` events pin
+to the top of the feed until newer than any escalation.
 
 ## 4. Visual identity — growth rings
 
@@ -131,7 +138,8 @@ one step for contrast):
 | `--heartwood` | `#251B10` | Background — warm dark brown, not near-black |
 | `--panel` | `#2E2317` | Cards, drawer |
 | `--sapwood` | `#F1E7D2` | Primary text (dark theme) / background (light theme) |
-| `--bark` | `#8A7A64` | Muted text, borders, hairlines |
+| `--bark` | `#8A7A64` | Borders and hairlines **only** (≈3.9:1 on `--heartwood` — below AA for text) |
+| `--bark-text` | `#A6957C` | Muted text (AA-passing on both grounds) |
 | `--sap` | `#E8A33D` | Amber — the *activity* color: flowing tokens, running lanes, spend meter |
 | `--moss` | `#8FA36B` | Success: merged, CI green, healthy engine dot |
 | `--rust` | `#C05A2E` | Failure/escalation: failed lanes, `needs-human`, ceiling breach |
@@ -160,7 +168,12 @@ movement in the hero), easing `cubic-bezier(.3,.7,.3,1)`; ambient pulses ≥ 3 s
 
 **Quality floor** (not negotiable, not announced): responsive to 720 px wide
 (modules stack A→B→C→D→E), visible keyboard focus (`--sap` outline), WCAG AA
-contrast in both themes, `prefers-reduced-motion` honored (§6).
+contrast in both themes — **every text-on-ground token pair is checked with a
+contrast tool at implementation, per theme**, `prefers-reduced-motion` honored
+(§6). Color is never the sole carrier: gate resolutions get a ✓/✕ glyph,
+failed lanes a static ✕ (moss/rust is deuteranopia-ambiguous), and the
+activity feed is the hero's accessible text channel (`aria-live="polite"` on
+new entries).
 
 ## 6. Motion spec — the hero Loop
 
@@ -178,16 +191,21 @@ drive it, via one anime.js timeline per transition:
 | Event(s) | Animation |
 |---|---|
 | `dispatched` | Droplet detaches from the backlog stack, travels into a lane channel (`--travel`); the lane card (§3 C) lights `--sap` in the same beat. |
-| lane `running → driving` (from `/state` polling) | Droplet emerges from the lane carrying a PR tag, parks before gate ①. |
-| gate progress (`/state`: PR awaiting gate) | Gate ① then gate ② tick `--moss` as CI/review resolve; droplet steps through each. |
-| `merged` | Droplet crosses the merge arm into the trunk and **becomes a ring**: a new circle strokes in over 1.2 s, ring counter increments in Fraunces. The one celebratory moment. |
+| lane `running → driving` (from `/state` polling) | Droplet emerges from the lane carrying a PR tag and parks **in the gate section** (drawn as the two gates ①②, labeled "checks" and "review"), which breathes softly while the PR waits. The engine computes gate progress live against GitHub and persists no substate, so v0.2 renders the review passage as one *waiting* state — the gates never fake per-gate progress. (A persisted `gate-advanced` event unlocking the two-step animation is deferred, §10.) |
+| `merged` | Both gates flash `--moss` with a ✓, the droplet crosses the merge arm into the trunk and **becomes a ring**: a new circle strokes in over 1.2 s, ring counter increments in Fraunces. The one celebratory moment. |
 | `handoff` | Droplet folds back into the backlog with a small progress badge ("saved for a successor"). |
-| `reclaim-failed`, `reclaim-dead`, `drive-needs-human`, `rollback-escalated` | Droplet stops, flips `--rust`, and pins a marker above its position; no shaking, no bouncing — failures are still, not loud. |
+| `reclaim-failed`, `reclaim-dead`, `drive-needs-human`, `rollback-escalated` | Droplet stops, flips `--rust` with a static ✕, and pins a marker above its position; no shaking, no bouncing — failures are still, not loud. |
 | `ceiling-escalated` / PAUSE / kill switch | Stage dims; ambient sap flow stops; header state word explains. |
 
 Ambient (CSS only): a faint sap shimmer along active lane channels (≥ 3 s
 cycle); the current outermost ring breathes at low amplitude while any lane
 is running.
+
+**Coalescing policy** (bursts must not queue): animated transitions are
+budgeted, not unbounded. If more than 2 transitions are pending (poll catch-up
+after a gap, multi-merge ticks) — or replay speed is ≥ ×4 — pending
+transitions collapse to instant state swaps and only the newest ring stroke
+animates. The hero must never lag behind the state it claims to show.
 
 `prefers-reduced-motion`: all travel becomes instant position/color swaps;
 rings appear without stroke animation; ambient shimmer off. The scene remains
@@ -196,9 +214,19 @@ fully legible — motion is commentary, never the only carrier of state.
 **Replay mode** drives the identical scene from historical events: a transport
 (play/pause, speed ×1/×4/×16, scrub bar spanning the event log) replaces the
 polling source. Scrubbing rebuilds state by folding events up to the cursor —
-same reducer as live mode, one code path. This is both the "browse past
-rounds" feature and the launch demo (replaying the recorded run that built the
-dashboard).
+same reducer as live mode, one code path; the fold keeps periodic checkpoints
+(every ~500 events) so scrubbing stays O(distance), not O(log-length).
+**Replay covers event-backed panels only** — hero, lane narrative, feed, ring
+count. Snapshot-backed panels (spend meter, cost strip, config drawer) have no
+historical source (event payloads carry no cost; spend lives in
+`spend_ledger`) and grey out in replay with the caption "live only".
+
+**Launch artifact** — two forms, both from the recorded dogfood run:
+(a) a screen capture of the replay for README/launch page, and (b) a **demo
+fixture mode**: the run's event log ships as a bundled JSON fixture, and
+`?demo` feeds it to the same replay player — an interactive demo that runs
+with no engine, no DB, on a static host. No new dependency; the replay reducer
+is the mechanism either way.
 
 ## 7. Copy — the plain-language layer
 
@@ -210,7 +238,7 @@ kind. Voice: active, specific, no system internals (say "lane", "checks",
 |---|---|
 | `dispatched` | Started work on issue #{issue} |
 | `dispatch-failed` | Couldn't start issue #{issue} — it's back in the backlog |
-| `reclaim-done` | Lane {worker} finished its work |
+| `reclaim-done` | Branches on `payload.next`: PR produced → "Lane {worker} opened a PR — now in review"; ended without a PR → "Lane {worker} ended without a PR — flagged for a human" |
 | `reclaim-failed` | Lane {worker} hit a problem and stopped |
 | `reclaim-dead` | Lane {worker} went silent — cleaned up; its issue goes back to the backlog |
 | `handoff` | Lane {worker} reached its budget and saved its progress for a successor |
@@ -244,19 +272,24 @@ computes for `sapwood status`.
 ```jsonc
 {
   "engine": {
-    "state": "running",            // running | paused | winding-down | stopped
-                                    // derived: KILL_SWITCH → stopped; ceiling_breach →
-                                    // winding-down; PAUSE → paused; else running
+    "state": "running",            // running | stalled | paused | winding-down | stopping | stopped
+                                    // derived: KILL_SWITCH + active lanes → stopping (drain in
+                                    // progress); KILL_SWITCH + none → stopped; ceiling_breach →
+                                    // winding-down; PAUSE → paused; lastTickAt older than the
+                                    // engine's stale-gap threshold → stalled (dead engine must
+                                    // not read as a green "running"); else running
     "reasons": [],                  // ceiling_breach.reasons when winding-down
     "lastTickAt": "2026-07-09T08:12:00Z"   // engine_session.last_tick_at
   },
   "lanes": {
     "max": 3,                       // config lanes.max (null if config unreadable)
     "items": [{                     // workers rows, running + driving
-      "lane": "w1", "issue": 86, "title": null,   // title enriched client-side is OUT of scope;
-      "state": "driving", "pr": 97,               // v0.2 shows numbers, links to GitHub
+      "lane": "w1", "issue": 86,    // numbers link out to GitHub; no title (deferred, §10)
+      "state": "driving", "pr": 97,
       "startedAt": "…", "endedAt": null,
-      "costUsd": 1.20               // SUM(spend_ledger) per worker
+      "costUsd": null               // SUM(spend_ledger) per worker — spend is written at
+                                    // reclaim, so in-flight lanes are null ("settles when
+                                    // the lane ends"); live in-flight cost is #33-gated
     }]
   },
   "spend": {
@@ -266,7 +299,8 @@ computes for `sapwood status`.
                   "inputTokens": 0, "outputTokens": 0 }]
   },
   "rings": 27,                      // COUNT(events WHERE kind='merged') — the ring count
-  "config": { /* resolved config, §3 E; contains no secrets by construction */ }
+  "config": { /* ALLOWLISTED subset of resolved config (§3 E) — the server names the
+                 keys it serves; never the whole object */ }
 }
 ```
 
@@ -302,8 +336,10 @@ dashboard/            # new npm workspace (root package.json already anticipates
 - **Build:** Vite + React + TypeScript; `vite build` output embedded in the
   plugin package. Dev: `vite` proxying `/api` to the local server.
 - **One state reducer** folds events into UI state; live mode feeds it the
-  polling tail, replay feeds it history. The hero, lanes, and feed all render
-  from the reducer output — replay correctness falls out for free.
+  polling tail, replay (and the `?demo` fixture) feeds it history. The hero,
+  lane narrative, feed, and ring count render from the reducer output, so
+  those panels replay for free. Snapshot-backed panels (spend, config) render
+  from `/api/loop/state` only and grey out in replay (§6).
 - Launched via a `sapwood dashboard` CLI/slash command that starts the server
   and opens the browser. Read-only DB handle; safe to run beside a live engine
   (WAL mode).
@@ -320,4 +356,11 @@ dashboard/            # new npm workspace (root package.json already anticipates
   single-viewer tool; revisit only if a hosted multi-viewer mode ever exists.
 - **Issue-title enrichment** in lane cards (needs a GitHub read from the
   dashboard server; v0.2 links out instead).
+- **Per-gate progress in the hero** — needs the engine to persist gate
+  substate (a `gate-advanced` event); v0.2 renders the review passage as one
+  waiting state (§6).
+- **Replayable cost panels** — needs cost folded into `merged`/reclaim event
+  payloads; v0.2 greys spend panels in replay.
+- **Live in-flight lane cost** — gated on the live cost signal (#33); v0.2
+  shows "settles when the lane ends".
 - **Localization** — the copy map is the seam; add locales when someone asks.
