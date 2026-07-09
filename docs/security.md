@@ -101,14 +101,29 @@ and `--resume` takes effect on the very next tick.
 The engine's `data/` directory (which holds both sentinels and the state DB) sits
 outside worker git worktrees as a **permission-layer boundary** — the worker process is
 not launched with `--add-dir data`, so it has no `claude`-tool path into that directory.
-This is **not an OS-level sandbox**: a worker is still allowlisted to run `Bash(node
-*)`/`Bash(npm *)`, and the guard blocks `node -e <inline>` but not `node
-some-script.js` where that script (written via the ordinarily-permitted `Write` tool)
-reaches out via a relative path like `../../data/PAUSE` and touches or unlinks a
-sentinel directly. This residual vector is tracked in **issue #81** (guard
-defense-in-depth for `data/KILL_SWITCH` and `data/PAUSE`), not yet closed. Until it is,
-treat the sentinel boundary as "a worker won't accidentally step here," not "a worker
-provably cannot reach here."
+This is **not an OS-level sandbox**, so the guard (`engine/src/guard.ts`) adds
+defense-in-depth (#81) on top of that boundary: any `Write`/`Edit` targeting
+`data/KILL_SWITCH` or `data/PAUSE` (including via relative traversal, e.g.
+`../../data/PAUSE`) is denied, as is `Bash` `touch`/`rm`/`mv`/`git rm`/redirect-to-path
+targeting either sentinel, and a sentinel path appearing as a literal argument to any
+other command (e.g. `node some-script.js ../../data/PAUSE`) — including glued to a
+flag (`--target=../../data/PAUSE`) — with the
+sentinel names matched case-insensitively (macOS/APFS default is case-insensitive, so
+`data/pause` hits the real file). What remains open, deliberately documented rather
+than blocked:
+
+- a script written via the ordinarily-permitted `Write` tool that hardcodes the
+  sentinel path *inside its own source* rather than taking it as a CLI argument — the
+  guard judges the Bash command line, not a script's file contents, so
+  `node some-script.js` (no path argument) is opaque to it;
+- directory-level deletion that never names a sentinel, e.g. `rm -rf ../../data`
+  (removes both sentinels *and* the state DB). Blocking the bare `data` suffix would
+  false-positive on a worker legitimately removing a `data/` dir inside its own repo,
+  so this stays a documented residual instead of a guard rule.
+
+Until those are closed too, treat the isolation boundary as "a worker won't
+accidentally step here, and the obvious direct/indirect vectors are blocked," not "a
+worker provably cannot reach here by any means."
 
 ## Cost ceilings vs. the soft worker budget
 
