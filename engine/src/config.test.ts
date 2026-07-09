@@ -14,6 +14,7 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.reviewer.mode, "different-model-codex");
   assert.equal(cfg.labels.verifyNa, "verify:n/a");
+  assert.equal(cfg.labels.planApproved, "plan:approved"); // #88 gate⓪
   // #14 engine cost ceiling + kill switch: conservative defaults.
   assert.equal(cfg.cost.dailyBudgetUsd, 100);
   assert.equal(cfg.cost.maxWallClockSec, 14400);
@@ -240,6 +241,54 @@ test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's dir
     );
     const cfg = loadConfig(cfgPath);
     assert.equal(cfg.worker.pricingFile, join(dir, "rates", "my-rates.yaml"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #88 gate⓪: labels.planApproved + roles.planReviewer.promptFile ──────────────────────────
+// Session wiring (actually loading/rendering this prompt) lands with the peripheral-role-
+// runner issue; here the config surface is validated + path-resolved, same "accepted, not
+// yet wired" shape as lanes.reserveCap/prFixCap/frictionMin.
+
+test("labels.planApproved: defaults to plan:approved, overridable", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.labels.planApproved, "plan:approved");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { planApproved: custom:approved }",
+  );
+  assert.equal(over.labels.planApproved, "custom:approved");
+});
+
+test("roles.planReviewer.promptFile: unset by default, overridable, strict schema (same #74 pattern as worker.promptFile)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.planReviewer.promptFile, undefined);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFile: prompts/custom-plan-reviewer.md } }",
+  );
+  assert.equal(over.roles.planReviewer.promptFile, "prompts/custom-plan-reviewer.md");
+});
+
+test("roles.planReviewer.promptFile: a typo'd key under roles.planReviewer.* is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.planReviewer.promptFile: a relative path resolves against the config file's directory, not cwd (same #74 pattern as worker.promptFile)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFile: my-plan-reviewer.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.planReviewer.promptFile, join(dir, "my-plan-reviewer.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
