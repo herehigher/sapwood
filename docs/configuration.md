@@ -164,6 +164,18 @@ individually configurable).
 | `blocked` | `blocked` | Held out of the main dispatch lane. |
 | `reserve` | `reserve` | Not part of the main dispatch lane. |
 | `verifyNa` | `verify:n/a` | Marks an issue as inherently unverifiable by tests — skips the verification-plan gate and routes through the doc-gate path instead. |
+| `planApproved` | `plan:approved` | gate⓪ (#88): required, together with a genuine verification-plan section, for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. See [`security.md`](security.md#plan-approved). |
+
+## `roles`
+
+Peripheral-role configuration (v0.2). **Accepted, not yet wired** — validated here so the
+config surface doesn't need a migration when the round-orchestrator lands (see
+[`PLAN.md`](PLAN.md)'s v0.2 chapter); no session currently loads or runs this prompt.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `planReviewer.promptFile` | unset | Override the gate⓪ plan-reviewer's prompt (same `#74` pattern as `worker.promptFile`: a relative path resolves against the config file's own directory, not the CLI's cwd). Unset uses the engine's shipped `prompts/plan-reviewer.md`. |
+| `planReviewer.maxDraftCycles` | `2` | gate⓪ self-heal bound (#77 Amendment 2): max draft→re-review cycles per issue when the reviewer requests a plan draft (a scoped, issues-only drafting session — never a worker lane, never an implementation). Exhausted → the loop applies `needs-human` with the attempt trail. Positive integer only — `0` would turn every draft request into an instant `needs-human`. |
 
 ## `guard`
 

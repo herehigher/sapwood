@@ -168,6 +168,31 @@ const Labels = z.object({
   blocked: z.string().default("blocked"),
   reserve: z.string().default("reserve"),
   verifyNa: z.string().default("verify:n/a"), // Decision #8: skips the verification-plan gate
+  // #88 gate⓪ (amends Decision #8 per #77's 2026-07-09 comment): a verification plan must
+  // also pass the plan-reviewer peripheral's quality review before getReadyIssues dispatches
+  // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
+  // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
+  planApproved: z.string().default("plan:approved"),
+}).strict();
+
+// #88: gate⓪ plan-reviewer peripheral config surface. Session wiring (actually loading and
+// rendering this prompt) lands with the peripheral-role-runner issue — same "accepted, not
+// yet wired" shape as lanes.reserveCap/prFixCap/frictionMin below. This issue ships the
+// validated config key + path resolution + the shipped default prompt file only.
+const Roles = z.object({
+  planReviewer: z.object({
+    // Same #74 promptFile pattern as worker.promptFile: unset -> the engine's shipped
+    // `prompts/plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
+    // directory (see loadConfig below), not the CLI's cwd.
+    promptFile: z.string().optional(),
+    // #77 Amendment 2 (gate⓪ self-heal): max draft→re-review cycles per issue before the
+    // loop gives up and applies needs-human with the attempt trail (Decision #9's
+    // degrade-to-human) — the bound that keeps the self-heal path from livelocking.
+    // Positive int only: 0 would turn every request-a-draft outcome into an instant
+    // needs-human, silently disabling the self-heal path. Enforced by the #87 role
+    // runner's plan_review phase (accepted, not yet wired — like promptFile above).
+    maxDraftCycles: z.number().int().positive().default(2),
+  }).strict().default({}),
 }).strict();
 
 const Guard = z.object({
@@ -253,6 +278,7 @@ export const ConfigSchema = z.object({
   reviewer: Reviewer.default({}),
   merge: Merge.default({}),
   labels: Labels.default({}),
+  roles: Roles.default({}),
   escalation: z
     .object({ humanLabels: z.array(z.string()).default(["needs-human", "blocked"]) })
     .strict()
@@ -298,6 +324,13 @@ export function loadConfig(path?: string): SapwoodConfig {
   // Same rule for worker.pricingFile (#33 follow-up, PR #85 review).
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
     cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
+  }
+  // #88: same relative-to-config-file resolution for the (not-yet-wired) plan-reviewer prompt.
+  if (
+    cfg.roles.planReviewer.promptFile !== undefined &&
+    !isAbsolute(cfg.roles.planReviewer.promptFile)
+  ) {
+    cfg.roles.planReviewer.promptFile = resolve(dirname(file), cfg.roles.planReviewer.promptFile);
   }
   return cfg;
 }

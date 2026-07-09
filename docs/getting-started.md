@@ -162,6 +162,14 @@ doc-gate path (the reviewer checks that the described durable-knowledge change a
 landed) rather than a red/green test cycle. `sapwood init` provisions the `verify:n/a`
 label for you.
 
+As of gate⓪ (#88), a plan being present isn't enough on its own either: a `plan:approved`
+label is also required before `getReadyIssues` will dispatch a non-`verify:n/a` issue — it
+means the plan-reviewer peripheral judged the acceptance criteria and verification plan
+actually executable, not just present. See
+[`security.md`](security.md#plan-approved) for the full gate. That peripheral session
+isn't wired yet, so today `plan:approved` must be applied by hand; unlike `verify:n/a`
+and `origin:agent` above, `sapwood init` does not yet provision this label.
+
 Any issue a human didn't personally author — including one an agent role opens on your
 behalf — should carry the `origin:agent` label; see
 [`security.md`](security.md#origin-agent) for why.

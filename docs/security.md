@@ -171,9 +171,52 @@ can enter `Ready` — an agent can propose work, but a human still decides what 
 enters the dispatch queue. Provisioning the label now means that gate can be turned on
 later without a taxonomy migration.
 
+## The `plan:approved` label and gate⓪ (#88)
+
+Decision #8's `Ready` gate originally checked only that a verification plan *existed* —
+not whether it was any good — and `verify:n/a` was self-declared by whoever wrote the
+issue. A 2026-07-09 amendment to Decision #8 (locked in issue #77's comments) closes
+that gap: a plan must also pass agent quality review before dispatch.
+
+`getReadyIssues` (`engine/src/forge.ts`) now requires, for any issue not labelled
+`verify:n/a`, **both** a verification-plan section in the body **and** the
+`plan:approved` label — plan presence alone no longer dispatches. `verify:n/a` still
+routes through the doc-gate path, but only when `needs-human` is absent: the
+plan-reviewer peripheral may *propose* `verify:n/a` for genuinely unverifiable work, but
+it always pairs that proposal with `needs-human` in the same action, so it's a human —
+never the agent — who actually opens the doc-gate path, by removing `needs-human`
+themselves. `needs-human` and `blocked` block dispatch unconditionally, regardless of
+any other label present.
+
+**A plan below standard self-heals rather than stalls** (#77 Amendment 2): when the
+reviewer finds the plan missing or inadequate beyond its minor-correction latitude, it
+does not park the issue for a human — it posts a comment stating precisely what's
+missing (that comment is the brief), and the loop dispatches a **scoped plan-drafting
+session**: issues-only writes, a session distinct from the reviewer (plan-author ≠
+plan-approver — the reviewer never approves a plan it authored), never a full worker
+lane, and it never implements the issue itself. The draft then comes back through a
+fresh plan-review. The cycle is bounded — at most `roles.planReviewer.maxDraftCycles`
+draft→re-review attempts per issue (default 2) — after which the loop applies
+`needs-human` with the full attempt trail preserved (Decision #9's degrade-to-human).
+Every attempt is externalized as issue edits/comments, so a human can inspect or
+intervene at any point. The Ready-gate enforcement above is unchanged by any of this:
+implementation dispatch still requires `plan:approved` (or adjudicated `verify:n/a`) —
+only the repair path became more autonomous.
+
+Today the enforcement in `getReadyIssues` is real and covered by tests. The
+**plan-reviewer session** that actually applies `plan:approved` is not wired yet — same
+"convention/enforcement now, machinery later" shape as `origin:agent` above; it lands
+with v0.2's round-orchestrator peripheral roles (see [`PLAN.md`](PLAN.md)'s v0.2
+chapter). The shipped default prompt for that future session already exists at
+`engine/prompts/plan-reviewer.md` (`roles.planReviewer.promptFile` overrides it — same
+`#74` pattern as `worker.promptFile`). Until that session lands, `plan:approved` must be
+applied by hand for any issue meant to dispatch on a reviewed plan; `sapwood init` does
+not yet provision the label (unlike `verify:n/a`/`origin:agent` above — provisioning it
+now would be premature ahead of the session that actually applies it).
+
 ## See also
 
 - [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `cost`,
-  and `labels` config sections referenced above.
+  `labels`, and `roles` config sections referenced above.
 - [`PLAN.md`](PLAN.md) — the full architecture, decision log, and the v0.2 round
   orchestrator's self-feed design.
