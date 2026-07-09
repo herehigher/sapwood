@@ -64,6 +64,9 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     { name: l.blocked, color: "5319e7", description: "Blocked — held out of the main lane" },
     { name: l.reserve, color: "5319e7", description: "Reserve — not in the main dispatch lane" },
     { name: l.verifyNa, color: "c5def5", description: "Verification N/A — skips the Decision #8 gate" },
+    // Convention only until v0.2's self-feed lands (#77) — no code applies this label yet;
+    // provisioned now so the taxonomy doesn't need a migration later. See docs/security.md.
+    { name: "origin:agent", color: "bfd4f2", description: "Issue was created by an agent, not a human" },
   ];
 }
 

@@ -39,6 +39,7 @@ test("requiredLabels includes the config taxonomy and verify:n/a", () => {
   assert.ok(names.includes("prio:0"));
   assert.ok(names.includes("in-progress"));
   assert.ok(names.includes("verify:n/a"));
+  assert.ok(names.includes("origin:agent")); // #16: provenance convention (see docs/security.md)
 });
 
 test("preflight throws actionably when not logged in", async () => {

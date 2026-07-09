@@ -500,7 +500,24 @@ rewrite.** v1 requirements:
   `commands/` that shell out to the CLI (`/sapwood-stop` flips the documented
   kill-switch file sentinel — see Security model). Supervised "watch one issue" is the
   existing `--once` mode plus leaving a single issue `Ready` on the board, not a new
-  subsystem. **Goal-based stop conditions (#76):** optional `stop.afterIssuesMerged` /
+  subsystem. **Node.js 22 → 24 (#73):** the engines floor, `.nvmrc`, and CI now match
+  the `node:sqlite` requirement stated since M0 — a housekeeping catch-up, not a
+  behavior change. **File-based worker prompt (#74):** `worker.promptFile` lets an
+  operator replace the shipped `prompts/worker.md` (TDD + two-gate method) with their
+  own template, resolved relative to the config file's own directory so the same config
+  behaves identically regardless of invocation cwd. The template is loaded and rendered
+  eagerly at startup — before any dispatch — so a missing/unreadable/empty file or an
+  unknown `{{var}}` is a fail-fast startup error, never a silent fallback to the default
+  or a lazily-discovered break mid-run; `sapwood validate` runs the identical check.
+  This is also the prerequisite v0.2's self-evolution path needs (below): a
+  peripheral role rewriting a prompt has something concrete to open a PR against.
+  **PAUSE sentinel (#75):** a second, gentler human control alongside the kill switch —
+  `data/PAUSE` freezes new lane dispatch only, while everything already in flight
+  (running workers, PRs already moving through the review/merge gate) proceeds exactly
+  as normal; no drain, nothing killed. Distinct from the kill switch's strict freeze +
+  drain (if both are present, the kill switch's behavior governs). Wired into
+  `/sapwood-stop --pause`/`--resume` and `sapwood status`'s `pause: …` line. See
+  `docs/security.md` for the full two-tier control model. **Goal-based stop conditions (#76):** optional `stop.afterIssuesMerged` /
   `stop.afterPRsOpened` / `stop.onMilestoneComplete` config (each overridable by a
   matching `--stop-after-issues` / `--stop-after-prs` / `--stop-on-milestone` CLI flag)
   are FINAL break conditions — "when is this run complete" — not a change to the loop's
@@ -513,8 +530,15 @@ rewrite.** v1 requirements:
   SQLite table: issues merged and PRs opened (a lane's first reclaim into `driving`, the
   earliest point the engine can see a PR exists) both come straight off `TickResult`;
   milestone completion is one small `IForge.countOpenIssuesInMilestone` read per tick.
-  **Still open:** docs set (usage/config guide beyond this plan doc), and
-  the **live** merge-gate + kill-switch runs on a real repo (#46 scope 3/4).
+  **Docs set delivered (#16):** `docs/getting-started.md`, `docs/configuration.md`,
+  `docs/security.md`, `docs/troubleshooting.md`, plus a plugin-facing
+  `.claude-plugin/CLAUDE.md` for a calling model, and the `origin:agent` label
+  (provisioned by `init`, see the v0.2 chapter and `docs/security.md` for what it's
+  for). **Still open:** the **live** merge-gate + kill-switch runs on a real repo (#46
+  scope 3/4); soft per-worker budget *auto*-enforcement, still needing a live in-flight
+  cost signal (#33); guard defense-in-depth for the `data/KILL_SWITCH` / `data/PAUSE`
+  sentinel write paths, currently a permission-layer boundary rather than a closed one
+  (#81, see `docs/security.md`'s isolation-boundary note).
 - **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`
@@ -525,6 +549,78 @@ rewrite.** v1 requirements:
   never finished (`ops/loop/README.md:109`). Because workers may touch security-
   sensitive files, the human-merge-only rule for guard/hook/reviewer/security config
   (see Security model) stays in force during this dogfood.
+
+## v0.2 north star: the round orchestrator
+
+Locked design (2026-07-08, issue #77) for v0.2's second axis — alongside the dashboard,
+v0.2 also introduces a **round orchestrator**: a layer *above* the tick engine that adds
+peripheral roles (goal alignment, architecture review, harvest, retrospective) around
+the existing dispatch loop, without rewriting it. This section is the durable record of
+that design; implementation issues are cut from it when v0.2 opens.
+
+**The model — a round is a batch, wrapped in peripherals:**
+
+```
+while True:
+    if a final stop condition is met: break        # v1: stop.* (#76)
+    peripheral: goal alignment / decomposition       # PO role
+    peripheral: architecture design / review         # architect role
+    for lane in the parallel cap:                    # existing: lanes.max / roundDispatchCap
+        await lane(round stop conditions)            # existing: cost.roundBudgetUsd
+    peripheral: harvest (results roll-up)
+    peripheral: retrospective / self-evolution
+```
+
+The round loop dispatches a batch, ticks the existing engine until that batch drains,
+runs the peripherals, then opens the next round. **The tick engine (`conductor.ts`) is
+not rewritten** — a round is a caller of `tick()`, the same relationship `driver.ts`
+already has to it.
+
+**Two-level termination.** Round-level conditions (OR'd, first hit ends *this* round,
+not the run) are the round budget (`cost.roundBudgetUsd`, already exists) and an opened-
+PR cap (already exists as `lanes.roundDispatchCap`), plus a new round milestone/theme
+that also filters which issues a round selects. Final-level conditions are v1's
+`stop.*` (#76) — preemptive: hitting one mid-round means no new round opens, the current
+one winds down, and the process exits. The two levels count different things: round
+level counts PRs opened; final level counts issues merged — matching `stop.*`'s existing
+semantics exactly.
+
+**Peripherals never review or merge.** The goal-alignment/PO, architect, harvest, and
+retrospective roles read and write issues and docs only. `guard.ts`, `reviewer.ts`, and
+`merge-driver.ts` stay fixed and non-configurable regardless of orchestration config —
+producer≠reviewer≠merger holds no matter how the round loop is shaped. A graceful exit
+(a final stop condition, or the run simply ending) still runs harvest and retrospective
+once before stopping, so a round's output is never orphaned — only the kill switch skips
+peripherals outright.
+
+**Recovery is rerun-not-resume for peripheral phases.** Workers keep the existing
+handoff+resume model (code WIP is expensive to redo). Peripheral phases get a cheaper
+contract: phase-level rerun, backed by a `rounds` ledger (round id, phase — aligning /
+architecting / executing / harvesting / retro / closed — status, and an artifact
+reference) plus idempotent externalized artifacts on GitHub itself (marker comments/
+labels, e.g. a `<!-- sapwood:round:N:harvest -->` HTML comment that a rerun checks for
+before re-posting). A graceful interrupt finishes the current phase and writes its
+cursor before exiting; a crash reruns whatever phase was `in_progress`, and the markers
+make that idempotent rather than duplicating output. This deliberately never attempts to
+restore a model's mid-conversation state — only its externally-visible artifacts.
+
+**Self-evolution goes through a PR, never a direct write.** When the retrospective role
+proposes a change to a prompt, doc, or config, it opens a PR through the same gate②
+path every other change takes — never a direct write to disk. This is why
+`worker.promptFile` (#74) landed in v1: it gives the retrospective role a concrete file
+to open a PR against, rather than an inline prompt with no addressable target.
+
+**Issue provenance becomes load-bearing here.** A PO-role-created issue carries
+`origin:agent` (the label convention landed in v1 via this issue; see
+`docs/security.md`) and initially *requires human confirmation* before it can enter
+`Ready` — the round loop can propose work, but a human still decides what actually
+enters the dispatch queue. The mechanics of that confirmation gate are a v0.2
+implementation detail, cut as its own issue when the milestone opens.
+
+**Role configuration is sketched, not designed.** Each role is expected to need at
+least a `role_id`, a `model`, and a `promptFile`, with execution modes (sequential /
+routing / parallel / competitive) selectable per role — the detailed shape is deferred
+to when v0.2 implementation issues are cut, not locked here.
 
 ## Key risks / watch items
 
