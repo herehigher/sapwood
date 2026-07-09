@@ -545,7 +545,12 @@ rewrite.** v1 requirements:
   `docs/security.md`, `docs/troubleshooting.md`, plus a plugin-facing
   `.claude-plugin/CLAUDE.md` for a calling model, and the `origin:agent` label
   (provisioned by `init`, see the v0.2 chapter and `docs/security.md` for what it's
-  for). **Soft-budget auto-enforcement via token estimation (#33):** `worker.ts` accumulates a
+  for). Guard defense-in-depth for the `data/KILL_SWITCH` / `data/PAUSE` sentinel write
+  paths (#81): direct `Write`/`Edit` and Bash `touch`/`rm`/`mv`/`git rm`/redirect vectors,
+  plus a sentinel path as a literal argument to any command, are now blocked in
+  `guard.ts`; a script that hardcodes the sentinel path in its own source (no CLI
+  argument) remains an open residual — see `docs/security.md`'s isolation-boundary note.
+  **Soft-budget auto-enforcement via token estimation (#33):** `worker.ts` accumulates a
   running USD estimate from every streamed `assistant` message's token usage (input/output/
   cache-write/cache-read — cache reads at the cache-read rate, not the input rate, so a
   cache-heavy run doesn't over-trigger) and calls the existing `requestHandoff()` graceful path
@@ -558,9 +563,7 @@ rewrite.** v1 requirements:
   the real terminal `total_cost_usd` when a lane finishes — the divergence is logged, not
   enforced; the rate table is explicitly a hand-maintained snapshot (see `pricing.yaml`'s
   header), not a live pricing lookup. **Still open:** the **live** merge-gate + kill-switch
-  runs on a real repo (#46 scope 3/4); guard defense-in-depth for the `data/KILL_SWITCH` /
-  `data/PAUSE` sentinel write paths, currently a permission-layer boundary rather than a closed
-  one (#81, see `docs/security.md`'s isolation-boundary note).
+  runs on a real repo (#46 scope 3/4).
 - **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`
