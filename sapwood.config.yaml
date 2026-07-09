@@ -27,11 +27,12 @@ worker:
   model: opus
   effort: high # low | medium | high
   timeoutSec: 3600 # wall-clock hard cap (safety bound)
-  budgetUsdSoft: 10 # SOFT per-worker budget: DECLARED here as the intended graceful-handoff
-  #                   threshold (commit+push WIP, progress note, .handoff sentinel, clean
-  #                   exit — never a mid-work kill), but enforcement is not yet wired: the
-  #                   worker has no live in-flight cost signal to compare against this value.
-  #                   Tracked as issue #33.
+  budgetUsdSoft: 10 # SOFT per-worker budget: auto-enforced via a live TOKEN-ESTIMATE (#33) —
+  #                   crossing it triggers a graceful handoff (commit+push WIP, progress note,
+  #                   .handoff sentinel, clean exit — never a mid-work kill). The estimate is a
+  #                   hand-maintained rate-table approximation (engine/src/pricing.ts), not the
+  #                   real billed cost; it's reconciled against the real total_cost_usd (logged)
+  #                   once the worker finishes.
   heartbeatStaleSecs: 180 # heartbeat older than this => worker considered dead
   # promptFile: prompts/my-worker.md
   #                   #74: override the worker prompt with your own template file. Relative

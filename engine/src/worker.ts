@@ -27,6 +27,7 @@ import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
 import type { Supervisor, LaneProbe, ReclaimResult } from "./conductor.js";
 import type { ModelUsageEntry } from "./state.js";
+import { estimateUsd } from "./pricing.js";
 
 /** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60/#69: a
  *  lane that's hard-killed (escalated past drain, or never resumed after a handoff) before ever
@@ -104,6 +105,35 @@ function toCategorized(u: unknown): CategorizedTokenUsageRaw {
 }
 
 type CategorizedTokenUsageRaw = Omit<ModelUsageEntry, "model">;
+
+/** #33: the LIVE in-flight cost-estimation signal — distinct from parseModelUsage/parseCostUsd,
+ *  which only ever read the terminal `result` line (absent until the whole run finishes).
+ *  Claude Code's stream-json carries a `message.usage` block on every streamed `assistant`
+ *  event, and that block is PER-MESSAGE (not cumulative) — so summing every assistant line's
+ *  usage across the jsonl-so-far gives the running total spent up to that point. Same tolerance
+ *  guarantee as parseModelUsage: a malformed/partial line (the stream may be mid-write, or the
+ *  worker's Bash tool literally echoed the string "assistant" as text) is skipped, never thrown,
+ *  and a line missing/misshaping `message`/`usage` yields zeros rather than aborting the scan. */
+export function parseAssistantUsageDeltas(jsonl: string): ModelUsageEntry[] {
+  const out: ModelUsageEntry[] = [];
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // partial/garbage line — ignore (stream may be mid-write)
+    }
+    if (obj.type !== "assistant") continue;
+    const message = obj.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const m = message as Record<string, unknown>;
+    const model = typeof m.model === "string" && m.model.length > 0 ? m.model : "unknown";
+    out.push({ model, ...toCategorized(m.usage) });
+  }
+  return out;
+}
 
 /** CLAUDE_BIN env override, else `claude` on PATH. */
 export function discoverClaudeBin(env: Record<string, string | undefined>): string {
@@ -221,6 +251,7 @@ interface Lane {
   reclaiming: boolean;
   startedMs: number; // wall-clock start, for the timeoutSec ceiling
   timedOut: boolean;
+  estimatedCostUsd: number; // #33: live token-estimation running total (see pricing.ts)
 }
 
 export class WorkerSupervisor implements Supervisor {
@@ -311,7 +342,7 @@ export class WorkerSupervisor implements Supervisor {
     const lane: Lane = {
       child, issue: issue.number, sessionId, jsonlFd, jsonlPath,
       hb: undefined, handoffRequested: false, reclaiming: false,
-      startedMs: this.now().getTime(), timedOut: false,
+      startedMs: this.now().getTime(), timedOut: false, estimatedCostUsd: 0,
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -407,7 +438,7 @@ export class WorkerSupervisor implements Supervisor {
     const lane: Lane = {
       child, issue: issue.number, sessionId, jsonlFd, jsonlPath,
       hb: undefined, handoffRequested: false, reclaiming: false,
-      startedMs: this.now().getTime(), timedOut: false,
+      startedMs: this.now().getTime(), timedOut: false, estimatedCostUsd: 0,
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
@@ -441,9 +472,11 @@ export class WorkerSupervisor implements Supervisor {
 
   /** Operator/drain-initiated graceful handoff: SIGTERM (not SIGKILL) so the worker wraps up
    *  the current step; onExit then writes the resumable .handoff sentinel. This is the live
-   *  handoff path for M2 (the drain half of the kill-switch, PLAN.md). AUTO cost-triggered
-   *  handoff is deferred — it needs a live cost signal, which stream-json does not carry
-   *  (total_cost_usd is only in the terminal result message). See the follow-up issue. */
+   *  handoff path for M2 (the drain half of the kill-switch, PLAN.md) — AND (#33) the path
+   *  checkSoftBudget() calls automatically when the live token-ESTIMATE crosses
+   *  worker.budgetUsdSoft, since stream-json carries no in-progress REAL total_cost_usd
+   *  (only the terminal result message has that). Both callers share this one method, so both
+   *  get the same idempotent-per-lane guard below. */
   requestHandoff(name: string): boolean {
     const lane = this.lanes.get(name);
     if (lane) {
@@ -496,10 +529,7 @@ export class WorkerSupervisor implements Supervisor {
   }
 
   /** Outer liveness heartbeat (mtime), independent of the model self-reporting, plus the
-   *  wall-clock timeout ceiling. NOTE: this deliberately does NOT monitor cost — stream-json
-   *  carries no in-progress total_cost_usd (only the terminal result message has it), so a
-   *  per-tick cost check would read 0 the whole run. Auto cost-triggered handoff is a
-   *  follow-up (#33); requestHandoff() is the live (drain) path for M2. */
+   *  wall-clock timeout ceiling and (#33) the live soft-budget check. */
   private heartbeatTick(name: string): void {
     const lane = this.lanes.get(name);
     if (!lane || lane.reclaiming) return;
@@ -515,6 +545,37 @@ export class WorkerSupervisor implements Supervisor {
       return;
     }
     this.touchHeartbeat(name);
+    this.checkSoftBudget(name, lane);
+  }
+
+  /** #33: soft per-worker budget auto-enforcement via LIVE token estimation. stream-json never
+   *  carries an in-progress `total_cost_usd` (only the terminal `result` line has it), so this
+   *  re-derives a running USD estimate from every streamed `assistant` message's token usage
+   *  (parseAssistantUsageDeltas), priced by the small rate table in pricing.ts — cache reads are
+   *  priced at the cache-READ rate there, not the input rate, specifically so a cache-heavy run
+   *  does not look artificially expensive and hand off prematurely (the failure mode the issue
+   *  flags). Crossing `worker.budgetUsdSoft` triggers the SAME graceful requestHandoff() path
+   *  the operator/drain uses: SIGTERM -> `.handoff` sentinel, resumable. NEVER a hard kill,
+   *  NEVER a fabricated result line (CLAUDE.md non-negotiable).
+   *
+   *  Re-parsing the whole jsonl-so-far every tick (rather than tracking a byte offset) is
+   *  deliberate: a per-worker jsonl is small relative to a heartbeat interval's cost, and it
+   *  keeps this correct-by-construction (no partial-line/byte-offset bookkeeping to get wrong)
+   *  at the price of doing a bit of redundant re-parsing — the same trade-off terminalCostUsd's
+   *  jsonl fallback already makes. Guarded by `handoffRequested` so a lane already draining
+   *  neither re-parses nor re-fires (requestHandoff() is idempotent regardless, but skipping the
+   *  parse here is pure waste avoidance once the outcome is already decided). */
+  private checkSoftBudget(name: string, lane: Lane): void {
+    if (lane.handoffRequested) return;
+    const deltas = parseAssistantUsageDeltas(this.readJsonl(lane.jsonlPath));
+    lane.estimatedCostUsd = deltas.reduce((sum, d) => sum + estimateUsd(d), 0);
+    if (lane.estimatedCostUsd >= this.deps.cfg.worker.budgetUsdSoft) {
+      console.error(
+        `[sapwood:worker] lane ${name}: estimated spend $${lane.estimatedCostUsd.toFixed(4)} crossed ` +
+          `the soft budget $${this.deps.cfg.worker.budgetUsdSoft} — requesting graceful handoff`,
+      );
+      this.requestHandoff(name);
+    }
   }
 
   private onExit(name: string, code: number | null): void {
@@ -542,7 +603,7 @@ export class WorkerSupervisor implements Supervisor {
           : code === 0
             ? "done"
             : "failed";
-      this.writeTerminalSentinel(name, lane.issue, lane.sessionId, lane.jsonlPath, tag, code);
+      this.writeTerminalSentinel(name, lane.issue, lane.sessionId, lane.jsonlPath, tag, code, lane.estimatedCostUsd);
     }
     this.lanes.delete(name);
   }
@@ -556,10 +617,25 @@ export class WorkerSupervisor implements Supervisor {
   private writeTerminalSentinel(
     name: string, issue: number, sessionId: string, jsonlPath: string,
     tag: "done" | "failed" | "handoff", exitCode: number | null,
+    // #33: the live token-ESTIMATE this lane accumulated (undefined for the detached-lane path
+    // below, which has no in-memory Lane to have accumulated one). Purely for the divergence log
+    // below — never affects what gets written to the sentinel.
+    estimatedCostUsd?: number,
   ): void {
     const jsonl = this.readJsonl(jsonlPath);
     const cost = parseCostUsd(jsonl);
     const modelUsage = parseModelUsage(jsonl);
+    // #33: reconcile the live estimate against the REAL terminal total_cost_usd and log the gap
+    // — this is how the pricing.ts rate table's known drift (see its module doc) is made
+    // visible instead of silent, per the estimate-vs-real divergence requirement. Never fatal,
+    // never gates anything — logging only.
+    if (estimatedCostUsd !== undefined && cost > 0) {
+      const divergence = estimatedCostUsd - cost;
+      console.error(
+        `[sapwood:worker] lane ${name}: cost estimate $${estimatedCostUsd.toFixed(4)} vs real ` +
+          `total_cost_usd $${cost.toFixed(4)} (estimate ${divergence >= 0 ? "+" : ""}${divergence.toFixed(4)})`,
+      );
+    }
     // #69 (fable P1): carry the immutable first-dispatch baseline out of running.json (still
     // present here — removed only at the tail below) into the terminal sentinel, so resume()
     // and the terminal-lane dirty check (inspectWorktree) can recover it after running.json

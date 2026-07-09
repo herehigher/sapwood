@@ -395,6 +395,16 @@ rewrite.** v1 requirements:
     green step**, not just at exit — so the latest pushed state is itself a handoff.
     This improves on 0day, which passes `--max-budget-usd` as a hard cut
     (`loop_worker.sh:81`) and only has crash-`--resume` (no pre-budget handoff).
+    **Auto-enforced (#33) via live token estimation:** stream-json carries no in-progress
+    `total_cost_usd` (only the terminal result line has it), so `worker.ts` accumulates a
+    running USD estimate from every streamed `assistant` message's token usage — priced by a
+    small, explicitly-marked-as-an-estimate per-model rate table (`pricing.ts`) — and calls the
+    same `requestHandoff()` the operator/drain path uses once the estimate crosses
+    `worker.budgetUsdSoft`. Cache-read tokens are priced at the cache-read rate, not the input
+    rate, so a cache-heavy run doesn't look artificially expensive and hand off prematurely.
+    The estimate is reconciled against the real terminal `total_cost_usd` when it lands (the
+    divergence is logged, never enforced) — real billing can diverge from the table (repricing,
+    discounts, cache-TTL differences), so the estimate is a trigger signal, not a source of truth.
   - *Engine ceiling is **hard**.* A cumulative/daily USD cap + wall-clock cap in the
     conductor (independent of the drift-prone CLI `--max-budget-usd`), with auto-drain
     on breach + an out-of-band kill switch. This is a **safety boundary** for runaway
@@ -534,11 +544,18 @@ rewrite.** v1 requirements:
   `docs/security.md`, `docs/troubleshooting.md`, plus a plugin-facing
   `.claude-plugin/CLAUDE.md` for a calling model, and the `origin:agent` label
   (provisioned by `init`, see the v0.2 chapter and `docs/security.md` for what it's
-  for). **Still open:** the **live** merge-gate + kill-switch runs on a real repo (#46
-  scope 3/4); soft per-worker budget *auto*-enforcement, still needing a live in-flight
-  cost signal (#33); guard defense-in-depth for the `data/KILL_SWITCH` / `data/PAUSE`
-  sentinel write paths, currently a permission-layer boundary rather than a closed one
-  (#81, see `docs/security.md`'s isolation-boundary note).
+  for). **Soft-budget auto-enforcement via token estimation (#33):** `worker.ts` accumulates a
+  running USD estimate from every streamed `assistant` message's token usage (input/output/
+  cache-write/cache-read, priced by a small per-model rate table in `pricing.ts` — cache reads
+  at the cache-read rate, not the input rate, so a cache-heavy run doesn't over-trigger) and
+  calls the existing `requestHandoff()` graceful path (SIGTERM -> `.handoff`, resumable, never a
+  hard kill) once the estimate crosses `worker.budgetUsdSoft`. The estimate is reconciled
+  against the real terminal `total_cost_usd` when a lane finishes — the divergence is logged,
+  not enforced; the rate table is explicitly a hand-maintained snapshot (see `pricing.ts`'s
+  module doc), not a live pricing lookup. **Still open:** the **live** merge-gate + kill-switch
+  runs on a real repo (#46 scope 3/4); guard defense-in-depth for the `data/KILL_SWITCH` /
+  `data/PAUSE` sentinel write paths, currently a permission-layer boundary rather than a closed
+  one (#81, see `docs/security.md`'s isolation-boundary note).
 - **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`

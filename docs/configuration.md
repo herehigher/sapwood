@@ -60,7 +60,7 @@ Per-worker execution.
 | `model` | `opus` | Model the headless worker runs as. |
 | `effort` | `high` | `low` \| `medium` \| `high`. |
 | `timeoutSec` | `3600` | Wall-clock hard cap per worker (enforced). |
-| `budgetUsdSoft` | `10` | **Soft** per-worker USD budget. Reaching it is meant to trigger a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. Live enforcement of this exact threshold needs an in-flight cost signal the worker doesn't currently have (tracked separately); today the effective spend bound is `timeoutSec` plus the engine's hard `cost` ceiling below. |
+| `budgetUsdSoft` | `10` | **Soft** per-worker USD budget, auto-enforced via a live token-usage estimate (stream-json carries no in-progress real cost). Crossing it triggers a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. The estimate is a hand-maintained per-model rate-table approximation, reconciled (logged, not enforced) against the real cost when the worker finishes; `timeoutSec` plus the engine's hard `cost` ceiling below remain the actual backstop. |
 | `heartbeatStaleSecs` | `180` | A worker heartbeat older than this is considered dead (stale-heartbeat reclaim). |
 | `promptFile` | unset | Override the worker's prompt template with your own file. A relative path resolves against **the config file's own directory**, not the CLI's cwd — so the same config behaves identically no matter where `sapwood` is invoked from. Unset uses the engine's shipped `prompts/worker.md` (TDD + two-gate method). |
 

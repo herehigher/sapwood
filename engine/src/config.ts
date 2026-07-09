@@ -51,11 +51,14 @@ const Worker = z.object({
   model: z.string().default("opus"),
   effort: z.enum(["low", "medium", "high"]).default("high"),
   timeoutSec: z.number().int().positive().default(3600),
-  // SOFT per-worker budget -> graceful handoff (never a mid-work kill). NOTE: automatic
-  // enforcement at this limit is pending #33 — it needs a live cost signal, which stream-json
-  // does not carry (total_cost_usd is only in the terminal result message). Interim spend
-  // bound: worker.timeoutSec (enforced) + the engine HARD ceiling (M3, the actual runaway
-  // safety boundary). requestHandoff() is the live drain path today.
+  // SOFT per-worker budget -> graceful handoff (never a mid-work kill). Auto-enforced (#33) via
+  // LIVE TOKEN ESTIMATION: stream-json carries no in-progress total_cost_usd (only the terminal
+  // result message has that), so worker.ts's checkSoftBudget() accumulates a running USD
+  // ESTIMATE from every streamed assistant message's token usage (priced by the small rate
+  // table in pricing.ts) and calls requestHandoff() once the estimate crosses this value. The
+  // estimate is reconciled against the real terminal total_cost_usd when it lands (logged, not
+  // enforced) — see worker.ts's writeTerminalSentinel. Backstopped by worker.timeoutSec
+  // (enforced) + the engine HARD ceiling (M3, the actual runaway safety boundary).
   budgetUsdSoft: z.number().finite().positive().default(10),
   heartbeatStaleSecs: z.number().int().positive().default(180),
   // #74: file-based worker prompt. A relative path is resolved against the CONFIG FILE's

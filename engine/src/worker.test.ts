@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import {
-  parseCostUsd, parseModelUsage, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote,
+  parseCostUsd, parseModelUsage, parseAssistantUsageDeltas, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote,
   WorkerSupervisor, renderPromptTemplate, defaultPromptPath, loadWorkerPromptTemplate, buildRenderPrompt,
 } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -110,6 +110,39 @@ test("parseModelUsage: multiple result lines -> last one wins (same as parseCost
   assert.deepEqual(parseModelUsage(jsonl), [
     { model: "m2", inputTokens: 2, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
   ]);
+});
+
+// ── #33: parseAssistantUsageDeltas — the live in-flight cost-estimation signal ──
+test("parseAssistantUsageDeltas: extracts per-message usage from streamed `assistant` lines, ignoring system/result lines and malformed json", () => {
+  const jsonl = [
+    `{"type":"system","subtype":"init"}`,
+    JSON.stringify({
+      type: "assistant",
+      message: { model: "claude-opus-4-8", usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+    }),
+    `garbage{{{`,
+    JSON.stringify({
+      type: "assistant",
+      message: { model: "claude-opus-4-8", usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 2000 } },
+    }),
+    // a terminal result line must NOT be double-counted as an assistant delta
+    JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 9.99, usage: { input_tokens: 99999 } }),
+  ].join("\n");
+  assert.deepEqual(parseAssistantUsageDeltas(jsonl), [
+    { model: "claude-opus-4-8", inputTokens: 100, outputTokens: 50, cacheCreationTokens: 0, cacheReadTokens: 0 },
+    { model: "claude-opus-4-8", inputTokens: 10, outputTokens: 5, cacheCreationTokens: 0, cacheReadTokens: 2000 },
+  ]);
+});
+
+test("parseAssistantUsageDeltas: no assistant lines / malformed message / missing usage -> [] or zeros, never throws", () => {
+  assert.deepEqual(parseAssistantUsageDeltas(""), []);
+  assert.deepEqual(parseAssistantUsageDeltas("garbage{{{\nnot json either"), []);
+  assert.deepEqual(parseAssistantUsageDeltas(`{"type":"assistant","message":"not-an-object"}`), []);
+  assert.deepEqual(parseAssistantUsageDeltas(`{"type":"assistant"}`), []); // no message field at all
+  assert.deepEqual(
+    parseAssistantUsageDeltas(JSON.stringify({ type: "assistant", message: { model: "m", usage: {} } })),
+    [{ model: "m", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }],
+  );
 });
 
 test("discoverClaudeBin: env CLAUDE_BIN wins, else 'claude'", () => {
@@ -567,6 +600,90 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
     assert.ok(existsSync(join(dir, `${name}.failed.json`)), "timed-out worker marked failed");
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "timed-out worker process killed");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #33: soft per-worker budget auto-enforcement via live token estimation ──
+
+test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly once, and the lane ends up .handoff (graceful), never .failed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    // Emits one streamed assistant usage line big enough to cross a tiny budget, then sleeps
+    // with no TERM trap (the empirically-confirmed real CLI shape, #60) so the SIGTERM the
+    // budget check fires actually ends the process and lets onExit write the sentinel.
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `sleep 30`,
+        ``,
+      ].join("\n"),
+    );
+    // opus: $5/MTok input + $25/MTok output -> 1000 in + 1000 out = $0.005 + $0.025 = $0.03,
+    // comfortably over a $0.01 soft budget.
+    const tcfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { budgetUsdSoft: 0.01 },
+    });
+    const s = new WorkerSupervisor({
+      cfg: tcfg, stateDir: dir, claudeBin: bin,
+      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: mkHook(dir),
+    });
+    let handoffCalls = 0;
+    const original = s.requestHandoff.bind(s);
+    s.requestHandoff = (name: string) => {
+      handoffCalls++;
+      return original(name);
+    };
+    const { name } = await s.dispatch({ number: 33, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "soft-budget crossing led to a graceful .handoff");
+    assert.ok(!existsSync(join(dir, `${name}.failed.json`)), "never a hard-kill .failed for a budget-triggered handoff");
+    // Give any further heartbeat ticks a moment to prove the guard actually holds, not just
+    // that the first tick happened to be the last one before exit.
+    await sleep(150);
+    assert.equal(handoffCalls, 1, "requestHandoff fired exactly once for the soft-budget crossing");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache reads are priced at the cache-read rate, not the input rate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    // 1,000,000 cache-read tokens at opus's cache-read rate (~$0.50/MTok) is ~$0.50 --
+    // comfortably under a $2 budget. Priced (WRONGLY) at the input rate ($5/MTok) it would be
+    // ~$5.00 and cross the budget on the very first heartbeat tick -- exactly the cache-heavy
+    // over-trigger failure mode #33 flags.
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":1000000}}}'`,
+        `sleep 30`,
+        ``,
+      ].join("\n"),
+    );
+    const tcfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { budgetUsdSoft: 2 },
+    });
+    const s = new WorkerSupervisor({
+      cfg: tcfg, stateDir: dir, claudeBin: bin,
+      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: mkHook(dir),
+    });
+    const { name } = await s.dispatch({ number: 34, title: "t", labels: [] });
+    // Let several heartbeat ticks pass -- long enough that a wrongly-priced estimate would
+    // already have crossed budget and triggered a handoff by now.
+    await sleep(400);
+    assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "cache-heavy run under budget must NOT hand off");
+    assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
+    await s.reclaim(name);
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
