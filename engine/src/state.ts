@@ -151,6 +151,33 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN review_fallback_kind TEXT;
     `);
   },
+  // 7 -> 8: rounds ledger (#86 — round-loop skeleton, #77 decisions 1/2/4). A round layers
+  // ABOVE the tick engine: dispatch a batch -> tick until it drains -> peripheral-phase stubs
+  // (aligning/architecting/plan_review before executing; harvesting/retro after) -> close ->
+  // next round. `phase` is the cursor (round.ts's RoundPhase enum); `status` distinguishes a
+  // round still being driven from one fully closed. `artifact_ref` is the CURRENT phase's
+  // externalized idempotency marker (#77 decision 4, rerun-not-resume): a crash mid-phase
+  // leaves this row `in_progress` at that same phase; on restart the round loop re-invokes
+  // ONLY that phase's stub fresh (never resuming a prior attempt's mid-session state, never
+  // re-running an earlier already-completed phase), handing the stub this marker so it can
+  // recognize "already externalized, don't duplicate" rather than blindly redoing the side
+  // effect. Nullable: cleared every time the phase cursor advances (a new phase starts with no
+  // marker of its own). One row per round; at most one `in_progress` row is expected at a time
+  // (round.ts's own invariant, not DB-enforced — mirrors workers' single-writer-serial
+  // assumption elsewhere in this file).
+  (db) => {
+    db.exec(`
+      CREATE TABLE rounds (
+        round_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        phase        TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        artifact_ref TEXT,
+        started_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        ended_at     TEXT
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -267,6 +294,36 @@ export interface CategorizedTokenUsage {
  *  when the CLI gave no model identifier at all. */
 export interface ModelUsageEntry extends CategorizedTokenUsage {
   model: string;
+}
+
+// ── Rounds ledger (#86) ────────────────────────────────────────────────────────────────────
+
+/** The round-loop's phase cursor (round.ts). Peripheral-phase stubs run in `aligning`,
+ *  `architecting`, `plan_review` (pre-executing) and `harvesting`, `retro` (post-executing);
+ *  `executing` is the real tick-engine dispatch-batch-then-drain phase (no stub — tick()
+ *  itself, unmodified); `closed` is terminal. */
+export type RoundPhase =
+  | "aligning"
+  | "architecting"
+  | "plan_review"
+  | "executing"
+  | "harvesting"
+  | "retro"
+  | "closed";
+
+export type RoundStatus = "in_progress" | "done";
+
+export interface RoundRow {
+  round_id: number;
+  phase: RoundPhase;
+  status: RoundStatus;
+  /** The CURRENT phase's externalized idempotency marker, or null if that phase hasn't
+   *  persisted one yet. See the schema v7->v8 migration comment for the rerun-not-resume
+   *  contract this backs. */
+  artifact_ref: string | null;
+  started_at: string;
+  updated_at: string;
+  ended_at: string | null;
 }
 
 /** A durably-persisted recovery-path board mutation still awaiting success or escalation
@@ -646,5 +703,64 @@ export class State {
    *  conductor escalated to needs-human instead. Either way, stop retrying. */
   clearPendingRollback(id: number): void {
     this.db.prepare("DELETE FROM pending_rollbacks WHERE id = ?").run(id);
+  }
+
+  // ── Rounds ledger (#86) ─────────────────────────────────────────────────────────────────
+
+  /** Insert a fresh round in phase 'aligning', status 'in_progress', no marker. Returns the
+   *  created row (round_id assigned by SQLite). */
+  startRound(now: string): RoundRow {
+    const res = this.db
+      .prepare(
+        "INSERT INTO rounds (phase, status, artifact_ref, started_at, updated_at) VALUES ('aligning', 'in_progress', NULL, ?, ?)",
+      )
+      .run(now, now);
+    return {
+      round_id: Number(res.lastInsertRowid),
+      phase: "aligning",
+      status: "in_progress",
+      artifact_ref: null,
+      started_at: now,
+      updated_at: now,
+      ended_at: null,
+    };
+  }
+
+  /** The most recent round still `in_progress` — a round.ts restart's rerun-not-resume probe
+   *  (#77 decision 4). At most one is expected to exist at a time (round.ts's own invariant);
+   *  `ORDER BY round_id DESC LIMIT 1` is a defensive tiebreak, not evidence multiple are normal. */
+  openRound(): RoundRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM rounds WHERE status = 'in_progress' ORDER BY round_id DESC LIMIT 1")
+      .get() as RoundRow | undefined;
+  }
+
+  getRound(id: number): RoundRow | undefined {
+    return this.db.prepare("SELECT * FROM rounds WHERE round_id = ?").get(id) as RoundRow | undefined;
+  }
+
+  /** Advance the phase cursor. Always CLEARS artifact_ref — a newly-entered phase has no
+   *  marker of its own yet (the previous phase's marker is irrelevant once it's done; see the
+   *  schema v7->v8 migration comment). */
+  advanceRoundPhase(id: number, phase: RoundPhase, now: string): void {
+    this.db
+      .prepare("UPDATE rounds SET phase = ?, artifact_ref = NULL, updated_at = ? WHERE round_id = ?")
+      .run(phase, now, id);
+  }
+
+  /** Persist a phase stub's externalized idempotency token WITHOUT changing phase — the
+   *  rerun-not-resume marker a crash-and-restart hands back to that same phase's stub. */
+  setRoundMarker(id: number, marker: string, now?: string): void {
+    this.db
+      .prepare("UPDATE rounds SET artifact_ref = ?, updated_at = ? WHERE round_id = ?")
+      .run(marker, now ?? new Date().toISOString(), id);
+  }
+
+  /** Close a round: phase 'closed', status 'done', ended_at stamped. Terminal — round.ts never
+   *  reopens a closed round (a new round gets its own row via startRound). */
+  closeRound(id: number, now: string): void {
+    this.db
+      .prepare("UPDATE rounds SET phase = 'closed', status = 'done', updated_at = ?, ended_at = ? WHERE round_id = ?")
+      .run(now, now, id);
   }
 }

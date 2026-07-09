@@ -219,6 +219,18 @@ const Stop = z.object({
   onMilestoneComplete: z.string().min(1).optional(),
 }).strict();
 
+// #86: round-loop scoping. `milestone` reuses the exact GitHub-milestone mechanism
+// stop.onMilestoneComplete already validates against (forge.listMilestoneTitles/
+// countOpenIssuesInMilestone) rather than inventing a parallel label-based "theme" — one key
+// does both jobs the round loop needs: (1) dispatch-candidate filter (round.ts's
+// RoundScopedForge only returns Ready issues whose Issue.milestone matches), and (2) a
+// round-level stop condition (the round's dispatch batch is skipped once that milestone has
+// zero open issues left). Unset = no scoping, every Ready issue is a candidate (today's
+// behavior, unchanged).
+const Round = z.object({
+  milestone: z.string().min(1).optional(),
+}).strict();
+
 const Recovery = z.object({
   // #31: bounded retry count for a durably-persisted rollback/requeue (a recovery-path board
   // mutation, e.g. rolling a dispatch-failed claim back to Ready, or requeuing a dead lane).
@@ -236,6 +248,7 @@ export const ConfigSchema = z.object({
   guard: Guard.default({}),
   cost: Cost.default({}),
   stop: Stop.default({}),
+  round: Round.default({}),
   recovery: Recovery.default({}),
   reviewer: Reviewer.default({}),
   merge: Merge.default({}),

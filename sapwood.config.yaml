@@ -78,6 +78,12 @@ labels: # taxonomy used by the loop
   reserve: reserve
   verifyNa: verify:n/a # Decision #8: issues with this label skip the verification-plan gate
 
+# round-loop scoping (#86 skeleton). Unset = no scoping (every Ready issue is a candidate).
+# round:
+#   milestone: M4 # exact GitHub milestone title (same matching as stop.onMilestoneComplete).
+#                 # Scopes this round's dispatch batch to that milestone's issues, and ends
+#                 # the round's dispatch early once it has zero open issues left.
+
 escalation:
   humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human
 
