@@ -118,8 +118,9 @@ Two different things are both called "budget," and they behave differently on pu
   token estimate. stream-json carries no in-progress `total_cost_usd` (only the
   terminal result line has that), so the worker accumulates a running USD estimate
   from every streamed assistant message's token usage (priced by a small, explicitly
-  approximate per-model rate table — cache reads priced at the cache-read rate, not
-  the input rate, so a cache-heavy run doesn't look artificially expensive). Crossing
+  approximate per-model rate table — the shipped `pricing.yaml`, overridable via
+  `worker.pricingFile` — with cache reads priced at the cache-read rate, not the
+  input rate, so a cache-heavy run doesn't look artificially expensive). Crossing
   the threshold triggers a graceful handoff — finish the current atomic step, commit +
   push WIP, write a progress note, drop a `.handoff` sentinel carrying a resumable
   session id, exit clean — **never** a mid-work `SIGKILL`. A hard kill mid-step both

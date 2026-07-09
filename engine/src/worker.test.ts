@@ -690,6 +690,54 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
   }
 });
 
+test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONSTRUCTION (fail-closed, before any dispatch), naming the path — and a valid custom file's rates actually drive the budget check", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    // Fail-closed: constructing the supervisor with a missing pricingFile throws immediately.
+    const badCfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { pricingFile: "/nonexistent/rates.yaml" },
+    });
+    assert.throws(
+      () => new WorkerSupervisor({ cfg: badCfg, stateDir: dir, claudeBin: "claude", hasOpenPr: async () => false, guardHookPath: mkHook(dir) }),
+      /\/nonexistent\/rates\.yaml/,
+    );
+
+    // And a VALID custom table is what the budget check prices against: rates 100x the
+    // shipped defaults make a tiny usage line cross a budget the default table wouldn't.
+    const ratesPath = join(dir, "expensive.yaml");
+    writeFileSync(
+      ratesPath,
+      "models: { opus: { input: 500, output: 2500, cacheWrite: 625, cacheRead: 50 } }\n",
+    );
+    // 1000 in + 1000 out at 100x rates = $3.00; the shipped table would price it $0.03 —
+    // under this $1 budget. A handoff proves the CUSTOM table is in effect.
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `sleep 30`,
+        ``,
+      ].join("\n"),
+    );
+    const cfgCustom = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { budgetUsdSoft: 1, pricingFile: ratesPath },
+    });
+    const s = new WorkerSupervisor({
+      cfg: cfgCustom, stateDir: dir, claudeBin: bin,
+      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: mkHook(dir),
+    });
+    const { name } = await s.dispatch({ number: 35, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "custom pricingFile rates drove the soft-budget handoff");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NOT instantly re-handoff — the soft budget bounds spend PER RUN; new post-resume usage crossing it again MUST", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

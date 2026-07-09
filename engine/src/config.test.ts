@@ -220,6 +220,31 @@ test("worker.promptFile: a typo'd key under worker.* is rejected, not silently d
   );
 });
 
+// ── #33 follow-up (PR #85 human review): worker.pricingFile ──
+test("worker.pricingFile: unset by default, overridable, follows the #74 promptFile shape", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.pricingFile, undefined);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { pricingFile: pricing/my-rates.yaml }",
+  );
+  assert.equal(over.worker.pricingFile, "pricing/my-rates.yaml");
+});
+
+test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's directory, exactly like promptFile (#74)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { pricingFile: rates/my-rates.yaml }",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.worker.pricingFile, join(dir, "rates", "my-rates.yaml"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
 
 test("stop: absent by default — every field undefined, no behavior change (#76 regression contract)", () => {

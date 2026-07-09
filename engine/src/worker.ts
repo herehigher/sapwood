@@ -27,7 +27,7 @@ import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
 import type { Supervisor, LaneProbe, ReclaimResult } from "./conductor.js";
 import type { ModelUsageEntry } from "./state.js";
-import { estimateUsd } from "./pricing.js";
+import { estimateUsd, loadPricingTable, type PricingTable } from "./pricing.js";
 
 /** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60/#69: a
  *  lane that's hard-killed (escalated past drain, or never resumed after a handoff) before ever
@@ -269,6 +269,10 @@ export class WorkerSupervisor implements Supervisor {
   private readonly bin: string;
   private readonly hbMs: number;
   private readonly guardHookPath: string;
+  // #33: the soft-budget estimator's model rate table, loaded ONCE at construction (from
+  // worker.pricingFile or the shipped engine/pricing.yaml — see pricing.ts), never per tick.
+  // A missing/malformed configured file throws HERE, at startup, before any dispatch.
+  private readonly pricing: PricingTable;
   private readonly lanes = new Map<string, Lane>();
   // Detached lanes (persisted running.json, no in-memory handle — engine restarted while the
   // worker kept running) already asked to hand off. Keeps requestHandoff idempotent-per-tick
@@ -291,6 +295,7 @@ export class WorkerSupervisor implements Supervisor {
     // "build-dist" step (#26) is the existing `npm run build`; dispatch fails closed below if
     // the file is absent in hard mode rather than running an unguarded worker.
     this.guardHookPath = deps.guardHookPath ?? fileURLToPath(new URL("./guard-hook.js", import.meta.url));
+    this.pricing = loadPricingTable(deps.cfg);
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -439,7 +444,7 @@ export class WorkerSupervisor implements Supervisor {
     // re-cross it on the first heartbeat tick after resume — an unresumable handoff loop.
     // The estimator-side mirror of State.recordSpend's resume cost-delta baseline.
     const estimateBaselineUsd = parseAssistantUsageDeltas(this.readJsonl(jsonlPath))
-      .reduce((sum, d) => sum + estimateUsd(d), 0);
+      .reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0);
     const jsonlFd = openSync(jsonlPath, "a"); // append: preserve the pre-handoff stream
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     const args = claudeArgs({
@@ -584,7 +589,7 @@ export class WorkerSupervisor implements Supervisor {
   private checkSoftBudget(name: string, lane: Lane): void {
     if (lane.handoffRequested) return;
     const deltas = parseAssistantUsageDeltas(this.readJsonl(lane.jsonlPath));
-    const wholeFileUsd = deltas.reduce((sum, d) => sum + estimateUsd(d), 0);
+    const wholeFileUsd = deltas.reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0);
     // PER-RUN spend: the whole-file total minus what was already in the jsonl when this run
     // started (0 on a fresh dispatch; the pre-handoff stream's total on a resume — see
     // Lane.estimateBaselineUsd). The soft budget bounds spend per run, not per issue lifetime;

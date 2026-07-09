@@ -398,7 +398,8 @@ rewrite.** v1 requirements:
     **Auto-enforced (#33) via live token estimation:** stream-json carries no in-progress
     `total_cost_usd` (only the terminal result line has it), so `worker.ts` accumulates a
     running USD estimate from every streamed `assistant` message's token usage — priced by a
-    small, explicitly-marked-as-an-estimate per-model rate table (`pricing.ts`) — and calls the
+    small, explicitly-marked-as-an-estimate per-model rate table (the shipped `pricing.yaml`,
+    user-overridable via `worker.pricingFile`, loaded fail-closed by `pricing.ts`) — and calls the
     same `requestHandoff()` the operator/drain path uses once the estimate crosses
     `worker.budgetUsdSoft`. Cache-read tokens are priced at the cache-read rate, not the input
     rate, so a cache-heavy run doesn't look artificially expensive and hand off prematurely.
@@ -546,13 +547,17 @@ rewrite.** v1 requirements:
   (provisioned by `init`, see the v0.2 chapter and `docs/security.md` for what it's
   for). **Soft-budget auto-enforcement via token estimation (#33):** `worker.ts` accumulates a
   running USD estimate from every streamed `assistant` message's token usage (input/output/
-  cache-write/cache-read, priced by a small per-model rate table in `pricing.ts` — cache reads
-  at the cache-read rate, not the input rate, so a cache-heavy run doesn't over-trigger) and
-  calls the existing `requestHandoff()` graceful path (SIGTERM -> `.handoff`, resumable, never a
-  hard kill) once the estimate crosses `worker.budgetUsdSoft`. The estimate is reconciled
-  against the real terminal `total_cost_usd` when a lane finishes — the divergence is logged,
-  not enforced; the rate table is explicitly a hand-maintained snapshot (see `pricing.ts`'s
-  module doc), not a live pricing lookup. **Still open:** the **live** merge-gate + kill-switch
+  cache-write/cache-read — cache reads at the cache-read rate, not the input rate, so a
+  cache-heavy run doesn't over-trigger) and calls the existing `requestHandoff()` graceful path
+  (SIGTERM -> `.handoff`, resumable, never a hard kill) once the estimate crosses
+  `worker.budgetUsdSoft`. Rates are NOT hardcoded in source (PR #85 human review): they live in
+  a user-editable YAML — the engine ships a commented `pricing.yaml` default, overridable via
+  `worker.pricingFile` (relative paths resolve against the config file's directory, the exact
+  #74 promptFile pattern; missing/malformed = fail-fast startup error, never a silent fallback)
+  — loaded once at supervisor construction by `pricing.ts`. The estimate is reconciled against
+  the real terminal `total_cost_usd` when a lane finishes — the divergence is logged, not
+  enforced; the rate table is explicitly a hand-maintained snapshot (see `pricing.yaml`'s
+  header), not a live pricing lookup. **Still open:** the **live** merge-gate + kill-switch
   runs on a real repo (#46 scope 3/4); guard defense-in-depth for the `data/KILL_SWITCH` /
   `data/PAUSE` sentinel write paths, currently a permission-layer boundary rather than a closed
   one (#81, see `docs/security.md`'s isolation-boundary note).

@@ -69,6 +69,13 @@ const Worker = z.object({
   // error (buildRenderPrompt loads it once, eagerly, before any dispatch) — never a silent
   // fallback to the shipped default.
   promptFile: z.string().optional(),
+  // #33 follow-up (PR #85 human review): user-editable model rate table for the soft-budget
+  // token estimator. Same shape as promptFile (#74): a relative path resolves against the
+  // CONFIG FILE's directory (see loadConfig); unset (default) -> the shipped preset at the
+  // engine package's `pricing.yaml` (see pricing.ts's defaultPricingPath). Set-but-missing/
+  // unreadable/malformed is a fail-fast startup error (loadPricingTable, loaded once at
+  // supervisor construction) — never a silent fallback to the shipped default.
+  pricingFile: z.string().optional(),
 }).strict();
 
 const Cost = z.object({
@@ -274,6 +281,10 @@ export function loadConfig(path?: string): SapwoodConfig {
   // the same config the engine would run inside `repo/`.
   if (cfg.worker.promptFile !== undefined && !isAbsolute(cfg.worker.promptFile)) {
     cfg.worker.promptFile = resolve(dirname(file), cfg.worker.promptFile);
+  }
+  // Same rule for worker.pricingFile (#33 follow-up, PR #85 review).
+  if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
+    cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
   }
   return cfg;
 }
