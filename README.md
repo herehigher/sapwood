@@ -43,6 +43,17 @@ GitHub issue (Ready)
    → board: Done
 ```
 
+## Documentation
+
+- [`docs/getting-started.md`](docs/getting-started.md) — install, `sapwood init`, the
+  first-run trust ramp, slash commands, writing a `Ready` issue.
+- [`docs/configuration.md`](docs/configuration.md) — every config key, default, and
+  semantics.
+- [`docs/security.md`](docs/security.md) — the trust/governance model: guard hook,
+  human-merge-only paths, kill switch vs. pause, cost ceilings.
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — common failures and what they
+  mean.
+
 ## Requirements
 
 - **Node.js ≥ 24** — the engine uses the built-in `node:sqlite` (WAL) for durable
