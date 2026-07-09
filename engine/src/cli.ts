@@ -10,11 +10,11 @@ import { ZodError } from "zod";
 import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.js";
 import { init, InitError } from "./init.js";
 import { State, SCHEMA_VERSION, type WorkerRow } from "./state.js";
-import { GithubForge, type Issue } from "./forge.js";
+import { GithubForge, type IForge, type Issue } from "./forge.js";
 import { WorkerSupervisor, buildRenderPrompt } from "./worker.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
-import { runDriver, type StopMode, type DriverResult } from "./driver.js";
+import { runDriver, type StopMode, type DriverResult, type StopConfig, type StopConditionHit } from "./driver.js";
 import { orderForDispatch } from "./conductor.js";
 
 const require = createRequire(import.meta.url);
@@ -53,7 +53,7 @@ Flags:
 `;
 
 const RUN_USAGE = `\
-usage: sapwood run [--once | --until-idle | --dry-run]
+usage: sapwood run [--once | --until-idle | --dry-run] [--stop-* ...]
 
 Run the engine loop: tick (reclaim -> drive -> dispatch) on cfg.engine.tickIntervalSec's cadence.
 
@@ -64,6 +64,23 @@ Flags:
                  and a cost preview (per-worker soft budget x candidate count, daily
                  ceiling), then exit. Never spawns a worker or writes state — the
                  first-run trust ramp's "see before you run" step.
+
+Goal-based stop conditions (#76) — each optional; hitting ANY of them (OR semantics, first hit
+wins) winds the run down: stop dispatching new lanes, let in-flight lanes finish, exit cleanly,
+naming the condition that fired. Override the config's \`stop.*\` section when given. Combine
+with --once/--until-idle/--forever (the default) freely; NOT with --dry-run (which never runs
+the loop at all).
+  --stop-after-issues N     Stop once N issues have been merged this run
+  --stop-after-prs N        Stop once N PRs have been opened this run
+  --stop-on-milestone NAME  Stop once milestone NAME has zero open issues left
+                            (NAME must match the milestone title EXACTLY — validated
+                            against the repo at startup, before any dispatch)
+
+N is a floor, not an exact bound: the tick that crosses N has already dispatched its own
+wave (up to lanes.roundDispatchCap lanes), and those finish during the wind-down. With
+--once, a condition hit on the single tick is named in the exit line but never waits for
+wind-down (stoppedBy stays "once").
+
   --help, -h     Print this help and exit
 `;
 
@@ -71,6 +88,49 @@ Flags:
  *  engine starts — `sapwood run --bogus` silently starting a daemon that claims issues and
  *  dispatches workers is the exact failure Codex PR #50 flagged (thread on cli.ts:46). */
 const RUN_FLAGS = ["--once", "--until-idle", "--dry-run"] as const;
+
+/** #76: the three value-taking `--stop-*` flags, each paired with the StopConfig key it feeds. */
+const STOP_FLAG_SPECS = [
+  { flag: "--stop-after-issues", key: "afterIssuesMerged" as const },
+  { flag: "--stop-after-prs", key: "afterPRsOpened" as const },
+  { flag: "--stop-on-milestone", key: "onMilestoneComplete" as const },
+];
+
+/** Pulls the `--stop-*` flags (and their values) out of a run-subcommand argv, leaving `rest`
+ *  for the existing bare-flag validation (RUN_FLAGS) to check. Pure + exported for testing.
+ *  Tolerant of being run over the FULL process.argv (cli.ts calls it twice: once in runCli's
+ *  synchronous validation, once in runEngine to build the resolved StopConfig) — non-matching
+ *  tokens (including "sapwood", "run") just pass through to `rest` unexamined, same tolerance
+ *  parseRunStopMode already relies on. Fails closed: a `--stop-*` flag with a missing value, a
+ *  value that looks like another flag, or (for the two count flags) a non-positive-integer value
+ *  is an `error`, never a silently-ignored/mis-parsed condition. */
+export function parseStopFlags(argv: string[]): { rest: string[]; stop: StopConfig; error?: string } {
+  const rest: string[] = [];
+  const stop: StopConfig = {};
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    const spec = STOP_FLAG_SPECS.find((s) => s.flag === token);
+    if (!spec) {
+      rest.push(token);
+      continue;
+    }
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("-")) {
+      return { rest, stop, error: `${spec.flag} requires a value` };
+    }
+    if (spec.key === "onMilestoneComplete") {
+      stop.onMilestoneComplete = value;
+    } else {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n <= 0) {
+        return { rest, stop, error: `${spec.flag} requires a positive integer, got: ${value}` };
+      }
+      stop[spec.key] = n;
+    }
+    i++; // consume the value token too
+  }
+  return { rest, stop };
+}
 
 const STATUS_USAGE = `\
 usage: sapwood status [db-path]
@@ -360,9 +420,16 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
     if (flags.includes("--help") || flags.includes("-h")) {
       return { stdout: RUN_USAGE, stderr: "", code: 0 };
     }
+    // #76: pull the value-taking --stop-* flags out first (both for their own validation and so
+    // their VALUE tokens — an integer, a milestone name — never get mistaken for unknown bare
+    // flags below).
+    const { rest, stop, error: stopError } = parseStopFlags(flags);
+    if (stopError) {
+      return { stdout: "", stderr: `sapwood run: ${stopError}\n\n${RUN_USAGE}`, code: 1 };
+    }
     // Unknown flags fail closed: error + usage, exit 1 — never silently ignored by a daemon
     // that goes on to claim issues.
-    const unknown = flags.filter((f) => !(RUN_FLAGS as readonly string[]).includes(f));
+    const unknown = rest.filter((f) => !(RUN_FLAGS as readonly string[]).includes(f));
     if (unknown.length > 0) {
       return { stdout: "", stderr: `sapwood run: unknown flag(s): ${unknown.join(" ")}\n\n${RUN_USAGE}`, code: 1 };
     }
@@ -373,6 +440,15 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
       return {
         stdout: "",
         stderr: `sapwood run: --dry-run cannot combine with --once/--until-idle\n\n${RUN_USAGE}`,
+        code: 1,
+      };
+    }
+    // #76: --dry-run never runs the loop at all, so a --stop-* goal has nothing to apply to —
+    // same standalone stance as the once/until-idle check above.
+    if (flags.includes("--dry-run") && Object.keys(stop).length > 0) {
+      return {
+        stdout: "",
+        stderr: `sapwood run: --dry-run cannot combine with --stop-*\n\n${RUN_USAGE}`,
         code: 1,
       };
     }
@@ -401,6 +477,53 @@ export function runExitCode(result: Pick<DriverResult, "ticks" | "tickErrors">, 
   return stopMode === "once" && result.ticks === 0 && result.tickErrors > 0 ? 1 : 0;
 }
 
+/** #76: the resolved StopConfig for a real `sapwood run` — cfg.stop.* as the base, each field
+ *  individually overridden by its CLI --stop-* flag when present. Pure + exported for testing,
+ *  same split as parseRunStopMode/runExitCode above. `argv` may be the full process.argv (like
+ *  parseRunStopMode already tolerates) — parseStopFlags ignores everything that isn't one of
+ *  its three flags. */
+export function resolveStopConfig(argv: string[], cfg: Pick<SapwoodConfig, "stop">): StopConfig {
+  const { stop: flags } = parseStopFlags(argv);
+  // exactOptionalPropertyTypes: only set a key when a value actually exists — an explicit
+  // `key: undefined` is a different (rejected) shape than simply omitting the key.
+  const resolved: StopConfig = {};
+  const afterIssuesMerged = flags.afterIssuesMerged ?? cfg.stop.afterIssuesMerged;
+  const afterPRsOpened = flags.afterPRsOpened ?? cfg.stop.afterPRsOpened;
+  const onMilestoneComplete = flags.onMilestoneComplete ?? cfg.stop.onMilestoneComplete;
+  if (afterIssuesMerged !== undefined) resolved.afterIssuesMerged = afterIssuesMerged;
+  if (afterPRsOpened !== undefined) resolved.afterPRsOpened = afterPRsOpened;
+  if (onMilestoneComplete !== undefined) resolved.onMilestoneComplete = onMilestoneComplete;
+  return resolved;
+}
+
+/** #76 (fable gate② P2): fail-closed startup validation for --stop-on-milestone. `gh issue
+ *  list --milestone` matches the EXACT title only and silently returns [] otherwise, so a typo
+ *  ("M4" vs the real "M4 — UX surface + CLI") would fire the stop condition on the first tick —
+ *  after dispatching a full wave of workers. Called by runEngine BEFORE runDriver: unknown
+ *  title = a thrown error naming the available titles, no dispatch ever happens. Pure given the
+ *  forge — exported for testing with a fake. */
+export async function assertStopMilestoneExists(
+  forge: Pick<IForge, "listMilestoneTitles">,
+  stop: StopConfig,
+): Promise<void> {
+  if (stop.onMilestoneComplete === undefined) return;
+  const titles = await forge.listMilestoneTitles();
+  if (!titles.includes(stop.onMilestoneComplete)) {
+    throw new Error(
+      `stop.onMilestoneComplete: no milestone titled "${stop.onMilestoneComplete}" in this repo ` +
+      `(exact match required). Available: ${titles.length > 0 ? titles.map((t) => `"${t}"`).join(", ") : "(none)"}`,
+    );
+  }
+}
+
+/** #76: the exit log line naming whichever stop condition fired — e.g. "sapwood run: stop
+ *  condition hit — afterIssuesMerged=3 (merged 3)". Pure + exported for testing; only called
+ *  when result.stopCondition is set (stoppedBy "stop-condition", or "once" when the single
+ *  tick satisfied a goal). */
+export function formatStopConditionLine(hit: StopConditionHit): string {
+  return `sapwood run: stop condition hit — ${hit.name}=${hit.threshold} (${hit.detail})`;
+}
+
 async function runEngine(argv: string[]): Promise<number> {
   const cfg = loadConfig();
   // #74: build the worker-prompt renderer NOW, before anything else — loadWorkerPromptTemplate
@@ -426,6 +549,10 @@ async function runEngine(argv: string[]): Promise<number> {
     renderPrompt,
   });
   const stopMode = parseRunStopMode(argv);
+  const stop = resolveStopConfig(argv, cfg);
+  // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
+  // startup with zero dispatch, not silently stop the run after the first wave of workers.
+  await assertStopMilestoneExists(forge, stop);
   console.log(`sapwood run: tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
   // NOTE: roundSpendUsd (the per-round hard budget gate, cfg.cost.roundBudgetUsd) is left at
   // its TickDeps default (0, i.e. never over-budget) — computing a live "this round's spend"
@@ -434,7 +561,13 @@ async function runEngine(argv: string[]): Promise<number> {
   // engine-wide daily/wall-clock/kill-switch ceiling (cfg.cost.dailyBudgetUsd /
   // maxWallClockSec / KILL_SWITCH) is fully live regardless — that's the actual hard safety
   // boundary; roundBudgetUsd is a softer per-round throttle.
-  const result = await runDriver({ forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, stopMode });
+  const result = await runDriver({
+    forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, stopMode, stop,
+  });
+  // #76: name the condition that fired BEFORE the generic stop-summary line, when one did.
+  if (result.stopCondition) {
+    console.log(formatStopConditionLine(result.stopCondition));
+  }
   console.log(
     `sapwood run: stopped after ${result.ticks} tick(s), ${result.tickErrors} tick error(s) (${result.stoppedBy})`,
   );

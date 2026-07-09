@@ -4,13 +4,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runDriver, type DriverDeps } from "./driver.js";
-import type { Supervisor, LaneProbe } from "./conductor.js";
+import type { Supervisor, LaneProbe, MergeGate } from "./conductor.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
+import type { DriveOutcome } from "./merge-driver.js";
 
 class FakeForge implements IForge {
   ready: Issue[] = [];
+  /** #76: countOpenIssuesInMilestone's canned answer — a mutable array so a test can simulate
+   *  the count changing across calls (shift() per call; last value repeats once exhausted). */
+  milestoneOpenCounts: number[] = [0];
+  milestoneQueries: string[] = [];
   async detectOwnerKind(): Promise<"user"> { return "user"; }
   async getReadyIssues(): Promise<Issue[]> { return this.ready; }
   async claimIssue(): Promise<void> {}
@@ -29,15 +34,33 @@ class FakeForge implements IForge {
       labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
     };
   }
+  /** Set to make countOpenIssuesInMilestone throw ONCE (then clear) — the P1 containment test. */
+  milestoneErrOnce: Error | null = null;
+  async countOpenIssuesInMilestone(milestone: string): Promise<number> {
+    this.milestoneQueries.push(milestone);
+    if (this.milestoneErrOnce) {
+      const e = this.milestoneErrOnce;
+      this.milestoneErrOnce = null;
+      throw e;
+    }
+    return this.milestoneOpenCounts.length > 1 ? this.milestoneOpenCounts.shift()! : this.milestoneOpenCounts[0]!;
+  }
+  milestoneTitles: string[] = [];
+  async listMilestoneTitles(): Promise<string[]> { return this.milestoneTitles; }
 }
 
 class FakeSupervisor implements Supervisor {
   probes: Record<string, LaneProbe> = {};
+  /** #76: every issue number ever passed to dispatch() — the wind-down tests' proof that a
+   *  stop-condition freeze actually prevented a NEW dispatch, not just that there was nothing
+   *  eligible to dispatch. */
+  dispatchedIssues: number[] = [];
   private n = 0;
   async probe(w: string): Promise<LaneProbe> {
     return this.probes[w] ?? { done: false, failed: false, handoff: false, hbAge: 10, wrapperAlive: 1, hasPr: false };
   }
   async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
+    this.dispatchedIssues.push(issue.number);
     const name = `lane-${issue.number}-${++this.n}`;
     return { name, sessionId: `sess-${name}` };
   }
@@ -279,5 +302,180 @@ test("runDriver: a persistently-throwing tick keeps the daemon looping at normal
   assert.equal(result.ticks, 0);
   assert.equal(result.tickErrors, 3); // three contained failures, three normal-cadence sleeps
   assert.deepEqual(calls, [5000, 5000, 5000]);
+  deps.state.close();
+});
+
+// ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
+
+/** A merge gate whose driveOne outcome is scripted call-by-call (unlike conductor.test.ts's
+ *  FakeMergeGate, keyed per-pr) — lets a test simulate a driving lane sitting QUEUED for a few
+ *  ticks before it finally resolves, so the wind-down's "in-flight lanes finish, never killed"
+ *  claim is actually exercised across multiple ticks rather than resolving on the very first. */
+class ScriptedMergeGate implements MergeGate {
+  calls = 0;
+  constructor(private readonly outcomes: DriveOutcome[]) {}
+  async driveOne(pr: number): Promise<DriveOutcome> {
+    const i = this.calls;
+    this.calls++;
+    return this.outcomes[Math.min(i, this.outcomes.length - 1)] ?? { kind: "queued", pr, reason: "default" };
+  }
+}
+
+/** A bounded safety net so a driver bug (stop condition never detected / never idle) fails the
+ *  test instead of hanging the suite — real correct behavior always returns well before this. */
+function boundedStop(deps: DriverDeps, maxTicks: number): () => void {
+  let stop = () => {};
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  let ticks = 0;
+  const prevOnTick = deps.onTick;
+  deps.onTick = (r) => {
+    prevOnTick?.(r);
+    ticks++;
+    if (ticks >= maxTicks) stop();
+  };
+  return () => stop();
+}
+
+test("runDriver stop.afterIssuesMerged: hitting it winds the run down (no kill) then exits, naming the condition — in default 'forever' mode, no --until-idle needed", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
+  const gate = new ScriptedMergeGate([{ kind: "merged", pr: 1, headOid: "H" }]);
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep, mergeGate: gate,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
+    stop: { afterIssuesMerged: 1 },
+  });
+  // Claiming removes an issue from Ready in the real forge; the fake must mimic that or the
+  // (never-reached, thanks to the pause) DISPATCH phase would just re-dispatch #1 forever.
+  deps.onTick = (r) => {
+    for (const d of r.dispatched) if (d.kind === "dispatched") forge.ready = [];
+  };
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterIssuesMerged", threshold: 1, detail: "merged 1" });
+  assert.equal(gate.calls, 1); // driven to completion once — never re-driven, never killed mid-work
+  assert.equal(deps.state.activeWorkers().length, 0); // wound down to a clean, idle stop
+  deps.state.close();
+});
+
+test("runDriver stop.afterPRsOpened: fires the moment a lane's PR is first discovered (reclaim -> driving), independent of merge outcome", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
+  // The PR is escalated to needs-human, never merged — proves afterPRsOpened counts the PR
+  // becoming known to the engine, not a successful merge (that's afterIssuesMerged's job).
+  const gate = new ScriptedMergeGate([{ kind: "needs-human", pr: 1, reason: "test" }]);
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep, mergeGate: gate,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
+    stop: { afterPRsOpened: 1 },
+  });
+  deps.onTick = (r) => {
+    for (const d of r.dispatched) if (d.kind === "dispatched") forge.ready = [];
+  };
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterPRsOpened", threshold: 1, detail: "opened 1" });
+  assert.equal(deps.state.activeWorkers().length, 0);
+  deps.state.close();
+});
+
+test("runDriver stop.onMilestoneComplete: evaluated at tick boundaries, fires only once the forge reports zero open issues left", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = []; // no dispatch activity at all — this test isolates the milestone check itself
+  forge.milestoneOpenCounts = [2, 1, 0];
+  const deps = baseDeps({ forge, sleep, stop: { onMilestoneComplete: "M4" } });
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
+  assert.equal(result.ticks, 3); // checked every tick boundary — 2 misses, then the hit
+  assert.deepEqual(forge.milestoneQueries, ["M4", "M4", "M4"]);
+  deps.state.close();
+});
+
+test("runDriver stop.onMilestoneComplete: a THROWING forge read is contained — tick-error + keep looping, never a daemon crash, never a fired condition (fable gate② P1)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.milestoneErrOnce = new Error("gh: HTTP 502 from GitHub"); // transient outage on tick 1
+  forge.milestoneOpenCounts = [0]; // tick 2's read succeeds and reports complete
+  const deps = baseDeps({ forge, sleep, stop: { onMilestoneComplete: "M4" } });
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps); // must NOT reject
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition"); // survived the failure, stopped on the retry
+  assert.equal(result.ticks, 2);
+  assert.equal(result.tickErrors, 1); // the failed read was recorded, not swallowed
+  deps.state.close();
+});
+
+test("runDriver stop conditions: --once still NAMES a condition that fired on its single tick (stoppedBy stays 'once')", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.milestoneOpenCounts = [0];
+  const deps = baseDeps({ forge, sleep, stopMode: "once" as const, stop: { onMilestoneComplete: "M4" } });
+  const result = await runDriver(deps);
+  assert.equal(result.stoppedBy, "once");
+  assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
+  deps.state.close();
+});
+
+test("runDriver stop conditions: OR semantics — whichever fires FIRST wins and is never overwritten by a later condition also becoming true", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
+  // Stays "queued" (driving, undecided) for 2 ticks, THEN merges — long enough that
+  // afterPRsOpened (satisfied the instant the PR is discovered) fires several ticks before
+  // afterIssuesMerged ever could.
+  const gate = new ScriptedMergeGate([
+    { kind: "queued", pr: 1, reason: "pending" },
+    { kind: "queued", pr: 1, reason: "pending" },
+    { kind: "merged", pr: 1, headOid: "H" },
+  ]);
+  // Room for a SECOND lane so a dispatch freeze failure would be observable (issue #2 could
+  // otherwise slot into the free lane while #1 is still driving).
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep, mergeGate: gate,
+    cfg: mkCfg({ lanes: { max: 2, roundDispatchCap: 1 } }),
+    stop: { afterPRsOpened: 1, afterIssuesMerged: 1 },
+  });
+  deps.onTick = (r) => {
+    for (const d of r.dispatched) if (d.kind === "dispatched") {
+      forge.ready = forge.ready.filter((i) => i.number !== d.issue);
+    }
+    // Once #1's PR is discovered (this run's actual afterPRsOpened trigger), a second issue
+    // becomes Ready. If the wind-down freeze is broken, this is exactly what would get
+    // wrongly dispatched into the still-free second lane on a later tick.
+    const prJustOpened = r.reclaimed.some((x) =>
+      (x.kind === "done" && x.next === "DRIVING") ||
+      (x.kind === "failed" && x.next === "DRIVING") ||
+      (x.kind === "dead" && x.rescued));
+    if (prJustOpened) forge.ready.push({ number: 2, title: "t2", labels: ["prio:3-feature"] });
+  };
+  const stopSafety = boundedStop(deps, 15);
+  const result = await runDriver(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  // afterPRsOpened won — even though a merge (which would satisfy afterIssuesMerged too)
+  // eventually happened later in the same run.
+  assert.deepEqual(result.stopCondition, { name: "afterPRsOpened", threshold: 1, detail: "opened 1" });
+  assert.equal(gate.calls, 3); // driven through all 3 scripted polls to its natural conclusion
+  assert.deepEqual(sup.dispatchedIssues, [1]); // #2 was NEVER dispatched despite a free lane
+  assert.equal(deps.state.activeWorkers().length, 0);
   deps.state.close();
 });

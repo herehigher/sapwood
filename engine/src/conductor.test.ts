@@ -72,6 +72,8 @@ class FakeForge implements IForge {
       labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
     };
   }
+  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
+  async listMilestoneTitles(): Promise<string[]> { return []; }
 }
 
 class FakeSupervisor implements Supervisor {

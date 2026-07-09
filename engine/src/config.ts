@@ -179,6 +179,36 @@ const Engine = z.object({
   tickIntervalSec: z.number().int().positive().default(60),
 }).strict();
 
+// #76: goal-based stop conditions — the loop driver's FINAL break conditions ("when is this run
+// complete"). All optional; absent = today's behavior exactly (the driver only stops on a signal,
+// --once, or --until-idle idleness). CLI --stop-after-issues/--stop-after-prs/--stop-on-milestone
+// override these per invocation (cli.ts). OR semantics: the first condition to be satisfied wins
+// and converts the rest of the run into an until-idle wind-down (driver.ts) — never a mid-work
+// kill of an in-flight lane.
+const Stop = z.object({
+  // Counted from THIS run's tick results (driver.ts): DrivenOutcome "merged" entries, summed
+  // across ticks. Scope = process lifetime, not cumulative history — a restarted engine starts
+  // this counter back at 0.
+  //
+  // N is a FLOOR, not an exact bound: conditions are evaluated at tick boundaries, and the tick
+  // that crosses N has already run its own DISPATCH phase — so up to lanes.roundDispatchCap
+  // extra lanes may launch in that tick and run to full completion (including merge) during the
+  // wind-down. Counts from a tick that THREW are also lost (fail toward more work, bounded by
+  // the cost ceilings). Both are inherent to tick-boundary counting; the exit line reports the
+  // count at hit time.
+  afterIssuesMerged: z.number().int().positive().optional(),
+  // Counted from THIS run's tick results: reclaim transitions into the `driving` state (a lane's
+  // PR becomes known to the engine for the first time) — see driver.ts's prsOpenedThisTick for
+  // why that's the simplest accurate signal without a new SQLite table. Same FLOOR semantics as
+  // afterIssuesMerged above.
+  afterPRsOpened: z.number().int().positive().optional(),
+  // Milestone TITLE — EXACT, as GitHub displays it ("M4" does NOT match "M4 — UX surface +
+  // CLI"; cli.ts fails closed at startup against the repo's real titles). Condition = zero OPEN
+  // issues remain in it (forge.countOpenIssuesInMilestone), checked at tick boundaries; a failed
+  // check (gh outage) is a recorded tick-error, never a fired condition, never a crash.
+  onMilestoneComplete: z.string().min(1).optional(),
+}).strict();
+
 const Recovery = z.object({
   // #31: bounded retry count for a durably-persisted rollback/requeue (a recovery-path board
   // mutation, e.g. rolling a dispatch-failed claim back to Ready, or requeuing a dead lane).
@@ -195,6 +225,7 @@ export const ConfigSchema = z.object({
   worker: Worker.default({}),
   guard: Guard.default({}),
   cost: Cost.default({}),
+  stop: Stop.default({}),
   recovery: Recovery.default({}),
   reviewer: Reviewer.default({}),
   merge: Merge.default({}),
