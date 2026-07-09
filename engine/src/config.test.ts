@@ -254,6 +254,37 @@ test("roles.planReviewer.promptFile: a typo'd key under roles.planReviewer.* is 
   );
 });
 
+test("roles.planReviewer.maxDraftCycles: defaults to 2, overridable (#77 Amendment 2 — gate⓪ self-heal bound)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.planReviewer.maxDraftCycles, 2);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycles: 5 } }",
+  );
+  assert.equal(over.roles.planReviewer.maxDraftCycles, 5);
+});
+
+test("roles.planReviewer.maxDraftCycles: zero, negative, and non-integer are rejected (positive int only — 0 would make every bounce an instant needs-human)", () => {
+  for (const bad of [0, -1, 1.5]) {
+    assert.throws(
+      () =>
+        parseConfig(
+          `board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycles: ${bad} } }`,
+        ),
+      /maxDraftCycles/,
+    );
+  }
+});
+
+test("roles.planReviewer.maxDraftCycles: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycle: 3 } }",
+      ),
+    /maxDraftCycle|[Uu]nrecognized/,
+  );
+});
+
 test("roles.planReviewer.promptFile: a relative path resolves against the config file's directory, not cwd (same #74 pattern as worker.promptFile)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {
