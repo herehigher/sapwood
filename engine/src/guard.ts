@@ -513,8 +513,11 @@ const PROTECTED_SUFFIXES = [
 // sandbox (docs/security.md's isolation-boundary note). A worker has zero legitimate reason
 // to touch either path: forging PAUSE starves competing dispatch, deleting KILL_SWITCH
 // defeats the hard-stop escape hatch. Matched on the normalized absolute path, so relative
-// traversal (`../../data/PAUSE`) resolves to the same block as the direct path.
-const CONTROL_SENTINEL_RE = /\/data\/(KILL_SWITCH|PAUSE)$/;
+// traversal (`../../data/PAUSE`) resolves to the same block as the direct path. Matched
+// case-insensitively (#84 gate② P2-1): macOS/APFS is case-insensitive by default, so
+// `touch data/pause` creates the file existsSync(pausePath()) finds and `rm data/kill_switch`
+// deletes the real sentinel — the $-anchor keeps near-misses (data/paused) unaffected.
+const CONTROL_SENTINEL_RE = /\/data\/(KILL_SWITCH|PAUSE)$/i;
 
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
@@ -612,10 +615,13 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
  */
 function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
   for (const t of tokens) {
-    if (!t || t.startsWith("-")) continue;
-    const abs = normalizePath(t, cwd);
-    if (CONTROL_SENTINEL_RE.test(abs)) {
-      return `BLOCK [write-path] ${protectedPathLabel(abs)} referenced is human-merge-only`;
+    if (!t) continue;
+    // A flag can glue the path to its value (`--target=../../data/PAUSE`) — judge the
+    // substring after the first `=` for `-`-prefixed tokens (#84 gate② P2-2).
+    const candidate = t.startsWith("-") ? (t.includes("=") ? t.slice(t.indexOf("=") + 1) : null) : t;
+    if (!candidate) continue;
+    if (CONTROL_SENTINEL_RE.test(normalizePath(candidate, cwd))) {
+      return "BLOCK [write-path] data/KILL_SWITCH / data/PAUSE is a protected control sentinel";
     }
   }
   return null;

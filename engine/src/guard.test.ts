@@ -151,6 +151,16 @@ const BLOCK: [string, string, string][] = [
   // by path matching, even though the script's own write is opaque to the guard).
   ["node kill.js ../../data/KILL_SWITCH", CWD, "write-path"],
   ["node scripts/unpause.js data/PAUSE", CWD, "write-path"],
+  // #84 gate② P2-1: macOS/APFS is case-insensitive — `touch data/pause` creates a file that
+  // existsSync(pausePath()) finds, so lowercase/mixed-case variants must block too.
+  ["touch data/pause", CWD, "write-path"],
+  ["rm data/kill_switch", CWD, "write-path"],
+  ["touch ../../data/Pause", CWD, "write-path"],
+  ["echo x > data/Kill_Switch", CWD, "write-path"],
+  // #84 gate② P2-2: sentinel path glued to a flag (`--target=...`) must not slip past the
+  // literal-arg matcher's `-`-prefix skip.
+  ["node kill.js --target=../../data/PAUSE", CWD, "write-path"],
+  ["node unpause.js --file=data/kill_switch", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -220,6 +230,11 @@ const ALLOW: string[] = [
   "touch data/README.md",
   "node scripts/build.js",
   "cat data/README.md",
+  // #84 gate② guardrails: /i near-misses ($-anchored, so suffix-extended names pass) and
+  // benign flag-glued paths must still pass
+  "touch data/paused",
+  "touch data/pause-notes.md",
+  "node build.js --out=dist/app.js",
 ];
 
 for (const command of ALLOW) {
@@ -260,6 +275,10 @@ const WRITE_BLOCK: [string, string][] = [
   ["/repo/data/PAUSE", "write-path"],
   ["../../data/PAUSE", "write-path"],
   ["../../data/KILL_SWITCH", "write-path"],
+  // #84 gate② P2-1: case-insensitive FS (macOS/APFS) — lowercase names hit the same file.
+  ["data/pause", "write-path"],
+  ["data/kill_switch", "write-path"],
+  ["/repo/data/Pause", "write-path"],
 ];
 for (const [file_path, kw] of WRITE_BLOCK) {
   test(`WRITE BLOCK: ${file_path}`, () => {
