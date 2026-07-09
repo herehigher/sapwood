@@ -672,14 +672,34 @@ quality or feasibility before a producer spent budget on it, and `verify:n/a` wa
 self-declared. gate⓪ closes both holes: a **plan-reviewer** peripheral runs
 post-`Ready`, pre-dispatch, in a session distinct from both the plan's author and the
 producer. Approve → it applies `plan:approved` itself (and may edit corrections into
-the issue body); bounce → it comments what's missing and the issue waits for the next
-triage pass; judged inherently unverifiable → it only ever **proposes** `verify:n/a`,
+the issue body); bounce → its comment of what's missing becomes the brief for a
+scoped plan-draft dispatch (self-heal, next paragraph — never a parked issue);
+judged inherently unverifiable → it only ever **proposes** `verify:n/a`,
 always paired with `needs-human` — a human resolves the adjudication (supply a plan,
 or accept `verify:n/a` by removing `needs-human`, which routes the issue down the
 doc-gate path / human merge). Enforcement is fail-closed in code, never a prompt:
 `getReadyIssues` requires the plan present **and** `plan:approved`; `verify:n/a`
 without `needs-human` passes via the doc-gate path; `needs-human`/`blocked` never
 dispatch.
+
+**Bounce self-heals — an active plan-draft dispatch, never a stall.** A bounced plan
+does not park the issue until the next round (that would stall against the autonomy
+principle below): the reviewer's bounce comment — what's missing or wrong,
+concretely — becomes the brief for a scoped **plan-drafting session** the loop
+dispatches. The drafter is an issues-only peripheral like PO/triage (no repo
+checkout, no code access — never a full worker lane), runs in a session distinct
+from the plan-reviewer (plan-author ≠ plan-approver holds; the reviewer never
+approves a plan it authored, its minor-correction latitude aside), and is restricted
+to editing the issue's acceptance criteria + verification plan — it never implements
+the issue itself. Bounded, never a livelock: at most
+`roles.planReviewer.maxDraftCycles` draft→re-review cycles per issue (default 2,
+YAML-tunable); cycles exhausted → `needs-human` with the full attempt trail
+preserved (Decision #9). Accepted trade-off: for a thin why/what-only human-filed
+issue, the agent-drafted plan effectively defines "done" — mitigated by that visible
+trail and by gate②'s independent re-check of the finished PR against the same plan.
+Ready-gate enforcement is unchanged: implementation dispatch still requires
+`plan:approved` (or adjudicated `verify:n/a`); only the repair path became more
+autonomous.
 
 **Plan authorship moves upstream.** The issue's creator authors the acceptance
 criteria + verification plan at creation — for `origin:agent` issues that is the PO
