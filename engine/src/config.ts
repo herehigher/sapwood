@@ -231,6 +231,25 @@ const Roles = z.object({
   po: RoleSession.extend({
     promptFile: z.string().optional(),
   }).strict().default({}),
+  // #91: round-close peripheral roles (#77 decision 2's harvest / decision 6's retro). Config
+  // key + path resolution + shipped default prompt only — same "accepted, not yet wired" shape
+  // #88 shipped for planReviewer before #87 wired it: harvest.ts/retro.ts implement the
+  // PeripheralStub, but wiring either into runRounds's default `harvesting`/`retro` peripherals
+  // (or the CLI) is a deliberate follow-up, not this issue's scope.
+  harvest: RoleSession.extend({
+    // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/harvest.md`;
+    // relative resolves against the CONFIG FILE's directory.
+    promptFile: z.string().optional(),
+  }).strict().default({}),
+  // #91 (#77 decision 6): the retrospective/self-evolution peripheral. Its role write scope is
+  // intentionally WIDER than the issues-only roles above (git + `gh pr create` — proposals land
+  // exclusively as PRs through the normal gate② path, never a direct write) — see retro.ts's
+  // RETRO_ALLOWED_TOOLS/RETRO_DISALLOWED_TOOLS for the enforcement this config key feeds.
+  retro: RoleSession.extend({
+    // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/retro.md`; relative
+    // resolves against the CONFIG FILE's directory.
+    promptFile: z.string().optional(),
+  }).strict().default({}),
 }).strict();
 
 const Guard = z.object({
@@ -387,6 +406,14 @@ export function loadConfig(path?: string): SapwoodConfig {
   // #89: same rule for the PO prompt.
   if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {
     cfg.roles.po.promptFile = resolve(dirname(file), cfg.roles.po.promptFile);
+  }
+  // #91: same rule for the harvest prompt.
+  if (cfg.roles.harvest.promptFile !== undefined && !isAbsolute(cfg.roles.harvest.promptFile)) {
+    cfg.roles.harvest.promptFile = resolve(dirname(file), cfg.roles.harvest.promptFile);
+  }
+  // #91: same rule for the retro prompt.
+  if (cfg.roles.retro.promptFile !== undefined && !isAbsolute(cfg.roles.retro.promptFile)) {
+    cfg.roles.retro.promptFile = resolve(dirname(file), cfg.roles.retro.promptFile);
   }
   return cfg;
 }

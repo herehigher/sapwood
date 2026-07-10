@@ -763,4 +763,32 @@ export class State {
       .prepare("UPDATE rounds SET phase = 'closed', status = 'done', updated_at = ?, ended_at = ? WHERE round_id = ?")
       .run(now, now, id);
   }
+
+  // ── #91: harvest/retro round-ledger reads ─────────────────────────────────────────────
+
+  /** Durable event-log rows at or after `sinceIso`, restricted to `kinds` — the harvest/retro
+   *  peripherals' round-ledger source (conductor.ts's DRIVE/RECLAIM phases already append every
+   *  event these two roles summarize; see harvest.ts's gatherRoundFacts / retro.ts's
+   *  gatherRetroFacts for the specific kinds each reads). Chronological (by id) order, parsed
+   *  payload. `kinds` must be non-empty — an empty SQL `IN ()` is invalid, so this throws rather
+   *  than silently returning everything or nothing (a caller bug, not a runtime condition to
+   *  degrade gracefully from). */
+  eventsSince(sinceIso: string, kinds: string[]): { kind: string; payload: unknown }[] {
+    if (kinds.length === 0) throw new Error("eventsSince: kinds must be non-empty");
+    const placeholders = kinds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(`SELECT kind, payload FROM events WHERE ts >= ? AND kind IN (${placeholders}) ORDER BY id`)
+      .all(sinceIso, ...kinds) as { kind: string; payload: string }[];
+    return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
+  }
+
+  /** Cumulative spend_ledger sum at or after `sinceIso` — harvest's "spend vs round budget"
+   *  fact. Same table/column as dailySpendUsd; a `>=` cutoff rather than a calendar-day prefix
+   *  match, since a round doesn't align to a day boundary. */
+  spentUsdSince(sinceIso: string): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts >= ?")
+      .get(sinceIso) as { total: number };
+    return row.total;
+  }
 }

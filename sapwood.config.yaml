@@ -100,6 +100,19 @@ labels: # taxonomy used by the loop
 #     #                   Unset = the engine's shipped prompts/plan-drafter.md.
 #     model: sonnet
 #     effort: medium
+#   harvest: # #91: round-close summary — comments round context onto this round's
+#     #        needs-human issues. Issue-comment writes only (no labels, no body edits).
+#     # promptFile: prompts/my-harvest.md
+#     #                   Unset = the engine's shipped prompts/harvest.md.
+#     model: sonnet
+#     effort: medium
+#   retro: # #91: retrospective/self-evolution — analyzes the round and proposes
+#     #      prompt/config/docs improvements EXCLUSIVELY as PRs through gate②
+#     #      (#77 decision 6); it can never write main/docs directly.
+#     # promptFile: prompts/my-retro.md
+#     #                   Unset = the engine's shipped prompts/retro.md.
+#     model: sonnet
+#     effort: medium
 
 # round-loop scoping (#86 skeleton). Unset = no scoping (every Ready issue is a candidate).
 # round:

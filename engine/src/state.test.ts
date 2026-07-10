@@ -722,3 +722,42 @@ test("rounds row persists across close/reopen (DB-backed, not memory) — crash-
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #91: eventsSince / spentUsdSince (harvest/retro round-ledger reads) ────────────────────
+
+test("eventsSince: filters by kind AND ts cutoff, chronological order, parsed payload", () => {
+  const s = mem();
+  s.appendEvent("dispatched", { worker: "lane-a", issue: 1 });
+  s.appendEvent("merged", { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
+  s.appendEvent("drive-needs-human", { worker: "lane-b", issue: 2, pr: 11, reason: "changes requested" });
+  const rows = s.eventsSince("2020-01-01T00:00:00.000Z", ["merged", "drive-needs-human"]);
+  assert.deepEqual(rows.map((r) => r.kind), ["merged", "drive-needs-human"]); // "dispatched" excluded
+  assert.deepEqual(rows[0]!.payload, { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
+  s.close();
+});
+
+test("eventsSince: a sinceIso cutoff after an event's ts excludes it (round-window scoping)", () => {
+  const s = mem();
+  s.appendEvent("merged", { worker: "lane-a", issue: 1, pr: 10 });
+  // Every appendEvent call stamps `new Date().toISOString()` — a cutoff far in the future
+  // excludes everything already recorded, exactly like a later round's own window would.
+  const rows = s.eventsSince("2999-01-01T00:00:00.000Z", ["merged"]);
+  assert.deepEqual(rows, []);
+  s.close();
+});
+
+test("eventsSince: empty kinds list throws (caller bug, not a runtime condition)", () => {
+  const s = mem();
+  assert.throws(() => s.eventsSince("2020-01-01T00:00:00.000Z", []), /kinds must be non-empty/);
+  s.close();
+});
+
+test("spentUsdSince: sums spend_ledger rows at or after the cutoff, excludes earlier rows", () => {
+  const s = mem();
+  s.recordSpend("lane-a", 1, 5, "2026-07-06T00:00:00.000Z");
+  s.recordSpend("lane-b", 2, 7, "2026-07-06T01:00:00.000Z");
+  s.recordSpend("lane-c", 3, 100, "2026-07-05T23:00:00.000Z"); // before the cutoff — excluded
+  assert.equal(s.spentUsdSince("2026-07-06T00:00:00.000Z"), 12);
+  assert.equal(s.spentUsdSince("2999-01-01T00:00:00.000Z"), 0);
+  s.close();
+});
