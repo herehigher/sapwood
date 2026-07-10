@@ -19,7 +19,7 @@ import { extractVerificationPlan } from "./forge.js";
 import type { State } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { RoleRunner } from "./peripheral.js";
-import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS } from "./peripheral.js";
+import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "./peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "./plan-review.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
@@ -65,8 +65,10 @@ export interface AlignDeps {
    *  runner directly, same split as plan-review.ts's PlanReviewDeps). */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
-  /** Override for loadPlanMd's path — tests inject a fixed string via a temp file, or rely on
-   *  the real docs/PLAN.md when omitted. */
+  /** Override for loadPlanMd's path — tests inject a fixed string via a temp file. A real
+   *  caller omits this and gets `cfg.roles.architect.planMdPath` (#104): align.ts and
+   *  architect.ts both read the repo's architecture doc, so they honor the SAME config key
+   *  rather than each hardcoding their own default. */
   planMdPath?: string;
 }
 
@@ -78,7 +80,6 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
   return {
     async run({ roundId, marker }) {
       if (marker != null) return { marker };
-      const iso = (): string => (deps.now ? deps.now() : new Date()).toISOString();
       const template = loadRolePromptTemplate(deps.cfg.roles.po.promptFile, defaultPoPromptPath());
       const role = deps.cfg.roles.po;
       const l = deps.cfg.labels;
@@ -86,46 +87,40 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
 
       /** One PO session, spend ledgered under its own name. RoleRunner.run never throws on the
        *  session's OWN outcome (peripheral.ts) — failed/timeout is a normal return the caller
-       *  must handle. Same retry-once stance as plan-review.ts's reviewer sessions (fable PR
-       *  #101 P2, mirroring PR #100's architect fix); the divergence from plan-review's
-       *  needs-human escalation is deliberate and cheap here: this phase runs PRE-Ready, so a
-       *  double failure never poisons a dispatch decision — the round advances (marker still
-       *  set) and the degradation is made observable (a durable event + a log line) instead of
-       *  wedging the round; the next round retries naturally. */
-      const runSession = async (
+       *  must handle. #104: ported to peripheral.ts's shared runSessionWithRetry (outcome-check
+       *  -> retry-once -> visible-degradation, ONE implementation for architect/align/harvest/
+       *  retro). Same retry-once stance as plan-review.ts's reviewer sessions (fable PR #101 P2,
+       *  mirroring PR #100's architect fix); the divergence from plan-review's needs-human
+       *  escalation is deliberate and cheap here: this phase runs PRE-Ready, so a double failure
+       *  never poisons a dispatch decision — the round advances (marker still set) and the
+       *  degradation is made observable (a durable event + a log line) instead of wedging the
+       *  round; the next round retries naturally. */
+      const runSession = (
         roleId: "po-align" | "po-triage",
         prompt: string,
         issue: number,
         degradeEvent: "po-degraded" | "triage-degraded",
-      ): Promise<{ outcome: string }> => {
-        const attempt = async (): ReturnType<AlignDeps["runner"]["run"]> => {
-          const result = await deps.runner.run({
+      ): ReturnType<typeof runSessionWithRetry> =>
+        runSessionWithRetry({
+          runner: deps.runner,
+          state: deps.state,
+          session: {
             roleId, prompt, model: role.model, effort: role.effort,
             allowedTools: PO_ALLOWED_TOOLS, disallowedTools: PO_DISALLOWED_TOOLS,
-          });
+          },
           // Align spend is round-scoped, not tied to any single issue — `issue` is a plain int
           // column with no FK, so 0 is a documented sentinel ("no single issue").
-          deps.state.recordSpend(result.name, issue, result.costUsd, iso(), result.modelUsage);
-          return result;
-        };
-        let result = await attempt();
-        if (result.outcome !== "done") {
-          result = await attempt();
-          if (result.outcome !== "done") {
-            try {
-              deps.state.appendEvent(degradeEvent, {
-                round_id: roundId, ...(issue !== 0 ? { issue } : {}), outcome: result.outcome, session: result.name,
-              });
-            } catch { /* state write failed — the console line below still lands */ }
-            console.error(
-              `[sapwood:po] round ${roundId}: ${roleId} session failed twice (${result.outcome})` +
-                `${issue !== 0 ? ` for issue #${issue}` : ""} — proceeding (pre-Ready, low stakes; ` +
-                `the next round retries naturally)`,
-            );
-          }
-        }
-        return result;
-      };
+          issue,
+          now: deps.now ?? (() => new Date()),
+          degradeEvent,
+          degradePayload: (result) => ({
+            round_id: roundId, ...(issue !== 0 ? { issue } : {}), outcome: result.outcome, session: result.name,
+          }),
+          degradeMessage: (result) =>
+            `[sapwood:po] round ${roundId}: ${roleId} session failed twice (${result.outcome})` +
+            `${issue !== 0 ? ` for issue #${issue}` : ""} — proceeding (pre-Ready, low stakes; ` +
+            `the next round retries naturally)`,
+        });
 
       // ── Alignment/decomposition pass: ONE session, dispatched even with an unscoped round
       // (round.milestone unset) — decomposition still has docs/PLAN.md to work from alone. ──
@@ -133,7 +128,9 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
         "po.mode": "align",
         "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
-        "plan.md": loadPlanMd(deps.planMdPath),
+        // #104: deps.planMdPath is a TEST override only now — a real caller omits it and gets
+        // cfg.roles.architect.planMdPath (the same key architect.ts's own PLAN.md read honors).
+        "plan.md": loadPlanMd(deps.planMdPath ?? deps.cfg.roles.architect.planMdPath),
       });
       await runSession("po-align", alignPrompt, 0, "po-degraded");
 

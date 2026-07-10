@@ -20,6 +20,7 @@ import type { IForge, Issue } from "./forge.js";
 import type { State } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { RoleRunner } from "./peripheral.js";
+import { runSessionWithRetry } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 
 export interface ArchitectDeps {
@@ -30,13 +31,13 @@ export interface ArchitectDeps {
    *  CLI" split plan-review.ts/conductor.test.ts use). */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
-  /** Path to the repo's PLAN.md — the architecture-chapter source. Default: docs/PLAN.md under
-   *  process.cwd() (the repo root the engine is invoked from — same cwd-relative convention as
-   *  peripheral.ts's RoleRunnerDeps.stateDir/worktreeRoot defaults). Deliberately NOT a config
-   *  key: architecture review is advisory (never a dispatch gate), so a missing/unreadable file
-   *  degrades to an explicit placeholder (see loadArchitectureChapter) rather than failing the
-   *  round — keeping this a deps-level default also avoids growing config.ts, which two sibling
-   *  role-issue PRs are touching concurrently. */
+  /** Path to the repo's PLAN.md — the architecture-chapter source. Override for tests; a real
+   *  caller omits this and gets `cfg.roles.architect.planMdPath` (#104 — was a hardcoded
+   *  `<cwd>/docs/PLAN.md`, which broke for any target repo keeping its architecture doc
+   *  elsewhere; now a real, config-file-relative-resolved config key, same one align.ts's
+   *  PLAN.md read honors). Architecture review stays advisory either way: a missing/unreadable
+   *  file degrades to an explicit placeholder (see loadArchitectureChapter) rather than failing
+   *  the round. */
   planMdPath?: string;
   /** The round's aligned-goals text from the (not yet shipped, #89) PO/goal-alignment
    *  peripheral. Default: an explicit "not available yet" placeholder — #89 hasn't landed, so
@@ -58,10 +59,6 @@ export function defaultArchitectPromptPath(): string {
   // engine/src (tsx) and engine/dist (built) are both one level below engine/ — same
   // resolution rationale as worker.ts's defaultPromptPath / plan-review.ts's own default paths.
   return join(here, "..", "prompts", "architect.md");
-}
-
-export function defaultPlanMdPath(): string {
-  return join(process.cwd(), "docs", "PLAN.md");
 }
 
 const NO_ALIGNED_GOALS_YET =
@@ -142,7 +139,11 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       if (candidates.length === 0) return { marker: architectMarker(roundId) };
 
       const template = loadRolePromptTemplate(deps.cfg.roles.architect.promptFile, defaultArchitectPromptPath());
-      const architectureChapter = loadArchitectureChapter(deps.planMdPath ?? defaultPlanMdPath());
+      // #104: deps.planMdPath is a TEST override only now — a real caller omits it and gets
+      // cfg.roles.architect.planMdPath (config-file-relative resolved, default "docs/PLAN.md";
+      // was a hardcoded <cwd>/docs/PLAN.md, which broke for any target repo keeping its
+      // architecture doc elsewhere).
+      const architectureChapter = loadArchitectureChapter(deps.planMdPath ?? deps.cfg.roles.architect.planMdPath);
       // The round design note needs SOME issue to live on (GitHub has no round/project-level
       // comment surface this role can write to — its tools are issue comment/edit only); the
       // lowest-numbered candidate is an arbitrary but deterministic, reproducible anchor.
@@ -160,39 +161,30 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       });
 
       const role = deps.cfg.roles.architect;
-      const iso = (): string => (deps.now ? deps.now() : new Date()).toISOString();
-      const runSession = async (): ReturnType<ArchitectDeps["runner"]["run"]> => {
-        const result = await deps.runner.run({ roleId: "architect", prompt, model: role.model, effort: role.effort });
-        // Spend is round-scoped, not tied to any single issue — `issue` is a plain int column
-        // with no FK, so 0 is a documented sentinel ("no single issue"), not a real number.
-        deps.state.recordSpend(result.name, 0, result.costUsd, iso(), result.modelUsage);
-        return result;
-      };
 
       // RoleRunner.run never throws on the session's OWN outcome (peripheral.ts) — a failed/
-      // timeout session is a normal return, so it must be handled here (fable PR #100 P2).
-      // Same retry-once stance as plan-review.ts's reviewer sessions; the DIVERGENCE is what
-      // happens on the second failure: plan-review escalates needs-human (its verdict gates
-      // dispatch), but the architect is ADVISORY — no dispatch decision depends on its note, so
-      // wedging the round (or rerunning a session that keeps failing forever) would cost more
-      // than the note is worth. Deliberate degradation instead: the marker is STILL set (the
-      // round advances; a rerun will NOT retry this phase), and the skip is made observable —
-      // a durable `architect-degraded` event plus a log line — never a silent no-op.
-      let result = await runSession();
-      if (result.outcome !== "done") {
-        result = await runSession();
-        if (result.outcome !== "done") {
-          try {
-            deps.state.appendEvent("architect-degraded", {
-              round_id: roundId, outcome: result.outcome, session: result.name,
-            });
-          } catch { /* state write failed — the console line below still lands */ }
-          console.error(
-            `[sapwood:architect] round ${roundId}: session failed twice (${result.outcome}) — ` +
-              `proceeding WITHOUT a round design note (advisory phase, round not wedged)`,
-          );
-        }
-      }
+      // timeout session is a normal return, so it must be handled (fable PR #100 P2). #104:
+      // ported to peripheral.ts's shared runSessionWithRetry (outcome-check -> retry-once ->
+      // visible-degradation, ONE implementation for architect/align/harvest/retro). Same
+      // retry-once stance as plan-review.ts's reviewer sessions; the DIVERGENCE is what happens
+      // on the second failure: plan-review escalates needs-human (its verdict gates dispatch),
+      // but the architect is ADVISORY — no dispatch decision depends on its note, so wedging the
+      // round (or rerunning a session that keeps failing forever) would cost more than the note
+      // is worth. Deliberate degradation instead: the marker is STILL set (the round advances; a
+      // rerun will NOT retry this phase), and the skip is made observable — a durable
+      // `architect-degraded` event plus a log line — never a silent no-op.
+      await runSessionWithRetry({
+        runner: deps.runner,
+        state: deps.state,
+        session: { roleId: "architect", prompt, model: role.model, effort: role.effort },
+        issue: 0, // round-scoped, not tied to any single issue (spend_ledger's documented sentinel)
+        now: deps.now ?? (() => new Date()),
+        degradeEvent: "architect-degraded",
+        degradePayload: (result) => ({ round_id: roundId, outcome: result.outcome, session: result.name }),
+        degradeMessage: (result) =>
+          `[sapwood:architect] round ${roundId}: session failed twice (${result.outcome}) — ` +
+          `proceeding WITHOUT a round design note (advisory phase, round not wedged)`,
+      });
 
       return { marker: marker_ };
     },

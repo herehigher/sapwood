@@ -220,6 +220,15 @@ const Roles = z.object({
   // above, #87/#99): never reviews PR code, never merges. Same #74 promptFile shape too.
   architect: RoleSession.extend({
     promptFile: z.string().optional(),
+    // #104 (#100 gate② P3): the architecture-doc path — was hardcoded to
+    // `<cwd>/docs/PLAN.md` (architect.ts's old defaultPlanMdPath), which breaks for any target
+    // repo sapwood runs against that doesn't keep its architecture doc at that exact path.
+    // Defaults to "docs/PLAN.md" (this repo's own convention) but is now a real config key, ALWAYS
+    // resolved relative to the CONFIG FILE's directory (see loadConfig below) — same #74
+    // promptFile pattern, except this key always has a value (never "unset -> engine-shipped
+    // default": the target repo's own doc, not a file sapwood ships). align.ts's PLAN.md read
+    // honors this same key (the two peripherals must read the SAME architecture doc).
+    planMdPath: z.string().min(1).default("docs/PLAN.md"),
   }).strict().default({}),
   // #89: the PO (product-owner) peripheral — goal alignment/decomposition at round start
   // (reads the round milestone/theme + docs/PLAN.md, creates issues) plus the round-start
@@ -249,6 +258,12 @@ const Roles = z.object({
     // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/retro.md`; relative
     // resolves against the CONFIG FILE's directory.
     promptFile: z.string().optional(),
+    // #104: retro cadence — the wiring-time decision retro.ts's own module doc named as a
+    // follow-up ("whether every round should pay for a retro pass"). Default 1 = every round
+    // (unchanged behavior from #91). N>1 thins it: retro.ts skips every round whose id isn't a
+    // multiple of N, still setting the phase marker (never wedges the round). Positive int
+    // only, same rationale as roles.planReviewer.maxDraftCycles above (0 has no sane meaning).
+    everyNRounds: z.number().int().positive().default(1),
   }).strict().default({}),
 }).strict();
 
@@ -402,6 +417,13 @@ export function loadConfig(path?: string): SapwoodConfig {
     !isAbsolute(cfg.roles.architect.promptFile)
   ) {
     cfg.roles.architect.promptFile = resolve(dirname(file), cfg.roles.architect.promptFile);
+  }
+  // #104: same rule for the architecture-doc path — UNLIKE promptFile this key always has a
+  // value (the schema default is "docs/PLAN.md", never unset), so there's no `!== undefined`
+  // guard: every non-absolute value, default or explicit, resolves against the config file's
+  // directory.
+  if (!isAbsolute(cfg.roles.architect.planMdPath)) {
+    cfg.roles.architect.planMdPath = resolve(dirname(file), cfg.roles.architect.planMdPath);
   }
   // #89: same rule for the PO prompt.
   if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {

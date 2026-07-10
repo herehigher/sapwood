@@ -588,14 +588,29 @@ rewrite.** v1 requirements:
   (see Security model) stays in force during this dogfood. The frontend itself —
   scope decisions, information architecture, visual identity, motion/copy specs,
   and the API data contract — is specified in [`frontend-design.md`](frontend-design.md).
-  **② Round orchestrator (#86–#91),** cut from the locked design in the v0.2 chapter
-  below: the round ledger + round-loop skeleton — two-level termination,
+  **② Round orchestrator (#86–#91, wired #104),** cut from the locked design in the
+  v0.2 chapter below: the round ledger + round-loop skeleton — two-level termination,
   rerun-not-resume (#86); the peripheral role runner — issues+docs write scope,
   idempotent round markers (#87); gate⓪, the verification-plan quality gate —
   `plan:approved` dispatch requirement + the plan-reviewer (#88); the PO role — goal
   alignment / decomposition + plan-drafting triage (#89); the architect role — round
   design/review (#90); and harvest + retrospective — self-evolution via PR + gate②
-  only (#91).
+  only (#91). **#104 closed the wiring gap #100/#101/#103's gate② reviews deliberately
+  deferred:** all four peripheral roles (PO/aligning, architect, harvest, retro —
+  gate⓪'s plan-reviewer already ran in `runRounds` since #87) are now constructed by
+  one factory (`round-defaults.ts`'s `createDefaultPeripherals`) sharing a single
+  `RoleRunner`/`State`/forge, feeding the architect stub the PO pass's own output where
+  available; a shared `runSessionWithRetry` helper (`peripheral.ts`) replaced four
+  hand-rolled outcome-check → retry-once → degrade-visibly loops with one; gate⓪
+  escalations now also land in the durable event log (`plan-review-escalated`), so
+  harvest/retro's round summaries see BOTH gates, not gate② alone; `roles.architect`
+  gained a real `planMdPath` config key (was hardcoded to this repo's own
+  `docs/PLAN.md`); and `roles.retro.everyNRounds` (default 1) lets operators thin the
+  retrospective cadence. `sapwood run` does not reach `runRounds` at all — it still
+  drives the M4 tick-driver (`runDriver`); `runRounds` is currently exercised only
+  via the library export and its integration tests. Switching `cli.ts`'s `run` entry
+  point from the tick-driver to the round orchestrator is a distinct decision, left
+  for a follow-up issue.
 
 ## v0.2 north star: the round orchestrator
 

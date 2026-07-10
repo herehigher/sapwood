@@ -160,6 +160,64 @@ test("createRetroStub: two failed sessions degrade VISIBLY but never wedge the r
   state.close();
 });
 
+// ── #104: roles.retro.everyNRounds cadence ──────────────────────────────────────────────────
+
+test("createRetroStub: everyNRounds > 1 skips a round whose id isn't a multiple of N — marker still set, no session run", async () => {
+  const state = new State(":memory:");
+  const round1 = state.startRound("2026-07-10T00:00:00.000Z"); // round_id 1
+  const round2 = state.startRound("2026-07-10T01:00:00.000Z"); // round_id 2
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
+  const deps: RetroDeps = { state, cfg, runner };
+  const stub = createRetroStub(deps);
+
+  const r1 = await stub.run({ roundId: round1.round_id, phase: "retro", marker: null });
+  assert.equal(r1.marker, retroMarker(round1.round_id));
+  assert.equal(runner.calls.length, 0, "round 1 is not a multiple of 3 — skipped");
+
+  const r2 = await stub.run({ roundId: round2.round_id, phase: "retro", marker: null });
+  assert.equal(r2.marker, retroMarker(round2.round_id));
+  assert.equal(runner.calls.length, 0, "round 2 is not a multiple of 3 — skipped");
+  state.close();
+});
+
+test("createRetroStub: everyNRounds > 1 runs on a round whose id IS a multiple of N", async () => {
+  const state = new State(":memory:");
+  for (let i = 0; i < 2; i++) state.startRound(`2026-07-10T0${i}:00:00.000Z`); // round_id 1, 2
+  const round3 = state.startRound("2026-07-10T03:00:00.000Z"); // round_id 3
+  const runner = new ScriptedRunner(doneResult("role-retro-3"));
+  const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
+  const deps: RetroDeps = { state, cfg, runner };
+  const stub = createRetroStub(deps);
+  const { marker } = await stub.run({ roundId: round3.round_id, phase: "retro", marker: null });
+  assert.equal(marker, retroMarker(round3.round_id));
+  assert.equal(runner.calls.length, 1, "round 3 is a multiple of 3 — retro runs");
+  state.close();
+});
+
+test("createRetroStub: everyNRounds default (1) runs every round, unchanged from #91 behavior", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner };
+  const stub = createRetroStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(runner.calls.length, 1);
+  state.close();
+});
+
+// ── #104: gate⓪ escalations feed retro's needsHumanEscalations count too ───────────────────
+
+test("gatherRetroFacts: plan-review-escalated events (gate⓪) are counted alongside drive-needs-human (gate②) in needsHumanEscalations", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound(new Date().toISOString());
+  state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 1, pr: 5, reason: "flaky" });
+  state.appendEvent("plan-review-escalated", { round_id: round.round_id, issue: 2, reason: "self-heal exhausted" });
+  const facts = gatherRetroFacts(state, round);
+  assert.equal(facts.needsHumanEscalations, 2);
+  state.close();
+});
+
 test("createRetroStub: roles.retro.promptFile override is honored (the #74 promptFile pattern)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-retro-"));
   try {
