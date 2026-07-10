@@ -74,6 +74,9 @@ class ScriptedRunner {
 const doneResult = (name: string): RoleSessionResult => ({
   outcome: "done", costUsd: 0.02, modelUsage: [], exitCode: 0, name,
 });
+const failedResult = (name: string): RoleSessionResult => ({
+  outcome: "failed", costUsd: 0.02, modelUsage: [], exitCode: 1, name,
+});
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
@@ -123,6 +126,72 @@ test("createArchitectStub: runs exactly ONE session for the whole round regardle
   assert.equal(marker, architectMarker(9));
   // Spend recorded against the architect session's own name.
   assert.equal(state.spentUsdForWorker("architect-1"), 0.02);
+  state.close();
+});
+
+// ── session-failure handling (fable PR #100 P2) ────────────────────────────────────────────
+
+test("createArchitectStub P2: a failed session is retried once; a successful retry proceeds normally (marker set, both sessions' spend recorded, no degradation event)", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 60, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([
+    {
+      result: failedResult("architect-0"),
+    },
+    {
+      result: doneResult("architect-0-retry"),
+      effect: () => forge.addIssueComment(60, `Round design note.\n\n${architectMarker(8)}`),
+    },
+  ]);
+  const state = new State(":memory:");
+  const logged: Array<[string, unknown]> = [];
+  const realAppend = state.appendEvent.bind(state);
+  state.appendEvent = (kind: string, payload: unknown) => {
+    logged.push([kind, payload]);
+    realAppend(kind, payload);
+  };
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const stub = createArchitectStub(deps);
+  const { marker } = await stub.run({ roundId: 8, phase: "architecting", marker: null });
+  assert.equal(runner.calls.length, 2, "exactly one retry");
+  assert.equal(marker, architectMarker(8));
+  // The retried session actually externalized the note (the effect above simulated it).
+  assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 60 && body.includes(architectMarker(8))));
+  // Both attempts' spend is ledgered under their own session names.
+  assert.equal(state.spentUsdForWorker("architect-0"), 0.02);
+  assert.equal(state.spentUsdForWorker("architect-0-retry"), 0.02);
+  assert.ok(!logged.some(([kind]) => kind === "architect-degraded"), "a converged retry is not a degradation");
+  state.close();
+});
+
+test("createArchitectStub P2: two failed sessions -> marker STILL set (advisory phase never wedges the round), exactly two sessions, degradation durably visible via appendEvent", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 61, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([
+    { result: failedResult("architect-0") },
+    { result: failedResult("architect-0-retry") },
+  ]);
+  const state = new State(":memory:");
+  const logged: Array<[string, unknown]> = [];
+  const realAppend = state.appendEvent.bind(state);
+  state.appendEvent = (kind: string, payload: unknown) => {
+    logged.push([kind, payload]);
+    realAppend(kind, payload);
+  };
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const stub = createArchitectStub(deps);
+  const { marker } = await stub.run({ roundId: 8, phase: "architecting", marker: null });
+  assert.equal(runner.calls.length, 2, "one retry, never a third attempt");
+  // The marker is still set: the architect is advisory — a failed session must not wedge the
+  // round or trigger an endless rerun loop of a session that keeps failing.
+  assert.equal(marker, architectMarker(8));
+  // ...but the degradation is deliberate and OBSERVABLE, not silent: a durable event names the
+  // round and the outcome.
+  const ev = logged.find(([kind]) => kind === "architect-degraded");
+  assert.ok(ev, "an architect-degraded event was durably appended");
+  const payload = ev![1] as { round_id: number; outcome: string };
+  assert.equal(payload.round_id, 8);
+  assert.equal(payload.outcome, "failed");
   state.close();
 });
 

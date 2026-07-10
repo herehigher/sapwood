@@ -211,8 +211,8 @@ const Roles = z.object({
     promptFile: z.string().optional(),
   }).strict().default({}),
   // #90: the architect peripheral — round design/review between goal alignment and dispatch
-  // (#77's model). Issues+docs write scope only (peripheral runner, #87/#99): never reviews PR
-  // code, never merges. Same #74 promptFile shape as the two roles above.
+  // (#77's model). Issues-only write scope (the same peripheral-runner scope as the two roles
+  // above, #87/#99): never reviews PR code, never merges. Same #74 promptFile shape too.
   architect: RoleSession.extend({
     promptFile: z.string().optional(),
   }).strict().default({}),
