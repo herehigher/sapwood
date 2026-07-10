@@ -606,10 +606,11 @@ rewrite.** v1 requirements:
   harvest/retro's round summaries see BOTH gates, not gate② alone; `roles.architect`
   gained a real `planMdPath` config key (was hardcoded to this repo's own
   `docs/PLAN.md`); and `roles.retro.everyNRounds` (default 1) lets operators thin the
-  retrospective cadence. `runRounds` is still reached by `sapwood run` only as a
-  library call (an integration test, not `cli.ts`'s `run` subcommand) — switching the
-  CLI's live entry point from the M4 tick-driver to the round orchestrator is a
-  distinct decision, left for a follow-up issue.
+  retrospective cadence. `sapwood run` does not reach `runRounds` at all — it still
+  drives the M4 tick-driver (`runDriver`); `runRounds` is currently exercised only
+  via the library export and its integration tests. Switching `cli.ts`'s `run` entry
+  point from the tick-driver to the round orchestrator is a distinct decision, left
+  for a follow-up issue.
 
 ## v0.2 north star: the round orchestrator
 
