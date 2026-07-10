@@ -97,15 +97,19 @@ export interface RoleSessionOpts {
   prompt: string;
   model: string;
   effort: string;
+  /** #89/#91: per-role ALLOW-list override (e.g. PO_ALLOWED_TOOLS, retro.ts's
+   *  RETRO_ALLOWED_TOOLS) — the symmetric widening counterpart to disallowedTools below, for a
+   *  role whose job legitimately needs MORE than the base issues-only ROLE_ALLOWED_TOOLS: the
+   *  PO's `gh issue create` (#89 goal decomposition) and retro's git + `gh pr create` (#77
+   *  decision 6 — proposals land EXCLUSIVELY as PRs). Omitted -> the base ROLE_ALLOWED_TOOLS,
+   *  unchanged for every role that doesn't need it. Widening the allow-list is always paired
+   *  with a role-specific disallowedTools override too (see align.ts/retro.ts) — never shipped
+   *  wide-open. */
+  allowedTools?: string;
   /** Per-role deny-list override (e.g. PLAN_DRAFTER_DISALLOWED_TOOLS). Omitted -> the base
    *  ROLE_DISALLOWED_TOOLS. Deny rules take precedence over allows in Claude Code, so this
    *  only ever narrows the base allow scope, never widens it. */
   disallowedTools?: string;
-  /** #89: per-role allow-list override (e.g. PO_ALLOWED_TOOLS) — the symmetric widening
-   *  counterpart to disallowedTools above, for a role that legitimately needs one MORE write
-   *  action than the base ROLE_ALLOWED_TOOLS grants (issue creation). Omitted -> the base
-   *  ROLE_ALLOWED_TOOLS, unchanged for every role that doesn't need it. */
-  allowedTools?: string;
 }
 
 export interface RoleSessionResult {

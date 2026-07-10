@@ -237,6 +237,27 @@ test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the
   }
 });
 
+test("run: a per-role allowedTools override reaches the argv (#91 — retro's wider git+PR-create scope)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    const widerScope = "Read,Write,Edit,Bash(git *),Bash(gh pr create*)";
+    await runner.run({
+      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium",
+      allowedTools: widerScope, disallowedTools: "Bash(gh pr merge*)",
+    });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], widerScope);
+    assert.equal(seen[seen.indexOf("--disallowedTools") + 1], "Bash(gh pr merge*)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: the ephemeral worktree is always deleted afterward — a role session never has WIP worth retaining", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {

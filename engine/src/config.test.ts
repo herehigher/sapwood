@@ -460,6 +460,83 @@ test("roles.po.promptFile: a relative path resolves against the config file's di
   }
 });
 
+// ── #91: roles.harvest / roles.retro (round-close peripheral roles) ────────────────────────
+
+test("roles.harvest: promptFile unset by default, model/effort defaulted (same #74/#88 pattern), strict schema", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.harvest.promptFile, undefined);
+  assert.equal(cfg.roles.harvest.model, "sonnet");
+  assert.equal(cfg.roles.harvest.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { harvest: { promptFile: prompts/custom-harvest.md, model: opus, effort: high } }",
+  );
+  assert.equal(over.roles.harvest.promptFile, "prompts/custom-harvest.md");
+  assert.equal(over.roles.harvest.model, "opus");
+  assert.equal(over.roles.harvest.effort, "high");
+});
+
+test("roles.harvest: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { harvest: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.harvest.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { harvest: { promptFile: my-harvest.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.harvest.promptFile, join(dir, "my-harvest.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("roles.retro: promptFile unset by default, model/effort defaulted, strict schema", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.retro.promptFile, undefined);
+  assert.equal(cfg.roles.retro.model, "sonnet");
+  assert.equal(cfg.roles.retro.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { promptFile: prompts/custom-retro.md, model: opus } }",
+  );
+  assert.equal(over.roles.retro.promptFile, "prompts/custom-retro.md");
+  assert.equal(over.roles.retro.model, "opus");
+});
+
+test("roles.retro: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.retro.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { promptFile: my-retro.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.retro.promptFile, join(dir, "my-retro.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
 
 test("stop: absent by default — every field undefined, no behavior change (#76 regression contract)", () => {
