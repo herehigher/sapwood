@@ -74,7 +74,7 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 5 | Default merge gate | **0day-style: autonomous-merge gated on a different-model Codex PR review** — gate① CI green + gate② a fresh non-author Codex review → the Conductor merges (producer≠merger). Reviewer is pluggable; **produce-PR-and-stop** (human merges) and same-model self-review remain selectable modes. Different-model default matches 0day and the security review's recommendation. |
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
 | 7 | Config format | **YAML default** — `sapwood.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
-| 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. |
+| 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. **Amended 2026-07-09 (gate⓪, lands in v0.2 — see the v0.2 chapter):** presence alone is no longer the bar — a **plan-reviewer peripheral (gate⓪)** reviews each plan's quality/feasibility post-`Ready`, pre-dispatch, and `getReadyIssues` requires the plan **and** its `plan:approved` label (fail-closed). `verify:n/a` is never self-declared: gate⓪ can only *propose* it, always paired with `needs-human`, and a human finalizes the adjudication by removing `needs-human` (→ doc-gate path). |
 | 9 | Edge-case handling | **Rare edge cases degrade to `needs-human`, never to more machinery** (CTO, 2026-07-07, #69). Automation covers the common path only; when a low-probability edge would require new hardening/persistence/recovery code, the correct handling is: preserve the evidence, label `needs-human`, stop. First application: the drain path never runs git in worker worktrees (the whole #59–#68 issue family collapsed into sentinel-only handoff + dirty-worktree retention). |
 
 ## Architecture (v1)
@@ -395,6 +395,17 @@ rewrite.** v1 requirements:
     green step**, not just at exit — so the latest pushed state is itself a handoff.
     This improves on 0day, which passes `--max-budget-usd` as a hard cut
     (`loop_worker.sh:81`) and only has crash-`--resume` (no pre-budget handoff).
+    **Auto-enforced (#33) via live token estimation:** stream-json carries no in-progress
+    `total_cost_usd` (only the terminal result line has it), so `worker.ts` accumulates a
+    running USD estimate from every streamed `assistant` message's token usage — priced by a
+    small, explicitly-marked-as-an-estimate per-model rate table (the shipped `pricing.yaml`,
+    user-overridable via `worker.pricingFile`, loaded fail-closed by `pricing.ts`) — and calls the
+    same `requestHandoff()` the operator/drain path uses once the estimate crosses
+    `worker.budgetUsdSoft`. Cache-read tokens are priced at the cache-read rate, not the input
+    rate, so a cache-heavy run doesn't look artificially expensive and hand off prematurely.
+    The estimate is reconciled against the real terminal `total_cost_usd` when it lands (the
+    divergence is logged, never enforced) — real billing can diverge from the table (repricing,
+    discounts, cache-TTL differences), so the estimate is a trigger signal, not a source of truth.
   - *Engine ceiling is **hard**.* A cumulative/daily USD cap + wall-clock cap in the
     conductor (independent of the drift-prone CLI `--max-budget-usd`), with auto-drain
     on breach + an out-of-band kill switch. This is a **safety boundary** for runaway
@@ -534,12 +545,38 @@ rewrite.** v1 requirements:
   `docs/security.md`, `docs/troubleshooting.md`, plus a plugin-facing
   `.claude-plugin/CLAUDE.md` for a calling model, and the `origin:agent` label
   (provisioned by `init`, see the v0.2 chapter and `docs/security.md` for what it's
-  for). **Still open:** the **live** merge-gate + kill-switch runs on a real repo (#46
-  scope 3/4); soft per-worker budget *auto*-enforcement, still needing a live in-flight
-  cost signal (#33); guard defense-in-depth for the `data/KILL_SWITCH` / `data/PAUSE`
-  sentinel write paths, currently a permission-layer boundary rather than a closed one
-  (#81, see `docs/security.md`'s isolation-boundary note).
-- **v0.2 (post-v1) — Dashboard, built BY sapwood (flagship dogfood):** drive the
+  for). Guard defense-in-depth for the `data/KILL_SWITCH` / `data/PAUSE` sentinel write
+  paths (#81): direct `Write`/`Edit` and Bash `touch`/`rm`/`mv`/`git rm`/redirect vectors,
+  plus a sentinel path as a literal argument to any command, are now blocked in
+  `guard.ts`; a script that hardcodes the sentinel path in its own source (no CLI
+  argument) remains an open residual — see `docs/security.md`'s isolation-boundary note.
+  **Soft-budget auto-enforcement via token estimation (#33):** `worker.ts` accumulates a
+  running USD estimate from every streamed `assistant` message's token usage (input/output/
+  cache-write/cache-read — cache reads at the cache-read rate, not the input rate, so a
+  cache-heavy run doesn't over-trigger) and calls the existing `requestHandoff()` graceful path
+  (SIGTERM -> `.handoff`, resumable, never a hard kill) once the estimate crosses
+  `worker.budgetUsdSoft`. Rates are NOT hardcoded in source (PR #85 human review): they live in
+  a user-editable YAML — the engine ships a commented `pricing.yaml` default, overridable via
+  `worker.pricingFile` (relative paths resolve against the config file's directory, the exact
+  #74 promptFile pattern; missing/malformed = fail-fast startup error, never a silent fallback)
+  — loaded once at supervisor construction by `pricing.ts`. The estimate is reconciled against
+  the real terminal `total_cost_usd` when a lane finishes — the divergence is logged, not
+  enforced; the rate table is explicitly a hand-maintained snapshot (see `pricing.yaml`'s
+  header), not a live pricing lookup. **Live end-to-end verification delivered (#46),
+  closing M4:** on the sapwood repo itself, the driver ran at real cadence with the
+  wall-clock ceiling seeing it; gate② carried the issue's verification plan on every
+  review trigger; the **first autonomous conductor-merge** landed (PR #51 for issue
+  #49 — TOCTOU-pinned, gated on CI green + an identity-gated, pin-fresh Codex
+  verdict, lane→done, board→Done, driver exited idle); and a live kill-switch drill
+  (flipped mid-work) terminated the worker, froze dispatch, drove the orphaned PR
+  through a full gate afterwards, and held state across three driver restarts. The
+  drill did what live verification is for — it surfaced real gaps the offline suite
+  couldn't (unwired verdict shapes, a merge path the kill switch didn't yet freeze,
+  unrecorded killed-worker spend), all since fixed in v1 (the drain-path gaps via the
+  #69 redesign, above). **M0–M4 are all delivered and closed; v0.2 is the only open
+  milestone.**
+- **v0.2 (post-v1) — the open milestone, two workstreams.**
+  **① Dashboard, built BY sapwood (flagship dogfood, #17):** drive the
   entire dashboard build through sapwood's own loop on the sapwood repo, and
   **record the run** as the launch artifact. Scope: event schema + `GET /api/loop/state`
   & `/events` (current-state, from SQLite) → React views (lane board, event feed)
@@ -551,14 +588,24 @@ rewrite.** v1 requirements:
   (see Security model) stays in force during this dogfood. The frontend itself —
   scope decisions, information architecture, visual identity, motion/copy specs,
   and the API data contract — is specified in [`frontend-design.md`](frontend-design.md).
+  **② Round orchestrator (#86–#91),** cut from the locked design in the v0.2 chapter
+  below: the round ledger + round-loop skeleton — two-level termination,
+  rerun-not-resume (#86); the peripheral role runner — issues+docs write scope,
+  idempotent round markers (#87); gate⓪, the verification-plan quality gate —
+  `plan:approved` dispatch requirement + the plan-reviewer (#88); the PO role — goal
+  alignment / decomposition + plan-drafting triage (#89); the architect role — round
+  design/review (#90); and harvest + retrospective — self-evolution via PR + gate②
+  only (#91).
 
 ## v0.2 north star: the round orchestrator
 
-Locked design (2026-07-08, issue #77) for v0.2's second axis — alongside the dashboard,
-v0.2 also introduces a **round orchestrator**: a layer *above* the tick engine that adds
-peripheral roles (goal alignment, architecture review, harvest, retrospective) around
-the existing dispatch loop, without rewriting it. This section is the durable record of
-that design; implementation issues are cut from it when v0.2 opens.
+Locked design (2026-07-08, issue #77; gate⓪ amendment locked 2026-07-09) for v0.2's
+second axis — alongside the dashboard, v0.2 also introduces a **round orchestrator**:
+a layer *above* the tick engine that adds peripheral roles (goal alignment,
+architecture review, gate⓪ plan review, harvest, retrospective) around the existing
+dispatch loop, without rewriting it. This section is the durable record of that
+design; implementation issues #86–#91 are cut from it (see the v0.2 build-sequencing
+bullet above).
 
 **The model — a round is a batch, wrapped in peripherals:**
 
@@ -587,9 +634,10 @@ one winds down, and the process exits. The two levels count different things: ro
 level counts PRs opened; final level counts issues merged — matching `stop.*`'s existing
 semantics exactly.
 
-**Peripherals never review or merge.** The goal-alignment/PO, architect, harvest, and
-retrospective roles read and write issues and docs only. `guard.ts`, `reviewer.ts`, and
-`merge-driver.ts` stay fixed and non-configurable regardless of orchestration config —
+**Peripherals never review or merge.** The goal-alignment/PO, architect, gate⓪
+plan-reviewer, harvest, and retrospective roles read and write issues and docs only.
+`guard.ts`, `reviewer.ts`, and `merge-driver.ts` stay fixed and non-configurable
+regardless of orchestration config —
 producer≠reviewer≠merger holds no matter how the round loop is shaped. A graceful exit
 (a final stop condition, or the run simply ending) still runs harvest and retrospective
 once before stopping, so a round's output is never orphaned — only the kill switch skips
@@ -618,6 +666,64 @@ to open a PR against, rather than an inline prompt with no addressable target.
 `Ready` — the round loop can propose work, but a human still decides what actually
 enters the dispatch queue. The mechanics of that confirmation gate are a v0.2
 implementation detail, cut as its own issue when the milestone opens.
+
+**gate⓪ — the verification-plan quality gate (locked 2026-07-09, amends Decision
+#8).** Decision #8 enforced plan *presence* (dispatch refuses a plan-less issue) and
+gate② re-checks the finished PR against the plan — but nothing reviewed the plan's
+quality or feasibility before a producer spent budget on it, and `verify:n/a` was
+self-declared. gate⓪ closes both holes: a **plan-reviewer** peripheral runs
+post-`Ready`, pre-dispatch, in a session distinct from both the plan's author and the
+producer. Approve → it applies `plan:approved` itself (and may edit corrections into
+the issue body); bounce → its comment of what's missing becomes the brief for a
+scoped plan-draft dispatch (self-heal, next paragraph — never a parked issue);
+judged inherently unverifiable → it only ever **proposes** `verify:n/a`,
+always paired with `needs-human` — a human resolves the adjudication (supply a plan,
+or accept `verify:n/a` by removing `needs-human`, which routes the issue down the
+doc-gate path / human merge). Enforcement is fail-closed in code, never a prompt:
+`getReadyIssues` requires the plan present **and** `plan:approved`; `verify:n/a`
+without `needs-human` passes via the doc-gate path; `needs-human`/`blocked` never
+dispatch.
+
+**Bounce self-heals — an active plan-draft dispatch, never a stall.** A bounced plan
+does not park the issue until the next round (that would stall against the autonomy
+principle below): the reviewer's bounce comment — what's missing or wrong,
+concretely — becomes the brief for a scoped **plan-drafting session** the loop
+dispatches. The drafter is an issues-only peripheral like PO/triage (no repo
+checkout, no code access — never a full worker lane), runs in a session distinct
+from the plan-reviewer (plan-author ≠ plan-approver holds; the reviewer never
+approves a plan it authored, its minor-correction latitude aside), and is restricted
+to editing the issue's acceptance criteria + verification plan — it never implements
+the issue itself. Bounded, never a livelock: at most
+`roles.planReviewer.maxDraftCycles` draft→re-review cycles per issue (default 2,
+YAML-tunable); cycles exhausted → `needs-human` with the full attempt trail
+preserved (Decision #9). Accepted trade-off: for a thin why/what-only human-filed
+issue, the agent-drafted plan effectively defines "done" — mitigated by that visible
+trail and by gate②'s independent re-check of the finished PR against the same plan.
+Ready-gate enforcement is unchanged: implementation dispatch still requires
+`plan:approved` (or adjudicated `verify:n/a`); only the repair path became more
+autonomous.
+
+**Plan authorship moves upstream.** The issue's creator authors the acceptance
+criteria + verification plan at creation — for `origin:agent` issues that is the PO
+role (a decomposition without a plan is incomplete). A human-filed issue lacking a
+plan gets one drafted by the PO/triage peripheral; the loop never blocks waiting for
+a human-written plan.
+
+**The separation chain extends: plan-author ≠ plan-approver ≠ producer.** The
+plan-reviewer reads and writes issues only — it never reviews code and never merges.
+The safety invariant (producer≠reviewer≠merger, locked decision above) is untouched.
+
+**The autonomy principle (governs gate⓪ and every future gate).** Humans decide only
+the *why/what* of an issue — the act of moving it to `Ready` (including the initial
+confirmation of `origin:agent` issues). Everything after `Ready` — plan drafting,
+plan review, execution, acceptance — is agentic; the loop never hangs waiting for a
+human on the normal path, and rare edges still degrade to `needs-human` (Decision
+#9). The precondition that makes this safe: every agent decision is externalized —
+issue comments, labels, the round ledger, structured events — observable and
+traceable, so a human can watch and intervene on unexpected behavior rather than
+being polled for routine approval.
+
+**Dispatch heuristic:** within equal priority, prefer lightweight issues first.
 
 **Role configuration is sketched, not designed.** Each role is expected to need at
 least a `role_id`, a `model`, and a `promptFile`, with execution modes (sequential /

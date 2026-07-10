@@ -20,6 +20,11 @@ export interface Issue {
   // it keep typechecking, and renderPromptTemplate treats an absent body as "" (Decision #8's
   // getIssueBody uses the same empty-string-not-throw convention for a bodyless issue).
   body?: string;
+  // #86: the issue's GitHub milestone TITLE, when it has one — round.ts's RoundScopedForge
+  // filters dispatch candidates against cfg.round.milestone using this field. Optional
+  // (additive, same pattern as body above): undefined means no milestone assigned, not "no
+  // data fetched" (the project GraphQL query always requests it — see projectQuery).
+  milestone?: string;
 }
 
 export interface PRStatus {
@@ -164,8 +169,11 @@ export class GithubForge implements IForge {
 
   async getReadyIssues(): Promise<Issue[]> {
     // Source-of-truth work-queue boundary: only ProjectV2 items in the configured Ready
-    // lane, OPEN, in THIS repo, that also carry a verification plan (Decision #8). Never
-    // every open issue. Fail-closed: a missing plan -> not returned -> not dispatched.
+    // lane, OPEN, in THIS repo, that pass gate⓪ (#88, amending Decision #8): a verify:n/a
+    // issue with no needs-human (doc-gate path), or a genuine plan that also carries
+    // plan:approved. needs-human/blocked always exclude. Never every open issue. Fail-closed
+    // on any error: fetchProject's gh()/GraphQL calls throw straight through this method
+    // (no partial/empty ready list on a fetch failure) — see selectReadyIssues below.
     const project = await this.fetchProject();
     return selectReadyIssues(project, this.cfg);
   }
@@ -364,6 +372,7 @@ export interface ProjectItem {
   repo: string; // nameWithOwner
   labels: string[];
   status: string | null; // current Status single-select value, if set
+  milestone: string | null; // #86: GitHub milestone title, or null if unassigned
 }
 
 export interface ParsedProject {
@@ -392,6 +401,7 @@ query($login: String!, $number: Int!, $after: String) {
               number title state body
               repository { nameWithOwner }
               labels(first: 100) { nodes { name } }
+              milestone { title }
             }
           }
           # first:100 — an item has at most one value per project field, and GitHub caps a
@@ -446,6 +456,7 @@ export function parseProject(json: string, statusField: string): ParsedProject {
       repo: n.content.repository?.nameWithOwner ?? "",
       labels: (n.content.labels?.nodes ?? []).map((l) => l.name),
       status: statusValue(n, statusField),
+      milestone: n.content.milestone?.title ?? null,
     }));
   return {
     projectId: proj.id,
@@ -464,6 +475,7 @@ interface RawItem {
     body?: string;
     repository?: { nameWithOwner?: string };
     labels?: { nodes?: { name: string }[] };
+    milestone?: { title?: string } | null;
   };
   fieldValues?: { nodes?: { name?: string; field?: { name?: string } }[] };
 }
@@ -529,18 +541,49 @@ export function findOpenPrNumber(prs: { number: number; body: string }[], issue:
 
 type ReadyCfg = {
   board: { owner: string; repo: string; statusField: string; status: { ready: string } };
-  labels: { verifyNa: string };
+  labels: { verifyNa: string; planApproved: string; needsHuman: string; blocked: string };
 };
 
-/** Ready-lane + OPEN + this repo + has-verification-plan. The dispatch work-queue. */
+/**
+ * gate⓪ (#88, amending Decision #8 per #77's 2026-07-09 comment): a verification plan must
+ * pass agent quality review before dispatch, not merely exist. `needsHuman`/`blocked` block
+ * unconditionally regardless of any other label — the fail-closed floor under both dispatch
+ * paths below:
+ *
+ *  - `verifyNa` present (and `needsHuman` already ruled out) -> the doc-gate path. A human has
+ *    effectively adjudicated this: the plan-reviewer peripheral only ever proposes `verifyNa`
+ *    paired WITH `needsHuman` in the same action, so `verifyNa` alone means a human accepted
+ *    it by removing `needsHuman` themselves.
+ *  - otherwise -> dispatchable only if a verification-plan section exists in the body AND
+ *    `planApproved` is present (applied by the plan-reviewer peripheral, never by this gate).
+ *    Presence alone (pre-#88 behavior) is no longer sufficient.
+ *
+ * Reuses `extractVerificationPlan` directly rather than `hasVerificationPlan` — the latter's
+ * OR-the-two-conditions-together semantics ("has a plan, in either sense") no longer matches
+ * gate⓪'s dispatch rule (verifyNa's doc-gate path and a reviewed plan's path are now stricter
+ * and mutually exclusive); `hasVerificationPlan` remains exported/tested unchanged as a
+ * standalone "does a plan exist in some form" helper for any other caller.
+ */
+function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
+  if (labels.includes(l.needsHuman) || labels.includes(l.blocked)) return false;
+  if (labels.includes(l.verifyNa)) return true;
+  return extractVerificationPlan(body) != null && labels.includes(l.planApproved);
+}
+
+/** Ready-lane + OPEN + this repo + gate⓪-dispatchable (#88). The dispatch work-queue. */
 export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[] {
   const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
   return project.items
     .filter((it) => it.repo === fullName)
     .filter((it) => it.state === "OPEN")
     .filter((it) => it.status === cfg.board.status.ready)
-    .filter((it) => hasVerificationPlan(it.body, it.labels, cfg.labels.verifyNa))
-    .map((it) => ({ number: it.number, title: it.title, labels: it.labels, body: it.body }));
+    .filter((it) => isDispatchable(it.body, it.labels, cfg.labels))
+    .map((it) => ({
+      number: it.number, title: it.title, labels: it.labels, body: it.body,
+      // exactOptionalPropertyTypes: an optional field must be OMITTED, not set to explicit
+      // undefined — only include the key when there's a real milestone title.
+      ...(it.milestone != null ? { milestone: it.milestone } : {}),
+    }));
 }
 
 export function findOptionId(project: ParsedProject, name: string): string | undefined {

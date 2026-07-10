@@ -101,27 +101,49 @@ and `--resume` takes effect on the very next tick.
 The engine's `data/` directory (which holds both sentinels and the state DB) sits
 outside worker git worktrees as a **permission-layer boundary** — the worker process is
 not launched with `--add-dir data`, so it has no `claude`-tool path into that directory.
-This is **not an OS-level sandbox**: a worker is still allowlisted to run `Bash(node
-*)`/`Bash(npm *)`, and the guard blocks `node -e <inline>` but not `node
-some-script.js` where that script (written via the ordinarily-permitted `Write` tool)
-reaches out via a relative path like `../../data/PAUSE` and touches or unlinks a
-sentinel directly. This residual vector is tracked in **issue #81** (guard
-defense-in-depth for `data/KILL_SWITCH` and `data/PAUSE`), not yet closed. Until it is,
-treat the sentinel boundary as "a worker won't accidentally step here," not "a worker
-provably cannot reach here."
+This is **not an OS-level sandbox**, so the guard (`engine/src/guard.ts`) adds
+defense-in-depth (#81) on top of that boundary: any `Write`/`Edit` targeting
+`data/KILL_SWITCH` or `data/PAUSE` (including via relative traversal, e.g.
+`../../data/PAUSE`) is denied, as is `Bash` `touch`/`rm`/`mv`/`git rm`/redirect-to-path
+targeting either sentinel, and a sentinel path appearing as a literal argument to any
+other command (e.g. `node some-script.js ../../data/PAUSE`) — including glued to a
+flag (`--target=../../data/PAUSE`) — with the
+sentinel names matched case-insensitively (macOS/APFS default is case-insensitive, so
+`data/pause` hits the real file). What remains open, deliberately documented rather
+than blocked:
+
+- a script written via the ordinarily-permitted `Write` tool that hardcodes the
+  sentinel path *inside its own source* rather than taking it as a CLI argument — the
+  guard judges the Bash command line, not a script's file contents, so
+  `node some-script.js` (no path argument) is opaque to it;
+- directory-level deletion that never names a sentinel, e.g. `rm -rf ../../data`
+  (removes both sentinels *and* the state DB). Blocking the bare `data` suffix would
+  false-positive on a worker legitimately removing a `data/` dir inside its own repo,
+  so this stays a documented residual instead of a guard rule.
+
+Until those are closed too, treat the isolation boundary as "a worker won't
+accidentally step here, and the obvious direct/indirect vectors are blocked," not "a
+worker provably cannot reach here by any means."
 
 ## Cost ceilings vs. the soft worker budget
 
 Two different things are both called "budget," and they behave differently on purpose:
 
-- **`worker.budgetUsdSoft`** is a **soft** per-worker budget. Reaching it is designed to
-  trigger a graceful handoff — finish the current atomic step, commit + push WIP, write
-  a progress note, drop a `.handoff` sentinel carrying a resumable session id, exit
-  clean — **never** a mid-work `SIGKILL`. A hard kill mid-step both burns the spend and
-  throws away the work; a graceful handoff preserves both. (Live enforcement of this
-  exact threshold is pending a real in-flight cost signal the worker doesn't have yet;
-  today the effective per-worker bound is `worker.timeoutSec` plus the hard ceiling
-  below.)
+- **`worker.budgetUsdSoft`** is a **soft** per-worker budget, auto-enforced via a live
+  token estimate. stream-json carries no in-progress `total_cost_usd` (only the
+  terminal result line has that), so the worker accumulates a running USD estimate
+  from every streamed assistant message's token usage (priced by a small, explicitly
+  approximate per-model rate table — the shipped `pricing.yaml`, overridable via
+  `worker.pricingFile` — with cache reads priced at the cache-read rate, not the
+  input rate, so a cache-heavy run doesn't look artificially expensive). Crossing
+  the threshold triggers a graceful handoff — finish the current atomic step, commit +
+  push WIP, write a progress note, drop a `.handoff` sentinel carrying a resumable
+  session id, exit clean — **never** a mid-work `SIGKILL`. A hard kill mid-step both
+  burns the spend and throws away the work; a graceful handoff preserves both. The
+  estimate is reconciled against the real terminal cost when a lane finishes (the
+  divergence is logged, not enforced) — it is a trigger signal, not a billing source
+  of truth, so `worker.timeoutSec` plus the hard ceiling below remain the actual
+  backstop.
 - **`cost.dailyBudgetUsd` / `cost.maxWallClockSec`** are **hard** engine-wide ceilings —
   the actual runaway-spend safety boundary, independent of any single worker. Breaching
   either freezes new dispatch/merges and starts draining in-flight workers
@@ -149,9 +171,52 @@ can enter `Ready` — an agent can propose work, but a human still decides what 
 enters the dispatch queue. Provisioning the label now means that gate can be turned on
 later without a taxonomy migration.
 
+## The `plan:approved` label and gate⓪ (#88)
+
+Decision #8's `Ready` gate originally checked only that a verification plan *existed* —
+not whether it was any good — and `verify:n/a` was self-declared by whoever wrote the
+issue. A 2026-07-09 amendment to Decision #8 (locked in issue #77's comments) closes
+that gap: a plan must also pass agent quality review before dispatch.
+
+`getReadyIssues` (`engine/src/forge.ts`) now requires, for any issue not labelled
+`verify:n/a`, **both** a verification-plan section in the body **and** the
+`plan:approved` label — plan presence alone no longer dispatches. `verify:n/a` still
+routes through the doc-gate path, but only when `needs-human` is absent: the
+plan-reviewer peripheral may *propose* `verify:n/a` for genuinely unverifiable work, but
+it always pairs that proposal with `needs-human` in the same action, so it's a human —
+never the agent — who actually opens the doc-gate path, by removing `needs-human`
+themselves. `needs-human` and `blocked` block dispatch unconditionally, regardless of
+any other label present.
+
+**A plan below standard self-heals rather than stalls** (#77 Amendment 2): when the
+reviewer finds the plan missing or inadequate beyond its minor-correction latitude, it
+does not park the issue for a human — it posts a comment stating precisely what's
+missing (that comment is the brief), and the loop dispatches a **scoped plan-drafting
+session**: issues-only writes, a session distinct from the reviewer (plan-author ≠
+plan-approver — the reviewer never approves a plan it authored), never a full worker
+lane, and it never implements the issue itself. The draft then comes back through a
+fresh plan-review. The cycle is bounded — at most `roles.planReviewer.maxDraftCycles`
+draft→re-review attempts per issue (default 2) — after which the loop applies
+`needs-human` with the full attempt trail preserved (Decision #9's degrade-to-human).
+Every attempt is externalized as issue edits/comments, so a human can inspect or
+intervene at any point. The Ready-gate enforcement above is unchanged by any of this:
+implementation dispatch still requires `plan:approved` (or adjudicated `verify:n/a`) —
+only the repair path became more autonomous.
+
+Today the enforcement in `getReadyIssues` is real and covered by tests. The
+**plan-reviewer session** that actually applies `plan:approved` is not wired yet — same
+"convention/enforcement now, machinery later" shape as `origin:agent` above; it lands
+with v0.2's round-orchestrator peripheral roles (see [`PLAN.md`](PLAN.md)'s v0.2
+chapter). The shipped default prompt for that future session already exists at
+`engine/prompts/plan-reviewer.md` (`roles.planReviewer.promptFile` overrides it — same
+`#74` pattern as `worker.promptFile`). Until that session lands, `plan:approved` must be
+applied by hand for any issue meant to dispatch on a reviewed plan; `sapwood init` does
+not yet provision the label (unlike `verify:n/a`/`origin:agent` above — provisioning it
+now would be premature ahead of the session that actually applies it).
+
 ## See also
 
 - [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `cost`,
-  and `labels` config sections referenced above.
+  `labels`, and `roles` config sections referenced above.
 - [`PLAN.md`](PLAN.md) — the full architecture, decision log, and the v0.2 round
   orchestrator's self-feed design.

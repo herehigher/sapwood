@@ -631,3 +631,94 @@ test("spend_ledger model/token columns persist across close/reopen (schema-migra
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #86: rounds ledger (round-loop skeleton) ──────────────────────────────────────────────
+
+test("fresh DB migrates to a schema version that includes the rounds table (#86)", () => {
+  const s = mem();
+  assert.ok(SCHEMA_VERSION >= 8);
+  assert.equal(s.userVersion(), SCHEMA_VERSION);
+  s.close();
+});
+
+test("startRound: creates a round in phase 'aligning', status 'in_progress', no marker", () => {
+  const s = mem();
+  const r = s.startRound("2026-07-09T00:00:00.000Z");
+  assert.equal(r.phase, "aligning");
+  assert.equal(r.status, "in_progress");
+  assert.equal(r.artifact_ref, null);
+  assert.equal(r.started_at, "2026-07-09T00:00:00.000Z");
+  assert.equal(r.updated_at, "2026-07-09T00:00:00.000Z");
+  assert.equal(r.ended_at, null);
+  assert.ok(r.round_id >= 1);
+  s.close();
+});
+
+test("openRound: returns the most recent in_progress round, undefined once none are open", () => {
+  const s = mem();
+  assert.equal(s.openRound(), undefined);
+  const r1 = s.startRound("2026-07-09T00:00:00.000Z");
+  assert.equal(s.openRound()?.round_id, r1.round_id);
+  s.closeRound(r1.round_id, "2026-07-09T00:05:00.000Z");
+  assert.equal(s.openRound(), undefined); // closed -> no longer "open"
+  const r2 = s.startRound("2026-07-09T00:10:00.000Z");
+  assert.equal(s.openRound()?.round_id, r2.round_id); // the newer one
+  s.close();
+});
+
+test("advanceRoundPhase: updates phase + updated_at and CLEARS artifact_ref (a new phase starts markerless)", () => {
+  const s = mem();
+  const r = s.startRound("2026-07-09T00:00:00.000Z");
+  s.setRoundMarker(r.round_id, "m1");
+  assert.equal(s.getRound(r.round_id)?.artifact_ref, "m1");
+  s.advanceRoundPhase(r.round_id, "architecting", "2026-07-09T00:01:00.000Z");
+  const row = s.getRound(r.round_id);
+  assert.equal(row?.phase, "architecting");
+  assert.equal(row?.updated_at, "2026-07-09T00:01:00.000Z");
+  assert.equal(row?.artifact_ref, null); // cleared, not carried over
+  s.close();
+});
+
+test("setRoundMarker: persists a phase stub's idempotency token without changing phase", () => {
+  const s = mem();
+  const r = s.startRound("2026-07-09T00:00:00.000Z");
+  s.setRoundMarker(r.round_id, "issue-42-comment-posted");
+  const row = s.getRound(r.round_id);
+  assert.equal(row?.artifact_ref, "issue-42-comment-posted");
+  assert.equal(row?.phase, "aligning"); // unchanged
+  s.close();
+});
+
+test("closeRound: sets phase 'closed', status 'done', ended_at", () => {
+  const s = mem();
+  const r = s.startRound("2026-07-09T00:00:00.000Z");
+  s.closeRound(r.round_id, "2026-07-09T00:30:00.000Z");
+  const row = s.getRound(r.round_id);
+  assert.equal(row?.phase, "closed");
+  assert.equal(row?.status, "done");
+  assert.equal(row?.ended_at, "2026-07-09T00:30:00.000Z");
+  s.close();
+});
+
+test("rounds row persists across close/reopen (DB-backed, not memory) — crash-rerun's data foundation", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s1 = new State(path);
+    const r = s1.startRound("2026-07-09T00:00:00.000Z");
+    s1.advanceRoundPhase(r.round_id, "plan_review", "2026-07-09T00:02:00.000Z");
+    s1.setRoundMarker(r.round_id, "plan-review-comment-1");
+    s1.close();
+
+    const s2 = new State(path); // re-migrating an already-current DB must be a no-op (idempotent)
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    const row = s2.openRound();
+    assert.equal(row?.round_id, r.round_id);
+    assert.equal(row?.phase, "plan_review");
+    assert.equal(row?.status, "in_progress");
+    assert.equal(row?.artifact_ref, "plan-review-comment-1");
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

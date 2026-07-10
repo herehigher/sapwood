@@ -51,11 +51,14 @@ const Worker = z.object({
   model: z.string().default("opus"),
   effort: z.enum(["low", "medium", "high"]).default("high"),
   timeoutSec: z.number().int().positive().default(3600),
-  // SOFT per-worker budget -> graceful handoff (never a mid-work kill). NOTE: automatic
-  // enforcement at this limit is pending #33 — it needs a live cost signal, which stream-json
-  // does not carry (total_cost_usd is only in the terminal result message). Interim spend
-  // bound: worker.timeoutSec (enforced) + the engine HARD ceiling (M3, the actual runaway
-  // safety boundary). requestHandoff() is the live drain path today.
+  // SOFT per-worker budget -> graceful handoff (never a mid-work kill). Auto-enforced (#33) via
+  // LIVE TOKEN ESTIMATION: stream-json carries no in-progress total_cost_usd (only the terminal
+  // result message has that), so worker.ts's checkSoftBudget() accumulates a running USD
+  // ESTIMATE from every streamed assistant message's token usage (priced by the small rate
+  // table in pricing.ts) and calls requestHandoff() once the estimate crosses this value. The
+  // estimate is reconciled against the real terminal total_cost_usd when it lands (logged, not
+  // enforced) — see worker.ts's writeTerminalSentinel. Backstopped by worker.timeoutSec
+  // (enforced) + the engine HARD ceiling (M3, the actual runaway safety boundary).
   budgetUsdSoft: z.number().finite().positive().default(10),
   heartbeatStaleSecs: z.number().int().positive().default(180),
   // #74: file-based worker prompt. A relative path is resolved against the CONFIG FILE's
@@ -66,6 +69,13 @@ const Worker = z.object({
   // error (buildRenderPrompt loads it once, eagerly, before any dispatch) — never a silent
   // fallback to the shipped default.
   promptFile: z.string().optional(),
+  // #33 follow-up (PR #85 human review): user-editable model rate table for the soft-budget
+  // token estimator. Same shape as promptFile (#74): a relative path resolves against the
+  // CONFIG FILE's directory (see loadConfig); unset (default) -> the shipped preset at the
+  // engine package's `pricing.yaml` (see pricing.ts's defaultPricingPath). Set-but-missing/
+  // unreadable/malformed is a fail-fast startup error (loadPricingTable, loaded once at
+  // supervisor construction) — never a silent fallback to the shipped default.
+  pricingFile: z.string().optional(),
 }).strict();
 
 const Cost = z.object({
@@ -158,6 +168,31 @@ const Labels = z.object({
   blocked: z.string().default("blocked"),
   reserve: z.string().default("reserve"),
   verifyNa: z.string().default("verify:n/a"), // Decision #8: skips the verification-plan gate
+  // #88 gate⓪ (amends Decision #8 per #77's 2026-07-09 comment): a verification plan must
+  // also pass the plan-reviewer peripheral's quality review before getReadyIssues dispatches
+  // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
+  // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
+  planApproved: z.string().default("plan:approved"),
+}).strict();
+
+// #88: gate⓪ plan-reviewer peripheral config surface. Session wiring (actually loading and
+// rendering this prompt) lands with the peripheral-role-runner issue — same "accepted, not
+// yet wired" shape as lanes.reserveCap/prFixCap/frictionMin below. This issue ships the
+// validated config key + path resolution + the shipped default prompt file only.
+const Roles = z.object({
+  planReviewer: z.object({
+    // Same #74 promptFile pattern as worker.promptFile: unset -> the engine's shipped
+    // `prompts/plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
+    // directory (see loadConfig below), not the CLI's cwd.
+    promptFile: z.string().optional(),
+    // #77 Amendment 2 (gate⓪ self-heal): max draft→re-review cycles per issue before the
+    // loop gives up and applies needs-human with the attempt trail (Decision #9's
+    // degrade-to-human) — the bound that keeps the self-heal path from livelocking.
+    // Positive int only: 0 would turn every request-a-draft outcome into an instant
+    // needs-human, silently disabling the self-heal path. Enforced by the #87 role
+    // runner's plan_review phase (accepted, not yet wired — like promptFile above).
+    maxDraftCycles: z.number().int().positive().default(2),
+  }).strict().default({}),
 }).strict();
 
 const Guard = z.object({
@@ -209,6 +244,18 @@ const Stop = z.object({
   onMilestoneComplete: z.string().min(1).optional(),
 }).strict();
 
+// #86: round-loop scoping. `milestone` reuses the exact GitHub-milestone mechanism
+// stop.onMilestoneComplete already validates against (forge.listMilestoneTitles/
+// countOpenIssuesInMilestone) rather than inventing a parallel label-based "theme" — one key
+// does both jobs the round loop needs: (1) dispatch-candidate filter (round.ts's
+// RoundScopedForge only returns Ready issues whose Issue.milestone matches), and (2) a
+// round-level stop condition (the round's dispatch batch is skipped once that milestone has
+// zero open issues left). Unset = no scoping, every Ready issue is a candidate (today's
+// behavior, unchanged).
+const Round = z.object({
+  milestone: z.string().min(1).optional(),
+}).strict();
+
 const Recovery = z.object({
   // #31: bounded retry count for a durably-persisted rollback/requeue (a recovery-path board
   // mutation, e.g. rolling a dispatch-failed claim back to Ready, or requeuing a dead lane).
@@ -226,10 +273,12 @@ export const ConfigSchema = z.object({
   guard: Guard.default({}),
   cost: Cost.default({}),
   stop: Stop.default({}),
+  round: Round.default({}),
   recovery: Recovery.default({}),
   reviewer: Reviewer.default({}),
   merge: Merge.default({}),
   labels: Labels.default({}),
+  roles: Roles.default({}),
   escalation: z
     .object({ humanLabels: z.array(z.string()).default(["needs-human", "blocked"]) })
     .strict()
@@ -271,6 +320,17 @@ export function loadConfig(path?: string): SapwoodConfig {
   // the same config the engine would run inside `repo/`.
   if (cfg.worker.promptFile !== undefined && !isAbsolute(cfg.worker.promptFile)) {
     cfg.worker.promptFile = resolve(dirname(file), cfg.worker.promptFile);
+  }
+  // Same rule for worker.pricingFile (#33 follow-up, PR #85 review).
+  if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
+    cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
+  }
+  // #88: same relative-to-config-file resolution for the (not-yet-wired) plan-reviewer prompt.
+  if (
+    cfg.roles.planReviewer.promptFile !== undefined &&
+    !isAbsolute(cfg.roles.planReviewer.promptFile)
+  ) {
+    cfg.roles.planReviewer.promptFile = resolve(dirname(file), cfg.roles.planReviewer.promptFile);
   }
   return cfg;
 }

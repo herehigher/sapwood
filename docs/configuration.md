@@ -60,7 +60,8 @@ Per-worker execution.
 | `model` | `opus` | Model the headless worker runs as. |
 | `effort` | `high` | `low` \| `medium` \| `high`. |
 | `timeoutSec` | `3600` | Wall-clock hard cap per worker (enforced). |
-| `budgetUsdSoft` | `10` | **Soft** per-worker USD budget. Reaching it is meant to trigger a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. Live enforcement of this exact threshold needs an in-flight cost signal the worker doesn't currently have (tracked separately); today the effective spend bound is `timeoutSec` plus the engine's hard `cost` ceiling below. |
+| `budgetUsdSoft` | `10` | **Soft** per-worker USD budget, auto-enforced via a live token-usage estimate (stream-json carries no in-progress real cost). Crossing it triggers a graceful handoff (commit + push WIP, progress note, `.handoff` sentinel, clean exit) — never a mid-work kill. The estimate is a per-model rate-table approximation (see `pricingFile` below), reconciled (logged, not enforced) against the real cost when the worker finishes; `timeoutSec` plus the engine's hard `cost` ceiling below remain the actual backstop. |
+| `pricingFile` | unset | Override the model rate table the soft-budget estimator prices against. A relative path resolves against **the config file's own directory** (same rule as `promptFile`). Unset uses the engine's shipped `pricing.yaml` — a commented snapshot of per-model USD-per-million-token rates (`input` / `output` / `cacheWrite` / `cacheRead` per model alias). Your file **replaces** the shipped table entirely (no merging), so copy every model you use; you may add your own aliases. Aliases match case-insensitively as substrings of the model id (`opus` matches `claude-opus-4-8`); a model matching nothing is priced at the most expensive tier in the loaded table. A set-but-missing/unreadable/malformed file is a fail-fast startup error (`sapwood validate` catches it too) — never a silent fallback to the shipped rates. |
 | `heartbeatStaleSecs` | `180` | A worker heartbeat older than this is considered dead (stale-heartbeat reclaim). |
 | `promptFile` | unset | Override the worker's prompt template with your own file. A relative path resolves against **the config file's own directory**, not the CLI's cwd — so the same config behaves identically no matter where `sapwood` is invoked from. Unset uses the engine's shipped `prompts/worker.md` (TDD + two-gate method). |
 
@@ -163,6 +164,18 @@ individually configurable).
 | `blocked` | `blocked` | Held out of the main dispatch lane. |
 | `reserve` | `reserve` | Not part of the main dispatch lane. |
 | `verifyNa` | `verify:n/a` | Marks an issue as inherently unverifiable by tests — skips the verification-plan gate and routes through the doc-gate path instead. |
+| `planApproved` | `plan:approved` | gate⓪ (#88): required, together with a genuine verification-plan section, for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. See [`security.md`](security.md#plan-approved). |
+
+## `roles`
+
+Peripheral-role configuration (v0.2). **Accepted, not yet wired** — validated here so the
+config surface doesn't need a migration when the round-orchestrator lands (see
+[`PLAN.md`](PLAN.md)'s v0.2 chapter); no session currently loads or runs this prompt.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `planReviewer.promptFile` | unset | Override the gate⓪ plan-reviewer's prompt (same `#74` pattern as `worker.promptFile`: a relative path resolves against the config file's own directory, not the CLI's cwd). Unset uses the engine's shipped `prompts/plan-reviewer.md`. |
+| `planReviewer.maxDraftCycles` | `2` | gate⓪ self-heal bound (#77 Amendment 2): max draft→re-review cycles per issue when the reviewer requests a plan draft (a scoped, issues-only drafting session — never a worker lane, never an implementation). Exhausted → the loop applies `needs-human` with the attempt trail. Positive integer only — `0` would turn every draft request into an instant `needs-human`. |
 
 ## `guard`
 

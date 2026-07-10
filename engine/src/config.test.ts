@@ -14,6 +14,7 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.reviewer.mode, "different-model-codex");
   assert.equal(cfg.labels.verifyNa, "verify:n/a");
+  assert.equal(cfg.labels.planApproved, "plan:approved"); // #88 gate⓪
   // #14 engine cost ceiling + kill switch: conservative defaults.
   assert.equal(cfg.cost.dailyBudgetUsd, 100);
   assert.equal(cfg.cost.maxWallClockSec, 14400);
@@ -220,6 +221,110 @@ test("worker.promptFile: a typo'd key under worker.* is rejected, not silently d
   );
 });
 
+// ── #33 follow-up (PR #85 human review): worker.pricingFile ──
+test("worker.pricingFile: unset by default, overridable, follows the #74 promptFile shape", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.pricingFile, undefined);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { pricingFile: pricing/my-rates.yaml }",
+  );
+  assert.equal(over.worker.pricingFile, "pricing/my-rates.yaml");
+});
+
+test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's directory, exactly like promptFile (#74)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { pricingFile: rates/my-rates.yaml }",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.worker.pricingFile, join(dir, "rates", "my-rates.yaml"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #88 gate⓪: labels.planApproved + roles.planReviewer.promptFile ──────────────────────────
+// Session wiring (actually loading/rendering this prompt) lands with the peripheral-role-
+// runner issue; here the config surface is validated + path-resolved, same "accepted, not
+// yet wired" shape as lanes.reserveCap/prFixCap/frictionMin.
+
+test("labels.planApproved: defaults to plan:approved, overridable", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.labels.planApproved, "plan:approved");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { planApproved: custom:approved }",
+  );
+  assert.equal(over.labels.planApproved, "custom:approved");
+});
+
+test("roles.planReviewer.promptFile: unset by default, overridable, strict schema (same #74 pattern as worker.promptFile)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.planReviewer.promptFile, undefined);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFile: prompts/custom-plan-reviewer.md } }",
+  );
+  assert.equal(over.roles.planReviewer.promptFile, "prompts/custom-plan-reviewer.md");
+});
+
+test("roles.planReviewer.promptFile: a typo'd key under roles.planReviewer.* is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.planReviewer.maxDraftCycles: defaults to 2, overridable (#77 Amendment 2 — gate⓪ self-heal bound)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.planReviewer.maxDraftCycles, 2);
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycles: 5 } }",
+  );
+  assert.equal(over.roles.planReviewer.maxDraftCycles, 5);
+});
+
+test("roles.planReviewer.maxDraftCycles: zero, negative, and non-integer are rejected (positive int only — 0 would make every bounce an instant needs-human)", () => {
+  for (const bad of [0, -1, 1.5]) {
+    assert.throws(
+      () =>
+        parseConfig(
+          `board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycles: ${bad} } }`,
+        ),
+      /maxDraftCycles/,
+    );
+  }
+});
+
+test("roles.planReviewer.maxDraftCycles: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { maxDraftCycle: 3 } }",
+      ),
+    /maxDraftCycle|[Uu]nrecognized/,
+  );
+});
+
+test("roles.planReviewer.promptFile: a relative path resolves against the config file's directory, not cwd (same #74 pattern as worker.promptFile)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { promptFile: my-plan-reviewer.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.planReviewer.promptFile, join(dir, "my-plan-reviewer.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
 
 test("stop: absent by default — every field undefined, no behavior change (#76 regression contract)", () => {
@@ -263,5 +368,31 @@ test("stop: a typo'd key is rejected, not silently dropped (.strict())", () => {
   assert.throws(
     () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nstop: { afterIssuesMerge: 3 }"),
     /afterIssuesMerge|[Uu]nrecognized/,
+  );
+});
+
+// ── #86: round.milestone — round-level dispatch-candidate filter + stop condition ───────────
+
+test("round.milestone: absent by default — no scoping, no behavior change", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.round.milestone, undefined);
+});
+
+test("round.milestone: overridable to a milestone title", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { milestone: M4 }");
+  assert.equal(cfg.round.milestone, "M4");
+});
+
+test("round.milestone: an empty string is rejected (a name is required once the key is set)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { milestone: '' }"),
+    /milestone/,
+  );
+});
+
+test("round: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { milestne: M4 }"),
+    /milestne|[Uu]nrecognized/,
   );
 });
