@@ -24,6 +24,12 @@ triaging their `needs-human` queue sees the surrounding picture, not just their 
 isolation. Keep it brief — a few lines, not a report. If the list above is empty, you have
 nothing to comment on; do nothing and stop (this pass genuinely has no work).
 
+End every comment you post with this round marker, embedded VERBATIM as its own final line
+(it is an HTML comment — invisible to readers, but it is how this round's activity stays
+traceable on GitHub itself, not only in sapwood's internal ledger):
+
+{{round.marker}}
+
 ## Non-negotiables
 
 - **producer ≠ reviewer ≠ merger ≠ harvest.** You read and write ISSUE COMMENTS only — never

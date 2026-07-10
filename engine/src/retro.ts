@@ -42,8 +42,12 @@ export const RETRO_ALLOWED_TOOLS =
  *  as branches/PRs only" (#91 acceptance criterion), asserted directly against these strings in
  *  retro.test.ts. `git push`ing straight to the default branch is denied by NAME (main/master)
  *  since a role session has no reliable way to ask "what is this repo's default branch" from a
- *  fixed string pattern; an unusual default-branch name is a residual gap the guard hook (not
- *  this best-effort list) is the real backstop for.
+ *  fixed string pattern. RESIDUAL, stated honestly (fable review PR #103 P3): an unusual
+ *  default-branch name slips this pattern AND the guard hook — the guard's git category
+ *  protects boundary FILES, not push targets — so the only backstop today is GitHub-side
+ *  branch protection, if the repo has it configured (nothing, otherwise). The structural fix
+ *  (derive the repo's real default branch and deny it dynamically) is tracked in #102's
+ *  tool-scope hardening, not here.
  *
  *  `gh pr create *--body-file*` (#101 push-time security review): every widened gh WRITE allow
  *  carries the matching --body-file deny, same rule the issues-only roles established. For

@@ -123,6 +123,9 @@ function factVars(facts: RoundLedgerFacts): Record<string, string> {
     "round.needsHumanList": facts.needsHumanIssues.length > 0
       ? facts.needsHumanIssues.map((n) => `#${n}`).join(", ")
       : "(none)",
+    // P2 (fable review, PR #103): the session embeds this verbatim in each briefing comment —
+    // the same on-GitHub traceability convention plan-review.ts's comments follow.
+    "round.marker": harvestMarker(facts.roundId),
   };
 }
 
@@ -139,11 +142,19 @@ export function renderFactsTemplate(template: string, vars: Record<string, strin
   });
 }
 
-/** Builds the `harvesting` phase's PeripheralStub. Idempotence (#77 decision 4): a non-null
- *  incoming marker means a prior attempt this round already externalized this phase's work —
- *  returned UNCHANGED, no session re-dispatched. No `needs-human` issues to brief -> no session
- *  at all (mirrors plan-review.ts's "no candidates, no session run" shortcut) — there is
- *  nothing for harvest to say. */
+/** Builds the `harvesting` phase's PeripheralStub. The round-summary ARTIFACT (#91 acceptance
+ *  criterion 1) is TWO-PART: (1) a durable `harvest-summary` state event carrying the full
+ *  RoundLedgerFacts, appended unconditionally once per round — the machine-readable summary
+ *  (exactly what the #17 dashboard's round view needs); (2) marker-stamped briefing comments
+ *  on the round's needs-human issues, when there are any — the human-facing half. A deliberate
+ *  deviation from a "post one summary comment somewhere" reading: harvest has no natural
+ *  GitHub anchor at round close (no single issue/PR owns a round), so the durable event is the
+ *  canonical artifact and GitHub carries only the parts humans are already waiting on.
+ *
+ *  Idempotence (#77 decision 4): a non-null incoming marker means a prior attempt this round
+ *  already externalized this phase's work — returned UNCHANGED, no session re-dispatched. No
+ *  `needs-human` issues to brief -> no session (mirrors plan-review.ts's "no candidates, no
+ *  session run" shortcut) — but the summary event above still lands. */
 export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
   return {
     async run({ roundId, marker }) {
@@ -154,6 +165,17 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
       // throwing, consistent with this codebase's fail-toward-more-work stance elsewhere.
       if (!round) return { marker: harvestMarker(roundId) };
       const facts = gatherRoundFacts(deps.state, round, deps.cfg.cost.roundBudgetUsd);
+      // P2 (fable review, PR #103): the round-summary ARTIFACT itself — a durable
+      // `harvest-summary` event carrying the full ledger facts, appended UNCONDITIONALLY
+      // (before and independent of any session dispatch), so a round with an empty
+      // needs-human list — no session at all — still externalizes its summary, and a failed
+      // session never loses it. Exactly once per round: round.ts persists the phase marker
+      // only after run() returns, so a crash mid-phase re-invokes this with marker null —
+      // the existing-event check (not the marker) is what dedups that rerun.
+      const summaryExists = deps.state
+        .eventsSince(round.started_at, ["harvest-summary"])
+        .some((e) => (e.payload as { round_id?: number }).round_id === roundId);
+      if (!summaryExists) deps.state.appendEvent("harvest-summary", { round_id: roundId, facts });
       if (facts.needsHumanIssues.length > 0) {
         const template = loadRolePromptTemplate(deps.cfg.roles.harvest.promptFile, defaultHarvestPromptPath());
         const rendered = renderFactsTemplate(template, factVars(facts));

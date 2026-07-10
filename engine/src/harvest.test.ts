@@ -49,9 +49,12 @@ test("defaultHarvestPromptPath: resolves to the shipped prompts/harvest.md, whic
   const p = defaultHarvestPromptPath();
   assert.ok(existsSync(p), `expected shipped prompt at ${p}`);
   const body = readFileSync(p, "utf8");
-  for (const v of ["{{round.id}}", "{{round.prsOpened}}", "{{round.prsMerged}}", "{{round.spentUsd}}", "{{round.needsHumanList}}"]) {
+  for (const v of ["{{round.id}}", "{{round.prsOpened}}", "{{round.prsMerged}}", "{{round.spentUsd}}", "{{round.needsHumanList}}", "{{round.marker}}"]) {
     assert.ok(body.includes(v), `harvest.md should reference ${v}`);
   }
+  // P2 (fable review, PR #103): the marker must be INSTRUCTED into every briefing comment
+  // (traceability on GitHub, not only in sapwood's own ledger) — "verbatim" is the contract.
+  assert.ok(/verbatim/i.test(body), "harvest.md must instruct embedding the marker verbatim");
 });
 
 test("renderFactsTemplate: substitutes known vars, throws on an unknown placeholder (#74 fail-closed pattern)", () => {
@@ -103,15 +106,42 @@ test("createHarvestStub: marker present -> returns it unchanged, no facts gather
   state.close();
 });
 
-test("createHarvestStub: no needs-human issues this round -> returns the round's marker, no session run", async () => {
+test("createHarvestStub: no needs-human issues this round -> no session run, but the durable harvest-summary artifact STILL lands (P2, fable review PR #103)", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("merged", { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: HarvestDeps = { state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id));
   assert.equal(runner.calls.length, 0);
+  // The summary ARTIFACT is the durable event, independent of any session: an empty
+  // needs-human list means nobody to brief, never "no round summary exists anywhere".
+  const summaries = state.eventsSince("2020-01-01T00:00:00.000Z", ["harvest-summary"]);
+  assert.equal(summaries.length, 1);
+  assert.deepEqual(summaries[0]!.payload, {
+    round_id: round.round_id,
+    facts: {
+      roundId: round.round_id, prsOpened: 0, prsMerged: 1, issuesClosed: 1,
+      spentUsd: 0, roundBudgetUsd: 30, needsHumanIssues: [],
+    },
+  });
+  state.close();
+});
+
+test("createHarvestStub: harvest-summary is appended exactly once per round — a crash-rerun (marker null again) never duplicates it", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const deps: HarvestDeps = { state, cfg: mkCfg(), runner };
+  const stub = createHarvestStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
+  // Crash-rerun simulation: round.ts persists the marker only AFTER run() returns, so a crash
+  // mid-phase re-invokes the stub with marker null — the summary event must not duplicate.
+  await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
+  const summaries = state.eventsSince("2020-01-01T00:00:00.000Z", ["harvest-summary"]);
+  assert.equal(summaries.length, 1);
   state.close();
 });
 
@@ -134,6 +164,9 @@ test("createHarvestStub: a needs-human issue this round -> dispatches ONE harves
   assert.ok(call.prompt.includes(`Round: #${round.round_id}`));
   assert.ok(call.prompt.includes("PRs merged this round: 1"));
   assert.ok(call.prompt.includes("#42"));
+  // P2 (fable review, PR #103): the round marker is substituted into the prompt so the session
+  // can embed it verbatim in each briefing comment (GitHub-side traceability).
+  assert.ok(call.prompt.includes(harvestMarker(round.round_id)));
   // #101 security-review pitfall: comments-only role — the WHOLE `gh issue edit` verb is
   // pattern-denied (labels included), on top of the base issues-only denies.
   assert.equal(call.disallowedTools, HARVEST_DISALLOWED_TOOLS);
