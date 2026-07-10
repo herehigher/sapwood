@@ -75,6 +75,21 @@ export const PLAN_DRAFTER_DISALLOWED_TOOLS =
  *  post-session check (origin:agent stamp + plan-presence escalation). */
 export const PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS + ",Bash(gh issue create*)";
 
+/** The PO's matching deny list (security review, PR #101): `gh issue create` opens flag holes
+ *  the base ROLE_DISALLOWED_TOOLS never had to close (its create-less scope made them moot):
+ *  - `--body-file` reads ANY file into a (possibly public) issue body — the same file-read
+ *    exfiltration channel the base list already denies on comment/edit, closed for create too;
+ *  - `--label` could self-apply `plan:approved`/`verify:n/a` at creation (a gate⓪ bypass) —
+ *    labels on PO-created issues are the ORCHESTRATOR's job (align.ts stamps origin:agent and
+ *    post-checks for poisoned dispatch-path labels, the authoritative layer);
+ *  - `--project` could place the new issue onto a board lane directly (a board write, locked
+ *    decision 5's territory).
+ *  Best-effort pattern layer, same caveat as everything above; the authoritative enforcement
+ *  for the --label hole is align.ts's created-issue label post-check. */
+export const PO_DISALLOWED_TOOLS =
+  ROLE_DISALLOWED_TOOLS +
+  ",Bash(gh issue create *--body-file*),Bash(gh issue create *--label*),Bash(gh issue create *--project*)";
+
 export interface RoleSessionOpts {
   /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
    *  part of the session's lane/sentinel name, never interpreted. */

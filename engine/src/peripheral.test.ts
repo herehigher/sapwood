@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   RoleRunner, ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, PLAN_DRAFTER_DISALLOWED_TOOLS,
-  PO_ALLOWED_TOOLS, type RoleRunnerDeps,
+  PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, type RoleRunnerDeps,
 } from "./peripheral.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
@@ -205,7 +205,19 @@ test("PO_ALLOWED_TOOLS: strict superset of the base allows, adding issue creatio
   assert.ok(!PO_ALLOWED_TOOLS.includes("git"), "no code/repo capability");
 });
 
-test("run: a per-role allowedTools override reaches the argv (the PO's wider issue-creation scope path)", async () => {
+test("PO_DISALLOWED_TOOLS: strict superset of the base denies, closing the `gh issue create` flag holes the new allow opens (file exfil via --body-file, gate⓪ bypass via --label, board writes via --project)", () => {
+  assert.ok(PO_DISALLOWED_TOOLS.startsWith(ROLE_DISALLOWED_TOOLS), "keeps every base deny");
+  // --body-file on create reads ANY file into a (possibly public) issue body — the same
+  // no-repo-read boundary the base list already closes for comment/edit.
+  assert.ok(PO_DISALLOWED_TOOLS.includes("Bash(gh issue create *--body-file*)"));
+  // --label at creation could self-apply plan:approved/verify:n/a (gate⓪ bypass); labels on
+  // PO-created issues are the orchestrator's job (align.ts stamps origin:agent itself).
+  assert.ok(PO_DISALLOWED_TOOLS.includes("Bash(gh issue create *--label*)"));
+  // --project could place the new issue onto a board lane directly (a board write).
+  assert.ok(PO_DISALLOWED_TOOLS.includes("Bash(gh issue create *--project*)"));
+});
+
+test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the align/triage session wiring)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -215,12 +227,11 @@ test("run: a per-role allowedTools override reaches the argv (the PO's wider iss
     const runner = mkRunner(dir, bin);
     await runner.run({
       roleId: "po-align", prompt: "p", model: "sonnet", effort: "medium",
-      allowedTools: PO_ALLOWED_TOOLS,
+      allowedTools: PO_ALLOWED_TOOLS, disallowedTools: PO_DISALLOWED_TOOLS,
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], PO_ALLOWED_TOOLS);
-    // The base disallowed-list is untouched by an allowedTools override — deny still wins.
-    assert.equal(seen[seen.indexOf("--disallowedTools") + 1], ROLE_DISALLOWED_TOOLS);
+    assert.equal(seen[seen.indexOf("--disallowedTools") + 1], PO_DISALLOWED_TOOLS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -260,6 +260,15 @@ test("labels.planApproved: defaults to plan:approved, overridable", () => {
   assert.equal(over.labels.planApproved, "custom:approved");
 });
 
+test("labels.originAgent: defaults to origin:agent, overridable (#89 — the PO provenance stamp, config-driven like every sibling label)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.labels.originAgent, "origin:agent");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { originAgent: bot:made }",
+  );
+  assert.equal(over.labels.originAgent, "bot:made");
+});
+
 test("roles.planReviewer.promptFile: unset by default, overridable, strict schema (same #74 pattern as worker.promptFile)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.roles.planReviewer.promptFile, undefined);

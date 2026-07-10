@@ -173,6 +173,11 @@ const Labels = z.object({
   // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
   // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
   planApproved: z.string().default("plan:approved"),
+  // #89: provenance stamp for agent-created issues (docs/security.md's convention, now
+  // load-bearing): align.ts's PO orchestrator applies it to every issue the alignment
+  // session creates. Config-driven like every sibling label here — never a hardcoded
+  // string at the call site (fable PR #101 P3).
+  originAgent: z.string().default("origin:agent"),
 }).strict();
 
 // #87: peripheral role sessions (plan-reviewer, plan-drafter, ...) are cheap, issues-only,

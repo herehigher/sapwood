@@ -19,7 +19,7 @@ import { extractVerificationPlan } from "./forge.js";
 import type { State } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { RoleRunner } from "./peripheral.js";
-import { PO_ALLOWED_TOOLS } from "./peripheral.js";
+import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS } from "./peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "./plan-review.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
@@ -81,7 +81,51 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const iso = (): string => (deps.now ? deps.now() : new Date()).toISOString();
       const template = loadRolePromptTemplate(deps.cfg.roles.po.promptFile, defaultPoPromptPath());
       const role = deps.cfg.roles.po;
+      const l = deps.cfg.labels;
       const mark = alignMarker(roundId);
+
+      /** One PO session, spend ledgered under its own name. RoleRunner.run never throws on the
+       *  session's OWN outcome (peripheral.ts) — failed/timeout is a normal return the caller
+       *  must handle. Same retry-once stance as plan-review.ts's reviewer sessions (fable PR
+       *  #101 P2, mirroring PR #100's architect fix); the divergence from plan-review's
+       *  needs-human escalation is deliberate and cheap here: this phase runs PRE-Ready, so a
+       *  double failure never poisons a dispatch decision — the round advances (marker still
+       *  set) and the degradation is made observable (a durable event + a log line) instead of
+       *  wedging the round; the next round retries naturally. */
+      const runSession = async (
+        roleId: "po-align" | "po-triage",
+        prompt: string,
+        issue: number,
+        degradeEvent: "po-degraded" | "triage-degraded",
+      ): Promise<{ outcome: string }> => {
+        const attempt = async (): ReturnType<AlignDeps["runner"]["run"]> => {
+          const result = await deps.runner.run({
+            roleId, prompt, model: role.model, effort: role.effort,
+            allowedTools: PO_ALLOWED_TOOLS, disallowedTools: PO_DISALLOWED_TOOLS,
+          });
+          // Align spend is round-scoped, not tied to any single issue — `issue` is a plain int
+          // column with no FK, so 0 is a documented sentinel ("no single issue").
+          deps.state.recordSpend(result.name, issue, result.costUsd, iso(), result.modelUsage);
+          return result;
+        };
+        let result = await attempt();
+        if (result.outcome !== "done") {
+          result = await attempt();
+          if (result.outcome !== "done") {
+            try {
+              deps.state.appendEvent(degradeEvent, {
+                round_id: roundId, ...(issue !== 0 ? { issue } : {}), outcome: result.outcome, session: result.name,
+              });
+            } catch { /* state write failed — the console line below still lands */ }
+            console.error(
+              `[sapwood:po] round ${roundId}: ${roleId} session failed twice (${result.outcome})` +
+                `${issue !== 0 ? ` for issue #${issue}` : ""} — proceeding (pre-Ready, low stakes; ` +
+                `the next round retries naturally)`,
+            );
+          }
+        }
+        return result;
+      };
 
       // ── Alignment/decomposition pass: ONE session, dispatched even with an unscoped round
       // (round.milestone unset) — decomposition still has docs/PLAN.md to work from alone. ──
@@ -91,33 +135,62 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
         "plan.md": loadPlanMd(deps.planMdPath),
       });
-      const alignResult = await deps.runner.run({
-        roleId: "po-align", prompt: alignPrompt, model: role.model, effort: role.effort,
-        allowedTools: PO_ALLOWED_TOOLS,
-      });
-      deps.state.recordSpend(alignResult.name, 0, alignResult.costUsd, iso(), alignResult.modelUsage);
+      await runSession("po-align", alignPrompt, 0, "po-degraded");
 
       // Discover what the session actually made (it has no structured return channel — see
-      // peripheral.ts's module doc) via a before/after diff of open issue numbers.
+      // peripheral.ts's module doc) via a before/after diff of open issue numbers. Runs even
+      // after a degraded session: a session that failed AFTER creating some issues still needs
+      // those creations stamped/checked below. KNOWN, ACCEPTED RACE (fable PR #101 nit): an
+      // issue created CONCURRENTLY by a human (or another agent) while the session runs also
+      // lands in this diff and gets mistaken for PO output — stamped origin:agent, possibly
+      // needs-human'd. Low probability (the window is one session), mild consequence (wrong
+      // provenance label + an explanatory comment a human can see and revert; never a dispatch
+      // enablement — the containment below only ever BLOCKS), and the alternative (parsing the
+      // session's freeform output for issue URLs) trades a visible mislabel for silent misses.
       const after = await deps.forge.listOpenIssueNumbers();
       const created = after.filter((n) => !before.has(n));
 
       for (const issueNumber of created) {
-        // The session cannot have touched origin:agent or Ready itself (no gh api/project
-        // capability, and origin:agent isn't in its allowed tools either) — this orchestrator
-        // stamps it directly, unconditionally, so the fact is guaranteed rather than merely
-        // best-effort. See peripheral.ts's PO_ALLOWED_TOOLS doc for the structural boundary.
+        // The session cannot have set board Status itself (no gh api/project capability) —
+        // and labels are the orchestrator's job: origin:agent is stamped here directly,
+        // unconditionally, so the fact is guaranteed rather than merely best-effort. See
+        // peripheral.ts's PO_ALLOWED_TOOLS/PO_DISALLOWED_TOOLS docs for the structural boundary.
         const labels = await deps.forge.getIssueLabels(issueNumber);
-        if (!labels.includes("origin:agent")) await deps.forge.addLabel(issueNumber, "origin:agent");
+        if (!labels.includes(l.originAgent)) await deps.forge.addLabel(issueNumber, l.originAgent);
+
+        // AUTHORITATIVE gate⓪-bypass containment (security review, PR #101): the create
+        // --label deny in PO_DISALLOWED_TOOLS is only the best-effort pattern layer — a
+        // created issue that nonetheless carries a dispatch-path label (plan:approved /
+        // verify:n/a) would walk straight through getReadyIssues once a human moves it to
+        // Ready, without any plan-reviewer ever seeing it. Same stance as plan-review.ts's
+        // drafter label post-check: needs-human is an unconditional dispatch blocker, so
+        // applying it CONTAINS the poisoned label without needing label-removal capability.
+        // NB: plan-review's own post-check cannot cover this — it snapshots labels of
+        // pre-existing issues; a freshly created issue has no before-snapshot.
+        const poisoned = [
+          ...(labels.includes(l.planApproved) ? [`\`${l.planApproved}\``] : []),
+          ...(labels.includes(l.verifyNa) ? [`\`${l.verifyNa}\``] : []),
+        ];
+        if (poisoned.length > 0) {
+          await deps.forge.addLabel(issueNumber, l.needsHuman);
+          await deps.forge.addIssueComment(
+            issueNumber,
+            `Created by sapwood's round ${roundId} PO alignment pass, but carrying ` +
+              `${poisoned.join(", ")} at creation — a dispatch-path label the PO must never ` +
+              `self-apply (gate⓪ bypass). Applying \`${l.needsHuman}\` to contain it; a human ` +
+              `needs to remove the poisoned label(s) before this issue can proceed.\n\n${mark}`,
+          );
+          continue;
+        }
 
         const body = await deps.forge.getIssueBody(issueNumber);
         const hasPlan = extractVerificationPlan(body) != null;
         const note = hasPlan
           ? `Created by sapwood's round ${roundId} PO alignment pass (goal decomposition).`
           : `Created by sapwood's round ${roundId} PO alignment pass, but with no verification ` +
-            `plan detected — applying \`${deps.cfg.labels.needsHuman}\` so it is never dispatched ` +
+            `plan detected — applying \`${l.needsHuman}\` so it is never dispatched ` +
             `planless. A human (or a future triage pass) needs to supply one.`;
-        if (!hasPlan) await deps.forge.addLabel(issueNumber, deps.cfg.labels.needsHuman);
+        if (!hasPlan) await deps.forge.addLabel(issueNumber, l.needsHuman);
         await deps.forge.addIssueComment(issueNumber, `${note}\n\n${mark}`);
       }
 
@@ -126,23 +199,36 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // the per-issue level, since a successfully drafted issue now carries a plan section and
       // so no longer matches getIssuesNeedingPlanTriage's candidate query on any later run. ──
       const triageCandidates = await deps.forge.getIssuesNeedingPlanTriage();
-      const triaged: number[] = [];
       for (const issue of triageCandidates) {
         const triagePrompt = renderRolePrompt(template, issue, deps.cfg, {
           "po.mode": "triage",
           "round.milestone": deps.cfg.round.milestone ?? "",
           "plan.md": "",
         });
-        const result = await deps.runner.run({
-          roleId: "po-triage", prompt: triagePrompt, model: role.model, effort: role.effort,
-          allowedTools: PO_ALLOWED_TOOLS,
-        });
-        deps.state.recordSpend(result.name, issue.number, result.costUsd, iso(), result.modelUsage);
-        triaged.push(issue.number);
-        await deps.forge.addIssueComment(
-          issue.number,
-          `PO triage pass (round ${roundId}) drafted a plan into this issue's body.\n\n${mark}`,
-        );
+        const result = await runSession("po-triage", triagePrompt, issue.number, "triage-degraded");
+        // The success comment is EARNED by the re-fetched body, never by the session's exit
+        // code (fable PR #101 P2): a failed/no-op session must not leave a comment claiming a
+        // draft that never landed — that false audit-trail entry would also invert the natural
+        // per-issue idempotence above (the un-drafted issue re-matches next round while
+        // already "documented" as drafted). Still planless after the session (and its retry)
+        // -> no comment, a durable degradation event, and the candidate re-matches next round.
+        const bodyAfter = await deps.forge.getIssueBody(issue.number);
+        if (extractVerificationPlan(bodyAfter) != null) {
+          await deps.forge.addIssueComment(
+            issue.number,
+            `PO triage pass (round ${roundId}) drafted a plan into this issue's body.\n\n${mark}`,
+          );
+        } else if (result.outcome === "done") {
+          // A "done" session that left the body planless is its own degradation shape (the
+          // failed-twice shape was already externalized inside runSession — not repeated here).
+          try {
+            deps.state.appendEvent("triage-degraded", { round_id: roundId, issue: issue.number, outcome: "no-plan-after-draft" });
+          } catch { /* state write failed — the console line below still lands */ }
+          console.error(
+            `[sapwood:po] round ${roundId}: triage left issue #${issue.number} still planless — ` +
+              `no success comment posted; the candidate re-matches next round`,
+          );
+        }
       }
 
       return { marker: mark };
