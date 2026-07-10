@@ -375,6 +375,45 @@ test("roles.planDrafter.promptFile: a relative path resolves against the config 
   }
 });
 
+// ── #90: roles.architect (round design/review peripheral) ──────────────────────────────────
+
+test("roles.architect: promptFile unset by default, model/effort defaulted, strict schema (same #74 pattern)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.architect.promptFile, undefined);
+  assert.equal(cfg.roles.architect.model, "sonnet");
+  assert.equal(cfg.roles.architect.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { promptFile: prompts/custom-architect.md, model: opus } }",
+  );
+  assert.equal(over.roles.architect.promptFile, "prompts/custom-architect.md");
+  assert.equal(over.roles.architect.model, "opus");
+});
+
+test("roles.architect: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.architect.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { promptFile: my-architect.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.architect.promptFile, join(dir, "my-architect.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
 
 test("stop: absent by default — every field undefined, no behavior change (#76 regression contract)", () => {
