@@ -174,6 +174,20 @@ test("claudeArgs: resumeSessionId (#46) uses --resume instead of --session-id, r
   assert.ok(!args.includes("--session-id"));
 });
 
+test("claudeArgs: allowedTools/disallowedTools override the worker defaults when given (#87 role-runner reuse)", () => {
+  const defaults = claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s" });
+  const idx = defaults.indexOf("--allowedTools");
+  assert.equal(defaults[idx + 1], "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)");
+  const scoped = claudeArgs({
+    prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s",
+    allowedTools: "Bash(gh issue comment*)", disallowedTools: "Bash(gh pr *)",
+  });
+  const aIdx = scoped.indexOf("--allowedTools");
+  const dIdx = scoped.indexOf("--disallowedTools");
+  assert.equal(scoped[aIdx + 1], "Bash(gh issue comment*)");
+  assert.equal(scoped[dIdx + 1], "Bash(gh pr *)");
+});
+
 test("claudeArgs: --settings only when given (guard hook wiring lands in #26)", () => {
   assert.ok(!claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s" }).includes("--settings"));
   const withSettings = claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s", settings: "/tmp/guard.json" });

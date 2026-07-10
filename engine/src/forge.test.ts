@@ -19,6 +19,8 @@ import {
   parseReviewThreadsPage,
   countUnresolvedThreads,
   assemblePRReviewData,
+  selectPlanReviewCandidates,
+  parseIssueLabels,
 } from "./forge.js";
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —
@@ -709,4 +711,53 @@ test("countOpenIssuesInMilestone: zero open issues -> 0 (the condition's fire si
   const forge = new GithubForge(cfg);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => JSON.stringify([]);
   assert.equal(await forge.countOpenIssuesInMilestone("M4"), 0);
+});
+
+// ── #87: selectPlanReviewCandidates — the plan_review peripheral's candidate query,
+//    disjoint at completion from selectReadyIssues (that returns what's ALREADY past gate⓪) ──
+
+test("selectPlanReviewCandidates: #88 gate⓪ matrix — only issues still AWAITING adjudication (no plan:approved, no needsHuman/blocked/verifyNa)", () => {
+  const p = parseProject(GATE0_PROJECT_JSON, "Status");
+  const candidates = selectPlanReviewCandidates(p, cfg);
+  // #40 already plan:approved -> not a candidate (already reviewed).
+  // #41 has a plan but no plan:approved yet -> still awaiting review.
+  // #42 no plan at all -> still awaiting review.
+  // #43 verify:n/a + needs-human (proposed, unresolved) -> not plan-review's concern.
+  // #44 verify:n/a alone (doc-gate path) -> not plan-review's concern.
+  // #45/#46 plan:approved + needs-human/blocked -> settled, not re-reviewed.
+  assert.deepEqual(candidates.map((i) => i.number).sort((a, b) => a - b), [41, 42]);
+});
+
+test("parseIssueLabels: extracts label names, tolerates missing/malformed", () => {
+  assert.deepEqual(parseIssueLabels(JSON.stringify({ labels: [{ name: "a" }, { name: "b" }] })), ["a", "b"]);
+  assert.deepEqual(parseIssueLabels(JSON.stringify({})), []);
+  assert.deepEqual(parseIssueLabels(JSON.stringify({ labels: [] })), []);
+  assert.deepEqual(parseIssueLabels(JSON.stringify({ labels: [{}, { name: "" }] })), []);
+});
+
+test("getIssueLabels: parses gh issue view --json labels, scoped to owner/repo", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({ labels: [{ name: "plan:approved" }] });
+  };
+  assert.deepEqual(await forge.getIssueLabels(9), ["plan:approved"]);
+  assert.deepEqual(seen[0]!.slice(0, 2), ["issue", "view"]);
+  assert.ok(seen[0]!.includes("--json") && seen[0]!.includes("labels"));
+});
+
+test("getIssueComments: reuses parsePRComments' shape/pagination tolerance off the shared issues/<n>/comments endpoint", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify([{ body: "please fix the plan", created_at: "2026-01-01T00:00:00Z", user: { login: "plan-reviewer" } }]);
+  };
+  const comments = await forge.getIssueComments(9);
+  assert.deepEqual(comments, [{ login: "plan-reviewer", createdAt: "2026-01-01T00:00:00Z", body: "please fix the plan" }]);
+  assert.ok(seen[0]!.some((a) => a.includes("issues/9/comments")));
+  assert.ok(seen[0]!.includes("--paginate") && seen[0]!.includes("--slurp"));
 });

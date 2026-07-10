@@ -119,6 +119,22 @@ export interface IForge {
    *  fire the stop condition on the first tick — after dispatching a full wave of workers.
    *  cli.ts fails closed against this list BEFORE any dispatch. */
   listMilestoneTitles(): Promise<string[]>;
+  /** #87: Ready-lane issues that still need gate⓪ plan review — the `plan_review` peripheral's
+   *  candidate set. Distinct from getReadyIssues() (which already applies gate⓪'s dispatch
+   *  filter, i.e. only what's ALREADY approved or doc-gated): this returns Ready issues that
+   *  haven't yet been adjudicated one way or the other (excludes needsHuman/blocked/verifyNa —
+   *  those are settled, not "awaiting review"). */
+  getIssuesNeedingPlanReview(): Promise<Issue[]>;
+  /** #87: an issue's current label set — the plan_review orchestrator's per-issue outcome
+   *  check after a plan-reviewer/plan-drafter session runs (distinguishing approved vs
+   *  needs-human vs still-awaiting without re-fetching the whole board). */
+  getIssueLabels(issue: number): Promise<string[]>;
+  /** #87: an ISSUE's conversation comments (distinct from getPRReviewData's PR comments,
+   *  though the underlying GitHub REST endpoint is the same `issues/<n>/comments` either way —
+   *  PRs are issues under the hood). The plan_review orchestrator reads the plan-reviewer's
+   *  most recent comment as the plan-drafter's brief (#77 Amendment 2). Newest-last (gh's
+   *  default chronological order). */
+  getIssueComments(issue: number): Promise<PRComment[]>;
 }
 
 export class GithubForge implements IForge {
@@ -353,6 +369,29 @@ export class GithubForge implements IForge {
     return milestones.map((m) => m.title);
   }
 
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    const project = await this.fetchProject();
+    return selectPlanReviewCandidates(project, this.cfg);
+  }
+
+  async getIssueLabels(issue: number): Promise<string[]> {
+    const out = await this.gh([
+      "issue", "view", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "--json", "labels",
+    ]);
+    return parseIssueLabels(out);
+  }
+
+  async getIssueComments(issue: number): Promise<PRComment[]> {
+    // Same endpoint shape (and pagination discipline) as getPRReviewData's commentsJson fetch
+    // — GitHub's REST API serves issue and PR conversation comments off the same
+    // `issues/<n>/comments` route, so parsePRComments parses this unchanged.
+    const out = await this.gh([
+      "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${issue}/comments`, "--paginate", "--slurp",
+    ]);
+    return parsePRComments(out);
+  }
+
   private repo(): string {
     return this.cfg.board.repo;
   }
@@ -584,6 +623,41 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
       // undefined — only include the key when there's a real milestone title.
       ...(it.milestone != null ? { milestone: it.milestone } : {}),
     }));
+}
+
+/** #87: true when an issue still needs a gate⓪ plan-review pass — the `plan_review`
+ *  peripheral's candidate test. `needsHuman`/`blocked` are settled states (a human is already
+ *  in the loop, or must act first) — never re-reviewed. `verifyNa` is the doc-gate path, a
+ *  DIFFERENT dispatch route than plan-review's; an issue that already carries it needs no plan
+ *  review (whether or not `needsHuman` also accompanies it, per the plan-reviewer's own
+ *  outcome-3 contract). Otherwise: needs review unless already `planApproved`. */
+function needsPlanReview(labels: string[], l: ReadyCfg["labels"]): boolean {
+  if (labels.includes(l.needsHuman) || labels.includes(l.blocked)) return false;
+  if (labels.includes(l.verifyNa)) return false;
+  return !labels.includes(l.planApproved);
+}
+
+/** Ready-lane + OPEN + this repo + still awaiting gate⓪ plan review (#87). The plan_review
+ *  peripheral's candidate set — a DIFFERENT (and disjoint at completion) query from
+ *  selectReadyIssues, which returns the opposite: issues that have ALREADY passed gate⓪. */
+export function selectPlanReviewCandidates(project: ParsedProject, cfg: ReadyCfg): Issue[] {
+  const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
+  return project.items
+    .filter((it) => it.repo === fullName)
+    .filter((it) => it.state === "OPEN")
+    .filter((it) => it.status === cfg.board.status.ready)
+    .filter((it) => needsPlanReview(it.labels, cfg.labels))
+    .map((it) => ({
+      number: it.number, title: it.title, labels: it.labels, body: it.body,
+      ...(it.milestone != null ? { milestone: it.milestone } : {}),
+    }));
+}
+
+/** Pure parse of `gh issue view --json labels` (#87). Malformed/missing -> []; never a throw
+ *  (mirrors parsePRComments' degrade-to-empty tolerance). */
+export function parseIssueLabels(json: string): string[] {
+  const parsed = JSON.parse(json) as { labels?: { name?: string }[] };
+  return (parsed.labels ?? []).map((l) => l.name ?? "").filter((n) => n.length > 0);
 }
 
 export function findOptionId(project: ParsedProject, name: string): string | undefined {

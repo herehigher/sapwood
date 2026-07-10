@@ -77,6 +77,29 @@ labels: # taxonomy used by the loop
   blocked: blocked
   reserve: reserve
   verifyNa: verify:n/a # Decision #8: issues with this label skip the verification-plan gate
+  # planApproved: plan:approved
+  #                   #88 gate⓪: applied by the plan-reviewer peripheral itself, never by a
+  #                   human or the loop directly — required (alongside a real plan section)
+  #                   for a non-verify:n/a issue to become dispatchable.
+
+# #87: peripheral role sessions (gate⓪'s plan-reviewer + plan-drafter) — issues-only writes,
+# never code, never PR review/approve/merge. Cheaper defaults than worker.model/effort (real
+# implementation work): both roles default to sonnet/medium, fully overridable.
+# roles:
+#   planReviewer:
+#     # promptFile: prompts/my-plan-reviewer.md
+#     #                   #74-style override; relative paths resolve against THIS config file's
+#     #                   directory. Unset = the engine's shipped prompts/plan-reviewer.md.
+#     model: sonnet
+#     effort: medium
+#     maxDraftCycles: 2  # #77 Amendment 2: bounded draft->re-review self-heal cycles per issue
+#                        # before the loop gives up and applies needs-human with the attempt
+#                        # trail. Positive int only (0 would disable the self-heal path).
+#   planDrafter:
+#     # promptFile: prompts/my-plan-drafter.md
+#     #                   Unset = the engine's shipped prompts/plan-drafter.md.
+#     model: sonnet
+#     effort: medium
 
 # round-loop scoping (#86 skeleton). Unset = no scoping (every Ready issue is a candidate).
 # round:
