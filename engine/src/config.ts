@@ -216,6 +216,16 @@ const Roles = z.object({
   architect: RoleSession.extend({
     promptFile: z.string().optional(),
   }).strict().default({}),
+  // #89: the PO (product-owner) peripheral — goal alignment/decomposition at round start
+  // (reads the round milestone/theme + docs/PLAN.md, creates issues) plus the round-start
+  // triage pass that drafts a plan into any existing plan-less issue. Every PO-created issue
+  // carries `origin:agent` + a verification plan; the PO never sets board Status=Ready (locked
+  // decision 5 — only a human confirms Ready). Same #74 promptFile shape as every other role
+  // above: unset -> the engine's shipped `prompts/po.md`; a relative path resolves against the
+  // CONFIG FILE's directory (see loadConfig below), not the CLI's cwd.
+  po: RoleSession.extend({
+    promptFile: z.string().optional(),
+  }).strict().default({}),
 }).strict();
 
 const Guard = z.object({
@@ -368,6 +378,10 @@ export function loadConfig(path?: string): SapwoodConfig {
     !isAbsolute(cfg.roles.architect.promptFile)
   ) {
     cfg.roles.architect.promptFile = resolve(dirname(file), cfg.roles.architect.promptFile);
+  }
+  // #89: same rule for the PO prompt.
+  if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {
+    cfg.roles.po.promptFile = resolve(dirname(file), cfg.roles.po.promptFile);
   }
   return cfg;
 }

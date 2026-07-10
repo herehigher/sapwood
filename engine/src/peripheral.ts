@@ -65,6 +65,16 @@ export const ROLE_DISALLOWED_TOOLS =
 export const PLAN_DRAFTER_DISALLOWED_TOOLS =
   ROLE_DISALLOWED_TOOLS + ",Bash(gh issue edit *--add-label*),Bash(gh issue edit *--remove-label*)";
 
+/** #89: the PO/alignment role's ADDITIVE allow-list — everything the base role scope allows
+ *  PLUS issue creation (`gh issue create`), the one write action goal decomposition needs that
+ *  no earlier role required. Board-status/project mutations stay OUT OF REACH regardless: `gh
+ *  api *` (the only channel GithubForge.setBoardStatus uses) remains in ROLE_DISALLOWED_TOOLS
+ *  unchanged, so the PO structurally cannot set Status=Ready itself (locked decision 5 — only a
+ *  human confirms Ready). Best-effort pattern layer only, same caveat as ROLE_ALLOWED_TOOLS
+ *  above; the authoritative enforcement for what a PO-created issue carries is align.ts's
+ *  post-session check (origin:agent stamp + plan-presence escalation). */
+export const PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS + ",Bash(gh issue create*)";
+
 export interface RoleSessionOpts {
   /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
    *  part of the session's lane/sentinel name, never interpreted. */
@@ -76,6 +86,11 @@ export interface RoleSessionOpts {
    *  ROLE_DISALLOWED_TOOLS. Deny rules take precedence over allows in Claude Code, so this
    *  only ever narrows the base allow scope, never widens it. */
   disallowedTools?: string;
+  /** #89: per-role allow-list override (e.g. PO_ALLOWED_TOOLS) — the symmetric widening
+   *  counterpart to disallowedTools above, for a role that legitimately needs one MORE write
+   *  action than the base ROLE_ALLOWED_TOOLS grants (issue creation). Omitted -> the base
+   *  ROLE_ALLOWED_TOOLS, unchanged for every role that doesn't need it. */
+  allowedTools?: string;
 }
 
 export interface RoleSessionResult {
@@ -155,7 +170,7 @@ export class RoleRunner {
     const args = claudeArgs({
       prompt: opts.prompt, model: opts.model, effort: opts.effort,
       worktree: name, name, sessionId, settings: settingsJson,
-      allowedTools: ROLE_ALLOWED_TOOLS,
+      allowedTools: opts.allowedTools ?? ROLE_ALLOWED_TOOLS,
       disallowedTools: opts.disallowedTools ?? ROLE_DISALLOWED_TOOLS,
       // NB: no addDir — same as worker.ts's dispatch(): a role session must never see engine
       // state (sentinels, the sqlite db) via --add-dir.

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   RoleRunner, ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, PLAN_DRAFTER_DISALLOWED_TOOLS,
-  type RoleRunnerDeps,
+  PO_ALLOWED_TOOLS, type RoleRunnerDeps,
 } from "./peripheral.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
@@ -192,6 +192,35 @@ test("run: a per-role disallowedTools override reaches the argv (the drafter's s
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.equal(seen[seen.indexOf("--disallowedTools") + 1], PLAN_DRAFTER_DISALLOWED_TOOLS);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PO_ALLOWED_TOOLS: strict superset of the base allows, adding issue creation (#89 goal decomposition) — no board-status/PR/code capability anywhere", () => {
+  assert.ok(PO_ALLOWED_TOOLS.startsWith(ROLE_ALLOWED_TOOLS), "keeps every base allow");
+  assert.ok(PO_ALLOWED_TOOLS.includes("Bash(gh issue create*)"));
+  assert.ok(!PO_ALLOWED_TOOLS.includes("gh api"), "no channel to setBoardStatus (locked decision 5: PO never sets Ready)");
+  assert.ok(!PO_ALLOWED_TOOLS.includes("gh pr"), "no PR capability");
+  assert.ok(!PO_ALLOWED_TOOLS.includes("git"), "no code/repo capability");
+});
+
+test("run: a per-role allowedTools override reaches the argv (the PO's wider issue-creation scope path)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    await runner.run({
+      roleId: "po-align", prompt: "p", model: "sonnet", effort: "medium",
+      allowedTools: PO_ALLOWED_TOOLS,
+    });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], PO_ALLOWED_TOOLS);
+    // The base disallowed-list is untouched by an allowedTools override — deny still wins.
+    assert.equal(seen[seen.indexOf("--disallowedTools") + 1], ROLE_DISALLOWED_TOOLS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

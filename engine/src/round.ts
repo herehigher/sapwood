@@ -154,6 +154,17 @@ export class RoundScopedForge implements IForge {
     const issues = await this.inner.getIssuesNeedingPlanReview();
     return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
   }
+
+  createIssue(title: string, body: string) { return this.inner.createIssue(title, body); }
+  listOpenIssueNumbers() { return this.inner.listOpenIssueNumbers(); }
+
+  /** #89: same milestone scoping as getIssuesNeedingPlanReview above — the PO/triage
+   *  peripheral's candidates are dispatch candidates too (just pre-Ready), so a round scoped to
+   *  one milestone should only triage issues actually in scope for it. */
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    const issues = await this.inner.getIssuesNeedingPlanTriage();
+    return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
+  }
 }
 
 /**

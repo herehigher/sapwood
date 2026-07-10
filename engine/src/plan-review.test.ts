@@ -53,6 +53,9 @@ class FakeForge implements IForge {
   async getIssuesNeedingPlanReview(): Promise<Issue[]> { return this.planReviewCandidates; }
   async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
   async getIssueComments(issue: number) { return this.issueComments[issue] ?? []; }
+  async createIssue(): Promise<number> { return 0; }
+  async listOpenIssueNumbers(): Promise<number[]> { return []; }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
 }
 
 /** A scripted fake of RoleRunner.run — each call consumes the next scripted result (or the
