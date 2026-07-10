@@ -20,6 +20,7 @@ import {
   countUnresolvedThreads,
   assemblePRReviewData,
   selectPlanReviewCandidates,
+  selectPlanTriageCandidates,
   parseIssueLabels,
 } from "./forge.js";
 
@@ -730,6 +731,46 @@ test("countOpenIssuesInMilestone: zero open issues -> 0 (the condition's fire si
   assert.equal(await forge.countOpenIssuesInMilestone("M4"), 0);
 });
 
+// ── #89: createIssue / listOpenIssueNumbers — the PO/alignment peripheral's forge surface ──
+
+test("createIssue: runs `gh issue create` scoped to this repo, parses the new issue number from the URL gh prints", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "https://github.com/o/r/issues/123\n";
+  };
+  const n = await forge.createIssue("A title", "A body");
+  assert.equal(n, 123);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["issue", "create"]);
+  assert.ok(args.includes("--repo") && args.includes("o/r"));
+  assert.ok(args.includes("--title") && args.includes("A title"));
+  assert.ok(args.includes("--body") && args.includes("A body"));
+});
+
+test("createIssue: an unparseable gh output throws rather than silently returning a bogus number", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => "not a URL";
+  await assert.rejects(() => forge.createIssue("t", "b"), /could not parse issue number/);
+});
+
+test("listOpenIssueNumbers: every open issue number in this repo", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify([{ number: 5 }, { number: 7 }]);
+  };
+  assert.deepEqual(await forge.listOpenIssueNumbers(), [5, 7]);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
+  assert.ok(args.includes("--state") && args.includes("open"));
+});
+
 // ── #87: selectPlanReviewCandidates — the plan_review peripheral's candidate query,
 //    disjoint at completion from selectReadyIssues (that returns what's ALREADY past gate⓪) ──
 
@@ -745,6 +786,36 @@ test("selectPlanReviewCandidates: #88 gate⓪ matrix — only issues still AWAIT
   // #47 verify:n/a + plan:approved (forbidden mixed state, #94 Codex retro P2) -> needs a
   //     human CLEANUP, not another review session — never a candidate.
   assert.deepEqual(candidates.map((i) => i.number).sort((a, b) => a - b), [41, 42]);
+});
+
+// ── #89: selectPlanTriageCandidates — the PO/triage peripheral's candidate query. Unlike
+//    selectPlanReviewCandidates, this is NOT scoped to the Ready lane (triage runs proactively,
+//    before a human ever moves an issue to Ready) — it's scoped by plan PRESENCE instead. ──
+
+test("selectPlanTriageCandidates: only OPEN issues that are genuinely plan-less and not settled (needsHuman/blocked/verifyNa excluded)", () => {
+  const p = parseProject(GATE0_PROJECT_JSON, "Status");
+  const candidates = selectPlanTriageCandidates(p, cfg);
+  // #40/#41/#45/#46/#47 all carry a real plan section -> not a triage target regardless of labels.
+  // #42 has no plan at all and no settled label -> the one genuine candidate.
+  // #43/#44 carry verify:n/a (doc-gate path, no plan expected) -> excluded.
+  assert.deepEqual(candidates.map((i) => i.number), [42]);
+});
+
+test("selectPlanTriageCandidates: unlike selectPlanReviewCandidates, a NON-Ready-lane plan-less issue is still a candidate (triage runs before Ready, not after)", () => {
+  const project = {
+    projectId: "P", statusFieldId: "F", options: [],
+    items: [
+      {
+        itemId: "I1", number: 99, title: "backlog, no plan yet", state: "OPEN",
+        body: "just a raw idea", repo: "herehigher/sapwood", labels: [], status: "Todo",
+        milestone: null,
+      },
+    ],
+  };
+  const candidates = selectPlanTriageCandidates(project, cfg);
+  assert.deepEqual(candidates.map((i) => i.number), [99]);
+  // The same item is NOT a plan_review candidate — it isn't even in the Ready lane yet.
+  assert.deepEqual(selectPlanReviewCandidates(project, cfg).map((i) => i.number), []);
 });
 
 test("parseIssueLabels: extracts label names; missing/empty fields degrade to []; malformed JSON throws (fail-closed — a failed gh read must never look like 'no labels')", () => {

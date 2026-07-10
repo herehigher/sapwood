@@ -135,6 +135,24 @@ export interface IForge {
    *  most recent comment as the plan-drafter's brief (#77 Amendment 2). Newest-last (gh's
    *  default chronological order). */
   getIssueComments(issue: number): Promise<PRComment[]>;
+  /** #89: create a new issue (the PO peripheral's decomposition output) — title + body only.
+   *  Labels are applied via the existing addLabel path afterward (e.g. `origin:agent`), rather
+   *  than bundled into creation, so there is exactly one label-mutation code path in the
+   *  engine, not two. Returns the new issue number. */
+  createIssue(title: string, body: string): Promise<number>;
+  /** #89: every OPEN issue number in this repo. The PO/alignment peripheral's before/after
+   *  diff to discover which issues its own session just created via `gh issue create` — a role
+   *  session has no structured return channel back to the orchestrator (see peripheral.ts), so
+   *  this diff is the only way align.ts learns what got made. Same fail-closed-on-error stance
+   *  as the rest of IForge: a thrown gh call propagates, never a partial/empty list. */
+  listOpenIssueNumbers(): Promise<number[]>;
+  /** #89: OPEN issues in this repo that still lack a verification-plan section in their body —
+   *  the PO/triage peripheral's candidate set. Broader than getIssuesNeedingPlanReview: every
+   *  open issue regardless of board Status, not just the Ready lane, because triage runs
+   *  proactively (before a human ever moves an issue to Ready) so it already carries a plan by
+   *  the time gate⓪ sees it. needs-human/blocked/verify:n/a issues are excluded — settled
+   *  state, not a drafting target (same exclusion stance as needsPlanReview). */
+  getIssuesNeedingPlanTriage(): Promise<Issue[]>;
 }
 
 export class GithubForge implements IForge {
@@ -390,6 +408,32 @@ export class GithubForge implements IForge {
       "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${issue}/comments`, "--paginate", "--slurp",
     ]);
     return parsePRComments(out);
+  }
+
+  async createIssue(title: string, body: string): Promise<number> {
+    const out = await this.gh([
+      "issue", "create", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "--title", title, "--body", body,
+    ]);
+    const m = out.match(/\/issues\/(\d+)/);
+    if (!m) throw new Error(`createIssue: could not parse issue number from: ${out.trim()}`);
+    return Number(m[1]);
+  }
+
+  async listOpenIssueNumbers(): Promise<number[]> {
+    // Same --limit rationale as countOpenIssuesInMilestone: generously above any realistic
+    // open-issue count for this loop's use case (ponytail).
+    const out = await this.gh([
+      "issue", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "--state", "open", "--json", "number", "--limit", "1000",
+    ]);
+    const issues = JSON.parse(out) as { number: number }[];
+    return issues.map((i) => i.number);
+  }
+
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    const project = await this.fetchProject();
+    return selectPlanTriageCandidates(project, this.cfg);
   }
 
   private repo(): string {
@@ -658,6 +702,34 @@ export function selectPlanReviewCandidates(project: ParsedProject, cfg: ReadyCfg
     .filter((it) => it.state === "OPEN")
     .filter((it) => it.status === cfg.board.status.ready)
     .filter((it) => needsPlanReview(it.labels, cfg.labels))
+    .map((it) => ({
+      number: it.number, title: it.title, labels: it.labels, body: it.body,
+      ...(it.milestone != null ? { milestone: it.milestone } : {}),
+    }));
+}
+
+/** #89: true when an OPEN issue still lacks a verification plan and isn't already a settled
+ *  human state — the PO/triage peripheral's candidate test. Unlike needsPlanReview, this does
+ *  NOT gate on board Status (triage runs on any open issue, Ready or not — it exists so a
+ *  plan-less issue already carries one BEFORE a human ever moves it to Ready). `verifyNa`
+ *  issues are excluded (the doc-gate path; no plan is expected). `needsHuman`/`blocked` are
+ *  excluded (settled — a human is already in the loop, not a drafting target). An issue that
+ *  already has SOME plan section is excluded too — triage's whole job is to fill the gap, not
+ *  to re-draft an existing plan (that quality judgment belongs to gate⓪'s plan-reviewer). */
+function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
+  if (labels.includes(l.needsHuman) || labels.includes(l.blocked)) return false;
+  if (labels.includes(l.verifyNa)) return false;
+  return extractVerificationPlan(body) == null;
+}
+
+/** OPEN + this repo + still lacking a verification plan (#89). The PO/triage peripheral's
+ *  candidate set — deliberately NOT scoped to the Ready lane (see needsPlanTriage above). */
+export function selectPlanTriageCandidates(project: ParsedProject, cfg: ReadyCfg): Issue[] {
+  const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
+  return project.items
+    .filter((it) => it.repo === fullName)
+    .filter((it) => it.state === "OPEN")
+    .filter((it) => needsPlanTriage(it.body, it.labels, cfg.labels))
     .map((it) => ({
       number: it.number, title: it.title, labels: it.labels, body: it.body,
       ...(it.milestone != null ? { milestone: it.milestone } : {}),

@@ -260,6 +260,15 @@ test("labels.planApproved: defaults to plan:approved, overridable", () => {
   assert.equal(over.labels.planApproved, "custom:approved");
 });
 
+test("labels.originAgent: defaults to origin:agent, overridable (#89 — the PO provenance stamp, config-driven like every sibling label)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.labels.originAgent, "origin:agent");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { originAgent: bot:made }",
+  );
+  assert.equal(over.labels.originAgent, "bot:made");
+});
+
 test("roles.planReviewer.promptFile: unset by default, overridable, strict schema (same #74 pattern as worker.promptFile)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.roles.planReviewer.promptFile, undefined);
@@ -409,6 +418,43 @@ test("roles.architect.promptFile: a relative path resolves against the config fi
     );
     const cfg = loadConfig(cfgPath);
     assert.equal(cfg.roles.architect.promptFile, join(dir, "my-architect.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #89: roles.po (the PO/product-owner peripheral) ─────────────────────────────────────────
+
+test("roles.po: promptFile unset by default, model/effort defaulted, strict schema (same #74 pattern as roles.planReviewer/planDrafter)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.po.promptFile, undefined);
+  assert.equal(cfg.roles.po.model, "sonnet");
+  assert.equal(cfg.roles.po.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFile: prompts/custom-po.md, model: opus, effort: high } }",
+  );
+  assert.equal(over.roles.po.promptFile, "prompts/custom-po.md");
+  assert.equal(over.roles.po.model, "opus");
+  assert.equal(over.roles.po.effort, "high");
+});
+
+test("roles.po: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFiel: x.md } }"),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.po.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFile: my-po.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.po.promptFile, join(dir, "my-po.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

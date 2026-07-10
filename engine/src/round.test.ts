@@ -51,6 +51,18 @@ class FakeForge implements IForge {
   async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   async getIssueComments(issue: number) { return this.issueComments[issue] ?? []; }
+  createdIssues: Array<{ title: string; body: string }> = [];
+  nextIssueNumber = 100;
+  openIssueNumbers: number[] = [];
+  async createIssue(title: string, body: string): Promise<number> {
+    this.createdIssues.push({ title, body });
+    const n = this.nextIssueNumber++;
+    this.openIssueNumbers.push(n);
+    return n;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> { return this.openIssueNumbers; }
+  planTriageCandidates: Issue[] = [];
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return this.planTriageCandidates; }
 }
 
 class FakeSupervisor implements Supervisor {

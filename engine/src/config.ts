@@ -173,6 +173,11 @@ const Labels = z.object({
   // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
   // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
   planApproved: z.string().default("plan:approved"),
+  // #89: provenance stamp for agent-created issues (docs/security.md's convention, now
+  // load-bearing): align.ts's PO orchestrator applies it to every issue the alignment
+  // session creates. Config-driven like every sibling label here — never a hardcoded
+  // string at the call site (fable PR #101 P3).
+  originAgent: z.string().default("origin:agent"),
 }).strict();
 
 // #87: peripheral role sessions (plan-reviewer, plan-drafter, ...) are cheap, issues-only,
@@ -214,6 +219,16 @@ const Roles = z.object({
   // (#77's model). Issues-only write scope (the same peripheral-runner scope as the two roles
   // above, #87/#99): never reviews PR code, never merges. Same #74 promptFile shape too.
   architect: RoleSession.extend({
+    promptFile: z.string().optional(),
+  }).strict().default({}),
+  // #89: the PO (product-owner) peripheral — goal alignment/decomposition at round start
+  // (reads the round milestone/theme + docs/PLAN.md, creates issues) plus the round-start
+  // triage pass that drafts a plan into any existing plan-less issue. Every PO-created issue
+  // carries `origin:agent` + a verification plan; the PO never sets board Status=Ready (locked
+  // decision 5 — only a human confirms Ready). Same #74 promptFile shape as every other role
+  // above: unset -> the engine's shipped `prompts/po.md`; a relative path resolves against the
+  // CONFIG FILE's directory (see loadConfig below), not the CLI's cwd.
+  po: RoleSession.extend({
     promptFile: z.string().optional(),
   }).strict().default({}),
 }).strict();
@@ -368,6 +383,10 @@ export function loadConfig(path?: string): SapwoodConfig {
     !isAbsolute(cfg.roles.architect.promptFile)
   ) {
     cfg.roles.architect.promptFile = resolve(dirname(file), cfg.roles.architect.promptFile);
+  }
+  // #89: same rule for the PO prompt.
+  if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {
+    cfg.roles.po.promptFile = resolve(dirname(file), cfg.roles.po.promptFile);
   }
   return cfg;
 }
