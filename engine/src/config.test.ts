@@ -325,6 +325,56 @@ test("roles.planReviewer.promptFile: a relative path resolves against the config
   }
 });
 
+// ── #87: role runner — model/effort defaults + the plan-drafter role ────────────────────────
+
+test("roles.planReviewer.model/effort: default to a lighter model/effort than worker.model/effort, overridable", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.planReviewer.model, "sonnet");
+  assert.equal(cfg.roles.planReviewer.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { model: opus, effort: high } }",
+  );
+  assert.equal(over.roles.planReviewer.model, "opus");
+  assert.equal(over.roles.planReviewer.effort, "high");
+});
+
+test("roles.planDrafter: promptFile unset by default, model/effort defaulted, strict schema (#74/#77 Amendment 2 pattern)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.planDrafter.promptFile, undefined);
+  assert.equal(cfg.roles.planDrafter.model, "sonnet");
+  assert.equal(cfg.roles.planDrafter.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFile: prompts/custom-drafter.md, model: opus } }",
+  );
+  assert.equal(over.roles.planDrafter.promptFile, "prompts/custom-drafter.md");
+  assert.equal(over.roles.planDrafter.model, "opus");
+});
+
+test("roles.planDrafter: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.planDrafter.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFile: my-plan-drafter.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.planDrafter.promptFile, join(dir, "my-plan-drafter.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #76: goal-based stop conditions ─────────────────────────────────────────────────────────
 
 test("stop: absent by default — every field undefined, no behavior change (#76 regression contract)", () => {

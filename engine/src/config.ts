@@ -175,12 +175,20 @@ const Labels = z.object({
   planApproved: z.string().default("plan:approved"),
 }).strict();
 
-// #88: gate⓪ plan-reviewer peripheral config surface. Session wiring (actually loading and
-// rendering this prompt) lands with the peripheral-role-runner issue — same "accepted, not
-// yet wired" shape as lanes.reserveCap/prFixCap/frictionMin below. This issue ships the
-// validated config key + path resolution + the shipped default prompt file only.
+// #87: peripheral role sessions (plan-reviewer, plan-drafter, ...) are cheap, issues-only,
+// text-judgment tasks — no code, no repo context beyond what's substituted into the prompt.
+// Default to a lighter model/effort than worker.model/effort (which does real implementation
+// work); still fully YAML-tunable per role, same as every other user-facing knob here.
+const RoleSession = z.object({
+  model: z.string().default("sonnet"),
+  effort: z.enum(["low", "medium", "high"]).default("medium"),
+}).strict();
+
+// #88/#87: gate⓪ plan-reviewer + plan-drafter peripheral config surface. #88 shipped the
+// validated config key + path resolution + the shipped default prompt file ("accepted, not
+// yet wired"); #87 (the role runner) is what actually loads/renders/dispatches these.
 const Roles = z.object({
-  planReviewer: z.object({
+  planReviewer: RoleSession.extend({
     // Same #74 promptFile pattern as worker.promptFile: unset -> the engine's shipped
     // `prompts/plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
     // directory (see loadConfig below), not the CLI's cwd.
@@ -190,8 +198,17 @@ const Roles = z.object({
     // degrade-to-human) — the bound that keeps the self-heal path from livelocking.
     // Positive int only: 0 would turn every request-a-draft outcome into an instant
     // needs-human, silently disabling the self-heal path. Enforced by the #87 role
-    // runner's plan_review phase (accepted, not yet wired — like promptFile above).
+    // runner's plan_review phase.
     maxDraftCycles: z.number().int().positive().default(2),
+  }).strict().default({}),
+  // #87 (#77 Amendment 2's self-heal): the plan-drafter peripheral — issues-only writes, a
+  // session distinct from the plan-reviewer, briefed by the reviewer's bounce comment to
+  // draft/repair an issue's acceptance criteria + verification plan. Never implements the
+  // issue, never approves its own draft (plan-author != plan-approver).
+  planDrafter: RoleSession.extend({
+    // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/plan-drafter.md`;
+    // relative resolves against the CONFIG FILE's directory.
+    promptFile: z.string().optional(),
   }).strict().default({}),
 }).strict();
 
@@ -325,12 +342,19 @@ export function loadConfig(path?: string): SapwoodConfig {
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
     cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
   }
-  // #88: same relative-to-config-file resolution for the (not-yet-wired) plan-reviewer prompt.
+  // #88/#87: same relative-to-config-file resolution for the plan-reviewer prompt.
   if (
     cfg.roles.planReviewer.promptFile !== undefined &&
     !isAbsolute(cfg.roles.planReviewer.promptFile)
   ) {
     cfg.roles.planReviewer.promptFile = resolve(dirname(file), cfg.roles.planReviewer.promptFile);
+  }
+  // #87: same rule for the plan-drafter prompt.
+  if (
+    cfg.roles.planDrafter.promptFile !== undefined &&
+    !isAbsolute(cfg.roles.planDrafter.promptFile)
+  ) {
+    cfg.roles.planDrafter.promptFile = resolve(dirname(file), cfg.roles.planDrafter.promptFile);
   }
   return cfg;
 }
