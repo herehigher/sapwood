@@ -585,7 +585,9 @@ rewrite.** v1 requirements:
   (merge/rework/cycle-time) are a later phase, gated on the GitHub-history work 0day
   never finished (`ops/loop/README.md:109`). Because workers may touch security-
   sensitive files, the human-merge-only rule for guard/hook/reviewer/security config
-  (see Security model) stays in force during this dogfood.
+  (see Security model) stays in force during this dogfood. The frontend itself —
+  scope decisions, information architecture, visual identity, motion/copy specs,
+  and the API data contract — is specified in [`frontend-design.md`](frontend-design.md).
   **② Round orchestrator (#86–#91),** cut from the locked design in the v0.2 chapter
   below: the round ledger + round-loop skeleton — two-level termination,
   rerun-not-resume (#86); the peripheral role runner — issues+docs write scope,
