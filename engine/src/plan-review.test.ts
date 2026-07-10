@@ -21,6 +21,9 @@ class FakeForge implements IForge {
   planReviewCandidates: Issue[] = [];
   issueLabels: Record<number, string[]> = {};
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
+  /** Mutable per-issue body — a fake drafter's "edit" writes here, and getIssueBody (the P1
+   *  refetch) reads it back, so the test can prove the next reviewer render sees the edit. */
+  issueBodies: Record<number, string> = {};
   labelsAdded: Array<[number, string]> = [];
   issueCommentsPosted: Array<[number, string]> = [];
 
@@ -38,7 +41,7 @@ class FakeForge implements IForge {
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
   async addIssueComment(n: number, body: string): Promise<void> { this.issueCommentsPosted.push([n, body]); }
-  async getIssueBody(): Promise<string> { return ""; }
+  async getIssueBody(issue: number): Promise<string> { return this.issueBodies[issue] ?? ""; }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
@@ -73,6 +76,9 @@ class ScriptedRunner {
 
 const doneResult = (name: string): RoleSessionResult => ({
   outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name,
+});
+const failedResult = (name: string): RoleSessionResult => ({
+  outcome: "failed", costUsd: 0.01, modelUsage: [], exitCode: 1, name,
 });
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -172,6 +178,111 @@ test("createPlanReviewStub: outcome 2 (request draft) — briefs a distinct plan
   assert.ok(forge.issueLabels[12]!.includes("plan:approved"));
   cycle++;
   assert.equal(cycle, 1);
+  state.close();
+});
+
+test("createPlanReviewStub P1: after the drafter edits the body, the NEXT reviewer render sees the NEW body (refetched per cycle, never the phase-start snapshot)", async () => {
+  const forge = new FakeForge();
+  // Phase-start snapshot carries the OLD body.
+  forge.planReviewCandidates = [{ number: 30, title: "t", labels: [], body: "OLD PLAN — inadequate" }];
+  forge.issueBodies[30] = "OLD PLAN — inadequate";
+  const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
+  const runner = new ScriptedRunner(forge, [
+    // cycle 0 reviewer: bounces with a brief.
+    {
+      result: doneResult("reviewer-0"),
+      effect: () => { forge.issueComments[30] = [{ login: "r", createdAt: "t", body: "criteria too vague" }]; },
+    },
+    // cycle 0 drafter: EDITS the issue body — the whole point of the self-heal path.
+    { result: doneResult("drafter-0"), effect: () => { forge.issueBodies[30] = "NEW PLAN — concrete criteria"; } },
+    // cycle 1 reviewer: approves ONLY if its prompt embeds the drafter's NEW body. Against the
+    // stale-snapshot bug this effect never fires the approval (the prompt still carries the old
+    // body), the loop exhausts, and the needs-human assertion below fails the test.
+    {
+      result: doneResult("reviewer-1"),
+      effect: (opts) => {
+        if (opts.prompt.includes("NEW PLAN — concrete criteria")) forge.addLabel(30, cfg.labels.planApproved);
+      },
+    },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  assert.ok((forge.issueLabels[30] ?? []).includes("plan:approved"), "cycle-1 reviewer saw the drafter's new body and approved");
+  assert.ok(!(forge.issueLabels[30] ?? []).includes(cfg.labels.needsHuman), "self-heal converged — never escalated");
+  state.close();
+});
+
+test("createPlanReviewStub P2: a reviewer session failure is retried once; a second failure escalates needs-human — NEVER briefs a drafter", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 31, title: "t", labels: [] }];
+  // A stale, unrelated comment sits on the issue — the pre-fix bug would brief a drafter off it.
+  forge.issueComments[31] = [{ login: "human", createdAt: "t", body: "unrelated old comment" }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, [
+    { result: failedResult("reviewer-0") },
+    { result: failedResult("reviewer-0-retry") },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 2, phase: "plan_review", marker: null });
+  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-reviewer"], "one retry, no drafter");
+  assert.ok((forge.issueLabels[31] ?? []).includes(cfg.labels.needsHuman));
+  const comment = forge.issueCommentsPosted.find(([n]) => n === 31)?.[1] ?? "";
+  assert.ok(/failed/.test(comment), "the escalation comment names the session failure");
+  assert.ok(comment.includes(planReviewMarker(2)));
+  state.close();
+});
+
+test("createPlanReviewStub P2: a reviewer failure followed by a successful retry continues normally (approve on the retry)", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 32, title: "t", labels: [] }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, [
+    { result: failedResult("reviewer-0") },
+    { result: doneResult("reviewer-0-retry"), effect: () => forge.addLabel(32, cfg.labels.planApproved) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 2, phase: "plan_review", marker: null });
+  assert.equal(runner.calls.length, 2);
+  assert.ok((forge.issueLabels[32] ?? []).includes("plan:approved"));
+  assert.ok(!(forge.issueLabels[32] ?? []).includes(cfg.labels.needsHuman));
+  state.close();
+});
+
+test("createPlanReviewStub P2: a bounce with NO usable brief (no comment / empty body) escalates needs-human — never briefs a drafter off nothing", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 33, title: "t", labels: [] }];
+  const cfg = mkCfg();
+  // Reviewer "succeeds" but violates its own contract: applies no label AND posts no comment.
+  const runner = new ScriptedRunner(forge, [{ result: doneResult("reviewer-0") }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 3, phase: "plan_review", marker: null });
+  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer"], "no drafter ever ran");
+  assert.ok((forge.issueLabels[33] ?? []).includes(cfg.labels.needsHuman));
+  const comment = forge.issueCommentsPosted.find(([n]) => n === 33)?.[1] ?? "";
+  assert.ok(/brief/.test(comment), "the escalation comment names the missing brief");
+  state.close();
+});
+
+test("createPlanReviewStub P2: a whitespace-only last comment is not a usable brief either", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 34, title: "t", labels: [] }];
+  forge.issueComments[34] = [{ login: "r", createdAt: "t", body: "   \n  " }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, [{ result: doneResult("reviewer-0") }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 3, phase: "plan_review", marker: null });
+  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer"]);
+  assert.ok((forge.issueLabels[34] ?? []).includes(cfg.labels.needsHuman));
   state.close();
 });
 

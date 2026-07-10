@@ -114,7 +114,20 @@ export function renderRolePrompt(
  *  needs-human — this orchestrator never applies either on the reviewer's behalf); on neither,
  *  it's outcome 2 (request-a-draft) — brief a plan-drafter session with the reviewer's most
  *  recent comment, then loop. Bounded by cfg.roles.planReviewer.maxDraftCycles; exhausted ->
- *  this orchestrator itself applies needs-human with the attempt trail (Decision #9). */
+ *  this orchestrator itself applies needs-human with the attempt trail (Decision #9).
+ *
+ *  Every cycle re-renders the reviewer/drafter prompts from the issue's CURRENT body
+ *  (forge.getIssueBody), never the phase-start snapshot — the drafter's whole output IS a body
+ *  edit, and the session cannot re-read the issue itself (`gh issue view` is in
+ *  ROLE_DISALLOWED_TOOLS by design), so a stale render would make the reviewer re-judge the
+ *  pre-draft plan forever and the self-heal path could never converge (fable review P1).
+ *
+ *  A reviewer SESSION failure (failed/timeout) is not outcome 2 (fable review P2): it produced
+ *  no verdict at all, so briefing a drafter off "the most recent comment" would act on
+ *  something that is not a reviewer bounce. Failed sessions are retried once; a second failure
+ *  escalates needs-human with the trail, drafter never run. Same stance for a "done" session
+ *  that left no usable brief (no label AND no non-empty comment — a contract violation of the
+ *  prompt's "every pass ends in exactly one of the three outcomes"). */
 async function reviewOneIssue(
   deps: PlanReviewDeps,
   issue: Issue,
@@ -128,16 +141,45 @@ async function reviewOneIssue(
   const marker = planReviewMarker(roundId);
   const trail: string[] = [];
 
+  const escalate = async (reason: string): Promise<void> => {
+    await deps.forge.addLabel(issue.number, l.needsHuman);
+    await deps.forge.addIssueComment(
+      issue.number,
+      `gate⓪ plan-review ${reason} — applying \`${l.needsHuman}\`. A human plan (or accepting ` +
+        `\`${l.verifyNa}\` by removing \`${l.needsHuman}\`) is needed to make this issue ` +
+        `dispatchable again.\n\nAttempt trail:\n- ${trail.join("\n- ")}\n\n${marker}`,
+    );
+  };
+
+  const runSession = async (
+    roleId: "plan-reviewer" | "plan-drafter",
+    prompt: string,
+    cycle: number,
+    tag = "",
+  ): ReturnType<PlanReviewDeps["runner"]["run"]> => {
+    const role = roleId === "plan-reviewer" ? deps.cfg.roles.planReviewer : deps.cfg.roles.planDrafter;
+    const result = await deps.runner.run({ roleId, prompt, model: role.model, effort: role.effort });
+    deps.state.recordSpend(result.name, issue.number, result.costUsd, iso(), result.modelUsage);
+    trail.push(`cycle ${cycle}: ${roleId}${tag} session ${result.name} -> ${result.outcome}`);
+    return result;
+  };
+
   for (let cycle = 0; cycle <= maxCycles; cycle++) {
-    const reviewerPrompt = renderRolePrompt(reviewerTemplate, issue, deps.cfg);
-    const reviewResult = await deps.runner.run({
-      roleId: "plan-reviewer",
-      prompt: reviewerPrompt,
-      model: deps.cfg.roles.planReviewer.model,
-      effort: deps.cfg.roles.planReviewer.effort,
-    });
-    deps.state.recordSpend(reviewResult.name, issue.number, reviewResult.costUsd, iso(), reviewResult.modelUsage);
-    trail.push(`cycle ${cycle}: plan-reviewer session ${reviewResult.name} -> ${reviewResult.outcome}`);
+    // P1: refetch the CURRENT body every cycle — after cycle 0 it's the drafter's edit the
+    // reviewer must judge, not the phase-start snapshot. Labels aren't refetched for the
+    // render: the outcome routing below reads live labels anyway, and only this orchestrator's
+    // own sessions move the labels this prompt branches on.
+    const currentIssue: Issue = { ...issue, body: await deps.forge.getIssueBody(issue.number) };
+    const reviewerPrompt = renderRolePrompt(reviewerTemplate, currentIssue, deps.cfg);
+    let reviewResult = await runSession("plan-reviewer", reviewerPrompt, cycle);
+    if (reviewResult.outcome !== "done") {
+      // P2: a crashed/timed-out reviewer produced no verdict — retry once, then escalate.
+      reviewResult = await runSession("plan-reviewer", reviewerPrompt, cycle, " (retry)");
+      if (reviewResult.outcome !== "done") {
+        await escalate(`reviewer session failed twice (${reviewResult.outcome})`);
+        return;
+      }
+    }
 
     const labels = await deps.forge.getIssueLabels(issue.number);
     if (labels.includes(l.planApproved)) return; // outcome 1 — approved, done
@@ -145,30 +187,24 @@ async function reviewOneIssue(
 
     // Outcome 2: request-a-draft. At the cycle bound already -> self-heal exhausted, escalate.
     if (cycle >= maxCycles) {
-      await deps.forge.addLabel(issue.number, l.needsHuman);
-      await deps.forge.addIssueComment(
-        issue.number,
-        `gate⓪ plan-review self-heal exhausted after ${maxCycles} draft→re-review cycle(s) — ` +
-          `applying \`${l.needsHuman}\`. A human plan (or accepting \`${l.verifyNa}\` by removing ` +
-          `\`${l.needsHuman}\`) is needed to make this issue dispatchable again.\n\n` +
-          `Attempt trail:\n- ${trail.join("\n- ")}\n\n${marker}`,
-      );
+      await escalate(`self-heal exhausted after ${maxCycles} draft→re-review cycle(s)`);
       return;
     }
 
     // Brief the drafter with the reviewer's most recent comment (its bounce/draft-request).
+    // P2 guard: a "done" reviewer that applied no label AND left no non-empty comment violated
+    // its every-pass-ends-in-an-outcome contract — there is nothing to brief a drafter with,
+    // so escalate rather than dispatch a drafter off nothing (or off a stale earlier comment
+    // that happens to be empty-adjacent).
     const comments = await deps.forge.getIssueComments(issue.number);
     const brief = comments.length > 0 ? comments[comments.length - 1]!.body : "";
-    const drafterPrompt = renderRolePrompt(drafterTemplate, issue, deps.cfg, { "reviewer.brief": brief });
-    const draftResult = await deps.runner.run({
-      roleId: "plan-drafter",
-      prompt: drafterPrompt,
-      model: deps.cfg.roles.planDrafter.model,
-      effort: deps.cfg.roles.planDrafter.effort,
-    });
-    deps.state.recordSpend(draftResult.name, issue.number, draftResult.costUsd, iso(), draftResult.modelUsage);
-    trail.push(`cycle ${cycle}: plan-drafter session ${draftResult.name} -> ${draftResult.outcome}`);
-    // Loop back -> re-run the reviewer against the drafter's edit.
+    if (brief.trim() === "") {
+      await escalate("reviewer bounced without a usable brief comment");
+      return;
+    }
+    const drafterPrompt = renderRolePrompt(drafterTemplate, currentIssue, deps.cfg, { "reviewer.brief": brief });
+    await runSession("plan-drafter", drafterPrompt, cycle);
+    // Loop back -> re-run the reviewer against the drafter's edit (body refetched above).
   }
 }
 

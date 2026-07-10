@@ -653,8 +653,11 @@ export function selectPlanReviewCandidates(project: ParsedProject, cfg: ReadyCfg
     }));
 }
 
-/** Pure parse of `gh issue view --json labels` (#87). Malformed/missing -> []; never a throw
- *  (mirrors parsePRComments' degrade-to-empty tolerance). */
+/** Pure parse of `gh issue view --json labels` (#87). A missing/empty `labels` array or
+ *  entries without a usable name degrade to [] — but malformed JSON THROWS (JSON.parse),
+ *  deliberately fail-closed: gh emitting non-JSON means the read itself failed, and the
+ *  plan-review orchestrator must surface that rather than treat it as "no labels" (which
+ *  would mis-route an already-approved issue back into review). */
 export function parseIssueLabels(json: string): string[] {
   const parsed = JSON.parse(json) as { labels?: { name?: string }[] };
   return (parsed.labels ?? []).map((l) => l.name ?? "").filter((n) => n.length > 0);

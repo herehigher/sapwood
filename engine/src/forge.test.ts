@@ -728,11 +728,12 @@ test("selectPlanReviewCandidates: #88 gate⓪ matrix — only issues still AWAIT
   assert.deepEqual(candidates.map((i) => i.number).sort((a, b) => a - b), [41, 42]);
 });
 
-test("parseIssueLabels: extracts label names, tolerates missing/malformed", () => {
+test("parseIssueLabels: extracts label names; missing/empty fields degrade to []; malformed JSON throws (fail-closed — a failed gh read must never look like 'no labels')", () => {
   assert.deepEqual(parseIssueLabels(JSON.stringify({ labels: [{ name: "a" }, { name: "b" }] })), ["a", "b"]);
   assert.deepEqual(parseIssueLabels(JSON.stringify({})), []);
   assert.deepEqual(parseIssueLabels(JSON.stringify({ labels: [] })), []);
   assert.deepEqual(parseIssueLabels(JSON.stringify({ labels: [{}, { name: "" }] })), []);
+  assert.throws(() => parseIssueLabels("not json at all"), SyntaxError);
 });
 
 test("getIssueLabels: parses gh issue view --json labels, scoped to owner/repo", async () => {
