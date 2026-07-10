@@ -425,6 +425,64 @@ test("createPlanReviewStub: exhausted after maxDraftCycles — applies needs-hum
   state.close();
 });
 
+// ── #104: gate⓪ escalate() also appends a durable state event ──────────────────────────────
+
+test("createPlanReviewStub #104: escalate() (maxDraftCycles exhausted) appends a plan-review-escalated state event naming the round and issue", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 13, title: "t", labels: [] }];
+  const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
+  const runner = new ScriptedRunner(forge, [
+    { result: doneResult("reviewer-0"), effect: () => { forge.issueComments[13] = [{ login: "r", createdAt: "t", body: "still bad" }]; } },
+    { result: doneResult("drafter-0") },
+    { result: doneResult("reviewer-1"), effect: () => { forge.issueComments[13] = [{ login: "r", createdAt: "t2", body: "still bad again" }]; } },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 7, phase: "plan_review", marker: null });
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string };
+  assert.equal(payload.round_id, 7);
+  assert.equal(payload.issue, 13);
+  assert.ok(/exhausted/.test(payload.reason));
+  state.close();
+});
+
+test("createPlanReviewStub #104: escalate() from a reviewer-session-failed-twice path also appends the event", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 31, title: "t", labels: [] }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, [
+    { result: failedResult("reviewer-0") },
+    { result: failedResult("reviewer-0-retry") },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 2, phase: "plan_review", marker: null });
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { round_id: number; issue: number };
+  assert.equal(payload.round_id, 2);
+  assert.equal(payload.issue, 31);
+  state.close();
+});
+
+test("createPlanReviewStub #104: a state-write failure on escalate() is contained — the forge label/comment still land, run() does not throw", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 33, title: "t", labels: [] }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, [{ result: doneResult("reviewer-0") }]);
+  const state = new State(":memory:");
+  state.appendEvent = () => { throw new Error("simulated disk failure"); };
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await assert.doesNotReject(() => stub.run({ roundId: 3, phase: "plan_review", marker: null }));
+  assert.ok((forge.issueLabels[33] ?? []).includes(cfg.labels.needsHuman), "the forge escalation still landed");
+  state.close();
+});
+
 test("createPlanReviewStub: processes every candidate issue, independently", async () => {
   const forge = new FakeForge();
   forge.planReviewCandidates = [

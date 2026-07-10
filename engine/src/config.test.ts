@@ -608,3 +608,89 @@ test("round: a typo'd key is rejected, not silently dropped (.strict())", () => 
     /milestne|[Uu]nrecognized/,
   );
 });
+
+// ── #104: roles.architect.planMdPath (architecture-doc path, no longer hardcoded to cwd) ───
+
+test("roles.architect.planMdPath: defaults to docs/PLAN.md", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.architect.planMdPath, "docs/PLAN.md");
+});
+
+test("roles.architect.planMdPath: overridable, same #74-style key as promptFile", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: notes/ARCH.md } }",
+  );
+  assert.equal(cfg.roles.architect.planMdPath, "notes/ARCH.md");
+});
+
+test("roles.architect.planMdPath: a relative path resolves against the config file's directory, not cwd (same rule as promptFile)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: my-plan.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.architect.planMdPath, join(dir, "my-plan.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("roles.architect.planMdPath: the DEFAULT value is also resolved relative to the config file's directory (not left cwd-relative)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\n");
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.architect.planMdPath, join(dir, "docs", "PLAN.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("roles.architect: an absolute planMdPath is left untouched", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const absPath = join(dir, "elsewhere", "PLAN.md");
+    writeFileSync(cfgPath, `board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: ${absPath} } }\n`);
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.architect.planMdPath, absPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #104: roles.retro.everyNRounds (retro cadence) ──────────────────────────────────────────
+
+test("roles.retro.everyNRounds: defaults to 1 (every round)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.retro.everyNRounds, 1);
+});
+
+test("roles.retro.everyNRounds: overridable to thin the cadence", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { everyNRounds: 3 } }",
+  );
+  assert.equal(cfg.roles.retro.everyNRounds, 3);
+});
+
+test("roles.retro.everyNRounds: zero/negative is rejected (positive int only)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { everyNRounds: 0 } }"),
+    /everyNRounds/,
+  );
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { everyNRounds: -1 } }"),
+    /everyNRounds/,
+  );
+});
+
+test("roles.retro.everyNRounds: a non-integer is rejected", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { everyNRounds: 1.5 } }"),
+    /everyNRounds/,
+  );
+});

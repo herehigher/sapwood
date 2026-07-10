@@ -162,6 +162,15 @@ async function reviewOneIssue(
         `\`${l.verifyNa}\` by removing \`${l.needsHuman}\`) is needed to make this issue ` +
         `dispatchable again.\n\nAttempt trail:\n- ${trail.join("\n- ")}\n\n${marker}`,
     );
+    // #104: gate⓪ escalations now also land in the durable event log — the same source
+    // harvest.ts/retro.ts read for their round summaries, closing the KNOWN GAP both modules
+    // used to document (only gate② `drive-needs-human` escalations were visible there before).
+    // Contained: a state-write failure here must never undo the forge label/comment above,
+    // which already externalized the escalation — same fail-toward-more-work stance as every
+    // other appendEvent call site in this codebase.
+    try {
+      deps.state.appendEvent("plan-review-escalated", { round_id: roundId, issue: issue.number, reason });
+    } catch { /* state write failed — the forge label/comment above already externalized it */ }
   };
 
   const runSession = async (

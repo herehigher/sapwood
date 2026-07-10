@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { PeripheralStub } from "./round.js";
 import type { State, RoundRow } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
-import { ROLE_DISALLOWED_TOOLS, type RoleRunner } from "./peripheral.js";
+import { ROLE_DISALLOWED_TOOLS, runSessionWithRetry, type RoleRunner } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 
 /** Harvest's deny-list: the base denies PLUS all of `gh issue edit` — harvest writes issue
@@ -61,18 +61,18 @@ export interface RoundLedgerFacts {
   issuesClosed: number;
   spentUsd: number;
   roundBudgetUsd: number;
-  /** Distinct issue numbers escalated to needs-human via a DRIVE-phase gate② rejection
-   *  (`drive-needs-human` events) since round start.
-   *
-   *  KNOWN GAP: gate⓪'s plan-review escalation path (plan-review.ts's `escalate()`) applies
-   *  `needs-human` and posts a comment directly against the forge — it never appends a state
-   *  event, so a gate⓪ (pre-dispatch) escalation is NOT reflected here, only a gate② (post-PR)
-   *  one. Tracked as a follow-up (would need plan-review.ts to also emit a state event, or
-   *  harvest to query the forge live for the label) rather than silently claimed complete. */
+  /** Distinct issue numbers escalated to needs-human since round start — a DRIVE-phase gate②
+   *  rejection (`drive-needs-human`) OR a gate⓪ plan-review escalation (`plan-review-escalated`,
+   *  #104: plan-review.ts's `escalate()` now appends this event alongside its forge label/
+   *  comment, closing the gap this doc used to name). Deduped across both kinds — the same
+   *  issue can appear in only one at a time in practice (gate⓪ blocks dispatch entirely), but
+   *  the Set guards it regardless. */
   needsHumanIssues: number[];
 }
 
-const HARVEST_EVENT_KINDS = ["merged", "reclaim-done", "reclaim-failed", "reclaim-dead", "drive-needs-human"];
+const HARVEST_EVENT_KINDS = [
+  "merged", "reclaim-done", "reclaim-failed", "reclaim-dead", "drive-needs-human", "plan-review-escalated",
+];
 
 /** Assemble this round's ledger facts. Pure given `state`'s current contents — exported so
  *  fake-data tests can assert on it directly, independent of the session-dispatch plumbing. */
@@ -93,7 +93,7 @@ export function gatherRoundFacts(state: State, round: RoundRow, roundBudgetUsd: 
   const needsHumanIssues = [
     ...new Set(
       events
-        .filter((e) => e.kind === "drive-needs-human")
+        .filter((e) => e.kind === "drive-needs-human" || e.kind === "plan-review-escalated")
         .map((e) => (e.payload as { issue: number }).issue),
     ),
   ];
@@ -180,37 +180,36 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
         const template = loadRolePromptTemplate(deps.cfg.roles.harvest.promptFile, defaultHarvestPromptPath());
         const rendered = renderFactsTemplate(template, factVars(facts));
         const role = deps.cfg.roles.harvest;
-        const iso = (): string => (deps.now ? deps.now() : new Date()).toISOString();
-        const runOnce = async (): ReturnType<HarvestDeps["runner"]["run"]> => {
-          const result = await deps.runner.run({
-            roleId: "harvest", prompt: rendered, model: role.model, effort: role.effort,
-            disallowedTools: HARVEST_DISALLOWED_TOOLS,
-          });
-          // Round-level spend, no single associated issue — 0 is the sentinel (spend_ledger's
-          // `issue` column is NOT NULL; harvest is the first role whose session isn't scoped
-          // to one issue).
-          deps.state.recordSpend(result.name, 0, result.costUsd, iso(), result.modelUsage);
-          return result;
-        };
         // RoleRunner.run never throws on the session's OWN outcome (failed/timeout return
         // normally) — checked here, not assumed (gate② P2 on the sibling #100/#101 PRs: both
         // stubs originally ignored result.outcome and silently marked the phase externalized
-        // over a dead session). Retry once (plan-review.ts's reviewer-retry precedent); a
-        // second failure DEGRADES VISIBLY but still closes the phase below: harvest must never
-        // wedge the round or block run termination (#91's graceful-stop requirement) over a
-        // summary comment — the durable event + stderr line are the operator's signal.
-        let result = await runOnce();
-        if (result.outcome !== "done") result = await runOnce();
-        if (result.outcome !== "done") {
-          deps.state.appendEvent("harvest-degraded", {
+        // over a dead session). #104: ported to peripheral.ts's shared runSessionWithRetry
+        // (outcome-check -> retry-once -> visible-degradation, ONE implementation for
+        // architect/align/harvest/retro) — a second failure DEGRADES VISIBLY but still closes
+        // the phase below: harvest must never wedge the round or block run termination (#91's
+        // graceful-stop requirement) over a summary comment — the durable event + stderr line
+        // are the operator's signal.
+        await runSessionWithRetry({
+          runner: deps.runner,
+          state: deps.state,
+          session: {
+            roleId: "harvest", prompt: rendered, model: role.model, effort: role.effort,
+            disallowedTools: HARVEST_DISALLOWED_TOOLS,
+          },
+          // Round-level spend, no single associated issue — 0 is the sentinel (spend_ledger's
+          // `issue` column is NOT NULL; harvest is the first role whose session isn't scoped
+          // to one issue).
+          issue: 0,
+          now: deps.now ?? (() => new Date()),
+          degradeEvent: "harvest-degraded",
+          degradePayload: (result) => ({
             round_id: roundId, outcome: result.outcome, session: result.name, attempts: 2,
-          });
-          console.error(
+          }),
+          degradeMessage: (result) =>
             `sapwood: harvest session failed twice (${result.outcome}) for round ${roundId} — ` +
-              `closing the harvesting phase WITHOUT a round summary (degraded, see the ` +
-              `harvest-degraded event); the run is not blocked`,
-          );
-        }
+            `closing the harvesting phase WITHOUT a round summary (degraded, see the ` +
+            `harvest-degraded event); the run is not blocked`,
+        });
       }
       return { marker: harvestMarker(roundId) };
     },

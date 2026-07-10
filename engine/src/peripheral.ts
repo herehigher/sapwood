@@ -19,7 +19,7 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "./config.js";
-import type { ModelUsageEntry } from "./state.js";
+import type { ModelUsageEntry, State } from "./state.js";
 import {
   claudeArgs, guardSettings, discoverClaudeBin, parseCostUsd, parseModelUsage,
   spawnClaudeSession, type SpawnedSession,
@@ -281,4 +281,68 @@ export class RoleRunner {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── #104: shared session-retry helper ───────────────────────────────────────────────────────
+//
+// architect.ts/align.ts/harvest.ts/retro.ts each hand-rolled the exact same shape (a same-class
+// recurrence flagged at gate② on #100/#101/#103): dispatch a role session, record its spend,
+// and if its outcome isn't "done" — RoleRunner.run never throws on the session's OWN outcome
+// (see the module doc above), so a failed/timeout result is a normal return that MUST be
+// checked, not assumed — retry exactly once; a second non-"done" outcome degrades VISIBLY (a
+// durable state event plus a stderr line) rather than either silently no-op'ing or wedging the
+// round forever. Extracted here as the ONE implementation every caller now ports to.
+//
+// Deliberately NOT extracted: plan-review.ts's reviewer-session retry. Its shape diverges in a
+// way that matters — a second failure there ESCALATES needs-human (a dispatch-gating verdict,
+// via forge label/comment, not a state event) rather than degrading-and-proceeding, and only
+// the reviewer (never the drafter) is retried at all. Forcing that into this same helper would
+// either lose the escalation behavior or bloat the helper with a branch only one caller uses.
+
+/** One session dispatch, with spend recorded against `issue` (0 = round-level, no single issue —
+ *  the same documented sentinel every caller already used). */
+export interface RetriedSession {
+  runner: Pick<RoleRunner, "run">;
+  state: Pick<State, "recordSpend" | "appendEvent">;
+  session: RoleSessionOpts;
+  /** spend_ledger's `issue` column: a real issue number, or 0 for round-level spend with no
+   *  single associated issue (harvest/architect/retro's own documented sentinel). */
+  issue: number;
+  now: () => Date;
+  /** The event kind appended on a SECOND non-"done" outcome (e.g. "architect-degraded"). */
+  degradeEvent: string;
+  /** Built from the final (second) attempt's result — callers keep full control over their own
+   *  event payload shape (some include `attempts: 2`, some fold in an `issue` key only when
+   *  non-zero — see harvest.ts/retro.ts vs. align.ts), so behavior stays byte-identical to what
+   *  each site hand-rolled before this extraction. */
+  degradePayload: (result: RoleSessionResult) => Record<string, unknown>;
+  /** Same rationale: the stderr line's wording is role-specific ("advisory phase, round not
+   *  wedged" vs. "pre-Ready, low stakes", ...), so the caller supplies it verbatim. */
+  degradeMessage: (result: RoleSessionResult) => string;
+}
+
+/** Run one role session; on a non-"done" outcome, retry exactly once; on a SECOND non-"done"
+ *  outcome, durably record the degradation (contained — a state-write failure here never throws,
+ *  same fail-toward-more-work stance as every other appendEvent call site in this codebase) and
+ *  log it to stderr. Always returns the LAST attempt's result (the caller decides what "still
+ *  not done" means for its own phase: proceed without a note, skip a summary/proposal, etc. —
+ *  this helper only owns the retry-and-degrade mechanics, never the phase's own business logic). */
+export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSessionResult> {
+  const iso = (): string => opts.now().toISOString();
+  const attempt = async (): Promise<RoleSessionResult> => {
+    const result = await opts.runner.run(opts.session);
+    opts.state.recordSpend(result.name, opts.issue, result.costUsd, iso(), result.modelUsage);
+    return result;
+  };
+  let result = await attempt();
+  if (result.outcome !== "done") {
+    result = await attempt();
+    if (result.outcome !== "done") {
+      try {
+        opts.state.appendEvent(opts.degradeEvent, opts.degradePayload(result));
+      } catch { /* state write failed — the console line below still lands */ }
+      console.error(opts.degradeMessage(result));
+    }
+  }
+  return result;
 }

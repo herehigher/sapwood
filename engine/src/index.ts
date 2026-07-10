@@ -127,6 +127,10 @@ export {
   type PeripheralPhase,
   type RoundStopHit,
 } from "./round.js";
+export {
+  createDefaultPeripherals,
+  type DefaultPeripheralsDeps,
+} from "./round-defaults.js";
 export { gh, ghText, type GhRunner } from "./gh.js";
 export { guardDecision, safeSplit, type Decision, type GuardInput } from "./guard.js";
 export {
