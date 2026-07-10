@@ -343,6 +343,15 @@ const GATE0_PROJECT_JSON = JSON.stringify({
             labels: ["plan:approved", "blocked"],
             body: "## Verification\n- run npm test",
           },
+          // #47: BOTH verify:n/a and plan:approved — a state the plan-reviewer prompt forbids
+          // ("never both dispatch paths on one issue"). Fail closed: excluded from dispatch
+          // AND from plan-review (it needs a human cleanup, not another session) — #94
+          // Codex retro-review P2.
+          {
+            number: 47, title: "mixed dispatch labels (forbidden state)",
+            labels: ["verify:n/a", "plan:approved"],
+            body: "## Verification\n- run npm test",
+          },
         ].map((it: { number: number; title: string; labels: string[]; body: string; milestone?: string }) => ({
           id: `ITEM_${it.number}`,
           content: {
@@ -364,9 +373,17 @@ const GATE0_PROJECT_JSON = JSON.stringify({
 test("selectReadyIssues: #88 gate⓪ full matrix — needs-human/blocked always block; verify:n/a alone is the doc-gate path; a real plan additionally requires plan:approved", () => {
   const p = parseProject(GATE0_PROJECT_JSON, "Status");
   const ready = selectReadyIssues(p, cfg);
+  // #47 (verify:n/a + plan:approved together) is the forbidden mixed state — fail-closed
+  // excluded (#94 Codex retro-review P2), never dispatched via the verify:n/a early path.
   assert.deepEqual(ready.map((i) => i.number).sort((a, b) => a - b), [40, 44]);
   // #86: milestone threads through selectReadyIssues when present.
   assert.equal(ready.find((i) => i.number === 40)?.milestone, "M4");
+});
+
+test("isDispatchable: BOTH verify:n/a and plan:approved (forbidden mixed state) fails closed — excluded from dispatch until a human cleans up (#94 Codex retro-review P2)", () => {
+  const p = parseProject(GATE0_PROJECT_JSON, "Status");
+  const ready = selectReadyIssues(p, cfg);
+  assert.ok(!ready.some((i) => i.number === 47), "mixed-label issue never dispatches");
 });
 
 test("getReadyIssues: any gh/API error during the project fetch -> rejects, never a silent partial/empty ready list (fail-closed)", async () => {
@@ -725,6 +742,8 @@ test("selectPlanReviewCandidates: #88 gate⓪ matrix — only issues still AWAIT
   // #43 verify:n/a + needs-human (proposed, unresolved) -> not plan-review's concern.
   // #44 verify:n/a alone (doc-gate path) -> not plan-review's concern.
   // #45/#46 plan:approved + needs-human/blocked -> settled, not re-reviewed.
+  // #47 verify:n/a + plan:approved (forbidden mixed state, #94 Codex retro P2) -> needs a
+  //     human CLEANUP, not another review session — never a candidate.
   assert.deepEqual(candidates.map((i) => i.number).sort((a, b) => a - b), [41, 42]);
 });
 

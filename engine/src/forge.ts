@@ -605,6 +605,12 @@ type ReadyCfg = {
  */
 function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
   if (labels.includes(l.needsHuman) || labels.includes(l.blocked)) return false;
+  // #94 Codex retro-review P2: BOTH dispatch-path labels on one issue is a state the
+  // plan-reviewer prompt forbids ("never apply both") — it can only arise from a stale or
+  // manual label mutation. Fail closed BEFORE the verifyNa early-true below: a mixed-label
+  // issue must not slip through the doc-gate path (which skips the red/green cycle); it waits
+  // for a human to remove one of the two labels.
+  if (labels.includes(l.verifyNa) && labels.includes(l.planApproved)) return false;
   if (labels.includes(l.verifyNa)) return true;
   return extractVerificationPlan(body) != null && labels.includes(l.planApproved);
 }
@@ -630,10 +636,15 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
  *  in the loop, or must act first) — never re-reviewed. `verifyNa` is the doc-gate path, a
  *  DIFFERENT dispatch route than plan-review's; an issue that already carries it needs no plan
  *  review (whether or not `needsHuman` also accompanies it, per the plan-reviewer's own
- *  outcome-3 contract). Otherwise: needs review unless already `planApproved`. */
+ *  outcome-3 contract). The forbidden verifyNa+planApproved MIXED state (#94 Codex retro P2)
+ *  is likewise not a review candidate: it needs a human label CLEANUP, not another session —
+ *  isDispatchable already fail-closes it out of dispatch, and dispatching a reviewer at it
+ *  would burn a session on a state the prompt forbids it to resolve (it may never remove
+ *  labels). The verifyNa check below covers it explicitly by construction. Otherwise: needs
+ *  review unless already `planApproved`. */
 function needsPlanReview(labels: string[], l: ReadyCfg["labels"]): boolean {
   if (labels.includes(l.needsHuman) || labels.includes(l.blocked)) return false;
-  if (labels.includes(l.verifyNa)) return false;
+  if (labels.includes(l.verifyNa)) return false; // doc-gate path OR the mixed state — neither is reviewable
   return !labels.includes(l.planApproved);
 }
 

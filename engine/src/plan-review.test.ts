@@ -12,7 +12,7 @@ import {
   createPlanReviewStub, planReviewMarker, renderRolePrompt, loadRolePromptTemplate,
   defaultPlanReviewerPromptPath, defaultPlanDrafterPromptPath, type PlanReviewDeps,
 } from "./plan-review.js";
-import type { RoleSessionOpts, RoleSessionResult } from "./peripheral.js";
+import { PLAN_DRAFTER_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
 import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -175,6 +175,10 @@ test("createPlanReviewStub: outcome 2 (request draft) — briefs a distinct plan
   assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-drafter", "plan-reviewer"]);
   // The drafter's prompt was briefed with the reviewer's comment verbatim.
   assert.ok(runner.calls[1]!.prompt.includes("missing acceptance criteria"));
+  // Codex #99 P1(b): the drafter runs under its stricter deny-list (no label mutation); the
+  // reviewer keeps the base scope (labeling is its legitimate job).
+  assert.equal(runner.calls[1]!.disallowedTools, PLAN_DRAFTER_DISALLOWED_TOOLS);
+  assert.equal(runner.calls[0]!.disallowedTools, undefined);
   assert.ok(forge.issueLabels[12]!.includes("plan:approved"));
   cycle++;
   assert.equal(cycle, 1);
@@ -283,6 +287,115 @@ test("createPlanReviewStub P2: a whitespace-only last comment is not a usable br
   await stub.run({ roundId: 3, phase: "plan_review", marker: null });
   assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer"]);
   assert.ok((forge.issueLabels[34] ?? []).includes(cfg.labels.needsHuman));
+  state.close();
+});
+
+test("createPlanReviewStub sep-P1: a drafter that self-applies plan:approved is caught by the label post-check — contained with needs-human, cycle stopped, no further reviewer", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 40, title: "t", labels: [] }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, [
+    // cycle 0 reviewer: bounces with a brief.
+    {
+      result: doneResult("reviewer-0"),
+      effect: () => { forge.issueComments[40] = [{ login: "r", createdAt: "t", body: "plan is missing" }]; },
+    },
+    // cycle 0 drafter: VIOLATES its write discipline — self-approves its own draft.
+    { result: doneResult("drafter-0"), effect: () => forge.addLabel(40, cfg.labels.planApproved) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 4, phase: "plan_review", marker: null });
+  // The cycle stopped at the violation — no cycle-1 reviewer ever ran.
+  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-drafter"]);
+  // Contained: needs-human applied (an unconditional dispatch blocker — the poisoned
+  // plan:approved cannot dispatch through it), violation named in the escalation comment.
+  assert.ok((forge.issueLabels[40] ?? []).includes(cfg.labels.needsHuman));
+  const comment = forge.issueCommentsPosted.find(([n]) => n === 40)?.[1] ?? "";
+  assert.ok(comment.includes(cfg.labels.planApproved), "the violation names the label the drafter added");
+  assert.ok(comment.includes(planReviewMarker(4)));
+  state.close();
+});
+
+test("createPlanReviewStub sep-P1: a drafter that self-applies verify:n/a is likewise caught", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 41, title: "t", labels: [] }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, [
+    { result: doneResult("reviewer-0"), effect: () => { forge.issueComments[41] = [{ login: "r", createdAt: "t", body: "plan is missing" }]; } },
+    { result: doneResult("drafter-0"), effect: () => forge.addLabel(41, cfg.labels.verifyNa) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 4, phase: "plan_review", marker: null });
+  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-drafter"]);
+  assert.ok((forge.issueLabels[41] ?? []).includes(cfg.labels.needsHuman));
+  state.close();
+});
+
+test("createPlanReviewStub sep-P1: an honest drafter (edits the body, touches no label) sails through the post-check unaffected", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 42, title: "t", labels: [], body: "OLD" }];
+  forge.issueBodies[42] = "OLD";
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, [
+    { result: doneResult("reviewer-0"), effect: () => { forge.issueComments[42] = [{ login: "r", createdAt: "t", body: "criteria vague" }]; } },
+    { result: doneResult("drafter-0"), effect: () => { forge.issueBodies[42] = "NEW CONCRETE PLAN"; } },
+    { result: doneResult("reviewer-1"), effect: () => forge.addLabel(42, cfg.labels.planApproved) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 4, phase: "plan_review", marker: null });
+  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-drafter", "plan-reviewer"]);
+  assert.ok((forge.issueLabels[42] ?? []).includes("plan:approved"));
+  assert.ok(!(forge.issueLabels[42] ?? []).includes(cfg.labels.needsHuman), "no false-positive violation");
+  state.close();
+});
+
+test("createPlanReviewStub stale-brief-P2: a PRE-EXISTING comment is never accepted as the brief — reviewer done + no label + no NEW comment escalates, drafter never briefed off the stale comment", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 43, title: "t", labels: [] }];
+  // A human discussion comment already sits on the issue BEFORE the reviewer ever runs.
+  forge.issueComments[43] = [{ login: "human", createdAt: "2026-01-01T00:00:00Z", body: "let's discuss scope sometime" }];
+  const cfg = mkCfg();
+  // Reviewer "succeeds" but posts nothing and applies no label (contract violation).
+  const runner = new ScriptedRunner(forge, [{ result: doneResult("reviewer-0") }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 5, phase: "plan_review", marker: null });
+  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer"], "no drafter briefed off the stale human comment");
+  assert.ok((forge.issueLabels[43] ?? []).includes(cfg.labels.needsHuman));
+  const comment = forge.issueCommentsPosted.find(([n]) => n === 43)?.[1] ?? "";
+  assert.ok(/brief/.test(comment));
+  state.close();
+});
+
+test("createPlanReviewStub stale-brief-P2: with pre-existing comments, only the comment the reviewer JUST posted becomes the brief", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 44, title: "t", labels: [] }];
+  forge.issueComments[44] = [{ login: "human", createdAt: "2026-01-01T00:00:00Z", body: "old unrelated discussion" }];
+  const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
+  const runner = new ScriptedRunner(forge, [
+    // cycle 0 reviewer: appends its bounce AFTER the pre-existing comment.
+    {
+      result: doneResult("reviewer-0"),
+      effect: () => { forge.issueComments[44]!.push({ login: "r", createdAt: "2026-01-02T00:00:00Z", body: "fresh bounce brief" }); },
+    },
+    { result: doneResult("drafter-0") },
+    { result: doneResult("reviewer-1"), effect: () => forge.addLabel(44, cfg.labels.planApproved) },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 5, phase: "plan_review", marker: null });
+  const drafterCall = runner.calls.find((c) => c.roleId === "plan-drafter");
+  assert.ok(drafterCall, "drafter ran (a fresh bounce comment existed)");
+  assert.ok(drafterCall!.prompt.includes("fresh bounce brief"), "briefed with the NEW comment");
+  assert.ok(!drafterCall!.prompt.includes("old unrelated discussion"), "the stale comment never reaches the brief");
   state.close();
 });
 

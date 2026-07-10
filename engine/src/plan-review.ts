@@ -17,7 +17,7 @@ import type { PeripheralStub } from "./round.js";
 import type { IForge, Issue } from "./forge.js";
 import type { State } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
-import { RoleRunner } from "./peripheral.js";
+import { RoleRunner, PLAN_DRAFTER_DISALLOWED_TOOLS } from "./peripheral.js";
 
 export interface PlanReviewDeps {
   forge: IForge;
@@ -127,7 +127,20 @@ export function renderRolePrompt(
  *  something that is not a reviewer bounce. Failed sessions are retried once; a second failure
  *  escalates needs-human with the trail, drafter never run. Same stance for a "done" session
  *  that left no usable brief (no label AND no non-empty comment — a contract violation of the
- *  prompt's "every pass ends in exactly one of the three outcomes"). */
+ *  prompt's "every pass ends in exactly one of the three outcomes").
+ *
+ *  The brief must be FRESH (Codex PR #99 P2): the comment count is snapshotted before each
+ *  cycle's reviewer session, and only a comment created after that snapshot can become the
+ *  drafter's brief — a pre-existing comment (a human discussion, a previous cycle's note) is
+ *  never mistaken for this pass's bounce.
+ *
+ *  The drafter is held to its write discipline fail-closed (Codex PR #99 P1): labels are
+ *  snapshotted immediately before each drafter session and re-fetched after — a drafter that
+ *  added plan:approved/verify:n/a or removed needs-human/blocked is a violation: escalate
+ *  needs-human (an unconditional dispatch blocker, which CONTAINS a poisoned plan:approved
+ *  without needing label removal) with the trail, and stop this issue's cycle. The drafter's
+ *  stricter tool deny-list (PLAN_DRAFTER_DISALLOWED_TOOLS) is only the best-effort pattern
+ *  layer in front of this check — see peripheral.ts. */
 async function reviewOneIssue(
   deps: PlanReviewDeps,
   issue: Issue,
@@ -158,22 +171,31 @@ async function reviewOneIssue(
     tag = "",
   ): ReturnType<PlanReviewDeps["runner"]["run"]> => {
     const role = roleId === "plan-reviewer" ? deps.cfg.roles.planReviewer : deps.cfg.roles.planDrafter;
-    const result = await deps.runner.run({ roleId, prompt, model: role.model, effort: role.effort });
+    const result = await deps.runner.run({
+      roleId, prompt, model: role.model, effort: role.effort,
+      // The drafter's stricter deny-list (no label mutation) — best-effort pattern layer; the
+      // authoritative enforcement is the label post-check in the loop below.
+      ...(roleId === "plan-drafter" ? { disallowedTools: PLAN_DRAFTER_DISALLOWED_TOOLS } : {}),
+    });
     deps.state.recordSpend(result.name, issue.number, result.costUsd, iso(), result.modelUsage);
     trail.push(`cycle ${cycle}: ${roleId}${tag} session ${result.name} -> ${result.outcome}`);
     return result;
   };
 
   for (let cycle = 0; cycle <= maxCycles; cycle++) {
-    // P1: refetch the CURRENT body every cycle — after cycle 0 it's the drafter's edit the
-    // reviewer must judge, not the phase-start snapshot. Labels aren't refetched for the
+    // P1 (fable): refetch the CURRENT body every cycle — after cycle 0 it's the drafter's edit
+    // the reviewer must judge, not the phase-start snapshot. Labels aren't refetched for the
     // render: the outcome routing below reads live labels anyway, and only this orchestrator's
     // own sessions move the labels this prompt branches on.
     const currentIssue: Issue = { ...issue, body: await deps.forge.getIssueBody(issue.number) };
+    // P2 (Codex): snapshot the comment count BEFORE the reviewer session — only a comment
+    // created after this point can become the drafter's brief. Count-based (not id/timestamp):
+    // getIssueComments returns chronological order, so anything past this index is new.
+    const commentCountBefore = (await deps.forge.getIssueComments(issue.number)).length;
     const reviewerPrompt = renderRolePrompt(reviewerTemplate, currentIssue, deps.cfg);
     let reviewResult = await runSession("plan-reviewer", reviewerPrompt, cycle);
     if (reviewResult.outcome !== "done") {
-      // P2: a crashed/timed-out reviewer produced no verdict — retry once, then escalate.
+      // P2 (fable): a crashed/timed-out reviewer produced no verdict — retry once, then escalate.
       reviewResult = await runSession("plan-reviewer", reviewerPrompt, cycle, " (retry)");
       if (reviewResult.outcome !== "done") {
         await escalate(`reviewer session failed twice (${reviewResult.outcome})`);
@@ -191,19 +213,42 @@ async function reviewOneIssue(
       return;
     }
 
-    // Brief the drafter with the reviewer's most recent comment (its bounce/draft-request).
-    // P2 guard: a "done" reviewer that applied no label AND left no non-empty comment violated
-    // its every-pass-ends-in-an-outcome contract — there is nothing to brief a drafter with,
-    // so escalate rather than dispatch a drafter off nothing (or off a stale earlier comment
-    // that happens to be empty-adjacent).
+    // Brief the drafter with the bounce comment the reviewer JUST posted. Guards (both
+    // escalate rather than dispatch a drafter off the wrong instructions):
+    //  - freshness (Codex #99 P2): only comments created after this cycle's snapshot count —
+    //    a pre-existing human discussion or an earlier cycle's note is never the brief;
+    //  - substance (fable P2): a "done" reviewer that applied no label AND posted no
+    //    non-empty NEW comment violated its every-pass-ends-in-an-outcome contract.
     const comments = await deps.forge.getIssueComments(issue.number);
-    const brief = comments.length > 0 ? comments[comments.length - 1]!.body : "";
+    const newComments = comments.slice(commentCountBefore);
+    const brief = newComments.length > 0 ? newComments[newComments.length - 1]!.body : "";
     if (brief.trim() === "") {
-      await escalate("reviewer bounced without a usable brief comment");
+      await escalate("reviewer bounced without a fresh usable brief comment");
       return;
     }
     const drafterPrompt = renderRolePrompt(drafterTemplate, currentIssue, deps.cfg, { "reviewer.brief": brief });
+    // P1 (Codex #99): snapshot labels immediately before the drafter, verify after — the
+    // fail-closed enforcement of the drafter's issues-TEXT-only write discipline (the tool
+    // deny patterns in peripheral.ts are best-effort only).
+    const labelsBeforeDraft = await deps.forge.getIssueLabels(issue.number);
     await runSession("plan-drafter", drafterPrompt, cycle);
+    const labelsAfterDraft = await deps.forge.getIssueLabels(issue.number);
+    const added = (x: string): boolean => !labelsBeforeDraft.includes(x) && labelsAfterDraft.includes(x);
+    const removed = (x: string): boolean => labelsBeforeDraft.includes(x) && !labelsAfterDraft.includes(x);
+    const violations = [
+      ...(added(l.planApproved) ? [`added \`${l.planApproved}\``] : []),
+      ...(added(l.verifyNa) ? [`added \`${l.verifyNa}\``] : []),
+      ...(removed(l.needsHuman) ? [`removed \`${l.needsHuman}\``] : []),
+      ...(removed(l.blocked) ? [`removed \`${l.blocked}\``] : []),
+    ];
+    if (violations.length > 0) {
+      trail.push(`cycle ${cycle}: plan-drafter label violation: ${violations.join(", ")}`);
+      // needs-human is an UNCONDITIONAL dispatch blocker (isDispatchable checks it first), so
+      // applying it contains a poisoned plan:approved without this orchestrator needing any
+      // label-removal capability of its own.
+      await escalate(`plan-drafter wrote outside its scope (${violations.join(", ")})`);
+      return;
+    }
     // Loop back -> re-run the reviewer against the drafter's edit (body refetched above).
   }
 }

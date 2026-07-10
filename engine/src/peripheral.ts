@@ -29,14 +29,41 @@ import {
  *  file Read/Write/Edit, no git, no `gh pr`/`gh api` (no PR visibility, no review/approve/
  *  merge capability). Everything the session needs to know about the issue is already
  *  substituted into its prompt (issue.number/title/body/labels), so it needs no READ tool at
- *  all, only the two write actions its role requires. Coarse noise-reduction (same caveat as
- *  worker.ts's tool lists) — the real boundary is the SAME fail-closed guard hook every
- *  session gets via guardSettings, unchanged. */
+ *  all, only the two write actions its role requires.
+ *
+ *  WHAT ENFORCES WHAT (Codex PR #99 P1 — no aspirational claims):
+ *  - These tool patterns are NOISE REDUCTION only, same caveat as worker.ts's lists. Claude
+ *    Code's permission docs confirm Bash glob patterns DO support mid-pattern wildcards
+ *    ("Wildcards can appear at any position in the command", e.g. `Bash(git * main)`), so the
+ *    flag-level denies below (`*--body-file*`, `*--add-label*`, ...) genuinely match — but the
+ *    same docs warn flag-constraining Bash patterns are FRAGILE and recommend PreToolUse hooks
+ *    for reliable enforcement. Treat every deny below as best-effort.
+ *  - The REAL boundaries are (1) the same fail-closed PreToolUse guard hook every session gets
+ *    via guardSettings, unchanged, and (2) for the plan-drafter's label discipline
+ *    specifically, plan-review.ts's fail-closed LABEL POST-CHECK: labels are snapshotted
+ *    before each drafter session and re-fetched after — a drafter that added
+ *    plan:approved/verify:n/a or removed needs-human/blocked is escalated to needs-human (an
+ *    unconditional dispatch blocker that contains a poisoned plan:approved) regardless of
+ *    whether any pattern below caught the command.
+ *
+ *  `--body-file` is denied for BOTH commands (and both roles): it reads body text from a
+ *  FILE, which would pierce the no-repo-read boundary (the session has no Read tool for the
+ *  same reason). */
 export const ROLE_ALLOWED_TOOLS = "Bash(gh issue comment*),Bash(gh issue edit*)";
 export const ROLE_DISALLOWED_TOOLS =
   "Read,Write,Edit,MultiEdit,Bash(git *),Bash(gh pr *),Bash(gh api *),Bash(gh issue view*)," +
   "Bash(gh issue list*),Bash(gh issue close*),Bash(gh issue reopen*),Bash(gh issue transfer*)," +
-  "Bash(gh issue delete*)";
+  "Bash(gh issue delete*)," +
+  "Bash(gh issue comment *--body-file*),Bash(gh issue edit *--body-file*)";
+
+/** The plan-DRAFTER's stricter deny list (#77 Amendment 2's plan-author ≠ plan-approver chain):
+ *  everything above PLUS label mutation — a drafter edits plan TEXT only, and must never
+ *  self-apply `plan:approved`/`verify:n/a` or lift `needs-human`/`blocked`. Best-effort
+ *  pattern layer only; the authoritative enforcement is plan-review.ts's label post-check
+ *  (see ROLE_ALLOWED_TOOLS doc above). The plan-REVIEWER keeps label capability — applying
+ *  `plan:approved`/`needs-human` is its legitimate job. */
+export const PLAN_DRAFTER_DISALLOWED_TOOLS =
+  ROLE_DISALLOWED_TOOLS + ",Bash(gh issue edit *--add-label*),Bash(gh issue edit *--remove-label*)";
 
 export interface RoleSessionOpts {
   /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
@@ -45,6 +72,10 @@ export interface RoleSessionOpts {
   prompt: string;
   model: string;
   effort: string;
+  /** Per-role deny-list override (e.g. PLAN_DRAFTER_DISALLOWED_TOOLS). Omitted -> the base
+   *  ROLE_DISALLOWED_TOOLS. Deny rules take precedence over allows in Claude Code, so this
+   *  only ever narrows the base allow scope, never widens it. */
+  disallowedTools?: string;
 }
 
 export interface RoleSessionResult {
@@ -124,7 +155,8 @@ export class RoleRunner {
     const args = claudeArgs({
       prompt: opts.prompt, model: opts.model, effort: opts.effort,
       worktree: name, name, sessionId, settings: settingsJson,
-      allowedTools: ROLE_ALLOWED_TOOLS, disallowedTools: ROLE_DISALLOWED_TOOLS,
+      allowedTools: ROLE_ALLOWED_TOOLS,
+      disallowedTools: opts.disallowedTools ?? ROLE_DISALLOWED_TOOLS,
       // NB: no addDir — same as worker.ts's dispatch(): a role session must never see engine
       // state (sentinels, the sqlite db) via --add-dir.
     });

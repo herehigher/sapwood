@@ -6,7 +6,8 @@ import { mkdtempSync, writeFileSync, chmodSync, existsSync, readFileSync, mkdirS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  RoleRunner, ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, type RoleRunnerDeps,
+  RoleRunner, ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, PLAN_DRAFTER_DISALLOWED_TOOLS,
+  type RoleRunnerDeps,
 } from "./peripheral.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
@@ -159,6 +160,38 @@ test("run: argv scopes the session to issues-only writes — no code paths, no P
     assert.ok(!ROLE_ALLOWED_TOOLS.includes("git"), "allowed tools carry no git/code capability");
     assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh pr *)"), "PR namespace explicitly disallowed");
     assert.ok(ROLE_DISALLOWED_TOOLS.includes("Read") && ROLE_DISALLOWED_TOOLS.includes("Write"), "no file access");
+    // Codex PR #99 P1: --body-file reads body text from a FILE — a repo-read bypass, denied
+    // for both commands (best-effort pattern layer; see peripheral.ts's enforcement doc).
+    assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh issue comment *--body-file*)"));
+    assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--body-file*)"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PLAN_DRAFTER_DISALLOWED_TOOLS: strict superset of the base denies, adding label mutation (plan-author ≠ plan-approver)", () => {
+  assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.startsWith(ROLE_DISALLOWED_TOOLS), "keeps every base deny");
+  assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--add-label*)"));
+  assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--remove-label*)"));
+  // The base (reviewer) scope must NOT deny label mutation — applying plan:approved/needs-human
+  // is the reviewer's legitimate job.
+  assert.ok(!ROLE_DISALLOWED_TOOLS.includes("--add-label"));
+});
+
+test("run: a per-role disallowedTools override reaches the argv (the drafter's stricter deny-list path)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    await runner.run({
+      roleId: "plan-drafter", prompt: "p", model: "sonnet", effort: "medium",
+      disallowedTools: PLAN_DRAFTER_DISALLOWED_TOOLS,
+    });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.equal(seen[seen.indexOf("--disallowedTools") + 1], PLAN_DRAFTER_DISALLOWED_TOOLS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
