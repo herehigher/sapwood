@@ -63,10 +63,15 @@ import {
  *  `comment *`): cobra/pflag accepts flags BEFORE positional args (`gh issue comment -F f 12`),
  *  and a literal space after the subcommand would consume the only space preceding a
  *  flag-first `-F`, silently un-denying that argv order (gate② finding on this very fix).
- *  Residual gap, same best-effort class as everything else here: `gh`'s pflag-style shorthand
- *  parser lets a boolean short flag CLUSTER with `-F` in one token (e.g. `-eF file` ==
- *  `-e -F file`), which would not contain a space directly before `-F`. Not covered — the
- *  guard hook remains the authoritative backstop for the residual case. */
+ *  Residual gaps, same best-effort class as everything else here: (a) `gh`'s pflag-style
+ *  shorthand parser lets a boolean short flag CLUSTER with `-F` in one token (e.g. `-eF file`
+ *  == `-e -F file`), which would not contain a space directly before `-F`; (b) shell
+ *  quoting/escaping (`'-F'`, `"-F"`, `\-F`) — the glob matches the RAW command string, but the
+ *  shell strips quotes/backslashes before `gh` parses its argv, so the quoted spellings reach
+ *  `gh` as a plain `-F` without ever containing the ` -F` substring the patterns look for
+ *  (Codex gate② round 2). Quoting variants are unbounded, so the pattern layer structurally
+ *  cannot close (b) — both residuals are covered by issue #110's authoritative guard-hook
+ *  backstop (shell-aware argv tokenization, fail-closed), not by more globs here. */
 export const ROLE_ALLOWED_TOOLS = "Bash(gh issue comment*),Bash(gh issue edit*)";
 export const ROLE_DISALLOWED_TOOLS =
   "Read,Write,Edit,MultiEdit,Bash(git *),Bash(gh pr *),Bash(gh api *),Bash(gh issue view*)," +
