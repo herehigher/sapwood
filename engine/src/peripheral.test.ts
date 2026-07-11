@@ -252,6 +252,15 @@ test("PLAN_DRAFTER_DISALLOWED_TOOLS inherits the base list's -F short-flag denie
   assert.ok(anyDenyMatches(PLAN_DRAFTER_DISALLOWED_TOOLS, "gh issue edit 12 -F /etc/passwd"));
 });
 
+test("#102 gate② regression: FLAG-FIRST argv order is denied too — cobra/pflag accepts flags before positionals, and a `subcommand *` shape (space after the subcommand) would let the literal prefix consume the only space before -F", () => {
+  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue comment -F /etc/passwd 12"));
+  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue edit -F /etc/passwd 12"));
+  assert.ok(anyDenyMatches(PLAN_DRAFTER_DISALLOWED_TOOLS, "gh issue edit -F /etc/passwd 12"));
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create -F /etc/passwd --title x"));
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create -l bad --title x"));
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create -p Roadmap --title x"));
+});
+
 test("PO_DISALLOWED_TOOLS denies `gh issue create -F/-l/-p` (#102) — both space-separated and pflag-attached forms", () => {
   assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -F /etc/passwd"));
   assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -F/etc/passwd"), "attached form");

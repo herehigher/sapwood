@@ -56,20 +56,24 @@ import {
  *  `--label`, see PO_DISALLOWED_TOOLS below) — the pattern layer below is the ONLY layer for this
  *  one, so its shape matters: a bare `*-F*` would also match a body/title CONTAINING the
  *  substring "-F" (over-broad, but still fails safe by over-denying) or, worse, flags like a
- *  hypothetical `--foo-Fbar` (under-broad if such a flag existed). The `* -F*` shape below
- *  requires "-F" be preceded by a space — i.e. its own argv token — which both long-flag
+ *  hypothetical `--foo-Fbar` (under-broad if such a flag existed). The `subcommand* -F*` shape
+ *  below requires "-F" be preceded by a space — i.e. its own argv token — which both long-flag
  *  substrings (`--body-file`, always two leading dashes) and non-flag text glued onto another
- *  word never produce. Residual gap, same best-effort class as everything else here: `gh`'s
- *  pflag-style shorthand parser lets a boolean short flag CLUSTER with `-F` in one token (e.g.
- *  `-eF file` == `-e -F file`), which would not contain a space directly before `-F`. Not
- *  covered — the guard hook remains the authoritative backstop for the residual case. */
+ *  word never produce. The first `*` binds DIRECTLY to the subcommand (`comment*`, not
+ *  `comment *`): cobra/pflag accepts flags BEFORE positional args (`gh issue comment -F f 12`),
+ *  and a literal space after the subcommand would consume the only space preceding a
+ *  flag-first `-F`, silently un-denying that argv order (gate② finding on this very fix).
+ *  Residual gap, same best-effort class as everything else here: `gh`'s pflag-style shorthand
+ *  parser lets a boolean short flag CLUSTER with `-F` in one token (e.g. `-eF file` ==
+ *  `-e -F file`), which would not contain a space directly before `-F`. Not covered — the
+ *  guard hook remains the authoritative backstop for the residual case. */
 export const ROLE_ALLOWED_TOOLS = "Bash(gh issue comment*),Bash(gh issue edit*)";
 export const ROLE_DISALLOWED_TOOLS =
   "Read,Write,Edit,MultiEdit,Bash(git *),Bash(gh pr *),Bash(gh api *),Bash(gh issue view*)," +
   "Bash(gh issue list*),Bash(gh issue close*),Bash(gh issue reopen*),Bash(gh issue transfer*)," +
   "Bash(gh issue delete*)," +
   "Bash(gh issue comment *--body-file*),Bash(gh issue edit *--body-file*)," +
-  "Bash(gh issue comment * -F*),Bash(gh issue edit * -F*)";
+  "Bash(gh issue comment* -F*),Bash(gh issue edit* -F*)";
 
 /** The plan-DRAFTER's stricter deny list (#77 Amendment 2's plan-author ≠ plan-approver chain):
  *  everything above PLUS label mutation — a drafter edits plan TEXT only, and must never
@@ -104,15 +108,15 @@ export const PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS + ",Bash(gh issue create*)";
  *
  *  #102 (gate② on #101): each of the three flags above also has a short alias on `gh issue
  *  create` — confirmed via `gh issue create --help`: `-F` (body-file), `-l` (label), `-p`
- *  (project) — which the long-flag-only denies above never matched. Same `* -X*`
+ *  (project) — which the long-flag-only denies above never matched. Same `subcommand* -X*`
  *  space-boundary shape as ROLE_DISALLOWED_TOOLS's `-F` denies above (see that doc for the
- *  greediness/residual-clustering rationale — it applies identically here). `-l`/`-p` both
- *  keep an authoritative backstop (align.ts's post-checks) unlike `-F`, so this is hardening for
- *  those two either way. */
+ *  greediness/flag-first-order/residual-clustering rationale — it applies identically here).
+ *  `-l`/`-p` both keep an authoritative backstop (align.ts's post-checks) unlike `-F`, so this
+ *  is hardening for those two either way. */
 export const PO_DISALLOWED_TOOLS =
   ROLE_DISALLOWED_TOOLS +
   ",Bash(gh issue create *--body-file*),Bash(gh issue create *--label*),Bash(gh issue create *--project*)," +
-  "Bash(gh issue create * -F*),Bash(gh issue create * -l*),Bash(gh issue create * -p*)";
+  "Bash(gh issue create* -F*),Bash(gh issue create* -l*),Bash(gh issue create* -p*)";
 
 export interface RoleSessionOpts {
   /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
