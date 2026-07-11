@@ -16,8 +16,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createRetroStub, gatherRetroFacts, retroMarker, defaultRetroPromptPath,
-  RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS, type RetroDeps,
+  createRetroStub, gatherRetroFacts, retroMarker, defaultRetroPromptPath, parseRetroScratch,
+  RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS, RETRO_SCRATCH_FILE, type RetroDeps,
 } from "./retro.js";
 import type { RoleSessionOpts, RoleSessionResult } from "./peripheral.js";
 import { State } from "./state.js";
@@ -39,8 +39,13 @@ class ScriptedRunner {
   }
 }
 
-const doneResult = (name: string): RoleSessionResult => ({
-  outcome: "done", costUsd: 0.03, modelUsage: [], exitCode: 0, name,
+// #111 PR-B: a "done" session must also carry a VALID scratch file (parseRetroScratch feeds
+// runSessionWithRetry's isValid) — "none" is the explicit quiet-round content, so the many
+// existing tests that only exercise the session-dispatch plumbing default to it. A result with
+// NO scratchText at all is built as a literal where needed (a default parameter can't be
+// bypassed by passing undefined explicitly).
+const doneResult = (name: string, scratchText = "none"): RoleSessionResult => ({
+  outcome: "done", costUsd: 0.03, modelUsage: [], exitCode: 0, name, scratchText,
 });
 const timeoutResult = (name: string): RoleSessionResult => ({
   outcome: "timeout", costUsd: 0.03, modelUsage: [], exitCode: null, name,
@@ -51,25 +56,24 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
 
 // ── Write-scope: "proposals appear as branches/PRs only" ────────────────────────────────────
 
-test("RETRO_ALLOWED_TOOLS: grants git + gh pr create (proposal path) — never a merge/review/issue-mutation capability", () => {
-  assert.ok(RETRO_ALLOWED_TOOLS.includes("Bash(gh pr create*)"), "can open a PR");
+test("RETRO_ALLOWED_TOOLS: grants local git (proposal authorship) — never a merge/review/issue-mutation capability", () => {
   assert.ok(RETRO_ALLOWED_TOOLS.includes("Bash(git commit*)") && RETRO_ALLOWED_TOOLS.includes("Bash(git push*)"), "can commit + push a branch");
   for (const forbidden of ["gh pr merge", "gh pr review", "gh pr ready", "gh issue edit", "gh issue comment", "gh api"]) {
     assert.ok(!RETRO_ALLOWED_TOOLS.includes(forbidden), `allowed tools must not grant ${forbidden}`);
   }
 });
 
-// ── #111 PR-A: live GitHub-browsing grants are gone — the digest replaces them ──────────────
+// ── #111: ALL gh grants are gone — reads via the digest (PR-A), writes via the engine (PR-B) ─
 
-test("RETRO_ALLOWED_TOOLS: no gh READ entries at all (gh pr view/list/diff, gh issue view/list) — the round digest replaces live browsing", () => {
-  for (const removed of ["Bash(gh pr view*)", "Bash(gh pr list*)", "Bash(gh pr diff*)", "Bash(gh issue view*)", "Bash(gh issue list*)"]) {
+test("RETRO_ALLOWED_TOOLS: no gh entries AT ALL (#111 acceptance criterion) — reads come from the digest, PR creation is engine-side", () => {
+  for (const removed of [
+    "Bash(gh pr view*)", "Bash(gh pr list*)", "Bash(gh pr diff*)", "Bash(gh issue view*)", "Bash(gh issue list*)",
+    "Bash(gh pr create*)",
+  ]) {
     assert.ok(!RETRO_ALLOWED_TOOLS.includes(removed), `allowed tools must no longer grant ${removed}`);
   }
-  // #111 explicitly keeps this ONE gh write for now (PR-B, a later separate PR, relocates it
-  // engine-side) — asserted here as the one gh entry that DOES survive PR-A's sweep.
-  assert.ok(RETRO_ALLOWED_TOOLS.includes("Bash(gh pr create*)"));
-  const ghEntries = RETRO_ALLOWED_TOOLS.split(",").filter((t) => t.startsWith("Bash(gh "));
-  assert.deepEqual(ghEntries, ["Bash(gh pr create*)"], "the only gh entry left is gh pr create");
+  const ghEntries = RETRO_ALLOWED_TOOLS.split(",").filter((t) => t.includes("gh "));
+  assert.deepEqual(ghEntries, [], "zero gh entries of any kind remain");
 });
 
 test("RETRO_ALLOWED_TOOLS: local git introspection (branch/checkout/add/commit/push/diff/status/log) is unchanged — never GitHub browsing", () => {
@@ -87,8 +91,8 @@ test("RETRO_DISALLOWED_TOOLS: explicitly denies merge/review/ready, issue mutati
   }
   assert.ok(RETRO_DISALLOWED_TOOLS.includes("git push*main*"));
   assert.ok(RETRO_DISALLOWED_TOOLS.includes("git push*master*"));
-  // #101 security-review rule: every widened gh WRITE allow carries the matching --body-file
-  // deny (gh pr create is retro's only gh write verb).
+  // #111 PR-B: with zero gh allows left, the gh denies (this one included) are regression
+  // trip-wires — kept byte-identical, same stance as peripheral.ts's ROLE_DISALLOWED_TOOLS.
   assert.ok(RETRO_DISALLOWED_TOOLS.includes("Bash(gh pr create *--body-file*)"));
 });
 
@@ -103,6 +107,8 @@ test("createRetroStub: every dispatched session carries RETRO_ALLOWED_TOOLS/RETR
   const call = runner.calls[0]!;
   assert.equal(call.allowedTools, RETRO_ALLOWED_TOOLS);
   assert.equal(call.disallowedTools, RETRO_DISALLOWED_TOOLS);
+  // #111 PR-B: the engine (not the session) chooses where the PR-proposal scratch file lives.
+  assert.equal(call.scratchFile, RETRO_SCRATCH_FILE);
   state.close();
 });
 
@@ -226,6 +232,180 @@ test("createRetroStub: roles.retro.digestMaxChars is honored — a tiny cap trun
   assert.ok(prompt.includes("digest truncated"), "the digest's own truncation marker must appear in the prompt");
   assert.ok(!prompt.includes("x".repeat(5000)), "the oversize diff content must not survive uncut");
   state.close();
+});
+
+// ── #111 PR-B: the scratch-file contract (parseRetroScratch, fail-closed) ───────────────────
+
+const PROPOSAL_SCRATCH =
+  "branch: retro/round-1-proposal\ntitle: docs: tighten worker prompt\n\n## Why\n\nRecurring gate② finding.\n";
+
+test("parseRetroScratch: a well-formed proposal parses to exact branch/title/body (body raw markdown, trimmed)", () => {
+  const p = parseRetroScratch(PROPOSAL_SCRATCH);
+  assert.deepEqual(p, {
+    kind: "proposal",
+    branch: "retro/round-1-proposal",
+    title: "docs: tighten worker prompt",
+    body: "## Why\n\nRecurring gate② finding.",
+  });
+});
+
+test("parseRetroScratch: 'none' (any surrounding whitespace) is the explicit quiet-round outcome", () => {
+  assert.deepEqual(parseRetroScratch("none"), { kind: "none" });
+  assert.deepEqual(parseRetroScratch("\nnone\n\n"), { kind: "none" });
+});
+
+test("parseRetroScratch: fail-closed cases — missing, empty, malformed headers, empty body", () => {
+  const missing = parseRetroScratch(undefined);
+  assert.equal(missing.kind, "invalid");
+  assert.match((missing as { reason: string }).reason, /missing/);
+
+  const empty = parseRetroScratch("   \n  ");
+  assert.equal(empty.kind, "invalid");
+  assert.match((empty as { reason: string }).reason, /empty/);
+
+  assert.equal(parseRetroScratch("title: x\nbranch: y\nbody").kind, "invalid", "swapped header order fails closed");
+  assert.equal(parseRetroScratch("branch: feat/x\nbody with no title line").kind, "invalid");
+  assert.equal(parseRetroScratch("branch: feat/x\ntitle: t\n\n   \n").kind, "invalid", "empty body fails closed");
+});
+
+test("parseRetroScratch: branch-name sanity fails closed — bad charset, leading dash, dot-dot, and the default branch by name", () => {
+  for (const branch of ["has space", "-leading-dash", "a..b", "main", "master", "semi;colon"]) {
+    const p = parseRetroScratch(`branch: ${branch}\ntitle: t\n\nbody\n`);
+    assert.equal(p.kind, "invalid", `branch ${JSON.stringify(branch)} must fail closed`);
+  }
+  // Ordinary ref shapes (slashes, dots, dashes) stay valid.
+  assert.equal(parseRetroScratch("branch: feat/x.y-z/1\ntitle: t\n\nbody\n").kind, "proposal");
+});
+
+// ── #111 PR-B: engine-side PR creation — verify push, then openPR, partial failures degrade ─
+
+test("createRetroStub: happy path — session writes a proposal scratch; engine verifies the pushed branch and opens the PR itself with the exact title/body", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1", PROPOSAL_SCRATCH));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const stub = createRetroStub(deps);
+  const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.equal(marker, retroMarker(round.round_id));
+  assert.deepEqual(forge.branchExistsCalls, ["retro/round-1-proposal"], "push verified engine-side, by name");
+  assert.deepEqual(forge.openPRCalls, [[
+    "retro/round-1-proposal", "docs: tighten worker prompt", "## Why\n\nRecurring gate② finding.",
+  ]]);
+  const opened = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-opened"]);
+  assert.equal(opened.length, 1);
+  assert.deepEqual(opened[0]!.payload, { round_id: round.round_id, pr: 77, branch: "retro/round-1-proposal" });
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded", "retro-degraded"]), []);
+  state.close();
+});
+
+test("createRetroStub: quiet round ('none' scratch) — no branch check, no openPR, no degrade; the phase just closes", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1", "none"));
+  const forge = new MinimalForge();
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const stub = createRetroStub(deps);
+  const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(marker, retroMarker(round.round_id));
+  assert.deepEqual(forge.branchExistsCalls, []);
+  assert.deepEqual(forge.openPRCalls, []);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded", "retro-degraded"]), []);
+  state.close();
+});
+
+test("createRetroStub: push verification fails (branch absent on the forge) — openPR is NEVER called, retro-pr-degraded appended, round not wedged", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1", PROPOSAL_SCRATCH));
+  const forge = new MinimalForge(); // branchExistsResult defaults to false
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const stub = createRetroStub(deps);
+  const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.equal(marker, retroMarker(round.round_id)); // the phase still closes
+  assert.deepEqual(forge.branchExistsCalls, ["retro/round-1-proposal"]);
+  assert.deepEqual(forge.openPRCalls, [], "an unverified push must never reach openPR");
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded"]);
+  assert.equal(degraded.length, 1);
+  const payload = degraded[0]!.payload as { round_id: number; branch: string; reason: string };
+  assert.equal(payload.round_id, round.round_id);
+  assert.equal(payload.branch, "retro/round-1-proposal");
+  assert.match(payload.reason, /no such branch|could not be verified/);
+  state.close();
+});
+
+test("createRetroStub: openPR throws AFTER a verified push — retro-pr-degraded names the pushed branch as preserved evidence, never a crash", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1", PROPOSAL_SCRATCH));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  forge.openPRError = new Error("boom: PR already exists");
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const stub = createRetroStub(deps);
+  const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.equal(marker, retroMarker(round.round_id)); // degraded, not wedged
+  assert.equal(forge.openPRCalls.length, 1);
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded"]);
+  assert.equal(degraded.length, 1);
+  const payload = degraded[0]!.payload as { branch: string; reason: string };
+  assert.equal(payload.branch, "retro/round-1-proposal");
+  assert.match(payload.reason, /openPR failed/);
+  assert.match(payload.reason, /preserved evidence/);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-opened"]), []);
+  state.close();
+});
+
+test("createRetroStub: missing scratch file is an INVALID attempt — retried once, then retro-degraded; openPR never called", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  // Literals, not doneResult(name, undefined): an explicit `undefined` argument would trigger
+  // the helper's default ("none") — these results must genuinely carry NO scratchText field.
+  const noScratch = (name: string): RoleSessionResult => ({
+    outcome: "done", costUsd: 0.03, modelUsage: [], exitCode: 0, name,
+  });
+  const runner = new ScriptedRunner(noScratch("s1"), noScratch("s2"));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const stub = createRetroStub(deps);
+  const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.equal(marker, retroMarker(round.round_id));
+  assert.equal(runner.calls.length, 2, "invalid scratch retries exactly once");
+  assert.deepEqual(forge.openPRCalls, []);
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-degraded"]);
+  assert.equal(degraded.length, 1);
+  assert.deepEqual(degraded[0]!.payload, { round_id: round.round_id, outcome: "done", session: "s2", attempts: 2 });
+  state.close();
+});
+
+test("createRetroStub: malformed scratch on the first attempt, valid on the retry — two sessions, no degrade, PR opened", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1", "garbage that is not a proposal"), doneResult("s2", PROPOSAL_SCRATCH));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const stub = createRetroStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(runner.calls.length, 2);
+  assert.equal(forge.openPRCalls.length, 1);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-degraded", "retro-pr-degraded"]), []);
+  state.close();
+});
+
+test("prompts/retro.md instructs the scratch-file contract — fixed path, always written, 'none' for a quiet round — and never a gh command", () => {
+  const body = readFileSync(defaultRetroPromptPath(), "utf8");
+  assert.ok(body.includes(RETRO_SCRATCH_FILE), "must name the fixed scratch path");
+  assert.ok(body.includes("branch:") && body.includes("title:"), "must show the two labeled header lines");
+  assert.ok(body.includes("none"), "must name the explicit quiet-round content");
+  assert.ok(/always.{0,20}write/is.test(body), "must require the file be written every session");
+  assert.ok(!body.includes("gh pr create"), "must not instruct the session to open the PR itself");
 });
 
 test("createRetroStub: a failed session is retried once — non-done then done means exactly two sessions, no degradation event", async () => {
@@ -372,7 +552,20 @@ class MinimalForge implements IForge {
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
+  // #111 PR-B: recording + programmable — the engine-side PR-creation tests drive these.
+  openPRCalls: Array<[string, string, string]> = [];
+  openPRError: Error | null = null;
+  async openPR(branch: string, title: string, body: string): Promise<number> {
+    this.openPRCalls.push([branch, title, body]);
+    if (this.openPRError) throw this.openPRError;
+    return 77;
+  }
+  branchExistsCalls: string[] = [];
+  branchExistsResult = false;
+  async branchExists(branch: string): Promise<boolean> {
+    this.branchExistsCalls.push(branch);
+    return this.branchExistsResult;
+  }
   async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}

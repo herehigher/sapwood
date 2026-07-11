@@ -38,6 +38,7 @@ class FakeForge implements IForge {
   }
   async getPRDiff(): Promise<string> { return ""; }
   async getCommitsSince(): Promise<CommitInfo[]> { return []; }
+  async branchExists(): Promise<boolean> { return false; }
   /** Set to make countOpenIssuesInMilestone throw ONCE (then clear) — the P1 containment test. */
   milestoneErrOnce: Error | null = null;
   async countOpenIssuesInMilestone(milestone: string): Promise<number> {

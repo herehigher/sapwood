@@ -181,17 +181,19 @@ schema plus cheap content invariants (e.g. re-confirming an "approve" claim's bo
 really carries a verification-plan section), and performs every GitHub write itself.
 Malformed or invalid output retries once, then the role's own degrade path — never a
 silent no-op, never a wedged round. `retro` is the one exception: a worker-class
-session with `Read` + git + `gh pr create` (proposals land exclusively as PRs, never a
+session with `Read` + local git only (proposals land exclusively as PRs, never a
 direct write) — see [`security.md`](security.md) for the full model.
 
-**`retro` reads a round-scoped digest, not live GitHub browsing (#111 PR-A).** Its
-prompt is seeded with an engine-built digest — PR diffs + review signals for every PR
-the round touched, comments/labels for every escalated issue, and the round's commit
-history — assembled deterministically before the session runs and substituted in as
-`{{round.digest}}`. The `gh pr view/list/diff` and `gh issue view/list` Bash grants
-that used to let the session fetch this itself are gone; `retro` keeps only local git
-(branch/checkout/add/commit/push/diff/status/log, for its own worktree) and, for now,
-`gh pr create` (the write-side relocation is a separate, later PR).
+**`retro` holds no `gh` grant at all (#111).** Reads: its prompt is seeded with an
+engine-built round-scoped digest — PR descriptions + diffs + review signals for every
+PR the round touched, comments/labels for every escalated issue, and the round's
+commit history — assembled deterministically before the session runs and substituted
+in as `{{round.digest}}`. Writes: the session edits, commits, and pushes a proposal
+branch, then records its intended PR (branch/title/body, or `none` for a quiet round)
+in a fixed scratch file (`.sapwood-retro-pr`) in its worktree; the engine parses that
+file fail-closed, verifies the branch really exists on the forge, and opens the PR
+itself via the same forge layer every other engine write uses. `retro` keeps only
+local git (branch/checkout/add/commit/push/diff/status/log, for its own worktree).
 
 | Key | Default | Meaning |
 |---|---|---|

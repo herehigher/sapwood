@@ -793,6 +793,30 @@ test("updateIssueBody: runs `gh issue edit <n> --body <text>` scoped to this rep
 // ── #111 PR-A: getCommitsSince — the retro digest's commit-history source (a `gh api` read,
 //    never a local `git log` subprocess — see IForge.getCommitsSince's doc). ──
 
+// ── #111 PR-B: branchExists — engine-side push verification for retro's PR proposal. ──
+
+test("branchExists: runs `gh api repos/<owner>/<repo>/branches/<branch>`, per-segment encoded so slashes survive but other reserved chars can't reshape the path", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "{}";
+  };
+  assert.equal(await forge.branchExists("feat/111-pr-b#x"), true);
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], ["api", "repos/o/r/branches/feat/111-pr-b%23x"]);
+});
+
+test("branchExists: a gh failure (404, network, auth — indistinguishable) reads as false, never a throw — fail direction: no PR against an unverified head", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    throw new Error("gh: Not Found (HTTP 404)");
+  };
+  assert.equal(await forge.branchExists("no-such-branch"), false);
+});
+
 test("getCommitsSince: runs `gh api repos/<owner>/<repo>/commits?since=...` with the ISO cutoff url-encoded, paginated to exhaustion", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);

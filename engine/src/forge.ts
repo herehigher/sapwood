@@ -125,6 +125,14 @@ export interface IForge {
    *  reads the round's commits from GitHub's own authoritative view, not whatever the engine's
    *  local checkout happens to have fetched. */
   getCommitsSince(sinceIso: string): Promise<CommitInfo[]>;
+  /** #111 PR-B: does a branch of this name exist on the FORGE (not any local checkout)? The
+   *  engine-side push verification behind retro's engine-side PR creation: the retro session
+   *  claims (via its scratch file) to have pushed a proposal branch, and the engine verifies
+   *  that claim against GitHub's own view before ever calling openPR — a session claim is
+   *  never trusted as evidence of a push. FAIL DIRECTION: any error (404, network, auth) reads
+   *  as `false` — the caller then declines to open a PR and degrades visibly, never opens a PR
+   *  against an unverified head. */
+  branchExists(branch: string): Promise<boolean>;
   /** Raw issue body text (#46, Decision #8's gate② re-check): reviewer.ts extracts the
    *  verification-plan section from this to carry into the review trigger. Read-only;
    *  "" for an issue with no body rather than throwing (extractVerificationPlan treats an
@@ -314,6 +322,22 @@ export class GithubForge implements IForge {
       "--paginate", "--slurp",
     ]);
     return parseCommitsSince(out);
+  }
+
+  async branchExists(branch: string): Promise<boolean> {
+    // Per-SEGMENT encoding: branch names routinely contain "/" (feat/x), which must survive as
+    // a path separator for GitHub's greedy branch route, while any other reserved character in
+    // a segment must not be able to reshape the API path (the branch name originates from a
+    // SESSION-written scratch file — treated as data, same stance as every other session-text
+    // input in this file). gh exits non-zero on a 404 (and on any network/auth failure) — both
+    // read as "not verifiably pushed", the fail direction the IForge doc requires.
+    const path = branch.split("/").map(encodeURIComponent).join("/");
+    try {
+      await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/branches/${path}`]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async mergePR(pr: number, headOid: string): Promise<void> {
