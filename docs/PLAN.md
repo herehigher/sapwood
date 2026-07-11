@@ -606,11 +606,18 @@ rewrite.** v1 requirements:
   harvest/retro's round summaries see BOTH gates, not gate② alone; `roles.architect`
   gained a real `planMdPath` config key (was hardcoded to this repo's own
   `docs/PLAN.md`); and `roles.retro.everyNRounds` (default 1) lets operators thin the
-  retrospective cadence. `sapwood run` does not reach `runRounds` at all — it still
-  drives the M4 tick-driver (`runDriver`); `runRounds` is currently exercised only
-  via the library export and its integration tests. Switching `cli.ts`'s `run` entry
-  point from the tick-driver to the round orchestrator is a distinct decision, left
-  for a follow-up issue.
+  retrospective cadence. **#106 closed the wiring gap this note used to flag:**
+  `sapwood run` now drives the round orchestrator (`runRounds` + `createDefaultPeripherals`,
+  a real `RoleRunner`) by DEFAULT (`engine.driver: "rounds"`, config.ts). The M4
+  tick-driver (`runDriver`) stays reachable via an explicit escape hatch
+  (`engine.driver: "tick"`) until a live dogfood run has validated the round path —
+  same CTO-call bias as everything else in this section (rounds is the destination,
+  the tick driver is the safety net during the transition). `cli.ts`'s `runEngine`
+  dispatches on the resolved config; both paths share the same safety primitives
+  (KILL_SWITCH, cost ceilings, drain-before-kill, graceful-stop-still-runs-harvest)
+  unchanged — round.ts/state.ts own that logic, `cli.ts` only wires collaborators.
+  `--once`/`--until-idle` remain tick-driver-only flags (a round has no single-tick
+  concept); `--dry-run` and the `stop.*` final conditions apply to both.
 
 ## v0.2 north star: the round orchestrator
 

@@ -17,6 +17,9 @@ import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
 import { runDriver, type StopMode, type DriverResult, type StopConfig, type StopConditionHit } from "./driver.js";
 import { orderForDispatch } from "./conductor.js";
+import { runRounds, type RoundsResult, type PeripheralPhase } from "./round.js";
+import { createDefaultPeripherals } from "./round-defaults.js";
+import { RoleRunner, type RoleRunnerDeps } from "./peripheral.js";
 
 const require = createRequire(import.meta.url);
 // ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
@@ -56,21 +59,31 @@ Flags:
 const RUN_USAGE = `\
 usage: sapwood run [--once | --until-idle | --dry-run] [--stop-* ...]
 
-Run the engine loop: tick (reclaim -> drive -> dispatch) on cfg.engine.tickIntervalSec's cadence.
+Run the engine. Default driver (cfg.engine.driver, "rounds"): the round orchestrator —
+peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the
+same dispatch-and-drain tick engine, one round at a time, until a signal or a \`stop.*\`
+final condition winds the run down (the in-flight round always finishes, including
+harvest, before the process exits). Set \`engine.driver: tick\` in config to run the bare
+M4 loop driver instead: tick (reclaim -> drive -> dispatch) on
+cfg.engine.tickIntervalSec's cadence, no peripherals — the pre-#106 behavior, kept
+reachable as an explicit escape hatch.
 
 Flags:
-  --once         Run exactly one tick, then exit (exit 1 if the tick attempt failed)
-  --until-idle   Keep ticking until no lanes are in flight and nothing dispatches, then exit
+  --once         Tick driver only (engine.driver: tick): run exactly one tick, then exit
+                 (exit 1 if the tick attempt failed). No equivalent under the round
+                 orchestrator, which has no notion of a single tick; ignored there.
+  --until-idle   Tick driver only: keep ticking until no lanes are in flight and nothing
+                 dispatches, then exit. Ignored under the round orchestrator.
   --dry-run      Resolve config, list the ready issues that WOULD be dispatched this round
                  and a cost preview (per-worker soft budget x candidate count, daily
                  ceiling), then exit. Never spawns a worker or writes state — the
-                 first-run trust ramp's "see before you run" step.
+                 first-run trust ramp's "see before you run" step. Driver-agnostic.
 
 Goal-based stop conditions (#76) — each optional; hitting ANY of them (OR semantics, first hit
 wins) winds the run down: stop dispatching new lanes, let in-flight lanes finish, exit cleanly,
-naming the condition that fired. Override the config's \`stop.*\` section when given. Combine
-with --once/--until-idle/--forever (the default) freely; NOT with --dry-run (which never runs
-the loop at all).
+naming the condition that fired. Override the config's \`stop.*\` section when given. Apply to
+both drivers. Combine with --once/--until-idle/--forever (the default) freely; NOT with
+--dry-run (which never runs the loop at all).
   --stop-after-issues N     Stop once N issues have been merged this run
   --stop-after-prs N        Stop once N PRs have been opened this run
   --stop-on-milestone NAME  Stop once milestone NAME has zero open issues left
@@ -79,8 +92,8 @@ the loop at all).
 
 N is a floor, not an exact bound: the tick that crosses N has already dispatched its own
 wave (up to lanes.roundDispatchCap lanes), and those finish during the wind-down. With
---once, a condition hit on the single tick is named in the exit line but never waits for
-wind-down (stoppedBy stays "once").
+--once (tick driver), a condition hit on the single tick is named in the exit line but
+never waits for wind-down (stoppedBy stays "once").
 
   --help, -h     Print this help and exit
 `;
@@ -529,16 +542,66 @@ export function formatStopConditionLine(hit: StopConditionHit): string {
   return `sapwood run: stop condition hit — ${hit.name}=${hit.threshold} (${hit.detail})`;
 }
 
-async function runEngine(argv: string[]): Promise<number> {
-  const cfg = loadConfig();
+/** #106: injectable collaborators for `sapwood run`'s engine wiring (both drivers) — production
+ *  code (`main`) passes none, so every field falls back to the real thing (loadConfig/
+ *  GithubForge/State/RoleRunner with its own defaults). Tests pass a fake `forge` (no live `gh`
+ *  calls, same "fake the collaborator, not the CLI" split round-defaults.test.ts uses) and/or
+ *  `roleRunnerDeps` overrides (a stub `claudeBin`, a temp `stateDir`/`guardHookPath` — same
+ *  claude-stub style as peripheral.test.ts) to drive the REAL runEngine/runRoundsEngine
+ *  production path in-process instead of only exercising runRounds directly. `cfg` lets a test
+ *  skip disk-based config loading entirely. */
+export interface EngineOverrides {
+  cfg?: SapwoodConfig;
+  forge?: IForge;
+  state?: State;
+  roleRunnerDeps?: Partial<RoleRunnerDeps>;
+  /** RoundDeps passthrough, rounds driver only — lets a test control the signal/sleep sources
+   *  the same way round-defaults.test.ts's own integration tests do, without real wall-clock
+   *  waits or real process signal handlers. */
+  sleep?: (ms: number) => Promise<void>;
+  registerSignals?: (requestStop: () => void) => () => void;
+  /** RoundDeps.onRoundPhase passthrough, rounds driver only — an observability hook a test can
+   *  use to trigger a graceful stop mid-round (round-defaults.test.ts's own pattern), proving a
+   *  round already open finishes every remaining phase, harvest included, before the loop
+   *  actually stops. */
+  onRoundPhase?: (roundId: number, phase: PeripheralPhase) => void;
+}
+
+/** #106: exit code for a finished `sapwood run` under the round orchestrator. Rounds have no
+ *  --once/--until-idle equivalent (no single-tick concept), so unlike runExitCode above this
+ *  doesn't key off stopMode/ticks — a kill-switch stop is the one outcome that needs an operator
+ *  to notice (cron/scripts should see it as a failure); a graceful signal or a final stop
+ *  condition is the design working as intended, same as the tick driver's daemon-mode exit 0. */
+export function roundsExitCode(result: Pick<RoundsResult, "stoppedBy">): number {
+  return result.stoppedBy === "kill-switch" ? 1 : 0;
+}
+
+/** #106: `WorkerSupervisor`'s hasOpenPr/findOpenPr need `GithubForge`'s own
+ *  `findOpenPrForIssue` — not part of the narrower `IForge` interface every fake forge in tests
+ *  (round-defaults.test.ts's FakeForge, etc.) implements. Production `forge` is always a real
+ *  GithubForge (EngineOverrides.forge is unset), so this always resolves to the real method
+ *  there; a test-injected bare-IForge fake falls back to "no open PR found", which is fine
+ *  because those tests never dispatch a worker (no ready issues) — this only exists so
+ *  EngineOverrides can type `forge` as the general `IForge` interface. */
+function findOpenPrForIssue(forge: IForge, issue: number): Promise<number | null> {
+  const withPr = forge as Partial<Pick<GithubForge, "findOpenPrForIssue">>;
+  return typeof withPr.findOpenPrForIssue === "function"
+    ? withPr.findOpenPrForIssue(issue)
+    : Promise.resolve(null);
+}
+
+/** The M4 tick-driver path (`driver.ts`'s `runDriver`) — unchanged behavior, kept reachable via
+ *  `engine.driver: tick` (#106's explicit escape hatch) now that the round orchestrator
+ *  (runRoundsEngine below) is the default. */
+async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: EngineOverrides): Promise<number> {
   // #74: build the worker-prompt renderer NOW, before anything else — loadWorkerPromptTemplate
   // (inside buildRenderPrompt) reads the template file EAGERLY, so a configured
   // `worker.promptFile` that's missing/unreadable throws here and aborts startup. Never a lazy
   // load deferred to first dispatch: that would let the engine claim issues / churn ticks before
   // failing, instead of a clean fail-fast with no dispatch ever happening.
   const renderPrompt = buildRenderPrompt(cfg);
-  const state = new State();
-  const forge = new GithubForge(cfg);
+  const state = overrides.state ?? new State();
+  const forge = overrides.forge ?? new GithubForge(cfg);
   const reviewer = makeReviewer(cfg);
   // #54: the ordered reviewer-failover chain (cfg.reviewer.fallback) — empty by default, in
   // which case MergeDriver.driveOne behaves exactly as before this existed.
@@ -549,8 +612,8 @@ async function runEngine(argv: string[]): Promise<number> {
     // #46: a first-pass live findOpenPr wiring (GithubForge.findOpenPrForIssue) — see its
     // doc comment for the heuristic and its known limits; hardening it is part of the live
     // merge-gate run (#46 scope 3), not this PR.
-    hasOpenPr: async (issue) => (await forge.findOpenPrForIssue(issue)) != null,
-    findOpenPr: (issue) => forge.findOpenPrForIssue(issue),
+    hasOpenPr: async (issue) => (await findOpenPrForIssue(forge, issue)) != null,
+    findOpenPr: (issue) => findOpenPrForIssue(forge, issue),
     renderPrompt,
   });
   const stopMode = parseRunStopMode(argv);
@@ -558,7 +621,7 @@ async function runEngine(argv: string[]): Promise<number> {
   // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
   // startup with zero dispatch, not silently stop the run after the first wave of workers.
   await assertStopMilestoneExists(forge, stop);
-  console.log(`sapwood run: tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
+  console.log(`sapwood run: driver=tick tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
   // NOTE: roundSpendUsd (the per-round hard budget gate, cfg.cost.roundBudgetUsd) is left at
   // its TickDeps default (0, i.e. never over-budget) — computing a live "this round's spend"
   // figure needs a round-tracking concept (nextRoundId exists as a pure helper but nothing
@@ -577,6 +640,63 @@ async function runEngine(argv: string[]): Promise<number> {
     `sapwood run: stopped after ${result.ticks} tick(s), ${result.tickErrors} tick error(s) (${result.stoppedBy})`,
   );
   return runExitCode(result, stopMode);
+}
+
+/** #106: the round-orchestrator path (`round.ts`'s `runRounds`), wired with the REAL default
+ *  peripherals (`round-defaults.ts`'s `createDefaultPeripherals`) sharing one `RoleRunner` — the
+ *  same wiring shape round-defaults.test.ts's integration tests already prove end-to-end, now
+ *  reached from `sapwood run` itself instead of only from a test/library caller (#106's
+ *  acceptance criterion). Every safety behavior (KILL_SWITCH, cost ceilings, drain-before-kill,
+ *  graceful-stop-still-runs-harvest) lives in round.ts/state.ts unchanged — this function only
+ *  wires the real collaborators runRounds needs, it adds no safety logic of its own. */
+async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: EngineOverrides): Promise<number> {
+  // Same fail-fast stance as the tick driver above: a broken worker.promptFile must abort
+  // startup before any dispatch — the round loop's `executing` phase still dispatches workers
+  // via WorkerSupervisor exactly like the tick driver does.
+  const renderPrompt = buildRenderPrompt(cfg);
+  const state = overrides.state ?? new State();
+  const forge = overrides.forge ?? new GithubForge(cfg);
+  const reviewer = makeReviewer(cfg);
+  const fallbackReviewers = makeFallbackReviewers(cfg);
+  const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
+  const supervisor = new WorkerSupervisor({
+    cfg,
+    hasOpenPr: async (issue) => (await findOpenPrForIssue(forge, issue)) != null,
+    findOpenPr: (issue) => findOpenPrForIssue(forge, issue),
+    renderPrompt,
+  });
+  const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps });
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const stop = resolveStopConfig(argv, cfg);
+  // #76: same fail-fast stance as the tick driver — a typo'd milestone goal must abort startup
+  // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
+  await assertStopMilestoneExists(forge, stop);
+  console.log(`sapwood run: driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
+  const result = await runRounds({
+    forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, peripherals, stop,
+    ...(overrides.sleep !== undefined ? { sleep: overrides.sleep } : {}),
+    ...(overrides.registerSignals !== undefined ? { registerSignals: overrides.registerSignals } : {}),
+    ...(overrides.onRoundPhase !== undefined ? { onRoundPhase: overrides.onRoundPhase } : {}),
+  });
+  if (result.stopCondition) {
+    console.log(formatStopConditionLine(result.stopCondition));
+  }
+  console.log(
+    `sapwood run: stopped after ${result.rounds} round(s), ${result.ticks} tick(s), ` +
+      `${result.tickErrors} tick error(s) (${result.stoppedBy})`,
+  );
+  return roundsExitCode(result);
+}
+
+/** #106: `sapwood run`'s engine dispatcher — resolves config once, then routes to the round
+ *  orchestrator (default, `cfg.engine.driver: "rounds"`) or the M4 tick-driver escape hatch
+ *  (`cfg.engine.driver: "tick"`). `overrides` is production-empty (see EngineOverrides doc);
+ *  tests pass fakes to drive this exact function — the real `main()` entry point — instead of
+ *  reimplementing its wiring. */
+export async function runEngine(argv: string[], overrides: EngineOverrides = {}): Promise<number> {
+  const cfg = overrides.cfg ?? loadConfig();
+  if (cfg.engine.driver === "tick") return runTickEngine(argv, cfg, overrides);
+  return runRoundsEngine(argv, cfg, overrides);
 }
 
 async function main(argv: string[]): Promise<number> {

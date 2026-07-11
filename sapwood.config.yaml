@@ -16,6 +16,15 @@ board:
     inProgress: In Progress
     done: Done
 
+# engine:
+#   tickIntervalSec: 60 # how often the engine calls tick() (also feeds the wall-clock
+#                        # cost ceiling's session-gap scaling)
+#   driver: rounds       # #106: "rounds" (default) - the round orchestrator (aligning/
+#                        # architecting/dispatch/harvesting/retro peripherals wrapped
+#                        # around the tick engine, one round at a time). "tick" - the
+#                        # bare M4 loop driver (no peripherals; --once/--until-idle
+#                        # apply), kept as an explicit escape hatch.
+
 lanes:
   max: 3 # max concurrent workers
   roundDispatchCap: 2 # max new dispatches per round (conservative default)
