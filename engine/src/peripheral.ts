@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "./config.js";
 import type { ModelUsageEntry, State } from "./state.js";
 import {
-  claudeArgs, guardSettings, discoverClaudeBin, parseCostUsd, parseModelUsage,
+  claudeArgs, guardSettings, discoverClaudeBin, parseCostUsd, parseModelUsage, parseResultText,
   spawnClaudeSession, type SpawnedSession,
 } from "./worker.js";
 
@@ -152,6 +152,15 @@ export interface RoleSessionResult {
   exitCode: number | null;
   /** The session/lane name this run used — callers key spend-ledger rows off it. */
   name: string;
+  /** #110 PR1: the session's final-message text, extracted via worker.ts's parseResultText —
+   *  the READ side a role-session caller needs to actually consume structured output (PR0 added
+   *  the extraction primitive but wired no caller to it). Always present (possibly "") on a
+   *  REAL RoleRunner.run() result; optional here only so the many existing test fakes across
+   *  align.test.ts/architect.test.ts/harvest.test.ts/retro.test.ts/round-defaults.test.ts (roles
+   *  that don't consume structured output yet, per #110's PR sequence) keep compiling without
+   *  updating every literal they construct. A caller that DOES need it reads `?? ""`, the same
+   *  empty-string-not-undefined convention parseResultText itself already guarantees. */
+  resultText?: string;
 }
 
 export interface RoleRunnerDeps {
@@ -276,6 +285,9 @@ export class RoleRunner {
     const jsonl = this.readJsonl(jsonlPath);
     const costUsd = parseCostUsd(jsonl);
     const modelUsage = parseModelUsage(jsonl);
+    // #110 PR1: the structured-output READ side — same jsonl scan parseCostUsd/parseModelUsage
+    // already do, so this costs nothing extra to compute even for roles that don't consume it.
+    const resultText = parseResultText(jsonl);
     const outcome: "done" | "failed" | "timeout" = timedOut ? "timeout" : exitCode === 0 ? "done" : "failed";
     const sentinelTag = outcome === "timeout" ? "failed" : outcome;
     this.writeJsonAtomic(this.path(name, `${sentinelTag}.json`), {
@@ -290,7 +302,7 @@ export class RoleRunner {
     // dirty-vs-clean retention there is no WIP that could ever need preserving here.
     try { rmSync(join(this.worktreeRoot, name), { recursive: true, force: true }); } catch { /* best-effort */ }
 
-    return { outcome, costUsd, modelUsage, exitCode, name };
+    return { outcome, costUsd, modelUsage, exitCode, name, resultText };
   }
 
   private async killTree(session: SpawnedSession): Promise<void> {

@@ -17,6 +17,7 @@ import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import type { Supervisor, LaneProbe } from "./conductor.js";
 import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "./peripheral.js";
+import { RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END } from "./structured-output.js";
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
@@ -70,18 +71,26 @@ class MinimalSupervisor implements Supervisor {
 /** One shared scripted fake for every role session dispatched across the whole round — real
  *  stubs each get their OWN RoleRunner-shaped dep, but this factory feeds them all the same
  *  `runner`, exactly like a real caller would (peripheral.ts's module doc: RoleRunner is the
- *  single spawn/sentinel/cost-parse implementation every role reuses). Applies the one side
- *  effect this round actually needs to converge without a drafter: the plan-reviewer approves
- *  its candidate immediately. */
+ *  single spawn/sentinel/cost-parse implementation every role reuses).
+ *
+ *  #110 PR1: a "plan-reviewer" call no longer converges via a direct forge side effect (role
+ *  sessions don't touch `gh` anymore) — it must emit a structured-output "approve" decision for
+ *  the engine to act on. The issue number is recovered from the rendered prompt (both shipped
+ *  gate⓪ prompts render "Number: #<n>" verbatim), and the decision carries its OWN BODY with a
+ *  verification section so it validates regardless of whatever FakeForge.getIssueBody's stub
+ *  (always "") would otherwise fail the content-invariant check on. */
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
   constructor(private readonly forge: FakeForge, private readonly cfg: SapwoodConfig) {}
   async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
     this.calls.push(opts);
     if (opts.roleId === "plan-reviewer") {
-      for (const issue of this.forge.planReviewCandidates) {
-        await this.forge.addLabel(issue.number, this.cfg.labels.planApproved);
-      }
+      const m = /Number: #(\d+)/.exec(opts.prompt);
+      const issue = m ? Number(m[1]) : 0;
+      const resultText =
+        `${RESULT_BLOCK_START}\n${JSON.stringify({ decision: "approve", issue })}\n${RESULT_BLOCK_END}\n` +
+        `${BODY_BLOCK_START}\nApproved by the scripted test reviewer.\n\n## Verification\n\nStubbed.\n${BODY_BLOCK_END}`;
+      return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
     }
     return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1` };
   }

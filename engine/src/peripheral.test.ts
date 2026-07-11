@@ -104,6 +104,35 @@ test("run: two sequential sessions for the same role never collide (random per-r
   }
 });
 
+test("run: #110 PR1 — resultText carries the stub's final structured-output text (parseResultText's read side, now wired to a real caller)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const resultText = "<<<SAPWOOD_RESULT>>>\\n{\\\"decision\\\":\\\"approve\\\",\\\"issue\\\":1}\\n<<<END_SAPWOOD_RESULT>>>";
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.001,"result":"${resultText}"}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    assert.equal(result.resultText, "<<<SAPWOOD_RESULT>>>\n{\"decision\":\"approve\",\"issue\":1}\n<<<END_SAPWOOD_RESULT>>>");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: #110 PR1 — no result line at all (e.g. a crashed session) -> resultText is \"\", never undefined", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 1\n`);
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    assert.equal(result.outcome, "failed");
+    assert.equal(result.resultText, "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: guard hook missing in hard mode -> throws, refuses to spawn an unguarded session", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
