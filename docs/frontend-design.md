@@ -322,7 +322,9 @@ policy.
 ## 9. Tech architecture
 
 ```
-dashboard/            # new npm workspace (root package.json already anticipates it)
+dashboard/            # new npm workspace — implementer MUST add "dashboard" to root
+                      # package.json "workspaces" (currently ["engine"] only), or root
+                      # -ws build/test/typecheck silently skip the package and CI lies
   server.ts           # node:http + node:sqlite, ~150 LOC, no deps
   src/
     api/              # fetch + TanStack Query hooks (poll 3 s)  ── the data layer
