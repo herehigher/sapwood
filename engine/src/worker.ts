@@ -53,11 +53,18 @@ export function parseCostUsd(jsonl: string): number {
 /** #110 PR0: the READ side for a role session's structured final-message output. Extracts the
  *  `result` string from the LAST `type:"result"` line of a stream-json transcript — the same
  *  line parseCostUsd/parseModelUsage already treat as authoritative. Mirrors parseCostUsd's
- *  tolerance exactly: a non-`{`-prefixed line is skipped outright, a JSON.parse failure or a
- *  missing/non-string `result` field is ignored (never thrown), and an input with no valid
- *  result line returns "". Later #110 PRs parse each role's structured decision block out of
- *  this text (per-role zod schema, sentinel-delimited raw-text bodies); this PR only adds the
- *  parse primitive — no call site uses it yet, so this change is zero behavior change. */
+ *  tolerance for the stream itself: a non-`{`-prefixed line is skipped outright, a JSON.parse
+ *  failure is ignored (never thrown, mid-write tolerance), and an input with no valid result
+ *  line returns "".
+ *
+ *  DELIBERATE divergence from parseCostUsd (Codex review round 1, P2): the last PARSEABLE
+ *  result line is AUTHORITATIVE, even when its `result` field is missing/non-string — such a
+ *  line RESETS the value to "" rather than letting an EARLIER line's text survive. Cost keeps
+ *  the last-VALID value (a lost cost number only under-counts spend); decision text feeding a
+ *  validator must never fail open by resurrecting stale text from a superseded result line.
+ *  Later #110 PRs parse each role's structured decision block out of this text (per-role zod
+ *  schema, sentinel-delimited raw-text bodies); this PR only adds the parse primitive — no
+ *  call site uses it yet, so this change is zero behavior change. */
 export function parseResultText(jsonl: string): string {
   let text = "";
   for (const line of jsonl.split("\n")) {
@@ -65,7 +72,7 @@ export function parseResultText(jsonl: string): string {
     if (!t.startsWith("{")) continue;
     try {
       const obj = JSON.parse(t) as { type?: string; result?: unknown };
-      if (obj.type === "result" && typeof obj.result === "string") text = obj.result;
+      if (obj.type === "result") text = typeof obj.result === "string" ? obj.result : "";
     } catch {
       // partial/garbage line — ignore (stream may be mid-write)
     }

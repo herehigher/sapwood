@@ -50,6 +50,16 @@ test("parseResultText: missing `result` field -> \"\"", () => {
   assert.equal(parseResultText(`{"type":"result","subtype":"success","total_cost_usd":0.1}`), "");
 });
 
+test("parseResultText: a LAST result line without a string `result` RESETS earlier text — never fail-open on stale text (Codex round 1 P2)", () => {
+  // The last parseable result line is authoritative even when it carries no usable text —
+  // an earlier line's "old" must NOT survive to be validated and applied downstream.
+  assert.equal(parseResultText(`{"type":"result","result":"old"}\n{"type":"result","total_cost_usd":0.1}`), "");
+  assert.equal(parseResultText(`{"type":"result","result":"old"}\n{"type":"result","result":42}`), "");
+  // A trailing GARBAGE line (unparseable, mid-write) still leaves the last VALID text intact —
+  // the reset applies only to parseable result lines, tolerance for the stream is unchanged.
+  assert.equal(parseResultText(`{"type":"result","result":"kept"}\ngarbage{{{`), "kept");
+});
+
 test("parseResultText: non-string `result` field -> \"\" (never throws)", () => {
   assert.equal(parseResultText(`{"type":"result","result":{"nested":true}}`), "");
   assert.equal(parseResultText(`{"type":"result","result":42}`), "");

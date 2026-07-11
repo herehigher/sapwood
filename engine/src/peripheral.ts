@@ -355,8 +355,12 @@ export interface RetriedSession {
   /** #110 PR0: OPTIONAL extra pass/fail check beyond `outcome` itself. A "done" outcome that
    *  fails this predicate is treated as a NON-"done" outcome for retry/degrade purposes — e.g.
    *  a session that exited cleanly but whose structured final-message output failed schema
-   *  validation (parseResultText's write-side consumers, landing in later #110 PRs). Omitted ->
-   *  today's behavior is byte-identical: only `outcome` decides done vs. not-done. */
+   *  validation (parseResultText's write-side consumers, landing in later #110 PRs). FAIL
+   *  CLOSED on a throw (Codex review round 1, P2): a validator that THROWS (e.g. a future
+   *  caller's bare zod.parse) counts as invalid — retry once, then the degrade path — never a
+   *  propagated exception, which would wedge the round in violation of #110's "malformed output
+   *  twice -> degrade path, never a wedged round". Omitted -> today's behavior is
+   *  byte-identical: only `outcome` decides done vs. not-done. */
   isValid?: (result: RoleSessionResult) => boolean;
 }
 
@@ -375,8 +379,17 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
     return result;
   };
   // isValid omitted -> isDone reduces to the original `outcome === "done"` check exactly.
-  const isDone = (result: RoleSessionResult): boolean =>
-    result.outcome === "done" && (opts.isValid ? opts.isValid(result) : true);
+  // A THROWING validator counts as invalid (fail closed, see the RetriedSession doc above) —
+  // the throw must feed the retry/degrade machinery, never escape it.
+  const isDone = (result: RoleSessionResult): boolean => {
+    if (result.outcome !== "done") return false;
+    if (!opts.isValid) return true;
+    try {
+      return opts.isValid(result);
+    } catch {
+      return false;
+    }
+  };
   let result = await attempt();
   if (!isDone(result)) {
     result = await attempt();

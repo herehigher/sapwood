@@ -430,6 +430,32 @@ test("runSessionWithRetry + isValid: \"done\" but invalid on BOTH attempts — d
   assert.equal(result.outcome, "done"); // last attempt's raw result is still returned as-is
 });
 
+test("runSessionWithRetry + isValid: a THROWING validator counts as invalid — throws twice -> degrade event, never a propagated exception (Codex round 1 P2)", async () => {
+  const runner = new FakeRunner([mkResult(), mkResult()]);
+  const state = new FakeState();
+  // Must resolve normally (a propagated throw would wedge the round, violating #110's
+  // "malformed output twice -> degrade path, never a wedged round").
+  const result = await runSessionWithRetry(mkOpts(runner, state, () => { throw new Error("zod.parse blew up"); }));
+  assert.equal(runner.calls.length, 2, "a throwing validator still drives the retry-once path");
+  assert.equal(state.events.length, 1);
+  assert.equal(state.events[0]![0], "test-degraded");
+  assert.equal(result.outcome, "done"); // last attempt's raw result still returned as-is
+});
+
+test("runSessionWithRetry + isValid: throws on attempt 1, valid on attempt 2 — one retry, no degrade event", async () => {
+  const runner = new FakeRunner([mkResult({ name: "role-x-1" }), mkResult({ name: "role-x-2" })]);
+  const state = new FakeState();
+  let calls = 0;
+  const result = await runSessionWithRetry(mkOpts(runner, state, () => {
+    calls++;
+    if (calls === 1) throw new Error("malformed first output");
+    return true;
+  }));
+  assert.equal(runner.calls.length, 2, "the throw triggers exactly one retry");
+  assert.equal(state.events.length, 0, "an eventually-valid result never degrades");
+  assert.equal(result.name, "role-x-2");
+});
+
 test("runSessionWithRetry: isValid OMITTED — behavior is byte-identical to today (only `outcome` decides done vs. not-done)", async () => {
   // A "done" outcome with no isValid never retries, exactly like before #110.
   const doneRunner = new FakeRunner([mkResult({ outcome: "done" })]);
