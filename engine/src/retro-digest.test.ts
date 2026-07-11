@@ -290,3 +290,66 @@ test("buildRetroDigest: the assembled digest respects maxChars end-to-end — a 
   assert.ok(digest.includes("digest truncated"));
   state.close();
 });
+
+// ── Codex review round 1 (PR #118): small caps must not defeat per-item budgeting ───────────
+//
+// The pre-review fairShare applied hard per-item MINIMUM floors even when digestMaxChars was
+// smaller than the floors' sum (cap=200 with two PRs -> 1,500 chars EACH), so the assembled
+// digest blew the cap and the final whole-digest capDigest FRONT-truncated it — silently
+// dropping later PRs, the issues section, and the commit history: the exact starvation failure
+// per-item budgets exist to prevent. Floors now scale to the proportional share.
+
+test("small cap (Codex round 1): a cap the old floors couldn't afford — every section and item still present, each truncation marked, total <= cap", async () => {
+  const forge = new FakeForge();
+  // Two PRs with diffs far beyond any per-item share, one escalated issue, real commits —
+  // under the old 1,500/PR floor a 2,500 cap could not hold all of this without the final
+  // backstop silently dropping the tail.
+  forge.diffs.set(1, "a".repeat(5000));
+  forge.diffs.set(2, "b".repeat(5000));
+  forge.labels.set(4, ["needs-human"]);
+  forge.issueComments.set(4, [{ login: "bot", createdAt: "2026-07-11T00:00:00Z", body: "escalated note" }]);
+  forge.commits = [{ sha: "abc1234def", message: "fix: thing", author: "alice", date: "2026-07-11T00:00:00Z" }];
+  const state = new State(":memory:");
+  const round = state.startRound(new Date().toISOString());
+  state.appendEvent("merged", { worker: "a", issue: 1, pr: 1, headOid: "x" });
+  state.appendEvent("merged", { worker: "b", issue: 2, pr: 2, headOid: "y" });
+  state.appendEvent("drive-needs-human", { worker: "c", issue: 4, pr: 2, reason: "r" });
+
+  const digest = await buildRetroDigest({ forge, state }, round, 2500, ISSUE_KINDS);
+
+  assert.ok(digest.length <= 2500, `total must respect the cap (got ${digest.length})`);
+  // Every item/section present — nothing silently dropped:
+  assert.ok(digest.includes("### PR #1"), "PR #1's section present");
+  assert.ok(digest.includes("### PR #2"), "PR #2's section present — the old floors starved it out");
+  assert.ok(digest.includes("### Issue #4"), "the escalated issue's section present");
+  assert.ok(digest.includes("escalated note"), "the issue's comment present");
+  assert.ok(digest.includes("abc1234"), "the commit history present");
+  // Both oversize diffs were cut PER ITEM, each cut marked — never a silent drop:
+  const markers = digest.split("digest truncated").length - 1;
+  assert.ok(markers >= 2, `each oversize PR section carries its own truncation marker (got ${markers})`);
+  state.close();
+});
+
+test("small cap (Codex round 1): a pathologically tiny cap (200) with 2 PRs + 1 issue + commits — bounded and marked, never over the cap", async () => {
+  const forge = new FakeForge();
+  forge.diffs.set(1, "a".repeat(5000));
+  forge.diffs.set(2, "b".repeat(5000));
+  forge.labels.set(4, ["needs-human"]);
+  forge.commits = [{ sha: "abc1234def", message: "fix: thing", author: "alice", date: "2026-07-11T00:00:00Z" }];
+  const state = new State(":memory:");
+  const round = state.startRound(new Date().toISOString());
+  state.appendEvent("merged", { worker: "a", issue: 1, pr: 1, headOid: "x" });
+  state.appendEvent("merged", { worker: "b", issue: 2, pr: 2, headOid: "y" });
+  state.appendEvent("drive-needs-human", { worker: "c", issue: 4, pr: 2, reason: "r" });
+
+  const digest = await buildRetroDigest({ forge, state }, round, 200, ISSUE_KINDS);
+
+  // 200 chars cannot hold even the section skeleton, so the final backstop MUST fire — but it
+  // fires MARKED (the truncation is named in the text), and the result never exceeds the cap.
+  // Determinism: byte-identical on a second assembly over the same inputs.
+  assert.ok(digest.length <= 200, `total must respect the cap (got ${digest.length})`);
+  assert.ok(digest.includes("digest truncated"), "the backstop truncation is marked, never silent");
+  const again = await buildRetroDigest({ forge, state }, round, 200, ISSUE_KINDS);
+  assert.equal(digest, again);
+  state.close();
+});

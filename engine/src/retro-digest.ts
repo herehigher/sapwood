@@ -114,12 +114,24 @@ export function capDigest(text: string, maxChars: number): string {
 }
 
 /** Fair-share budget for one item within a `total`-char pool split across `count` items —
- *  floored at `min` (a single item never drops to near-nothing just because the round touched
- *  many) and ceilinged at `max` (one item never hogs the whole pool when there's only one of
- *  it). `count === 0` returns 0 (nothing to share). */
-function fairShare(total: number, count: number, min: number, max: number): number {
+ *  each item gets its PROPORTIONAL slice, floored at 1 (never zero — an item never silently
+ *  vanishes) and ceilinged at `max` (one item never hogs the whole pool when there's only one
+ *  of it). `count === 0` returns 0 (nothing to share).
+ *
+ *  Codex review round 1 (PR #118): the previous version also applied hard per-item MINIMUM
+ *  floors (1,500/PR, 300/issue) even when the pool couldn't afford them — e.g.
+ *  digestMaxChars=200 with two touched PRs still allocated 1,500 chars EACH, so the assembled
+ *  digest blew the overall cap and the final whole-digest capDigest front-truncated it,
+ *  silently dropping later PRs/issues/commits: the exact starvation failure per-item budgets
+ *  exist to prevent. A floor that scales down with the pool (min(ITEM_MIN, share)) can never
+ *  lift an item above its proportional share, making the MIN constants inert — so they are
+ *  REMOVED rather than kept as dead parameters. Per-item budgets now sum to <= `total` by
+ *  construction (up to the 1-char floor at absurdly tiny pools), leaving the final capDigest
+ *  as a marked last-resort backstop for fixed header/join overhead, never the mechanism that
+ *  drops whole items. */
+function fairShare(total: number, count: number, max: number): number {
   if (count <= 0) return 0;
-  return Math.min(max, Math.max(min, Math.floor(total / count)));
+  return Math.min(max, Math.max(1, Math.floor(total / count)));
 }
 
 export interface RetroDigestDeps {
@@ -139,9 +151,7 @@ export interface RetroDigestDeps {
 // trim a few trailing bytes.
 const ISSUES_SHARE = 0.25; // reserved fraction of maxChars for the whole issues section
 const COMMITS_SHARE = 0.1; // reserved fraction of maxChars for commit history
-const PR_ITEM_MIN = 1500;
 const PR_ITEM_MAX = 20_000;
-const ISSUE_ITEM_MIN = 300;
 const ISSUE_ITEM_MAX = 5_000;
 
 /** Assemble this round's read-only digest: PR diffs + review signals for every PR the round's
@@ -164,8 +174,8 @@ export async function buildRetroDigest(
   const issuesBudget = Math.floor(maxChars * ISSUES_SHARE);
   const commitsBudget = Math.floor(maxChars * COMMITS_SHARE);
   const prsBudget = Math.max(maxChars - issuesBudget - commitsBudget, 0);
-  const perPrCap = fairShare(prsBudget, prs.length, PR_ITEM_MIN, PR_ITEM_MAX);
-  const perIssueCap = fairShare(issuesBudget, issues.length, ISSUE_ITEM_MIN, ISSUE_ITEM_MAX);
+  const perPrCap = fairShare(prsBudget, prs.length, PR_ITEM_MAX);
+  const perIssueCap = fairShare(issuesBudget, issues.length, ISSUE_ITEM_MAX);
 
   const prSections: string[] = [];
   for (const pr of prs) {
