@@ -234,6 +234,72 @@ test("runRounds round.milestone: filters dispatch candidates to the configured m
   deps.state.close();
 });
 
+// ── #109 gate② P1: idle throttle between rounds ─────────────────────────────────────────────
+
+test("runRounds idle throttle: an idle round (nothing dispatched) waits tickIntervalSec before the next round opens — peripherals never spin back-to-back on an empty backlog", async () => {
+  const events: string[] = [];
+  const sleep = async (ms: number): Promise<void> => { events.push(`sleep:${ms}`); };
+  const deps = baseDeps({ sleep, tickIntervalSec: 7 });
+  deps.onRoundPhase = (roundId, phase) => events.push(`r${roundId}:${phase}`);
+  const stopSafety = boundedStopOnPhase(deps, 10); // two idle rounds' worth of phases
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2);
+  const r1retro = events.indexOf("r1:retro");
+  const r2aligning = events.indexOf("r2:aligning");
+  assert.ok(r1retro >= 0 && r2aligning > r1retro, `expected both rounds' phases in ${JSON.stringify(events)}`);
+  // Exactly ONE throttle wait — at the tick cadence — sits between round 1 closing and round 2
+  // opening (an idle round's drain loop breaks before its first wait, so this is the only sleep).
+  assert.deepEqual(events.slice(r1retro + 1, r2aligning), ["sleep:7000"]);
+  deps.state.close();
+});
+
+test("runRounds idle throttle: a signal during the idle wait exits promptly — the wait never delays shutdown, and no new round opens", async () => {
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  // A sleep that NEVER resolves on its own — the signal (fired the moment the wait starts) must
+  // be what ends it, proving the throttle wait is signal-abortable rather than a shutdown delay.
+  const sleep = (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    stop();
+    return new Promise<void>(() => {});
+  };
+  const deps = baseDeps({ sleep });
+  // Safety net so a regression (throttle never firing -> idle rounds spinning forever) fails
+  // the rounds===1 assertion below instead of hanging the suite.
+  const stopSafety = boundedStopOnPhase(deps, 12);
+  const inner = deps.registerSignals!;
+  deps.registerSignals = (requestStop) => { stop = requestStop; return inner(requestStop); };
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1);
+  assert.deepEqual(sleepCalls, [5000]); // baseDeps tickIntervalSec=5 — the one idle wait, aborted
+  assert.equal(deps.state.getRound(2), undefined, "no second round ever opened");
+  deps.state.close();
+});
+
+test("runRounds idle throttle: a round that dispatched work is NOT additionally throttled — its drain loop already paced it on the tick cadence", async () => {
+  const events: string[] = [];
+  const sleep = async (ms: number): Promise<void> => { events.push(`sleep:${ms}`); };
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "a", labels: ["prio:3-feature"] }];
+  const sup = new AutoCompleteSupervisor();
+  const deps = baseDeps({ forge, supervisor: sup, sleep });
+  deps.onRoundPhase = (roundId, phase) => events.push(`r${roundId}:${phase}`);
+  const stopSafety = boundedStopOnPhase(deps, 6); // through round 2's first phase
+  await runRounds(deps);
+  stopSafety();
+  const r1retro = events.indexOf("r1:retro");
+  const r2aligning = events.indexOf("r2:aligning");
+  assert.ok(r1retro >= 0 && r2aligning > r1retro, `expected both rounds' phases in ${JSON.stringify(events)}`);
+  // The dispatched lane's cadence waits happened INSIDE executing (before r1:harvesting)…
+  assert.ok(events.slice(0, r1retro).some((e) => e.startsWith("sleep:")), "drain loop did pace the dispatched lane");
+  // …and NO extra wait separates round 1's close from round 2 opening.
+  assert.deepEqual(events.slice(r1retro + 1, r2aligning), []);
+  deps.state.close();
+});
+
 test("runRounds round.milestone: 0 open issues left skips the batch dispatch entirely and still closes the round", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
