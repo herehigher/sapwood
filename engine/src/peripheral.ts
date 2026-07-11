@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 import {
   existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "./config.js";
 import type { ModelUsageEntry, State } from "./state.js";
@@ -100,7 +100,12 @@ export interface RoleSessionOpts {
    *  stream/context cutoff that would lose the final message, and a raw file has no
    *  embedded-sentinel collision surface for a body that documents this very codebase). The
    *  path is fixed BY THE CALLER (retro.ts's RETRO_SCRATCH_FILE), never by the session — the
-   *  engine decides where it looks; the session can only decide what the file says. */
+   *  engine decides where it looks; the session can only decide what the file says.
+   *
+   *  CONTAINMENT (Codex round 1, PR #119): "inside the worktree" is enforced by run() itself,
+   *  not assumed — a path that resolves outside the session's worktree root (`../`-escaping,
+   *  absolute) is refused with a stderr line and reads as absent (scratchText undefined),
+   *  never a file read outside the root. */
   scratchFile?: string;
 }
 
@@ -265,9 +270,27 @@ export class RoleRunner {
     // #111 PR-B: read the caller-requested scratch file BEFORE the worktree deletion below —
     // the deliverable would otherwise be destroyed with the worktree. Absent/unreadable reads
     // as undefined (never a throw): the caller's own validator owns deciding what that means.
+    //
+    // PATH CONTAINMENT (Codex review round 1, PR #119): the API's contract is "a path INSIDE
+    // the session's worktree" — enforced here, in the API itself, not left to callers. A bare
+    // join() would let a `../..`-shaped or absolute scratchFile normalize OUTSIDE the worktree
+    // and read arbitrary engine files into scratchText. Today's only caller passes a fixed
+    // constant (retro.ts's RETRO_SCRATCH_FILE), but the invariant must hold regardless of who
+    // calls tomorrow: resolve both sides and require the target to sit strictly UNDER the
+    // worktree root. A violating path reads as absent (scratchText undefined — the caller's
+    // fail-closed validator path) plus one stderr line naming it — never a read outside root.
     let scratchText: string | undefined;
     if (opts.scratchFile !== undefined) {
-      try { scratchText = readFileSync(join(this.worktreeRoot, name, opts.scratchFile), "utf8"); } catch { /* absent */ }
+      const root = resolve(this.worktreeRoot, name);
+      const target = resolve(root, opts.scratchFile);
+      if (!target.startsWith(root + sep)) {
+        console.error(
+          `[sapwood:role] session ${name}: scratchFile ${JSON.stringify(opts.scratchFile)} resolves ` +
+            `outside the session worktree (${target}) — refusing to read it; scratchText stays undefined`,
+        );
+      } else {
+        try { scratchText = readFileSync(target, "utf8"); } catch { /* absent */ }
+      }
     }
 
     // Always delete the worktree — see the module doc: a role session never writes code

@@ -433,6 +433,49 @@ test("run: scratchFile requested but the session never wrote it — scratchText 
   }
 });
 
+// Codex round 1 (PR #119): scratchFile path containment — "inside the worktree" is enforced by
+// run() itself. A `../`-escaping or absolute scratchFile must NEVER be read, even when the file
+// it resolves to genuinely exists outside the worktree root.
+
+test("run: a ../-escaping scratchFile is refused — the outside file is NOT read even though it exists, scratchText stays undefined", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const worktreeRoot = join(dir, "worktrees");
+    mkdirSync(worktreeRoot, { recursive: true });
+    // A real file OUTSIDE every session worktree (a sibling of worktreeRoot itself) — the
+    // exact target a `../../secret` scratchFile would resolve to from <worktreeRoot>/<name>/.
+    writeFileSync(join(dir, "secret"), "engine-private content");
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = new RoleRunner({
+      cfg, stateDir: dir, worktreeRoot, claudeBin: bin, heartbeatMs: 50, guardHookPath: mkHook(dir),
+    });
+    const result = await runner.run({
+      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium", scratchFile: "../../secret",
+    });
+    assert.equal(result.outcome, "done");
+    assert.equal(result.scratchText, undefined, "an escaping path must read as absent, never as the outside file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: an absolute scratchFile is refused — scratchText stays undefined even though the target exists", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const outside = join(dir, "absolute-target");
+    writeFileSync(outside, "outside content");
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({
+      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium", scratchFile: outside,
+    });
+    assert.equal(result.outcome, "done");
+    assert.equal(result.scratchText, undefined, "an absolute path must read as absent, never as its target");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: spend baseline — costUsd is 0 when the stub emits no result line", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
