@@ -48,13 +48,37 @@ import {
  *
  *  `--body-file` is denied for BOTH commands (and both roles): it reads body text from a
  *  FILE, which would pierce the no-repo-read boundary (the session has no Read tool for the
- *  same reason). */
+ *  same reason).
+ *
+ *  #102 (gate② on #101): `gh` accepts `-F` as a short alias for `--body-file` (confirmed via
+ *  `gh issue comment/edit --help` — no `=`-form, no other spelling), and the original
+ *  `*--body-file*` denies only matched the long flag. `-F` has NO authoritative backstop (unlike
+ *  `--label`, see PO_DISALLOWED_TOOLS below) — the pattern layer below is the ONLY layer for this
+ *  one, so its shape matters: a bare `*-F*` would also match a body/title CONTAINING the
+ *  substring "-F" (over-broad, but still fails safe by over-denying) or, worse, flags like a
+ *  hypothetical `--foo-Fbar` (under-broad if such a flag existed). The `subcommand* -F*` shape
+ *  below requires "-F" be preceded by a space — i.e. its own argv token — which both long-flag
+ *  substrings (`--body-file`, always two leading dashes) and non-flag text glued onto another
+ *  word never produce. The first `*` binds DIRECTLY to the subcommand (`comment*`, not
+ *  `comment *`): cobra/pflag accepts flags BEFORE positional args (`gh issue comment -F f 12`),
+ *  and a literal space after the subcommand would consume the only space preceding a
+ *  flag-first `-F`, silently un-denying that argv order (gate② finding on this very fix).
+ *  Residual gaps, same best-effort class as everything else here: (a) `gh`'s pflag-style
+ *  shorthand parser lets a boolean short flag CLUSTER with `-F` in one token (e.g. `-eF file`
+ *  == `-e -F file`), which would not contain a space directly before `-F`; (b) shell
+ *  quoting/escaping (`'-F'`, `"-F"`, `\-F`) — the glob matches the RAW command string, but the
+ *  shell strips quotes/backslashes before `gh` parses its argv, so the quoted spellings reach
+ *  `gh` as a plain `-F` without ever containing the ` -F` substring the patterns look for
+ *  (Codex gate② round 2). Quoting variants are unbounded, so the pattern layer structurally
+ *  cannot close (b) — both residuals are covered by issue #110's authoritative guard-hook
+ *  backstop (shell-aware argv tokenization, fail-closed), not by more globs here. */
 export const ROLE_ALLOWED_TOOLS = "Bash(gh issue comment*),Bash(gh issue edit*)";
 export const ROLE_DISALLOWED_TOOLS =
   "Read,Write,Edit,MultiEdit,Bash(git *),Bash(gh pr *),Bash(gh api *),Bash(gh issue view*)," +
   "Bash(gh issue list*),Bash(gh issue close*),Bash(gh issue reopen*),Bash(gh issue transfer*)," +
   "Bash(gh issue delete*)," +
-  "Bash(gh issue comment *--body-file*),Bash(gh issue edit *--body-file*)";
+  "Bash(gh issue comment *--body-file*),Bash(gh issue edit *--body-file*)," +
+  "Bash(gh issue comment* -F*),Bash(gh issue edit* -F*)";
 
 /** The plan-DRAFTER's stricter deny list (#77 Amendment 2's plan-author ≠ plan-approver chain):
  *  everything above PLUS label mutation — a drafter edits plan TEXT only, and must never
@@ -85,10 +109,19 @@ export const PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS + ",Bash(gh issue create*)";
  *  - `--project` could place the new issue onto a board lane directly (a board write, locked
  *    decision 5's territory).
  *  Best-effort pattern layer, same caveat as everything above; the authoritative enforcement
- *  for the --label hole is align.ts's created-issue label post-check. */
+ *  for the --label hole is align.ts's created-issue label post-check.
+ *
+ *  #102 (gate② on #101): each of the three flags above also has a short alias on `gh issue
+ *  create` — confirmed via `gh issue create --help`: `-F` (body-file), `-l` (label), `-p`
+ *  (project) — which the long-flag-only denies above never matched. Same `subcommand* -X*`
+ *  space-boundary shape as ROLE_DISALLOWED_TOOLS's `-F` denies above (see that doc for the
+ *  greediness/flag-first-order/residual-clustering rationale — it applies identically here).
+ *  `-l`/`-p` both keep an authoritative backstop (align.ts's post-checks) unlike `-F`, so this
+ *  is hardening for those two either way. */
 export const PO_DISALLOWED_TOOLS =
   ROLE_DISALLOWED_TOOLS +
-  ",Bash(gh issue create *--body-file*),Bash(gh issue create *--label*),Bash(gh issue create *--project*)";
+  ",Bash(gh issue create *--body-file*),Bash(gh issue create *--label*),Bash(gh issue create *--project*)," +
+  "Bash(gh issue create* -F*),Bash(gh issue create* -l*),Bash(gh issue create* -p*)";
 
 export interface RoleSessionOpts {
   /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
