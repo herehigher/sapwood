@@ -72,8 +72,8 @@ GitHub issue (Ready)
 | M1 ✅ | Guard port — the fail-closed safety core (ships green first) — **shipped** |
 | M2 ✅ | Engine core (conductor + worker + guard wired live) — dogfooded end-to-end; **sapwood now builds sapwood** — **shipped** |
 | M3 ✅ | Review gate + opt-in autonomous-merge + cost ceiling + kill switch — the engine can now finish work under the two-gate policy — **shipped** |
-| M4 | Loop driver ✅, commands + status CLI + dry-run ✅, docs — **in progress** |
-| v0.2 | Dashboard — built *by* sapwood itself, as the flagship dogfood |
+| M4 ✅ | Loop driver, commands + status CLI + dry-run, docs — **shipped** |
+| v0.2 | Round orchestrator (peripheral roles, gate⓪, round ledger) ✅ — now `sapwood run`'s default driver; Dashboard — built *by* sapwood itself, as the flagship dogfood — **in progress** |
 
 Built in TypeScript. Targets your own / your team's repos first (trusted context),
 architected toward public-repo hardening.
