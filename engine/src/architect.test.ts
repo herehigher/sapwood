@@ -581,3 +581,52 @@ test("validateArchitectOutput: duplicate CONTRADICTION markers for the same issu
   const result = validateArchitectOutput(text, new Set([5]));
   assert.equal(result.ok, false);
 });
+
+// ── Codex review round 1: P1 duplicate metadata entries + P2 sub-delimiter containment ─────
+
+test("validateArchitectOutput Codex P1: duplicate metadata entries for the same issue -> invalid — never applied twice with conflicting severity", () => {
+  // Both sides collapse to Sets ({21} vs {21}, sizes match), so without the explicit duplicate
+  // check this would fail OPEN: schema-valid, set-match-valid, candidate-set-valid — and the
+  // write loop would then post #21's comment twice and apply `blocked` off whichever entry's
+  // `severe` it hit. The duplication itself must be rejected.
+  const text = `${RESULT_BLOCK_START}\n` +
+    `{"contradictions":[{"issue":21,"severe":false},{"issue":21,"severe":true}]}\n` +
+    `${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nnote\n<<<CONTRADICTION #21>>>\nexplanation\n${BODY_BLOCK_END}`;
+  const result = validateArchitectOutput(text, new Set([21]));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.ok(/duplicate issue/.test(result.reason));
+});
+
+test("validateArchitectOutput Codex P2: an explanation embedding an own-line CONTRADICTION marker for another metadata-listed issue -> invalid, never a truncated/mis-associated slice", () => {
+  // #5's explanation content contains an own-line `<<<CONTRADICTION #6>>>` — the split consumes
+  // it as a real marker, so #5's explanation is silently truncated there and its tail would be
+  // mis-associated with #6. With #6's REAL section also present, the embedded marker surfaces
+  // as a duplicate #6 marker — fail closed, the whole output is invalid.
+  const text = `${RESULT_BLOCK_START}\n` +
+    `{"contradictions":[{"issue":5,"severe":false},{"issue":6,"severe":false}]}\n` +
+    `${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nnote\n` +
+    `<<<CONTRADICTION #5>>>\nthis explanation embeds a marker line:\n<<<CONTRADICTION #6>>>\nsmuggled tail\n` +
+    `<<<CONTRADICTION #6>>>\nthe real #6 explanation\n` +
+    `${BODY_BLOCK_END}`;
+  const result = validateArchitectOutput(text, new Set([5, 6]));
+  assert.equal(result.ok, false);
+});
+
+test("validateArchitectOutput Codex P2: an INLINE '<<<CONTRADICTION' mention inside an explanation -> invalid (sub-delimiter containment, fail closed)", () => {
+  // Not own-line, so the split regex never consumes it — the substring survives into the
+  // section text, which the containment rule rejects as ambiguous by construction (same
+  // no-embedded-sentinels doctrine structured-output.ts applies to its own sentinels).
+  const text = architectResult("Design note.", [
+    { issue: 5, severe: false, explanation: "see the <<<CONTRADICTION #9>>> marker convention" },
+  ]);
+  const result = validateArchitectOutput(text, new Set([5]));
+  assert.equal(result.ok, false);
+});
+
+test("validateArchitectOutput Codex P2: an inline '<<<CONTRADICTION' mention inside the DESIGN NOTE is rejected too", () => {
+  const text = architectResult("A note quoting the <<<CONTRADICTION format inline.");
+  const result = validateArchitectOutput(text, new Set([1]));
+  assert.equal(result.ok, false);
+});

@@ -167,12 +167,26 @@ const ArchitectMetadataSchema = z.object({
 }).strict();
 
 const CONTRADICTION_MARKER_RE = /^<<<CONTRADICTION #(\d+)>>>[ \t]*$/gm;
+const CONTRADICTION_MARKER_SUBSTRING = "<<<CONTRADICTION";
 
 /** Split the BODY block's raw text into the round design note (everything before the first
  *  marker) and a per-issue explanation map (everything between consecutive markers). null on any
  *  malformed shape: an empty design note, an empty explanation section, or a duplicate marker for
  *  the same issue number — all ambiguous, and this module never guesses at an ambiguous slice
- *  (structured-output.ts's own fail-closed stance, applied to this module's own sub-format). */
+ *  (structured-output.ts's own fail-closed stance, applied to this module's own sub-format).
+ *
+ *  SUB-DELIMITER CONTAINMENT (Codex review round 1, P2 — structured-output.ts's own
+ *  no-embedded-sentinels doctrine, applied to this module's OWN sub-format): after splitting,
+ *  the design note and every section text are checked for the `<<<CONTRADICTION` substring —
+ *  any remaining occurrence (an inline/quoted mention, a marker-shaped line with trailing text
+ *  that the own-line regex didn't consume) is ambiguous by construction and returns null. An
+ *  explanation whose content legitimately needs to write the marker string is the same rare
+ *  edge structured-output.ts already adjudicated for its sentinels: degrade-to-human via the
+ *  isValid retry/degrade path, never more escaping machinery. (An EMBEDDED own-line marker is
+ *  consumed by the split itself and lands in the duplicate-marker check below when its number
+ *  also has a real section — the residual case, an embedded own-line marker for a section that
+ *  never otherwise exists, is structurally indistinguishable from a valid output and is
+ *  bounded by the candidate-set + metadata-match checks in validateArchitectOutput.) */
 function parseArchitectBody(body: string): { designNote: string; sections: Map<number, string> } | null {
   const markers: Array<{ issue: number; index: number; end: number }> = [];
   CONTRADICTION_MARKER_RE.lastIndex = 0;
@@ -190,6 +204,12 @@ function parseArchitectBody(body: string): { designNote: string; sections: Map<n
     if (text === "") return null; // a flagged issue with no explanation text — malformed
     if (sections.has(marker.issue)) return null; // duplicate marker for the same issue — ambiguous
     sections.set(marker.issue, text);
+  }
+  // Sub-delimiter containment (Codex round 1, P2 — see the doc comment above): any REMAINING
+  // occurrence of the marker substring after the split consumed every own-line marker is an
+  // inline/quoted mention — ambiguous by construction, fail closed.
+  if ([designNote, ...sections.values()].some((t) => t.includes(CONTRADICTION_MARKER_SUBSTRING))) {
+    return null;
   }
   return { designNote, sections };
 }
@@ -236,6 +256,13 @@ export function validateArchitectOutput(
     return { ok: false, reason: "BODY block is malformed — empty design note, an empty/duplicate contradiction section" };
   }
   const metaIssues = new Set(parsed.data.contradictions.map((c) => c.issue));
+  // Codex round 1, P1: duplicate metadata entries for the same issue would otherwise fail OPEN —
+  // both sides collapse to Sets (sizes match against one body section), and the write loop would
+  // then apply the SAME issue twice, with conflicting `severe` values. Reject the duplication
+  // itself, before any set comparison can mask it.
+  if (metaIssues.size !== parsed.data.contradictions.length) {
+    return { ok: false, reason: "duplicate issue in metadata contradictions" };
+  }
   const bodyIssues = new Set(parsedBody.sections.keys());
   if (metaIssues.size !== bodyIssues.size || [...metaIssues].some((n) => !bodyIssues.has(n))) {
     return { ok: false, reason: "structured output metadata contradictions don't match the BODY block's sections" };
