@@ -142,6 +142,7 @@ export class RoundScopedForge implements IForge {
   addIssueComment(issue: number, body: string) { return this.inner.addIssueComment(issue, body); }
   getPRReviewData(pr: number) { return this.inner.getPRReviewData(pr); }
   getIssueBody(issue: number) { return this.inner.getIssueBody(issue); }
+  updateIssueBody(issue: number, body: string) { return this.inner.updateIssueBody(issue, body); }
   countOpenIssuesInMilestone(milestone: string) { return this.inner.countOpenIssuesInMilestone(milestone); }
   listMilestoneTitles() { return this.inner.listMilestoneTitles(); }
   getIssueLabels(issue: number) { return this.inner.getIssueLabels(issue); }

@@ -105,6 +105,12 @@ export interface IForge {
    *  "" for an issue with no body rather than throwing (extractVerificationPlan treats an
    *  empty body as "no plan", the same fail-closed outcome as a genuinely planless issue). */
   getIssueBody(issue: number): Promise<string>;
+  /** #110 PR0: overwrite an issue's body (the WRITE counterpart to getIssueBody). Additive infra
+   *  for the structured-output rework: post-#110, the engine applies a plan-drafter's revised
+   *  body (and other role-session edits) itself, from validated data — the role session that
+   *  produced the text never touches `gh` directly. Unused by any call site in this PR (zero
+   *  behavior change); the first real caller lands in PR1/PR2. */
+  updateIssueBody(issue: number, body: string): Promise<void>;
   /** #76: open (state OPEN) issue count in the named milestone — the `stop.onMilestoneComplete`
    *  condition's "is this milestone done" signal. The driver evaluates this at tick boundaries
    *  only (never mid-tick); zero means the milestone has no open issues left, so the condition
@@ -304,6 +310,10 @@ export class GithubForge implements IForge {
     ]);
     const parsed = JSON.parse(out) as { body?: string };
     return parsed.body ?? "";
+  }
+
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    await this.gh(["issue", "edit", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
   }
 
   /** #46: maps an issue to its already-open PR, for the live `sapwood run` wiring

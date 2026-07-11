@@ -352,14 +352,25 @@ export interface RetriedSession {
   /** Same rationale: the stderr line's wording is role-specific ("advisory phase, round not
    *  wedged" vs. "pre-Ready, low stakes", ...), so the caller supplies it verbatim. */
   degradeMessage: (result: RoleSessionResult) => string;
+  /** #110 PR0: OPTIONAL extra pass/fail check beyond `outcome` itself. A "done" outcome that
+   *  fails this predicate is treated as a NON-"done" outcome for retry/degrade purposes — e.g.
+   *  a session that exited cleanly but whose structured final-message output failed schema
+   *  validation (parseResultText's write-side consumers, landing in later #110 PRs). FAIL
+   *  CLOSED on a throw (Codex review round 1, P2): a validator that THROWS (e.g. a future
+   *  caller's bare zod.parse) counts as invalid — retry once, then the degrade path — never a
+   *  propagated exception, which would wedge the round in violation of #110's "malformed output
+   *  twice -> degrade path, never a wedged round". Omitted -> today's behavior is
+   *  byte-identical: only `outcome` decides done vs. not-done. */
+  isValid?: (result: RoleSessionResult) => boolean;
 }
 
-/** Run one role session; on a non-"done" outcome, retry exactly once; on a SECOND non-"done"
- *  outcome, durably record the degradation (contained — a state-write failure here never throws,
- *  same fail-toward-more-work stance as every other appendEvent call site in this codebase) and
- *  log it to stderr. Always returns the LAST attempt's result (the caller decides what "still
- *  not done" means for its own phase: proceed without a note, skip a summary/proposal, etc. —
- *  this helper only owns the retry-and-degrade mechanics, never the phase's own business logic). */
+/** Run one role session; on a non-"done" outcome (or, when `isValid` is supplied, a "done"
+ *  outcome that also fails `isValid` — #110 PR0), retry exactly once; on a SECOND such outcome,
+ *  durably record the degradation (contained — a state-write failure here never throws, same
+ *  fail-toward-more-work stance as every other appendEvent call site in this codebase) and log
+ *  it to stderr. Always returns the LAST attempt's result (the caller decides what "still not
+ *  done" means for its own phase: proceed without a note, skip a summary/proposal, etc. — this
+ *  helper only owns the retry-and-degrade mechanics, never the phase's own business logic). */
 export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSessionResult> {
   const iso = (): string => opts.now().toISOString();
   const attempt = async (): Promise<RoleSessionResult> => {
@@ -367,10 +378,22 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
     opts.state.recordSpend(result.name, opts.issue, result.costUsd, iso(), result.modelUsage);
     return result;
   };
+  // isValid omitted -> isDone reduces to the original `outcome === "done"` check exactly.
+  // A THROWING validator counts as invalid (fail closed, see the RetriedSession doc above) —
+  // the throw must feed the retry/degrade machinery, never escape it.
+  const isDone = (result: RoleSessionResult): boolean => {
+    if (result.outcome !== "done") return false;
+    if (!opts.isValid) return true;
+    try {
+      return opts.isValid(result);
+    } catch {
+      return false;
+    }
+  };
   let result = await attempt();
-  if (result.outcome !== "done") {
+  if (!isDone(result)) {
     result = await attempt();
-    if (result.outcome !== "done") {
+    if (!isDone(result)) {
       try {
         opts.state.appendEvent(opts.degradeEvent, opts.degradePayload(result));
       } catch { /* state write failed — the console line below still lands */ }

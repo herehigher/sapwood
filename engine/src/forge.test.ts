@@ -771,6 +771,25 @@ test("listOpenIssueNumbers: every open issue number in this repo", async () => {
   assert.ok(args.includes("--state") && args.includes("open"));
 });
 
+// ── #110 PR0: updateIssueBody — the WRITE counterpart to getIssueBody, additive infra for the
+//    structured-output rework (unused by any call site in this PR). ──
+
+test("updateIssueBody: runs `gh issue edit <n> --body <text>` scoped to this repo", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "";
+  };
+  await forge.updateIssueBody(46, "revised body text");
+  assert.equal(seen.length, 1);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 3), ["issue", "edit", "46"]);
+  assert.ok(args.includes("--repo") && args.includes("o/r"));
+  assert.ok(args.includes("--body") && args.includes("revised body text"));
+});
+
 // ── #87: selectPlanReviewCandidates — the plan_review peripheral's candidate query,
 //    disjoint at completion from selectReadyIssues (that returns what's ALREADY past gate⓪) ──
 

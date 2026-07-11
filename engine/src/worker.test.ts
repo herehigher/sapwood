@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import {
-  parseCostUsd, parseModelUsage, parseAssistantUsageDeltas, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote,
+  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote,
   WorkerSupervisor, renderPromptTemplate, defaultPromptPath, loadWorkerPromptTemplate, buildRenderPrompt,
 } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -27,6 +27,47 @@ test("parseCostUsd: multiple results -> last wins; none -> 0; junk lines ignored
   assert.equal(parseCostUsd(`no json here\n{"type":"assistant"}`), 0);
   assert.equal(parseCostUsd(""), 0);
   assert.equal(parseCostUsd(`garbage{{{\n{"type":"result","total_cost_usd":0.2}`), 0.2);
+});
+
+// ── #110 PR0: parseResultText — the read side for a role session's structured final-message
+//    output. Mirrors parseCostUsd's own tolerance test shapes exactly (same fixture style). ──
+test("parseResultText: takes the last result line's `result` string", () => {
+  const jsonl = [
+    `{"type":"system","subtype":"init"}`,
+    `{"type":"assistant","message":{}}`,
+    `{"type":"result","subtype":"success","result":"final answer"}`,
+  ].join("\n");
+  assert.equal(parseResultText(jsonl), "final answer");
+});
+
+test("parseResultText: multiple results -> last wins; garbage/partial lines ignored", () => {
+  assert.equal(parseResultText(`{"type":"result","result":"first"}\n{"type":"result","result":"second"}`), "second");
+  assert.equal(parseResultText(`garbage{{{\n{"type":"result","result":"ok"}`), "ok");
+  assert.equal(parseResultText(`no json here\n{"type":"assistant"}`), "");
+});
+
+test("parseResultText: missing `result` field -> \"\"", () => {
+  assert.equal(parseResultText(`{"type":"result","subtype":"success","total_cost_usd":0.1}`), "");
+});
+
+test("parseResultText: a LAST result line without a string `result` RESETS earlier text — never fail-open on stale text (Codex round 1 P2)", () => {
+  // The last parseable result line is authoritative even when it carries no usable text —
+  // an earlier line's "old" must NOT survive to be validated and applied downstream.
+  assert.equal(parseResultText(`{"type":"result","result":"old"}\n{"type":"result","total_cost_usd":0.1}`), "");
+  assert.equal(parseResultText(`{"type":"result","result":"old"}\n{"type":"result","result":42}`), "");
+  // A trailing GARBAGE line (unparseable, mid-write) still leaves the last VALID text intact —
+  // the reset applies only to parseable result lines, tolerance for the stream is unchanged.
+  assert.equal(parseResultText(`{"type":"result","result":"kept"}\ngarbage{{{`), "kept");
+});
+
+test("parseResultText: non-string `result` field -> \"\" (never throws)", () => {
+  assert.equal(parseResultText(`{"type":"result","result":{"nested":true}}`), "");
+  assert.equal(parseResultText(`{"type":"result","result":42}`), "");
+  assert.equal(parseResultText(`{"type":"result","result":null}`), "");
+});
+
+test("parseResultText: empty input -> \"\"", () => {
+  assert.equal(parseResultText(""), "");
 });
 
 // ── #47: per-model token usage capture (parseModelUsage) ──

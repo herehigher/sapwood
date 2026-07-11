@@ -33,6 +33,8 @@ class FakeForge implements IForge {
   async addPRComment(): Promise<void> {}
   async addIssueComment(): Promise<void> {}
   async getIssueBody(): Promise<string> { return ""; }
+  updateIssueBodyCalls: Array<[number, string]> = [];
+  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
@@ -581,6 +583,13 @@ test("RoundScopedForge: filters getReadyIssues() by milestone; passthrough when 
   assert.deepEqual((await scoped.getReadyIssues()).map((i) => i.number), [1]);
   const unscoped = new RoundScopedForge(forge, undefined);
   assert.deepEqual((await unscoped.getReadyIssues()).map((i) => i.number), [1, 2]);
+});
+
+test("RoundScopedForge: updateIssueBody passes through unchanged (#110 PR0 — explicit passthrough, no milestone scoping)", async () => {
+  const forge = new FakeForge();
+  const scoped = new RoundScopedForge(forge, "M4");
+  await scoped.updateIssueBody(7, "revised body");
+  assert.deepEqual(forge.updateIssueBodyCalls, [[7, "revised body"]]);
 });
 
 test("noopPeripheralStub: echoes the incoming marker, or 'noop' on a first attempt", async () => {
