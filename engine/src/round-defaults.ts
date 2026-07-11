@@ -16,7 +16,7 @@ import type { IForge } from "./forge.js";
 import type { State } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { RoleRunner } from "./peripheral.js";
-import type { PeripheralPhase, PeripheralStub } from "./round.js";
+import { RoundScopedForge, type PeripheralPhase, type PeripheralStub } from "./round.js";
 import { createAligningStub, alignMarker } from "./align.js";
 import { createArchitectStub, type ArchitectDeps } from "./architect.js";
 import { createPlanReviewStub } from "./plan-review.js";
@@ -47,8 +47,20 @@ export interface DefaultPeripheralsDeps {
  *  caller that never wires aligning at all), the architect stub falls back to its own built-in
  *  "not available" placeholder, unchanged. */
 export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<Record<PeripheralPhase, PeripheralStub>> {
+  // #109 gate② P2: scope the PERIPHERALS' forge to cfg.round.milestone, exactly like runRounds
+  // scopes its own tick forge (round.ts:runRounds wraps deps.forge independently — that wrap
+  // covers dispatch only, never these stubs). Without this, a milestone-scoped run's PO triage /
+  // plan-review candidates come from the WHOLE repo: the peripherals could comment on, draft
+  // plans into, or plan:approve issues outside the round's milestone. Wrapping here (not at each
+  // caller) fixes every wiring site at once and keeps cli.ts dumb. Double-wrapping an
+  // already-scoped forge with the same milestone would be harmless (the filter is idempotent),
+  // but no caller does that today: runRounds wraps the raw forge for its ticks, this factory
+  // wraps the same raw forge for the stubs — two independent single wraps.
+  const forge = deps.cfg.round.milestone
+    ? new RoundScopedForge(deps.forge, deps.cfg.round.milestone)
+    : deps.forge;
   const shared = {
-    forge: deps.forge,
+    forge,
     state: deps.state,
     cfg: deps.cfg,
     runner: deps.runner,

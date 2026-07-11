@@ -314,8 +314,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  drain-only ticks until nothing's in flight. `freshBatch` is false only when we RESUMED
    *  directly into `executing` after a crash mid-drain — re-running the batch dispatch in
    *  that case would double-dispatch on top of lanes already recovering via tick()'s own
-   *  reclaim logic, so a resumed pass skips straight to draining what's already there. */
-  const runExecuting = async (round: RoundRow, freshBatch: boolean): Promise<RoundStopHit | undefined> => {
+   *  reclaim logic, so a resumed pass skips straight to draining what's already there.
+   *  Returns how many workers this round put in flight (dispatched, or — resumed — inherited
+   *  from activeWorkers): the caller's idle-throttle signal (#109 gate② P1, below). */
+  const runExecuting = async (round: RoundRow, freshBatch: boolean): Promise<number> => {
     let stopHit: RoundStopHit | undefined;
     const dispatchedNames: string[] = [];
     const spentSoFar = (): number =>
@@ -372,7 +374,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       }
       if (deps.state.activeWorkers().length === 0) break;
     }
-    return stopHit;
+    // stopHit has already been externalized (emitRoundStop) — the caller only needs the
+    // in-flight count for the idle throttle.
+    return dispatchedNames.length;
   };
 
   try {
@@ -395,11 +399,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       const startedPhase = round.phase; // captured once — the freshBatch test for `executing`
       let idx = SEQUENCE.indexOf(round.phase);
       let killSwitchStop = false;
+      let workersThisRound = 0;
 
       while (SEQUENCE[idx] !== "closed") {
         const phase = SEQUENCE[idx]!;
         if (phase === "executing") {
-          await runExecuting(round, phase !== startedPhase);
+          workersThisRound = await runExecuting(round, phase !== startedPhase);
         } else if (phase !== "closed") {
           // Narrowed to PeripheralPhase: every RoundPhase except "executing" (handled above)
           // and "closed" (excluded by the while guard — this branch is unreachable at
@@ -422,6 +427,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       deps.state.closeRound(round.round_id, iso());
       roundsClosed++;
+      // #109 gate② P1 (idle throttle): an IDLE round — zero workers in flight — closing and the
+      // next opening back-to-back would run the real peripheral role sessions (PO/architect/
+      // plan-review/harvest/retro Claude sessions, the production default since #106)
+      // continuously on an empty backlog, burning tokens with no throttle. Wait one tick cadence
+      // before opening the next round, via the SAME signal-abortable interTickWait the drain
+      // loop uses: a SIGINT during this wait resolves it immediately (never delays shutdown —
+      // the loop top's `signalled` check runs right after). A round that dispatched work is NOT
+      // additionally throttled: its drain loop already paced it on the tick cadence.
+      if (workersThisRound === 0 && !signalled) {
+        await interTickWait(deps.tickIntervalSec * 1000);
+      }
       // Loop back to the top: re-check signal / final-stop before opening the NEXT round.
     }
   } finally {

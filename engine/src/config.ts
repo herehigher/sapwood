@@ -284,6 +284,14 @@ const Engine = z.object({
   // otherwise make every tick look "stale" and void the wall-clock tier). Conservative default:
   // 1 minute (0day's loop ticks minutes apart, PLAN.md).
   tickIntervalSec: z.number().int().positive().default(60),
+  // #106: which engine `sapwood run` drives. "rounds" (default, v0.2 north star) — the round
+  // orchestrator (round.ts's runRounds + round-defaults.ts's createDefaultPeripherals): peripheral
+  // roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the same tick
+  // engine, batch-dispatch-then-drain per round. "tick" — the bare M4 loop driver (driver.ts's
+  // runDriver), unchanged: no peripherals, --once/--until-idle apply. Kept reachable as an
+  // explicit escape hatch until a live dogfood run has validated the round path (PLAN.md's
+  // follow-up note); not deprecated, just no longer the default.
+  driver: z.enum(["rounds", "tick"]).default("rounds"),
 }).strict();
 
 // #76: goal-based stop conditions — the loop driver's FINAL break conditions ("when is this run

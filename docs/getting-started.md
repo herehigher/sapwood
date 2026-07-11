@@ -92,29 +92,42 @@ Don't point sapwood at a live backlog and walk away. Ramp up in stages:
    against `cost.dailyBudgetUsd`). No worker is spawned and no state is written — safe
    to run repeatedly.
 
-3. **`sapwood run --once`** — dispatch one wave, then hand back the terminal. Leave
-   exactly one issue `Ready` on the board and run:
-   ```
-   sapwood run --once
-   ```
-   This runs a single tick (reclaim → drive → dispatch) and exits. Note what that does
-   NOT mean: the dispatched worker keeps running **detached in the background** after the
-   CLI returns — its TDD work, the PR, and the review gate all happen later, driven by
-   subsequent ticks. Watch it with `sapwood status`, and run `sapwood run --once` again
-   (or move to `--until-idle`) to drive the resulting PR through the gate.
+3. **`sapwood run`** (steady state) — as of #106, this drives the **round
+   orchestrator** by default (`engine.driver: rounds`): a round dispatches a batch
+   (claim → worker → PR → review gate → merge, same tick engine underneath), then
+   runs peripheral roles around it — goal alignment, architecture review, gate⓪ plan
+   review, harvest, retrospective — before opening the next round. It ticks
+   indefinitely until a signal (Ctrl-C / SIGTERM — the in-flight round always finishes,
+   harvest included, before the process exits) or a configured
+   [stop condition](configuration.md#stop) fires. There's no `--once`/`--until-idle`
+   equivalent for a round — passing either flag under the rounds default is an
+   **error** (exit 1, before anything dispatches), never silently ignored; the error
+   names the fix (see step 4 below if you want that shape for your first run, or use
+   `--stop-after-issues`/`--stop-after-prs`/`--stop-on-milestone` to bound a rounds
+   run).
 
-4. **`sapwood run --until-idle`** — the actual "watch one issue end-to-end" mode:
+4. **The M4 tick-driver escape hatch** — set `engine.driver: tick` in
+   `sapwood.config.yaml` to run the pre-#106 loop driver instead (no peripherals):
    ```
-   sapwood run --until-idle
+   engine:
+     driver: tick
    ```
-   Keeps ticking until nothing is in flight and nothing new dispatches, then exits
-   cleanly — with one `Ready` issue this is claim → worker → PR → review gate → merge,
-   supervised to completion. Also good for a bounded batch run.
-
-5. **`sapwood run`** (daemon / "forever" mode) — ticks on `cfg.engine.tickIntervalSec`'s
-   cadence indefinitely, until a signal (Ctrl-C / SIGTERM) or a configured
-   [stop condition](configuration.md#stop) fires. This is the steady-state mode once
-   you trust the loop.
+   With `driver: tick`, the same first-run staging `--once`/`--until-idle` flags from
+   pre-#106 apply:
+   - **`sapwood run --once`** — dispatch one wave, then hand back the terminal. Leave
+     exactly one issue `Ready` on the board and run `sapwood run --once`. This runs a
+     single tick (reclaim → drive → dispatch) and exits. Note what that does NOT mean:
+     the dispatched worker keeps running **detached in the background** after the CLI
+     returns — its TDD work, the PR, and the review gate all happen later, driven by
+     subsequent ticks. Watch it with `sapwood status`, and run `sapwood run --once`
+     again (or move to `--until-idle`) to drive the resulting PR through the gate.
+   - **`sapwood run --until-idle`** — the "watch one issue end-to-end" mode: keeps
+     ticking until nothing is in flight and nothing new dispatches, then exits cleanly
+     — with one `Ready` issue this is claim → worker → PR → review gate → merge,
+     supervised to completion. Also good for a bounded batch run.
+   - **`sapwood run`** (daemon / "forever" mode) — ticks on
+     `cfg.engine.tickIntervalSec`'s cadence indefinitely, same signal/stop-condition
+     exit as the round orchestrator above, minus the peripherals.
 
 At every stage, `sapwood status` (below) tells you what's happening without needing a
 live session, and `/sapwood-stop` is always available to freeze or gently pause the

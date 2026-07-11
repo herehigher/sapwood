@@ -32,6 +32,17 @@ test("engine.tickIntervalSec (#46 loop driver): defaults to 60s, positive-int-gu
   );
 });
 
+test("engine.driver (#106): defaults to \"rounds\", overridable to \"tick\", rejects anything else", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.engine.driver, "rounds");
+  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { driver: tick }");
+  assert.equal(over.engine.driver, "tick");
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { driver: bogus }"),
+    /driver/i,
+  );
+});
+
 test("cost: #14 ceiling fields are finite-guarded and overridable", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\ncost: { dailyBudgetUsd: 5, maxWallClockSec: 60, drainWindowSec: 10 }",

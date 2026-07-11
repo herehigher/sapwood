@@ -53,7 +53,8 @@ class FakeForge implements IForge {
   async getIssueComments(issue: number) { return this.issueComments[issue] ?? []; }
   async createIssue(): Promise<number> { return 0; }
   async listOpenIssueNumbers(): Promise<number[]> { return this.openIssueNumbers; }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
+  planTriageCandidates: Issue[] = [];
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return this.planTriageCandidates; }
 }
 
 class MinimalSupervisor implements Supervisor {
@@ -94,6 +95,37 @@ test("createDefaultPeripherals: every PeripheralPhase key is present and none of
     assert.ok(peripherals[phase], `expected a real stub for ${phase}`);
     assert.notEqual(peripherals[phase], noopPeripheralStub, `${phase} must not be the noop stub`);
   }
+  state.close();
+});
+
+test("createDefaultPeripherals (#109 gate② P2): with round.milestone set, the peripherals' forge is milestone-scoped — plan review and PO triage never touch issues outside the round's milestone", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [
+    { number: 5, title: "in-scope review candidate", labels: [], milestone: "M-X" },
+    { number: 6, title: "out-of-scope review candidate", labels: [] },
+  ];
+  forge.planTriageCandidates = [
+    { number: 7, title: "in-scope triage candidate", labels: [], milestone: "M-X" },
+    { number: 8, title: "out-of-scope triage candidate", labels: [] },
+  ];
+  const cfg = mkCfg({ round: { milestone: "M-X" } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+
+  // Drive the two candidate-consuming stubs directly (round.ts's SEQUENCE order is round.test.ts
+  // territory; the scoping property under test is per-stub).
+  await peripherals.plan_review!.run({ roundId: 1, phase: "plan_review", marker: null });
+  const reviewerCalls = runner.calls.filter((c) => c.roleId === "plan-reviewer");
+  assert.equal(reviewerCalls.length, 1, "exactly one reviewer session — the in-milestone candidate only");
+  assert.match(reviewerCalls[0]!.prompt, /in-scope review candidate/);
+  assert.doesNotMatch(reviewerCalls[0]!.prompt, /out-of-scope/);
+
+  await peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null });
+  const triageCalls = runner.calls.filter((c) => c.roleId === "po-triage");
+  assert.equal(triageCalls.length, 1, "exactly one triage session — the in-milestone candidate only");
+  assert.match(triageCalls[0]!.prompt, /in-scope triage candidate/);
+  assert.doesNotMatch(triageCalls[0]!.prompt, /out-of-scope/);
   state.close();
 });
 
