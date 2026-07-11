@@ -203,6 +203,11 @@ test("createPlanReviewStub: outcome 3 (propose verify:n/a) — engine applies ve
   assert.equal(runner.calls.length, 1); // no drafter, no further reviewer pass
   assert.ok(forge.issueLabels[11]!.includes(cfg.labels.verifyNa));
   assert.ok(forge.issueLabels[11]!.includes(cfg.labels.needsHuman));
+  // ORDERING INVARIANT (dual-review round 1, P1): needsHuman lands BEFORE verifyNa — if the
+  // second addLabel fails after the first succeeded, the surviving label must be the BLOCKING
+  // one (verify:n/a alone is dispatchable via the doc-gate path, i.e. fail-open).
+  const order = forge.labelsAdded.filter(([n]) => n === 11).map(([, l]) => l);
+  assert.deepEqual(order, [cfg.labels.needsHuman, cfg.labels.verifyNa], "needs-human applied first, fail-closed");
   const comment = lastComment(forge, 11);
   assert.ok(comment.includes("Pure docs work"));
   assert.ok(comment.includes(planReviewMarker(1)));

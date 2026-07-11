@@ -66,6 +66,66 @@ test("parseStructuredBlock: empty input -> null", () => {
   assert.equal(parseStructuredBlock(""), null);
 });
 
+// ── sentinel containment (dual-review round 1, P1): silent truncation is impossible ─────────
+
+test("containment P1: a body whose CONTENT embeds <<<END_BODY>>> -> null, never a silently truncated slice", () => {
+  // Realistic: issue #110's own body documents these sentinels. Without the trailing rule the
+  // parse would stop at the embedded sentinel and return "docs say the format uses " — a
+  // truncated body that could still schema-validate and be applied via updateIssueBody.
+  const text =
+    `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\ndocs say the format uses ${BODY_BLOCK_END} as its end marker\n${BODY_BLOCK_END}\n`;
+  assert.equal(parseStructuredBlock(text), null);
+});
+
+test("containment P1: a body embedding <<<BODY>>> -> null (no-embedded-sentinels rule)", () => {
+  const text =
+    `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nthe start marker is ${BODY_BLOCK_START} on its own line\n${BODY_BLOCK_END}\n`;
+  assert.equal(parseStructuredBlock(text), null);
+});
+
+test("containment P1: a body embedding the RESULT sentinels -> null either way (END via the containment rule, START via last-wins relocation failing the parse)", () => {
+  const endEmbedded =
+    `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nmetadata ends at ${RESULT_BLOCK_END}, like so\n${BODY_BLOCK_END}\n`;
+  assert.equal(parseStructuredBlock(endEmbedded), null);
+  const startEmbedded =
+    `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nmetadata starts at ${RESULT_BLOCK_START}, like so\n${BODY_BLOCK_END}\n`;
+  assert.equal(parseStructuredBlock(startEmbedded), null);
+});
+
+test("containment P1: trailing prose after a metadata+BODY block -> null ('Nothing may follow the last sentinel')", () => {
+  const text =
+    `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nthe body\n${BODY_BLOCK_END}\nLet me know if you need anything else!`;
+  assert.equal(parseStructuredBlock(text), null);
+});
+
+test("containment P1: trailing prose after a metadata-ONLY block -> null (END_SAPWOOD_RESULT is the final sentinel then)", () => {
+  const text = `${RESULT_BLOCK_START}\n{"decision":"approve","issue":1}\n${RESULT_BLOCK_END}\nHope that helps.`;
+  assert.equal(parseStructuredBlock(text), null);
+});
+
+test("containment P1: trailing whitespace/newlines after the final sentinel still parse fine", () => {
+  const metadataOnly = `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n\n  \n`;
+  assert.ok(parseStructuredBlock(metadataOnly));
+  const withBody =
+    `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nthe body\n${BODY_BLOCK_END}\n\n\t\n`;
+  const block = parseStructuredBlock(withBody);
+  assert.ok(block);
+  assert.equal(block!.body, "the body");
+});
+
+test("containment P1: prose BETWEEN the metadata block and a later BODY block -> null (a quoted body example after a metadata-only decision is never silently adopted)", () => {
+  const text =
+    `${RESULT_BLOCK_START}\n{"decision":"approve","issue":1}\n${RESULT_BLOCK_END}\n` +
+    `For example, a bounce would have looked like:\n${BODY_BLOCK_START}\nquoted example brief\n${BODY_BLOCK_END}\n`;
+  assert.equal(parseStructuredBlock(text), null);
+});
+
 test("parseStructuredBlock: metadataRaw is trimmed of surrounding whitespace/newlines", () => {
   const text = `${RESULT_BLOCK_START}\n\n  {"issue":1}  \n\n${RESULT_BLOCK_END}`;
   const block = parseStructuredBlock(text);

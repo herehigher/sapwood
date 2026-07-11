@@ -360,8 +360,14 @@ async function reviewOneIssue(
     }
 
     if (decision.decision === "verify_na") {
-      await deps.forge.addLabel(issue.number, l.verifyNa);
+      // ORDERING INVARIANT (dual-review round 1, P1): needsHuman MUST land BEFORE verifyNa.
+      // verify:n/a without needs-human is a DISPATCHABLE state (the doc-gate path) — so if the
+      // second addLabel call fails after the first succeeded, the label the issue is left
+      // holding alone must be the blocking one. needsHuman-first fails closed (issue stuck
+      // non-dispatchable, a human notices); verifyNa-first fails OPEN (the issue dispatches via
+      // the doc-gate path without the human adjudication this whole outcome exists to require).
       await deps.forge.addLabel(issue.number, l.needsHuman);
+      await deps.forge.addLabel(issue.number, l.verifyNa);
       await deps.forge.addIssueComment(issue.number, `${decision.body}\n\n${marker}`);
       return; // outcome 3 (verify:n/a proposal) — a human resolves it
     }
