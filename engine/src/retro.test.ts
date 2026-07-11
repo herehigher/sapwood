@@ -4,6 +4,12 @@
 // branches/PRs only — no direct main/docs writes — asserted against the role's OWN write-scope
 // constants (RETRO_ALLOWED_TOOLS/RETRO_DISALLOWED_TOOLS) and against how createRetroStub wires
 // them into every session it dispatches.
+//
+// #111 PR-A: the digest-ASSEMBLY tests (bounded cap, empty round, event-kind filtering, per-item
+// fetch-failure containment) live in retro-digest.test.ts, next to the module they test — this
+// file keeps its original scope: the peripheral's OWN wiring (marker idempotence, write-scope
+// grants, cadence, prompt-template rendering) with the digest as one more thing that wiring now
+// produces and substitutes in.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -18,7 +24,7 @@ import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import { runRounds, type RoundDeps, type PeripheralPhase, type PeripheralStub } from "./round.js";
 import type { Supervisor, LaneProbe } from "./conductor.js";
-import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
+import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
 
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
@@ -53,6 +59,28 @@ test("RETRO_ALLOWED_TOOLS: grants git + gh pr create (proposal path) — never a
   }
 });
 
+// ── #111 PR-A: live GitHub-browsing grants are gone — the digest replaces them ──────────────
+
+test("RETRO_ALLOWED_TOOLS: no gh READ entries at all (gh pr view/list/diff, gh issue view/list) — the round digest replaces live browsing", () => {
+  for (const removed of ["Bash(gh pr view*)", "Bash(gh pr list*)", "Bash(gh pr diff*)", "Bash(gh issue view*)", "Bash(gh issue list*)"]) {
+    assert.ok(!RETRO_ALLOWED_TOOLS.includes(removed), `allowed tools must no longer grant ${removed}`);
+  }
+  // #111 explicitly keeps this ONE gh write for now (PR-B, a later separate PR, relocates it
+  // engine-side) — asserted here as the one gh entry that DOES survive PR-A's sweep.
+  assert.ok(RETRO_ALLOWED_TOOLS.includes("Bash(gh pr create*)"));
+  const ghEntries = RETRO_ALLOWED_TOOLS.split(",").filter((t) => t.startsWith("Bash(gh "));
+  assert.deepEqual(ghEntries, ["Bash(gh pr create*)"], "the only gh entry left is gh pr create");
+});
+
+test("RETRO_ALLOWED_TOOLS: local git introspection (branch/checkout/add/commit/push/diff/status/log) is unchanged — never GitHub browsing", () => {
+  for (const kept of [
+    "Bash(git branch*)", "Bash(git checkout*)", "Bash(git add*)", "Bash(git commit*)", "Bash(git push*)",
+    "Bash(git diff*)", "Bash(git status*)", "Bash(git log*)",
+  ]) {
+    assert.ok(RETRO_ALLOWED_TOOLS.includes(kept), `allowed tools must still grant ${kept}`);
+  }
+});
+
 test("RETRO_DISALLOWED_TOOLS: explicitly denies merge/review/ready, issue mutation, raw gh api, and a direct push to main/master", () => {
   for (const denied of ["gh pr merge", "gh pr review", "gh pr ready", "gh issue edit", "gh issue comment", "gh api"]) {
     assert.ok(RETRO_DISALLOWED_TOOLS.includes(denied), `disallowed tools must deny ${denied}`);
@@ -68,7 +96,7 @@ test("createRetroStub: every dispatched session carries RETRO_ALLOWED_TOOLS/RETR
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(doneResult("role-retro-1"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner };
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(runner.calls.length, 1);
@@ -83,7 +111,7 @@ test("createRetroStub: every dispatched session carries RETRO_ALLOWED_TOOLS/RETR
 test("createRetroStub: marker present -> returns it unchanged, no session run (idempotence)", async () => {
   const state = new State(":memory:");
   const runner = new ScriptedRunner(doneResult("s1"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner };
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: 3, phase: "retro", marker: "prior-marker" });
   assert.equal(marker, "prior-marker");
@@ -116,7 +144,10 @@ test("createRetroStub: renders the round facts into the prompt and dispatches ex
   state.appendEvent("handoff", { worker: "lane-a", issue: 1 });
   state.appendEvent("drive-needs-human", { worker: "lane-b", issue: 2, pr: 5, reason: "flaky" });
   const runner = new ScriptedRunner(doneResult("role-retro-2"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner, now: () => new Date("2026-07-10T02:00:00.000Z") };
+  const deps: RetroDeps = {
+    state, cfg: mkCfg(), runner, forge: new MinimalForge(),
+    now: () => new Date("2026-07-10T02:00:00.000Z"),
+  };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
 
@@ -129,6 +160,71 @@ test("createRetroStub: renders the round facts into the prompt and dispatches ex
   assert.ok(call.prompt.includes("mid-task): 1")); // handoffs var substituted into its template line
   assert.ok(call.prompt.includes("Gate② rejections this round"));
   assert.equal(state.spentUsdSince("2026-07-10T00:00:00.000Z") >= 0.03, true);
+  // #111 PR-A: the round-scoped digest (PR #5's diff/review data, from THIS round's
+  // drive-needs-human event above) is substituted into `{{round.digest}}` — not left literal.
+  assert.ok(call.prompt.includes("This round's digest"));
+  assert.ok(call.prompt.includes("PR #5"), "the touched PR from the drive-needs-human event appears in the digest");
+  assert.ok(!call.prompt.includes("{{round.digest}}"), "the placeholder itself must be substituted away");
+  state.close();
+});
+
+// ── #111 PR-A: the round-scoped digest reaches the session's prompt via the engine, not a
+// live `gh` browse ───────────────────────────────────────────────────────────────────────────
+
+test("createRetroStub: uses deps.forge to build the digest (PR diff + review data + commit history) — never a live gh call of its own", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("merged", { worker: "lane-a", issue: 7, pr: 42, headOid: "abc" });
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const forge = new MinimalForge();
+  let diffCalledWith: number | undefined;
+  forge.getPRDiff = async (pr: number) => { diffCalledWith = pr; return "diff --git a/x b/x\n+hello"; };
+  let commitsCalledWith: string | undefined;
+  forge.getCommitsSince = async (sinceIso: string) => {
+    commitsCalledWith = sinceIso;
+    return [{ sha: "abc1234def", message: "fix: something", author: "alice", date: "2026-07-10T01:00:00Z" }];
+  };
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge };
+  const stub = createRetroStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.equal(diffCalledWith, 42);
+  assert.equal(commitsCalledWith, round.started_at);
+  const prompt = runner.calls[0]!.prompt;
+  assert.ok(prompt.includes("PR #42"));
+  assert.ok(prompt.includes("hello"));
+  assert.ok(prompt.includes("abc1234"));
+  assert.ok(prompt.includes("fix: something"));
+  state.close();
+});
+
+test("createRetroStub: an empty round (no touched PRs, no escalated issues) still renders a digest — never a literal placeholder or a crash", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const stub = createRetroStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+  const prompt = runner.calls[0]!.prompt;
+  assert.ok(prompt.includes("PRs touched this round (0)"));
+  assert.ok(prompt.includes("Escalated issues this round (0)"));
+  state.close();
+});
+
+test("createRetroStub: roles.retro.digestMaxChars is honored — a tiny cap truncates the digest deterministically inside the rendered prompt", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("merged", { worker: "lane-a", issue: 7, pr: 42, headOid: "abc" });
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const forge = new MinimalForge();
+  forge.getPRDiff = async () => "x".repeat(5000);
+  const cfg = mkCfg({ roles: { retro: { digestMaxChars: 200 } } });
+  const deps: RetroDeps = { state, cfg, runner, forge };
+  const stub = createRetroStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+  const prompt = runner.calls[0]!.prompt;
+  assert.ok(prompt.includes("digest truncated"), "the digest's own truncation marker must appear in the prompt");
+  assert.ok(!prompt.includes("x".repeat(5000)), "the oversize diff content must not survive uncut");
   state.close();
 });
 
@@ -136,7 +232,7 @@ test("createRetroStub: a failed session is retried once — non-done then done m
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(timeoutResult("s1"), doneResult("s2"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner };
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(marker, retroMarker(round.round_id));
@@ -149,7 +245,7 @@ test("createRetroStub: two failed sessions degrade VISIBLY but never wedge the r
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(timeoutResult("s1"), timeoutResult("s2"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner };
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(marker, retroMarker(round.round_id)); // the phase still closes — never wedges the run
@@ -168,7 +264,7 @@ test("createRetroStub: everyNRounds > 1 skips a round whose id isn't a multiple 
   const round2 = state.startRound("2026-07-10T01:00:00.000Z"); // round_id 2
   const runner = new ScriptedRunner(doneResult("s1"));
   const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
-  const deps: RetroDeps = { state, cfg, runner };
+  const deps: RetroDeps = { state, cfg, runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
 
   const r1 = await stub.run({ roundId: round1.round_id, phase: "retro", marker: null });
@@ -187,7 +283,7 @@ test("createRetroStub: everyNRounds > 1 runs on a round whose id IS a multiple o
   const round3 = state.startRound("2026-07-10T03:00:00.000Z"); // round_id 3
   const runner = new ScriptedRunner(doneResult("role-retro-3"));
   const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
-  const deps: RetroDeps = { state, cfg, runner };
+  const deps: RetroDeps = { state, cfg, runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   const { marker } = await stub.run({ roundId: round3.round_id, phase: "retro", marker: null });
   assert.equal(marker, retroMarker(round3.round_id));
@@ -199,7 +295,7 @@ test("createRetroStub: everyNRounds default (1) runs every round, unchanged from
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(doneResult("s1"));
-  const deps: RetroDeps = { state, cfg: mkCfg(), runner };
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
   await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
   assert.equal(runner.calls.length, 1);
@@ -227,7 +323,7 @@ test("createRetroStub: roles.retro.promptFile override is honored (the #74 promp
     const round = state.startRound("2026-07-10T00:00:00.000Z");
     const runner = new ScriptedRunner(doneResult("s1"));
     const cfg = mkCfg({ roles: { retro: { promptFile: promptPath } } });
-    const deps: RetroDeps = { state, cfg, runner };
+    const deps: RetroDeps = { state, cfg, runner, forge: new MinimalForge() };
     const stub = createRetroStub(deps);
     await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
     assert.equal(runner.calls[0]!.prompt, `custom retro prompt: round ${round.round_id} handoffs=0`);
@@ -246,9 +342,17 @@ test("defaultRetroPromptPath: resolves to the shipped prompts/retro.md, which ex
   assert.ok(/not a fix queue|point.fix/i.test(body), "must reject a point-fix-queue response to recurring findings");
   assert.ok(/inputs to judge|evidence to weigh/i.test(body), "must treat findings as evidence to judge");
   assert.ok(/accepted/i.test(body) && /rejected/i.test(body), "must require an accepted/rejected classification with reasons");
-  for (const v of ["{{round.id}}", "{{round.handoffs}}", "{{round.needsHumanEscalations}}", "{{round.ceilingEscalations}}"]) {
+  for (const v of ["{{round.id}}", "{{round.handoffs}}", "{{round.needsHumanEscalations}}", "{{round.ceilingEscalations}}", "{{round.digest}}"]) {
     assert.ok(body.includes(v), `retro.md should reference ${v}`);
   }
+});
+
+test("prompts/retro.md no longer instructs live gh browsing — it points at the engine-built digest instead", () => {
+  const body = readFileSync(defaultRetroPromptPath(), "utf8");
+  for (const removed of ["gh pr view", "gh pr list", "gh issue view", "gh issue list"]) {
+    assert.ok(!body.includes(removed), `retro.md must not instruct ${removed}`);
+  }
+  assert.ok(/digest/i.test(body));
 });
 
 test("prompts/retro.md never instructs a direct merge/approve — the PR-only path is stated as a non-negotiable", () => {
@@ -279,6 +383,8 @@ class MinimalForge implements IForge {
   async getPRReviewData(): Promise<PRReviewData> {
     return { headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false, labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0 };
   }
+  async getPRDiff(): Promise<string> { return ""; }
+  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
   async listMilestoneTitles(): Promise<string[]> { return []; }
   async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
@@ -307,7 +413,7 @@ const baseIntegrationDeps = (state: State, peripherals: Partial<Record<Periphera
 test("runRounds integration: the real retro stub runs during a normal round close and persists a marker", async () => {
   const state = new State(":memory:");
   const runner = new ScriptedRunner(doneResult("role-retro-int"));
-  const retroStub = createRetroStub({ state, cfg: mkCfg(), runner });
+  const retroStub = createRetroStub({ state, cfg: mkCfg(), runner, forge: new MinimalForge() });
   const deps = baseIntegrationDeps(state, { retro: retroStub });
   // Graceful stop mid-round (round.test.ts's pattern): the in-flight round still finishes
   // every phase — retro included — and only the NEXT round is withheld.
@@ -329,7 +435,7 @@ test("runRounds integration: KILL_SWITCH blocks retro entirely — the stub neve
     const state = new State(join(dir, "sapwood.sqlite"));
     writeFileSync(join(dir, "KILL_SWITCH"), "");
     const runner = new ScriptedRunner(doneResult("role-retro-int"));
-    const retroStub = createRetroStub({ state, cfg: mkCfg(), runner });
+    const retroStub = createRetroStub({ state, cfg: mkCfg(), runner, forge: new MinimalForge() });
     const deps = baseIntegrationDeps(state, { retro: retroStub });
     const result = await runRounds(deps);
     assert.equal(result.stoppedBy, "kill-switch");

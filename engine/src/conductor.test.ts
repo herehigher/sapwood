@@ -34,7 +34,7 @@ import {
 } from "./conductor.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
-import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
+import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
 import type { DriveOutcome } from "./merge-driver.js";
 
 // ── tick test doubles (real State, fake forge + supervisor — no claude, no gh) ──
@@ -74,6 +74,8 @@ class FakeForge implements IForge {
       labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
     };
   }
+  async getPRDiff(): Promise<string> { return ""; }
+  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
   async listMilestoneTitles(): Promise<string[]> { return []; }
   async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }

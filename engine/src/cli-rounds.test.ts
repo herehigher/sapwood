@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { runEngine, runDryRun, tickOnlyFlagError, type EngineOverrides } from "./cli.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import { State } from "./state.js";
-import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
+import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
 import type { PeripheralPhase } from "./round.js";
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -67,6 +67,8 @@ class FakeForge implements IForge {
       labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
     };
   }
+  async getPRDiff(): Promise<string> { return ""; }
+  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
   async listMilestoneTitles(): Promise<string[]> { return []; }
   async getIssuesNeedingPlanReview(): Promise<Issue[]> { return this.planReviewCandidates; }

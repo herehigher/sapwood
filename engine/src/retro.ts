@@ -1,10 +1,19 @@
 // retro.ts — implements PeripheralStub for the `retro` phase (#91, #77 decision 6): the
 // self-evolution role. Analyzes the round (bounced plans, review rejections, budget overruns —
-// and whatever else its own reading of the round's GitHub history surfaces) and proposes
-// improvements to prompts/config/docs EXCLUSIVELY as a PR through the normal gate② path — never
-// a direct write. See prompts/retro.md for the CTO + user 2026-07-10 review-findings-philosophy
-// amendment this role's prompt must carry (recurring findings are a design signal, not a fix
-// queue; review findings are evidence to judge, not orders to follow).
+// and whatever else the round's own digest surfaces) and proposes improvements to
+// prompts/config/docs EXCLUSIVELY as a PR through the normal gate② path — never a direct write.
+// See prompts/retro.md for the CTO + user 2026-07-10 review-findings-philosophy amendment this
+// role's prompt must carry (recurring findings are a design signal, not a fix queue; review
+// findings are evidence to judge, not orders to follow).
+//
+// #111 PR-A (read-side hardening): retro no longer browses GitHub live. Its prompt is seeded
+// with an ENGINE-BUILT, round-scoped digest (retro-digest.ts's buildRetroDigest — PR diffs +
+// review signals for every PR the round touched, comments/labels for every escalated issue,
+// commit history since round start), assembled deterministically BEFORE the session runs and
+// substituted in as `{{round.digest}}` (run() below). The `gh pr view/list/diff` and
+// `gh issue view/list` Bash grants that used to let the session fetch this itself are gone
+// (RETRO_ALLOWED_TOOLS, below) — see #111's write-side half (PR-B, not this PR) for the
+// remaining direct forge write (`gh pr create`), still granted here for now.
 //
 // UNLIKE plan-review.ts/harvest.ts's issues-only RoleRunner sessions, retro's job genuinely
 // needs git (branch/commit/push) + `gh pr create` — a strictly wider write scope than
@@ -15,17 +24,27 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PeripheralStub } from "./round.js";
+import type { IForge } from "./forge.js";
 import type { State, RoundRow } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import { runSessionWithRetry, type RoleRunner } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 import { renderFactsTemplate } from "./harvest.js";
+import { buildRetroDigest } from "./retro-digest.js";
 
 /** #91: retro's write scope — the FIRST role in this codebase whose job requires more than
- *  issues-only writes. Grants exactly what "propose via PR, never directly" needs: read-only
- *  git/gh history browsing, file edits inside its own ephemeral worktree, and `gh pr create` —
- *  nothing that mutates an issue (that is harvest's/plan-reviewer's/plan-drafter's scope, never
- *  retro's) and nothing that merges, reviews, or approves anything.
+ *  issues-only writes. Grants exactly what "propose via PR, never directly" needs: LOCAL git
+ *  history/diff/status (its own worktree, never GitHub), file edits inside its own ephemeral
+ *  worktree, and `gh pr create` — nothing that mutates an issue (that is harvest's/
+ *  plan-reviewer's/plan-drafter's scope, never retro's) and nothing that merges, reviews, or
+ *  approves anything.
+ *
+ *  #111 PR-A: the live `gh pr view/list/diff` + `gh issue view/list` GitHub-browsing grants
+ *  are GONE — that read surface is now the engine-built digest (module doc above), never a
+ *  live session Bash call. `git diff/status/log` stay: local repo introspection inside the
+ *  session's own worktree (checking its own uncommitted edits before it commits), not GitHub
+ *  browsing — #111's scope item 1 names the `gh` browsing surface specifically, not local git
+ *  plumbing a role that edits-and-commits routinely needs.
  *
  *  Same best-effort-pattern-layer caveat as every other allow/deny list in this codebase (see
  *  peripheral.ts's enforcement doc on ROLE_ALLOWED_TOOLS): the REAL boundary is the unchanged
@@ -35,8 +54,7 @@ export const RETRO_ALLOWED_TOOLS =
   "Read,Write,Edit,MultiEdit," +
   "Bash(git branch*),Bash(git checkout*),Bash(git add*),Bash(git commit*),Bash(git push*)," +
   "Bash(git diff*),Bash(git status*),Bash(git log*)," +
-  "Bash(gh pr create*),Bash(gh pr view*),Bash(gh pr list*),Bash(gh pr diff*)," +
-  "Bash(gh issue view*),Bash(gh issue list*)";
+  "Bash(gh pr create*)";
 
 /** Direct-write / self-merge / issue-mutation paths retro must never reach — "proposals appear
  *  as branches/PRs only" (#91 acceptance criterion), asserted directly against these strings in
@@ -62,6 +80,10 @@ export const RETRO_DISALLOWED_TOOLS =
   "Bash(gh pr create *--body-file*)";
 
 export interface RetroDeps {
+  /** #111 PR-A: the digest's read surface — every PR-diff/review/issue-comment/label fetch
+   *  the engine makes on retro's behalf now goes through here, never through a live session
+   *  Bash call (see retro-digest.ts's buildRetroDigest, the module doc above). */
+  forge: IForge;
   state: State;
   cfg: SapwoodConfig;
   /** Injected so tests fake the underlying session directly (same "fake the collaborator, not
@@ -82,9 +104,10 @@ export function defaultRetroPromptPath(): string {
 /** The round facts retro's prompt is seeded with — "bounced plans, review rejections, budget
  *  overruns" per #91's scope, sourced from durable `state` (events since round.started_at),
  *  same convention as harvest.ts's gatherRoundFacts. This is a STARTING POINT, never the whole
- *  analysis — the prompt (prompts/retro.md) explicitly instructs the session to go read the
- *  actual PRs/issues/history behind these counts before concluding anything; the numbers alone
- *  can't tell it WHY something recurred or whether it matters. */
+ *  analysis — the prompt (prompts/retro.md) points the session at the round's DIGEST (below,
+ *  `{{round.digest}}` — retro-digest.ts's engine-built PR-diff/review/issue-comment text) for
+ *  the actual detail behind these counts; the numbers alone can't tell it WHY something
+ *  recurred or whether it matters. */
 export interface RetroFacts {
   roundId: number;
   /** Soft-budget graceful handoffs this round — the "budget overruns" signal. */
@@ -93,7 +116,7 @@ export interface RetroFacts {
    *  (`plan-review-escalated`) this round — the "review rejections" signal, now covering both
    *  gates (#104: plan-review.ts's `escalate()` appends the latter alongside its forge label/
    *  comment, closing the gap this doc used to name — only gate② was visible here before). The
-   *  retro prompt is still told to read PR/issue history directly rather than rely solely on
+   *  retro prompt points at the round digest for PR/issue detail rather than relying solely on
    *  this count — the numbers are a starting point, not the whole analysis (see the interface
    *  doc above). */
   needsHumanEscalations: number;
@@ -102,6 +125,10 @@ export interface RetroFacts {
   ceilingEscalations: number;
 }
 
+/** The event kinds retro's own "raw material" comes from (prompts/retro.md: bounced plans,
+ *  review rejections, budget overruns) — backs BOTH gatherRetroFacts's counts (below) and
+ *  retro-digest.ts's per-issue digest detail (buildRetroDigest's `issueEventKinds` param, run()
+ *  below) — one list, not two independently-maintained ones. */
 const RETRO_EVENT_KINDS = ["handoff", "drive-needs-human", "plan-review-escalated", "ceiling-escalated"];
 
 export function gatherRetroFacts(state: State, round: RoundRow): RetroFacts {
@@ -151,8 +178,22 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
       const round = deps.state.getRound(roundId);
       if (!round) return { marker: retroMarker(roundId) }; // defensive; round.ts always supplies a real row
       const facts = gatherRetroFacts(deps.state, round);
+      // #111 PR-A: the engine-built read digest — PR diffs + review signals for every PR the
+      // round touched, comments/labels for every escalated issue, commit history since round
+      // start (retro-digest.ts's IForge.getCommitsSince — a `gh api` read, never a local `git
+      // log` subprocess; see that module's doc for the #69 grep-invariant this respects).
+      // Assembled BEFORE the session runs, bounded by roles.retro.digestMaxChars (a hard cap,
+      // deterministic truncation — retro-digest.ts's capDigest), and substituted into the
+      // prompt below as `{{round.digest}}` — the session's ONLY read surface into this round's
+      // history now (RETRO_ALLOWED_TOOLS above carries no `gh` read grant anymore).
+      const digest = await buildRetroDigest(
+        { forge: deps.forge, state: deps.state },
+        round,
+        deps.cfg.roles.retro.digestMaxChars,
+        RETRO_EVENT_KINDS,
+      );
       const template = loadRolePromptTemplate(deps.cfg.roles.retro.promptFile, defaultRetroPromptPath());
-      const rendered = renderFactsTemplate(template, factVars(facts));
+      const rendered = renderFactsTemplate(template, { ...factVars(facts), "round.digest": digest });
       const role = deps.cfg.roles.retro;
       // Same outcome-check-and-retry as harvest.ts (gate② P2 on the sibling #100/#101 PRs:
       // RoleRunner.run never throws on the session's own outcome, so an unchecked failed/

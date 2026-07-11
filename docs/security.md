@@ -87,10 +87,22 @@ closed bypass class.
 **`retro` is the one exception**, by session class rather than role name: it is
 worker-class, with `Read`/git + `gh pr create` (proposals land exclusively as PRs
 through the normal review gate, never a direct write) — the same broader trust level a
-code-producing worker gets, because its job (reading round history, editing prompts/
-docs/config) genuinely needs it. Its own hardening (beyond the dangerous verbs
-`guard.ts` already blocks category-C, and `gh issue *` already denied wholesale) is
-tracked separately in #111.
+code-producing worker gets, because its job (editing prompts/docs/config from round
+history) genuinely needs it. Its own hardening is tracked in #111, split 5a/5b:
+
+- **PR-A (read side, shipped):** retro no longer browses GitHub live. `gh pr view/
+  list/diff` and `gh issue view/list` are gone from its allowedTools; instead the
+  engine builds a round-scoped digest (PR diffs + review signals for every PR the
+  round touched, comments/labels for every escalated issue, commit history since
+  round start) *before* the session runs, bounded by a hard, deterministically-
+  truncated character cap (`roles.retro.digestMaxChars`), and substitutes it into the
+  prompt. See [`configuration.md`](configuration.md#roles) for the config key and
+  `engine/src/retro-digest.ts` for the assembly. The dangerous verbs `guard.ts`
+  already blocks category-C, and `gh issue *` being denied wholesale, are unchanged.
+- **PR-B (write side, not yet shipped):** `gh pr create` moves engine-side — the
+  session writes its intended title/body to a fixed scratch path, and the engine
+  verifies a real push happened before calling `forge.openPR()` itself. Until PR-B
+  lands, `gh pr create` remains retro's one direct forge write.
 
 ## Human-merge-only paths
 

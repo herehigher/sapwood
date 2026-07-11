@@ -264,6 +264,17 @@ const Roles = z.object({
     // multiple of N, still setting the phase marker (never wedges the round). Positive int
     // only, same rationale as roles.planReviewer.maxDraftCycles above (0 has no sane meaning).
     everyNRounds: z.number().int().positive().default(1),
+    // #111 PR-A: the hard cap on the engine-built round-scoped read digest (retro-digest.ts's
+    // buildRetroDigest) substituted into the prompt as `{{round.digest}}` — the user-tunable
+    // knob this repo's convention requires for any size/cost bound (see #110's adjudication:
+    // "user-adjustable values go in shipped config, never hardcoded"). 60,000 chars (~15k
+    // tokens) comfortably covers a handful of PR diffs + review threads + issue comments for a
+    // normal-sized round while keeping the digest a bounded, predictable addition to the
+    // retro prompt's own context cost; a much larger/longer-running round is deterministically
+    // TRUNCATED (never silently dropped — retro-digest.ts's capDigest marks the cut in the
+    // digest text itself) rather than growing the prompt unboundedly. Positive int only — 0
+    // would produce an empty, useless digest.
+    digestMaxChars: z.number().int().positive().default(60_000),
   }).strict().default({}),
 }).strict();
 

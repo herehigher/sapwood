@@ -184,10 +184,22 @@ silent no-op, never a wedged round. `retro` is the one exception: a worker-class
 session with `Read` + git + `gh pr create` (proposals land exclusively as PRs, never a
 direct write) — see [`security.md`](security.md) for the full model.
 
+**`retro` reads a round-scoped digest, not live GitHub browsing (#111 PR-A).** Its
+prompt is seeded with an engine-built digest — PR diffs + review signals for every PR
+the round touched, comments/labels for every escalated issue, and the round's commit
+history — assembled deterministically before the session runs and substituted in as
+`{{round.digest}}`. The `gh pr view/list/diff` and `gh issue view/list` Bash grants
+that used to let the session fetch this itself are gone; `retro` keeps only local git
+(branch/checkout/add/commit/push/diff/status/log, for its own worktree) and, for now,
+`gh pr create` (the write-side relocation is a separate, later PR).
+
 | Key | Default | Meaning |
 |---|---|---|
 | `planReviewer.promptFile` | unset | Override the gate⓪ plan-reviewer's prompt (same `#74` pattern as `worker.promptFile`: a relative path resolves against the config file's own directory, not the CLI's cwd). Unset uses the engine's shipped `prompts/plan-reviewer.md`. |
 | `planReviewer.maxDraftCycles` | `2` | gate⓪ self-heal bound (#77 Amendment 2): max draft→re-review cycles per issue when the reviewer requests a plan draft (a scoped, issues-only drafting session — never a worker lane, never an implementation). Exhausted → the loop applies `needs-human` with the attempt trail. Positive integer only — `0` would turn every draft request into an instant `needs-human`. |
+| `retro.promptFile` | unset | Override the retro/self-evolution peripheral's prompt (same `#74` pattern). Unset uses the engine's shipped `prompts/retro.md`. |
+| `retro.everyNRounds` | `1` | Retro cadence (#104): `1` runs every round; `N > 1` skips every round whose id isn't a multiple of `N` (the phase still closes, marker still set — never wedges the round). |
+| `retro.digestMaxChars` | `60000` | Hard cap, in characters, on the engine-built round-scoped read digest (#111 PR-A) substituted into retro's prompt as `{{round.digest}}` — PR diffs + review signals for every PR the round touched, comments/labels for every escalated issue, and the round's commit history. Oversize digests are truncated **deterministically** (same prefix every time for the same content+cap) and the cut is marked in the digest text itself, never silently dropped. |
 
 ## `guard`
 
