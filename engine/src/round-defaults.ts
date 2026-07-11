@@ -39,13 +39,14 @@ export interface DefaultPeripheralsDeps {
  *  each stub reads them off `deps.cfg` itself; this factory adds no config surface of its own.
  *
  *  Feeds the architect stub `alignedGoals` from the aligning phase's own output WHERE
- *  AVAILABLE (#104 scope item 1): the PO/aligning session has no structured return channel
- *  (peripheral.ts's module doc — its output is GitHub side effects, not text this process gets
- *  back), so "available" means a short, deterministic, traceable note — never fabricated
- *  analysis — set once THIS round's aligning phase has actually run, immediately before
- *  architecting runs next in round.ts's own SEQUENCE. Before that (the very first phase, or a
- *  caller that never wires aligning at all), the architect stub falls back to its own built-in
- *  "not available" placeholder, unchanged. */
+ *  AVAILABLE (#104 scope item 1): this factory threads through only a short, deterministic,
+ *  traceable note — never fabricated analysis — set once THIS round's aligning phase has
+ *  actually run, immediately before architecting runs next in round.ts's own SEQUENCE. (#110
+ *  PR2: align.ts's session DOES now emit structured output, but wiring the actual per-issue
+ *  decomposition detail through to the architect is out of scope for this factory — the note
+ *  still points at GitHub for the real detail.) Before the note is set (the very first phase,
+ *  or a caller that never wires aligning at all), the architect stub falls back to its own
+ *  built-in "not available" placeholder, unchanged. */
 export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<Record<PeripheralPhase, PeripheralStub>> {
   // #109 gate② P2: scope the PERIPHERALS' forge to cfg.round.milestone, exactly like runRounds
   // scopes its own tick forge (round.ts:runRounds wraps deps.forge independently — that wrap
@@ -82,7 +83,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         architectDeps.alignedGoals =
           `This round's PO/goal-alignment peripheral has run (round ${ctx.roundId}, marker ` +
           `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
-          `actual decomposition (the session has no structured text return channel).`;
+          `actual decomposition (this factory doesn't thread per-issue detail through).`;
         return result;
       },
     },

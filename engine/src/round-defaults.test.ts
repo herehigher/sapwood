@@ -73,12 +73,15 @@ class MinimalSupervisor implements Supervisor {
  *  `runner`, exactly like a real caller would (peripheral.ts's module doc: RoleRunner is the
  *  single spawn/sentinel/cost-parse implementation every role reuses).
  *
- *  #110 PR1: a "plan-reviewer" call no longer converges via a direct forge side effect (role
- *  sessions don't touch `gh` anymore) — it must emit a structured-output "approve" decision for
- *  the engine to act on. The issue number is recovered from the rendered prompt (both shipped
- *  gate⓪ prompts render "Number: #<n>" verbatim), and the decision carries its OWN BODY with a
- *  verification section so it validates regardless of whatever FakeForge.getIssueBody's stub
- *  (always "") would otherwise fail the content-invariant check on. */
+ *  #110 PR1/PR2: role sessions don't touch `gh` anymore — each must emit valid structured
+ *  output for the engine to act on, or the engine's own isValid-driven retry doubles the call
+ *  count (breaking this file's exact-call-count assertions). "plan-reviewer" emits a
+ *  structured-output "approve" decision; "po-triage" emits a structured-output body revision.
+ *  Issue numbers are recovered from the rendered prompt (every shipped issues-only role prompt
+ *  renders "Number: #<n>" verbatim), and both carry their OWN BODY with a verification section
+ *  so they validate regardless of whatever FakeForge.getIssueBody's stub (always "") would
+ *  otherwise fail the content-invariant check on. "po-align" emits a valid empty declaration
+ *  (no issues to create) — this file's scoping/wiring properties don't exercise creation. */
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
   constructor(private readonly forge: FakeForge, private readonly cfg: SapwoodConfig) {}
@@ -90,6 +93,18 @@ class ScriptedRunner {
       const resultText =
         `${RESULT_BLOCK_START}\n${JSON.stringify({ decision: "approve", issue })}\n${RESULT_BLOCK_END}\n` +
         `${BODY_BLOCK_START}\nApproved by the scripted test reviewer.\n\n## Verification\n\nStubbed.\n${BODY_BLOCK_END}`;
+      return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
+    }
+    if (opts.roleId === "po-triage") {
+      const m = /Number: #(\d+)/.exec(opts.prompt);
+      const issue = m ? Number(m[1]) : 0;
+      const resultText =
+        `${RESULT_BLOCK_START}\n${JSON.stringify({ issue })}\n${RESULT_BLOCK_END}\n` +
+        `${BODY_BLOCK_START}\nDrafted by the scripted test triage session.\n\n## Verification\n\nStubbed.\n${BODY_BLOCK_END}`;
+      return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
+    }
+    if (opts.roleId === "po-align") {
+      const resultText = `${RESULT_BLOCK_START}\n${JSON.stringify({ issues: [] })}\n${RESULT_BLOCK_END}`;
       return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
     }
     return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1` };
