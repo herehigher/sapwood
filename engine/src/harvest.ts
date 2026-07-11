@@ -207,7 +207,13 @@ function describeZodError(error: z.ZodError): string {
  *  (module doc). Every returned issue number is checked against that set; ANY number outside it
  *  fails the WHOLE batch closed — never partially honored — the same all-or-nothing posture
  *  validateReviewerOutput/validateDrafterOutput take for a schema/content failure. An empty
- *  `comments` array is valid (harvest.md: nothing to brief -> emit nothing and stop). */
+ *  `comments` array is valid (harvest.md: nothing to brief -> emit nothing and stop).
+ *
+ *  Duplicate issue numbers are rejected outright (Codex review round 1, P1): the contract is ONE
+ *  comment per needs-human issue, so a batch briefing the same issue twice is ambiguous by
+ *  construction — honoring it would post duplicate comments; picking one silently would be the
+ *  engine editorializing over unvalidated intent. Fail the WHOLE batch closed instead, same
+ *  doctrine as the out-of-set case above. */
 export function validateHarvestOutput(text: string, needsHumanIssues: number[]): HarvestValidation {
   const block = parseStructuredBlock(text);
   if (!block) return { ok: false, reason: "no structured output block found (missing or truncated sentinel)" };
@@ -233,6 +239,10 @@ export function validateHarvestOutput(text: string, needsHumanIssues: number[]):
     if (c.body.trim() === "") {
       return { ok: false, reason: `comment for issue #${c.issue} has an empty body` };
     }
+  }
+  const targets = parsed.data.comments.map((c) => c.issue);
+  if (new Set(targets).size !== targets.length) {
+    return { ok: false, reason: "duplicate issue in comments — one comment per needs-human issue, never two" };
   }
   return { ok: true, comments: parsed.data.comments };
 }

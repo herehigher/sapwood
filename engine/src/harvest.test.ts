@@ -326,6 +326,15 @@ test("validateHarvestOutput: an issue number outside the pre-computed needs-huma
   if (!result.ok) assert.ok(/#99/.test(result.reason) && /outside this round's needs-human set/.test(result.reason));
 });
 
+test("validateHarvestOutput: duplicate issue numbers in the batch -> fail-closed, WHOLE batch rejected (Codex round 1 P1: one comment per needs-human issue, never two)", () => {
+  const text = sapwoodResult({
+    comments: [{ issue: 42, body: "first" }, { issue: 42, body: "second, same target" }],
+  });
+  const result = validateHarvestOutput(text, [42]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.ok(/duplicate issue/.test(result.reason));
+});
+
 test("validateHarvestOutput: an empty-body comment -> fail-closed", () => {
   const result = validateHarvestOutput(sapwoodResult({ comments: [{ issue: 42, body: "   " }] }), [42]);
   assert.equal(result.ok, false);
@@ -383,6 +392,26 @@ test("createHarvestStub #110: an out-of-set issue number TWICE -> degrades fail-
   const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["harvest-degraded"]);
   assert.equal(degraded.length, 1);
   assert.deepEqual(forge.comments, []); // the WHOLE batch is rejected — #42 doesn't get a free pass
+  state.close();
+});
+
+test("createHarvestStub #110: duplicate issue numbers TWICE -> degrades fail-closed (harvest-degraded event), nothing posted for the duplicated issue", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 42, pr: 7, reason: "x" });
+  const duplicated = sapwoodResult({
+    comments: [{ issue: 42, body: "first" }, { issue: 42, body: "second, same target" }],
+  });
+  const runner = new ScriptedRunner(doneResult("s1", duplicated), doneResult("s1-retry", duplicated));
+  const forge = new MinimalForge();
+  const deps: HarvestDeps = { forge, state, cfg: mkCfg(), runner };
+  const stub = createHarvestStub(deps);
+  const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
+  assert.equal(marker, harvestMarker(round.round_id)); // the phase still closes — never a wedged round
+  assert.equal(runner.calls.length, 2); // exactly one retry
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["harvest-degraded"]);
+  assert.equal(degraded.length, 1);
+  assert.deepEqual(forge.comments, []); // ambiguous batch -> zero comments, never "post one of them"
   state.close();
 });
 
