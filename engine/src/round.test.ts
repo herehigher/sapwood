@@ -43,6 +43,7 @@ class FakeForge implements IForge {
   }
   async getPRDiff(): Promise<string> { return ""; }
   async getCommitsSince(): Promise<CommitInfo[]> { return []; }
+  async branchExists(): Promise<boolean> { return false; }
   async countOpenIssuesInMilestone(milestone: string): Promise<number> {
     this.milestoneQueries.push(milestone);
     return this.milestoneOpenCounts.length > 1 ? this.milestoneOpenCounts.shift()! : this.milestoneOpenCounts[0]!;

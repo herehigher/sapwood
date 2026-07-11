@@ -57,6 +57,7 @@ class FakeForge implements IForge {
     return this.diffs.get(pr) ?? "";
   }
   async getCommitsSince(): Promise<CommitInfo[]> { return this.commits; }
+  async branchExists(): Promise<boolean> { return false; }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
   async listMilestoneTitles(): Promise<string[]> { return []; }
   async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }

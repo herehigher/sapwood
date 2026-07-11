@@ -85,24 +85,34 @@ identical, as a regression trip-wire: a future PR that re-widens the allow-list 
 closed bypass class.
 
 **`retro` is the one exception**, by session class rather than role name: it is
-worker-class, with `Read`/git + `gh pr create` (proposals land exclusively as PRs
-through the normal review gate, never a direct write) — the same broader trust level a
-code-producing worker gets, because its job (editing prompts/docs/config from round
-history) genuinely needs it. Its own hardening is tracked in #111, split 5a/5b:
+worker-class, with `Read` + local git only — file edits, commit, and push inside its
+own ephemeral worktree (proposals land exclusively as PRs through the normal review
+gate, never a direct write) — the same broader trust level a code-producing worker
+gets, because its job (editing prompts/docs/config from round history) genuinely needs
+it. Its `gh` surface, however, is now **zero** — no `gh` entry of any kind remains in
+its allowedTools (#111, shipped in two halves):
 
-- **PR-A (read side, shipped):** retro no longer browses GitHub live. `gh pr view/
-  list/diff` and `gh issue view/list` are gone from its allowedTools; instead the
-  engine builds a round-scoped digest (PR diffs + review signals for every PR the
-  round touched, comments/labels for every escalated issue, commit history since
+- **Read side (#111 PR-A):** retro never browses GitHub live. Instead the engine
+  builds a round-scoped digest (PR descriptions + diffs + review signals for every PR
+  the round touched, comments/labels for every escalated issue, commit history since
   round start) *before* the session runs, bounded by a hard, deterministically-
   truncated character cap (`roles.retro.digestMaxChars`), and substitutes it into the
   prompt. See [`configuration.md`](configuration.md#roles) for the config key and
-  `engine/src/retro-digest.ts` for the assembly. The dangerous verbs `guard.ts`
-  already blocks category-C, and `gh issue *` being denied wholesale, are unchanged.
-- **PR-B (write side, not yet shipped):** `gh pr create` moves engine-side — the
-  session writes its intended title/body to a fixed scratch path, and the engine
-  verifies a real push happened before calling `forge.openPR()` itself. Until PR-B
-  lands, `gh pr create` remains retro's one direct forge write.
+  `engine/src/retro-digest.ts` for the assembly.
+- **Write side (#111 PR-B):** PR creation originates in engine TypeScript, never in
+  the session. The session's job ends at commit+push: it writes its intended PR
+  (branch/title/body — or an explicit `none` for a quiet round) to a fixed scratch
+  path in its worktree (`.sapwood-retro-pr`; the engine chooses the path). Post-
+  session the engine parses that file fail-closed, **verifies the claimed branch
+  actually exists on the forge** (an engine-side `gh api` read — a session claim is
+  never trusted as evidence of a push), and only then calls `forge.openPR()` itself.
+  Partial failures degrade visibly and durably (`retro-pr-degraded` event; a pushed
+  branch whose `openPR` failed is preserved evidence for a human), never a silent
+  no-op and never a wedged round.
+
+The dangerous verbs `guard.ts` already blocks category-C are unchanged, and retro's
+old `gh` deny patterns are kept byte-identical as regression trip-wires — the same
+stance the issues-only roles took after #110.
 
 ## Human-merge-only paths
 

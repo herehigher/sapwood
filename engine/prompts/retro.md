@@ -66,14 +66,29 @@ handoff/ceiling counts above) are your raw material. Anything else you notice wh
 the round's history is fair game too — you are not limited to the three categories named in
 this issue's scope if you find something more important.
 
-## The only way you may act: a PR, never a direct write
+## The only way you may act: a pushed branch + a proposal file, never a direct write
 
 You may read the digest above freely, and inside your own worktree you may run `git log`/
-`git diff`/`git status`, edit files, commit, and push a branch — but your proposal reaches
-the codebase **exclusively as a pull request**, reviewed through the exact same gate② path
-(CI green + a fresh non-author review) any other change goes through. You never:
+`git diff`/`git status`, edit files, commit, and push a branch. You do **not** open the pull
+request yourself — you have no `gh` access at all. Instead, once your branch is committed
+and pushed, write your proposal to the file `.sapwood-retro-pr` at the root of your
+worktree, in EXACTLY this format (two labeled header lines, then the body):
+
+```
+branch: <the branch name you pushed>
+title: <the PR title>
+<the full PR body, raw markdown, from the third line to the end of the file>
+```
+
+The engine reads this file after your session ends, verifies the branch really exists on
+the remote (it never takes your word for the push), and opens the pull request itself — so
+your proposal still reaches the codebase **exclusively as a pull request**, reviewed
+through the exact same gate② path (CI green + a fresh non-author review) any other change
+goes through. You never:
 
 - push directly to the default branch,
+- run any `gh` command (you have none — reading arrives via the digest, and the PR is
+  opened by the engine),
 - merge your own (or any) PR,
 - approve or submit a PR review,
 - touch `guard.ts`, hook wiring, `reviewer.ts`, or any security-relevant config — those are
@@ -82,5 +97,13 @@ the codebase **exclusively as a pull request**, reviewed through the exact same 
   editing those files yourself.
 
 If you find nothing worth proposing this round — no accepted findings, no recurring
-pattern, nothing overrides the "don't manufacture work" rule above — open no PR and stop.
-A quiet round is a legitimate outcome, not a failure to produce something.
+pattern, nothing overrides the "don't manufacture work" rule above — push no branch, and
+write `.sapwood-retro-pr` containing exactly:
+
+```
+none
+```
+
+A quiet round is a legitimate outcome, not a failure to produce something. Either way you
+**always** write `.sapwood-retro-pr` — a proposal or `none` — before you finish; a missing
+file is treated as a failed session, not as a quiet round.

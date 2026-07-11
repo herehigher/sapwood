@@ -92,6 +92,16 @@ export interface RoleSessionOpts {
    *  ROLE_DISALLOWED_TOOLS. Deny rules take precedence over allows in Claude Code, so this
    *  only ever narrows the base allow scope, never widens it. */
   disallowedTools?: string;
+  /** #111 PR-B: an ENGINE-CHOSEN relative path inside the session's ephemeral worktree, read
+   *  by the runner RIGHT BEFORE the worktree's unconditional deletion and returned as
+   *  RoleSessionResult.scratchText. This is the return channel for a role whose deliverable is
+   *  too session-lifecycle-coupled for the final-message structured block (retro writes its PR
+   *  proposal to this file mid-session, after its git push — a file survives a truncated
+   *  stream/context cutoff that would lose the final message, and a raw file has no
+   *  embedded-sentinel collision surface for a body that documents this very codebase). The
+   *  path is fixed BY THE CALLER (retro.ts's RETRO_SCRATCH_FILE), never by the session — the
+   *  engine decides where it looks; the session can only decide what the file says. */
+  scratchFile?: string;
 }
 
 export interface RoleSessionResult {
@@ -110,6 +120,12 @@ export interface RoleSessionResult {
    *  updating every literal they construct. A caller that DOES need it reads `?? ""`, the same
    *  empty-string-not-undefined convention parseResultText itself already guarantees. */
   resultText?: string;
+  /** #111 PR-B: the raw content of RoleSessionOpts.scratchFile, read from the session's
+   *  worktree immediately BEFORE its unconditional deletion. undefined when no scratchFile was
+   *  requested OR the file was absent/unreadable — the caller's validator decides what a
+   *  missing file means (retro.ts treats it as an invalid attempt: fail closed, retry once,
+   *  then the degrade path — never a silently skipped deliverable). */
+  scratchText?: string;
 }
 
 export interface RoleRunnerDeps {
@@ -246,12 +262,25 @@ export class RoleRunner {
     });
     this.removeIfExists(this.path(name, "running.json"));
 
+    // #111 PR-B: read the caller-requested scratch file BEFORE the worktree deletion below —
+    // the deliverable would otherwise be destroyed with the worktree. Absent/unreadable reads
+    // as undefined (never a throw): the caller's own validator owns deciding what that means.
+    let scratchText: string | undefined;
+    if (opts.scratchFile !== undefined) {
+      try { scratchText = readFileSync(join(this.worktreeRoot, name, opts.scratchFile), "utf8"); } catch { /* absent */ }
+    }
+
     // Always delete the worktree — see the module doc: a role session never writes code
     // (allowedTools scoping + the unchanged guard hook both block it), so unlike worker.ts's
-    // dirty-vs-clean retention there is no WIP that could ever need preserving here.
+    // dirty-vs-clean retention there is no WIP that could ever need preserving here. Retro's
+    // one worktree deliverable (the scratch file) was already captured above; its actual code
+    // proposal lives on its PUSHED BRANCH, never in the worktree.
     try { rmSync(join(this.worktreeRoot, name), { recursive: true, force: true }); } catch { /* best-effort */ }
 
-    return { outcome, costUsd, modelUsage, exitCode, name, resultText };
+    return {
+      outcome, costUsd, modelUsage, exitCode, name, resultText,
+      ...(scratchText !== undefined ? { scratchText } : {}),
+    };
   }
 
   private async killTree(session: SpawnedSession): Promise<void> {

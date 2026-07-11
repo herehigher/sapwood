@@ -381,6 +381,58 @@ exit 0
   }
 });
 
+// ── #111 PR-B: the scratch-file return channel — read BEFORE the worktree's deletion ────────
+
+test("run: scratchFile is read from the session's worktree before deletion — scratchText carries its raw content, worktree still deleted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const worktreeRoot = join(dir, "worktrees");
+    mkdirSync(worktreeRoot, { recursive: true });
+    // Stub session: writes the scratch file into its own worktree (same --worktree discovery
+    // as the deletion test above), exactly like retro's real session would after its push.
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+prev=""
+wt=""
+for a in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$a"; fi
+  prev="$a"
+done
+mkdir -p "${worktreeRoot}/$wt"
+printf 'branch: retro/x\\ntitle: t\\n\\nbody line\\n' > "${worktreeRoot}/$wt/.sapwood-retro-pr"
+echo '{"type":"result","total_cost_usd":0}'
+exit 0
+`,
+    );
+    const runner = new RoleRunner({
+      cfg, stateDir: dir, worktreeRoot, claudeBin: bin, heartbeatMs: 50, guardHookPath: mkHook(dir),
+    });
+    const result = await runner.run({
+      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium", scratchFile: ".sapwood-retro-pr",
+    });
+    assert.equal(result.scratchText, "branch: retro/x\ntitle: t\n\nbody line\n");
+    assert.ok(!existsSync(join(worktreeRoot, result.name)), "worktree still deleted after the scratch read");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: scratchFile requested but the session never wrote it — scratchText is undefined, never a throw", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB); // writes no worktree file at all
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({
+      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium", scratchFile: ".sapwood-retro-pr",
+    });
+    assert.equal(result.outcome, "done");
+    assert.equal(result.scratchText, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: spend baseline — costUsd is 0 when the stub emits no result line", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
