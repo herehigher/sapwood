@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runEngine, type EngineOverrides } from "./cli.js";
+import { runEngine, runDryRun, tickOnlyFlagError, type EngineOverrides } from "./cli.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import { State } from "./state.js";
 import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
@@ -152,6 +152,85 @@ test("sapwood run (default driver): KILL_SWITCH blocks every peripheral AND disp
     assert.ok(!existsSync(roleDir) || readdirSync(roleDir).length === 0, "no role session ever ran");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── gate② P2 (#106 review): tick-only flags FAIL FAST under rounds, never silently ignored ──
+
+test("tickOnlyFlagError: --once/--until-idle produce an actionable error; --dry-run and plain runs do not", () => {
+  assert.equal(tickOnlyFlagError(["node", "sapwood", "run"]), null);
+  assert.equal(tickOnlyFlagError(["node", "sapwood", "run", "--dry-run"]), null);
+  assert.match(tickOnlyFlagError(["node", "sapwood", "run", "--once"])!, /--once only apply to the tick driver/);
+  assert.match(tickOnlyFlagError(["node", "sapwood", "run", "--once"])!, /engine\.driver: tick/);
+  assert.match(tickOnlyFlagError(["node", "sapwood", "run", "--once"])!, /--stop-after-issues/);
+  assert.match(tickOnlyFlagError(["node", "sapwood", "run", "--until-idle"])!, /--until-idle only apply/);
+  assert.match(
+    tickOnlyFlagError(["node", "sapwood", "run", "--once", "--until-idle"])!,
+    /--once\/--until-idle only apply/,
+  );
+});
+
+/** Capture what runEngine writes to process.stderr for the duration of `fn`. */
+async function captureStderr(fn: () => Promise<number>): Promise<{ code: number; stderr: string }> {
+  const original = process.stderr.write.bind(process.stderr);
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    stderr += chunk.toString();
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const code = await fn();
+    return { code, stderr };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+for (const flag of ["--once", "--until-idle"] as const) {
+  test(`sapwood run ${flag} under the rounds default: fails fast with an actionable error — exit 1, ZERO dispatch (no round opened, no role session, no forge call)`, async () => {
+    const state = new State(":memory:");
+    const forge = new FakeForge();
+    let forgeTouched = false;
+    // Any forge access at all means dispatch machinery started — fail-fast must precede it.
+    const trackingForge = new Proxy(forge, {
+      get(target, prop, receiver) {
+        forgeTouched = true;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const cfg = mkCfg(); // engine.driver defaults to "rounds"
+
+    const { code, stderr } = await captureStderr(() =>
+      runEngine(["node", "sapwood", "run", flag], { cfg, forge: trackingForge, state }),
+    );
+
+    assert.equal(code, 1);
+    assert.match(stderr, /only apply to the tick driver/);
+    assert.match(stderr, /engine\.driver: tick/, "the error names the escape hatch");
+    assert.match(stderr, /--stop-after-issues/, "the error names the rounds-compatible bounding flags");
+    assert.equal(state.getRound(1), undefined, "no round was ever opened");
+    assert.equal(forgeTouched, false, "no forge collaborator was ever constructed/called — zero dispatch");
+    state.close();
+  });
+}
+
+test("sapwood run --dry-run stays driver-agnostic: the preview path works with the rounds default and dispatches nothing", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg(); // engine.driver defaults to "rounds"
+  // main() routes --dry-run to runDryRun BEFORE runEngine (so tickOnlyFlagError never sees it);
+  // this drives that exact production function with the rounds-default config.
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  let stdout = "";
+  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+    stdout += chunk.toString();
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    const code = await runDryRun({ cfg, forge });
+    assert.equal(code, 0);
+    assert.match(stdout, /no worker dispatched, no state written/);
+  } finally {
+    process.stdout.write = originalWrite;
   }
 });
 

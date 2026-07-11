@@ -71,9 +71,12 @@ reachable as an explicit escape hatch.
 Flags:
   --once         Tick driver only (engine.driver: tick): run exactly one tick, then exit
                  (exit 1 if the tick attempt failed). No equivalent under the round
-                 orchestrator, which has no notion of a single tick; ignored there.
+                 orchestrator, which has no notion of a single tick — passing it under
+                 engine.driver: rounds is an ERROR (exit 1, before any dispatch), never
+                 silently ignored.
   --until-idle   Tick driver only: keep ticking until no lanes are in flight and nothing
-                 dispatches, then exit. Ignored under the round orchestrator.
+                 dispatches, then exit. Same as --once: an ERROR under the round
+                 orchestrator, never silently ignored.
   --dry-run      Resolve config, list the ready issues that WOULD be dispatched this round
                  and a cost preview (per-worker soft budget x candidate count, daily
                  ceiling), then exit. Never spawns a worker or writes state — the
@@ -253,14 +256,18 @@ export function formatDryRunPreview(preview: DryRunPreview): string {
   return lines.join("\n") + "\n";
 }
 
-async function runDryRun(): Promise<number> {
-  const cfg = loadConfig();
+/** #106 (gate② P2): exported with an injection seam (same EngineOverrides fields runEngine
+ *  takes) so a test can prove --dry-run keeps working under the new rounds DEFAULT — main()
+ *  routes --dry-run here BEFORE runEngine ever runs, so the preview is driver-agnostic by
+ *  construction, and this stays the one place that must never gain a driver dependency. */
+export async function runDryRun(overrides: Pick<EngineOverrides, "cfg" | "forge"> = {}): Promise<number> {
+  const cfg = overrides.cfg ?? loadConfig();
   // Same fail-fast the real run does (#74): a broken worker.promptFile must surface in the
   // preview too — dry-run exists to predict the real run, not to green-light a config the
   // real run would reject at startup. Renderer is discarded; only validation matters here.
   buildRenderPrompt(cfg);
   loadPricingTable(cfg); // #33 follow-up: a broken worker.pricingFile surfaces here too
-  const forge = new GithubForge(cfg);
+  const forge = overrides.forge ?? new GithubForge(cfg);
   const preview = computeDryRunPreview(await forge.getReadyIssues(), cfg);
   process.stdout.write(formatDryRunPreview(preview));
   return 0;
@@ -688,6 +695,24 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   return roundsExitCode(result);
 }
 
+/** #106 (gate② P2): the tick-only flags a rounds run must REJECT, not silently ignore. A user
+ *  following the documented trust ramp who types `sapwood run --once` expects a single bounded
+ *  tick; under the rounds default that flag has no meaning (a round has no single-tick concept),
+ *  and silently starting a long-running round loop instead would invert the run-duration
+ *  semantics the flag exists to bound. Returns the actionable error message, or null when no
+ *  tick-only flag is present (--dry-run is NOT tick-only — main() routes it to runDryRun before
+ *  any driver runs, so it stays driver-agnostic). Pure + exported for testing, same split as
+ *  parseRunStopMode/runExitCode. */
+export function tickOnlyFlagError(argv: string[]): string | null {
+  const present = ["--once", "--until-idle"].filter((f) => argv.includes(f));
+  if (present.length === 0) return null;
+  return (
+    `sapwood run: ${present.join("/")} only apply to the tick driver — set \`engine.driver: tick\` ` +
+    `in config, or drop the flag (rounds runs have no single-tick concept; use ` +
+    `--stop-after-issues/--stop-after-prs/--stop-on-milestone to bound a rounds run)`
+  );
+}
+
 /** #106: `sapwood run`'s engine dispatcher — resolves config once, then routes to the round
  *  orchestrator (default, `cfg.engine.driver: "rounds"`) or the M4 tick-driver escape hatch
  *  (`cfg.engine.driver: "tick"`). `overrides` is production-empty (see EngineOverrides doc);
@@ -696,6 +721,14 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
 export async function runEngine(argv: string[], overrides: EngineOverrides = {}): Promise<number> {
   const cfg = overrides.cfg ?? loadConfig();
   if (cfg.engine.driver === "tick") return runTickEngine(argv, cfg, overrides);
+  // Gate② P2: fail fast on tick-only flags BEFORE any collaborator is constructed or any
+  // dispatch can happen — same abort-with-zero-dispatch stance as buildRenderPrompt /
+  // assertStopMilestoneExists startup validation.
+  const flagError = tickOnlyFlagError(argv);
+  if (flagError) {
+    process.stderr.write(`${flagError}\n`);
+    return 1;
+  }
   return runRoundsEngine(argv, cfg, overrides);
 }
 

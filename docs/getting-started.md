@@ -100,7 +100,11 @@ Don't point sapwood at a live backlog and walk away. Ramp up in stages:
    indefinitely until a signal (Ctrl-C / SIGTERM — the in-flight round always finishes,
    harvest included, before the process exits) or a configured
    [stop condition](configuration.md#stop) fires. There's no `--once`/`--until-idle`
-   equivalent for a round (see step 4 below if you want that shape for your first run).
+   equivalent for a round — passing either flag under the rounds default is an
+   **error** (exit 1, before anything dispatches), never silently ignored; the error
+   names the fix (see step 4 below if you want that shape for your first run, or use
+   `--stop-after-issues`/`--stop-after-prs`/`--stop-on-milestone` to bound a rounds
+   run).
 
 4. **The M4 tick-driver escape hatch** — set `engine.driver: tick` in
    `sapwood.config.yaml` to run the pre-#106 loop driver instead (no peripherals):

@@ -617,7 +617,11 @@ rewrite.** v1 requirements:
   (KILL_SWITCH, cost ceilings, drain-before-kill, graceful-stop-still-runs-harvest)
   unchanged — round.ts/state.ts own that logic, `cli.ts` only wires collaborators.
   `--once`/`--until-idle` remain tick-driver-only flags (a round has no single-tick
-  concept); `--dry-run` and the `stop.*` final conditions apply to both.
+  concept) — under the rounds default they FAIL FAST at startup (exit 1, zero
+  dispatch, error naming the `engine.driver: tick` escape hatch and the `--stop-*`
+  alternatives), never silently ignored (gate② P2 on the #106 PR: a trust-ramp user
+  typing `--once` must never silently get a long-running round loop instead of a
+  bounded tick); `--dry-run` and the `stop.*` final conditions apply to both.
 
 ## v0.2 north star: the round orchestrator
 
