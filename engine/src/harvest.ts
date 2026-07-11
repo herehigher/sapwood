@@ -5,13 +5,41 @@
 // doc) — and skips a peripheral ONLY when KILL_SWITCH is active (runPeripheral's own check,
 // generic across every phase). Neither behavior needs any special-casing here: this module
 // implements the STUB's own contract only (marker idempotence + what one invocation does).
+//
+// #110 PR3 rework: the harvest session is PURE COMPUTATION now — no `gh` tool grant is ever
+// exercised by its prompt (HARVEST_DISALLOWED_TOOLS is untouched; stripping the now-unused
+// allow-list is PR5's sweep, not this one's). Its final message ends in a structured block
+// (structured-output.ts's sentinel format); THIS module parses it, validates it against a
+// per-role zod schema, and performs every issue-comment write itself via IForge. Unlike
+// plan-reviewer/plan-drafter (one BODY block per session, one issue per session), a single
+// harvest session briefs a VARIABLE number of issues in one pass — the round's whole
+// needs-human set — so its comment bodies travel as an ARRAY of short strings INSIDE the JSON
+// metadata rather than the single sentinel-delimited BODY segment: harvest's own prompt caps
+// each comment at "a few lines, not a report" (no revised-issue-body-scale markdown, no code
+// fences to protect from JSON-string escaping), so the escaping cost the BODY segment exists to
+// avoid for plan-review's long bodies never applies here.
+//
+// Harvest's write targets are CLOSED-FORM PRE-SESSION (unlike architect's from-a-pool choice,
+// PR4): gatherRoundFacts computes the round's needsHumanIssues set from the durable ledger
+// BEFORE the session ever runs, deterministically. The session's only latitude is what to SAY
+// about each one, never WHICH issues to brief — validateHarvestOutput enforces this fail-closed,
+// rejecting the whole batch if any returned issue number falls outside that pre-computed set.
+// Malformed/schema-invalid/out-of-set output is an INVALID attempt for runSessionWithRetry's
+// `isValid` hook — retried once, then harvest's EXISTING advisory degrade path (the
+// `harvest-degraded` event, unchanged shape): a summary-role session that never wedges the round
+// even on total failure, now equally true when its output merely fails to validate.
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 import type { PeripheralStub } from "./round.js";
+import type { IForge } from "./forge.js";
 import type { State, RoundRow } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
-import { ROLE_DISALLOWED_TOOLS, runSessionWithRetry, type RoleRunner } from "./peripheral.js";
+import {
+  ROLE_DISALLOWED_TOOLS, runSessionWithRetry, type RoleRunner, type RoleSessionResult,
+} from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
+import { parseStructuredBlock } from "./structured-output.js";
 
 /** Harvest's deny-list: the base denies PLUS all of `gh issue edit` — harvest writes issue
  *  COMMENTS only (see prompts/harvest.md), never a body edit and never a label, so unlike the
@@ -27,6 +55,10 @@ import { loadRolePromptTemplate } from "./plan-review.js";
 export const HARVEST_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS + ",Bash(gh issue edit*)";
 
 export interface HarvestDeps {
+  /** #110 PR3: the write surface for every comment the harvest phase posts — the session
+   *  itself never touches `gh` (see the module doc); this is the ONLY channel a validated
+   *  harvest decision reaches GitHub through. */
+  forge: IForge;
   state: State;
   cfg: SapwoodConfig;
   /** Injected so tests fake the underlying session directly — peripheral.test.ts already
@@ -123,9 +155,6 @@ function factVars(facts: RoundLedgerFacts): Record<string, string> {
     "round.needsHumanList": facts.needsHumanIssues.length > 0
       ? facts.needsHumanIssues.map((n) => `#${n}`).join(", ")
       : "(none)",
-    // P2 (fable review, PR #103): the session embeds this verbatim in each briefing comment —
-    // the same on-GitHub traceability convention plan-review.ts's comments follow.
-    "round.marker": harvestMarker(facts.roundId),
   };
 }
 
@@ -140,6 +169,83 @@ export function renderFactsTemplate(template: string, vars: Record<string, strin
       `role prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`,
     );
   });
+}
+
+// ── #110 PR3: structured-output schema + validator ──────────────────────────────────────────
+//
+// Unlike plan-review.ts's per-issue sessions (one BODY block, one target), one harvest session
+// briefs a VARIABLE number of issues — the round's whole needsHumanIssues set — in a single
+// pass. structured-output.ts's sentinel format carries exactly one optional BODY segment per
+// session, which doesn't fit an N-target result, so harvest's comment bodies travel as an array
+// of short strings INSIDE the JSON metadata instead: harvest.md caps each comment at "a few
+// lines, not a report" (round-context prose, never a revised issue body), so none of the
+// nested-code-fence/JSON-escaping hazard the BODY segment exists to avoid for plan-review's
+// long bodies applies here.
+const HarvestMetadataSchema = z.object({
+  comments: z.array(
+    z.object({
+      issue: z.number().int().positive(),
+      body: z.string(),
+    }).strict(),
+  ),
+}).strict();
+
+export interface HarvestComment {
+  issue: number;
+  body: string;
+}
+
+export type HarvestValidation = { ok: true; comments: HarvestComment[] } | { ok: false; reason: string };
+
+function describeZodError(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+}
+
+/** Parse + schema-validate + set-validate a harvest session's structured output. `needsHumanIssues`
+ *  is the round's PRE-COMPUTED write-target set (gatherRoundFacts, run BEFORE the session) — the
+ *  session has no latitude to choose WHICH issues get briefed, only what to say about each one
+ *  (module doc). Every returned issue number is checked against that set; ANY number outside it
+ *  fails the WHOLE batch closed — never partially honored — the same all-or-nothing posture
+ *  validateReviewerOutput/validateDrafterOutput take for a schema/content failure. An empty
+ *  `comments` array is valid (harvest.md: nothing to brief -> emit nothing and stop). */
+export function validateHarvestOutput(text: string, needsHumanIssues: number[]): HarvestValidation {
+  const block = parseStructuredBlock(text);
+  if (!block) return { ok: false, reason: "no structured output block found (missing or truncated sentinel)" };
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(block.metadataRaw);
+  } catch {
+    return { ok: false, reason: "structured output metadata is not valid JSON" };
+  }
+  const parsed = HarvestMetadataSchema.safeParse(metadata);
+  if (!parsed.success) {
+    return { ok: false, reason: `structured output metadata failed schema validation: ${describeZodError(parsed.error)}` };
+  }
+  const allowed = new Set(needsHumanIssues);
+  for (const c of parsed.data.comments) {
+    if (!allowed.has(c.issue)) {
+      return {
+        ok: false,
+        reason: `comment targets issue #${c.issue}, outside this round's needs-human set ` +
+          `(${needsHumanIssues.length > 0 ? needsHumanIssues.map((n) => `#${n}`).join(", ") : "empty"})`,
+      };
+    }
+    if (c.body.trim() === "") {
+      return { ok: false, reason: `comment for issue #${c.issue} has an empty body` };
+    }
+  }
+  return { ok: true, comments: parsed.data.comments };
+}
+
+/** The reason string attached to the `harvest-degraded` degrade message (stderr line only —
+ *  the durable event's payload shape stays exactly {round_id, outcome, session, attempts},
+ *  unchanged from pre-#110, per the module's preserve-event-shapes constraint) — distinguishes
+ *  a session-level failure (crashed/timed out) from a session that exited clean but whose
+ *  output never validated, same split reviewerDegradeReason (plan-review.ts) makes. */
+function harvestDegradeReason(result: RoleSessionResult, needsHumanIssues: number[]): string {
+  if (result.outcome !== "done") return `harvest session failed twice (${result.outcome})`;
+  const v = validateHarvestOutput(result.resultText ?? "", needsHumanIssues);
+  return v.ok ? "harvest output valid" : `harvest produced invalid structured output twice: ${v.reason}`;
 }
 
 /** Builds the `harvesting` phase's PeripheralStub. The round-summary ARTIFACT (#91 acceptance
@@ -188,8 +294,10 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
         // architect/align/harvest/retro) — a second failure DEGRADES VISIBLY but still closes
         // the phase below: harvest must never wedge the round or block run termination (#91's
         // graceful-stop requirement) over a summary comment — the durable event + stderr line
-        // are the operator's signal.
-        await runSessionWithRetry({
+        // are the operator's signal. #110 PR3: `isValid` extends "failure" to include a "done"
+        // session whose structured output is malformed/schema-invalid/out-of-set — the SAME
+        // degrade path, never a silently-honored partial result and never a wedged round.
+        const result = await runSessionWithRetry({
           runner: deps.runner,
           state: deps.state,
           session: {
@@ -202,14 +310,34 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
           issue: 0,
           now: deps.now ?? (() => new Date()),
           degradeEvent: "harvest-degraded",
+          // Payload shape preserved EXACTLY (pre-#110): {round_id, outcome, session, attempts}.
+          // `outcome` is the SESSION's own outcome (RoleSessionResult.outcome) — a "done" session
+          // that degraded on invalid output still reports "done" here; harvestDegradeReason
+          // (below, stderr-only) is where the invalid-output cause is actually named.
           degradePayload: (result) => ({
             round_id: roundId, outcome: result.outcome, session: result.name, attempts: 2,
           }),
           degradeMessage: (result) =>
-            `sapwood: harvest session failed twice (${result.outcome}) for round ${roundId} — ` +
-            `closing the harvesting phase WITHOUT a round summary (degraded, see the ` +
-            `harvest-degraded event); the run is not blocked`,
+            `[sapwood:harvest] round ${roundId}: ${harvestDegradeReason(result, facts.needsHumanIssues)} — ` +
+            `closing the harvesting phase WITHOUT posting round-context comments (degraded, see ` +
+            `the harvest-degraded event); the run is not blocked`,
+          isValid: (result) => validateHarvestOutput(result.resultText ?? "", facts.needsHumanIssues).ok,
         });
+        // Every comment write originates from a SCHEMA-VALIDATED, SET-VALIDATED session decision
+        // (module doc) — the session itself never touches `gh`. A degraded (still-invalid-after-
+        // retry, or session-failed-twice) result posts nothing: runSessionWithRetry already fired
+        // the harvest-degraded event/stderr line above, and honoring a result that never
+        // validated would be exactly the silent-partial-result outcome this rework exists to
+        // prevent.
+        if (result.outcome === "done") {
+          const validated = validateHarvestOutput(result.resultText ?? "", facts.needsHumanIssues);
+          if (validated.ok) {
+            const roundMarker = harvestMarker(roundId);
+            for (const c of validated.comments) {
+              await deps.forge.addIssueComment(c.issue, `${c.body}\n\n${roundMarker}`);
+            }
+          }
+        }
       }
       return { marker: harvestMarker(roundId) };
     },
