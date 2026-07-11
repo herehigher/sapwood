@@ -10,6 +10,7 @@ import {
   PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry,
   type RoleRunnerDeps, type RoleSessionOpts, type RoleSessionResult, type RetriedSession,
 } from "./peripheral.js";
+import { validateReviewerOutput } from "./plan-review.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
@@ -166,7 +167,7 @@ test("run: soft guard mode tolerates a missing hook (no fail-closed refusal)", a
   }
 });
 
-test("run: argv scopes the session to issues-only writes — no code paths, no PR/review/merge capability, no --add-dir", async () => {
+test("run: argv scopes the session to NO Bash grant at all (#110 PR5) — pure computation, no code paths, no PR/review/merge capability, no --add-dir", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -178,6 +179,7 @@ test("run: argv scopes the session to issues-only writes — no code paths, no P
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
     assert.equal(at("--allowedTools"), ROLE_ALLOWED_TOOLS);
+    assert.equal(at("--allowedTools"), "", "#110 PR5: no Bash grant of any kind reaches the argv");
     assert.equal(at("--disallowedTools"), ROLE_DISALLOWED_TOOLS);
     assert.ok(!seen.includes("--add-dir"), "never mounts the engine's data dir");
     // No merge/review/PR capability anywhere in the tool-scoping strings (the acceptance
@@ -186,12 +188,13 @@ test("run: argv scopes the session to issues-only writes — no code paths, no P
     for (const tools of [ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS]) {
       assert.ok(!/gh pr merge|gh pr review|gh pr ready/.test(tools) || tools === ROLE_DISALLOWED_TOOLS);
     }
+    assert.ok(!ROLE_ALLOWED_TOOLS.includes("Bash("), "#110 PR5: allowed tools carry NO Bash(...) entry at all");
     assert.ok(!ROLE_ALLOWED_TOOLS.includes("gh pr"), "allowed tools carry no PR capability at all");
     assert.ok(!ROLE_ALLOWED_TOOLS.includes("git"), "allowed tools carry no git/code capability");
     assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh pr *)"), "PR namespace explicitly disallowed");
     assert.ok(ROLE_DISALLOWED_TOOLS.includes("Read") && ROLE_DISALLOWED_TOOLS.includes("Write"), "no file access");
-    // Codex PR #99 P1: --body-file reads body text from a FILE — a repo-read bypass, denied
-    // for both commands (best-effort pattern layer; see peripheral.ts's enforcement doc).
+    // #102/#108: the deny-glob lines are kept byte-identical as a regression trip-wire (see
+    // peripheral.ts's doc) — a future PR re-widening the allow-list lands back inside these.
     assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh issue comment *--body-file*)"));
     assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--body-file*)"));
   } finally {
@@ -199,12 +202,13 @@ test("run: argv scopes the session to issues-only writes — no code paths, no P
   }
 });
 
-test("PLAN_DRAFTER_DISALLOWED_TOOLS: strict superset of the base denies, adding label mutation (plan-author ≠ plan-approver)", () => {
+test("PLAN_DRAFTER_DISALLOWED_TOOLS: strict superset of the base denies, adding label mutation (plan-author ≠ plan-approver) — kept as a #110 PR5 regression trip-wire, not live enforcement (neither role has any Bash grant to mutate a label with)", () => {
   assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.startsWith(ROLE_DISALLOWED_TOOLS), "keeps every base deny");
   assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--add-label*)"));
   assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--remove-label*)"));
-  // The base (reviewer) scope must NOT deny label mutation — applying plan:approved/needs-human
-  // is the reviewer's legitimate job.
+  // The base (reviewer) deny list does not carry this extra denial — a distinction that only
+  // ever mattered when either role had a Bash grant to act on; applying plan:approved/
+  // needs-human is now the engine's job (plan-review.ts), never either session's own.
   assert.ok(!ROLE_DISALLOWED_TOOLS.includes("--add-label"));
 });
 
@@ -227,9 +231,10 @@ test("run: a per-role disallowedTools override reaches the argv (the drafter's s
   }
 });
 
-test("PO_ALLOWED_TOOLS: strict superset of the base allows, adding issue creation (#89 goal decomposition) — no board-status/PR/code capability anywhere", () => {
-  assert.ok(PO_ALLOWED_TOOLS.startsWith(ROLE_ALLOWED_TOOLS), "keeps every base allow");
-  assert.ok(PO_ALLOWED_TOOLS.includes("Bash(gh issue create*)"));
+test("PO_ALLOWED_TOOLS: #110 PR5 — no Bash grant at all (issue creation is now an engine-performed write, align.ts's validated structured output) — no board-status/PR/code capability anywhere", () => {
+  assert.equal(PO_ALLOWED_TOOLS, ROLE_ALLOWED_TOOLS, "identical to the base (empty) allow-list");
+  assert.ok(!PO_ALLOWED_TOOLS.includes("Bash("), "no Bash(...) entry of any kind");
+  assert.ok(!PO_ALLOWED_TOOLS.includes("gh issue create"), "issue creation is an engine write, not a session tool call");
   assert.ok(!PO_ALLOWED_TOOLS.includes("gh api"), "no channel to setBoardStatus (locked decision 5: PO never sets Ready)");
   assert.ok(!PO_ALLOWED_TOOLS.includes("gh pr"), "no PR capability");
   assert.ok(!PO_ALLOWED_TOOLS.includes("git"), "no code/repo capability");
@@ -304,7 +309,7 @@ test("PO_DISALLOWED_TOOLS: legitimate PO write (`gh issue create --title --body`
   assert.ok(!anyDenyMatches(PO_DISALLOWED_TOOLS, `gh issue create --title "Improve X" --body "Because Y"`));
 });
 
-test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the align/triage session wiring)", async () => {
+test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the align/triage session wiring) — #110 PR5: the allow half carries no Bash grant", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -318,6 +323,7 @@ test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], PO_ALLOWED_TOOLS);
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], "");
     assert.equal(seen[seen.indexOf("--disallowedTools") + 1], PO_DISALLOWED_TOOLS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -501,5 +507,74 @@ test("runSessionWithRetry: isValid OMITTED — behavior is byte-identical to tod
   assert.equal(failRunner.calls.length, 2);
   assert.equal(failState.events.length, 1);
   assert.equal(failState.events[0]![0], "test-degraded");
+});
+
+// ── #110 PR5: acceptance-criteria tests (issue #110's verification plan: "an integration test
+// asserting a role session is spawned with empty Bash grants and a structured-output round-trip
+// works end-to-end") ───────────────────────────────────────────────────────────────────────────
+
+test("#110 acceptance sweep: no issues-only role's allowedTools constant contains a Bash( entry (retro excepted, tracked in #111)", () => {
+  // Every allow-list-shaped export peripheral.ts/align.ts's roles actually wire into a session —
+  // harvest.ts/architect.ts/plan-review.ts's reviewer never override allowedTools at all (see
+  // architect.test.ts's/plan-review.test.ts's own "no override passed" assertions), so they fall
+  // back to ROLE_ALLOWED_TOOLS below unconditionally; PO/align+triage is the one role with its
+  // own named export (PO_ALLOWED_TOOLS). retro.ts's RETRO_ALLOWED_TOOLS is DELIBERATELY excluded
+  // — retro is worker-class (Read/git), out of #110's scope, tracked separately in #111.
+  const issuesOnlyAllowedTools: Record<string, string> = { ROLE_ALLOWED_TOOLS, PO_ALLOWED_TOOLS };
+  for (const [name, tools] of Object.entries(issuesOnlyAllowedTools)) {
+    assert.ok(!tools.includes("Bash("), `${name} must carry no Bash(...) allow-list entry, got: ${tools}`);
+    assert.equal(tools, "", `${name} must be the empty string (pure computation, no tool grant at all)`);
+  }
+});
+
+test("#110 PR5 final integration: a role session spawns with empty Bash grants, emits a valid structured-output block, the engine's real validator (plan-review.ts) accepts it, and the resulting write reaches the forge", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const issueNumber = 42;
+    const revisedBody = "## Verification\n- run `npm test`, confirm green CI\n- confirm the acceptance criteria above\n";
+    const resultText =
+      `<<<SAPWOOD_RESULT>>>\n${JSON.stringify({ decision: "approve", issue: issueNumber })}\n<<<END_SAPWOOD_RESULT>>>\n` +
+      `<<<BODY>>>\n${revisedBody}\n<<<END_BODY>>>`;
+    const jsonLine = JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.002, result: resultText });
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '${jsonLine.replace(/'/g, "'\\''")}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+
+    // 1. SPAWN: a real plan-reviewer role session under the DEFAULT (no override) allow/deny
+    // pair — the #110 PR5 acceptance criterion itself: no Bash(...) grant reaches the argv.
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    assert.equal(result.outcome, "done");
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const allowedArgv = seen[seen.indexOf("--allowedTools") + 1];
+    assert.equal(allowedArgv, "", "empty Bash grants reach the argv verbatim");
+    assert.ok(!(allowedArgv ?? "").includes("Bash("), "acceptance criterion: no Bash(...) entry anywhere in the argv");
+
+    // 2. VALIDATE: the engine's REAL validator (plan-review.ts's validateReviewerOutput, not a
+    // re-implementation) — schema-valid AND content-verified (the approve claim's revised body
+    // actually carries a verification-plan section, extractVerificationPlan re-checked).
+    const validated = validateReviewerOutput(result.resultText ?? "", issueNumber, "");
+    assert.equal(validated.ok, true, "a well-formed approve+verification-plan output validates");
+    if (!validated.ok) return; // unreachable — narrows the type for the write assertions below
+    assert.equal(validated.decision.decision, "approve");
+    assert.equal(validated.decision.body, revisedBody);
+
+    // 3. WRITE: the engine performs the forge write from the validated decision alone — the
+    // session itself never touched `gh` (no Bash grant to touch it with, step 1 above). Mirrors
+    // plan-review.ts's reviewOneIssue "approve" branch exactly (updateIssueBody + plan:approved).
+    const forgeWrites = { updateIssueBody: [] as Array<[number, string]>, labelsAdded: [] as Array<[number, string]> };
+    const forge = {
+      updateIssueBody: async (n: number, body: string): Promise<void> => { forgeWrites.updateIssueBody.push([n, body]); },
+      addLabel: async (n: number, l: string): Promise<void> => { forgeWrites.labelsAdded.push([n, l]); },
+    };
+    if (validated.decision.body !== undefined) await forge.updateIssueBody(issueNumber, validated.decision.body);
+    await forge.addLabel(issueNumber, "plan:approved");
+
+    assert.deepEqual(forgeWrites.updateIssueBody, [[issueNumber, revisedBody]]);
+    assert.deepEqual(forgeWrites.labelsAdded, [[issueNumber, "plan:approved"]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 

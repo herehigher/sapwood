@@ -228,7 +228,7 @@ test("createHarvestStub: a needs-human issue this round -> dispatches ONE harves
   state.close();
 });
 
-test("HARVEST_DISALLOWED_TOOLS: keeps every base deny and adds the whole `gh issue edit` verb (no label/body mutation at all)", () => {
+test("HARVEST_DISALLOWED_TOOLS: keeps every base deny and adds the whole `gh issue edit` verb (no label/body mutation at all) — #110 PR5: harvest's allowedTools carries no Bash grant either, so this is a regression trip-wire, not live enforcement", () => {
   assert.ok(HARVEST_DISALLOWED_TOOLS.startsWith(ROLE_DISALLOWED_TOOLS), "keeps every base deny");
   assert.ok(HARVEST_DISALLOWED_TOOLS.includes("Bash(gh issue edit*)"));
 });

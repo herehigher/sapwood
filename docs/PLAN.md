@@ -412,6 +412,22 @@ rewrite.** v1 requirements:
     spend, not routine cost management — prefer drain (let in-flight workers hand off)
     over kill; hard kill is the last resort. Conservative defaults (small round budget,
     dispatch cap 1–2).
+- **Issues-only peripheral role sessions carry no shell (#110, supersedes this
+  section's original guard-tokenizer scope for these roles):** plan-reviewer,
+  plan-drafter, PO/align+triage, harvest, and architect hold no `Bash` tool grant at
+  all — pure computation, prompt substituted in, no repo/`gh` access of their own.
+  Each session's final message ends in a structured, sentinel-delimited output block;
+  the deterministic engine parses it, validates it against a per-role zod schema plus
+  cheap content invariants, and performs every GitHub write itself via `IForge`,
+  fail-closed (ambiguous/duplicate/out-of-candidate-set output rejects the WHOLE
+  attempt, retried once, then the role's degrade path — gate⓪ escalates
+  `needs-human`, advisory roles proceed with a durable event). Because no shell
+  exists for these sessions, the string-level Bash-pattern bypass classes (short-flag
+  aliases, quoting/escaping) earlier hardening chased one glob at a time are moot for
+  them — closed by removing the capability, not a better pattern. `retro` stays
+  worker-class (`Read`/git + `gh pr create`, proposals land exclusively as PRs) —
+  out of this design's scope by session class; its own hardening is #111. Full model:
+  `docs/security.md`'s "Issues-only role sessions carry no shell" section.
 - **Designed-for-public seams (built as interfaces in v1, enforced in v1.1):**
   scoped ephemeral GitHub App tokens per worker (replacing host `gh` auth); a written
   threat model treating issue text as hostile data; fixing the public-repo merge-gate
@@ -699,9 +715,11 @@ gate② re-checks the finished PR against the plan — but nothing reviewed the 
 quality or feasibility before a producer spent budget on it, and `verify:n/a` was
 self-declared. gate⓪ closes both holes: a **plan-reviewer** peripheral runs
 post-`Ready`, pre-dispatch, in a session distinct from both the plan's author and the
-producer. Approve → it applies `plan:approved` itself (and may edit corrections into
-the issue body); bounce → its comment of what's missing becomes the brief for a
-scoped plan-draft dispatch (self-heal, next paragraph — never a parked issue);
+producer. The session itself holds no shell (#110) — it computes a decision only;
+approve → the engine applies `plan:approved` (and any body corrections) from that
+validated decision; bounce → the engine posts a comment naming what's missing, which
+becomes the brief for a scoped plan-draft dispatch (self-heal, next paragraph — never
+a parked issue);
 judged inherently unverifiable → it only ever **proposes** `verify:n/a`,
 always paired with `needs-human` — a human resolves the adjudication (supply a plan,
 or accept `verify:n/a` by removing `needs-human`, which routes the issue down the
@@ -715,11 +733,12 @@ does not park the issue until the next round (that would stall against the auton
 principle below): the reviewer's bounce comment — what's missing or wrong,
 concretely — becomes the brief for a scoped **plan-drafting session** the loop
 dispatches. The drafter is an issues-only peripheral like PO/triage (no repo
-checkout, no code access — never a full worker lane), runs in a session distinct
-from the plan-reviewer (plan-author ≠ plan-approver holds; the reviewer never
-approves a plan it authored, its minor-correction latitude aside), and is restricted
-to editing the issue's acceptance criteria + verification plan — it never implements
-the issue itself. Bounded, never a livelock: at most
+checkout, no code access, no shell at all — pure computation, #110), runs in a
+session distinct from the plan-reviewer (plan-author ≠ plan-approver holds; the
+reviewer never approves a plan it authored, its minor-correction latitude aside), and
+its structured output — the revised acceptance criteria + verification plan, which
+the engine writes into the issue body — never touches anything else; it never
+implements the issue itself. Bounded, never a livelock: at most
 `roles.planReviewer.maxDraftCycles` draft→re-review cycles per issue (default 2,
 YAML-tunable); cycles exhausted → `needs-human` with the full attempt trail
 preserved (Decision #9). Accepted trade-off: for a thin why/what-only human-filed
@@ -736,8 +755,10 @@ plan gets one drafted by the PO/triage peripheral; the loop never blocks waiting
 a human-written plan.
 
 **The separation chain extends: plan-author ≠ plan-approver ≠ producer.** The
-plan-reviewer reads and writes issues only — it never reviews code and never merges.
-The safety invariant (producer≠reviewer≠merger, locked decision above) is untouched.
+plan-reviewer computes a decision only (no shell of its own, #110) — the engine
+performs every issue write from its validated output; it never reviews code and never
+merges. The safety invariant (producer≠reviewer≠merger, locked decision above) is
+untouched.
 
 **The autonomy principle (governs gate⓪ and every future gate).** Humans decide only
 the *why/what* of an issue — the act of moving it to `Ready` (including the initial

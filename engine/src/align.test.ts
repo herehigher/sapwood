@@ -576,8 +576,8 @@ test("loadPlanMd: reads a real file; a missing path degrades to empty string (co
   }
 });
 
-test("PO_ALLOWED_TOOLS: carries issue-creation on top of the base scope, but no board-status/project capability (structural no-Ready guarantee)", () => {
-  assert.ok(PO_ALLOWED_TOOLS.includes("Bash(gh issue create*)"));
+test("PO_ALLOWED_TOOLS: #110 PR5 — no Bash grant at all (issue creation is now an engine write from validated structured output above), and still no board-status/project capability (structural no-Ready guarantee)", () => {
+  assert.ok(!PO_ALLOWED_TOOLS.includes("Bash("), "no Bash(...) entry of any kind");
   assert.ok(!PO_ALLOWED_TOOLS.includes("gh api"), "no channel to board-status/project mutation");
   assert.ok(!PO_ALLOWED_TOOLS.includes("gh project"));
   assert.ok(!PO_ALLOWED_TOOLS.includes("git"), "no code/repo capability");

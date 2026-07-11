@@ -455,9 +455,9 @@ test("createArchitectStub: the architect session runs under the base issues-only
   assert.equal(runner.calls[0]!.disallowedTools, undefined);
 });
 
-test("ROLE_ALLOWED_TOOLS / ROLE_DISALLOWED_TOOLS: issues-only write scope — no file write, no git, no PR/API access", () => {
-  assert.ok(ROLE_ALLOWED_TOOLS.includes("gh issue comment"));
-  assert.ok(ROLE_ALLOWED_TOOLS.includes("gh issue edit"));
+test("ROLE_ALLOWED_TOOLS / ROLE_DISALLOWED_TOOLS: issues-only write scope — #110 PR5: NO Bash grant at all (pure computation), no file write, no git, no PR/API access", () => {
+  assert.equal(ROLE_ALLOWED_TOOLS, "", "#110 PR5: the base issues-only allow-list is empty — no Bash(...) entry of any kind");
+  assert.ok(!ROLE_ALLOWED_TOOLS.includes("Bash("));
   assert.ok(!ROLE_ALLOWED_TOOLS.includes("Write"));
   assert.ok(!ROLE_ALLOWED_TOOLS.includes("Edit,"));
   assert.ok(ROLE_DISALLOWED_TOOLS.includes("Read"));
