@@ -169,9 +169,20 @@ individually configurable).
 
 ## `roles`
 
-Peripheral-role configuration (v0.2). **Accepted, not yet wired** — validated here so the
-config surface doesn't need a migration when the round-orchestrator lands (see
-[`PLAN.md`](PLAN.md)'s v0.2 chapter); no session currently loads or runs this prompt.
+Peripheral-role configuration. The round orchestrator (`driver: rounds`, the
+`sapwood run` default) loads and runs every one of these role prompts each round.
+
+**Issues-only role sessions carry no shell (#110).** `planReviewer`, `planDrafter`,
+`po` (align + triage), `harvest`, and `architect` sessions hold no `Bash` tool grant at
+all — pure computation: the issue/config context is substituted into the prompt, and
+the session has no `Read`/`gh` access of its own. Each session's final message ends in
+a structured output block; the engine parses it, validates it against a per-role
+schema plus cheap content invariants (e.g. re-confirming an "approve" claim's body
+really carries a verification-plan section), and performs every GitHub write itself.
+Malformed or invalid output retries once, then the role's own degrade path — never a
+silent no-op, never a wedged round. `retro` is the one exception: a worker-class
+session with `Read` + git + `gh pr create` (proposals land exclusively as PRs, never a
+direct write) — see [`security.md`](security.md) for the full model.
 
 | Key | Default | Meaning |
 |---|---|---|

@@ -53,6 +53,45 @@ The mode reaches the guard hook via a spawn-time environment variable
 worker-writable settings file — so a worker cannot weaken its own guard mode by editing
 config mid-run.
 
+## Issues-only role sessions carry no shell (#110)
+
+Workers are guarded by the argv-inspecting hook above. The round orchestrator's
+issues-only peripheral roles — plan-reviewer, plan-drafter, PO/align+triage, harvest,
+and architect — take a different, stronger approach: they hold no `Bash` tool grant at
+all (`peripheral.ts`'s `ROLE_ALLOWED_TOOLS`/`PO_ALLOWED_TOOLS` are the empty string).
+Each session is pure computation — its prompt never instructs a `gh` command, and it
+has no shell to run one through even if it tried. Its final message ends in a
+structured, sentinel-delimited output block instead. The deterministic engine
+(`plan-review.ts`/`align.ts`/`harvest.ts`/`architect.ts`) parses that block, validates
+it against a per-role zod schema plus the content invariants worth cheaply re-checking
+(e.g. an "approve" claim's body must actually carry a verification-plan section —
+schema-valid is not the same as truthful), and performs every GitHub write itself via
+`IForge`. Validation is fail-closed: ambiguous, duplicate, or out-of-candidate-set
+output (the architect is the one role that picks write targets from a pool — every
+flagged issue number is checked against the exact candidate set its prompt was shown)
+rejects the WHOLE structured output, never a partial/best-guess apply. A malformed or
+invalid attempt retries once; a second failure hits the role's existing degrade path —
+gate⓪ escalates to `needs-human` with the attempt trail, the advisory roles (PO,
+harvest, architect) degrade-and-proceed with a durable state event, never a silent
+no-op and never a wedged round.
+
+Because no shell exists for these sessions to reach `gh` through at all, the
+pattern-layer bypass classes earlier hardening closed one glob at a time (#102's short
+`-F`/`-l`/`-p` flag aliases, #108's quoted/escaped `-F` spellings) are structurally
+moot for them — not closed by a better pattern, but by removing the capability the
+pattern was constraining. The old deny-list entries stay in `peripheral.ts`, byte-
+identical, as a regression trip-wire: a future PR that re-widens the allow-list with a
+`Bash(...)` entry lands back inside those denies rather than silently reopening a
+closed bypass class.
+
+**`retro` is the one exception**, by session class rather than role name: it is
+worker-class, with `Read`/git + `gh pr create` (proposals land exclusively as PRs
+through the normal review gate, never a direct write) — the same broader trust level a
+code-producing worker gets, because its job (reading round history, editing prompts/
+docs/config) genuinely needs it. Its own hardening (beyond the dangerous verbs
+`guard.ts` already blocks category-C, and `gh issue *` already denied wholesale) is
+tracked separately in #111.
+
 ## Human-merge-only paths
 
 Some files are structurally off-limits to an autonomous worker because changing them
@@ -190,29 +229,32 @@ any other label present.
 
 **A plan below standard self-heals rather than stalls** (#77 Amendment 2): when the
 reviewer finds the plan missing or inadequate beyond its minor-correction latitude, it
-does not park the issue for a human — it posts a comment stating precisely what's
-missing (that comment is the brief), and the loop dispatches a **scoped plan-drafting
-session**: issues-only writes, a session distinct from the reviewer (plan-author ≠
-plan-approver — the reviewer never approves a plan it authored), never a full worker
-lane, and it never implements the issue itself. The draft then comes back through a
-fresh plan-review. The cycle is bounded — at most `roles.planReviewer.maxDraftCycles`
-draft→re-review attempts per issue (default 2) — after which the loop applies
-`needs-human` with the full attempt trail preserved (Decision #9's degrade-to-human).
-Every attempt is externalized as issue edits/comments, so a human can inspect or
-intervene at any point. The Ready-gate enforcement above is unchanged by any of this:
-implementation dispatch still requires `plan:approved` (or adjudicated `verify:n/a`) —
-only the repair path became more autonomous.
+does not park the issue for a human — its structured decision names precisely what's
+missing, the engine posts that as a comment (the brief), and the loop dispatches a
+**scoped plan-drafting session**: issues-only writes, a session distinct from the
+reviewer (plan-author ≠ plan-approver — the reviewer never approves a plan it
+authored), never a full worker lane, and it never implements the issue itself. The
+draft then comes back through a fresh plan-review. The cycle is bounded — at most
+`roles.planReviewer.maxDraftCycles` draft→re-review attempts per issue (default 2) —
+after which the loop applies `needs-human` with the full attempt trail preserved
+(Decision #9's degrade-to-human). Every attempt is externalized as issue edits/
+comments, so a human can inspect or intervene at any point. The Ready-gate enforcement
+above is unchanged by any of this: implementation dispatch still requires
+`plan:approved` (or adjudicated `verify:n/a`) — only the repair path became more
+autonomous.
 
-Today the enforcement in `getReadyIssues` is real and covered by tests. The
-**plan-reviewer session** that actually applies `plan:approved` is not wired yet — same
-"convention/enforcement now, machinery later" shape as `origin:agent` above; it lands
-with v0.2's round-orchestrator peripheral roles (see [`PLAN.md`](PLAN.md)'s v0.2
-chapter). The shipped default prompt for that future session already exists at
+The plan-reviewer/plan-drafter sessions are wired and, since #110, pure computation:
+neither holds a `Bash` tool grant, so neither ever runs `gh` itself. Each session's
+final message ends in a structured, sentinel-delimited output block; the engine
+(`plan-review.ts`) parses it, validates it against a zod schema, re-checks the one
+content invariant worth cheaply verifying — an "approve"/drafted body must actually
+carry a verification-plan section, since schema-valid is not the same as truthful —
+and only then applies `plan:approved` (or any body correction) itself via `IForge`.
+Malformed, schema-invalid, or content-invalid output is treated as a failed attempt:
+retried once, then escalated to `needs-human` with the full attempt trail, exactly like
+an outright session crash. The shipped default prompt lives at
 `engine/prompts/plan-reviewer.md` (`roles.planReviewer.promptFile` overrides it — same
-`#74` pattern as `worker.promptFile`). Until that session lands, `plan:approved` must be
-applied by hand for any issue meant to dispatch on a reviewed plan; `sapwood init` does
-not yet provision the label (unlike `verify:n/a`/`origin:agent` above — provisioning it
-now would be premature ahead of the session that actually applies it).
+`#74` pattern as `worker.promptFile`).
 
 ## See also
 

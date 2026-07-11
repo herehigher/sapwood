@@ -25,54 +25,21 @@ import {
   spawnClaudeSession, type SpawnedSession,
 } from "./worker.js";
 
-/** Issues-only write scope (#87 task A): comment/label/edit ISSUES via `gh issue ...` — no
- *  file Read/Write/Edit, no git, no `gh pr`/`gh api` (no PR visibility, no review/approve/
- *  merge capability). Everything the session needs to know about the issue is already
- *  substituted into its prompt (issue.number/title/body/labels), so it needs no READ tool at
- *  all, only the two write actions its role requires.
+/** #110 PR5: issues-only role sessions (plan-reviewer, plan-drafter, PO/align+triage, harvest,
+ *  architect) carry NO Bash grant at all — ROLE_ALLOWED_TOOLS is empty. Each session is pure
+ *  computation: its prompt never instructs a `gh` command, its final message ends in a
+ *  structured block (structured-output.ts), and the engine (plan-review.ts/align.ts/harvest.ts/
+ *  architect.ts) performs every GitHub write itself via IForge from schema-validated output. The
+ *  real boundary is simply the absence of any Bash grant — no shell exists for a role session to
+ *  reach `gh` through at all, so the #102/#108 quoting/short-flag bypass classes are moot for
+ *  these roles.
  *
- *  WHAT ENFORCES WHAT (Codex PR #99 P1 — no aspirational claims):
- *  - These tool patterns are NOISE REDUCTION only, same caveat as worker.ts's lists. Claude
- *    Code's permission docs confirm Bash glob patterns DO support mid-pattern wildcards
- *    ("Wildcards can appear at any position in the command", e.g. `Bash(git * main)`), so the
- *    flag-level denies below (`*--body-file*`, `*--add-label*`, ...) genuinely match — but the
- *    same docs warn flag-constraining Bash patterns are FRAGILE and recommend PreToolUse hooks
- *    for reliable enforcement. Treat every deny below as best-effort.
- *  - The REAL boundaries are (1) the same fail-closed PreToolUse guard hook every session gets
- *    via guardSettings, unchanged, and (2) for the plan-drafter's label discipline
- *    specifically, plan-review.ts's fail-closed LABEL POST-CHECK: labels are snapshotted
- *    before each drafter session and re-fetched after — a drafter that added
- *    plan:approved/verify:n/a or removed needs-human/blocked is escalated to needs-human (an
- *    unconditional dispatch blocker that contains a poisoned plan:approved) regardless of
- *    whether any pattern below caught the command.
- *
- *  `--body-file` is denied for BOTH commands (and both roles): it reads body text from a
- *  FILE, which would pierce the no-repo-read boundary (the session has no Read tool for the
- *  same reason).
- *
- *  #102 (gate② on #101): `gh` accepts `-F` as a short alias for `--body-file` (confirmed via
- *  `gh issue comment/edit --help` — no `=`-form, no other spelling), and the original
- *  `*--body-file*` denies only matched the long flag. `-F` has NO authoritative backstop (unlike
- *  `--label`, see PO_DISALLOWED_TOOLS below) — the pattern layer below is the ONLY layer for this
- *  one, so its shape matters: a bare `*-F*` would also match a body/title CONTAINING the
- *  substring "-F" (over-broad, but still fails safe by over-denying) or, worse, flags like a
- *  hypothetical `--foo-Fbar` (under-broad if such a flag existed). The `subcommand* -F*` shape
- *  below requires "-F" be preceded by a space — i.e. its own argv token — which both long-flag
- *  substrings (`--body-file`, always two leading dashes) and non-flag text glued onto another
- *  word never produce. The first `*` binds DIRECTLY to the subcommand (`comment*`, not
- *  `comment *`): cobra/pflag accepts flags BEFORE positional args (`gh issue comment -F f 12`),
- *  and a literal space after the subcommand would consume the only space preceding a
- *  flag-first `-F`, silently un-denying that argv order (gate② finding on this very fix).
- *  Residual gaps, same best-effort class as everything else here: (a) `gh`'s pflag-style
- *  shorthand parser lets a boolean short flag CLUSTER with `-F` in one token (e.g. `-eF file`
- *  == `-e -F file`), which would not contain a space directly before `-F`; (b) shell
- *  quoting/escaping (`'-F'`, `"-F"`, `\-F`) — the glob matches the RAW command string, but the
- *  shell strips quotes/backslashes before `gh` parses its argv, so the quoted spellings reach
- *  `gh` as a plain `-F` without ever containing the ` -F` substring the patterns look for
- *  (Codex gate② round 2). Quoting variants are unbounded, so the pattern layer structurally
- *  cannot close (b) — both residuals are covered by issue #110's authoritative guard-hook
- *  backstop (shell-aware argv tokenization, fail-closed), not by more globs here. */
-export const ROLE_ALLOWED_TOOLS = "Bash(gh issue comment*),Bash(gh issue edit*)";
+ *  ROLE_DISALLOWED_TOOLS below is KEPT, byte-identical, as a regression trip-wire: a future PR
+ *  that re-widens ROLE_ALLOWED_TOOLS with a `Bash(...)` entry lands back inside these denies
+ *  rather than silently reopening a bypass class #102/#108 already closed at the pattern layer.
+ *  It does no live enforcement today (see peripheral.ts's #99 note that Bash glob patterns were
+ *  always best-effort, backstopped by the unchanged fail-closed guard hook). */
+export const ROLE_ALLOWED_TOOLS = "";
 export const ROLE_DISALLOWED_TOOLS =
   "Read,Write,Edit,MultiEdit,Bash(git *),Bash(gh pr *),Bash(gh api *),Bash(gh issue view*)," +
   "Bash(gh issue list*),Bash(gh issue close*),Bash(gh issue reopen*),Bash(gh issue transfer*)," +
@@ -81,43 +48,24 @@ export const ROLE_DISALLOWED_TOOLS =
   "Bash(gh issue comment* -F*),Bash(gh issue edit* -F*)";
 
 /** The plan-DRAFTER's stricter deny list (#77 Amendment 2's plan-author ≠ plan-approver chain):
- *  everything above PLUS label mutation — a drafter edits plan TEXT only, and must never
- *  self-apply `plan:approved`/`verify:n/a` or lift `needs-human`/`blocked`. Best-effort
- *  pattern layer only; the authoritative enforcement is plan-review.ts's label post-check
- *  (see ROLE_ALLOWED_TOOLS doc above). The plan-REVIEWER keeps label capability — applying
- *  `plan:approved`/`needs-human` is its legitimate job. */
+ *  everything above PLUS label mutation, kept as the same regression trip-wire ROLE_DISALLOWED_
+ *  TOOLS is (see its doc above) — the drafter has no Bash grant to mutate a label with in the
+ *  first place; label discipline is now structural (plan-review.ts never calls forge.addLabel
+ *  on the drafter's behalf, see that module's doc). */
 export const PLAN_DRAFTER_DISALLOWED_TOOLS =
   ROLE_DISALLOWED_TOOLS + ",Bash(gh issue edit *--add-label*),Bash(gh issue edit *--remove-label*)";
 
-/** #89: the PO/alignment role's ADDITIVE allow-list — everything the base role scope allows
- *  PLUS issue creation (`gh issue create`), the one write action goal decomposition needs that
- *  no earlier role required. Board-status/project mutations stay OUT OF REACH regardless: `gh
- *  api *` (the only channel GithubForge.setBoardStatus uses) remains in ROLE_DISALLOWED_TOOLS
- *  unchanged, so the PO structurally cannot set Status=Ready itself (locked decision 5 — only a
- *  human confirms Ready). Best-effort pattern layer only, same caveat as ROLE_ALLOWED_TOOLS
- *  above; the authoritative enforcement for what a PO-created issue carries is align.ts's
- *  post-session check (origin:agent stamp + plan-presence escalation). */
-export const PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS + ",Bash(gh issue create*)";
+/** #110 PR5: the PO/alignment role also carries no Bash grant — `gh issue create` is performed
+ *  by the engine from align.ts's validated structured output, never by the session itself.
+ *  PO_ALLOWED_TOOLS is kept as its own export (rather than folded away) so align.ts's callsite
+ *  still documents which role-specific allow/deny pair it wires, unchanged in shape from before
+ *  #110 even though its value is now identical to the base ROLE_ALLOWED_TOOLS. */
+export const PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS;
 
-/** The PO's matching deny list (security review, PR #101): `gh issue create` opens flag holes
- *  the base ROLE_DISALLOWED_TOOLS never had to close (its create-less scope made them moot):
- *  - `--body-file` reads ANY file into a (possibly public) issue body — the same file-read
- *    exfiltration channel the base list already denies on comment/edit, closed for create too;
- *  - `--label` could self-apply `plan:approved`/`verify:n/a` at creation (a gate⓪ bypass) —
- *    labels on PO-created issues are the ORCHESTRATOR's job (align.ts stamps origin:agent and
- *    post-checks for poisoned dispatch-path labels, the authoritative layer);
- *  - `--project` could place the new issue onto a board lane directly (a board write, locked
- *    decision 5's territory).
- *  Best-effort pattern layer, same caveat as everything above; the authoritative enforcement
- *  for the --label hole is align.ts's created-issue label post-check.
- *
- *  #102 (gate② on #101): each of the three flags above also has a short alias on `gh issue
- *  create` — confirmed via `gh issue create --help`: `-F` (body-file), `-l` (label), `-p`
- *  (project) — which the long-flag-only denies above never matched. Same `subcommand* -X*`
- *  space-boundary shape as ROLE_DISALLOWED_TOOLS's `-F` denies above (see that doc for the
- *  greediness/flag-first-order/residual-clustering rationale — it applies identically here).
- *  `-l`/`-p` both keep an authoritative backstop (align.ts's post-checks) unlike `-F`, so this
- *  is hardening for those two either way. */
+/** The PO's matching deny list, kept byte-identical as the same regression trip-wire class as
+ *  ROLE_DISALLOWED_TOOLS above (`--body-file`/`--label`/`--project` and their `-F`/`-l`/`-p`
+ *  short-flag aliases on `gh issue create`, #101/#102) — the real boundary is PO_ALLOWED_TOOLS
+ *  carrying no Bash grant at all, not this pattern layer. */
 export const PO_DISALLOWED_TOOLS =
   ROLE_DISALLOWED_TOOLS +
   ",Bash(gh issue create *--body-file*),Bash(gh issue create *--label*),Bash(gh issue create *--project*)," +
@@ -130,14 +78,15 @@ export interface RoleSessionOpts {
   prompt: string;
   model: string;
   effort: string;
-  /** #89/#91: per-role ALLOW-list override (e.g. PO_ALLOWED_TOOLS, retro.ts's
-   *  RETRO_ALLOWED_TOOLS) — the symmetric widening counterpart to disallowedTools below, for a
-   *  role whose job legitimately needs MORE than the base issues-only ROLE_ALLOWED_TOOLS: the
-   *  PO's `gh issue create` (#89 goal decomposition) and retro's git + `gh pr create` (#77
-   *  decision 6 — proposals land EXCLUSIVELY as PRs). Omitted -> the base ROLE_ALLOWED_TOOLS,
-   *  unchanged for every role that doesn't need it. Widening the allow-list is always paired
-   *  with a role-specific disallowedTools override too (see align.ts/retro.ts) — never shipped
-   *  wide-open. */
+  /** #89/#91/#110: per-role ALLOW-list override — the symmetric widening counterpart to
+   *  disallowedTools below, for a role whose job legitimately needs MORE than the base
+   *  issues-only ROLE_ALLOWED_TOOLS (now empty, #110 PR5). retro.ts's RETRO_ALLOWED_TOOLS (git +
+   *  `gh pr create`, #77 decision 6 — proposals land EXCLUSIVELY as PRs) is the ONLY remaining
+   *  widening pair: PO_ALLOWED_TOOLS used to widen for `gh issue create` (#89) but #110 retired
+   *  that need — the engine performs issue creation itself from align.ts's validated structured
+   *  output now. Omitted -> the base ROLE_ALLOWED_TOOLS, unchanged for every role that doesn't
+   *  need it. Widening the allow-list is always paired with a role-specific disallowedTools
+   *  override too (see retro.ts) — never shipped wide-open. */
   allowedTools?: string;
   /** Per-role deny-list override (e.g. PLAN_DRAFTER_DISALLOWED_TOOLS). Omitted -> the base
    *  ROLE_DISALLOWED_TOOLS. Deny rules take precedence over allows in Claude Code, so this
