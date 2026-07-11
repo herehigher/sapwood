@@ -26,7 +26,7 @@ import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import { runRounds, type RoundDeps, type PeripheralPhase, type PeripheralStub } from "./round.js";
 import type { Supervisor, LaneProbe } from "./conductor.js";
-import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
+import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
 
 /** Scripted fake of RoleRunner.run — captures every call's opts for assertion, returns the
  *  next scripted result (or the last one, repeated) — same pattern as plan-review.test.ts's
@@ -67,6 +67,8 @@ class MinimalForge implements IForge {
   async getPRReviewData(): Promise<PRReviewData> {
     return { headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false, labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0 };
   }
+  async getPRDiff(): Promise<string> { return ""; }
+  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
   async listMilestoneTitles(): Promise<string[]> { return []; }
   async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }

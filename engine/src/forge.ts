@@ -52,6 +52,17 @@ export interface PRComment {
   body: string;
 }
 
+/** One commit (`gh api repos/<owner>/<repo>/commits?since=...`) — #111 PR-A's git-log-since
+ *  source for the retro round-digest (see IForge.getCommitsSince's doc for why this is a GitHub
+ *  API read rather than a local `git log`). `message` is the FULL commit message (subject +
+ *  body) verbatim; callers that want a one-line summary take the first line themselves. */
+export interface CommitInfo {
+  sha: string;
+  message: string;
+  author: string;
+  date: string; // ISO
+}
+
 /** One review on the PR (`gh pr view --json reviews`). */
 export interface PRReview {
   author: string;
@@ -100,6 +111,20 @@ export interface IForge {
   addIssueComment(issue: number, body: string): Promise<void>;
   /** Fetch gate②'s raw review signals for a PR. #13 reviewer.ts. */
   getPRReviewData(pr: number): Promise<PRReviewData>;
+  /** #111 PR-A: a PR's unified diff (`gh pr diff`), read-only. The retro round-digest's ONE
+   *  source for "what code actually changed" — retro.ts no longer has a live `gh pr diff`
+   *  Bash grant of its own; the engine fetches this itself, once per touched PR, before the
+   *  session ever runs (retro-digest.ts's buildRetroDigest). */
+  getPRDiff(pr: number): Promise<string>;
+  /** #111 PR-A: commit history since `sinceIso` — the digest's "git log since round start"
+   *  source. Deliberately sourced from the GitHub API (`gh api .../commits`), NOT a local
+   *  `git log` subprocess: worker.test.ts's #69 grep-invariant pins that the ONLY engine
+   *  modules ever allowed to shell a subprocess are worker.ts (spawn, the claude CLI) and
+   *  gh.ts (execFile, the `gh` binary) — no other engine module may exec `git` directly. Using
+   *  the GitHub API here keeps that invariant intact AND is arguably more correct anyway: it
+   *  reads the round's commits from GitHub's own authoritative view, not whatever the engine's
+   *  local checkout happens to have fetched. */
+  getCommitsSince(sinceIso: string): Promise<CommitInfo[]>;
   /** Raw issue body text (#46, Decision #8's gate② re-check): reviewer.ts extracts the
    *  verification-plan section from this to carry into the review trigger. Read-only;
    *  "" for an issue with no body rather than throwing (extractVerificationPlan treats an
@@ -275,6 +300,20 @@ export class GithubForge implements IForge {
       "--json", "number,headRefOid,state,mergeable,statusCheckRollup",
     ]);
     return parsePRStatus(out);
+  }
+
+  async getPRDiff(pr: number): Promise<string> {
+    return this.gh(["pr", "diff", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`]);
+  }
+
+  async getCommitsSince(sinceIso: string): Promise<CommitInfo[]> {
+    // Same --paginate/--slurp discipline as getIssueComments — the commits list endpoint pages
+    // at 30/page by default; a round spanning >30 commits must not silently lose the rest.
+    const out = await this.gh([
+      "api", `repos/${this.cfg.board.owner}/${this.repo()}/commits?since=${encodeURIComponent(sinceIso)}&per_page=100`,
+      "--paginate", "--slurp",
+    ]);
+    return parseCommitsSince(out);
   }
 
   async mergePR(pr: number, headOid: string): Promise<void> {
@@ -935,6 +974,27 @@ export function parsePRComments(json: string): PRComment[] {
   const parsed = JSON.parse(json) as Raw[] | Raw[][];
   const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
   return arr.map((c) => ({ login: c.user?.login ?? "", createdAt: c.created_at ?? "", body: c.body ?? "" }));
+}
+
+/** Pure parse of `gh api .../commits?since=... --paginate --slurp` (same page-shape convention
+ *  as parsePRComments above). `author` prefers the linked GitHub login (`author.login` — present
+ *  when the commit's email matches a GitHub account); falls back to the raw git author name
+ *  (`commit.author.name`) for an unlinked/unknown-account commit, same as never for an empty
+ *  string. Malformed/missing fields degrade to ""  — never a throw. */
+export function parseCommitsSince(json: string): CommitInfo[] {
+  type Raw = {
+    sha?: string;
+    commit?: { message?: string; author?: { name?: string; date?: string } };
+    author?: { login?: string } | null;
+  };
+  const parsed = JSON.parse(json) as Raw[] | Raw[][];
+  const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
+  return arr.map((c) => ({
+    sha: c.sha ?? "",
+    message: c.commit?.message ?? "",
+    author: c.author?.login ?? c.commit?.author?.name ?? "",
+    date: c.commit?.author?.date ?? "",
+  }));
 }
 
 export function assemblePRReviewData(viewJson: string, reactionsJson: string, unresolvedThreads: number, commentsJson = "[]"): PRReviewData {

@@ -14,7 +14,7 @@ import {
 import type { Supervisor, LaneProbe, MergeGate } from "./conductor.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
-import type { IForge, Issue, PRStatus, PRReviewData } from "./forge.js";
+import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
 import type { DriveOutcome } from "./merge-driver.js";
 
 class FakeForge implements IForge {
@@ -41,6 +41,8 @@ class FakeForge implements IForge {
       labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
     };
   }
+  async getPRDiff(): Promise<string> { return ""; }
+  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
   async countOpenIssuesInMilestone(milestone: string): Promise<number> {
     this.milestoneQueries.push(milestone);
     return this.milestoneOpenCounts.length > 1 ? this.milestoneOpenCounts.shift()! : this.milestoneOpenCounts[0]!;

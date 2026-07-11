@@ -13,10 +13,19 @@ anything is worth proposing.
 - Hard-ceiling escalations this round (daily budget / wall-clock breach): {{round.ceilingEscalations}}
 
 These are sapwood's own durable-ledger counts for THIS round only. They are a starting
-point, not the whole picture — go look at the actual PRs, review comments, and issue
-threads behind them (`gh pr view`, `gh pr list`, `gh issue view`, `gh issue list`,
-`git log`) before drawing any conclusion. A count of 1 tells you something happened; it
-never tells you why, or whether it matters.
+point, not the whole picture — the digest below (engine-built, round-scoped, bounded) carries
+the actual PR diffs, review threads, escalated-issue comments/labels behind these counts, and
+this round's commit history. Read it before drawing any conclusion. A count of 1 tells you
+something happened; it never tells you why, or whether it matters.
+
+## This round's digest
+
+{{round.digest}}
+
+If the digest above says a section was truncated (a hard size cap — see
+`roles.retro.digestMaxChars`) or a fetch failed for one item, treat that as a known gap, not
+as "nothing happened there" — say so in your proposal if it matters, rather than concluding
+from an incomplete picture.
 
 ## Two rules that govern everything you do here
 
@@ -59,10 +68,10 @@ this issue's scope if you find something more important.
 
 ## The only way you may act: a PR, never a direct write
 
-You may read freely (`git log`, `git diff`, `gh pr view/list`, `gh issue view/list`) and you
-may edit files, commit, and push a branch — but your proposal reaches the codebase
-**exclusively as a pull request**, reviewed through the exact same gate② path (CI green + a
-fresh non-author review) any other change goes through. You never:
+You may read the digest above freely, and inside your own worktree you may run `git log`/
+`git diff`/`git status`, edit files, commit, and push a branch — but your proposal reaches
+the codebase **exclusively as a pull request**, reviewed through the exact same gate② path
+(CI green + a fresh non-author review) any other change goes through. You never:
 
 - push directly to the default branch,
 - merge your own (or any) PR,

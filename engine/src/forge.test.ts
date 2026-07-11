@@ -790,6 +790,28 @@ test("updateIssueBody: runs `gh issue edit <n> --body <text>` scoped to this rep
   assert.ok(args.includes("--body") && args.includes("revised body text"));
 });
 
+// ── #111 PR-A: getCommitsSince — the retro digest's commit-history source (a `gh api` read,
+//    never a local `git log` subprocess — see IForge.getCommitsSince's doc). ──
+
+test("getCommitsSince: runs `gh api repos/<owner>/<repo>/commits?since=...` with the ISO cutoff url-encoded, paginated to exhaustion", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "[]";
+  };
+  const commits = await forge.getCommitsSince("2026-07-11T06:00:00.000Z");
+  assert.deepEqual(commits, []);
+  assert.equal(seen.length, 1);
+  const args = seen[0]!;
+  assert.equal(args[0], "api");
+  // The `since` ISO's colons must be url-encoded inside the query string.
+  assert.equal(args[1], "repos/o/r/commits?since=2026-07-11T06%3A00%3A00.000Z&per_page=100");
+  // Same pagination discipline as getIssueComments — never a silent first-page-only read.
+  assert.ok(args.includes("--paginate") && args.includes("--slurp"));
+});
+
 // ── #87: selectPlanReviewCandidates — the plan_review peripheral's candidate query,
 //    disjoint at completion from selectReadyIssues (that returns what's ALREADY past gate⓪) ──
 
