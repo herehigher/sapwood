@@ -42,6 +42,11 @@ class FakeForge implements IForge {
   async addPRComment(): Promise<void> {}
   async addIssueComment(n: number, body: string): Promise<void> { this.issueCommentsPosted.push([n, body]); }
   async getIssueBody(issue: number): Promise<string> { return this.issueBodies[issue] ?? ""; }
+  updateIssueBodyCalls: Array<[number, string]> = [];
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+    this.issueBodies[issue] = body;
+  }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
       headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,

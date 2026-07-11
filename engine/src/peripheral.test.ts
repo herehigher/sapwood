@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   RoleRunner, ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, PLAN_DRAFTER_DISALLOWED_TOOLS,
-  PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, type RoleRunnerDeps,
+  PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry,
+  type RoleRunnerDeps, type RoleSessionOpts, type RoleSessionResult, type RetriedSession,
 } from "./peripheral.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
@@ -356,5 +357,94 @@ test("run: spend baseline — costUsd is 0 when the stub emits no result line", 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #110 PR0: runSessionWithRetry's `isValid` hook — a fake runner/state, no CLI spawn (the
+//    helper itself only touches `Pick<RoleRunner,"run">`/`Pick<State,"recordSpend"|"appendEvent">`,
+//    so a real claude-stub binary buys nothing here; contrast the spawn-integration tests above). ──
+
+const mkResult = (over: Partial<RoleSessionResult> = {}): RoleSessionResult => ({
+  outcome: "done", costUsd: 0, modelUsage: [], exitCode: 0, name: "role-x-1", ...over,
+});
+
+/** Consumes the next scripted result per call (repeats the last once exhausted) — same
+ *  scripted-fake shape align.test.ts/architect.test.ts/plan-review.test.ts use for RoleRunner. */
+class FakeRunner {
+  calls: RoleSessionOpts[] = [];
+  private n = 0;
+  constructor(private readonly results: RoleSessionResult[]) {}
+  async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
+    this.calls.push(opts);
+    const r = this.results[Math.min(this.n, this.results.length - 1)]!;
+    this.n++;
+    return r;
+  }
+}
+
+class FakeState {
+  spends: Array<[string, number, number]> = [];
+  events: Array<[string, Record<string, unknown>]> = [];
+  recordSpend(worker: string, issue: number, usd: number): void { this.spends.push([worker, issue, usd]); }
+  appendEvent(kind: string, payload: Record<string, unknown>): void { this.events.push([kind, payload]); }
+}
+
+const mkOpts = (
+  runner: FakeRunner, state: FakeState, isValid: RetriedSession["isValid"],
+): RetriedSession => ({
+  runner, state, session: { roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium" },
+  issue: 0, now: () => new Date("2026-07-11T00:00:00Z"),
+  degradeEvent: "test-degraded",
+  degradePayload: (result) => ({ attempts: 2, exitCode: result.exitCode }),
+  degradeMessage: (result) => `test role degraded: ${result.outcome}`,
+  ...(isValid !== undefined ? { isValid } : {}),
+});
+
+test("runSessionWithRetry + isValid: a valid \"done\" result on the FIRST attempt — no retry, no degrade", async () => {
+  const runner = new FakeRunner([mkResult()]);
+  const state = new FakeState();
+  const result = await runSessionWithRetry(mkOpts(runner, state, () => true));
+  assert.equal(runner.calls.length, 1);
+  assert.equal(state.events.length, 0);
+  assert.equal(result.outcome, "done");
+});
+
+test("runSessionWithRetry + isValid: \"done\" but invalid on attempt 1, valid on attempt 2 — exactly one retry, no degrade event", async () => {
+  const runner = new FakeRunner([mkResult({ name: "role-x-1" }), mkResult({ name: "role-x-2" })]);
+  const state = new FakeState();
+  let calls = 0;
+  const result = await runSessionWithRetry(mkOpts(runner, state, () => { calls++; return calls >= 2; }));
+  assert.equal(runner.calls.length, 2, "invalid first attempt triggers exactly one retry");
+  assert.equal(state.events.length, 0, "eventually-valid result never degrades");
+  assert.equal(state.spends.length, 2, "spend is recorded for BOTH attempts regardless of validity");
+  assert.equal(result.name, "role-x-2");
+});
+
+test("runSessionWithRetry + isValid: \"done\" but invalid on BOTH attempts — degrades exactly like a non-\"done\" outcome (event + message)", async () => {
+  const runner = new FakeRunner([mkResult(), mkResult()]);
+  const state = new FakeState();
+  const result = await runSessionWithRetry(mkOpts(runner, state, () => false));
+  assert.equal(runner.calls.length, 2);
+  assert.equal(state.events.length, 1);
+  assert.equal(state.events[0]![0], "test-degraded");
+  assert.deepEqual(state.events[0]![1], { attempts: 2, exitCode: result.exitCode });
+  assert.equal(result.outcome, "done"); // last attempt's raw result is still returned as-is
+});
+
+test("runSessionWithRetry: isValid OMITTED — behavior is byte-identical to today (only `outcome` decides done vs. not-done)", async () => {
+  // A "done" outcome with no isValid never retries, exactly like before #110.
+  const doneRunner = new FakeRunner([mkResult({ outcome: "done" })]);
+  const doneState = new FakeState();
+  await runSessionWithRetry(mkOpts(doneRunner, doneState, undefined));
+  assert.equal(doneRunner.calls.length, 1);
+  assert.equal(doneState.events.length, 0);
+
+  // A "failed" outcome with no isValid still retries once, then degrades on a second failure —
+  // the pre-#110 behavior, untouched.
+  const failRunner = new FakeRunner([mkResult({ outcome: "failed" }), mkResult({ outcome: "failed" })]);
+  const failState = new FakeState();
+  await runSessionWithRetry(mkOpts(failRunner, failState, undefined));
+  assert.equal(failRunner.calls.length, 2);
+  assert.equal(failState.events.length, 1);
+  assert.equal(failState.events[0]![0], "test-degraded");
 });
 
