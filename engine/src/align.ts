@@ -149,6 +149,13 @@ export function validateAlignOutput(text: string): AlignValidation {
     return { ok: false, reason: `structured output metadata failed schema validation: ${describeZodError(parsed.error)}` };
   }
   const { issues } = parsed.data;
+  // Codex review round 1: duplicate titles in one batch would double-create the same issue on
+  // GitHub (the engine loops the array verbatim). A session declaring the same title twice is
+  // ambiguous by construction — rejected whole, same fail-closed doctrine as every other
+  // duplicate/ambiguity rejection in the #110 sequence (never a partial/best-guess apply).
+  if (new Set(issues.map((it) => it.title)).size !== issues.length) {
+    return { ok: false, reason: "duplicate issue title in the issues array" };
+  }
   if (issues.length === 0) {
     if (block.body !== undefined && block.body.trim() !== "") {
       return { ok: false, reason: "no issues declared but a BODY block was present" };

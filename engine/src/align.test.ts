@@ -495,6 +495,29 @@ test("createAligningStub #110: a malformed triage block is retried once, then de
   state.close();
 });
 
+test("createAligningStub #110 (Codex round 1): a duplicate-title align batch twice -> align's degrade path, NOTHING created (never a double-create)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const dupText = alignResultText([
+    { title: "Add X", body: PLAN_BODY },
+    { title: "Add X", body: PLAN_BODY },
+  ]);
+  const runner = new ScriptedRunner([
+    doneResult("po-align-0", dupText),
+    doneResult("po-align-0-retry", dupText),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapEvents(state);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  const { marker } = await stub.run({ roundId: 19, phase: "aligning", marker: null });
+  assert.equal(runner.calls.length, 2, "invalid output is retried once, then degrades");
+  assert.equal(marker, alignMarker(19), "the round still advances");
+  assert.equal(forge.createdIssues.length, 0, "zero createIssue calls — the duplicate batch is rejected whole, never partially applied");
+  assert.ok(logged.some(([kind]) => kind === "po-degraded"));
+  state.close();
+});
+
 test("createAligningStub #110: an align block with a wrong number of <<<ISSUE>>> body segments is malformed, not silently truncated/misassigned", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
@@ -585,6 +608,15 @@ test("validateAlignOutput: a smuggled 'labels' field in an issue entry is reject
   const result = validateAlignOutput(text);
   assert.equal(result.ok, false);
   assert.ok(!result.ok && /schema validation/.test(result.reason));
+});
+
+test("validateAlignOutput (Codex round 1): duplicate titles in one batch -> fail-closed, rejected whole (would double-create the same issue)", () => {
+  const result = validateAlignOutput(alignResultText([
+    { title: "Add X", body: "Body one." },
+    { title: "Add X", body: "Body two." },
+  ]));
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /duplicate issue title/.test(result.reason));
 });
 
 test("validateAlignOutput: empty issues array with a stray BODY block present -> fail-closed", () => {
