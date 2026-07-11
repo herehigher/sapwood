@@ -217,6 +217,54 @@ test("PO_DISALLOWED_TOOLS: strict superset of the base denies, closing the `gh i
   assert.ok(PO_DISALLOWED_TOOLS.includes("Bash(gh issue create *--project*)"));
 });
 
+// ── #102: gh short-flag alias denies (gate② finding on #101 — `-F`/`-l`/`-p` bypass the
+// long-flag-only `--body-file`/`--label`/`--project` denies) ───────────────────────────────────
+//
+// A local, test-only glob matcher mirrors Claude Code's Bash(...) permission-pattern semantics
+// (`*` = any run of characters, everything else literal) closely enough to assert deny/allow at
+// the ARGV level — not just substring presence in the deny-list string — so these tests actually
+// exercise the precise pattern shapes chosen in peripheral.ts, including the space-boundary
+// precision the module doc calls out (`*-F*` alone would be too greedy).
+function patternMatchesCommand(pattern: string, command: string): boolean {
+  const inner = pattern.replace(/^Bash\(/, "").replace(/\)$/, "");
+  const escaped = inner.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+  return new RegExp(`^${escaped}$`).test(command);
+}
+const anyDenyMatches = (denyList: string, command: string): boolean =>
+  denyList.split(",").some((p) => p.startsWith("Bash(") && patternMatchesCommand(p, command));
+
+test("ROLE_DISALLOWED_TOOLS denies `gh issue comment/edit -F` (#102) — both space-separated and pflag-attached forms", () => {
+  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue comment 12 -F /etc/passwd"));
+  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue comment 12 -F/etc/passwd"), "attached form (no space)");
+  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue edit 12 -F /etc/passwd"));
+  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue edit 12 -F/etc/passwd"), "attached form (no space)");
+});
+
+test("ROLE_DISALLOWED_TOOLS: legitimate role writes (`gh issue comment/edit --body`) still pass, including bodies that merely CONTAIN the substring \"-F\" without it being its own argv token", () => {
+  assert.ok(!anyDenyMatches(ROLE_DISALLOWED_TOOLS, `gh issue comment 12 --body "status update"`));
+  assert.ok(!anyDenyMatches(ROLE_DISALLOWED_TOOLS, `gh issue edit 12 --body "status update"`));
+  // "-F" appears in "PR-Foo" but isn't preceded by a space (not its own token) — the space-
+  // boundary pattern shape must not false-deny this the way a bare `*-F*` would.
+  assert.ok(!anyDenyMatches(ROLE_DISALLOWED_TOOLS, `gh issue comment 12 --body "see PR-Foo for context"`));
+});
+
+test("PLAN_DRAFTER_DISALLOWED_TOOLS inherits the base list's -F short-flag denies (#102)", () => {
+  assert.ok(anyDenyMatches(PLAN_DRAFTER_DISALLOWED_TOOLS, "gh issue edit 12 -F /etc/passwd"));
+});
+
+test("PO_DISALLOWED_TOOLS denies `gh issue create -F/-l/-p` (#102) — both space-separated and pflag-attached forms", () => {
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -F /etc/passwd"));
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -F/etc/passwd"), "attached form");
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -l plan:approved"));
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -lplan:approved"), "attached form");
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -p Roadmap"));
+  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -pRoadmap"), "attached form");
+});
+
+test("PO_DISALLOWED_TOOLS: legitimate PO write (`gh issue create --title --body` only) still passes", () => {
+  assert.ok(!anyDenyMatches(PO_DISALLOWED_TOOLS, `gh issue create --title "Improve X" --body "Because Y"`));
+});
+
 test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the align/triage session wiring)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
