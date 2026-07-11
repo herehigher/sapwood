@@ -260,6 +260,15 @@ test("labels.planApproved: defaults to plan:approved, overridable", () => {
   assert.equal(over.labels.planApproved, "custom:approved");
 });
 
+test("labels.originAgent: defaults to origin:agent, overridable (#89 — the PO provenance stamp, config-driven like every sibling label)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.labels.originAgent, "origin:agent");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { originAgent: bot:made }",
+  );
+  assert.equal(over.labels.originAgent, "bot:made");
+});
+
 test("roles.planReviewer.promptFile: unset by default, overridable, strict schema (same #74 pattern as worker.promptFile)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.roles.planReviewer.promptFile, undefined);
@@ -320,6 +329,209 @@ test("roles.planReviewer.promptFile: a relative path resolves against the config
     );
     const cfg = loadConfig(cfgPath);
     assert.equal(cfg.roles.planReviewer.promptFile, join(dir, "my-plan-reviewer.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #87: role runner — model/effort defaults + the plan-drafter role ────────────────────────
+
+test("roles.planReviewer.model/effort: default to a lighter model/effort than worker.model/effort, overridable", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.planReviewer.model, "sonnet");
+  assert.equal(cfg.roles.planReviewer.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { model: opus, effort: high } }",
+  );
+  assert.equal(over.roles.planReviewer.model, "opus");
+  assert.equal(over.roles.planReviewer.effort, "high");
+});
+
+test("roles.planDrafter: promptFile unset by default, model/effort defaulted, strict schema (#74/#77 Amendment 2 pattern)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.planDrafter.promptFile, undefined);
+  assert.equal(cfg.roles.planDrafter.model, "sonnet");
+  assert.equal(cfg.roles.planDrafter.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFile: prompts/custom-drafter.md, model: opus } }",
+  );
+  assert.equal(over.roles.planDrafter.promptFile, "prompts/custom-drafter.md");
+  assert.equal(over.roles.planDrafter.model, "opus");
+});
+
+test("roles.planDrafter: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.planDrafter.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planDrafter: { promptFile: my-plan-drafter.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.planDrafter.promptFile, join(dir, "my-plan-drafter.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #90: roles.architect (round design/review peripheral) ──────────────────────────────────
+
+test("roles.architect: promptFile unset by default, model/effort defaulted, strict schema (same #74 pattern)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.architect.promptFile, undefined);
+  assert.equal(cfg.roles.architect.model, "sonnet");
+  assert.equal(cfg.roles.architect.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { promptFile: prompts/custom-architect.md, model: opus } }",
+  );
+  assert.equal(over.roles.architect.promptFile, "prompts/custom-architect.md");
+  assert.equal(over.roles.architect.model, "opus");
+});
+
+test("roles.architect: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.architect.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { promptFile: my-architect.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.architect.promptFile, join(dir, "my-architect.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #89: roles.po (the PO/product-owner peripheral) ─────────────────────────────────────────
+
+test("roles.po: promptFile unset by default, model/effort defaulted, strict schema (same #74 pattern as roles.planReviewer/planDrafter)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.po.promptFile, undefined);
+  assert.equal(cfg.roles.po.model, "sonnet");
+  assert.equal(cfg.roles.po.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFile: prompts/custom-po.md, model: opus, effort: high } }",
+  );
+  assert.equal(over.roles.po.promptFile, "prompts/custom-po.md");
+  assert.equal(over.roles.po.model, "opus");
+  assert.equal(over.roles.po.effort, "high");
+});
+
+test("roles.po: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFiel: x.md } }"),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.po.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFile: my-po.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.po.promptFile, join(dir, "my-po.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #91: roles.harvest / roles.retro (round-close peripheral roles) ────────────────────────
+
+test("roles.harvest: promptFile unset by default, model/effort defaulted (same #74/#88 pattern), strict schema", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.harvest.promptFile, undefined);
+  assert.equal(cfg.roles.harvest.model, "sonnet");
+  assert.equal(cfg.roles.harvest.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { harvest: { promptFile: prompts/custom-harvest.md, model: opus, effort: high } }",
+  );
+  assert.equal(over.roles.harvest.promptFile, "prompts/custom-harvest.md");
+  assert.equal(over.roles.harvest.model, "opus");
+  assert.equal(over.roles.harvest.effort, "high");
+});
+
+test("roles.harvest: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { harvest: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.harvest.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { harvest: { promptFile: my-harvest.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.harvest.promptFile, join(dir, "my-harvest.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("roles.retro: promptFile unset by default, model/effort defaulted, strict schema", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.retro.promptFile, undefined);
+  assert.equal(cfg.roles.retro.model, "sonnet");
+  assert.equal(cfg.roles.retro.effort, "medium");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { promptFile: prompts/custom-retro.md, model: opus } }",
+  );
+  assert.equal(over.roles.retro.promptFile, "prompts/custom-retro.md");
+  assert.equal(over.roles.retro.model, "opus");
+});
+
+test("roles.retro: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { promptFiel: x.md } }",
+      ),
+    /promptFiel|[Uu]nrecognized/,
+  );
+});
+
+test("roles.retro.promptFile: a relative path resolves against the config file's directory, not cwd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { promptFile: my-retro.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.retro.promptFile, join(dir, "my-retro.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -394,5 +606,91 @@ test("round: a typo'd key is rejected, not silently dropped (.strict())", () => 
   assert.throws(
     () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { milestne: M4 }"),
     /milestne|[Uu]nrecognized/,
+  );
+});
+
+// ── #104: roles.architect.planMdPath (architecture-doc path, no longer hardcoded to cwd) ───
+
+test("roles.architect.planMdPath: defaults to docs/PLAN.md", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.architect.planMdPath, "docs/PLAN.md");
+});
+
+test("roles.architect.planMdPath: overridable, same #74-style key as promptFile", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: notes/ARCH.md } }",
+  );
+  assert.equal(cfg.roles.architect.planMdPath, "notes/ARCH.md");
+});
+
+test("roles.architect.planMdPath: a relative path resolves against the config file's directory, not cwd (same rule as promptFile)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: my-plan.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.architect.planMdPath, join(dir, "my-plan.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("roles.architect.planMdPath: the DEFAULT value is also resolved relative to the config file's directory (not left cwd-relative)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\n");
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.architect.planMdPath, join(dir, "docs", "PLAN.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("roles.architect: an absolute planMdPath is left untouched", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const absPath = join(dir, "elsewhere", "PLAN.md");
+    writeFileSync(cfgPath, `board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: ${absPath} } }\n`);
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.architect.planMdPath, absPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #104: roles.retro.everyNRounds (retro cadence) ──────────────────────────────────────────
+
+test("roles.retro.everyNRounds: defaults to 1 (every round)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.retro.everyNRounds, 1);
+});
+
+test("roles.retro.everyNRounds: overridable to thin the cadence", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { everyNRounds: 3 } }",
+  );
+  assert.equal(cfg.roles.retro.everyNRounds, 3);
+});
+
+test("roles.retro.everyNRounds: zero/negative is rejected (positive int only)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { everyNRounds: 0 } }"),
+    /everyNRounds/,
+  );
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { everyNRounds: -1 } }"),
+    /everyNRounds/,
+  );
+});
+
+test("roles.retro.everyNRounds: a non-integer is rejected", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { everyNRounds: 1.5 } }"),
+    /everyNRounds/,
   );
 });

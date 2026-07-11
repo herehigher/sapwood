@@ -74,6 +74,12 @@ class FakeForge implements IForge {
   }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
   async listMilestoneTitles(): Promise<string[]> { return []; }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
+  async getIssueLabels(): Promise<string[]> { return []; }
+  async getIssueComments() { return []; }
+  async createIssue(): Promise<number> { return 0; }
+  async listOpenIssueNumbers(): Promise<number[]> { return []; }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
 }
 
 class FakeSupervisor implements Supervisor {

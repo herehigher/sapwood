@@ -144,6 +144,27 @@ export class RoundScopedForge implements IForge {
   getIssueBody(issue: number) { return this.inner.getIssueBody(issue); }
   countOpenIssuesInMilestone(milestone: string) { return this.inner.countOpenIssuesInMilestone(milestone); }
   listMilestoneTitles() { return this.inner.listMilestoneTitles(); }
+  getIssueLabels(issue: number) { return this.inner.getIssueLabels(issue); }
+  getIssueComments(issue: number) { return this.inner.getIssueComments(issue); }
+
+  /** Same milestone scoping as getReadyIssues() above — the plan_review peripheral's
+   *  candidates are dispatch candidates too (just for review, not for a worker), so this round
+   *  should only review issues actually in scope for it. */
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    const issues = await this.inner.getIssuesNeedingPlanReview();
+    return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
+  }
+
+  createIssue(title: string, body: string) { return this.inner.createIssue(title, body); }
+  listOpenIssueNumbers() { return this.inner.listOpenIssueNumbers(); }
+
+  /** #89: same milestone scoping as getIssuesNeedingPlanReview above — the PO/triage
+   *  peripheral's candidates are dispatch candidates too (just pre-Ready), so a round scoped to
+   *  one milestone should only triage issues actually in scope for it. */
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    const issues = await this.inner.getIssuesNeedingPlanTriage();
+    return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
+  }
 }
 
 /**
@@ -277,6 +298,18 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     return true;
   };
 
+  /** #95 follow-up: persist a round-stop hit to the durable event log (in addition to firing
+   *  the observability hook) the instant it's first detected — so `round-stop` events survive
+   *  an engine restart/crash even if nothing ever reads deps.onRoundStop live. Contained: same
+   *  fail-toward-more-work stance as the tick-error appendEvent calls above — a write failure
+   *  here must never abort the round loop or swallow the stop condition itself. */
+  const emitRoundStop = (round: RoundRow, hit: RoundStopHit): void => {
+    try {
+      deps.state.appendEvent("round-stop", { round_id: round.round_id, name: hit.name, detail: hit.detail });
+    } catch { /* state write failed — the hit still reaches onRoundStop below */ }
+    deps.onRoundStop?.(round.round_id, hit);
+  };
+
   /** The `executing` phase: one dispatch-enabled tick (the round's single "batch"), then
    *  drain-only ticks until nothing's in flight. `freshBatch` is false only when we RESUMED
    *  directly into `executing` after a crash mid-drain — re-running the batch dispatch in
@@ -287,6 +320,21 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     const dispatchedNames: string[] = [];
     const spentSoFar = (): number =>
       dispatchedNames.reduce((sum, n) => sum + deps.state.spentUsdForWorker(n), 0);
+
+    // #95 follow-up: a resumed drain (crash mid-`executing`, restart resumes directly into this
+    // phase — freshBatch false) never runs the dispatch tick below, so dispatchedNames would
+    // stay permanently empty and cost.roundBudgetUsd could never fire for it (Codex PR #95
+    // review) — a resumed round could overspend without limit. The exact set of lanes THIS
+    // round originally dispatched isn't recoverable (that identity isn't persisted anywhere;
+    // only the round's phase cursor + marker survive a crash), so the best available proxy is
+    // every lane still ACTIVE right now (state.activeWorkers()) — exactly the lanes this
+    // resumed drain loop is waiting on below. Known, accepted gap: a dispatched lane that
+    // already finished (and had its spend recorded) in the crash-to-restart gap is invisible
+    // here and under-counted — but that is strictly better than never evaluating the budget at
+    // all, and it correctly tracks everything the drain loop's own exit condition depends on.
+    if (!freshBatch) {
+      for (const w of deps.state.activeWorkers()) dispatchedNames.push(w.name);
+    }
 
     if (freshBatch) {
       let milestoneExhausted = false;
@@ -306,7 +354,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           stopHit = { name: "roundDispatchCap", detail: `dispatched ${dispatchedNames.length}` };
         }
       }
-      if (stopHit) deps.onRoundStop?.(round.round_id, stopHit);
+      if (stopHit) emitRoundStop(round, stopHit);
     }
 
     // Drain until nothing's left in flight. tick() handles KILL_SWITCH drain-then-escalate
@@ -320,7 +368,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       await runTick(toTickDeps({ forge, forceDispatchPause: true, roundSpendUsd: spentSoFar() }));
       if (!stopHit && dispatchedNames.length > 0 && spentSoFar() >= cfg.cost.roundBudgetUsd) {
         stopHit = { name: "roundBudgetUsd", detail: `spent $${spentSoFar().toFixed(2)}` };
-        deps.onRoundStop?.(round.round_id, stopHit);
+        emitRoundStop(round, stopHit);
       }
       if (deps.state.activeWorkers().length === 0) break;
     }

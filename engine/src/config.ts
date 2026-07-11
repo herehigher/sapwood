@@ -173,14 +173,27 @@ const Labels = z.object({
   // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
   // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
   planApproved: z.string().default("plan:approved"),
+  // #89: provenance stamp for agent-created issues (docs/security.md's convention, now
+  // load-bearing): align.ts's PO orchestrator applies it to every issue the alignment
+  // session creates. Config-driven like every sibling label here — never a hardcoded
+  // string at the call site (fable PR #101 P3).
+  originAgent: z.string().default("origin:agent"),
 }).strict();
 
-// #88: gate⓪ plan-reviewer peripheral config surface. Session wiring (actually loading and
-// rendering this prompt) lands with the peripheral-role-runner issue — same "accepted, not
-// yet wired" shape as lanes.reserveCap/prFixCap/frictionMin below. This issue ships the
-// validated config key + path resolution + the shipped default prompt file only.
+// #87: peripheral role sessions (plan-reviewer, plan-drafter, ...) are cheap, issues-only,
+// text-judgment tasks — no code, no repo context beyond what's substituted into the prompt.
+// Default to a lighter model/effort than worker.model/effort (which does real implementation
+// work); still fully YAML-tunable per role, same as every other user-facing knob here.
+const RoleSession = z.object({
+  model: z.string().default("sonnet"),
+  effort: z.enum(["low", "medium", "high"]).default("medium"),
+}).strict();
+
+// #88/#87: gate⓪ plan-reviewer + plan-drafter peripheral config surface. #88 shipped the
+// validated config key + path resolution + the shipped default prompt file ("accepted, not
+// yet wired"); #87 (the role runner) is what actually loads/renders/dispatches these.
 const Roles = z.object({
-  planReviewer: z.object({
+  planReviewer: RoleSession.extend({
     // Same #74 promptFile pattern as worker.promptFile: unset -> the engine's shipped
     // `prompts/plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
     // directory (see loadConfig below), not the CLI's cwd.
@@ -190,8 +203,67 @@ const Roles = z.object({
     // degrade-to-human) — the bound that keeps the self-heal path from livelocking.
     // Positive int only: 0 would turn every request-a-draft outcome into an instant
     // needs-human, silently disabling the self-heal path. Enforced by the #87 role
-    // runner's plan_review phase (accepted, not yet wired — like promptFile above).
+    // runner's plan_review phase.
     maxDraftCycles: z.number().int().positive().default(2),
+  }).strict().default({}),
+  // #87 (#77 Amendment 2's self-heal): the plan-drafter peripheral — issues-only writes, a
+  // session distinct from the plan-reviewer, briefed by the reviewer's bounce comment to
+  // draft/repair an issue's acceptance criteria + verification plan. Never implements the
+  // issue, never approves its own draft (plan-author != plan-approver).
+  planDrafter: RoleSession.extend({
+    // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/plan-drafter.md`;
+    // relative resolves against the CONFIG FILE's directory.
+    promptFile: z.string().optional(),
+  }).strict().default({}),
+  // #90: the architect peripheral — round design/review between goal alignment and dispatch
+  // (#77's model). Issues-only write scope (the same peripheral-runner scope as the two roles
+  // above, #87/#99): never reviews PR code, never merges. Same #74 promptFile shape too.
+  architect: RoleSession.extend({
+    promptFile: z.string().optional(),
+    // #104 (#100 gate② P3): the architecture-doc path — was hardcoded to
+    // `<cwd>/docs/PLAN.md` (architect.ts's old defaultPlanMdPath), which breaks for any target
+    // repo sapwood runs against that doesn't keep its architecture doc at that exact path.
+    // Defaults to "docs/PLAN.md" (this repo's own convention) but is now a real config key, ALWAYS
+    // resolved relative to the CONFIG FILE's directory (see loadConfig below) — same #74
+    // promptFile pattern, except this key always has a value (never "unset -> engine-shipped
+    // default": the target repo's own doc, not a file sapwood ships). align.ts's PLAN.md read
+    // honors this same key (the two peripherals must read the SAME architecture doc).
+    planMdPath: z.string().min(1).default("docs/PLAN.md"),
+  }).strict().default({}),
+  // #89: the PO (product-owner) peripheral — goal alignment/decomposition at round start
+  // (reads the round milestone/theme + docs/PLAN.md, creates issues) plus the round-start
+  // triage pass that drafts a plan into any existing plan-less issue. Every PO-created issue
+  // carries `origin:agent` + a verification plan; the PO never sets board Status=Ready (locked
+  // decision 5 — only a human confirms Ready). Same #74 promptFile shape as every other role
+  // above: unset -> the engine's shipped `prompts/po.md`; a relative path resolves against the
+  // CONFIG FILE's directory (see loadConfig below), not the CLI's cwd.
+  po: RoleSession.extend({
+    promptFile: z.string().optional(),
+  }).strict().default({}),
+  // #91: round-close peripheral roles (#77 decision 2's harvest / decision 6's retro). Config
+  // key + path resolution + shipped default prompt only — same "accepted, not yet wired" shape
+  // #88 shipped for planReviewer before #87 wired it: harvest.ts/retro.ts implement the
+  // PeripheralStub, but wiring either into runRounds's default `harvesting`/`retro` peripherals
+  // (or the CLI) is a deliberate follow-up, not this issue's scope.
+  harvest: RoleSession.extend({
+    // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/harvest.md`;
+    // relative resolves against the CONFIG FILE's directory.
+    promptFile: z.string().optional(),
+  }).strict().default({}),
+  // #91 (#77 decision 6): the retrospective/self-evolution peripheral. Its role write scope is
+  // intentionally WIDER than the issues-only roles above (git + `gh pr create` — proposals land
+  // exclusively as PRs through the normal gate② path, never a direct write) — see retro.ts's
+  // RETRO_ALLOWED_TOOLS/RETRO_DISALLOWED_TOOLS for the enforcement this config key feeds.
+  retro: RoleSession.extend({
+    // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/retro.md`; relative
+    // resolves against the CONFIG FILE's directory.
+    promptFile: z.string().optional(),
+    // #104: retro cadence — the wiring-time decision retro.ts's own module doc named as a
+    // follow-up ("whether every round should pay for a retro pass"). Default 1 = every round
+    // (unchanged behavior from #91). N>1 thins it: retro.ts skips every round whose id isn't a
+    // multiple of N, still setting the phase marker (never wedges the round). Positive int
+    // only, same rationale as roles.planReviewer.maxDraftCycles above (0 has no sane meaning).
+    everyNRounds: z.number().int().positive().default(1),
   }).strict().default({}),
 }).strict();
 
@@ -325,12 +397,45 @@ export function loadConfig(path?: string): SapwoodConfig {
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
     cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
   }
-  // #88: same relative-to-config-file resolution for the (not-yet-wired) plan-reviewer prompt.
+  // #88/#87: same relative-to-config-file resolution for the plan-reviewer prompt.
   if (
     cfg.roles.planReviewer.promptFile !== undefined &&
     !isAbsolute(cfg.roles.planReviewer.promptFile)
   ) {
     cfg.roles.planReviewer.promptFile = resolve(dirname(file), cfg.roles.planReviewer.promptFile);
+  }
+  // #87: same rule for the plan-drafter prompt.
+  if (
+    cfg.roles.planDrafter.promptFile !== undefined &&
+    !isAbsolute(cfg.roles.planDrafter.promptFile)
+  ) {
+    cfg.roles.planDrafter.promptFile = resolve(dirname(file), cfg.roles.planDrafter.promptFile);
+  }
+  // #90: same rule for the architect prompt.
+  if (
+    cfg.roles.architect.promptFile !== undefined &&
+    !isAbsolute(cfg.roles.architect.promptFile)
+  ) {
+    cfg.roles.architect.promptFile = resolve(dirname(file), cfg.roles.architect.promptFile);
+  }
+  // #104: same rule for the architecture-doc path — UNLIKE promptFile this key always has a
+  // value (the schema default is "docs/PLAN.md", never unset), so there's no `!== undefined`
+  // guard: every non-absolute value, default or explicit, resolves against the config file's
+  // directory.
+  if (!isAbsolute(cfg.roles.architect.planMdPath)) {
+    cfg.roles.architect.planMdPath = resolve(dirname(file), cfg.roles.architect.planMdPath);
+  }
+  // #89: same rule for the PO prompt.
+  if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {
+    cfg.roles.po.promptFile = resolve(dirname(file), cfg.roles.po.promptFile);
+  }
+  // #91: same rule for the harvest prompt.
+  if (cfg.roles.harvest.promptFile !== undefined && !isAbsolute(cfg.roles.harvest.promptFile)) {
+    cfg.roles.harvest.promptFile = resolve(dirname(file), cfg.roles.harvest.promptFile);
+  }
+  // #91: same rule for the retro prompt.
+  if (cfg.roles.retro.promptFile !== undefined && !isAbsolute(cfg.roles.retro.promptFile)) {
+    cfg.roles.retro.promptFile = resolve(dirname(file), cfg.roles.retro.promptFile);
   }
   return cfg;
 }

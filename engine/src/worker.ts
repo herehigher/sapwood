@@ -155,6 +155,13 @@ export interface ClaudeArgsOpts {
    *  `--session-id` flag, unchanged. `--resume` reuses the SAME session (no --fork-session),
    *  so `sessionId` above should equal this value when both are set. */
   resumeSessionId?: string;
+  /** #87: override the coarse `--allowedTools`/`--disallowedTools` noise-reduction pair below —
+   *  peripheral.ts's role sessions need a narrower (issues-only) scope than a code-producing
+   *  worker's. Omitted -> today's worker defaults, unchanged. Same caveat as the worker
+   *  defaults: this is noise reduction only, never the real security boundary (the guard hook
+   *  is — see guardSettings). */
+  allowedTools?: string;
+  disallowedTools?: string;
 }
 
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
@@ -171,8 +178,8 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : ["--session-id", o.sessionId]),
     "--permission-mode", "auto",
     // Coarse noise-reduction only — the real boundary is the guard hook (#26).
-    "--allowedTools", "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)",
-    "--disallowedTools", "Bash(gh pr merge*),Bash(gh pr ready*)",
+    "--allowedTools", o.allowedTools ?? "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)",
+    "--disallowedTools", o.disallowedTools ?? "Bash(gh pr merge*),Bash(gh pr ready*)",
     ...(o.addDir ? ["--add-dir", o.addDir] : []),
     ...(o.settings ? ["--settings", o.settings] : []),
     "--output-format", "stream-json", "--include-hook-events", "--verbose",
@@ -208,6 +215,54 @@ export function guardSettings(hookPath: string): object {
     hooks: {
       PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit", hooks: [{ type: "command", command }] }],
     },
+  };
+}
+
+/** #87: an opaque handle over a spawned `claude` process — deliberately leaks NO
+ *  `child_process` types to callers (`ChildProcess` never appears in this interface), so
+ *  peripheral.ts (the role runner) can drive a spawned session without itself importing
+ *  `node:child_process` — worker.ts stays the engine's ONE module that touches the CLI /
+ *  subprocess layer (CLAUDE.md non-negotiable; pinned by the #69 grep-invariant test). */
+export interface SpawnedSession {
+  readonly pid: number | undefined;
+  onSpawn(cb: () => void): void;
+  onError(cb: (e: unknown) => void): void;
+  onExit(cb: (code: number | null) => void): void;
+  /** SIGTERM/SIGKILL the WHOLE detached process group (negative pid), falling back to just
+   *  the leader pid if group-signalling fails — same tolerance as WorkerSupervisor's own
+   *  killGroup/signalGroup. */
+  killGroup(sig: NodeJS.Signals): void;
+}
+
+/** Spawn a `claude` session: argv array (no shell), detached process group (so the caller can
+ *  kill the whole tree), stdio wired to the given jsonl fd. The SAME primitive
+ *  WorkerSupervisor.dispatch/resume use internally (not re-implemented — this function is
+ *  exported so peripheral.ts's narrower role-session shape reuses it directly rather than
+ *  opening a second `child_process` import site). */
+export function spawnClaudeSession(
+  bin: string,
+  args: string[],
+  opts: { jsonlFd: number; env: NodeJS.ProcessEnv },
+): SpawnedSession {
+  const child = spawn(bin, args, {
+    detached: true,
+    stdio: ["ignore", opts.jsonlFd, opts.jsonlFd],
+    env: opts.env,
+  });
+  const killGroup = (sig: NodeJS.Signals): void => {
+    if (child.pid == null) return;
+    try {
+      process.kill(-child.pid, sig); // negative pid -> the whole detached process group
+    } catch {
+      try { process.kill(child.pid, sig); } catch { /* already gone */ }
+    }
+  };
+  return {
+    get pid() { return child.pid; },
+    onSpawn: (cb) => child.once("spawn", cb),
+    onError: (cb) => child.on("error", cb),
+    onExit: (cb) => child.once("exit", cb),
+    killGroup,
   };
 }
 

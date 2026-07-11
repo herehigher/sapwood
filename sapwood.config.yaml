@@ -77,6 +77,58 @@ labels: # taxonomy used by the loop
   blocked: blocked
   reserve: reserve
   verifyNa: verify:n/a # Decision #8: issues with this label skip the verification-plan gate
+  # planApproved: plan:approved
+  #                   #88 gate⓪: applied by the plan-reviewer peripheral itself, never by a
+  #                   human or the loop directly — required (alongside a real plan section)
+  #                   for a non-verify:n/a issue to become dispatchable.
+
+# #87/#104: peripheral role sessions — the round orchestrator's aligning (PO)/architecting/
+# plan_review (gate⓪)/harvesting/retro phases, each a role-scoped session wired into runRounds's
+# default peripherals map by round-defaults.ts. Never code, never PR review/approve/merge except
+# retro (proposals land exclusively as PRs through gate②, never a direct write). Cheaper defaults
+# than worker.model/effort (real implementation work): every role defaults to sonnet/medium,
+# fully overridable.
+# roles:
+#   planReviewer:
+#     # promptFile: prompts/my-plan-reviewer.md
+#     #                   #74-style override; relative paths resolve against THIS config file's
+#     #                   directory. Unset = the engine's shipped prompts/plan-reviewer.md.
+#     model: sonnet
+#     effort: medium
+#     maxDraftCycles: 2  # #77 Amendment 2: bounded draft->re-review self-heal cycles per issue
+#                        # before the loop gives up and applies needs-human with the attempt
+#                        # trail. Positive int only (0 would disable the self-heal path).
+#   planDrafter:
+#     # promptFile: prompts/my-plan-drafter.md
+#     #                   Unset = the engine's shipped prompts/plan-drafter.md.
+#     model: sonnet
+#     effort: medium
+#   architect: # #90: round design/review between goal alignment and dispatch — issues-only
+#     #          writes (comments a round design note; flags contradicting issues).
+#     # promptFile: prompts/my-architect.md
+#     #                   Unset = the engine's shipped prompts/architect.md.
+#     model: sonnet
+#     effort: medium
+#     planMdPath: docs/PLAN.md # #104: the architecture-doc path the architect (and the PO's
+#                        # alignment pass) read for context. Same #74-style resolution as
+#                        # promptFile: a relative path resolves against THIS config file's
+#                        # directory. Default docs/PLAN.md — override for target repos that
+#                        # keep their architecture doc somewhere else (or don't have one).
+#   harvest: # #91: round-close summary — comments round context onto this round's
+#     #        needs-human issues. Issue-comment writes only (no labels, no body edits).
+#     # promptFile: prompts/my-harvest.md
+#     #                   Unset = the engine's shipped prompts/harvest.md.
+#     model: sonnet
+#     effort: medium
+#   retro: # #91: retrospective/self-evolution — analyzes the round and proposes
+#     #      prompt/config/docs improvements EXCLUSIVELY as PRs through gate②
+#     #      (#77 decision 6); it can never write main/docs directly.
+#     # promptFile: prompts/my-retro.md
+#     #                   Unset = the engine's shipped prompts/retro.md.
+#     model: sonnet
+#     effort: medium
+#     everyNRounds: 1    # #104: retro cadence — 1 (default) runs every round; N>1 thins it to
+#                        # every Nth round (by round id). Positive int only.
 
 # round-loop scoping (#86 skeleton). Unset = no scoping (every Ready issue is a candidate).
 # round:

@@ -150,6 +150,12 @@ class FakeForge implements IForge {
   async getPRReviewData(): Promise<PRReviewData> { return this.reviewData; }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
   async listMilestoneTitles(): Promise<string[]> { return []; }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
+  async getIssueLabels(): Promise<string[]> { return []; }
+  async getIssueComments() { return []; }
+  async createIssue(): Promise<number> { return 0; }
+  async listOpenIssueNumbers(): Promise<number[]> { return []; }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
 }
 
 class FakeReviewer implements Reviewer {

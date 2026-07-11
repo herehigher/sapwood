@@ -45,6 +45,24 @@ class FakeForge implements IForge {
   }
   milestoneTitles: string[] = [];
   async listMilestoneTitles(): Promise<string[]> { return this.milestoneTitles; }
+  planReviewCandidates: Issue[] = [];
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return this.planReviewCandidates; }
+  issueLabels: Record<number, string[]> = {};
+  async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
+  issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
+  async getIssueComments(issue: number) { return this.issueComments[issue] ?? []; }
+  createdIssues: Array<{ title: string; body: string }> = [];
+  nextIssueNumber = 100;
+  openIssueNumbers: number[] = [];
+  async createIssue(title: string, body: string): Promise<number> {
+    this.createdIssues.push({ title, body });
+    const n = this.nextIssueNumber++;
+    this.openIssueNumbers.push(n);
+    return n;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> { return this.openIssueNumbers; }
+  planTriageCandidates: Issue[] = [];
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return this.planTriageCandidates; }
 }
 
 class FakeSupervisor implements Supervisor {
@@ -264,6 +282,76 @@ test("runRounds cost.roundBudgetUsd: recorded once this round's cumulative worke
   assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
   assert.equal(result.rounds, 1);
   deps.state.close();
+});
+
+// ── #95 follow-ups ───────────────────────────────────────────────────────────────────────────
+
+test("runRounds #95: every round-stop hit is persisted via appendEvent, not just handed to the observability hook", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 999 };
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 }, cost: { roundBudgetUsd: 5 } }),
+  });
+  const logged: Array<[string, unknown]> = [];
+  const realAppend = deps.state.appendEvent.bind(deps.state);
+  deps.state.appendEvent = (kind: string, payload: unknown) => {
+    logged.push([kind, payload]);
+    realAppend(kind, payload);
+  };
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  const hit = logged.find(([kind]) => kind === "round-stop");
+  assert.ok(hit, "a round-stop event was durably appended");
+  assert.deepEqual(hit![1], { round_id: 1, name: "roundBudgetUsd", detail: "spent $999.00" });
+  deps.state.close();
+});
+
+test("runRounds #95: a resumed-into-executing drain evaluates cost.roundBudgetUsd against currently-active workers (never silently disabled)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    // Simulate a crash mid-`executing`: the round is already there, and a lane from the
+    // pre-crash dispatch is still on record as `running` with spend already ledgered above the
+    // round budget — exactly the case #95's review flagged as invisible (dispatchedNames was
+    // always [] on a resumed drain, so this could never fire).
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    state.upsertWorker({
+      name: "lane-99", issue: 99, session_id: "s99", state: "running",
+      started_at: "2026-07-09T00:00:30.000Z", ended_at: null,
+    });
+    state.recordSpend("lane-99", 99, 50, "2026-07-09T00:00:45.000Z");
+
+    const forge = new FakeForge();
+    forge.ready = [];
+    const sup = new FakeSupervisor();
+    // The resumed drain's first probe finds the lane already finished (no PR) -> tick()
+    // reclaims it out of `running`, so the drain loop reaches idle after one iteration.
+    sup.probes["lane-99"] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+    const hits: RoundStopHit[] = [];
+    const deps = baseDeps({
+      forge, supervisor: sup, state, sleep,
+      cfg: mkCfg({ cost: { roundBudgetUsd: 5 } }), // already-banked $50 >> $5 budget
+      onRoundStop: (_id, hit) => hits.push(hit),
+    });
+    const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.ok(
+      hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $50.00"),
+      "the resumed drain detected the already-banked spend against the currently-active lane",
+    );
+    assert.equal(result.rounds, 1);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── final stop.* preemption mid-round ───────────────────────────────────────────────────────
