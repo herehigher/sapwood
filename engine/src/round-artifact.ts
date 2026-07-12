@@ -209,11 +209,17 @@ export function assembleRoundArtifact(
       case "round-stop":
         roundStops.push({ name: p.name as string, detail: p.detail as string });
         break;
+      // The two retro outcomes are mutually exclusive — LAST event wins outright (Codex P2,
+      // PR #152): a crash-rerun can log retro-pr-opened then retro-pr-degraded (the rerun
+      // fails on the already-existing branch) in the same round's window, and the artifact
+      // must record the later outcome alone, never both.
       case "retro-pr-opened":
         retroOpened = { pr: p.pr as number, branch: p.branch as string };
+        retroDegraded = null;
         break;
       case "retro-pr-degraded":
         retroDegraded = { branch: p.branch as string, title: p.title as string, reason: p.reason as string };
+        retroOpened = null;
         break;
       case "align-summary":
         align = {

@@ -126,6 +126,24 @@ test("assembleRoundArtifact: retro-pr-opened/-degraded populate the retro sectio
     meta, 0, 30,
   );
   assert.deepEqual(degraded.retro, { opened: null, degraded: { branch: "retro/y", title: "t", reason: "push not verified" } });
+
+  // Codex P2 (PR #152): the outcomes are mutually exclusive across KINDS too — a crash-rerun
+  // logging opened THEN degraded (rerun fails on the already-existing branch) records the later
+  // outcome alone, never both; and vice versa.
+  const openedThenDegraded = assembleRoundArtifact(
+    [
+      { kind: "retro-pr-opened", payload: { round_id: 1, pr: 5, branch: "retro/x" } },
+      { kind: "retro-pr-degraded", payload: { round_id: 1, branch: "retro/x", title: "t", reason: "branch exists" } },
+    ], meta, 0, 30,
+  );
+  assert.deepEqual(openedThenDegraded.retro, { opened: null, degraded: { branch: "retro/x", title: "t", reason: "branch exists" } });
+  const degradedThenOpened = assembleRoundArtifact(
+    [
+      { kind: "retro-pr-degraded", payload: { round_id: 1, branch: "retro/x", title: "t", reason: "transient" } },
+      { kind: "retro-pr-opened", payload: { round_id: 1, pr: 6, branch: "retro/x" } },
+    ], meta, 0, 30,
+  );
+  assert.deepEqual(degradedThenOpened.retro, { opened: { pr: 6, branch: "retro/x" }, degraded: null });
 });
 
 test("assembleRoundArtifact: align-summary populates the align section verbatim; absent -> null", () => {
