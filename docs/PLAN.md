@@ -333,7 +333,31 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   In Progress with no worker row. No `.catch(() => {})` swallows remain in tick paths.
 - **Scope boundaries / deferred:** fixup-worker auto-dispatch (review findings fold to
   needs-human for now — 0day's FIXABLE/fix-rounds loop is a follow-up subsystem).
-  #33 unchanged (no in-flight cost signal). Review evidence: #42 survived 3 Codex
+  **Narrowed by #147 (gated-PR reentry, 2026-07-13):** a `needs-human` escalated on
+  gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
+  live-run report) is no longer a dead end requiring a manual fix→re-review→merge
+  drive — the conductor's **GATED RECLAIM** phase treats a human clearing the
+  issue of *every* `escalation.humanLabels` entry (`needs-human` and `blocked` by
+  default — dispatch's exact hold set, not `needs-human` alone) as the explicit
+  re-entry signal (autonomy principle: humans decide *why/what*, here "is this
+  actually fixed") and reclaims the SAME
+  worker row/PR/branch straight back to `driving`, letting the existing DRIVE loop
+  re-trigger review, re-poll gate①/gate②, and merge on green — no new worker/dispatch
+  (avoids the squash-branch-reuse hazard a fresh dispatch against a stale head would
+  hit). Two fail-closed guards (Codex review of the #147 PR): a re-driven gate②
+  counts only reviews submitted *after* the re-entry's own trigger (the stale
+  pre-escalation review still sits on the unchanged head and must not satisfy the
+  gate) — *unless* a standing `CHANGES_REQUESTED` is present on the head, in which
+  case the full review set gates (a fresh review from a different reviewer cannot
+  speak for another reviewer's undismissed block, so the lane re-escalates); and
+  label absence only counts as a human act when the engine durably recorded that
+  its escalation label write actually *succeeded* (a transient label failure must
+  not read as human approval next tick). Bounded by
+  `lanes.gatedReentryCap` (prFixCap's shape); a lane that keeps
+  re-escalating past the cap is permanently excluded and re-labeled for a manual
+  merge. This is reentry for an *already-produced* PR, not the broader fixup-worker
+  auto-dispatch subsystem above, which remains deferred. #33 unchanged (no in-flight
+  cost signal). Review evidence: #42 survived 3 Codex
   rounds (3 P1 + 3 P2 fail-open finds, all fixed + regression-tested); #41 survived 4
   rounds (3 Codex + 1 fresh non-author stand-in when Codex rate-limited) — the
   gate②-when-reviewer-unavailable policy was exercised *on the PR that implements it*.

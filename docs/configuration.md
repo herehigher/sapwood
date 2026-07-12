@@ -51,6 +51,7 @@ Concurrency and dispatch shape.
 | `reserveCap` | `1` | **Accepted, not yet wired** — parsed and validated, but no engine code reads it yet. |
 | `prFixCap` | `2` | **Accepted, not yet wired** — the PR-fix iteration loop it will bound doesn't exist yet (review findings currently escalate to `needs-human`). |
 | `frictionMin` | `0` | **Accepted, not yet wired** — no dispatch rate-limit is enforced from it yet. |
+| `gatedReentryCap` | `2` | (#147) Bounds the **GATED RECLAIM** phase: a gate②-escalated PR whose issue a human clears of **every** `escalation.humanLabels` entry (default `needs-human` *and* `blocked` — the same hold set dispatch honors) is reclaimed back to `driving` and re-driven through the existing gate①/gate② + merge path — no new worker, same PR/branch. Each reclaim counts as one attempt; once this many have re-escalated, a further label removal is rejected (re-applies `needs-human` + a "cap reached" comment) and the lane is never retried again — merge it by hand. `0` disables automatic reentry outright. |
 
 ## `worker`
 

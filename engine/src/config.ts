@@ -45,6 +45,13 @@ const Lanes = z.object({
   reserveCap: z.number().int().nonnegative().default(1),
   prFixCap: z.number().int().nonnegative().default(2),
   frictionMin: z.number().nonnegative().default(0),
+  // #147: sapwood-native (no 0day LOOP_* counterpart) — bounds the GATED RECLAIM phase
+  // (conductor.ts tick()): how many times a gate②-escalated PR may be reclaimed back to
+  // `driving` and re-driven after a human removes needs-human from its issue, before a further
+  // removal is rejected (re-escalated + permanently capped, never retried forever). Same
+  // nonnegative-int shape as prFixCap above — 0 disables automatic reentry outright (every
+  // removal is immediately capped).
+  gatedReentryCap: z.number().int().nonnegative().default(2),
 }).strict();
 
 const Worker = z.object({

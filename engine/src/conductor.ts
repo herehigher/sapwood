@@ -187,6 +187,31 @@ export function laneOnReclaimFailed(hasPr: boolean): ReclaimFailed {
   return hasPr ? "DRIVING" : "ESCALATE";
 }
 
+export type GatedReentryDecision = "RECLAIM" | "CAPPED" | "SKIP";
+/**
+ * #147 gated-PR reentry: the GATED RECLAIM phase's per-lane decision, pure so it's parity-
+ * testable like driveDecision above (which it deliberately mirrors — cfg.lanes.gatedReentryCap
+ * plays the same role prFixCap plays there).
+ *  - `humanHoldPresent`: ANY of the issue's cfg.escalation.humanLabels still present (round-4
+ *    P2, Codex PR #151: the human-hold set is the WHOLE escalation.humanLabels list — default
+ *    [needs-human, blocked] — exactly the set dispatch holds on via orderForDispatch's
+ *    hasReserveLabel check, not needs-human alone; an issue still carrying `blocked` must not
+ *    reclaim just because needs-human was removed) -> SKIP (no complete explicit human act
+ *    yet, PLAN.md autonomy principle — automation never re-admits itself).
+ *  - every hold cleared, `attempts < cap` -> RECLAIM (back to `driving`, bump the attempt count).
+ *  - every hold cleared, `attempts >= cap` -> CAPPED (the cap was already spent on a prior
+ *    reclaim that re-escalated; fail closed rather than retry forever — re-escalate + latch
+ *    permanently).
+ */
+export function gatedReentryDecision(
+  humanHoldPresent: boolean,
+  attempts: number,
+  cap: number,
+): GatedReentryDecision {
+  if (humanHoldPresent) return "SKIP";
+  return attempts < cap ? "RECLAIM" : "CAPPED";
+}
+
 export type DriveAction = "MERGE" | "WAIT" | "FIXUP" | "ESCALATE";
 /**
  * Derive a scheduling action from the PR gate + fixup-round count.
@@ -301,6 +326,11 @@ export interface MergeGate {
       lock: ReviewFallbackLock;
       recordFallback: (lock: ReviewFallbackLock) => void;
     },
+    /** #147 P1: true when this lane re-entered via GATED RECLAIM (gated_reentry_attempts > 0)
+     *  — the merge driver then counts only reviews submitted AFTER the re-entry's own trigger
+     *  (see MergeDriver.driveOne), so the stale pre-escalation review can't satisfy the
+     *  re-driven gate②. Optional — pre-#147 fakes still satisfy this type. */
+    reentered?: boolean,
   ): Promise<DriveOutcome>;
 }
 
@@ -343,6 +373,15 @@ export type RollbackOutcome =
   | { kind: "retrying"; issue: number; attempts: number; reason: string }
   | { kind: "escalated"; issue: number; attempts: number; reason: string };
 
+/** #147: outcome of one gated-PR reentry decision this tick — a failed, PR-carrying lane whose
+ *  issue's needs-human label is gone (gatedReentryDecision above). "reclaimed" means the lane is
+ *  back in `driving` this same tick (the DRIVE loop below re-drives it, no new worker); "capped"
+ *  means the cap was already spent and this removal was rejected — re-escalated + permanently
+ *  latched (State.gatedFailedWorkers never returns it again). */
+export type GatedReclaimOutcome =
+  | { kind: "reclaimed"; worker: string; issue: number; pr: number; attempt: number }
+  | { kind: "capped"; worker: string; issue: number; pr: number; attempts: number };
+
 export interface TickResult {
   reclaimed: ReclaimOutcome[];
   dispatched: DispatchOutcome[];
@@ -368,6 +407,10 @@ export interface TickResult {
    *  recovered / still-retrying / escalated-to-needs-human. Empty when nothing was pending
    *  and no new recovery-path failure occurred this tick. */
   rollbacks: RollbackOutcome[];
+  /** #147: gated-PR reentry decisions this tick (only when deps.mergeGate is provided — reentry
+   *  without a gate to drive through would just strand the lane). Empty when there were no
+   *  eligible failed+PR lanes, or every one's needs-human label was still present. */
+  gatedReclaimed: GatedReclaimOutcome[];
 }
 
 export interface TickDeps {
@@ -635,7 +678,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     return {
       reclaimed, dispatched: [], overBudget: false,
       ceilingBreached: true, ceilingReasons: ["kill-switch"],
-      drainRequested, escalated, driven: [], rollbacks: [],
+      drainRequested, escalated, driven: [], rollbacks: [], gatedReclaimed: [],
     };
   }
 
@@ -732,12 +775,98 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
 
+  // ── GATED RECLAIM (#147): a failed lane that DRIVE escalated (gate②/mergeDecision
+  //   needs-human — the ONLY "failed + a PR number" shape, see gatedFailedWorkers' doc) whose
+  //   ISSUE carries NONE of cfg.escalation.humanLabels (round-4 P2: the FULL human-hold set,
+  //   default [needs-human, blocked] — dispatch's exact standard, not needs-human alone) is a
+  //   human's EXPLICIT act (PLAN.md autonomy principle: only an explicit human act re-admits
+  //   automation) that the finding was addressed. Reclaim it straight back to `driving` —
+  //   same worker row, same PR/branch, no
+  //   new dispatch (Ref #122 live-run report: re-dispatch would spawn a fresh worker/branch
+  //   against a stale head, the squash-branch-reuse hazard this exists to avoid) — and let the
+  //   ORDINARY DRIVE loop just below re-drive it exactly like any other driving lane. Clearing
+  //   the recorded trigger pin makes driveOne treat the (unchanged) head as never-triggered, so
+  //   it posts a FRESH review trigger even with no new push — reusing driveOne's own re-trigger
+  //   machinery rather than building a parallel one. Bounded by cfg.lanes.gatedReentryCap (the
+  //   prFixCap pattern): spent attempts + another label removal -> re-escalate, latch
+  //   permanently (gatedReentryDecision's CAPPED branch), never retried forever. Runs BEFORE
+  //   DRIVE (same tick sees the reclaim) and regardless of `paused` (#75: pause only freezes
+  //   NEW dispatch — this never spawns a worker, so it's reclaim/drive continuation, not new
+  //   work). Skipped entirely without a mergeGate (mirrors DRIVE: reentry with nothing to drive
+  //   through would just strand the lane in `driving`).
+  const gate = deps.mergeGate;
+  const gatedReclaimed: GatedReclaimOutcome[] = [];
+  if (gate) {
+    for (const w of state.gatedFailedWorkers()) {
+      if (w.pr == null) continue; // fail-safe; gatedFailedWorkers() already filters this
+      const pr = w.pr;
+      const labels = await forge.getIssueLabels(w.issue);
+      const attempts = w.gated_reentry_attempts ?? 0;
+      // Round-4 P2 (Codex PR #151): eligibility requires ZERO of cfg.escalation.humanLabels on
+      // the issue — the SAME standard (and the same hasReserveLabel helper) dispatch applies in
+      // orderForDispatch. needsHuman alone would let an issue still carrying `blocked` reclaim
+      // and drive to merge (the merge driver's human-label veto reads the PR's labels, not the
+      // issue's) the moment needs-human was removed.
+      const decision = gatedReentryDecision(
+        hasReserveLabel(labels, cfg.escalation.humanLabels), attempts, cfg.lanes.gatedReentryCap,
+      );
+      if (decision === "SKIP") continue; // a human hold still stands — no complete human act yet
+      if (decision === "CAPPED") {
+        // The cap was already spent on a prior reclaim that re-escalated, and a human removed
+        // needs-human again anyway — refuse to retry forever: re-add the label, leave an
+        // explicit trail, and latch so this row is never reconsidered again.
+        //
+        // ORDERING (#147 round-3 P2, Codex PR #151 — the #69 fable-P2a rule: ALL forge work
+        // BEFORE the terminal upsert): the label goes FIRST, and the permanent latch is
+        // persisted ONLY once the label provably landed. Latching first would make a transient
+        // label failure permanent — the row leaves gatedFailedWorkers() forever while
+        // needs-human was never restored, so the exhausted PR becomes invisible to BOTH
+        // automation and human triage. On a label failure: record the error durably, do NOT
+        // latch, do NOT emit a capped outcome — the row stays eligible (label still absent,
+        // attempts >= cap), so the next tick's GATED RECLAIM re-enters this branch and retries
+        // the label until it succeeds (the same retry-until-success shape as the rollback
+        // machinery; gatedReentryDecision stays CAPPED throughout, so no extra reclaim can
+        // slip through while retrying).
+        try {
+          await forge.addLabel(w.issue, cfg.labels.needsHuman);
+        } catch (e) {
+          state.appendEvent("gated-reentry-capped-label-failed", {
+            worker: w.name, issue: w.issue, pr, attempts, error: String(e),
+          });
+          continue;
+        }
+        // Best-effort courtesy notice — the label above is the load-bearing block; a comment
+        // hiccup must not strand the latch.
+        await forge
+          .addIssueComment(
+            w.issue,
+            `sapwood: gated-PR reentry cap (${cfg.lanes.gatedReentryCap}) reached for PR #${pr} — ` +
+              `re-applying \`${cfg.labels.needsHuman}\`. Automatic reentry is exhausted for this ` +
+              `PR; merge it by hand once it's ready.`,
+          )
+          .catch(() => {});
+        state.upsertWorker({ ...w, ended_at: iso(), gated_reentry_capped: 1 });
+        state.appendEvent("gated-reentry-capped", { worker: w.name, issue: w.issue, pr, attempts });
+        gatedReclaimed.push({ kind: "capped", worker: w.name, issue: w.issue, pr, attempts });
+        continue;
+      }
+      // RECLAIM: back to `driving`, same worker/PR — the DRIVE loop below picks it up this tick.
+      const attempt = attempts + 1;
+      state.upsertWorker({
+        ...w, state: "driving", ended_at: iso(),
+        review_triggered_head: null, review_triggered_at: null,
+        gated_reentry_attempts: attempt,
+      });
+      state.appendEvent("gated-reentry", { worker: w.name, issue: w.issue, pr, attempt });
+      gatedReclaimed.push({ kind: "reclaimed", worker: w.name, issue: w.issue, pr, attempt });
+    }
+  }
+
   // ── DRIVE (#13): a DONE+PR lane is "driving" (awaiting gate①/gate②). producer != merger is
   //   preserved structurally: tick() never calls forge.mergePR itself — that lives one level
   //   down, in deps.mergeGate.driveOne (merge-driver.ts), invoked ONLY from here. Omitted
   //   mergeGate -> driving lanes stay driving with no gate/merge activity (pre-#13 behavior).
   const driven: DrivenOutcome[] = [];
-  const gate = deps.mergeGate;
   if (gate) {
     // #69: no per-lane kill-switch re-check here — an active switch never reaches this loop
     // at all (the global gate at the top of tick() returns first). See the gate's comment for
@@ -774,6 +903,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           lock: { head: lockKind ? (w.review_fallback_head ?? null) : null, kind: lockKind },
           recordFallback: (lock) => state.recordReviewFallback(w.name, lock.head, lock.kind),
         },
+        // #147 P1: a GATED-RECLAIM-re-entered lane's gate② must not be satisfied by the stale
+        // pre-escalation review still sitting on the (unchanged) head — driveOne filters to
+        // post-re-entry review signals when this is set.
+        (w.gated_reentry_attempts ?? 0) > 0,
       );
       // #54: announce a reviewer-failover switch/revert — structured event + PR comment.
       // driveOne reports the signal STATELESSLY every tick it holds (resolveReviewVerdict is
@@ -808,12 +941,54 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.appendEvent("merged", { worker: w.name, issue: w.issue, pr, headOid: outcome.headOid });
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
           break;
-        case "needs-human":
-          state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-          await forge.addLabel(w.issue, cfg.labels.needsHuman);
-          state.appendEvent("drive-needs-human", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+        case "needs-human": {
+          // #147 P2 (Codex PR #151): the label write goes FIRST, and its success is recorded
+          // durably on the terminal row (gated_escalation_labeled) — because GATED RECLAIM's
+          // re-entry signal is "the needs-human label is ABSENT", absence is only evidence of a
+          // human act if the engine provably APPLIED the label. The old order (upsert failed,
+          // then an unguarded addLabel) let a transient label failure leave a failed+PR row
+          // with no label, which the next tick would read as an explicit human removal —
+          // automation re-admitting itself with no human in the loop. A failed label write is
+          // contained (the escalation itself — terminal transition + structured event — always
+          // lands, same #69 P2a stance as the drain path) and marks the row labeled=0:
+          // permanently invisible to GATED RECLAIM (fail-closed — the pre-#147 manual-drive
+          // situation, no regression), with the error in the event payload, never a silent
+          // swallow.
+          let labeled = 1;
+          let labelError: string | null = null;
+          try {
+            await forge.addLabel(w.issue, cfg.labels.needsHuman);
+          } catch (e) {
+            labeled = 0;
+            labelError = String(e);
+          }
+          state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
+          state.appendEvent("drive-needs-human", {
+            worker: w.name, issue: w.issue, pr, reason: outcome.reason, labeled,
+            ...(labelError != null ? { labelError } : {}),
+          });
+          // #147: gated_reentry_attempts > 0 means this lane was reclaimed by GATED RECLAIM at
+          // least once (a human removed needs-human believing the finding was fixed) and STILL
+          // escalated — leave the attempt trail on the issue so a repeat escalation isn't
+          // indistinguishable from the very first one. Never fires for a first-time escalation
+          // (attempts is 0 for every lane that's never been through GATED RECLAIM).
+          const gatedAttempts = w.gated_reentry_attempts ?? 0;
+          if (gatedAttempts > 0) {
+            const cap = cfg.lanes.gatedReentryCap;
+            await forge
+              .addIssueComment(
+                w.issue,
+                `sapwood: gated-PR reentry attempt ${gatedAttempts}/${cap} for PR #${pr} ` +
+                  `re-escalated \`${cfg.labels.needsHuman}\` — ${outcome.reason}. ` +
+                  (gatedAttempts >= cap
+                    ? `That was the last automatic attempt; a further reentry will be rejected.`
+                    : `Remove \`${cfg.labels.needsHuman}\` again once it's addressed to retry.`),
+              )
+              .catch(() => {});
+          }
           driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           break;
+        }
         case "queued":
           // Stays driving — retried next tick. Covers gate-pending (WAIT), a review-unavailable
           // (rate-limit/timeout) signal (#13 requires the latter to queue, never skip/soften
@@ -961,6 +1136,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
 
   return {
     reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated,
-    driven, rollbacks,
+    driven, rollbacks, gatedReclaimed,
   };
 }

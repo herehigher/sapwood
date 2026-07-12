@@ -21,6 +21,7 @@ import {
   laneOnReclaimDone,
   laneOnReclaimFailed,
   driveDecision,
+  gatedReentryDecision,
   tick,
   orderForDispatch,
   evaluateCeiling,
@@ -35,7 +36,8 @@ import {
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
-import type { DriveOutcome } from "./merge-driver.js";
+import { MergeDriver, type DriveOutcome } from "./merge-driver.js";
+import { CodexReviewer, CODEX_REVIEWER_LOGINS } from "./reviewer.js";
 
 // ── tick test doubles (real State, fake forge + supervisor — no claude, no gh) ──
 const DEFAULT_PROBE: LaneProbe = { done: false, failed: false, handoff: false, hbAge: 10, wrapperAlive: 1, hasPr: false };
@@ -48,9 +50,23 @@ class FakeForge implements IForge {
   claimed: number[] = [];
   prComments: Array<[number, string]> = [];
   issueComments: Array<[number, string]> = [];
+  merged: Array<[number, string]> = [];
   /** #69 (fable P2a): when true, addLabel throws — proves the drain-escalation still lands its
    *  structured event + terminal transition (best-effort forge, ordered before the upsert). */
   throwOnAddLabel = false;
+  /** #147: per-issue label set — mutable so a test can simulate a human removing needs-human
+   *  mid-run. addLabel appends here too (so a label the ENGINE adds is reflected back), never
+   *  removes (only a test directly mutating this map models a human's removal). */
+  issueLabelsByIssue: Record<number, string[]> = {};
+  /** #147: mutable per-PR gate①/gate② inputs for tests that drive a REAL MergeDriver +
+   *  Reviewer through conductor.tick() (as opposed to the FakeMergeGate below, which bypasses
+   *  these entirely). Defaults reproduce the old static fixtures byte-for-byte, so every
+   *  existing FakeMergeGate-based test is unaffected. */
+  prStatus: PRStatus = { number: 0, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  prReviewData: PRReviewData = {
+    headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
+    labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+  };
   async detectOwnerKind(): Promise<"user"> { return "user"; }
   async getReadyIssues(): Promise<Issue[]> { return this.ready; }
   async claimIssue(n: number): Promise<void> { this.claimed.push(n); }
@@ -58,29 +74,26 @@ class FakeForge implements IForge {
   async addLabel(n: number, l: string): Promise<void> {
     if (this.throwOnAddLabel) throw new Error("simulated forge failure");
     this.labelsAdded.push([n, l]);
+    const cur = this.issueLabelsByIssue[n] ?? [];
+    if (!cur.includes(l)) this.issueLabelsByIssue[n] = [...cur, l];
   }
   async addPRLabel(n: number, l: string): Promise<void> { this.prLabelsAdded.push([n, l]); }
   async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
-  async mergePR(): Promise<void> {}
+  async getPRStatus(n: number): Promise<PRStatus> { return { ...this.prStatus, number: n }; }
+  async mergePR(pr: number, headOid: string): Promise<void> { this.merged.push([pr, headOid]); }
   async addPRComment(pr: number, body: string): Promise<void> { this.prComments.push([pr, body]); }
   async addIssueComment(n: number, body: string): Promise<void> { this.issueComments.push([n, body]); }
   async getIssueBody(): Promise<string> { return ""; }
   updateIssueBodyCalls: Array<[number, string]> = [];
   async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
-  async getPRReviewData(): Promise<PRReviewData> {
-    return {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
-    };
-  }
+  async getPRReviewData(): Promise<PRReviewData> { return this.prReviewData; }
   async getPRDiff(): Promise<string> { return ""; }
   async getCommitsSince(): Promise<CommitInfo[]> { return []; }
   async branchExists(): Promise<boolean> { return false; }
   async countOpenIssuesInMilestone(): Promise<number> { return 0; }
   async listMilestoneTitles(): Promise<string[]> { return []; }
   async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
-  async getIssueLabels(): Promise<string[]> { return []; }
+  async getIssueLabels(n: number): Promise<string[]> { return this.issueLabelsByIssue[n] ?? []; }
   async getIssueComments() { return []; }
   async createIssue(): Promise<number> { return 0; }
   async listOpenIssueNumbers(): Promise<number[]> { return []; }
@@ -1419,4 +1432,322 @@ test("driveDecision: gate + fix rounds -> scheduling action (fail-safe ESCALATE)
   assert.equal(driveDecision("HUMAN", 0, 3, false), "ESCALATE");
   assert.equal(driveDecision("", 0, 3, false), "ESCALATE"); // empty/unknown gate -> fail-safe
   assert.equal(driveDecision("WHATEVER", 0, 3, false), "ESCALATE");
+});
+
+// ── #147: gated-PR reentry — a human removing needs-human from an escalated PR's issue
+// reclaims the SAME worker row/PR/branch back into `driving` and re-drives it through the
+// ordinary DRIVE loop. No new worker/dispatch, ever. ──────────────────────────────────────────
+
+test("gatedReentryDecision: any human-hold label present -> SKIP (no complete human act yet); all holds cleared + under cap -> RECLAIM; at/over cap -> CAPPED", () => {
+  assert.equal(gatedReentryDecision(true, 0, 2), "SKIP");
+  assert.equal(gatedReentryDecision(true, 5, 2), "SKIP"); // a standing hold always wins, regardless of attempts
+  assert.equal(gatedReentryDecision(false, 0, 2), "RECLAIM");
+  assert.equal(gatedReentryDecision(false, 1, 2), "RECLAIM");
+  assert.equal(gatedReentryDecision(false, 2, 2), "CAPPED");
+  assert.equal(gatedReentryDecision(false, 3, 2), "CAPPED");
+  assert.equal(gatedReentryDecision(false, 0, 0), "CAPPED"); // cap=0 disables reentry outright
+});
+
+test("#147 round-4 P2 (Codex PR #151): needs-human removed but `blocked` (another escalation.humanLabels entry) still on the issue -> SKIP, no reclaim; clearing blocked too on a later tick -> RECLAIM proceeds", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg(); // escalation.humanLabels defaults to [needs-human, blocked]
+  const gate = new FakeMergeGate();
+  gate.outcomes[600] = { kind: "queued", pr: 600, reason: "gate-pending:WAIT_REVIEW" };
+
+  st.upsertWorker({
+    name: "lane-h", issue: 50, session_id: "s-lane-h", state: "failed",
+    started_at: "t0", ended_at: "t1", pr: 600, gated_escalation_labeled: 1,
+  });
+  // A human removed needs-human — but `blocked` still stands on the issue. The human-hold set
+  // is the WHOLE escalation.humanLabels list (dispatch's standard): the merge driver's
+  // human-label veto reads the PR's labels, not the issue's, so a reclaim here would drive an
+  // issue-blocked PR toward merge.
+  forge.issueLabelsByIssue[50] = ["blocked"];
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r1.gatedReclaimed, []); // SKIP — no outcome of any kind
+  assert.equal(st.getWorker("lane-h")?.state, "failed"); // untouched
+  assert.equal(st.getWorker("lane-h")?.gated_reentry_attempts, 0); // no attempt burned
+
+  // The human clears `blocked` too — now every hold is gone: reclaim proceeds.
+  forge.issueLabelsByIssue[50] = [];
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-h", issue: 50, pr: 600, attempt: 1 }]);
+  assert.equal(st.getWorker("lane-h")?.state, "driving");
+  assert.equal(sup.dispatched.length, 0);
+  st.close();
+});
+
+test("#147 gated-PR reentry: an escalated PR whose threads are resolved and label cleared is reclaimed on the next round, driven through gate② on the EXISTING branch (review-triggered -> merged), and no worker is ever spawned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  // Fixed engine clock (#147 P1): the re-trigger pin's `at` is recorded from this, and the
+  // re-driven gate② counts only reviews submitted strictly AFTER it.
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now: () => new Date("2026-07-02T00:00:00.000Z") });
+
+  // Pre-existing state: gate② already escalated PR #99 (issue #10) to needs-human for
+  // HANDLE_THREADS — failed, PR retained (labeled=1: the escalation's label write succeeded),
+  // the ORIGINAL drive's trigger pin still on file.
+  st.upsertWorker({
+    name: "lane-a", issue: 10, session_id: "s-lane-a", state: "failed",
+    started_at: "t0", ended_at: "t1", pr: 99,
+    review_triggered_head: "H1", review_triggered_at: "2026-07-01T00:00:00.000Z",
+    gated_escalation_labeled: 1,
+  });
+  forge.prStatus = { number: 99, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  // Human resolves the review threads AND removes needs-human from the issue (the explicit
+  // reentry signal); a FRESH accepted Codex review lands after the re-entry's trigger
+  // (submittedAt > the re-trigger pin — #147 P1: a pre-reentry review would NOT count).
+  forge.prReviewData = {
+    headOid: "H1", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
+    labels: [], state: "OPEN", reactions: [],
+    reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-02T00:05:00Z" }],
+    unresolvedThreads: 0,
+  };
+  forge.issueLabelsByIssue[10] = [];
+
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  // Reclaimed straight back to `driving` — same worker row, no dispatch.
+  assert.deepEqual(r1.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-a", issue: 10, pr: 99, attempt: 1 }]);
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+  assert.equal(st.getWorker("lane-a")?.gated_reentry_attempts, 1);
+  // The recorded trigger pin was cleared, so driveOne (same tick, right after the reclaim)
+  // treats this unchanged head as never-triggered and posts a FRESH @codex review comment.
+  assert.equal(forge.prComments.length, 1);
+  assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-a", issue: 10, pr: 99, reason: "review-triggered" }]);
+  assert.equal(sup.dispatched.length, 0); // no worker spawned
+
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  // Pin now matches -> gate② evaluates the live (resolved) data; the review post-dates the
+  // re-trigger, so it counts -> MERGE_OK; CI green -> merge.
+  assert.deepEqual(r2.driven, [{ kind: "merged", worker: "lane-a", issue: 10, pr: 99 }]);
+  assert.equal(st.getWorker("lane-a")?.state, "done");
+  assert.deepEqual(forge.merged, [[99, "H1"]]);
+  assert.equal(sup.dispatched.length, 0); // still zero across the whole re-drive
+  st.close();
+});
+
+test("#147 P1 (Codex PR #151): a STALE review (submitted before the re-entry's trigger) never satisfies the re-driven gate② — the lane queues until a FRESH post-reentry review lands", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now: () => new Date("2026-07-02T00:00:00.000Z") });
+
+  st.upsertWorker({
+    name: "lane-s", issue: 20, session_id: "s-lane-s", state: "failed",
+    started_at: "t0", ended_at: "t1", pr: 88,
+    review_triggered_head: "H1", review_triggered_at: "2026-06-30T00:00:00.000Z",
+    gated_escalation_labeled: 1,
+  });
+  forge.prStatus = { number: 88, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  // The Codex-P1 scenario exactly: the ORIGINAL pre-escalation COMMENTED review (the one whose
+  // threads caused HANDLE_THREADS) still sits on the UNCHANGED head; a human resolves the
+  // threads (unresolvedThreads -> 0) and removes needs-human. Without the freshness cutoff,
+  // that stale review would read as a fresh accepted review and auto-merge on the tick after
+  // the re-trigger — without the re-review ever responding.
+  forge.prReviewData = {
+    headOid: "H1", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
+    labels: [], state: "OPEN", reactions: [],
+    reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-01T00:00:00Z" }],
+    unresolvedThreads: 0,
+  };
+  forge.issueLabelsByIssue[20] = [];
+
+  // Tick 1: reclaimed + fresh re-trigger posted (pin recorded at the fixed clock, 07-02).
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r1.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-s", issue: 20, pr: 88, attempt: 1 }]);
+  assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-s", issue: 20, pr: 88, reason: "review-triggered" }]);
+
+  // Tick 2: pin matches, but the only review predates the re-trigger (07-01 < 07-02) — it is
+  // filtered out, the verdict is WAIT_REVIEW, the lane QUEUES. Never a merge.
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.driven, [{ kind: "queued", worker: "lane-s", issue: 20, pr: 88, reason: "gate-pending:WAIT_REVIEW" }]);
+  assert.deepEqual(forge.merged, []);
+  assert.equal(st.getWorker("lane-s")?.state, "driving"); // still waiting on the fresh review
+
+  // The FRESH re-review responds (submitted after the re-trigger pin) — now it counts.
+  forge.prReviewData = {
+    ...forge.prReviewData,
+    reviews: [
+      ...forge.prReviewData.reviews,
+      { author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-02T00:10:00Z" },
+    ],
+  };
+  const r3 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r3.driven, [{ kind: "merged", worker: "lane-s", issue: 20, pr: 88 }]);
+  assert.deepEqual(forge.merged, [[88, "H1"]]);
+  assert.equal(sup.dispatched.length, 0); // no worker across the whole sequence
+  st.close();
+});
+
+test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still standing) re-escalates needs-human with the attempt trail; attempts are bounded (cap reached -> re-escalated + permanently capped, never retried again)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 1 } });
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg });
+
+  st.upsertWorker({
+    name: "lane-b", issue: 11, session_id: "s-lane-b", state: "failed",
+    started_at: "t0", ended_at: "t1", pr: 199,
+    review_triggered_head: "H1", review_triggered_at: "2026-07-01T00:00:00.000Z",
+    gated_escalation_labeled: 1,
+  });
+  forge.prStatus = { number: 199, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  // The findings are STILL standing (unresolvedThreads unchanged) — a human removed
+  // needs-human believing it was fixed, but a re-review will find the same problem.
+  forge.prReviewData = {
+    headOid: "H1", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
+    labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 2,
+  };
+  forge.issueLabelsByIssue[11] = [];
+
+  // Tick 1: reclaimed + re-triggered (identical shape to the happy-path test above).
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r1.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-b", issue: 11, pr: 199, attempt: 1 }]);
+  assert.deepEqual(r1.driven, [{ kind: "queued", worker: "lane-b", issue: 11, pr: 199, reason: "review-triggered" }]);
+  assert.equal(st.getWorker("lane-b")?.state, "driving");
+
+  // Tick 2: pin now matches -> gate② re-evaluates the SAME standing findings -> HANDLE_THREADS
+  // -> needs-human again. Never a merge.
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.equal(st.getWorker("lane-b")?.state, "failed");
+  assert.equal(st.getWorker("lane-b")?.gated_reentry_attempts, 1);
+  assert.equal(st.getWorker("lane-b")?.gated_reentry_capped, 0); // cap is only latched on the NEXT removal
+  assert.deepEqual(r2.driven, [
+    { kind: "needs-human", worker: "lane-b", issue: 11, pr: 199, reason: "gate:HUMAN:HANDLE_THREADS" },
+  ]);
+  assert.deepEqual(forge.labelsAdded, [[11, "needs-human"]]);
+  // A REPEAT escalation (gated_reentry_attempts > 0) carries the attempt trail — the very first
+  // escalation for a lane never gets this comment.
+  assert.equal(forge.issueComments.length, 1);
+  assert.match(forge.issueComments[0]![1], /attempt 1\/1/);
+  assert.match(forge.issueComments[0]![1], /last automatic attempt/);
+  assert.equal(sup.dispatched.length, 0); // never a new worker, even across the re-escalation
+
+  // Human removes needs-human a SECOND time — but the cap (1) is already spent.
+  forge.issueLabelsByIssue[11] = [];
+  const r3 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r3.gatedReclaimed, [{ kind: "capped", worker: "lane-b", issue: 11, pr: 199, attempts: 1 }]);
+  assert.equal(st.getWorker("lane-b")?.state, "failed"); // never reclaimed this time
+  assert.equal(st.getWorker("lane-b")?.gated_reentry_capped, 1);
+  assert.deepEqual(forge.labelsAdded, [[11, "needs-human"], [11, "needs-human"]]); // re-applied
+  assert.equal(forge.issueComments.length, 2); // the cap-reached notice
+  assert.equal(sup.dispatched.length, 0);
+
+  // A THIRD removal changes nothing — the row is permanently excluded from here on.
+  forge.issueLabelsByIssue[11] = [];
+  const r4 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r4.gatedReclaimed, []);
+  assert.equal(st.getWorker("lane-b")?.state, "failed");
+  st.close();
+});
+
+test("#147 round-3 P2 (Codex PR #151): CAPPED latches ONLY after the needs-human label provably lands — a transient label failure retries next tick instead of permanently hiding the PR from human triage", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 1 } });
+  const gate = new FakeMergeGate();
+
+  // Cap already spent (attempts = cap = 1) and the human removed needs-human again — the
+  // CAPPED branch fires. Its job is to RESTORE the label + latch; if the latch landed while
+  // the label write failed, the row would leave gatedFailedWorkers() forever with no label on
+  // the issue: invisible to automation AND to human triage.
+  st.upsertWorker({
+    name: "lane-z", issue: 40, session_id: "s-lane-z", state: "failed",
+    started_at: "t0", ended_at: "t1", pr: 500,
+    gated_reentry_attempts: 1, gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[40] = [];
+
+  // Tick 1: the label write throws (transient forge failure) — NO latch, NO capped outcome,
+  // failure recorded durably; the row stays eligible for a retry.
+  forge.throwOnAddLabel = true;
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r1.gatedReclaimed, []); // no "capped" outcome emitted on a failed label
+  assert.equal(st.getWorker("lane-z")?.gated_reentry_capped, 0); // NOT latched
+  assert.equal(st.gatedFailedWorkers().length, 1); // still a candidate next tick
+  assert.equal(
+    st.eventsSince("2020-01-01T00:00:00Z", ["gated-reentry-capped-label-failed"]).length,
+    1, // the failure is durably recorded, never a silent swallow
+  );
+
+  // Tick 2: the forge recovers — label applied FIRST, then the latch + outcome, exactly once.
+  forge.throwOnAddLabel = false;
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, [{ kind: "capped", worker: "lane-z", issue: 40, pr: 500, attempts: 1 }]);
+  assert.deepEqual(forge.labelsAdded, [[40, "needs-human"]]); // restored where triage looks
+  assert.equal(st.getWorker("lane-z")?.gated_reentry_capped, 1); // latched only now
+  assert.equal(st.gatedFailedWorkers().length, 0); // permanently excluded from here on
+
+  // Tick 3: nothing further — the latch holds, no duplicate outcome/label/comment.
+  const r3 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r3.gatedReclaimed, []);
+  assert.equal(forge.labelsAdded.length, 1);
+  st.close();
+});
+
+test("#147 gated-PR reentry: without a mergeGate configured, an eligible failed+PR lane is never reclaimed (mirrors pre-#13 DRIVE behavior — nothing to drive it through)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  st.upsertWorker({
+    name: "lane-c", issue: 12, session_id: "s-lane-c", state: "failed",
+    started_at: "t0", ended_at: "t1", pr: 300, gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[12] = []; // label already removed
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }); // no mergeGate
+  assert.deepEqual(r.gatedReclaimed, []);
+  assert.equal(st.getWorker("lane-c")?.state, "failed"); // untouched
+  st.close();
+});
+
+test("#147 P2 (Codex PR #151): a FAILED needs-human label write means label absence is NOT a human act — the row records labeled=0 and GATED RECLAIM never reclaims it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  // A driving lane whose gate outcome escalates — but the needs-human addLabel call throws
+  // (transient forge failure). The escalation must still land durably (terminal row + event),
+  // with labeled=0 proving the label never applied.
+  seedRunning(st, "lane-x", 30);
+  sup.probes["lane-x"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 400 };
+  gate.outcomes[400] = { kind: "needs-human", pr: 400, reason: "gate:HUMAN:HANDLE_THREADS" };
+  forge.throwOnAddLabel = true;
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.equal(st.getWorker("lane-x")?.state, "failed"); // terminal transition still landed
+  assert.equal(st.getWorker("lane-x")?.gated_escalation_labeled, 0); // label write provably failed
+  assert.deepEqual(forge.labelsAdded, []); // nothing landed on the issue
+  assert.deepEqual(r1.driven, [{ kind: "needs-human", worker: "lane-x", issue: 30, pr: 400, reason: "gate:HUMAN:HANDLE_THREADS" }]);
+
+  // Next tick: the issue has NO needs-human label — exactly the state a transient label
+  // failure leaves behind. Without the labeled marker this would read as an explicit human
+  // removal and automation would re-admit itself with no human in the loop. It must not.
+  forge.throwOnAddLabel = false;
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, []);
+  assert.equal(st.getWorker("lane-x")?.state, "failed"); // permanently manual-drive (pre-#147 situation)
+  st.close();
+});
+
+test("#147 P2: the happy-path escalation records labeled=1 (label applied), which is what makes the later reclaim legitimate", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const gate = new FakeMergeGate();
+  seedRunning(st, "lane-y", 31);
+  sup.probes["lane-y"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 401 };
+  gate.outcomes[401] = { kind: "needs-human", pr: 401, reason: "gate:HUMAN:HANDLE_THREADS" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-y")?.state, "failed");
+  assert.equal(st.getWorker("lane-y")?.gated_escalation_labeled, 1);
+  assert.deepEqual(forge.labelsAdded, [[31, "needs-human"]]);
+  st.close();
 });
