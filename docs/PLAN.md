@@ -336,9 +336,11 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   **Narrowed by #147 (gated-PR reentry, 2026-07-13):** a `needs-human` escalated on
   gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
   live-run report) is no longer a dead end requiring a manual fix→re-review→merge
-  drive — the conductor's **GATED RECLAIM** phase treats a human removing
-  `needs-human` from the issue as the explicit re-entry signal (autonomy principle:
-  humans decide *why/what*, here "is this actually fixed") and reclaims the SAME
+  drive — the conductor's **GATED RECLAIM** phase treats a human clearing the
+  issue of *every* `escalation.humanLabels` entry (`needs-human` and `blocked` by
+  default — dispatch's exact hold set, not `needs-human` alone) as the explicit
+  re-entry signal (autonomy principle: humans decide *why/what*, here "is this
+  actually fixed") and reclaims the SAME
   worker row/PR/branch straight back to `driving`, letting the existing DRIVE loop
   re-trigger review, re-poll gate①/gate②, and merge on green — no new worker/dispatch
   (avoids the squash-branch-reuse hazard a fresh dispatch against a stale head would

@@ -192,18 +192,23 @@ export type GatedReentryDecision = "RECLAIM" | "CAPPED" | "SKIP";
  * #147 gated-PR reentry: the GATED RECLAIM phase's per-lane decision, pure so it's parity-
  * testable like driveDecision above (which it deliberately mirrors — cfg.lanes.gatedReentryCap
  * plays the same role prFixCap plays there).
- *  - `needsHumanLabelPresent`: still true -> SKIP (no explicit human act yet, PLAN.md autonomy
- *    principle — automation never re-admits itself).
- *  - label gone, `attempts < cap` -> RECLAIM (reclaim back to `driving`, bump the attempt count).
- *  - label gone, `attempts >= cap` -> CAPPED (the cap was already spent on a prior reclaim that
- *    re-escalated; fail closed rather than retry forever — re-escalate + latch permanently).
+ *  - `humanHoldPresent`: ANY of the issue's cfg.escalation.humanLabels still present (round-4
+ *    P2, Codex PR #151: the human-hold set is the WHOLE escalation.humanLabels list — default
+ *    [needs-human, blocked] — exactly the set dispatch holds on via orderForDispatch's
+ *    hasReserveLabel check, not needs-human alone; an issue still carrying `blocked` must not
+ *    reclaim just because needs-human was removed) -> SKIP (no complete explicit human act
+ *    yet, PLAN.md autonomy principle — automation never re-admits itself).
+ *  - every hold cleared, `attempts < cap` -> RECLAIM (back to `driving`, bump the attempt count).
+ *  - every hold cleared, `attempts >= cap` -> CAPPED (the cap was already spent on a prior
+ *    reclaim that re-escalated; fail closed rather than retry forever — re-escalate + latch
+ *    permanently).
  */
 export function gatedReentryDecision(
-  needsHumanLabelPresent: boolean,
+  humanHoldPresent: boolean,
   attempts: number,
   cap: number,
 ): GatedReentryDecision {
-  if (needsHumanLabelPresent) return "SKIP";
+  if (humanHoldPresent) return "SKIP";
   return attempts < cap ? "RECLAIM" : "CAPPED";
 }
 
@@ -772,9 +777,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
 
   // ── GATED RECLAIM (#147): a failed lane that DRIVE escalated (gate②/mergeDecision
   //   needs-human — the ONLY "failed + a PR number" shape, see gatedFailedWorkers' doc) whose
-  //   ISSUE no longer carries needs-human is a human's EXPLICIT act (PLAN.md autonomy
-  //   principle: only an explicit human act re-admits automation) that the finding was
-  //   addressed. Reclaim it straight back to `driving` — same worker row, same PR/branch, no
+  //   ISSUE carries NONE of cfg.escalation.humanLabels (round-4 P2: the FULL human-hold set,
+  //   default [needs-human, blocked] — dispatch's exact standard, not needs-human alone) is a
+  //   human's EXPLICIT act (PLAN.md autonomy principle: only an explicit human act re-admits
+  //   automation) that the finding was addressed. Reclaim it straight back to `driving` —
+  //   same worker row, same PR/branch, no
   //   new dispatch (Ref #122 live-run report: re-dispatch would spawn a fresh worker/branch
   //   against a stale head, the squash-branch-reuse hazard this exists to avoid) — and let the
   //   ORDINARY DRIVE loop just below re-drive it exactly like any other driving lane. Clearing
@@ -795,10 +802,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       const pr = w.pr;
       const labels = await forge.getIssueLabels(w.issue);
       const attempts = w.gated_reentry_attempts ?? 0;
+      // Round-4 P2 (Codex PR #151): eligibility requires ZERO of cfg.escalation.humanLabels on
+      // the issue — the SAME standard (and the same hasReserveLabel helper) dispatch applies in
+      // orderForDispatch. needsHuman alone would let an issue still carrying `blocked` reclaim
+      // and drive to merge (the merge driver's human-label veto reads the PR's labels, not the
+      // issue's) the moment needs-human was removed.
       const decision = gatedReentryDecision(
-        labels.includes(cfg.labels.needsHuman), attempts, cfg.lanes.gatedReentryCap,
+        hasReserveLabel(labels, cfg.escalation.humanLabels), attempts, cfg.lanes.gatedReentryCap,
       );
-      if (decision === "SKIP") continue; // still escalated — no human action yet
+      if (decision === "SKIP") continue; // a human hold still stands — no complete human act yet
       if (decision === "CAPPED") {
         // The cap was already spent on a prior reclaim that re-escalated, and a human removed
         // needs-human again anyway — refuse to retry forever: re-add the label, leave an

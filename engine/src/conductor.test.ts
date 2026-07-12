@@ -1438,14 +1438,45 @@ test("driveDecision: gate + fix rounds -> scheduling action (fail-safe ESCALATE)
 // reclaims the SAME worker row/PR/branch back into `driving` and re-drives it through the
 // ordinary DRIVE loop. No new worker/dispatch, ever. ──────────────────────────────────────────
 
-test("gatedReentryDecision: label present -> SKIP (no explicit human act yet); label absent + under cap -> RECLAIM; at/over cap -> CAPPED", () => {
+test("gatedReentryDecision: any human-hold label present -> SKIP (no complete human act yet); all holds cleared + under cap -> RECLAIM; at/over cap -> CAPPED", () => {
   assert.equal(gatedReentryDecision(true, 0, 2), "SKIP");
-  assert.equal(gatedReentryDecision(true, 5, 2), "SKIP"); // a present label always wins, regardless of attempts
+  assert.equal(gatedReentryDecision(true, 5, 2), "SKIP"); // a standing hold always wins, regardless of attempts
   assert.equal(gatedReentryDecision(false, 0, 2), "RECLAIM");
   assert.equal(gatedReentryDecision(false, 1, 2), "RECLAIM");
   assert.equal(gatedReentryDecision(false, 2, 2), "CAPPED");
   assert.equal(gatedReentryDecision(false, 3, 2), "CAPPED");
   assert.equal(gatedReentryDecision(false, 0, 0), "CAPPED"); // cap=0 disables reentry outright
+});
+
+test("#147 round-4 P2 (Codex PR #151): needs-human removed but `blocked` (another escalation.humanLabels entry) still on the issue -> SKIP, no reclaim; clearing blocked too on a later tick -> RECLAIM proceeds", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg(); // escalation.humanLabels defaults to [needs-human, blocked]
+  const gate = new FakeMergeGate();
+  gate.outcomes[600] = { kind: "queued", pr: 600, reason: "gate-pending:WAIT_REVIEW" };
+
+  st.upsertWorker({
+    name: "lane-h", issue: 50, session_id: "s-lane-h", state: "failed",
+    started_at: "t0", ended_at: "t1", pr: 600, gated_escalation_labeled: 1,
+  });
+  // A human removed needs-human — but `blocked` still stands on the issue. The human-hold set
+  // is the WHOLE escalation.humanLabels list (dispatch's standard): the merge driver's
+  // human-label veto reads the PR's labels, not the issue's, so a reclaim here would drive an
+  // issue-blocked PR toward merge.
+  forge.issueLabelsByIssue[50] = ["blocked"];
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r1.gatedReclaimed, []); // SKIP — no outcome of any kind
+  assert.equal(st.getWorker("lane-h")?.state, "failed"); // untouched
+  assert.equal(st.getWorker("lane-h")?.gated_reentry_attempts, 0); // no attempt burned
+
+  // The human clears `blocked` too — now every hold is gone: reclaim proceeds.
+  forge.issueLabelsByIssue[50] = [];
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-h", issue: 50, pr: 600, attempt: 1 }]);
+  assert.equal(st.getWorker("lane-h")?.state, "driving");
+  assert.equal(sup.dispatched.length, 0);
+  st.close();
 });
 
 test("#147 gated-PR reentry: an escalated PR whose threads are resolved and label cleared is reclaimed on the next round, driven through gate② on the EXISTING branch (review-triggered -> merged), and no worker is ever spawned", async () => {
