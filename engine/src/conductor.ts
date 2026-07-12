@@ -803,8 +803,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // The cap was already spent on a prior reclaim that re-escalated, and a human removed
         // needs-human again anyway — refuse to retry forever: re-add the label, leave an
         // explicit trail, and latch so this row is never reconsidered again.
-        state.upsertWorker({ ...w, ended_at: iso(), gated_reentry_capped: 1 });
-        await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});
+        //
+        // ORDERING (#147 round-3 P2, Codex PR #151 — the #69 fable-P2a rule: ALL forge work
+        // BEFORE the terminal upsert): the label goes FIRST, and the permanent latch is
+        // persisted ONLY once the label provably landed. Latching first would make a transient
+        // label failure permanent — the row leaves gatedFailedWorkers() forever while
+        // needs-human was never restored, so the exhausted PR becomes invisible to BOTH
+        // automation and human triage. On a label failure: record the error durably, do NOT
+        // latch, do NOT emit a capped outcome — the row stays eligible (label still absent,
+        // attempts >= cap), so the next tick's GATED RECLAIM re-enters this branch and retries
+        // the label until it succeeds (the same retry-until-success shape as the rollback
+        // machinery; gatedReentryDecision stays CAPPED throughout, so no extra reclaim can
+        // slip through while retrying).
+        try {
+          await forge.addLabel(w.issue, cfg.labels.needsHuman);
+        } catch (e) {
+          state.appendEvent("gated-reentry-capped-label-failed", {
+            worker: w.name, issue: w.issue, pr, attempts, error: String(e),
+          });
+          continue;
+        }
+        // Best-effort courtesy notice — the label above is the load-bearing block; a comment
+        // hiccup must not strand the latch.
         await forge
           .addIssueComment(
             w.issue,
@@ -813,6 +833,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               `PR; merge it by hand once it's ready.`,
           )
           .catch(() => {});
+        state.upsertWorker({ ...w, ended_at: iso(), gated_reentry_capped: 1 });
         state.appendEvent("gated-reentry-capped", { worker: w.name, issue: w.issue, pr, attempts });
         gatedReclaimed.push({ kind: "capped", worker: w.name, issue: w.issue, pr, attempts });
         continue;

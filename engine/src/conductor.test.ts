@@ -1616,6 +1616,51 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   st.close();
 });
 
+test("#147 round-3 P2 (Codex PR #151): CAPPED latches ONLY after the needs-human label provably lands — a transient label failure retries next tick instead of permanently hiding the PR from human triage", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ lanes: { gatedReentryCap: 1 } });
+  const gate = new FakeMergeGate();
+
+  // Cap already spent (attempts = cap = 1) and the human removed needs-human again — the
+  // CAPPED branch fires. Its job is to RESTORE the label + latch; if the latch landed while
+  // the label write failed, the row would leave gatedFailedWorkers() forever with no label on
+  // the issue: invisible to automation AND to human triage.
+  st.upsertWorker({
+    name: "lane-z", issue: 40, session_id: "s-lane-z", state: "failed",
+    started_at: "t0", ended_at: "t1", pr: 500,
+    gated_reentry_attempts: 1, gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[40] = [];
+
+  // Tick 1: the label write throws (transient forge failure) — NO latch, NO capped outcome,
+  // failure recorded durably; the row stays eligible for a retry.
+  forge.throwOnAddLabel = true;
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r1.gatedReclaimed, []); // no "capped" outcome emitted on a failed label
+  assert.equal(st.getWorker("lane-z")?.gated_reentry_capped, 0); // NOT latched
+  assert.equal(st.gatedFailedWorkers().length, 1); // still a candidate next tick
+  assert.equal(
+    st.eventsSince("2020-01-01T00:00:00Z", ["gated-reentry-capped-label-failed"]).length,
+    1, // the failure is durably recorded, never a silent swallow
+  );
+
+  // Tick 2: the forge recovers — label applied FIRST, then the latch + outcome, exactly once.
+  forge.throwOnAddLabel = false;
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, [{ kind: "capped", worker: "lane-z", issue: 40, pr: 500, attempts: 1 }]);
+  assert.deepEqual(forge.labelsAdded, [[40, "needs-human"]]); // restored where triage looks
+  assert.equal(st.getWorker("lane-z")?.gated_reentry_capped, 1); // latched only now
+  assert.equal(st.gatedFailedWorkers().length, 0); // permanently excluded from here on
+
+  // Tick 3: nothing further — the latch holds, no duplicate outcome/label/comment.
+  const r3 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r3.gatedReclaimed, []);
+  assert.equal(forge.labelsAdded.length, 1);
+  st.close();
+});
+
 test("#147 gated-PR reentry: without a mergeGate configured, an eligible failed+PR lane is never reclaimed (mirrors pre-#13 DRIVE behavior — nothing to drive it through)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
