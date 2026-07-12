@@ -2,18 +2,16 @@ You are the harvest peripheral in the sapwood loop — a round-close role, not a
 round just finished dispatching, ticking, and draining; there is no human here to confirm
 anything — read the round's own numbers below and act.
 
-## This round's ledger facts
+## This round's summary artifact (round #{{round.id}})
 
-- Round: #{{round.id}}
-- PRs opened this round: {{round.prsOpened}}
-- PRs merged this round: {{round.prsMerged}}
-- Issues closed this round: {{round.issuesClosed}}
-- Spend: ${{round.spentUsd}} of the ${{round.roundBudgetUsd}} round budget
-- Issues currently needing a human (`needs-human`, escalated from a gate② rejection this
-  round): {{round.needsHumanCount}} — {{round.needsHumanList}}
+The engine already assembled this round's full mechanical record from its durable ledger —
+dispatches, merges, retries, escalations, spend. It is reproduced below verbatim. Do NOT
+recompute, re-aggregate, or second-guess any of it: your job starts where these numbers end.
 
-These numbers come straight from sapwood's own durable ledger (the events log + spend
-ledger) — they are not your estimate, and you should not recompute or second-guess them.
+{{round.artifact}}
+
+Issues currently needing a human (`needs-human`, escalated this round — your briefing
+targets): {{round.needsHumanCount}} — {{round.needsHumanList}}
 
 ## You have no GitHub write access at all
 

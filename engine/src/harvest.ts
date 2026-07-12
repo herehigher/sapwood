@@ -20,7 +20,8 @@
 // avoid for plan-review's long bodies never applies here.
 //
 // Harvest's write targets are CLOSED-FORM PRE-SESSION (unlike architect's from-a-pool choice,
-// PR4): gatherRoundFacts computes the round's needsHumanIssues set from the durable ledger
+// PR4): the round artifact (#123, round-artifact.ts — supersedes the old gatherRoundFacts)
+// computes the round's needsHumanIssues set from the durable ledger
 // BEFORE the session ever runs, deterministically. The session's only latitude is what to SAY
 // about each one, never WHICH issues to brief — validateHarvestOutput enforces this fail-closed,
 // rejecting the whole batch if any returned issue number falls outside that pre-computed set.
@@ -40,6 +41,9 @@ import {
 } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 import { parseStructuredBlock } from "./structured-output.js";
+import {
+  buildRoundArtifact, renderRoundArtifactMarkdown, capRoundArtifactMarkdown, type RoundArtifact,
+} from "./round-artifact.js";
 
 /** Harvest's deny-list: the base denies PLUS all of `gh issue edit` — harvest writes issue
  *  COMMENTS only (see prompts/harvest.md), never a body edit and never a label, so unlike the
@@ -82,78 +86,27 @@ export function defaultHarvestPromptPath(): string {
   return join(here, "..", "prompts", "harvest.md");
 }
 
-/** The round-ledger facts this phase summarizes (#91's acceptance criterion: "contains the
- *  round ledger facts"). Sourced entirely from durable `state` — events + spend_ledger since
- *  the round STARTED (round.started_at) — never a live GitHub query: harvest reports on what
- *  THIS run's ledger recorded, not the board's current live state. */
-export interface RoundLedgerFacts {
-  roundId: number;
-  prsOpened: number;
-  prsMerged: number;
-  issuesClosed: number;
-  spentUsd: number;
-  roundBudgetUsd: number;
-  /** Distinct issue numbers escalated to needs-human since round start — a DRIVE-phase gate②
-   *  rejection (`drive-needs-human`) OR a gate⓪ plan-review escalation (`plan-review-escalated`,
-   *  #104: plan-review.ts's `escalate()` now appends this event alongside its forge label/
-   *  comment, closing the gap this doc used to name). Deduped across both kinds — the same
-   *  issue can appear in only one at a time in practice (gate⓪ blocks dispatch entirely), but
-   *  the Set guards it regardless. */
-  needsHumanIssues: number[];
-}
-
-const HARVEST_EVENT_KINDS = [
-  "merged", "reclaim-done", "reclaim-failed", "reclaim-dead", "drive-needs-human", "plan-review-escalated",
-];
-
-/** Assemble this round's ledger facts. Pure given `state`'s current contents — exported so
- *  fake-data tests can assert on it directly, independent of the session-dispatch plumbing. */
-export function gatherRoundFacts(state: State, round: RoundRow, roundBudgetUsd: number): RoundLedgerFacts {
-  const events = state.eventsSince(round.started_at, HARVEST_EVENT_KINDS);
-  const prsMerged = events.filter((e) => e.kind === "merged").length;
-  // Reuses driver.ts's prsOpenedThisTick DEFINITION (first reclaim transition into `driving`)
-  // but reads it off the durable events log instead of an in-memory TickResult, since harvest
-  // runs well after the ticks that produced these events — same three qualifying shapes:
-  // reclaim-done/reclaim-failed with next === "DRIVING", and reclaim-dead with rescued === true.
-  const prsOpened = events.filter((e) => {
-    if (e.kind === "reclaim-done" || e.kind === "reclaim-failed") {
-      return (e.payload as { next?: string }).next === "DRIVING";
-    }
-    if (e.kind === "reclaim-dead") return (e.payload as { rescued?: boolean }).rescued === true;
-    return false;
-  }).length;
-  const needsHumanIssues = [
-    ...new Set(
-      events
-        .filter((e) => e.kind === "drive-needs-human" || e.kind === "plan-review-escalated")
-        .map((e) => (e.payload as { issue: number }).issue),
-    ),
-  ];
+/** #123: the harvest prompt's `{{var}}` map, derived ENTIRELY from the round artifact — the
+ *  engine-built mechanical record round-artifact.ts assembles from the ledger. gatherRoundFacts
+ *  and the RoundLedgerFacts shape are gone (assembleRoundArtifact supersedes both; the durable
+ *  `harvest-summary` event they fed is superseded by the persisted round_artifacts row): harvest
+ *  keeps only its JUDGMENT duties — deciding what to SAY about each needs-human issue — while
+ *  every number it references is pre-computed. The individual fact vars are kept alongside the
+ *  new {{round.artifact}} block so a user's custom promptFile written against the pre-#123
+ *  variable set still renders (renderFactsTemplate fails closed on unknown vars). */
+export function factVars(artifact: RoundArtifact, artifactMd: string): Record<string, string> {
+  const needsHuman = artifact.escalations.needsHuman;
   return {
-    roundId: round.round_id,
-    prsOpened,
-    prsMerged,
-    // A merged lane's PR closes its issue via the worker's own `Closes #N` convention
-    // (worker.md) — the same "merged" event backs both counts; there is no separate
-    // issues-closed tracking to reconcile against.
-    issuesClosed: prsMerged,
-    spentUsd: state.spentUsdSince(round.started_at),
-    roundBudgetUsd,
-    needsHumanIssues,
-  };
-}
-
-function factVars(facts: RoundLedgerFacts): Record<string, string> {
-  return {
-    "round.id": String(facts.roundId),
-    "round.prsOpened": String(facts.prsOpened),
-    "round.prsMerged": String(facts.prsMerged),
-    "round.issuesClosed": String(facts.issuesClosed),
-    "round.spentUsd": facts.spentUsd.toFixed(2),
-    "round.roundBudgetUsd": facts.roundBudgetUsd.toFixed(2),
-    "round.needsHumanCount": String(facts.needsHumanIssues.length),
-    "round.needsHumanList": facts.needsHumanIssues.length > 0
-      ? facts.needsHumanIssues.map((n) => `#${n}`).join(", ")
+    "round.id": String(artifact.roundId),
+    "round.artifact": artifactMd,
+    "round.prsOpened": String(artifact.prsOpened),
+    "round.prsMerged": String(artifact.prsMerged),
+    "round.issuesClosed": String(artifact.issuesClosed),
+    "round.spentUsd": artifact.spendUsd.toFixed(2),
+    "round.roundBudgetUsd": artifact.roundBudgetUsd.toFixed(2),
+    "round.needsHumanCount": String(needsHuman.length),
+    "round.needsHumanList": needsHuman.length > 0
+      ? needsHuman.map((n) => `#${n}`).join(", ")
       : "(none)",
   };
 }
@@ -280,21 +233,19 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
       // a peripheral stub. Never observed to fail; fails toward "close the phase" rather than
       // throwing, consistent with this codebase's fail-toward-more-work stance elsewhere.
       if (!round) return { marker: harvestMarker(roundId) };
-      const facts = gatherRoundFacts(deps.state, round, deps.cfg.cost.roundBudgetUsd);
-      // P2 (fable review, PR #103): the round-summary ARTIFACT itself — a durable
-      // `harvest-summary` event carrying the full ledger facts, appended UNCONDITIONALLY
-      // (before and independent of any session dispatch), so a round with an empty
-      // needs-human list — no session at all — still externalizes its summary, and a failed
-      // session never loses it. Exactly once per round: round.ts persists the phase marker
-      // only after run() returns, so a crash mid-phase re-invokes this with marker null —
-      // the existing-event check (not the marker) is what dedups that rerun.
-      const summaryExists = deps.state
-        .eventsSince(round.started_at, ["harvest-summary"])
-        .some((e) => (e.payload as { round_id?: number }).round_id === roundId);
-      if (!summaryExists) deps.state.appendEvent("harvest-summary", { round_id: roundId, facts });
-      if (facts.needsHumanIssues.length > 0) {
+      // #123: the round artifact IS this phase's mechanical input — built mid-round (endedAt
+      // null, unpersisted: the FINAL persisted artifact is round.ts's own close-time build) and
+      // rendered into the prompt as {{round.artifact}}. The pre-#123 `harvest-summary` event is
+      // gone: the persisted round_artifacts row is the machine-readable round record now (one
+      // source of truth), and harvest keeps only judgment + the needs-human briefing.
+      const artifact = buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, null);
+      const needsHumanIssues = artifact.escalations.needsHuman;
+      if (needsHumanIssues.length > 0) {
         const template = loadRolePromptTemplate(deps.cfg.roles.harvest.promptFile, defaultHarvestPromptPath());
-        const rendered = renderFactsTemplate(template, factVars(facts));
+        const artifactMd = capRoundArtifactMarkdown(
+          renderRoundArtifactMarkdown(artifact), deps.cfg.roles.harvest.artifactMaxChars,
+        );
+        const rendered = renderFactsTemplate(template, factVars(artifact, artifactMd));
         const role = deps.cfg.roles.harvest;
         // RoleRunner.run never throws on the session's OWN outcome (failed/timeout return
         // normally) — checked here, not assumed (gate② P2 on the sibling #100/#101 PRs: both
@@ -328,10 +279,10 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
             round_id: roundId, outcome: result.outcome, session: result.name, attempts: 2,
           }),
           degradeMessage: (result) =>
-            `[sapwood:harvest] round ${roundId}: ${harvestDegradeReason(result, facts.needsHumanIssues)} — ` +
+            `[sapwood:harvest] round ${roundId}: ${harvestDegradeReason(result, needsHumanIssues)} — ` +
             `closing the harvesting phase WITHOUT posting round-context comments (degraded, see ` +
             `the harvest-degraded event); the run is not blocked`,
-          isValid: (result) => validateHarvestOutput(result.resultText ?? "", facts.needsHumanIssues).ok,
+          isValid: (result) => validateHarvestOutput(result.resultText ?? "", needsHumanIssues).ok,
         });
         // Every comment write originates from a SCHEMA-VALIDATED, SET-VALIDATED session decision
         // (module doc) — the session itself never touches `gh`. A degraded (still-invalid-after-
@@ -340,7 +291,7 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
         // validated would be exactly the silent-partial-result outcome this rework exists to
         // prevent.
         if (result.outcome === "done") {
-          const validated = validateHarvestOutput(result.resultText ?? "", facts.needsHumanIssues);
+          const validated = validateHarvestOutput(result.resultText ?? "", needsHumanIssues);
           if (validated.ok) {
             const roundMarker = harvestMarker(roundId);
             for (const c of validated.comments) {

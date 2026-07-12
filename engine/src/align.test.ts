@@ -206,6 +206,31 @@ test("createAligningStub: a declared issue with a plan section gets stamped orig
   state.close();
 });
 
+test("createAligningStub #123: the phase externalizes ONE align-summary event recording created issues (with hasPlan) and triage outcomes", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [] }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([{ title: "Do the thing", body: PLAN_BODY }])),
+    doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 1, phase: "aligning", marker: null });
+  const summaries = state.eventsSince("2020-01-01T00:00:00.000Z", ["align-summary"]);
+  assert.equal(summaries.length, 1);
+  const p = summaries[0]!.payload as {
+    round_id: number;
+    created: Array<{ issue: number; title: string; hasPlan: boolean }>;
+    triaged: Array<{ issue: number; drafted: boolean }>;
+  };
+  assert.equal(p.round_id, 1);
+  assert.deepEqual(p.created, [{ issue: forge.openIssueNumbers[0]!, title: "Do the thing", hasPlan: true }]);
+  assert.deepEqual(p.triaged, [{ issue: 9, drafted: true }]);
+  state.close();
+});
+
 test("createAligningStub: a declared issue WITHOUT a plan section is escalated needs-human, never left silently planless", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();

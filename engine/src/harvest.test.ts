@@ -17,10 +17,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createHarvestStub, gatherRoundFacts, harvestMarker, renderFactsTemplate,
+  createHarvestStub, harvestMarker, renderFactsTemplate, factVars,
   defaultHarvestPromptPath, HARVEST_DISALLOWED_TOOLS, validateHarvestOutput, type HarvestDeps,
 } from "./harvest.js";
 import { ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
+import { buildRoundArtifact } from "./round-artifact.js";
 import { RESULT_BLOCK_START, RESULT_BLOCK_END } from "./structured-output.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -97,7 +98,10 @@ test("defaultHarvestPromptPath: resolves to the shipped prompts/harvest.md, whic
   const p = defaultHarvestPromptPath();
   assert.ok(existsSync(p), `expected shipped prompt at ${p}`);
   const body = readFileSync(p, "utf8");
-  for (const v of ["{{round.id}}", "{{round.prsOpened}}", "{{round.prsMerged}}", "{{round.spentUsd}}", "{{round.needsHumanList}}"]) {
+  // #123: the shipped prompt consumes the round ARTIFACT block (plus the briefing-target list);
+  // the individual fact vars remain SUPPORTED by factVars for custom promptFiles, but the
+  // shipped template no longer spells each number out.
+  for (const v of ["{{round.id}}", "{{round.artifact}}", "{{round.needsHumanCount}}", "{{round.needsHumanList}}"]) {
     assert.ok(body.includes(v), `harvest.md should reference ${v}`);
   }
   // #110 PR3: the session has no gh grant it acts on — every comment travels through the
@@ -111,7 +115,7 @@ test("renderFactsTemplate: substitutes known vars, throws on an unknown placehol
   assert.throws(() => renderFactsTemplate("{{bogus}}", {}), /unknown variable \{\{bogus\}\}/);
 });
 
-test("gatherRoundFacts: sums PRs opened/merged, spend, and distinct needs-human issues from the durable ledger since round start", async () => {
+test("buildRoundArtifact (#123, ex-gatherRoundFacts): sums PRs opened/merged, spend, and distinct needs-human issues from the durable ledger since round start", async () => {
   const state = new State(":memory:");
   // Before round start — must be excluded. appendEvent stamps the REAL clock, so the round's
   // started_at must also be a real-clock timestamp strictly after this event (the small sleep
@@ -133,14 +137,14 @@ test("gatherRoundFacts: sums PRs opened/merged, spend, and distinct needs-human 
   state.recordSpend("lane-b", 2, 3, new Date().toISOString());
   state.recordSpend("lane-x", 99, 1000, "2026-07-09T00:00:00.000Z"); // before round start — excluded
 
-  const facts = gatherRoundFacts(state, round, 30);
-  assert.equal(facts.roundId, round.round_id);
-  assert.equal(facts.prsOpened, 3);
-  assert.equal(facts.prsMerged, 2);
-  assert.equal(facts.issuesClosed, 2);
-  assert.equal(facts.spentUsd, 7);
-  assert.equal(facts.roundBudgetUsd, 30);
-  assert.deepEqual(facts.needsHumanIssues, [6]); // deduped
+  const artifact = buildRoundArtifact(state, round, 30, null);
+  assert.equal(artifact.roundId, round.round_id);
+  assert.equal(artifact.prsOpened, 3);
+  assert.equal(artifact.prsMerged, 2);
+  assert.equal(artifact.issuesClosed, 2);
+  assert.equal(artifact.spendUsd, 7);
+  assert.equal(artifact.roundBudgetUsd, 30);
+  assert.deepEqual(artifact.escalations.needsHuman, [6]); // deduped
   state.close();
 });
 
@@ -155,7 +159,23 @@ test("createHarvestStub: marker present -> returns it unchanged, no facts gather
   state.close();
 });
 
-test("createHarvestStub: no needs-human issues this round -> no session run, but the durable harvest-summary artifact STILL lands (P2, fable review PR #103)", async () => {
+test("factVars (#123): {{round.artifact}} carries the rendered md verbatim; the pre-#123 fact vars stay supported for custom promptFiles", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("merged", { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
+  state.appendEvent("drive-needs-human", { worker: "lane-b", issue: 6, pr: 12, reason: "r" });
+  const artifact = buildRoundArtifact(state, round, 30, null);
+  const vars = factVars(artifact, "THE-ARTIFACT-MD");
+  assert.equal(vars["round.artifact"], "THE-ARTIFACT-MD");
+  assert.equal(vars["round.prsMerged"], "1");
+  assert.equal(vars["round.needsHumanList"], "#6");
+  // Both a pre-#123 custom template and the shipped one render without an unknown-var throw.
+  renderFactsTemplate("r{{round.id}}: {{round.prsOpened}}/{{round.prsMerged}} ${{round.spentUsd}}", vars);
+  renderFactsTemplate("{{round.artifact}} targets: {{round.needsHumanList}}", vars);
+  state.close();
+});
+
+test("createHarvestStub (#123): no needs-human issues this round -> no session run, and NO harvest-summary event — the persisted round artifact (round.ts's close) is the machine-readable record now", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("merged", { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
@@ -165,32 +185,10 @@ test("createHarvestStub: no needs-human issues this round -> no session run, but
   const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id));
   assert.equal(runner.calls.length, 0);
-  // The summary ARTIFACT is the durable event, independent of any session: an empty
-  // needs-human list means nobody to brief, never "no round summary exists anywhere".
+  // The pre-#123 harvest-summary event is gone (superseded by the round_artifacts row that
+  // round.ts persists at close) — harvest appends nothing when there's nobody to brief.
   const summaries = state.eventsSince("2020-01-01T00:00:00.000Z", ["harvest-summary"]);
-  assert.equal(summaries.length, 1);
-  assert.deepEqual(summaries[0]!.payload, {
-    round_id: round.round_id,
-    facts: {
-      roundId: round.round_id, prsOpened: 0, prsMerged: 1, issuesClosed: 1,
-      spentUsd: 0, roundBudgetUsd: 30, needsHumanIssues: [],
-    },
-  });
-  state.close();
-});
-
-test("createHarvestStub: harvest-summary is appended exactly once per round — a crash-rerun (marker null again) never duplicates it", async () => {
-  const state = new State(":memory:");
-  const round = state.startRound("2026-07-10T00:00:00.000Z");
-  const runner = new ScriptedRunner(doneResult("s1"));
-  const deps: HarvestDeps = { forge: new MinimalForge(), state, cfg: mkCfg(), runner };
-  const stub = createHarvestStub(deps);
-  await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
-  // Crash-rerun simulation: round.ts persists the marker only AFTER run() returns, so a crash
-  // mid-phase re-invokes the stub with marker null — the summary event must not duplicate.
-  await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
-  const summaries = state.eventsSince("2020-01-01T00:00:00.000Z", ["harvest-summary"]);
-  assert.equal(summaries.length, 1);
+  assert.equal(summaries.length, 0);
   state.close();
 });
 
@@ -212,8 +210,9 @@ test("createHarvestStub: a needs-human issue this round -> dispatches ONE harves
   assert.equal(call.roleId, "harvest");
   assert.equal(call.model, "sonnet"); // roles.harvest default
   assert.equal(call.effort, "medium");
-  assert.ok(call.prompt.includes(`Round: #${round.round_id}`));
-  assert.ok(call.prompt.includes("PRs merged this round: 1"));
+  // #123: the prompt now carries the rendered round-artifact markdown block.
+  assert.ok(call.prompt.includes(`# Round #${round.round_id} summary`));
+  assert.ok(call.prompt.includes("PRs merged: 1"));
   assert.ok(call.prompt.includes("#42"));
   // #101 security-review pitfall: comments-only role — the WHOLE `gh issue edit` verb is
   // pattern-denied (labels included), on top of the base issues-only denies.

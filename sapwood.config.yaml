@@ -133,6 +133,10 @@ labels: # taxonomy used by the loop
 #     #                   Unset = the engine's shipped prompts/harvest.md.
 #     model: sonnet
 #     effort: medium
+#     artifactMaxChars: 20000 # #123: cap on the {{round.artifact}} markdown block substituted
+#                             # into the harvest prompt (deterministic truncation, same contract
+#                             # as retro's digestMaxChars). A safety valve — the artifact is
+#                             # naturally small (bounded by the round's own dispatch cap).
 #   retro: # #91: retrospective/self-evolution — analyzes the round and proposes
 #     #      prompt/config/docs improvements EXCLUSIVELY as PRs through gate②
 #     #      (#77 decision 6); it can never write main/docs directly.

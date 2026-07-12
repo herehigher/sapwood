@@ -214,6 +214,23 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN gated_escalation_labeled INTEGER NOT NULL DEFAULT 0;
     `);
   },
+  // 9 -> 10: round summary artifact (#123, M5 item 3). One row per CLOSED round — the
+  // schema-validated JSON round-artifact.ts assembles from the event ledger at round.ts's
+  // closeRound call site (round-artifact.ts's persistRoundArtifact). `round_id` is the primary
+  // key (one artifact per round, upsert-on-conflict — see State.saveRoundArtifact); `json` is
+  // the full validated object (the source of truth — the on-disk markdown view is always
+  // RE-DERIVED from it, never authored independently); `schema_version` lets a future reader
+  // (the #17 dashboard included) detect an older artifact shape without re-parsing the JSON.
+  (db) => {
+    db.exec(`
+      CREATE TABLE round_artifacts (
+        round_id       INTEGER PRIMARY KEY,
+        schema_version INTEGER NOT NULL,
+        json           TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -869,5 +886,38 @@ export class State {
       .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts >= ?")
       .get(sinceIso) as { total: number };
     return row.total;
+  }
+
+  // ── #123: round summary artifact (round_artifacts, migration 9->10) ─────────────────────
+
+  /** Upsert the FINAL round artifact row — one per round (round_id is the PK), so a crash-rerun
+   *  of the close path overwrites rather than duplicates. `json` is the schema-validated object
+   *  (round-artifact.ts validates BEFORE calling this — state stores, never re-validates). */
+  saveRoundArtifact(roundId: number, schemaVersion: number, json: string, updatedAt: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO round_artifacts (round_id, schema_version, json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(round_id) DO UPDATE SET
+           schema_version = excluded.schema_version, json = excluded.json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(roundId, schemaVersion, json, updatedAt);
+  }
+
+  /** The persisted artifact row for a round — undefined when the round never closed (or
+   *  predates #123). `json` is returned RAW (the caller parses/validates against the version
+   *  it understands via `schemaVersion`) — reader for tests and the #17 dashboard. */
+  getRoundArtifact(roundId: number): { schemaVersion: number; json: string } | undefined {
+    const row = this.db
+      .prepare("SELECT schema_version, json FROM round_artifacts WHERE round_id = ?")
+      .get(roundId) as { schema_version: number; json: string } | undefined;
+    return row ? { schemaVersion: row.schema_version, json: row.json } : undefined;
+  }
+
+  /** Where the derived markdown VIEW of a round's artifact lives on disk — null for an
+   *  in-memory State (tests), same convention as killSwitchPath/pausePath above. */
+  roundArtifactMdPath(roundId: number): string | null {
+    return this.dataDir ? join(this.dataDir, "rounds", `round-${roundId}.md`) : null;
   }
 }

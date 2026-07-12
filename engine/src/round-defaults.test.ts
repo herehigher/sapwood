@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDefaultPeripherals } from "./round-defaults.js";
+import { createDefaultPeripherals, renderAlignedGoalsFromSummary } from "./round-defaults.js";
 import { runRounds, noopPeripheralStub, type RoundDeps } from "./round.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -124,6 +124,25 @@ test("createDefaultPeripherals: every PeripheralPhase key is present and none of
     assert.ok(peripherals[phase], `expected a real stub for ${phase}`);
     assert.notEqual(peripherals[phase], noopPeripheralStub, `${phase} must not be the noop stub`);
   }
+  state.close();
+});
+
+test("renderAlignedGoalsFromSummary (#123): renders the align-summary event's per-issue detail; no event (or no round) -> null (pointer-note fallback)", () => {
+  const state = new State(":memory:");
+  assert.equal(renderAlignedGoalsFromSummary(state, 1), null, "no round row -> null");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  assert.equal(renderAlignedGoalsFromSummary(state, round.round_id), null, "no summary event yet -> null");
+  state.appendEvent("align-summary", {
+    round_id: round.round_id,
+    created: [{ issue: 12, title: "Split the parser", hasPlan: true }],
+    triaged: [{ issue: 9, drafted: false }],
+  });
+  const text = renderAlignedGoalsFromSummary(state, round.round_id)!;
+  assert.ok(text.includes("created #12 — Split the parser"));
+  assert.ok(text.includes("triaged #9: still planless"));
+  // An empty summary renders the explicit "decomposed nothing" line, never null.
+  state.appendEvent("align-summary", { round_id: round.round_id, created: [], triaged: [] });
+  assert.ok(renderAlignedGoalsFromSummary(state, round.round_id)!.includes("decomposed nothing"));
   state.close();
 });
 

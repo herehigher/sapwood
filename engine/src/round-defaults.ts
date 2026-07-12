@@ -47,6 +47,39 @@ export interface DefaultPeripheralsDeps {
  *  still points at GitHub for the real detail.) Before the note is set (the very first phase,
  *  or a caller that never wires aligning at all), the architect stub falls back to its own
  *  built-in "not available" placeholder, unchanged. */
+/** #123: render the architect's `round.alignedGoals` context from the aligning phase's own
+ *  `align-summary` state event — the PO's actual per-issue decomposition/triage record, not a
+ *  pointer. Null when no summary exists for this round (degraded align, or a state hiccup —
+ *  the caller falls back to the deterministic pointer note). Pure read; exported for tests. */
+export function renderAlignedGoalsFromSummary(state: State, roundId: number): string | null {
+  try {
+    const round = state.getRound(roundId);
+    if (!round) return null;
+    const summaries = state
+      .eventsSince(round.started_at, ["align-summary"])
+      .filter((e) => (e.payload as { round_id?: number }).round_id === roundId);
+    const last = summaries[summaries.length - 1];
+    if (!last) return null;
+    const p = last.payload as {
+      created?: Array<{ issue: number; title: string; hasPlan: boolean }>;
+      triaged?: Array<{ issue: number; drafted: boolean }>;
+    };
+    const created = p.created ?? [];
+    const triaged = p.triaged ?? [];
+    if (created.length === 0 && triaged.length === 0) {
+      return `This round's PO/goal-alignment pass (round ${roundId}) ran and decomposed nothing: ` +
+        `no issues created, no plans triaged.`;
+    }
+    return [
+      `This round's PO/goal-alignment pass (round ${roundId}) recorded:`,
+      ...created.map((c) => `- created #${c.issue} — ${c.title}${c.hasPlan ? "" : " (no verification plan yet; labelled needs-human)"}`),
+      ...triaged.map((t) => `- triaged #${t.issue}${t.drafted ? ": plan drafted into the body" : ": still planless (re-matches next round)"}`),
+    ].join("\n");
+  } catch {
+    return null; // contained — the caller's pointer-note fallback covers a state read failure
+  }
+}
+
 export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<Record<PeripheralPhase, PeripheralStub>> {
   // #109 gate② P2: scope the PERIPHERALS' forge to cfg.round.milestone, exactly like runRounds
   // scopes its own tick forge (round.ts:runRounds wraps deps.forge independently — that wrap
@@ -80,10 +113,16 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     aligning: {
       async run(ctx) {
         const result = await alignStub.run(ctx);
+        // #123 acceptance criterion 3: thread the aligning phase's ACTUAL structured
+        // decomposition detail (its `align-summary` state event — created issues + triage
+        // outcomes) through to the architect, replacing the old deterministic pointer note.
+        // The event read is contained: a missing event (degraded align, state hiccup) falls
+        // back to the pointer note — never fabricated analysis, never a thrown phase.
         architectDeps.alignedGoals =
+          renderAlignedGoalsFromSummary(deps.state, ctx.roundId) ??
           `This round's PO/goal-alignment peripheral has run (round ${ctx.roundId}, marker ` +
           `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
-          `actual decomposition (this factory doesn't thread per-issue detail through).`;
+          `actual decomposition (no structured summary was recorded this round).`;
         return result;
       },
     },

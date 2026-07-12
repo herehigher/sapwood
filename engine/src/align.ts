@@ -287,6 +287,13 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // a created issue structurally cannot carry a dispatch-path label at creation (the
       // pre-#110 poisoned-label post-check this replaces is deleted outright, see module doc).
       const createdIssues = alignValidated.ok ? alignValidated.issues : [];
+      // #123: the aligning phase's own structured summary — what the PO actually decomposed/
+      // triaged this round — collected as the loops run and externalized as ONE `align-summary`
+      // event at the end. Consumed by the round artifact (round-artifact.ts) and by the
+      // architect's pre-dispatch context (round-defaults.ts), replacing the old deterministic
+      // pointer note. State event only — no new forge write.
+      const alignSummaryCreated: Array<{ issue: number; title: string; hasPlan: boolean }> = [];
+      const alignSummaryTriaged: Array<{ issue: number; drafted: boolean }> = [];
       for (const { title, body } of createdIssues) {
         const issueNumber = await deps.forge.createIssue(title, body);
         // Labels are the orchestrator's job, unconditionally — the session has no label channel
@@ -302,6 +309,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             `planless. A human (or a future triage pass) needs to supply one.`;
         if (!hasPlan) await deps.forge.addLabel(issueNumber, l.needsHuman);
         await deps.forge.addIssueComment(issueNumber, `${note}\n\n${mark}`);
+        alignSummaryCreated.push({ issue: issueNumber, title, hasPlan });
       }
 
       // ── Triage pass: existing plan-less issues get a plan drafted directly into the body.
@@ -343,13 +351,16 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           // Malformed-twice/failed-twice already went through runSessionWithRetry's own
           // isValid-driven retry+degrade above (triage-degraded fired there) — nothing further
           // to do: no write, no success comment, the candidate re-matches next round.
+          alignSummaryTriaged.push({ issue: issue.number, drafted: false });
           continue;
         }
         // The write is EARNED by validated output, never by the session's exit code alone —
         // same "schema-valid is not the same as truthful" stance issue #110 requires, applied
         // to the write itself rather than just the comment below.
         await deps.forge.updateIssueBody(issue.number, validated.body);
-        if (extractVerificationPlan(validated.body) != null) {
+        const planLanded = extractVerificationPlan(validated.body) != null;
+        alignSummaryTriaged.push({ issue: issue.number, drafted: planLanded });
+        if (planLanded) {
           await deps.forge.addIssueComment(
             issue.number,
             `PO triage pass (round ${roundId}) drafted a plan into this issue's body.\n\n${mark}`,
@@ -368,6 +379,15 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           );
         }
       }
+
+      // #123: externalize the phase's structured summary exactly once, after both passes.
+      // Contained: a state-write failure loses the summary (artifact's align section reads
+      // null, architect falls back to its pointer note) — never fails the phase.
+      try {
+        deps.state.appendEvent("align-summary", {
+          round_id: roundId, created: alignSummaryCreated, triaged: alignSummaryTriaged,
+        });
+      } catch { /* telemetry only — the phase's forge writes above already landed */ }
 
       return { marker: mark };
     },

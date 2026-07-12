@@ -18,6 +18,7 @@
 // mid-session state. The stub is handed the row's persisted marker and is contractually
 // responsible for treating a non-null marker as "already externalized, don't duplicate."
 import { tick, type TickDeps, type TickResult, type Supervisor, type MergeGate } from "./conductor.js";
+import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 import type { IForge, Issue } from "./forge.js";
 import { State, type RoundPhase, type RoundRow } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
@@ -563,7 +564,25 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "kill-switch" };
       }
 
-      deps.state.closeRound(round.round_id, iso());
+      const closedAt = iso();
+      deps.state.closeRound(round.round_id, closedAt);
+      // #123: the FINAL round summary artifact — assembled from the round's own ledger window
+      // and persisted (DB row = source of truth; the markdown view is derived from it inside
+      // persistRoundArtifact). Contained: an assembly/validation/persistence bug degrades to a
+      // durable tick-error, never blocks the round from closing (same stance as every other
+      // best-effort write in this loop).
+      try {
+        persistRoundArtifact(
+          deps.state,
+          buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, closedAt),
+          closedAt,
+        );
+      } catch (e) {
+        tickErrors++;
+        try {
+          deps.state.appendEvent("tick-error", { error: `round artifact persistence failed: ${String(e)}` });
+        } catch { /* state write failed too — tickErrors still counts it */ }
+      }
       roundsClosed++;
       // #125 idle-round precondition: record whether THIS round dispatched nothing — the gate
       // that lets standby engage at the top of the next iteration (see lastRoundIdle's comment).
