@@ -86,7 +86,10 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     const bin = mkStub(dir, FAST_STUB);
     const state = new State(":memory:");
     const forge = new FakeForge();
-    const cfg = mkCfg(); // engine.driver unset -> defaults to "rounds"
+    // #125: FakeForge is an intentionally empty board (this test is about the CLI's wiring to a
+    // REAL RoleRunner, not the standby probe) — opt out explicitly so round 1 still opens
+    // immediately, same as before #125.
+    const cfg = mkCfg({ round: { standby: { enabled: false } } }); // engine.driver unset -> defaults to "rounds"
     assert.equal(cfg.engine.driver, "rounds");
 
     let stop = (): void => {};

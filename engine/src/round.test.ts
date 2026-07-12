@@ -111,8 +111,18 @@ class ScriptedMergeGate implements MergeGate {
   }
 }
 
+// #125: every pre-existing test in this file predates standby and exercises an otherwise-empty
+// FakeForge (deliberately, to isolate whatever mechanic it's actually testing) — defaulting
+// round.standby OFF here keeps every one of them opening its round immediately, exactly as
+// before. The standby-specific tests below opt back in explicitly via `round: { standby: {...} }`
+// (merged over this default, not replaced by it — same shallow-merge-of-`round` shape as the
+// rest of this helper).
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" }, ...over });
+  ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" },
+    ...over,
+    round: { standby: { enabled: false }, ...(over.round as Record<string, unknown> | undefined) },
+  });
 
 function mkSleepSpy(): { sleep: (ms: number) => Promise<void>; calls: number[] } {
   const calls: number[] = [];
@@ -598,4 +608,193 @@ test("RoundScopedForge: updateIssueBody passes through unchanged (#110 PR0 — e
 test("noopPeripheralStub: echoes the incoming marker, or 'noop' on a first attempt", async () => {
   assert.deepEqual(await noopPeripheralStub.run({ roundId: 1, phase: "aligning", marker: null }), { marker: "noop" });
   assert.deepEqual(await noopPeripheralStub.run({ roundId: 1, phase: "aligning", marker: "prior" }), { marker: "prior" });
+});
+
+// ── #125: standby (pre-round probe + exponential backoff) ──────────────────────────────────
+//
+// mkCfg defaults standby OFF (see its own comment above) — every test below opts back in
+// explicitly via `round: { standby: { enabled: true, ... } }`.
+
+/** Spy on state.appendEvent, same pattern as the #95 "every round-stop hit is persisted" test
+ *  above — returns the recorded (kind, payload) pairs in order. */
+function spyOnEvents(state: State): Array<[string, unknown]> {
+  const events: Array<[string, unknown]> = [];
+  const realAppend = state.appendEvent.bind(state);
+  state.appendEvent = (kind: string, payload: unknown) => {
+    events.push([kind, payload]);
+    realAppend(kind, payload);
+  };
+  return events;
+}
+
+test("runRounds standby: an empty board withholds opening ANY round — zero peripheral sessions ever run, and standby-wait events show the backoff doubling", async () => {
+  const forge = new FakeForge(); // ready=[] and planReviewCandidates=[] by default — probe never hits
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    // Safety net so a regression (standby never firing / never stopping) fails these assertions
+    // instead of hanging the suite — same "bounded stop, not an infinite loop" stance as
+    // boundedStopOnPhase uses for the phase-sequence tests above.
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({
+    forge, state, sleep, tickIntervalSec: 5,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+    peripherals: allPeripherals(log),
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 0);
+  assert.deepEqual(log, [], "no peripheral phase ever ran — the round never opened");
+  assert.deepEqual(sleepCalls, [5000, 10000, 20000, 40000]); // tickIntervalSec=5 * 2^n, doubling
+  const waits = events.filter(([kind]) => kind === "standby-wait").map(([, payload]) => payload);
+  assert.deepEqual(waits, [
+    { attempt: 0, waitSec: 5 }, { attempt: 1, waitSec: 10 }, { attempt: 2, waitSec: 20 }, { attempt: 3, waitSec: 40 },
+  ]);
+  state.close();
+});
+
+test("runRounds standby: SIGINT during a standby wait exits promptly — the wait never delays shutdown, and no round ever opens", async () => {
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  // A sleep that NEVER resolves on its own — the signal (fired the moment the wait starts) must
+  // be what ends it, same shape as the #109 idle-throttle sigint test above.
+  const sleep = (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    stop();
+    return new Promise<void>(() => {});
+  };
+  const forge = new FakeForge(); // empty board — standby engages on the very first probe
+  const deps = baseDeps({
+    forge, sleep, tickIntervalSec: 5,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 0);
+  assert.deepEqual(sleepCalls, [5000]); // exactly the FIRST backoff step, aborted immediately
+  assert.equal(deps.state.getRound(1), undefined, "no round was ever opened");
+  deps.state.close();
+});
+
+test("runRounds standby: the backoff wait is capped at round.standby.backoffCapSec — it never grows past it", async () => {
+  const forge = new FakeForge();
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 5) stop();
+  };
+  const deps = baseDeps({
+    forge, sleep, tickIntervalSec: 10,
+    cfg: mkCfg({ round: { standby: { enabled: true, backoffCapSec: 25 } } }),
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  // 10, 20, then capped at 25 forever (uncapped would be 10, 20, 40, 80, 160).
+  assert.deepEqual(sleepCalls, [10000, 20000, 25000, 25000, 25000]);
+  deps.state.close();
+});
+
+test("runRounds standby: a Ready issue appearing mid-backoff is caught by the NEXT probe — standby exits and the round opens, no extra wait beyond that one step", async () => {
+  const forge = new FakeForge();
+  const sup = new AutoCompleteSupervisor();
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const sleep = async (): Promise<void> => {
+    // The issue appears during the FIRST standby wait — the very next probe (right after this
+    // resolves) must see it and exit standby immediately, never waiting a second time.
+    forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  };
+  const deps = baseDeps({
+    forge, supervisor: sup, state, sleep, tickIntervalSec: 5,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5); // one round's worth of phases
+  const result = await runRounds(deps);
+  stopSafety();
+  const waits = events.filter(([kind]) => kind === "standby-wait");
+  assert.equal(waits.length, 1, "exactly one backoff step before the new issue was noticed");
+  const exit = events.find(([kind]) => kind === "standby-exit");
+  assert.ok(exit, "a standby-exit event was recorded");
+  assert.deepEqual(exit![1], { attempts: 1 });
+  assert.deepEqual(sup.dispatchedIssues, [1], "the newly-Ready issue got dispatched once standby exited");
+  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.equal(result.rounds, 1);
+  deps.state.close();
+});
+
+test("runRounds standby: KILL_SWITCH bypasses the probe entirely — a round still opens & blocks at aligning, exactly like non-standby behavior", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge(); // empty board — standby would otherwise engage forever
+    const state = new State(join(dir, "sapwood.sqlite"));
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const { sleep } = mkSleepSpy();
+    const deps = baseDeps({
+      forge, state, sleep,
+      cfg: mkCfg({ round: { standby: { enabled: true } } }),
+      peripherals: allPeripherals(log),
+    });
+    const result = await runRounds(deps);
+    assert.equal(result.stoppedBy, "kill-switch");
+    assert.deepEqual(log, []); // aligning itself never ran — blocked before the stub
+    assert.equal(result.rounds, 0);
+    assert.ok(state.getRound(1), "the round loop still opens a round before checking the kill switch");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds standby: round.milestone open issues count as work even with Ready/plan-review both empty — decomposing them is the PO's job, not a standby signal", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // isolates the milestone-goals signal from Ready/plan-review
+  forge.milestoneOpenCounts = [3]; // the milestone still has undecomposed open issues
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({
+    forge, sleep,
+    cfg: mkCfg({ round: { milestone: "M4", standby: { enabled: true } } }),
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.equal(result.rounds, 1, "the round opened immediately — never entered standby");
+  assert.ok(forge.milestoneQueries.includes("M4"), "the probe actually checked the milestone");
+  deps.state.close();
+});
+
+test("runRounds standby: a truly exhausted round.milestone (0 open issues) contributes no work signal — standby engages same as the unscoped empty-board case", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.milestoneOpenCounts = [0]; // the milestone is fully drained — nothing left to decompose
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    stop();
+  };
+  const deps = baseDeps({
+    forge, sleep,
+    cfg: mkCfg({ round: { milestone: "M4", standby: { enabled: true } } }),
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 0, "standby withheld the round — the milestone had nothing left");
+  assert.deepEqual(sleepCalls, [5000]); // baseDeps tickIntervalSec=5 — the first backoff step
+  deps.state.close();
 });

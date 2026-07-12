@@ -224,6 +224,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   let issuesMerged = 0;
   let prsOpened = 0;
   let finalStopHit: StopConditionHit | undefined;
+  // #125 standby: consecutive empty probes since the last time a round actually opened — the
+  // exponential-backoff exponent. In-memory only (never persisted): a process restart is a fresh
+  // start at n=0, same as #109's idle throttle carries no state across restarts either.
+  let standbyAttempts = 0;
 
   /** Contained tick() call (same containment stance as driver.ts's runDriver): a thrown tick
    *  is a structured tick-error event, never a crash, never a hot retry loop (callers still
@@ -268,6 +272,25 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         deps.state.appendEvent("tick-error", { error: `stop-condition milestone check failed: ${String(e)}` });
       } catch { /* state write failed too — tickErrors still counts it */ }
     }
+  };
+
+  /** #125 standby: pure-GitHub-API pre-round probe — true the moment there is ANY signal that a
+   *  new round would have real work to do. 'Ready empty' alone is NOT "nothing to do": a
+   *  plan-review candidate needs gate⓪, and — when `round.milestone` scopes this run — an open
+   *  issue still sitting in that milestone (not yet Ready, not yet reviewed) is exactly the PO/
+   *  aligning peripheral's job to decompose, so it counts as work too. Unset milestone can't
+   *  express a "goals exhausted" signal at all (no scoping to ask about, and the future
+   *  goal-file target this parenthetical anticipates — M5 #135 — isn't shipped yet), so it
+   *  contributes no vote either way, same "unset = no scoping" stance as RoundScopedForge. Reads
+   *  the same (possibly milestone-scoped) `forge` runExecuting/checkFinalMilestone already use.
+   */
+  const probeHasWork = async (): Promise<boolean> => {
+    if ((await forge.getReadyIssues()).length > 0) return true;
+    if ((await forge.getIssuesNeedingPlanReview()).length > 0) return true;
+    if (cfg.round.milestone) {
+      return (await forge.countOpenIssuesInMilestone(cfg.round.milestone)) > 0;
+    }
+    return false;
   };
 
   const toTickDeps = (over: { forge: IForge; forceDispatchPause?: boolean; roundSpendUsd?: number }): TickDeps => ({
@@ -397,6 +420,37 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         if (finalStopHit) {
           return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
         }
+
+        // #125 standby: withhold opening a NEW round while the probe is provably empty, backing
+        // off tickIntervalSec * 2^n (capped at round.standby.backoffCapSec) between probes — any
+        // hit resets the exponent and opens the round immediately, no extra wait. KILL_SWITCH
+        // bypasses this entirely: a round is always OPENED first and blocked at its very first
+        // peripheral phase (runPeripheral's own check) instead, the same contract every other
+        // caller of this loop already relies on — standby must never turn that into "loops
+        // forever probing instead" for an operator who just wants the freeze to take effect.
+        if (cfg.round.standby.enabled && !deps.state.isKillSwitchActive()) {
+          while (!(await probeHasWork())) {
+            if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
+            const waitSec = Math.min(
+              deps.tickIntervalSec * 2 ** standbyAttempts,
+              cfg.round.standby.backoffCapSec,
+            );
+            deps.state.appendEvent("standby-wait", { attempt: standbyAttempts, waitSec });
+            standbyAttempts++;
+            await interTickWait(waitSec * 1000);
+            if (signalled) break;
+          }
+          // finalStopHit can't be set here (the check just above already returned if it were) —
+          // a signal breaking the wait is always a plain "signal" stop, unlike the loop-top check.
+          if (signalled) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
+          }
+          if (standbyAttempts > 0) {
+            deps.state.appendEvent("standby-exit", { attempts: standbyAttempts });
+            standbyAttempts = 0;
+          }
+        }
+
         round = deps.state.startRound(iso());
       }
 

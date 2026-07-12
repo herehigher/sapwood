@@ -597,7 +597,10 @@ const baseIntegrationDeps = (state: State, peripherals: Partial<Record<Periphera
   forge: new MinimalForge(),
   state,
   supervisor: new MinimalSupervisor(),
-  cfg: mkCfg(),
+  // #125: MinimalForge is an intentionally empty board — these tests are about the retro
+  // stub's own wiring, not the standby probe, so opt out of it explicitly (same rationale as
+  // round.test.ts's own mkCfg default).
+  cfg: mkCfg({ round: { standby: { enabled: false } } }),
   tickIntervalSec: 1,
   sleep: async () => {},
   peripherals,

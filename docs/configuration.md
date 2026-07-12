@@ -138,17 +138,20 @@ stop-condition half has any effect, since the tick driver has no round to scope.
 
 ## `round`
 
-Round-loop scoping (#86) — which issues the round orchestrator's dispatch batch draws
-from. Distinct from (but composable with) `stop.onMilestoneComplete` above: scope and
-stop are orthogonal mechanisms that happen to reuse the same GitHub-milestone concept —
-one can be set without the other, or to two different milestones. `run --milestone NAME`
-(above) is a shortcut that sets both to the same name in one flag, for callers who want
-the common case ("just work M, stop when it's done") without reasoning about the two
-mechanisms separately.
+Round-loop scoping (#86) and standby (#125) — which issues the round orchestrator's
+dispatch batch draws from, and whether a new round opens at all when there is provably
+nothing to do. Scoping is distinct from (but composable with) `stop.onMilestoneComplete`
+above: scope and stop are orthogonal mechanisms that happen to reuse the same
+GitHub-milestone concept — one can be set without the other, or to two different
+milestones. `run --milestone NAME` (above) is a shortcut that sets both to the same name
+in one flag, for callers who want the common case ("just work M, stop when it's done")
+without reasoning about the two mechanisms separately.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `milestone` | unset | Milestone TITLE (exact match, same mechanism `stop.onMilestoneComplete` validates against) that scopes this run's dispatch candidates — `sapwood run` only claims/dispatches `Ready` issues in this milestone; every other issue is left untouched. Also skips a round's dispatch batch once the milestone has zero open issues left (a round-level pause, distinct from `stop.onMilestoneComplete`'s run-ending final condition). Unset (the default) scopes nothing — every `Ready` issue is a candidate, today's behavior. Round-orchestrator only (`engine.driver: rounds`); has no effect under the `tick` escape hatch. |
+| `standby.enabled` | `true` | Pre-round probe (#125): before opening a NEW round, a pure-GitHub-API check — any Ready issue? any plan-review candidate? (when `milestone` is set) any open issue left in it? — decides whether there is provably anything for the round to do. All empty -> the round is withheld (an exponential backoff wait, below) instead of opening and running all five peripheral role sessions for nothing. `false` restores the pre-#125 behavior: a round always opens immediately. |
+| `standby.backoffCapSec` | `1800` (30min) | Cap on the standby wait: `engine.tickIntervalSec * 2^n` (n = consecutive empty probes), capped here. Any probe hit (a Ready issue appears, etc.) resets the exponent and opens the round immediately — no extra wait. Standby entries/waits/exits are recorded in the event log (`standby-wait`/`standby-exit`). KILL_SWITCH bypasses standby entirely: a round still opens and blocks at its first peripheral phase, same as `standby.enabled: false`. |
 
 ## `recovery`
 
