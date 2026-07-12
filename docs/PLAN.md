@@ -342,7 +342,13 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   worker row/PR/branch straight back to `driving`, letting the existing DRIVE loop
   re-trigger review, re-poll gate①/gate②, and merge on green — no new worker/dispatch
   (avoids the squash-branch-reuse hazard a fresh dispatch against a stale head would
-  hit). Bounded by `lanes.gatedReentryCap` (prFixCap's shape); a lane that keeps
+  hit). Two fail-closed guards (Codex review of the #147 PR): a re-driven gate②
+  counts only reviews submitted *after* the re-entry's own trigger (the stale
+  pre-escalation review still sits on the unchanged head and must not satisfy the
+  gate), and label absence only counts as a human act when the engine durably
+  recorded that its escalation label write actually *succeeded* (a transient label
+  failure must not read as human approval next tick). Bounded by
+  `lanes.gatedReentryCap` (prFixCap's shape); a lane that keeps
   re-escalating past the cap is permanently excluded and re-labeled for a manual
   merge. This is reentry for an *already-produced* PR, not the broader fixup-worker
   auto-dispatch subsystem above, which remains deferred. #33 unchanged (no in-flight

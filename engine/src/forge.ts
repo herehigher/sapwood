@@ -68,6 +68,14 @@ export interface PRReview {
   author: string;
   commitOid: string; // the head this review was submitted against
   state: string; // APPROVED | COMMENTED | CHANGES_REQUESTED | DISMISSED | PENDING
+  /** ISO timestamp the review was SUBMITTED at (gh's `submittedAt`) — #147 P1: the merge
+   *  driver's re-entry freshness cutoff. A re-driven gate② (gated-PR reentry) counts only
+   *  reviews submitted AFTER the re-entry's own review trigger; without this, the ORIGINAL
+   *  Codex review that raised the threads still sits on the (unchanged) head and would satisfy
+   *  the "fresh review" gate the moment a human resolves the threads. Optional: absent/
+   *  unparseable ⇒ the review can never pass a re-entry freshness filter (fail-closed); older
+   *  fixtures keep type-checking and non-reentry gating is unaffected (no filter there). */
+  submittedAt?: string;
 }
 
 /** Everything reviewer.ts needs to derive gate②'s ACTION (0day's pr_gate.sh, review half —
@@ -959,7 +967,7 @@ export function parsePRReviewView(json: string): {
     isDraft: boolean;
     labels?: { name: string }[];
     state: string;
-    reviews?: { author?: { login?: string }; commit?: { oid?: string }; state: string }[];
+    reviews?: { author?: { login?: string }; commit?: { oid?: string }; state: string; submittedAt?: string }[];
   };
   return {
     headOid: d.headRefOid,
@@ -972,6 +980,9 @@ export function parsePRReviewView(json: string): {
       author: r.author?.login ?? "",
       commitOid: r.commit?.oid ?? "",
       state: r.state,
+      // #147 P1: submittedAt rides the same `--json reviews` payload gh already returns — no
+      // new gh call. Left undefined when absent (fail-closed at the re-entry filter).
+      ...(r.submittedAt !== undefined ? { submittedAt: r.submittedAt } : {}),
     })),
   };
 }

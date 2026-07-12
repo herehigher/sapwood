@@ -193,10 +193,25 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // removal just re-escalates and is ignored by GATED RECLAIM's query (gated_reentry_capped = 0
   // filter) from then on. Both NOT NULL DEFAULT 0: every pre-existing row (which by definition
   // was never reclaimed this way) starts at "never attempted, never capped".
+  //
+  // `gated_escalation_labeled` (#147 P2, Codex PR #151): the reentry signal is "the needs-human
+  // label is ABSENT from the issue" — but absence only means a human acted if the engine
+  // actually APPLIED the label in the first place. The DRIVE escalation's addLabel call can
+  // fail transiently; without a durable success marker, a failed+PR row whose label never
+  // landed reads as "a human removed it" on the very next tick and automation re-admits itself
+  // with no human in the loop. So the escalation records label-write success (1) or failure (0)
+  // here, and gatedFailedWorkers() requires 1: a row whose label write failed is permanently
+  // invisible to GATED RECLAIM (same manual-drive situation as pre-#147 — no regression), and
+  // the invariant "reclaim requires a real human removal of a label the engine actually
+  // applied" holds. BACK-COMPAT (deliberate, fail-closed): pre-existing failed+PR rows from
+  // before this migration default to 0 and become invisible to reclaim — their labels were
+  // applied by the old code path, but that can't be proven from here, so they stay on the
+  // manual-drive path they were already on.
   (db) => {
     db.exec(`
       ALTER TABLE workers ADD COLUMN gated_reentry_attempts INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE workers ADD COLUMN gated_reentry_capped INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE workers ADD COLUMN gated_escalation_labeled INTEGER NOT NULL DEFAULT 0;
     `);
   },
 ];
@@ -304,6 +319,13 @@ export interface WorkerRow {
    *  a human has removed needs-human again anyway. Permanently excludes the row from
    *  State.gatedFailedWorkers() (fail-closed: never retried forever). Optional; DB default 0. */
   gated_reentry_capped?: number;
+  /** #147 P2: 1 iff the DRIVE escalation's needs-human addLabel call SUCCEEDED for this row's
+   *  terminal transition — the durable proof that "label absent" later means a human removed
+   *  it, not that the engine never applied it. gatedFailedWorkers() requires 1; a row whose
+   *  label write failed (0) is permanently invisible to GATED RECLAIM (fail-closed — see the
+   *  schema v8->v9 migration comment, incl. the deliberate pre-migration back-compat).
+   *  Optional; DB default 0. */
+  gated_escalation_labeled?: number;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -444,8 +466,8 @@ export class State {
         `INSERT INTO workers
            (name, issue, session_id, state, started_at, ended_at, pr, review_triggered,
             review_triggered_head, review_triggered_at, review_fallback_head, review_fallback_kind,
-            gated_reentry_attempts, gated_reentry_capped)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -456,7 +478,8 @@ export class State {
            review_fallback_head = excluded.review_fallback_head,
            review_fallback_kind = excluded.review_fallback_kind,
            gated_reentry_attempts = excluded.gated_reentry_attempts,
-           gated_reentry_capped = excluded.gated_reentry_capped`,
+           gated_reentry_capped = excluded.gated_reentry_capped,
+           gated_escalation_labeled = excluded.gated_escalation_labeled`,
       )
       .run(
         row.name, row.issue, row.session_id, row.state, row.started_at, row.ended_at,
@@ -464,6 +487,7 @@ export class State {
         row.review_triggered_head ?? null, row.review_triggered_at ?? null,
         row.review_fallback_head ?? null, row.review_fallback_kind ?? null,
         row.gated_reentry_attempts ?? 0, row.gated_reentry_capped ?? 0,
+        row.gated_escalation_labeled ?? 0,
       );
   }
 
@@ -528,11 +552,14 @@ export class State {
    *  reclaims eligible rows straight to `driving` — never a new dispatch. `gated_reentry_capped
    *  = 0` permanently drops a row once its reentry attempts are spent (fail-closed one-way
    *  latch — see the schema v8->v9 migration comment); no lane a human keeps re-escalating is
-   *  retried forever. */
+   *  retried forever. `gated_escalation_labeled = 1` (#147 P2) requires the escalation's
+   *  needs-human label write to have actually SUCCEEDED — label absence is only a human act if
+   *  the engine provably applied the label; a row whose label write failed (or that predates
+   *  the marker) is permanently invisible here (fail-closed, manual drive as before #147). */
   gatedFailedWorkers(): WorkerRow[] {
     return this.db
       .prepare(
-        "SELECT * FROM workers WHERE state = 'failed' AND pr IS NOT NULL AND gated_reentry_capped = 0 ORDER BY name",
+        "SELECT * FROM workers WHERE state = 'failed' AND pr IS NOT NULL AND gated_reentry_capped = 0 AND gated_escalation_labeled = 1 ORDER BY name",
       )
       .all() as unknown as WorkerRow[];
   }

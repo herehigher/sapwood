@@ -321,6 +321,11 @@ export interface MergeGate {
       lock: ReviewFallbackLock;
       recordFallback: (lock: ReviewFallbackLock) => void;
     },
+    /** #147 P1: true when this lane re-entered via GATED RECLAIM (gated_reentry_attempts > 0)
+     *  — the merge driver then counts only reviews submitted AFTER the re-entry's own trigger
+     *  (see MergeDriver.driveOne), so the stale pre-escalation review can't satisfy the
+     *  re-driven gate②. Optional — pre-#147 fakes still satisfy this type. */
+    reentered?: boolean,
   ): Promise<DriveOutcome>;
 }
 
@@ -865,6 +870,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           lock: { head: lockKind ? (w.review_fallback_head ?? null) : null, kind: lockKind },
           recordFallback: (lock) => state.recordReviewFallback(w.name, lock.head, lock.kind),
         },
+        // #147 P1: a GATED-RECLAIM-re-entered lane's gate② must not be satisfied by the stale
+        // pre-escalation review still sitting on the (unchanged) head — driveOne filters to
+        // post-re-entry review signals when this is set.
+        (w.gated_reentry_attempts ?? 0) > 0,
       );
       // #54: announce a reviewer-failover switch/revert — structured event + PR comment.
       // driveOne reports the signal STATELESSLY every tick it holds (resolveReviewVerdict is
@@ -900,9 +909,31 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
           break;
         case "needs-human": {
-          state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
-          await forge.addLabel(w.issue, cfg.labels.needsHuman);
-          state.appendEvent("drive-needs-human", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          // #147 P2 (Codex PR #151): the label write goes FIRST, and its success is recorded
+          // durably on the terminal row (gated_escalation_labeled) — because GATED RECLAIM's
+          // re-entry signal is "the needs-human label is ABSENT", absence is only evidence of a
+          // human act if the engine provably APPLIED the label. The old order (upsert failed,
+          // then an unguarded addLabel) let a transient label failure leave a failed+PR row
+          // with no label, which the next tick would read as an explicit human removal —
+          // automation re-admitting itself with no human in the loop. A failed label write is
+          // contained (the escalation itself — terminal transition + structured event — always
+          // lands, same #69 P2a stance as the drain path) and marks the row labeled=0:
+          // permanently invisible to GATED RECLAIM (fail-closed — the pre-#147 manual-drive
+          // situation, no regression), with the error in the event payload, never a silent
+          // swallow.
+          let labeled = 1;
+          let labelError: string | null = null;
+          try {
+            await forge.addLabel(w.issue, cfg.labels.needsHuman);
+          } catch (e) {
+            labeled = 0;
+            labelError = String(e);
+          }
+          state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
+          state.appendEvent("drive-needs-human", {
+            worker: w.name, issue: w.issue, pr, reason: outcome.reason, labeled,
+            ...(labelError != null ? { labelError } : {}),
+          });
           // #147: gated_reentry_attempts > 0 means this lane was reclaimed by GATED RECLAIM at
           // least once (a human removed needs-human believing the finding was fixed) and STILL
           // escalated — leave the attempt trail on the issue so a repeat escalation isn't

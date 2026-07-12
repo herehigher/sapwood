@@ -179,6 +179,16 @@ export class MergeDriver {
     triggerPin: ReviewTriggerPin,
     recordTrigger: (head: string, at: string) => void,
     fallback?: { lock: ReviewFallbackLock; recordFallback: (lock: ReviewFallbackLock) => void },
+    /** #147 P1 (Codex PR #151): true when this lane re-entered DRIVE via the conductor's GATED
+     *  RECLAIM phase (gated_reentry_attempts > 0). A re-entered lane's head usually has NOT
+     *  moved (a human resolved threads in place), so the ORIGINAL review that raised those
+     *  threads still sits on the current head — and freshHeadReviewCount has no time filter, so
+     *  once unresolvedThreads drops to 0 that STALE review would satisfy gate② without the
+     *  freshly-triggered re-review ever responding. When set, reviews submitted at/before the
+     *  recorded trigger pin's `at` are filtered out before any verdict is derived: a re-driven
+     *  gate② counts only post-re-entry review signals. Optional — every pre-#147 caller (and
+     *  every non-reentered lane) omits it: byte-for-byte the old behavior. */
+    reentered?: boolean,
   ): Promise<DriveOutcome> {
     const { forge, reviewer, cfg } = this.deps;
 
@@ -243,6 +253,35 @@ export class MergeDriver {
         return { kind: "queued", pr, reason: `review-trigger-failed: ${String(e)}` };
       }
       return { kind: "queued", pr, reason: "review-triggered" };
+    }
+
+    // #147 P1 (Codex PR #151): re-entry review-freshness cutoff. Reached only once the pin
+    // matches the live head — i.e. the re-entry's OWN trigger has already been posted and
+    // recorded (the reclaim cleared the pin, so the branch above always fires first). Filter
+    // out every review submitted at/before that trigger: on a re-entered lane the head is
+    // typically unchanged, so the pre-escalation review (the very one whose threads caused the
+    // HANDLE_THREADS) still matches freshHeadReviewCount's head check and would otherwise turn
+    // into MERGE_OK the moment the threads read resolved. Fail-closed on every edge: a missing/
+    // unparseable submittedAt or pin `at` excludes the review (zero reviews -> WAIT_REVIEW ->
+    // queued, waiting for the fresh re-review). Numeric epoch compare, not lexicographic — the
+    // engine pin carries ms precision while GitHub timestamps are second-granularity, so a
+    // same-second review truncates to the pin's second and fails the strict `>` (fail-closed;
+    // the genuine re-review arrives minutes later). This matches freshThumbCount's convention
+    // (reviewer.ts). A pre-reentry CHANGES_REQUESTED is filtered too — its author's standing
+    // block is re-asserted by the fresh review if still true, and live unresolvedThreads (NOT
+    // filtered — it's current thread state, not a historical signal) still blocks on its own.
+    // Non-reentered lanes never enter this branch: gate② semantics there are unchanged.
+    if (reentered) {
+      const cutoff = triggerPin.at == null ? NaN : Date.parse(triggerPin.at);
+      data = {
+        ...data,
+        reviews: Number.isFinite(cutoff)
+          ? data.reviews.filter((r) => {
+              const t = r.submittedAt == null ? NaN : Date.parse(r.submittedAt);
+              return Number.isFinite(t) && t > cutoff;
+            })
+          : [], // no usable pin time -> no review can prove it post-dates the re-entry
+      };
     }
 
     // #54: which reviewer's verdict gates THIS tick — the primary's, or (only once explicitly
