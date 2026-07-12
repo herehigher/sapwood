@@ -777,6 +777,55 @@ test("runRounds standby: round.milestone open issues count as work even with Rea
   deps.state.close();
 });
 
+test("runRounds standby: an open PLAN-TRIAGE candidate (plan-less, not Ready, no milestone scoping) counts as work — the PO exists to draft its plan, so no standby (Codex P1 on PR #150)", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // nothing dispatchable…
+  forge.planReviewCandidates = []; // …nothing awaiting gate⓪…
+  forge.planTriageCandidates = [{ number: 9, title: "new idea, no plan yet", labels: [] }]; // …but the PO has drafting to do
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({
+    forge, state, sleep,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }), // milestone UNSET — the triage signal must carry alone
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.equal(result.rounds, 1, "the round opened immediately — the triage candidate is work");
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "standby never engaged");
+  state.close();
+});
+
+test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-standby ends the run within one backoff step — never an eternal probe loop (Codex P2 on PR #150)", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // empty board — standby engages
+  forge.milestoneOpenCounts = [1, 0]; // loop-top check: 1 open (no hit); post-wake re-check: 0 (hit)
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    // Safety net: if the fix regresses (final stop never re-checked mid-standby), the loop would
+    // probe forever — bail via signal so the stoppedBy assertion below fails instead of hanging.
+    if (sleepCalls.length >= 3) stop();
+  };
+  const deps = baseDeps({
+    forge, sleep,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+    stop: { onMilestoneComplete: "M4" },
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
+  assert.equal(result.rounds, 0, "no round ever opened — the run ended from inside standby");
+  assert.deepEqual(sleepCalls, [5000], "exactly ONE backoff step before the completed milestone was noticed");
+  deps.state.close();
+});
+
 test("runRounds standby: a throwing probe fails OPEN — tick-error appended, the round still opens, the run never crashes (gate② on PR #150)", async () => {
   const forge = new FakeForge();
   // Every probe read throws — the long-idle mode where standby runs for hours makes a transient

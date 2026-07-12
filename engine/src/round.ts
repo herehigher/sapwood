@@ -276,7 +276,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
   /** #125 standby: pure-GitHub-API pre-round probe — true the moment there is ANY signal that a
    *  new round would have real work to do. 'Ready empty' alone is NOT "nothing to do": a
-   *  plan-review candidate needs gate⓪, and — when `round.milestone` scopes this run — an open
+   *  plan-review candidate needs gate⓪; a plan-TRIAGE candidate (any open plan-less issue,
+   *  regardless of board status — Codex P1 on PR #150: exactly what the aligning phase's PO
+   *  triage pass consumes, so skipping it would back off forever over a backlog the PO exists
+   *  to draft plans into) needs the PO; and — when `round.milestone` scopes this run — an open
    *  issue still sitting in that milestone (not yet Ready, not yet reviewed) is exactly the PO/
    *  aligning peripheral's job to decompose, so it counts as work too. Unset milestone can't
    *  express a "goals exhausted" signal at all (no scoping to ask about, and the future
@@ -295,6 +298,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     try {
       if ((await forge.getReadyIssues()).length > 0) return true;
       if ((await forge.getIssuesNeedingPlanReview()).length > 0) return true;
+      if ((await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
       if (cfg.round.milestone) {
         return (await forge.countOpenIssuesInMilestone(cfg.round.milestone)) > 0;
       }
@@ -454,8 +458,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
             standbyAttempts++;
             await interTickWait(waitSec * 1000);
             if (signalled) break;
+            // Codex P2 (PR #150): re-check the FINAL stop condition on every standby wake —
+            // checkFinalMilestone only ran once, before this block, so a stop.onMilestoneComplete
+            // milestone completed EXTERNALLY while the board is otherwise idle (exactly the
+            // --milestone scope+stop pairing, PR #149) would otherwise leave this loop probing
+            // forever instead of ending the run.
+            await checkFinalMilestone();
+            if (finalStopHit) {
+              return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
+            }
           }
-          // finalStopHit can't be set here (the check just above already returned if it were) —
+          // finalStopHit can't be set here (both checks above already returned if it were) —
           // a signal breaking the wait is always a plain "signal" stop, unlike the loop-top check.
           if (signalled) {
             return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
