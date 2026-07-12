@@ -393,6 +393,46 @@ test("MergeDriver.driveOne NOT reentered (param omitted): the same pre-pin revie
   assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
 });
 
+test("MergeDriver.driveOne reentered (round-2 P1): a STANDING pre-reentry human CHANGES_REQUESTED skips the time filter — a fresh post-pin clean Codex review cannot speak for it, so the lane re-escalates, never merges", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = {
+    ...forge.reviewData,
+    reviews: [
+      // A HUMAN's undismissed change request on the CURRENT head, left before the re-entry.
+      { author: "hank-human", commitOid: "HEAD", state: "CHANGES_REQUESTED", submittedAt: "2026-07-01T00:00:00Z" },
+      // The fresh post-pin clean Codex COMMENTED — an accept signal from a DIFFERENT reviewer,
+      // which must NOT override hank's standing block.
+      codexReview("2026-07-02T00:05:00Z"),
+    ],
+  };
+  const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, REENTRY_PIN, noopRecord, undefined, true);
+  assert.equal(outcome.kind, "needs-human");
+  assert.match((outcome as { reason: string }).reason, /HANDLE_THREADS/);
+  assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne reentered (round-2 P1): a pre-reentry CR already CLEARED by the same author's pre-reentry APPROVED is no standing block — the filter applies and the stale APPROVED does NOT merge, lane queues for the fresh review", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = {
+    ...forge.reviewData,
+    reviews: [
+      // alice requested changes, then approved — both BEFORE the re-entry. Her standing state
+      // is cleared (per-author semantics), so phase 1 finds no block; phase 2's filter then
+      // drops both as stale. Crucially, alice is a TRUSTED login here: if the filter were
+      // skipped, her stale APPROVED would satisfy gate② and merge — the original stale-accept
+      // hole. It must instead queue for the fresh post-reentry review.
+      { author: "alice", commitOid: "HEAD", state: "CHANGES_REQUESTED", submittedAt: "2026-07-01T00:00:00Z" },
+      { author: "alice", commitOid: "HEAD", state: "APPROVED", submittedAt: "2026-07-01T01:00:00Z" },
+    ],
+  };
+  const driver = new MergeDriver({ forge, reviewer: new CodexReviewer(["alice"]), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, REENTRY_PIN, noopRecord, undefined, true);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /gate-pending:WAIT_REVIEW/);
+  assert.deepEqual(forge.merged, []);
+});
+
 // ── review-trigger pin (#55 P1-B): the trigger decision now lives IN driveOne, at the point
 // the head is known, replacing the old once-per-lane MergeDriver.ensureTriggered (removed) ──
 

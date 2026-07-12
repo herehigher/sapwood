@@ -345,9 +345,12 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   hit). Two fail-closed guards (Codex review of the #147 PR): a re-driven gate②
   counts only reviews submitted *after* the re-entry's own trigger (the stale
   pre-escalation review still sits on the unchanged head and must not satisfy the
-  gate), and label absence only counts as a human act when the engine durably
-  recorded that its escalation label write actually *succeeded* (a transient label
-  failure must not read as human approval next tick). Bounded by
+  gate) — *unless* a standing `CHANGES_REQUESTED` is present on the head, in which
+  case the full review set gates (a fresh review from a different reviewer cannot
+  speak for another reviewer's undismissed block, so the lane re-escalates); and
+  label absence only counts as a human act when the engine durably recorded that
+  its escalation label write actually *succeeded* (a transient label failure must
+  not read as human approval next tick). Bounded by
   `lanes.gatedReentryCap` (prFixCap's shape); a lane that keeps
   re-escalating past the cap is permanently excluded and re-labeled for a manual
   merge. This is reentry for an *already-produced* PR, not the broader fixup-worker

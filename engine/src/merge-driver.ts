@@ -20,7 +20,7 @@
 import type { IForge, PRStatus, PRReviewData } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
 import type { Reviewer, ReviewAction, ReviewTriggerPin, ReviewFallbackLock, ReviewFailoverTransition } from "./reviewer.js";
-import { resolveReviewVerdict, NO_FALLBACK_LOCK } from "./reviewer.js";
+import { resolveReviewVerdict, changesRequestedOnHead, NO_FALLBACK_LOCK } from "./reviewer.js";
 
 export type Gate = "MERGE" | "WAIT" | "HUMAN";
 
@@ -255,23 +255,39 @@ export class MergeDriver {
       return { kind: "queued", pr, reason: "review-triggered" };
     }
 
-    // #147 P1 (Codex PR #151): re-entry review-freshness cutoff. Reached only once the pin
-    // matches the live head — i.e. the re-entry's OWN trigger has already been posted and
-    // recorded (the reclaim cleared the pin, so the branch above always fires first). Filter
-    // out every review submitted at/before that trigger: on a re-entered lane the head is
-    // typically unchanged, so the pre-escalation review (the very one whose threads caused the
-    // HANDLE_THREADS) still matches freshHeadReviewCount's head check and would otherwise turn
-    // into MERGE_OK the moment the threads read resolved. Fail-closed on every edge: a missing/
-    // unparseable submittedAt or pin `at` excludes the review (zero reviews -> WAIT_REVIEW ->
-    // queued, waiting for the fresh re-review). Numeric epoch compare, not lexicographic — the
-    // engine pin carries ms precision while GitHub timestamps are second-granularity, so a
-    // same-second review truncates to the pin's second and fails the strict `>` (fail-closed;
-    // the genuine re-review arrives minutes later). This matches freshThumbCount's convention
-    // (reviewer.ts). A pre-reentry CHANGES_REQUESTED is filtered too — its author's standing
-    // block is re-asserted by the fresh review if still true, and live unresolvedThreads (NOT
-    // filtered — it's current thread state, not a historical signal) still blocks on its own.
+    // #147 P1 (Codex PR #151, rounds 1+2): re-entry review-freshness cutoff — TWO-PHASE.
+    // Reached only once the pin matches the live head — i.e. the re-entry's OWN trigger has
+    // already been posted and recorded (the reclaim cleared the pin, so the branch above
+    // always fires first). On a re-entered lane the head is typically unchanged, so the
+    // pre-escalation review (the very one whose threads caused the HANDLE_THREADS) still
+    // matches freshHeadReviewCount's head check and would otherwise turn into MERGE_OK the
+    // moment the threads read resolved. But a wholesale time filter is wrong too (round-2 P1):
+    // changesRequestedOnHead is PER-AUTHOR standing state — a human's undismissed
+    // CHANGES_REQUESTED on this head must keep blocking even though it predates the re-entry
+    // (a fresh review from a DIFFERENT reviewer cannot speak for it), while an APPROVED plays
+    // a dual role (accept signal AND same-author CR-clear signal), so dropping old APPROVEDs
+    // while keeping old CRs would falsely re-block an already-cleared request. Hence:
+    //
+    //  Phase 1 — standing-block check on the UNFILTERED set: if any non-author reviewer's
+    //  standing state on the current head is CHANGES_REQUESTED (changesRequestedOnHead,
+    //  imported from reviewer.ts — same per-author clear semantics the verdict itself uses),
+    //  SKIP the time filter entirely and derive the verdict from the full data. The standing
+    //  CR then drives the normal blocking path (HANDLE_THREADS -> re-escalation): removing
+    //  needs-human after only resolving threads, while a change request stands undismissed,
+    //  re-escalates — it never merges and never waits forever.
+    //
+    //  Phase 2 — no standing block: apply the cutoff filter. With no CR in the picture,
+    //  dropping pre-pin reviews only removes ACCEPT signals — safe and fail-closed: a missing/
+    //  unparseable submittedAt or pin `at` excludes the review (zero reviews -> WAIT_REVIEW ->
+    //  queued, waiting for the fresh re-review). Numeric epoch compare, not lexicographic —
+    //  the engine pin carries ms precision while GitHub timestamps are second-granularity, so
+    //  a same-second review truncates to the pin's second and fails the strict `>`
+    //  (fail-closed; the genuine re-review arrives minutes later; freshThumbCount's
+    //  convention, reviewer.ts). Live unresolvedThreads is NOT filtered in either phase —
+    //  it's current thread state, not a historical signal, and blocks on its own.
+    //
     // Non-reentered lanes never enter this branch: gate② semantics there are unchanged.
-    if (reentered) {
+    if (reentered && !changesRequestedOnHead(data.reviews, data.headOid, data.author)) {
       const cutoff = triggerPin.at == null ? NaN : Date.parse(triggerPin.at);
       data = {
         ...data,
