@@ -285,8 +285,8 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     }
   };
 
-  /** #125 standby: pure-GitHub-API pre-round probe — true the moment there is ANY signal that a
-   *  new round would have real work to do. 'Ready empty' alone is NOT "nothing to do": a
+  /** #125 standby: cheap pre-round probe (one local SQLite read + pure GitHub API, no LLM) —
+   *  true the moment there is ANY signal that a new round would have real work to do. 'Ready empty' alone is NOT "nothing to do": a
    *  plan-review candidate needs gate⓪; a plan-TRIAGE candidate (any open plan-less issue,
    *  regardless of board status — Codex P1 on PR #150: exactly what the aligning phase's PO
    *  triage pass consumes, so skipping it would back off forever over a backlog the PO exists
@@ -313,6 +313,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  round, same fail-toward-more-work stance as every other contained read in this module. */
   const probeHasWork = async (): Promise<boolean> => {
     try {
+      // Codex P2 (PR #150 round 4): pending rollback rows are retried ONLY inside a tick
+      // (conductor.ts), and the failure that created one can be exactly what removed the
+      // board's Ready signal (a claimed-but-dead issue is invisible to every API probe below) —
+      // so an outstanding row counts as work, or standby would starve the retry indefinitely.
+      // Local SQLite read: the cheapest signal, checked first.
+      if (deps.state.pendingRollbacks().length > 0) return true;
       if ((await forge.getReadyIssues()).length > 0) return true;
       if ((await forge.getIssuesNeedingPlanReview()).length > 0) return true;
       if ((await forge.getIssuesNeedingPlanTriage()).length > 0) return true;

@@ -874,6 +874,34 @@ test("runRounds standby: an open PLAN-TRIAGE candidate (plan-less, not Ready, no
   state.close();
 });
 
+test("runRounds standby: an outstanding pending-rollback row counts as work — only a tick retries it, and the failure that created it can be exactly what hid the Ready signal (Codex P2 round 4, PR #150)", async () => {
+  const forge = new FakeForge(); // ready/planReview/triage all [] — every API signal is empty
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const sleepCalls: number[] = [];
+  // The row must still be PENDING when the probe runs, i.e. appear after round 1's tick already
+  // did its rollback-retry pass (a pre-seeded row would just be retried and cleared in round 1,
+  // which is the system working, not the starvation case). Sleep call 1 is round 1's
+  // idle-throttle wait — after closeRound, before the probe — exactly that window.
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length === 1) state.addPendingRollback(7, "Ready", "dispatch-rollback", new Date(0).toISOString());
+  };
+  const deps = baseDeps({
+    forge, state, sleep,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 10); // idle round 1 + the rollback-retry round 2
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "round 2 opened straight after the idle round 1 — the rollback row is work");
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "standby never engaged");
+  assert.equal(state.pendingRollbacks().length, 0, "round 2's tick retried and cleared the row — the starvation Codex flagged");
+  state.close();
+});
+
 test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-standby ends the run within one backoff step — never an eternal probe loop (Codex P2 on PR #150)", async () => {
   const forge = new FakeForge();
   forge.ready = []; // empty board — standby engages after the idle first round
