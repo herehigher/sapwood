@@ -283,14 +283,29 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  goal-file target this parenthetical anticipates — M5 #135 — isn't shipped yet), so it
    *  contributes no vote either way, same "unset = no scoping" stance as RoundScopedForge. Reads
    *  the same (possibly milestone-scoped) `forge` runExecuting/checkFinalMilestone already use.
-   */
+   *
+   *  Contained, fail-OPEN to round-opening (gate② on PR #150; same tick-error containment as
+   *  checkFinalMilestone above): standby is exactly the long-idle mode where this probe runs
+   *  for hours, so a transient GitHub failure (rate limit, network blip) is near-certain
+   *  eventually — it must never crash the run OR read as "nothing to do" (an indefinite silent
+   *  wait). A throwing probe is a recorded tick-error and counts as "has work": the round opens
+   *  and pre-#125 behavior resumes — the peripherals can cope with an occasionally-unnecessary
+   *  round, same fail-toward-more-work stance as every other contained read in this module. */
   const probeHasWork = async (): Promise<boolean> => {
-    if ((await forge.getReadyIssues()).length > 0) return true;
-    if ((await forge.getIssuesNeedingPlanReview()).length > 0) return true;
-    if (cfg.round.milestone) {
-      return (await forge.countOpenIssuesInMilestone(cfg.round.milestone)) > 0;
+    try {
+      if ((await forge.getReadyIssues()).length > 0) return true;
+      if ((await forge.getIssuesNeedingPlanReview()).length > 0) return true;
+      if (cfg.round.milestone) {
+        return (await forge.countOpenIssuesInMilestone(cfg.round.milestone)) > 0;
+      }
+      return false;
+    } catch (e) {
+      tickErrors++;
+      try {
+        deps.state.appendEvent("tick-error", { error: `standby probe failed: ${String(e)}` });
+      } catch { /* state write failed too — tickErrors still counts it */ }
+      return true;
     }
-    return false;
   };
 
   const toTickDeps = (over: { forge: IForge; forceDispatchPause?: boolean; roundSpendUsd?: number }): TickDeps => ({

@@ -777,6 +777,37 @@ test("runRounds standby: round.milestone open issues count as work even with Rea
   deps.state.close();
 });
 
+test("runRounds standby: a throwing probe fails OPEN — tick-error appended, the round still opens, the run never crashes (gate② on PR #150)", async () => {
+  const forge = new FakeForge();
+  // Every probe read throws — the long-idle mode where standby runs for hours makes a transient
+  // GitHub failure (rate limit, network blip) near-certain eventually; it must read as "has
+  // work" (round opens, pre-#125 behavior resumes), never as a crash or an indefinite wait.
+  forge.getReadyIssues = async () => { throw new Error("rate limited"); };
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => { sleepCalls.push(ms); };
+  const deps = baseDeps({
+    forge, state, sleep,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5); // one round's worth of phases
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.equal(result.rounds, 1, "the round opened despite the probe failure — fail-open");
+  assert.ok(result.tickErrors >= 1, "the probe failure was counted as a tick error");
+  const err = events.find(([kind, payload]) =>
+    kind === "tick-error" && String((payload as { error: string }).error).includes("standby probe failed"));
+  assert.ok(err, "a tick-error event naming the standby probe was durably appended");
+  // No wait of any kind happened before the round opened: the failed probe read as "has work"
+  // immediately (and the graceful stop mid-round means no post-close idle throttle either).
+  assert.deepEqual(sleepCalls, []);
+  deps.state.close();
+});
+
 test("runRounds standby: a truly exhausted round.milestone (0 open issues) contributes no work signal — standby engages same as the unscoped empty-board case", async () => {
   const forge = new FakeForge();
   forge.ready = [];
