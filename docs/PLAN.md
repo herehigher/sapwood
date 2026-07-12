@@ -434,6 +434,47 @@ rewrite.** v1 requirements:
   hole so `MERGE_OK` requires an *allowlisted* reviewer, not any non-author review
   (`pr_gate.sh:240-242` vs `loop_merge_driver.sh:33-34`).
 
+### Validation depth ∝ decision weight (the structured-output write inventory)
+
+**The principle.** Judgment flows back into the deterministic engine through exactly
+one channel: a role session's structured output (a sentinel-delimited JSON block +
+optional raw body — `structured-output.ts`, or, for `retro`, a fixed scratch file).
+The engine validates *format* and *permission*, never *decision quality*. So as a
+role's output gains **decision weight** — the moment its fields start driving a
+dispatch-gating label, a config change, or dispatch order rather than an advisory
+comment — the engine-side validation of that output **must deepen in proportion**.
+Otherwise a de-facto conductor agent quietly reassembles itself through the
+structured-output pipe, unnamed and ungoverned: the containment #110 bought by
+removing every role's tool grants is only as strong as what the engine chooses to
+honor from what those roles now *say*.
+
+This inventory is the standing safety baseline. **Every future "bring judgment in"
+change — a new role, a wider schema, a role output newly wired to a heavier write —
+updates the table below in the same PR**, and gate② checks that it did. If a field's
+decision weight rises a rung (comment → label → dispatch order → config), its
+validation column must show a matching deepening (schema-only → schema + content
+invariant → schema + cross-check against an engine-computed set / bound), or the
+change doesn't ship.
+
+The inventory below is current as of #119. Each row: the role, which
+structured-output fields drive which `IForge` write, the validation gating that
+write, and today's decision weight.
+
+| Role | Output fields → engine write | Validation (`engine/src/…`) | Decision weight |
+|------|------------------------------|-----------------------------|-----------------|
+| **plan-reviewer** | `decision`∈{approve, draft_request, verify_na} + `issue` + optional body → `updateIssueBody` + `addLabel(plan:approved)` (approve); `addLabel(needs-human)`+`addLabel(verify:n/a)`+`addIssueComment` (verify_na); routes to drafter **and posts the reviewer brief via `addIssueComment`** before the drafter runs (draft_request) — `plan-review.ts:352-384` | `validateReviewerOutput` (`plan-review.ts:164`): `PlanReviewerMetadataSchema` (strict zod) **+ content invariant** — `extractVerificationPlan` must find a plan in the approved body **+** issue-number match to the expected candidate | **High** — `plan:approved` is the gate⓪ dispatch key; a false approve dispatches an unverifiable issue. Deepest validation (schema + content + identity). |
+| **plan-drafter** | `issue` + body (revised issue body, required) → `updateIssueBody` only — `plan-review.ts:422` | `validateDrafterOutput` (`plan-review.ts:205`): `PlanDrafterMetadataSchema` (strict) + non-empty body + issue-number match **+ content invariant** — `extractVerificationPlan` must find a verification/acceptance section in the drafted body (`plan-review.ts:224-226`) | **Medium** — writes the body but **never** the `plan:approved` label (author ≠ approver, #77 Amendment 2); the reviewer must independently re-approve before dispatch, so the drafter's write is always re-gated. |
+| **PO / aligning** | *align mode:* `issues:[{title}]` + per-issue bodies → `createIssue` + `addLabel(origin:agent)` + `addLabel(needs-human)` when planless + `addIssueComment` — `align.ts:291-304`. *triage mode:* `issue` + drafted body → `updateIssueBody` + `addIssueComment` — `align.ts:351` | *align:* `validateAlignOutput` (`align.ts:138`): `AlignMetadataSchema` (strict) + per-issue body split; **post-write plan check** — a planless creation earns `needs-human` at creation time (`align.ts:297-304`). *triage:* `validateTriageOutput` (`align.ts:184`): `TriageMetadataSchema` (strict) + issue match + non-empty body — **deliberately no plan invariant** (pre-#110 semantics preserved): the drafted body is written via `updateIssueBody` first, then a plan-conditional success comment (`align.ts:351-356`); a still-planless draft records `triage-degraded` (no label, no success comment) and re-matches triage next round | **Low (pre-Ready)** — a created issue structurally cannot carry a dispatch label (engine applies labels, session has no channel); planless creations are fenced `needs-human`, planless triage drafts stay undispatchable via gate⓪'s `plan:approved` requirement; degrade proceeds (low stakes, next round retries). |
+| **architect** | `contradictions:[{issue, severe}]` + design note + per-issue explanations → `addIssueComment(anchor, designNote)`; per contradiction `addIssueComment` + `addLabel(blocked)` when `severe` — `architect.ts:387-390` | `validateArchitectOutput` (`architect.ts:235`): `ArchitectMetadataSchema` (strict) + `parseArchitectBody` fail-closed sub-format parse (`architect.ts:190`; own-line `<<<CONTRADICTION #n>>>` markers, no embedded sub-delimiters) **+ set cross-check** — every flagged `issue` must be inside the engine-computed candidate set or the whole output is rejected before any write (`architect.ts:270-278`) | **Medium** — the `blocked` label gates dispatch of the flagged issue; the design-note comments are advisory. Validation matches: schema + structural body parse + candidate-set bound on the label target; the prose itself carries no truth check. |
+| **harvest** | `comments:[{issue, body}]` → `addIssueComment` only — `harvest.ts:347` | `validateHarvestOutput` (`harvest.ts:217`): `HarvestMetadataSchema` (strict) **+ set cross-check** — every `issue` must be in the engine's pre-computed `needsHumanIssues` set (`gatherRoundFacts`, fixed *before* the session); any out-of-set number fails the **whole** batch | **Low** — comment-only, and the session's target choice is **bounded** by the engine-computed set: it may brief any subset (including none — an empty `comments` array is valid) but can never add an out-of-set target. No labels, no dispatch effect — the set cross-check is the guard against write-target choice leaking beyond the engine's bound. |
+| **retro** | Scratch file (`.sapwood-retro-pr`), not the JSON block: `branch`/`title`/`body` or `none` → `openPR(branch, title, body)` — `retro.ts:377` | `parseRetroScratch` (`retro.ts:141`): fail-closed labeled-header parse + `invalidBranchReason` (no default-branch, no `..`, argv-safe) **+ engine-side `forge.branchExists`** push verification before `openPR` (a session's push claim is never trusted) | **Low at write, gate②-bound** — a proposal is *only* a PR; it changes nothing until gate② (CI green + fresh non-author review) merges it. The heavy validation here is authenticity (branch really pushed), not decision quality — correctly, since the merge gate owns the quality call. |
+
+Reading the weight column top-down is the whole point: the one **High**-weight output
+(plan-reviewer's `plan:approved`) carries the deepest validation (schema + content
+invariant + identity), and weight falls in step with validation down the table. A
+future change that inverts that ordering — a heavier write behind lighter validation —
+is exactly what this principle exists to catch.
+
 ## Onboarding / DX (v1)
 
 - **`/sapwood-init` + `sapwood init`** must be credible and idempotent:
