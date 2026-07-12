@@ -565,12 +565,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       }
 
       const closedAt = iso();
-      deps.state.closeRound(round.round_id, closedAt);
       // #123: the FINAL round summary artifact — assembled from the round's own ledger window
       // and persisted (DB row = source of truth; the markdown view is derived from it inside
-      // persistRoundArtifact). Contained: an assembly/validation/persistence bug degrades to a
-      // durable tick-error, never blocks the round from closing (same stance as every other
-      // best-effort write in this loop).
+      // persistRoundArtifact). Persisted BEFORE closeRound (Codex P2, PR #152): a process kill
+      // between the two would otherwise leave a status='done' round that openRound never
+      // revisits — the artifact would be lost forever. This order fails toward a RESUMABLE
+      // round instead: crash after persist -> the round is still in_progress, the resume path
+      // re-runs the (marker-idempotent) close and the upsert overwrites with the same window.
+      // Contained: an assembly/validation/persistence BUG still degrades to a durable
+      // tick-error and the round still closes — the artifact is best-effort, the close is not.
       try {
         persistRoundArtifact(
           deps.state,
@@ -583,6 +586,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           deps.state.appendEvent("tick-error", { error: `round artifact persistence failed: ${String(e)}` });
         } catch { /* state write failed too — tickErrors still counts it */ }
       }
+      deps.state.closeRound(round.round_id, closedAt);
       roundsClosed++;
       // #125 idle-round precondition: record whether THIS round dispatched nothing — the gate
       // that lets standby engage at the top of the next iteration (see lastRoundIdle's comment).
