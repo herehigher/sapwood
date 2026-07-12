@@ -476,7 +476,19 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
             );
             deps.state.appendEvent("standby-wait", { attempt: standbyAttempts, waitSec });
             standbyAttempts++;
-            await interTickWait(waitSec * 1000);
+            // Codex P1 (PR #150 round 3): a backoff wait can be minutes long, and a KILL_SWITCH
+            // created mid-sleep must not sit unnoticed until it elapses — kill-switch
+            // acknowledgment is a documented safety property, and its check points must never be
+            // farther apart than the tick cadence. So wait in tickIntervalSec-sized slices,
+            // re-checking the sentinel between slices (one standby-wait event per backoff step
+            // above, NOT per slice — the schedule and total wait are unchanged).
+            let remainingSec = waitSec;
+            while (remainingSec > 0 && !signalled && !deps.state.isKillSwitchActive()) {
+              const sliceSec = Math.min(remainingSec, deps.tickIntervalSec);
+              await interTickWait(sliceSec * 1000);
+              remainingSec -= sliceSec;
+            }
+            if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
             if (signalled) break;
             // Codex P2 (PR #150): re-check the FINAL stop condition on every standby wake —
             // checkFinalMilestone only ran once, before this block, so a stop.onMilestoneComplete

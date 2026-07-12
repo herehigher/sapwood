@@ -658,11 +658,15 @@ test("runRounds standby: fresh empty board — the FIRST round always opens (the
   // Round 1 ran ALL five peripherals (the PO got its shot) — and nothing after it: standby.
   assert.equal(result.rounds, 1);
   assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
-  // First sleep = round 1's #109 idle-throttle wait; the rest = standby, tickIntervalSec * 2^n.
-  assert.deepEqual(sleepCalls, [5000, 5000, 10000, 20000, 40000]);
+  // First sleep = round 1's #109 idle-throttle wait; the rest = standby. Backoff waits are
+  // sliced into tickIntervalSec chunks (kill-switch acknowledgment, Codex round 3), so every
+  // sleep call is exactly one 5s slice — the DOUBLING shows up in the standby-wait events'
+  // waitSec, not in individual sleep lengths. 5 calls = throttle + attempt0 (1 slice of 5) +
+  // attempt1 (2 slices of 10) + the first slice of attempt2, where the safety net stops.
+  assert.deepEqual(sleepCalls, [5000, 5000, 5000, 5000, 5000]);
   const waits = events.filter(([kind]) => kind === "standby-wait").map(([, payload]) => payload);
   assert.deepEqual(waits, [
-    { attempt: 0, waitSec: 5 }, { attempt: 1, waitSec: 10 }, { attempt: 2, waitSec: 20 }, { attempt: 3, waitSec: 40 },
+    { attempt: 0, waitSec: 5 }, { attempt: 1, waitSec: 10 }, { attempt: 2, waitSec: 20 },
   ]);
   assert.equal(state.getRound(2), undefined, "no second round ever opened while in standby");
   state.close();
@@ -699,6 +703,8 @@ test("runRounds standby: SIGINT during a standby wait exits promptly — the wai
 
 test("runRounds standby: the backoff wait is capped at round.standby.backoffCapSec — it never grows past it", async () => {
   const forge = new FakeForge();
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
   let stop = (): void => {};
   const sleepCalls: number[] = [];
   const sleep = async (ms: number): Promise<void> => {
@@ -706,16 +712,54 @@ test("runRounds standby: the backoff wait is capped at round.standby.backoffCapS
     if (sleepCalls.length >= 6) stop();
   };
   const deps = baseDeps({
-    forge, sleep, tickIntervalSec: 10,
+    forge, state, sleep, tickIntervalSec: 10,
     cfg: mkCfg({ round: { standby: { enabled: true, backoffCapSec: 25 } } }),
   });
   deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
-  // Sleep 1 = the idle first round's throttle wait; then standby: 10, 20, capped at 25 forever
-  // (uncapped would be 10, 20, 40, 80, 160).
-  assert.deepEqual(sleepCalls, [10000, 10000, 20000, 25000, 25000, 25000]);
-  deps.state.close();
+  // The cap shows in the standby-wait events' waitSec (uncapped, attempt 2 would be 40): the
+  // sleeps themselves are tickIntervalSec slices (kill-switch acknowledgment), never longer.
+  const waits = events.filter(([kind]) => kind === "standby-wait").map(([, payload]) => payload);
+  assert.deepEqual(waits, [
+    { attempt: 0, waitSec: 10 }, { attempt: 1, waitSec: 20 }, { attempt: 2, waitSec: 25 },
+  ]);
+  assert.ok(sleepCalls.every((ms) => ms <= 10000), "no single sleep ever exceeds one tick slice");
+  state.close();
+});
+
+test("runRounds standby: a KILL_SWITCH created MID-backoff-wait is acknowledged within one tick slice — the round opens and freezes at aligning, never sleeping out the full backoff", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge(); // empty board — standby engages after the idle first round
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const sleepCalls: number[] = [];
+    const sleep = async (ms: number): Promise<void> => {
+      sleepCalls.push(ms);
+      // Call 1 = round 1's idle-throttle wait; call 2 = attempt 0's single 5s slice; call 3 =
+      // the FIRST slice of attempt 1's 10s wait — the operator flips the kill switch while that
+      // slice is sleeping. The between-slices check must catch it: no 4th sleep, ever.
+      if (sleepCalls.length === 3) writeFileSync(join(dir, "KILL_SWITCH"), "");
+    };
+    const deps = baseDeps({
+      forge, state, sleep, tickIntervalSec: 5,
+      cfg: mkCfg({ round: { standby: { enabled: true } } }),
+      peripherals: allPeripherals(log),
+    });
+    const result = await runRounds(deps);
+    assert.equal(result.stoppedBy, "kill-switch");
+    // Acknowledged after ONE 5s slice of the 10s backoff wait — pre-slicing this third call
+    // would have been a single 10000ms sleep with the sentinel unread until it elapsed.
+    assert.deepEqual(sleepCalls, [5000, 5000, 5000]);
+    assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+      "round 1 ran normally; round 2 froze BEFORE its aligning stub");
+    assert.equal(result.rounds, 1); // round 2 opened to acknowledge the freeze but never closed
+    assert.ok(state.getRound(2), "round 2 was opened (the freeze-acknowledgment round)");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("runRounds standby: a Ready issue appearing mid-backoff is caught by the NEXT probe — standby exits and the round opens, no extra wait beyond that one step", async () => {
