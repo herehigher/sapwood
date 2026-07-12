@@ -104,7 +104,9 @@ Don't point sapwood at a live backlog and walk away. Ramp up in stages:
    **error** (exit 1, before anything dispatches), never silently ignored; the error
    names the fix (see step 4 below if you want that shape for your first run, or use
    `--stop-after-issues`/`--stop-after-prs`/`--stop-on-milestone` to bound a rounds
-   run).
+   run). For "just work milestone M, stop when it's done" — the most common bounded
+   run — `--milestone M` is a shortcut for scoping dispatch to M **and** stopping once
+   M is complete, in one flag (see [`configuration.md#stop`](configuration.md#stop)).
 
 4. **The M4 tick-driver escape hatch** — set `engine.driver: tick` in
    `sapwood.config.yaml` to run the pre-#106 loop driver instead (no peripherals):
