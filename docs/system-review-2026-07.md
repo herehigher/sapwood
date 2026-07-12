@@ -124,6 +124,133 @@ recovered once given away.
   judgment functions — is repaid by the engine's context-assembly pipeline,
   which is why context work (below) concentrates on the engine side.
 
+## Flow
+
+Two views of the loop. **v0.2** is the walkthrough result: solid = shipped on
+`main` today (post-#119); dashed = the M5 items that attach to it. **v1.0**
+assumes M5 shipped (all solid) and highlights where the governed-extensibility
+layer plugs in.
+
+### v0.2 — the loop as reviewed (+ M5 attachment points)
+
+```mermaid
+flowchart TB
+  classDef m5 stroke-dasharray: 6 4
+
+  subgraph H["Human control plane"]
+    HREADY["Set issue Status=Ready<br/>(only humans — locked decision)"]
+    HSENT["Sentinels next to the state DB:<br/>data/KILL_SWITCH — freeze + drain(drainWindowSec) + kill, exit 1<br/>data/PAUSE — freeze new dispatch only"]
+    HDIR["data/DIRECTIVE.md — round steering (M5 #126)"]:::m5
+  end
+
+  subgraph E["Deterministic engine — runRounds (owns ALL GitHub writes)"]
+    S0["sapwood run — fail-fast startup:<br/>config / promptFile / stop-milestone validation<br/>(zero dispatch on any failure)"]
+    G0{"signal or final stop.* hit?"}
+    P0["standby probe: Ready? gate0 candidates?<br/>milestone goals? all empty → exp. backoff (M5 #125)"]:::m5
+    R0["open new round / resume unclosed round<br/>(rerun-not-resume: phase cursor + idempotency marker)"]
+    PH1["aligning — PO: north-star doc + round.milestone<br/>→ decompose goals, triage plan-less issues"]
+    PH2["architecting — one cross-issue design pass<br/>(+ last round's merged outcomes, M5 #132)"]
+    PH3["plan_review — gate0:<br/>reviewer ⇄ drafter self-heal ≤ maxDraftCycles<br/>→ plan:approved | needs-human"]
+    EX1["executing — ONE dispatch batch ≤ roundDispatchCap<br/>(M5 #124: multi-wave refill; lanes.max = concurrency)"]
+    EX2["drain ticks (dispatch frozen):<br/>reclaim by 4 lane signals → DRIVE gate2:<br/>CI green + fresh cross-model review → merge<br/>… until 0 lanes in flight"]
+    PH4["harvesting — ledger-sourced summary,<br/>needs-human briefings (M5 #123 slims it)"]
+    PH5["retro — engine-built bounded digest in;<br/>scratch-file proposal out → engine verifies branch,<br/>creates PR → gate2"]
+    C0["close round → idle throttle → next round"]
+
+    S0 --> G0
+    G0 -- "yes: wind down — in-flight round<br/>finishes incl. harvest+retro → exit 0" --> X0["exit"]
+    G0 -- "no" --> P0 --> R0 --> PH1 --> PH2 --> PH3 --> EX1 --> EX2 --> PH4 --> PH5 --> C0 --> G0
+  end
+
+  subgraph RS["Peripheral role sessions — zero tool grants (#110)"]
+    R1["one-shot judgment functions:<br/>engine-assembled context IN,<br/>sentinel-delimited structured output OUT<br/>(fail-closed parse → zod → engine executes writes)"]
+  end
+
+  subgraph WK["Worker lanes"]
+    W1["Claude coding session in a worktree —<br/>guard.ts fail-closed hook: producer ≠ reviewer ≠ merger;<br/>soft budget → graceful handoff (.handoff), never mid-work kill"]
+  end
+
+  subgraph GH["GitHub — process source of truth"]
+    B1["Project board Status + labels = the work queue;<br/>issues / PRs / milestones"]
+  end
+
+  HREADY --> B1
+  HSENT -. "checked at every tick /<br/>before every phase" .-> E
+  HDIR -.-> PH1
+  PH1 --- R1
+  PH3 --- R1
+  PH5 --- R1
+  EX1 --> W1
+  W1 --> B1
+  E <--> B1
+```
+
+Budget tiers overlay (not drawn per-edge): worker `budgetUsdSoft` → handoff
+inside W1; round `roundBudgetUsd` → stops further waves inside EX1/EX2, never
+kills; global `dailyBudgetUsd` + `maxWallClockSec` (4h) → engine-wide freeze +
+drain, checked at every tick.
+
+### v1.0 — the same loop with the governed-extensibility layer
+
+```mermaid
+flowchart TB
+  classDef v1 stroke-dasharray: 6 4
+
+  subgraph H["Human control plane"]
+    HNS["North-star goal file (top-level config key,<br/>init-scaffolded) — the alignment yardstick"]
+    HREADY["Status=Ready (humans only)"]
+    HHOP["Milestone-ladder hop confirmation (#137):<br/>auto-advance round.milestone through the ordered<br/>list — each hop human-acknowledged"]:::v1
+    HSENT["KILL_SWITCH / PAUSE / DIRECTIVE"]
+  end
+
+  subgraph E["Deterministic engine — unchanged trust core"]
+    G0{"signal / final stop?"}
+    P0["standby → webhook wake (#140)"]:::v1
+    R0["open round; milestone ladder advance (#137)"]:::v1
+    PH1["aligning"]
+    XP1["custom-role insertion points (#134):<br/>before/after ANY phase — ordered stub lists,<br/>write scope from engine-enumerated tiers only"]:::v1
+    PH2["architecting"]
+    PH3["plan_review gate0"]
+    EX1["executing — multi-wave quota;<br/>policy hooks (#135): dispatch order / retry /<br/>serialization — agent PICKS among<br/>engine-enumerated legal options only"]:::v1
+    EX2["drain + DRIVE gate2 → merge"]
+    PH4["harvesting"]
+    PH5["retro — hybrid routing (#138):<br/>small mechanical → scratch→PR path;<br/>large insight → origin:agent issue,<br/>citing a north-star entry"]:::v1
+    C0["close round"]
+
+    G0 -- "no" --> P0 --> R0 --> PH1 --> PH2 --> PH3 --> EX1 --> EX2 --> PH4 --> PH5 --> C0 --> G0
+    XP1 -.-> PH1
+    XP1 -.-> PH2
+    XP1 -.-> PH3
+    XP1 -.-> PH4
+    XP1 -.-> PH5
+  end
+
+  subgraph RS["Role sessions (incl. user-defined)"]
+    R1["one-shot judgment + bounded adaptivity:<br/>context-request protocol (#136) —<br/>role ASKS ({need-context, want, ref}),<br/>engine validates (N-capped) → fetches →<br/>re-runs; every read still passes the<br/>single ingestion point"]:::v1
+  end
+
+  subgraph SE["Self-evolution consumers (#139)"]
+    T1["role-prompt A/B candidates;<br/>cross-round trend role over N round artifacts"]:::v1
+  end
+
+  HNS --> PH1
+  HNS --> PH5
+  HHOP -.-> R0
+  HREADY --> E
+  HSENT -.-> E
+  PH1 --- R1
+  PH3 --- R1
+  PH5 --- R1
+  C0 --> T1
+  T1 -. "insights → issues → human Ready" .-> HREADY
+```
+
+The v1.0 layer never touches the trust core: every addition is either a
+*human* affordance (ladder confirmation), a *bounded choice* (policy hooks),
+or a *mediated capability* (context requests, tiered custom roles) — the
+engine remains the only writer, and Principle 1's inventory (#121) is the
+checklist each addition must update.
+
 ## Roadmap
 
 ### M5 — current version (ordered by ROI)
