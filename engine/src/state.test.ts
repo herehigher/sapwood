@@ -88,6 +88,37 @@ test("drivingWorkers returns only state=driving rows (#13 merge-driver targets)"
   s.close();
 });
 
+// ── #147: gated-PR reentry (gated_reentry_attempts/capped + gatedFailedWorkers) ───────────
+test("worker.gated_reentry_attempts/capped round-trip: default 0/0, persisted across upserts", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "failed", started_at: "t", ended_at: "t2", pr: 42 });
+  const fresh = s.getWorker("a");
+  assert.equal(fresh?.gated_reentry_attempts, 0);
+  assert.equal(fresh?.gated_reentry_capped, 0);
+
+  s.upsertWorker({ ...fresh!, state: "driving", gated_reentry_attempts: 1 });
+  assert.equal(s.getWorker("a")?.gated_reentry_attempts, 1);
+  assert.equal(s.getWorker("a")?.gated_reentry_capped, 0); // untouched
+
+  s.upsertWorker({ ...s.getWorker("a")!, state: "failed", gated_reentry_capped: 1 });
+  const after = s.getWorker("a");
+  assert.equal(after?.gated_reentry_attempts, 1); // preserved via spread, not clobbered
+  assert.equal(after?.gated_reentry_capped, 1);
+  s.close();
+});
+
+test("gatedFailedWorkers: only failed rows WITH a pr number, excluding capped ones — running/driving/done and no-pr failed rows never qualify", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null }); // running, no pr
+  s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "failed", started_at: "t", ended_at: "t2" }); // failed, no pr (e.g. dead lane / ESCALATE_NOPR)
+  s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "failed", started_at: "t", ended_at: "t2", pr: 30 }); // eligible
+  s.upsertWorker({ name: "d", issue: 4, session_id: "s4", state: "driving", started_at: "t", ended_at: "t2", pr: 40 }); // driving, not failed
+  s.upsertWorker({ name: "e", issue: 5, session_id: "s5", state: "failed", started_at: "t", ended_at: "t2", pr: 50, gated_reentry_capped: 1 }); // capped, excluded
+  s.upsertWorker({ name: "f", issue: 6, session_id: "s6", state: "done", started_at: "t", ended_at: "t2" }); // terminal, not failed
+  assert.deepEqual(s.gatedFailedWorkers().map((w) => w.name), ["c"]);
+  s.close();
+});
+
 test("worker.pr and review_triggered round-trip (#13): default null/0, persisted across upserts", () => {
   const s = mem();
   s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
@@ -637,6 +668,13 @@ test("spend_ledger model/token columns persist across close/reopen (schema-migra
 test("fresh DB migrates to a schema version that includes the rounds table (#86)", () => {
   const s = mem();
   assert.ok(SCHEMA_VERSION >= 8);
+  assert.equal(s.userVersion(), SCHEMA_VERSION);
+  s.close();
+});
+
+test("fresh DB migrates to a schema version that includes gated-PR reentry columns (#147)", () => {
+  const s = mem();
+  assert.ok(SCHEMA_VERSION >= 9);
   assert.equal(s.userVersion(), SCHEMA_VERSION);
   s.close();
 });

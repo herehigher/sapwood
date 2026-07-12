@@ -31,6 +31,10 @@ lanes:
   reserveCap: 1 # lanes held back as reserve
   prFixCap: 2 # max PR-fix iterations before escalating
   frictionMin: 0 # min minutes between dispatches (rate limit; 0 = off)
+  gatedReentryCap: 2 # #147: max gated-PR reentry attempts (human removes needs-human on an
+  #                    escalated PR -> reclaimed back to driving, re-driven on the SAME branch,
+  #                    no new worker) before a further removal re-escalates and is permanently
+  #                    capped (manual merge required). 0 disables automatic reentry outright.
 
 worker:
   model: opus

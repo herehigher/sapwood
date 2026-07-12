@@ -215,6 +215,22 @@ test("overrides survive validation", () => {
   assert.equal(cfg.worker.effort, "low");
 });
 
+// ── #147: lanes.gatedReentryCap (bounds the GATED RECLAIM phase's reentry attempts) ──
+test("lanes.gatedReentryCap: defaults to 2 (prFixCap's shape), overridable, nonnegative-int-guarded", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.lanes.gatedReentryCap, 2);
+  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { gatedReentryCap: 0 }");
+  assert.equal(over.lanes.gatedReentryCap, 0); // 0 is legal — disables automatic reentry outright
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { gatedReentryCap: -1 }"),
+    /gatedReentryCap/,
+  );
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { gatedReentryCap: 1.5 }"),
+    /gatedReentryCap/,
+  );
+});
+
 // ── #74: worker.promptFile ──
 test("worker.promptFile: unset by default, overridable, strict schema", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");

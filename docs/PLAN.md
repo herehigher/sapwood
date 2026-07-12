@@ -333,7 +333,20 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   In Progress with no worker row. No `.catch(() => {})` swallows remain in tick paths.
 - **Scope boundaries / deferred:** fixup-worker auto-dispatch (review findings fold to
   needs-human for now — 0day's FIXABLE/fix-rounds loop is a follow-up subsystem).
-  #33 unchanged (no in-flight cost signal). Review evidence: #42 survived 3 Codex
+  **Narrowed by #147 (gated-PR reentry, 2026-07-13):** a `needs-human` escalated on
+  gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
+  live-run report) is no longer a dead end requiring a manual fix→re-review→merge
+  drive — the conductor's **GATED RECLAIM** phase treats a human removing
+  `needs-human` from the issue as the explicit re-entry signal (autonomy principle:
+  humans decide *why/what*, here "is this actually fixed") and reclaims the SAME
+  worker row/PR/branch straight back to `driving`, letting the existing DRIVE loop
+  re-trigger review, re-poll gate①/gate②, and merge on green — no new worker/dispatch
+  (avoids the squash-branch-reuse hazard a fresh dispatch against a stale head would
+  hit). Bounded by `lanes.gatedReentryCap` (prFixCap's shape); a lane that keeps
+  re-escalating past the cap is permanently excluded and re-labeled for a manual
+  merge. This is reentry for an *already-produced* PR, not the broader fixup-worker
+  auto-dispatch subsystem above, which remains deferred. #33 unchanged (no in-flight
+  cost signal). Review evidence: #42 survived 3 Codex
   rounds (3 P1 + 3 P2 fail-open finds, all fixed + regression-tested); #41 survived 4
   rounds (3 Codex + 1 fresh non-author stand-in when Codex rate-limited) — the
   gate②-when-reviewer-unavailable policy was exercised *on the PR that implements it*.
