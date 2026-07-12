@@ -22,11 +22,12 @@ an unknown `{{var}}` fails validation — fix the path or the template, there is
 silent fallback to the shipped default once `promptFile` is set.
 
 **`stop.onMilestoneComplete` fail-fast:** if you set `stop.onMilestoneComplete` (or pass
-`--stop-on-milestone`), `sapwood run` checks the name against the repo's real milestone
-titles *before dispatching anything*. An unmatched name — including a near-miss like
-`"M4"` when the real title is `"M4 — UX surface + CLI"` — aborts startup with an error
-listing the milestone titles that actually exist in the repo. Match the title exactly,
-including any em-dash/suffix.
+`--stop-on-milestone`, or its `--milestone NAME` shortcut — see [`run
+--milestone`](configuration.md#stop)), `sapwood run` checks the name against the repo's
+real milestone titles *before dispatching anything*. An unmatched name — including a
+near-miss like `"M4"` when the real title is `"M4 — UX surface + CLI"` — aborts startup
+with an error listing the milestone titles that actually exist in the repo. Match the
+title exactly, including any em-dash/suffix.
 
 ## `needs-human` label
 

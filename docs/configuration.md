@@ -122,6 +122,34 @@ title is a hard startup error, not a condition that silently never fires.
 The `--stop-*` CLI flags cannot combine with `--dry-run` (which never runs the loop at
 all); config-file `stop.*` keys are simply ignored by a dry run.
 
+**`run --milestone NAME` (#129):** a shortcut for the single most common bounded-run
+intent — "work only milestone NAME, stop when it's done" — that would otherwise need two
+separate settings: `round.milestone` (dispatch scope, config-only) plus
+`--stop-on-milestone` (this run's final stop condition). `--milestone NAME` sets both to
+`NAME`, **for this run only** (never written back to the config file), and gets the same
+startup validation as `--stop-on-milestone` above. Precedence: the CLI flag always wins
+over both `round.milestone` and `stop.onMilestoneComplete` in config; it cannot combine
+with an explicit `--stop-on-milestone` (ambiguous which name should win — rejected at
+startup, before any dispatch, even when the two names match) or with `--dry-run` (same
+rule as every `--stop-*` flag above). The scope half (`round.milestone`) only affects the
+round orchestrator's dispatch candidates — under `engine.driver: tick` only the
+stop-condition half has any effect, since the tick driver has no round to scope. See
+[`round`](#round) below for the scoping mechanism on its own.
+
+## `round`
+
+Round-loop scoping (#86) — which issues the round orchestrator's dispatch batch draws
+from. Distinct from (but composable with) `stop.onMilestoneComplete` above: scope and
+stop are orthogonal mechanisms that happen to reuse the same GitHub-milestone concept —
+one can be set without the other, or to two different milestones. `run --milestone NAME`
+(above) is a shortcut that sets both to the same name in one flag, for callers who want
+the common case ("just work M, stop when it's done") without reasoning about the two
+mechanisms separately.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `milestone` | unset | Milestone TITLE (exact match, same mechanism `stop.onMilestoneComplete` validates against) that scopes this run's dispatch candidates — `sapwood run` only claims/dispatches `Ready` issues in this milestone; every other issue is left untouched. Also skips a round's dispatch batch once the milestone has zero open issues left (a round-level pause, distinct from `stop.onMilestoneComplete`'s run-ending final condition). Unset (the default) scopes nothing — every `Ready` issue is a candidate, today's behavior. Round-orchestrator only (`engine.driver: rounds`); has no effect under the `tick` escape hatch. |
+
 ## `recovery`
 
 | Key | Default | Meaning |

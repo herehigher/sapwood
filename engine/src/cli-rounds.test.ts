@@ -219,6 +219,54 @@ for (const flag of ["--once", "--until-idle"] as const) {
   });
 }
 
+// ── #129: `--milestone NAME` — same startup validation as --stop-on-milestone, reached through
+// runEngine (the exact function main() calls), proving the shortcut's stop half fails CLOSED
+// before any dispatch, exactly like an explicit --stop-on-milestone typo already does. Like
+// assertStopMilestoneExists itself (cli.test.ts), an unknown title THROWS rather than returning
+// a code — production's main() catches this at the top level (console.error + exit 1); this test
+// asserts the same rejection directly, plus zero dispatch (no round ever opened).
+test("sapwood run --milestone <unknown title>: fails fast — rejects naming the real titles, ZERO dispatch (no round opened)", async () => {
+  const state = new State(":memory:");
+  class NamedMilestoneForge extends FakeForge {
+    override async listMilestoneTitles(): Promise<string[]> {
+      return ["M4 — UX surface + CLI", "v0.2 — Dashboard (dogfood)"];
+    }
+  }
+  const forge = new NamedMilestoneForge();
+  const cfg = mkCfg(); // engine.driver defaults to "rounds"
+
+  await assert.rejects(
+    () => runEngine(["node", "sapwood", "run", "--milestone", "M4"], { cfg, forge, state }),
+    /no milestone titled "M4".*M4 — UX surface \+ CLI/s,
+  );
+  assert.equal(state.getRound(1), undefined, "no round was ever opened — the throw happens before runRounds starts");
+  state.close();
+});
+
+test("sapwood run --milestone <real title>: scopes AND stops on the same milestone (round.milestone + stop.onMilestoneComplete both set from one flag)", async () => {
+  const state = new State(":memory:");
+  class NamedMilestoneForge extends FakeForge {
+    override async listMilestoneTitles(): Promise<string[]> {
+      return ["M4 — UX surface + CLI"];
+    }
+    override async countOpenIssuesInMilestone(): Promise<number> {
+      return 0; // already exhausted -> the round loop's final stop condition fires immediately
+    }
+  }
+  const forge = new NamedMilestoneForge();
+  const cfg = mkCfg(); // engine.driver defaults to "rounds", no round.milestone/stop configured
+
+  const code = await runEngine(
+    ["node", "sapwood", "run", "--milestone", "M4 — UX surface + CLI"],
+    { cfg, forge, state, sleep: async () => {}, registerSignals: () => () => {} },
+  );
+
+  // Zero open issues in the milestone from tick 1 -> the round loop's dispatch batch is skipped
+  // (round.milestone scoping) AND the final onMilestoneComplete condition fires immediately
+  // (stop-condition wind-down) — both halves of the one flag, proven by a clean, prompt exit.
+  assert.equal(code, 0);
+});
+
 test("sapwood run --dry-run stays driver-agnostic: the preview path works with the rounds default and dispatches nothing", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg(); // engine.driver defaults to "rounds"

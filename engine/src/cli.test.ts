@@ -8,7 +8,9 @@ import {
   runCli,
   parseRunStopMode,
   parseStopFlags,
+  parseMilestoneFlag,
   resolveStopConfig,
+  applyMilestoneOverride,
   formatStopConditionLine,
   assertStopMilestoneExists,
   runExitCode,
@@ -19,7 +21,7 @@ import {
   runStatus,
   type StatusSnapshot,
 } from "./cli.js";
-import { parseConfig } from "./config.js";
+import { parseConfig, ConfigSchema } from "./config.js";
 import { State, SCHEMA_VERSION } from "./state.js";
 import type { Issue } from "./forge.js";
 
@@ -233,6 +235,119 @@ test("assertStopMilestoneExists: unknown/partial title fails CLOSED at startup, 
   );
   // No milestone goal configured -> no forge call needed, resolves silently.
   await assertStopMilestoneExists({ listMilestoneTitles: async () => { throw new Error("must not be called"); } }, {});
+});
+
+// ── #129: `--milestone NAME` shortcut — scope + stop in one flag ───────────────────────────────
+
+test("parseMilestoneFlag: parses --milestone NAME, tolerates the full argv, leaves everything else in `rest`", () => {
+  const { rest, milestone, error } = parseMilestoneFlag(["node", "sapwood", "run", "--once", "--milestone", "M4"]);
+  assert.equal(error, undefined);
+  assert.equal(milestone, "M4");
+  assert.deepEqual(rest, ["node", "sapwood", "run", "--once"]);
+});
+
+test("parseMilestoneFlag: no --milestone -> undefined, rest unchanged", () => {
+  const { rest, milestone, error } = parseMilestoneFlag(["run", "--until-idle"]);
+  assert.equal(error, undefined);
+  assert.equal(milestone, undefined);
+  assert.deepEqual(rest, ["run", "--until-idle"]);
+});
+
+test("parseMilestoneFlag: a missing value, or a value that looks like another flag, is a clear error", () => {
+  assert.match(parseMilestoneFlag(["--milestone"]).error ?? "", /--milestone requires a value/);
+  assert.match(parseMilestoneFlag(["--milestone", "--once"]).error ?? "", /--milestone requires a value/);
+});
+
+test("parseMilestoneFlag: accepts any non-flag string, including one that looks numeric", () => {
+  assert.equal(parseMilestoneFlag(["--milestone", "42"]).milestone, "42");
+});
+
+test("run: --milestone appears in --help usage, documenting the scope+stop shortcut and its precedence", () => {
+  const r = runCli(["node", "sapwood", "run", "--help"]);
+  assert.match(r.stdout, /--milestone/);
+  assert.match(r.stdout, /round\.milestone/);
+  assert.match(r.stdout, /cannot combine[\s\S]*--stop-on-milestone/);
+});
+
+test("run: --milestone NAME's value is never mistaken for an unknown bare flag — falls through to the engine path", () => {
+  const r = runCli(["node", "sapwood", "run", "--milestone", "M4"]);
+  assert.equal(r.code, -1);
+});
+
+test("run: a missing --milestone value is rejected before the engine starts (fail closed, exit 1)", () => {
+  const r = runCli(["node", "sapwood", "run", "--milestone"]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--milestone requires a value/);
+  assert.match(r.stderr, /usage: sapwood run/);
+});
+
+test("run: --milestone combined with an explicit --stop-on-milestone is rejected — ambiguous, even when the names match", () => {
+  const differing = runCli(["node", "sapwood", "run", "--milestone", "M4", "--stop-on-milestone", "M5"]);
+  assert.equal(differing.code, 1);
+  assert.match(differing.stderr, /--milestone cannot combine with --stop-on-milestone/);
+
+  const matching = runCli(["node", "sapwood", "run", "--milestone", "M4", "--stop-on-milestone", "M4"]);
+  assert.equal(matching.code, 1);
+  assert.match(matching.stderr, /--milestone cannot combine with --stop-on-milestone/);
+});
+
+test("run: --milestone combines fine with --stop-after-issues/--stop-after-prs (distinct stop keys, no conflict)", () => {
+  assert.equal(runCli(["node", "sapwood", "run", "--milestone", "M4", "--stop-after-issues", "3"]).code, -1);
+  assert.equal(runCli(["node", "sapwood", "run", "--milestone", "M4", "--stop-after-prs", "2"]).code, -1);
+});
+
+test("run: --milestone combined with --dry-run is rejected — --milestone implies a stop condition, same as any --stop-*", () => {
+  const r = runCli(["node", "sapwood", "run", "--dry-run", "--milestone", "M4"]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--dry-run cannot combine with --stop-\*/);
+});
+
+test("run: --milestone combines fine with --once/--until-idle (falls through to the engine path)", () => {
+  assert.equal(runCli(["node", "sapwood", "run", "--once", "--milestone", "M4"]).code, -1);
+  assert.equal(runCli(["node", "sapwood", "run", "--until-idle", "--milestone", "M4"]).code, -1);
+});
+
+test("resolveStopConfig: --milestone sets onMilestoneComplete exactly like --stop-on-milestone would", () => {
+  const cfg = { stop: {} };
+  assert.deepEqual(resolveStopConfig(["run", "--milestone", "M4"], cfg), { onMilestoneComplete: "M4" });
+});
+
+test("resolveStopConfig: --milestone (CLI) overrides config's stop.onMilestoneComplete for this run only", () => {
+  const cfg = { stop: { onMilestoneComplete: "M1" } };
+  assert.deepEqual(resolveStopConfig(["run", "--milestone", "M4"], cfg), { onMilestoneComplete: "M4" });
+  // No CLI flag at all -> config value passes through unchanged (the override is CLI-only).
+  assert.deepEqual(resolveStopConfig(["run"], cfg), { onMilestoneComplete: "M1" });
+});
+
+test("applyMilestoneOverride: no --milestone -> cfg returned unchanged (same reference)", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  assert.equal(applyMilestoneOverride(["run"], cfg), cfg);
+});
+
+test("applyMilestoneOverride: --milestone NAME overrides cfg.round.milestone for THIS RUN ONLY — a new object, original cfg untouched", () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    round: { milestone: "M1" },
+  });
+  const effective = applyMilestoneOverride(["run", "--milestone", "M4"], cfg);
+  assert.equal(effective.round.milestone, "M4");
+  assert.equal(cfg.round.milestone, "M1", "the original loaded config is never mutated");
+});
+
+test("applyMilestoneOverride + resolveStopConfig: --milestone sets BOTH scope and stop to the same name in one flag, config's independent (differing) values notwithstanding", () => {
+  // round.milestone and stop.onMilestoneComplete are orthogonal mechanisms and may legitimately
+  // differ in config (scope one milestone, stop on a different one) — #129's shortcut overrides
+  // BOTH to the same CLI-given name for this run, without erroring on that pre-existing config
+  // divergence (only an explicit conflicting --stop-on-milestone flag is rejected, tested above).
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    round: { milestone: "M1" },
+    stop: { onMilestoneComplete: "M2" },
+  });
+  const argv = ["node", "sapwood", "run", "--milestone", "M4"];
+  const effective = applyMilestoneOverride(argv, cfg);
+  assert.equal(effective.round.milestone, "M4");
+  assert.deepEqual(resolveStopConfig(argv, effective), { onMilestoneComplete: "M4" });
 });
 
 test("formatStopConditionLine: names the condition, its threshold, and the count/state detail", () => {

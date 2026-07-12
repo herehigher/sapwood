@@ -57,7 +57,7 @@ Flags:
 `;
 
 const RUN_USAGE = `\
-usage: sapwood run [--once | --until-idle | --dry-run] [--stop-* ...]
+usage: sapwood run [--once | --until-idle | --dry-run] [--milestone NAME] [--stop-* ...]
 
 Run the engine. Default driver (cfg.engine.driver, "rounds"): the round orchestrator —
 peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the
@@ -81,6 +81,20 @@ Flags:
                  and a cost preview (per-worker soft budget x candidate count, daily
                  ceiling), then exit. Never spawns a worker or writes state — the
                  first-run trust ramp's "see before you run" step. Driver-agnostic.
+  --milestone NAME  Shortcut (#129): scope AND stop on one milestone in a single flag —
+                 exactly \`round.milestone=NAME\` (this run's dispatch scope: only issues in
+                 that milestone are candidates) PLUS \`--stop-on-milestone NAME\` (this run's
+                 final stop condition: wind down once it has zero open issues left),
+                 THIS RUN ONLY — never written back to the config file. Same startup
+                 validation as --stop-on-milestone below (NAME must match a real milestone
+                 title EXACTLY, checked before any dispatch). The scope half is a
+                 round-orchestrator concept: under \`engine.driver: tick\` only the
+                 stop-condition half applies (the tick driver has no round to scope).
+                 Precedence: an explicit --milestone always wins over config's
+                 round.milestone/stop.onMilestoneComplete for this run; it cannot combine
+                 with an explicit --stop-on-milestone (ambiguous — which name wins? —
+                 rejected, exit 1, before any dispatch, even when the two names match) or
+                 with --dry-run (same as every --stop-* flag, below).
 
 Goal-based stop conditions (#76) — each optional; hitting ANY of them (OR semantics, first hit
 wins) winds the run down: stop dispatching new lanes, let in-flight lanes finish, exit cleanly,
@@ -91,7 +105,8 @@ both drivers. Combine with --once/--until-idle/--forever (the default) freely; N
   --stop-after-prs N        Stop once N PRs have been opened this run
   --stop-on-milestone NAME  Stop once milestone NAME has zero open issues left
                             (NAME must match the milestone title EXACTLY — validated
-                            against the repo at startup, before any dispatch)
+                            against the repo at startup, before any dispatch). See
+                            --milestone above for the scope+stop shortcut.
 
 N is a floor, not an exact bound: the tick that crosses N has already dispatched its own
 wave (up to lanes.roundDispatchCap lanes), and those finish during the wind-down. With
@@ -147,6 +162,33 @@ export function parseStopFlags(argv: string[]): { rest: string[]; stop: StopConf
     i++; // consume the value token too
   }
   return { rest, stop };
+}
+
+/** #129: `--milestone NAME` — CLI sugar composing the two existing milestone mechanisms into
+ *  one flag: `round.milestone` (this run's dispatch scope, config-only until now) + `stop.
+ *  onMilestoneComplete` (this run's final stop condition, already a CLI flag via
+ *  --stop-on-milestone above). Parsed separately from STOP_FLAG_SPECS/parseStopFlags because it
+ *  also carries a round-scope override that StopConfig's shape can't express — resolveStopConfig
+ *  folds its stop-condition half in below, and applyMilestoneOverride folds its scope half into
+ *  cfg.round. Same tolerant-of-full-argv, fail-closed-on-missing-value contract as
+ *  parseStopFlags. Pure + exported for testing. */
+export function parseMilestoneFlag(argv: string[]): { rest: string[]; milestone?: string; error?: string } {
+  const rest: string[] = [];
+  let milestone: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token !== "--milestone") {
+      rest.push(token);
+      continue;
+    }
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("-")) {
+      return { rest, error: "--milestone requires a value" };
+    }
+    milestone = value;
+    i++; // consume the value token too
+  }
+  return milestone !== undefined ? { rest, milestone } : { rest };
 }
 
 const STATUS_USAGE = `\
@@ -445,12 +487,32 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
     if (flags.includes("--help") || flags.includes("-h")) {
       return { stdout: RUN_USAGE, stderr: "", code: 0 };
     }
-    // #76: pull the value-taking --stop-* flags out first (both for their own validation and so
+    // #129: pull --milestone out first — it's sugar for round.milestone + stop.onMilestoneComplete
+    // together, and its VALUE token (a milestone name) must never be mistaken for an unknown bare
+    // flag below, same reasoning as the --stop-* extraction that follows.
+    const { rest: afterMilestone, milestone, error: milestoneError } = parseMilestoneFlag(flags);
+    if (milestoneError) {
+      return { stdout: "", stderr: `sapwood run: ${milestoneError}\n\n${RUN_USAGE}`, code: 1 };
+    }
+    // #76: pull the value-taking --stop-* flags out next (both for their own validation and so
     // their VALUE tokens — an integer, a milestone name — never get mistaken for unknown bare
     // flags below).
-    const { rest, stop, error: stopError } = parseStopFlags(flags);
+    const { rest, stop, error: stopError } = parseStopFlags(afterMilestone);
     if (stopError) {
       return { stdout: "", stderr: `sapwood run: ${stopError}\n\n${RUN_USAGE}`, code: 1 };
+    }
+    // #129: --milestone already sets stop.onMilestoneComplete — an explicit --stop-on-milestone
+    // alongside it is ambiguous (which name wins?), so reject rather than silently picking one,
+    // even when the two names happen to match. Same fail-closed stance as every other combo
+    // check here.
+    if (milestone !== undefined && stop.onMilestoneComplete !== undefined) {
+      return {
+        stdout: "",
+        stderr:
+          `sapwood run: --milestone cannot combine with --stop-on-milestone ` +
+          `(--milestone already sets it — pick one)\n\n${RUN_USAGE}`,
+        code: 1,
+      };
     }
     // Unknown flags fail closed: error + usage, exit 1 — never silently ignored by a daemon
     // that goes on to claim issues.
@@ -468,9 +530,10 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
         code: 1,
       };
     }
-    // #76: --dry-run never runs the loop at all, so a --stop-* goal has nothing to apply to —
-    // same standalone stance as the once/until-idle check above.
-    if (flags.includes("--dry-run") && Object.keys(stop).length > 0) {
+    // #76/#129: --dry-run never runs the loop at all, so neither a --stop-* goal nor --milestone
+    // (which implies one) has anything to apply to — same standalone stance as the once/until-idle
+    // check above.
+    if (flags.includes("--dry-run") && (Object.keys(stop).length > 0 || milestone !== undefined)) {
       return {
         stdout: "",
         stderr: `sapwood run: --dry-run cannot combine with --stop-*\n\n${RUN_USAGE}`,
@@ -509,16 +572,33 @@ export function runExitCode(result: Pick<DriverResult, "ticks" | "tickErrors">, 
  *  its three flags. */
 export function resolveStopConfig(argv: string[], cfg: Pick<SapwoodConfig, "stop">): StopConfig {
   const { stop: flags } = parseStopFlags(argv);
+  // #129: --milestone is CLI sugar for --stop-on-milestone too. runCli already rejects the two
+  // appearing together, so this ?? chain never has to arbitrate a real conflict — it just picks
+  // whichever of the (at most one) explicit CLI sources is present, config as the final fallback.
+  const { milestone } = parseMilestoneFlag(argv);
   // exactOptionalPropertyTypes: only set a key when a value actually exists — an explicit
   // `key: undefined` is a different (rejected) shape than simply omitting the key.
   const resolved: StopConfig = {};
   const afterIssuesMerged = flags.afterIssuesMerged ?? cfg.stop.afterIssuesMerged;
   const afterPRsOpened = flags.afterPRsOpened ?? cfg.stop.afterPRsOpened;
-  const onMilestoneComplete = flags.onMilestoneComplete ?? cfg.stop.onMilestoneComplete;
+  const onMilestoneComplete = flags.onMilestoneComplete ?? milestone ?? cfg.stop.onMilestoneComplete;
   if (afterIssuesMerged !== undefined) resolved.afterIssuesMerged = afterIssuesMerged;
   if (afterPRsOpened !== undefined) resolved.afterPRsOpened = afterPRsOpened;
   if (onMilestoneComplete !== undefined) resolved.onMilestoneComplete = onMilestoneComplete;
   return resolved;
+}
+
+/** #129: applies `--milestone`'s round-scope half to cfg for THIS RUN ONLY — never persisted,
+ *  never mutates the loaded config object (only spreads into a new object when the flag is
+ *  actually present). No flag -> returns cfg unchanged (same reference), so a caller never pays
+ *  for a copy it didn't ask for. Pure + exported for testing, same split as resolveStopConfig
+ *  (the flag's stop-condition half) — called once in runEngine, before cfg is handed to either
+ *  driver, so both round.milestone dispatch-scoping (round.ts) and stop.onMilestoneComplete
+ *  (resolveStopConfig, independently re-derived from argv) see the same overridden name. */
+export function applyMilestoneOverride(argv: string[], cfg: SapwoodConfig): SapwoodConfig {
+  const { milestone } = parseMilestoneFlag(argv);
+  if (milestone === undefined) return cfg;
+  return { ...cfg, round: { ...cfg.round, milestone } };
 }
 
 /** #76 (fable gate② P2): fail-closed startup validation for --stop-on-milestone. `gh issue
@@ -719,7 +799,10 @@ export function tickOnlyFlagError(argv: string[]): string | null {
  *  tests pass fakes to drive this exact function — the real `main()` entry point — instead of
  *  reimplementing its wiring. */
 export async function runEngine(argv: string[], overrides: EngineOverrides = {}): Promise<number> {
-  const cfg = overrides.cfg ?? loadConfig();
+  // #129: fold --milestone's round-scope half in here, once, before either driver sees cfg —
+  // this run's `round.milestone` override applies regardless of which driver runs, though only
+  // the round orchestrator (round.ts) actually reads it for dispatch scoping.
+  const cfg = applyMilestoneOverride(argv, overrides.cfg ?? loadConfig());
   if (cfg.engine.driver === "tick") return runTickEngine(argv, cfg, overrides);
   // Gate② P2: fail fast on tick-only flags BEFORE any collaborator is constructed or any
   // dispatch can happen — same abort-with-zero-dispatch stance as buildRenderPrompt /
