@@ -18,10 +18,18 @@ happens to install tsx itself. cwd stays the target repo, so config/DB paths res
 where the user runs it.)
 
 Notes for the user, only if they ask or the output needs context:
-- No flags = daemon mode (ticks forever until SIGINT/SIGTERM).
-- `--once` = a single tick, then exit (exit 1 if that tick failed) — also the cheap
-  "supervised, watch one issue" mode: leave exactly one issue `Ready` on the board and
-  run `--once` to dispatch just it and stop.
+- No flags = the round orchestrator (default `engine.driver: rounds`): peripheral roles
+  (aligning/architecting/plan_review/harvesting/retro) wrapped around the dispatch-and-
+  drain tick engine, one round at a time, until a signal or a `stop.*` condition winds
+  the run down (the in-flight round always finishes, including harvest, before exit).
+- `--once` / `--until-idle` are tick-driver-only (`engine.driver: tick` in config, the
+  pre-#106 escape hatch): `--once` runs exactly one tick then exits (exit 1 if that tick
+  failed); `--until-idle` keeps ticking until nothing dispatches, then exits. Under the
+  default rounds driver, passing either is a startup ERROR (exit 1, before any dispatch)
+  — never silently ignored, since rounds has no single-tick concept.
+- Use `--stop-after-issues N` / `--stop-after-prs N` / `--stop-on-milestone NAME` to
+  bound a rounds run instead (stop dispatching new lanes, let in-flight lanes finish,
+  exit cleanly). These are the rounds-run equivalent of "run for a while, then stop."
 - `--dry-run` = resolve config, list the ready issues that would be dispatched this
   round plus a cost estimate, and exit — no worker spawned, no state written. Use this
-  before a first run.
+  before a first run. Driver-agnostic; never combine with --once/--until-idle/--stop-*.
