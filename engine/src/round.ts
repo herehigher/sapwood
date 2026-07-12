@@ -228,6 +228,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // exponential-backoff exponent. In-memory only (never persisted): a process restart is a fresh
   // start at n=0, same as #109's idle throttle carries no state across restarts either.
   let standbyAttempts = 0;
+  // #125 idle-round precondition (Codex P1, PR #150 round 2): did the LAST round this run
+  // completed dispatch nothing (workersThisRound === 0 — the same signal the #109 throttle
+  // keys on)? Standby may only engage after such a round: the probe's three API signals can
+  // all be empty while the aligning phase's PO still has real work — decomposing the plan doc
+  // (align.ts's align mode reads docs/PLAN.md ALONE) into a first backlog on a fresh/unscoped
+  // repo — so the first round of a run ALWAYS opens, giving the PO its decomposition shot; if
+  // it drafts issues, the probe sees them (triage/Ready) and rounds continue. Only once a full
+  // round came up empty AND the board is still probe-empty does the run sleep. In-memory only,
+  // like standbyAttempts: a restart is a fresh shot for the PO (deliberate — the cheapest
+  // "wake the PO" lever an operator has).
+  let lastRoundIdle = false;
 
   /** Contained tick() call (same containment stance as driver.ts's runDriver): a thrown tick
    *  is a structured tick-error event, never a crash, never a hot retry loop (callers still
@@ -286,6 +297,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  goal-file target this parenthetical anticipates — M5 #135 — isn't shipped yet), so it
    *  contributes no vote either way, same "unset = no scoping" stance as RoundScopedForge. Reads
    *  the same (possibly milestone-scoped) `forge` runExecuting/checkFinalMilestone already use.
+   *
+   *  An all-empty probe is still not proof of "nothing to do" — the PO can decompose the plan
+   *  doc alone — which is why standby additionally requires the idle-round precondition (see
+   *  lastRoundIdle). Known ceiling: a plan-doc edit made DURING standby is invisible to this
+   *  pure-API probe — the operator files an issue (any probe signal) or restarts the run to
+   *  wake the PO.
    *
    *  Contained, fail-OPEN to round-opening (gate② on PR #150; same tick-error containment as
    *  checkFinalMilestone above): standby is exactly the long-idle mode where this probe runs
@@ -442,12 +459,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
         // #125 standby: withhold opening a NEW round while the probe is provably empty, backing
         // off tickIntervalSec * 2^n (capped at round.standby.backoffCapSec) between probes — any
-        // hit resets the exponent and opens the round immediately, no extra wait. KILL_SWITCH
+        // hit resets the exponent and opens the round immediately, no extra wait. Guarded by the
+        // idle-round precondition (`roundsClosed > 0 && lastRoundIdle`, see lastRoundIdle's own
+        // comment): standby only engages after a full round this run already came up empty, so
+        // the PO always gets its plan-doc decomposition shot first. KILL_SWITCH
         // bypasses this entirely: a round is always OPENED first and blocked at its very first
         // peripheral phase (runPeripheral's own check) instead, the same contract every other
         // caller of this loop already relies on — standby must never turn that into "loops
         // forever probing instead" for an operator who just wants the freeze to take effect.
-        if (cfg.round.standby.enabled && !deps.state.isKillSwitchActive()) {
+        if (cfg.round.standby.enabled && roundsClosed > 0 && lastRoundIdle && !deps.state.isKillSwitchActive()) {
           while (!(await probeHasWork())) {
             if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
             const waitSec = Math.min(
@@ -513,6 +533,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       deps.state.closeRound(round.round_id, iso());
       roundsClosed++;
+      // #125 idle-round precondition: record whether THIS round dispatched nothing — the gate
+      // that lets standby engage at the top of the next iteration (see lastRoundIdle's comment).
+      lastRoundIdle = workersThisRound === 0;
       // #109 gate② P1 (idle throttle): an IDLE round — zero workers in flight — closing and the
       // next opening back-to-back would run the real peripheral role sessions (PO/architect/
       // plan-review/harvest/retro Claude sessions, the production default since #106)
