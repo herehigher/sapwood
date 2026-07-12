@@ -933,6 +933,43 @@ test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-stan
   deps.state.close();
 });
 
+test("runRounds standby: a round resumed PAST executing (restart mid-harvest) never arms standby — the next round still opens fresh, giving the PO its restart shot (Codex P2 round 6, PR #150)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    // Simulate a crash mid-harvest: executing already ran (in the DEAD process — this one never
+    // calls runExecuting for it), the engine died before retro.
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "harvesting", "2026-07-09T00:01:00.000Z");
+    state.close();
+
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const events = spyOnEvents(state2);
+    const forge = new FakeForge(); // empty board — a probe would be empty, so standby WOULD engage if armed
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const { sleep } = mkSleepSpy();
+    const deps = baseDeps({
+      forge, state: state2, sleep,
+      cfg: mkCfg({ round: { standby: { enabled: true } } }),
+      peripherals: allPeripherals(log),
+    });
+    // Resumed round (harvesting, retro) + the fresh round 2 it must NOT standby away (5 phases).
+    const stopSafety = boundedStopOnPhase(deps, 7);
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.deepEqual(log.map((l) => l.phase), [
+      "harvesting", "retro", // the resumed round — no executing in THIS process
+      "aligning", "architecting", "plan_review", "harvesting", "retro", // round 2: the PO's restart shot
+    ]);
+    assert.equal(result.rounds, 2);
+    assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0,
+      "the resumed round is not idle-evidence — standby never engaged before the PO's fresh round");
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runRounds standby: a failing standby-wait/-exit event write is telemetry-only — the wait proceeds, work is still picked up, the run never crashes (Codex P2 round 5, PR #150)", async () => {
   const forge = new FakeForge(); // empty board — standby engages after the idle first round
   const sup = new AutoCompleteSupervisor();

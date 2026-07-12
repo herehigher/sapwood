@@ -532,11 +532,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       let idx = SEQUENCE.indexOf(round.phase);
       let killSwitchStop = false;
       let workersThisRound = 0;
+      // #125 (Codex P2 round 6): a round resumed PAST executing (process restart mid-harvest/
+      // retro) never calls runExecuting in this process, so workersThisRound === 0 says nothing
+      // about idleness — and it must not arm standby, or a restart lands straight back in
+      // standby without the fresh PO shot the restart-as-wakeup path documents.
+      let ranExecuting = false;
 
       while (SEQUENCE[idx] !== "closed") {
         const phase = SEQUENCE[idx]!;
         if (phase === "executing") {
           workersThisRound = await runExecuting(round, phase !== startedPhase);
+          ranExecuting = true;
         } else if (phase !== "closed") {
           // Narrowed to PeripheralPhase: every RoundPhase except "executing" (handled above)
           // and "closed" (excluded by the while guard — this branch is unreachable at
@@ -561,7 +567,8 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       roundsClosed++;
       // #125 idle-round precondition: record whether THIS round dispatched nothing — the gate
       // that lets standby engage at the top of the next iteration (see lastRoundIdle's comment).
-      lastRoundIdle = workersThisRound === 0;
+      // A resumed round that skipped executing is NOT idle-evidence (see ranExecuting above).
+      lastRoundIdle = ranExecuting && workersThisRound === 0;
       // #109 gate② P1 (idle throttle): an IDLE round — zero workers in flight — closing and the
       // next opening back-to-back would run the real peripheral role sessions (PO/architect/
       // plan-review/harvest/retro Claude sessions, the production default since #106)
