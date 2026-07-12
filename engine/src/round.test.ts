@@ -933,6 +933,37 @@ test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-stan
   deps.state.close();
 });
 
+test("runRounds standby: a failing standby-wait/-exit event write is telemetry-only — the wait proceeds, work is still picked up, the run never crashes (Codex P2 round 5, PR #150)", async () => {
+  const forge = new FakeForge(); // empty board — standby engages after the idle first round
+  const sup = new AutoCompleteSupervisor();
+  const state = new State(":memory:");
+  // Every standby event write fails (transient disk/SQLite trouble) — everything else persists.
+  const realAppend = state.appendEvent.bind(state);
+  state.appendEvent = (kind: string, payload: unknown) => {
+    if (kind.startsWith("standby-")) throw new Error("disk full");
+    realAppend(kind, payload);
+  };
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    // Sleep 1 = round 1's idle throttle; sleep 2 = the first standby slice, whose event write
+    // just threw — work appearing here proves the loop survived it and still probes.
+    if (sleepCalls.length === 2) forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  };
+  const deps = baseDeps({
+    forge, supervisor: sup, state, sleep, tickIntervalSec: 5,
+    cfg: mkCfg({ round: { standby: { enabled: true } } }),
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 10); // idle round 1 + the post-standby round 2
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "standby survived the event-write failures and round 2 opened on the new issue");
+  assert.deepEqual(sup.dispatchedIssues, [1]);
+  state.close();
+});
+
 test("runRounds standby: a throwing probe fails OPEN — tick-error appended, the next round still opens, the run never crashes (gate② on PR #150)", async () => {
   const forge = new FakeForge();
   // Every getReadyIssues throws — the long-idle mode where standby runs for hours makes a

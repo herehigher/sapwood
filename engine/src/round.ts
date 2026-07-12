@@ -480,7 +480,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
               deps.tickIntervalSec * 2 ** standbyAttempts,
               cfg.round.standby.backoffCapSec,
             );
-            deps.state.appendEvent("standby-wait", { attempt: standbyAttempts, waitSec });
+            // Observability-only write, best-effort (Codex P2 round 5, PR #150): this block sits
+            // outside the contained tick(), so a transient state-write failure here must degrade
+            // to a lost telemetry row, never take down an idle daemon — same stance as
+            // checkFinalMilestone's nested catch above.
+            try {
+              deps.state.appendEvent("standby-wait", { attempt: standbyAttempts, waitSec });
+            } catch { /* telemetry only — the wait itself proceeds */ }
             standbyAttempts++;
             // Codex P1 (PR #150 round 3): a backoff wait can be minutes long, and a KILL_SWITCH
             // created mid-sleep must not sit unnoticed until it elapses — kill-switch
@@ -512,7 +518,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
             return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
           }
           if (standbyAttempts > 0) {
-            deps.state.appendEvent("standby-exit", { attempts: standbyAttempts });
+            try {
+              deps.state.appendEvent("standby-exit", { attempts: standbyAttempts });
+            } catch { /* telemetry only — see the standby-wait catch above */ }
             standbyAttempts = 0;
           }
         }
