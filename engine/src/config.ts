@@ -335,6 +335,20 @@ const Stop = z.object({
   onMilestoneComplete: z.string().min(1).optional(),
 }).strict();
 
+// #125: standby — the round loop's pre-round probe + exponential backoff. #109's idle throttle
+// (round.ts's post-close single-tick wait) paces a round that already ran; standby goes one
+// step further and withholds opening a round AT ALL once a pure-GitHub-API probe shows there is
+// PROVABLY nothing for it to do (see round.ts's probeHasWork). Ships enabled by default — same
+// fail-safe-by-default stance as every other cost knob in this file (Cost above); an operator
+// who wants the pre-#125 "always open a round" behavior sets `enabled: false`.
+const Standby = z.object({
+  enabled: z.boolean().default(true),
+  // Cap on the backoff wait (tickIntervalSec * 2^n, n = consecutive empty probes). Conservative
+  // default: 30min — long enough to actually stop burning peripheral-session tokens on a
+  // genuinely idle backlog, short enough that a human re-Ready-ing an issue is noticed same-day.
+  backoffCapSec: z.number().int().positive().default(1800),
+}).strict();
+
 // #86: round-loop scoping. `milestone` reuses the exact GitHub-milestone mechanism
 // stop.onMilestoneComplete already validates against (forge.listMilestoneTitles/
 // countOpenIssuesInMilestone) rather than inventing a parallel label-based "theme" — one key
@@ -345,6 +359,7 @@ const Stop = z.object({
 // behavior, unchanged).
 const Round = z.object({
   milestone: z.string().min(1).optional(),
+  standby: Standby.default({}),
 }).strict();
 
 const Recovery = z.object({

@@ -144,6 +144,18 @@ labels: # taxonomy used by the loop
 #   milestone: M4 # exact GitHub milestone title (same matching as stop.onMilestoneComplete).
 #                 # Scopes this round's dispatch batch to that milestone's issues, and ends
 #                 # the round's dispatch early once it has zero open issues left.
+#   standby: # #125: pre-round probe + exponential backoff — before opening a NEW round,
+#            # check (pure GitHub API, no LLM) whether there's provably anything to do: a
+#            # Ready issue, a plan-review candidate, an open plan-less issue awaiting PO
+#            # triage, or (with round.milestone set above) an open issue still left in it.
+#            # All empty => wait instead of spinning up all five peripheral role sessions
+#            # for nothing; any hit opens the round immediately. Only engages after a fully
+#            # idle round (the first round of a run always opens, so the PO can decompose
+#            # the plan doc into a first backlog). Note: a plan-doc edit made DURING standby
+#            # is invisible to the probe — file an issue, or restart the run, to wake the PO.
+#     enabled: true
+#     backoffCapSec: 1800 # cap on engine.tickIntervalSec * 2^n (n = consecutive empty
+#                         # probes); any probe hit resets the exponent. Default 30min.
 
 escalation:
   humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human
