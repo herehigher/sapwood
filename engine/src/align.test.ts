@@ -231,6 +231,22 @@ test("createAligningStub #123: the phase externalizes ONE align-summary event re
   state.close();
 });
 
+test("createAligningStub #123: a DEGRADED align pass emits NO align-summary — downstream reads a missing summary, never a successful 'decomposed nothing' (Codex P2, PR #152)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  // Both attempts fail — runSessionWithRetry degrades (po-degraded event fires there).
+  const runner = new ScriptedRunner([
+    { outcome: "failed", costUsd: 0, modelUsage: [], exitCode: 1, name: "po-align-1" },
+    { outcome: "failed", costUsd: 0, modelUsage: [], exitCode: 1, name: "po-align-2" },
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 1, phase: "aligning", marker: null });
+  assert.equal(state.eventsSince("2020-01-01T00:00:00.000Z", ["align-summary"]).length, 0);
+  state.close();
+});
+
 test("createAligningStub: a declared issue WITHOUT a plan section is escalated needs-human, never left silently planless", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();

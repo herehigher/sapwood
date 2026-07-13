@@ -380,14 +380,19 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         }
       }
 
-      // #123: externalize the phase's structured summary exactly once, after both passes.
-      // Contained: a state-write failure loses the summary (artifact's align section reads
-      // null, architect falls back to its pointer note) — never fails the phase.
-      try {
-        deps.state.appendEvent("align-summary", {
-          round_id: roundId, created: alignSummaryCreated, triaged: alignSummaryTriaged,
-        });
-      } catch { /* telemetry only — the phase's forge writes above already landed */ }
+      // #123: externalize the phase's structured summary exactly once, after both passes —
+      // but ONLY when the align pass actually validated (Codex P2, PR #152): a degraded
+      // po-align session must read as a MISSING summary downstream (artifact align: null,
+      // architect falls back to its pointer note), never as a successful "decomposed nothing"
+      // — the po-degraded event and the artifact's degradedPhases already tell that story.
+      // Contained: a state-write failure loses the summary the same null-degrading way.
+      if (alignValidated.ok) {
+        try {
+          deps.state.appendEvent("align-summary", {
+            round_id: roundId, created: alignSummaryCreated, triaged: alignSummaryTriaged,
+          });
+        } catch { /* telemetry only — the phase's forge writes above already landed */ }
+      }
 
       return { marker: mark };
     },
