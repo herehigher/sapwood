@@ -968,6 +968,56 @@ test("runRounds standby: a KILL_SWITCH created MID-backoff-wait is acknowledged 
   }
 });
 
+test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count as work when planReviewer is disabled — standby still engages instead of the disabled-role signal pinning the probe true forever", async () => {
+  const forge = new FakeForge();
+  // The one probe signal present is a candidate ONLY the (disabled) plan-reviewer could
+  // consume — pre-fix, this pinned probeHasWork true and standby never engaged.
+  forge.planReviewCandidates = [{ number: 9, title: "unconsumable gate⓪ candidate", labels: [] }];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop(); // bounded safety net, same as the standby tests above
+  };
+  const deps = baseDeps({
+    forge, state, sleep, tickIntervalSec: 5,
+    cfg: mkCfg({ roles: { planReviewer: { enabled: false } }, round: { standby: { enabled: true } } }),
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(events.some(([kind]) => kind === "standby-wait"), "standby actually engaged");
+  assert.equal(state.getRound(2), undefined, "no further round burned peripherals on the unconsumable candidate");
+  state.close();
+});
+
+test("runRounds standby (#127 gate② F2): plan-TRIAGE candidates do NOT count as work when the PO is disabled — same disabled-consumer rule as the plan-review signal", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 11, title: "plan-less, but no PO to triage it", labels: [] }];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({
+    forge, state, sleep, tickIntervalSec: 5,
+    cfg: mkCfg({ roles: { po: { enabled: false } }, round: { standby: { enabled: true } } }),
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(events.some(([kind]) => kind === "standby-wait"), "standby actually engaged");
+  assert.equal(state.getRound(2), undefined);
+  state.close();
+});
+
 test("runRounds standby: a Ready issue appearing mid-backoff is caught by the NEXT probe — standby exits and the round opens, no extra wait beyond that one step", async () => {
   const forge = new FakeForge();
   const sup = new AutoCompleteSupervisor();

@@ -121,7 +121,9 @@ labels: # taxonomy used by the loop
 #     #                   Unset = the engine's shipped prompts/po.md.
 #     model: sonnet
 #     effort: medium
-#     enabled: true      # #127: false -> the aligning phase no-ops every round
+#     enabled: true      # #127: false -> the aligning phase no-ops every round. WARNING: with
+#                        # the PO off, plan-less issues are never triaged into gate⓪ — they
+#                        # need a verification plan from a human/external process instead.
 #   planReviewer:
 #     # promptFile: prompts/my-plan-reviewer.md
 #     #                   #74-style override; relative paths resolve against THIS config file's
@@ -131,7 +133,11 @@ labels: # taxonomy used by the loop
 #     maxDraftCycles: 2  # #77 Amendment 2: bounded draft->re-review self-heal cycles per issue
 #                        # before the loop gives up and applies needs-human with the attempt
 #                        # trail. Positive int only (0 would disable the self-heal path).
-#     enabled: true      # #127: false -> the WHOLE gate⓪ unit (reviewer + drafter) no-ops
+#     enabled: true      # #127: false -> the WHOLE gate⓪ unit (reviewer + drafter) no-ops.
+#                        # WARNING: dispatch still requires plan:approved (or verify:n/a) on
+#                        # every issue (PLAN Decision #8) and ONLY the plan-reviewer applies
+#                        # plan:approved — with gate⓪ off a human/external process must label
+#                        # issues, or nothing is ever dispatched.
 #   planDrafter:
 #     # promptFile: prompts/my-plan-drafter.md
 #     #                   Unset = the engine's shipped prompts/plan-drafter.md.

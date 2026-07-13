@@ -321,8 +321,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // Local SQLite read: the cheapest signal, checked first.
       if (deps.state.pendingRollbacks().length > 0) return true;
       if ((await forge.getReadyIssues()).length > 0) return true;
-      if ((await forge.getIssuesNeedingPlanReview()).length > 0) return true;
-      if ((await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
+      // #127 gate② F2: each candidate signal below only counts as work when the role that
+      // CONSUMES it is enabled. A plan-review candidate is only ever consumed by the
+      // plan-reviewer (gate⓪), a triage candidate only by the PO's aligning pass — with that
+      // role disabled (roles.<role>.enabled: false) the candidate can never be consumed, so
+      // counting it would pin this probe true forever: standby never engages and every round
+      // burns the remaining peripheral sessions doing nothing, indefinitely.
+      if (cfg.roles.planReviewer.enabled && (await forge.getIssuesNeedingPlanReview()).length > 0) return true;
+      if (cfg.roles.po.enabled && (await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
       if (cfg.round.milestone) {
         return (await forge.countOpenIssuesInMilestone(cfg.round.milestone)) > 0;
       }

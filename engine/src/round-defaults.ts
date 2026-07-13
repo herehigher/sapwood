@@ -120,11 +120,20 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         // handoff would silently fall back even though the summary event survived). The read
         // is contained: no summary (degraded align, state hiccup) falls back to the pointer
         // note — never fabricated analysis, never a thrown phase.
-        architectDeps.alignedGoals =
-          renderAlignedGoalsFromSummary(deps.state, ctx.roundId) ??
-          `This round's PO/goal-alignment peripheral has run (round ${ctx.roundId}, marker ` +
-          `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
-          `actual decomposition (no structured summary was recorded this round).`;
+        //
+        // #127 gate② F3: with the PO role DISABLED the aligning phase never ran at all — the
+        // fallback note below ("has run ... no structured summary was recorded") would imply a
+        // pass that never happened, and the architect would reason from a fabricated phase.
+        // Thread an explicit switched-off statement instead.
+        architectDeps.alignedGoals = !deps.cfg.roles.po.enabled
+          ? `This deployment has the PO/goal-alignment peripheral switched off ` +
+            `(roles.po.enabled: false) — the aligning phase no-oped this round ` +
+            `(round ${ctx.roundId}). There is no decomposition/triage record to consult; ` +
+            `treat the issue backlog as curated outside the loop.`
+          : renderAlignedGoalsFromSummary(deps.state, ctx.roundId) ??
+            `This round's PO/goal-alignment peripheral has run (round ${ctx.roundId}, marker ` +
+            `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
+            `actual decomposition (no structured summary was recorded this round).`;
         return architectStub.run(ctx);
       },
     };
@@ -147,9 +156,27 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     .filter(([role]) => !deps.cfg.roles[role].enabled)
     .map(([, phase]) => phase);
   if (disabledPhases.length > 0) {
-    console.log(
-      `sapwood: peripheral role(s) disabled by config — these phases will no-op every round: ${disabledPhases.join(", ")}`,
-    );
+    let line =
+      `sapwood: peripheral role(s) disabled by config — these phases will no-op every round: ${disabledPhases.join(", ")}`;
+    // #127 gate② F1: disabling gate⓪'s roles silently starves ALL dispatch — forge.ts's
+    // dispatchability gate still (correctly, PLAN Decision #8) requires the planApproved label
+    // (or verifyNa), and only the plan-reviewer applies planApproved; the PO is what triages
+    // plan-less issues INTO that pipeline. The gating must not soften, so warn loudly, here,
+    // once (this same line — still a single startup log).
+    const gateWarnings: string[] = [];
+    if (disabledPhases.includes("plan_review")) {
+      gateWarnings.push(
+        `with plan_review off nothing in the engine ever applies ${deps.cfg.labels.planApproved} — ` +
+        `a human/external process MUST apply it (or ${deps.cfg.labels.verifyNa}) or NO issue is ever dispatched`,
+      );
+    }
+    if (disabledPhases.includes("aligning")) {
+      gateWarnings.push(
+        "with aligning off plan-less issues are never triaged into the gate⓪ pipeline",
+      );
+    }
+    if (gateWarnings.length > 0) line += `. WARNING: ${gateWarnings.join("; ")}.`;
+    console.log(line);
   }
 
   return peripherals;

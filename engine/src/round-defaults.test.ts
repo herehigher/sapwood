@@ -293,6 +293,49 @@ test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits
   state.close();
 });
 
+test("architecting stub (#127 gate② F3): with roles.po.enabled=false the architect context states the aligning phase is switched off — never the 'ran but recorded no summary' fallback (a fabricated phase)", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  // A gate⓪ candidate so the architect actually dispatches (it short-circuits on none).
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  const cfg = mkCfg({ roles: { po: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  assert.equal(peripherals.aligning, undefined, "the disabled PO's aligning stub is omitted");
+  const round = state.startRound("2026-07-13T00:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const architectCall = runner.calls.find((c) => c.roleId === "architect");
+  assert.ok(architectCall, "the architect session was dispatched");
+  assert.match(architectCall!.prompt, /PO\/goal-alignment peripheral switched off/,
+    "the architect context names the switched-off deployment state");
+  assert.doesNotMatch(architectCall!.prompt, /no structured summary was recorded/,
+    "never the fallback wording that implies the aligning pass ran");
+  state.close();
+});
+
+test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exactly ONCE — one line naming every disabled phase, carrying the gate⓪ dispatch-starvation warning when planReviewer is among them; nothing logged when all roles are enabled", () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const logged: string[] = [];
+  const realLog = console.log;
+  console.log = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const cfg = mkCfg({ roles: { planReviewer: { enabled: false }, retro: { enabled: false } } });
+    createDefaultPeripherals({ forge, state, cfg, runner: new ScriptedRunner(forge, cfg) });
+    assert.equal(logged.length, 1, "exactly one startup log line for two disabled roles");
+    assert.match(logged[0]!, /plan_review/);
+    assert.match(logged[0]!, /retro/);
+    assert.match(logged[0]!, /plan:approved/,
+      "the planReviewer warning names the label a human/external process must now apply");
+    const allOn = mkCfg();
+    createDefaultPeripherals({ forge, state, cfg: allOn, runner: new ScriptedRunner(forge, allOn) });
+    assert.equal(logged.length, 1, "an all-enabled factory logs nothing");
+  } finally {
+    console.log = realLog;
+  }
+  state.close();
+});
+
 test("runRounds integration (#127): a disabled role spawns no session for its phase, and the round still closes — the phase no-ops via round.ts's existing noopPeripheralStub default, no round.ts change", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
