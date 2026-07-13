@@ -22,6 +22,14 @@
 <!-- Hard limits any change must respect: technical, security, organizational, or process.
      Locked decisions that later work should not silently re-litigate. -->
 
+## Architecture
+
+<!-- The system's shape as decided so far: major components, the key boundaries between them,
+     and the design decisions already locked in that new work must respect (the architect
+     peripheral reads exactly this section every round and flags issues that contradict it).
+     If this section is missing or empty, the architect proceeds with an explicit "no
+     architecture chapter available" placeholder — advisory only, it never blocks a round. -->
+
 ## Current milestone
 
 <!-- What "done" looks like for the phase of work in flight right now — the specific,
