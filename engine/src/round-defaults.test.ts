@@ -320,13 +320,21 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
   const realLog = console.log;
   console.log = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
   try {
-    const cfg = mkCfg({ roles: { planReviewer: { enabled: false }, retro: { enabled: false } } });
+    // #127 gate② R3: CUSTOM label names — the warning must render cfg.labels.planApproved/
+    // verifyNa, so a hardcoded "plan:approved"/"verify:n/a" string in round-defaults.ts would
+    // fail this test (the repo's no-hardcoded-label-at-call-sites rule, fable PR #101 P3).
+    const cfg = mkCfg({
+      roles: { planReviewer: { enabled: false }, retro: { enabled: false } },
+      labels: { planApproved: "ok-to-build", verifyNa: "no-verify" },
+    });
     createDefaultPeripherals({ forge, state, cfg, runner: new ScriptedRunner(forge, cfg) });
     assert.equal(logged.length, 1, "exactly one startup log line for two disabled roles");
     assert.match(logged[0]!, /plan_review/);
     assert.match(logged[0]!, /retro/);
-    assert.match(logged[0]!, /plan:approved/,
-      "the planReviewer warning names the label a human/external process must now apply");
+    assert.match(logged[0]!, /ok-to-build/,
+      "the planReviewer warning names the CONFIGURED planApproved label a human/external process must now apply");
+    assert.match(logged[0]!, /no-verify/, "the configured verifyNa label too");
+    assert.doesNotMatch(logged[0]!, /plan:approved/, "never the hardcoded default label name");
     const allOn = mkCfg();
     createDefaultPeripherals({ forge, state, cfg: allOn, runner: new ScriptedRunner(forge, allOn) });
     assert.equal(logged.length, 1, "an all-enabled factory logs nothing");

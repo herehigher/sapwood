@@ -329,7 +329,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // burns the remaining peripheral sessions doing nothing, indefinitely.
       if (cfg.roles.planReviewer.enabled && (await forge.getIssuesNeedingPlanReview()).length > 0) return true;
       if (cfg.roles.po.enabled && (await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
-      if (cfg.round.milestone) {
+      // #127 gate② R1 (same disabled-consumer rule): the milestone catch-all exists because an
+      // open not-yet-Ready issue in the round's milestone is exactly what the PO/aligning pass
+      // decomposes (or gate⓪ approves) — with BOTH gate⓪ roles off, nothing enabled can consume
+      // that signal either; the only consumable signal left is Ready+dispatchable, already
+      // covered by the getReadyIssues check above. Counting it anyway would pin the probe true
+      // and defeat standby, the same failure class as the two role-gated signals above.
+      // Residual imprecision (pre-existing, intentionally untouched): with the roles ENABLED, a
+      // milestone holding only needs-human/blocked issues still pins the probe true.
+      if (cfg.round.milestone && (cfg.roles.po.enabled || cfg.roles.planReviewer.enabled)) {
         return (await forge.countOpenIssuesInMilestone(cfg.round.milestone)) > 0;
       }
       return false;

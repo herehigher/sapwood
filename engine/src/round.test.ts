@@ -973,6 +973,11 @@ test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count a
   // The one probe signal present is a candidate ONLY the (disabled) plan-reviewer could
   // consume — pre-fix, this pinned probeHasWork true and standby never engaged.
   forge.planReviewCandidates = [{ number: 9, title: "unconsumable gate⓪ candidate", labels: [] }];
+  // #127 gate② R2: prove the SHORT-CIRCUIT, not just the outcome — with the consuming role
+  // disabled the probe must never even issue the API call (an && guard, not a discarded read).
+  let planReviewProbeCalls = 0;
+  const realGetNeedingReview = forge.getIssuesNeedingPlanReview.bind(forge);
+  forge.getIssuesNeedingPlanReview = async () => { planReviewProbeCalls++; return realGetNeedingReview(); };
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   let stop = (): void => {};
@@ -991,12 +996,17 @@ test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count a
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(events.some(([kind]) => kind === "standby-wait"), "standby actually engaged");
   assert.equal(state.getRound(2), undefined, "no further round burned peripherals on the unconsumable candidate");
+  assert.equal(planReviewProbeCalls, 0, "getIssuesNeedingPlanReview was never called — the disabled role short-circuits the probe's API read itself");
   state.close();
 });
 
 test("runRounds standby (#127 gate② F2): plan-TRIAGE candidates do NOT count as work when the PO is disabled — same disabled-consumer rule as the plan-review signal", async () => {
   const forge = new FakeForge();
   forge.planTriageCandidates = [{ number: 11, title: "plan-less, but no PO to triage it", labels: [] }];
+  // #127 gate② R2: same short-circuit proof as the plan-review test above.
+  let triageProbeCalls = 0;
+  const realGetNeedingTriage = forge.getIssuesNeedingPlanTriage.bind(forge);
+  forge.getIssuesNeedingPlanTriage = async () => { triageProbeCalls++; return realGetNeedingTriage(); };
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   let stop = (): void => {};
@@ -1015,6 +1025,37 @@ test("runRounds standby (#127 gate② F2): plan-TRIAGE candidates do NOT count a
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
   assert.ok(events.some(([kind]) => kind === "standby-wait"), "standby actually engaged");
   assert.equal(state.getRound(2), undefined);
+  assert.equal(triageProbeCalls, 0, "getIssuesNeedingPlanTriage was never called — the disabled role short-circuits the probe's API read itself");
+  state.close();
+});
+
+test("runRounds standby (#127 gate② R1): with BOTH gate⓪ roles disabled, open milestone issues do NOT count as work — the only consumable signal left is Ready+dispatchable, so standby still engages", async () => {
+  const forge = new FakeForge();
+  // A milestone-scoped run whose milestone still holds open issues — but nothing enabled can
+  // consume them: no PO to decompose/triage, no plan-reviewer to approve, and none are Ready.
+  // Pre-fix, the probe's milestone catch-all counted them unconditionally and pinned standby off.
+  forge.milestoneOpenCounts = [3];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({
+    forge, state, sleep, tickIntervalSec: 5,
+    cfg: mkCfg({
+      roles: { po: { enabled: false }, planReviewer: { enabled: false } },
+      round: { milestone: "M-X", standby: { enabled: true } },
+    }),
+  });
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(events.some(([kind]) => kind === "standby-wait"), "standby actually engaged");
+  assert.equal(state.getRound(2), undefined, "no further round burned peripherals on issues nothing enabled can consume");
   state.close();
 });
 
