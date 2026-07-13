@@ -25,6 +25,7 @@ import {
   RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END,
 } from "./structured-output.js";
 import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
+import { extractVerificationPlan } from "./forge.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 
@@ -627,4 +628,45 @@ test("validateDrafterOutput: well-formed drafted body -> ok, returns the body ve
   const result = validateDrafterOutput(text, 1);
   assert.equal(result.ok, true);
   assert.ok(result.ok && result.body === PLAN_BODY);
+});
+
+// #131: a body shaped like .github/ISSUE_TEMPLATE/feature.md (Description, then Acceptance
+// criteria with Verification NESTED as a ### subsection — exactly what the plan-drafter
+// prompt's "normalize toward the matching template" section now points a drafter session at)
+// — proves the template's heading names are the SAME ones extractVerificationPlan/
+// validateDrafterOutput already scan for, not a different convention that would need engine
+// changes to satisfy. The nesting matters (gate② P1, PR #165 review): extractVerificationPlan
+// slices ONE contiguous section from the first Acceptance/Verification heading to the next
+// heading of equal-or-shallower level, so a SIBLING `## Verification` would be cut off at the
+// boundary and silently dropped from the review trigger; a `###` subsection survives inside
+// the `##` slice.
+const TEMPLATE_SHAPED_BODY = `## Description
+
+Add a retry budget to the merge-driver's CI poll so a flaky check doesn't wedge a lane
+forever.
+
+## Acceptance criteria
+
+- [ ] Merge driver stops polling after N consecutive transient failures and escalates.
+- [ ] N is config-driven, not hardcoded.
+
+### Verification
+
+Add a unit test that feeds the poller N+1 transient failures and asserts it escalates
+(not spin forever); run \`npm test\` and confirm it's green.`;
+
+test("validateDrafterOutput: a template-shaped body (Acceptance criteria with nested ### Verification) passes validateDrafterOutput, and the EXTRACTED plan carries both the criteria and the verification steps", () => {
+  const text = sapwoodResult({ issue: 131 }, TEMPLATE_SHAPED_BODY);
+  const result = validateDrafterOutput(text, 131);
+  assert.equal(result.ok, true);
+  assert.ok(result.ok && result.body === TEMPLATE_SHAPED_BODY);
+  const plan = extractVerificationPlan(TEMPLATE_SHAPED_BODY);
+  assert.ok(plan != null);
+  // The extracted section — what gate②'s review trigger carries VERBATIM — must contain BOTH
+  // halves. These assertions fail against a sibling-`## Verification` body (the pre-existing
+  // partial-extraction trap the nested template shape exists to avoid).
+  assert.ok(/acceptance criteria/i.test(plan!));
+  assert.ok(plan!.includes("N is config-driven"), "extracted plan must carry the AC lines");
+  assert.ok(plan!.includes("### Verification"), "extracted plan must carry the Verification heading");
+  assert.ok(plan!.includes("feeds the poller N+1 transient failures"), "extracted plan must carry the verification steps");
 });
