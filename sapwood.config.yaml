@@ -78,6 +78,13 @@ reviewer:
   # different-model-codex: 0day-style gate② (fresh non-author Codex review) — default.
   # same-model-trusted | human | produce-pr-and-stop are the other modes.
   mode: different-model-codex
+  # triggerCommand: "@codex review"
+  #                   #156: the PR-comment text that requests a review. Default = Codex's
+  #                   PR-comment trigger (shown, commented, per the promptFile pattern). Point
+  #                   this at any bot/reviewer entry point instead — the verdict PARSER stays
+  #                   Codex-shaped regardless (COMMENTED/APPROVED states, Codex-bot identity), so
+  #                   a custom trigger with a different verdict format is out of scope here
+  #                   (v1.x reviewer adapters).
   trustedReviewers: [] # allowlisted reviewer logins (public-repo hardening, v1.1)
   # fallback: ordered, opt-in reviewer failover (empty by default = queue forever, unchanged
   # behavior — falling back to a weaker trust mode is NEVER silent). Each entry keeps its own

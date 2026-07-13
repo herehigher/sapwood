@@ -209,6 +209,7 @@ Gate② — who reviews a PR before it can merge.
 | Key | Default | Meaning |
 |---|---|---|
 | `mode` | `different-model-codex` | The reviewer kind: `different-model-codex` (0day-style fresh non-author Codex review), `same-model-trusted` (allowlisted reviewers only), or `human` (any non-author approval). |
+| `triggerCommand` | `"@codex review"` | The PR-comment text posted to request a review (`different-model-codex` mode). Non-empty string; rejected empty at parse. |
 | `trustedReviewers` | `[]` | Allowlisted reviewer logins, used by `same-model-trusted`. |
 | `pollIntervalSec` | `120` | Documents the operational review re-poll cadence (the actual cadence is driven by the tick loop). |
 | `pollTimeoutSec` | `1200` | **Accepted, not yet wired** — the timeout it describes isn't enforced yet. Today `REVIEW_UNAVAILABLE` (which queues the PR — never skips or softens gate②) arises only from review-data read failures. |
@@ -219,6 +220,15 @@ A fallback-obtained approval is **advisory, never verdict-bearing** on its own: 
 re-verified against live PR data through the recorded mode's own rules at every use, and
 the always-blocking signals (unresolved review threads, a standing
 `CHANGES_REQUESTED` from anyone) block regardless of any failover state.
+
+**Choosing a reviewer entry point (`triggerCommand`, #156):** sapwood doesn't hard-code how you
+invoke a review — the default posts `@codex review`, which triggers a Codex PR-comment review,
+but you can point this at any bot or reviewer entry point your workflow uses (e.g. a different
+bot's mention, or your own CI-triggering comment). The verdict *parser* stays Codex-shaped for
+now regardless of this setting — it looks for `COMMENTED`/`APPROVED` review states from a
+Codex-bot (or `trustedReviewers`-allowlisted) identity — so a custom trigger whose reviewer posts
+a different verdict shape (e.g. a differently-formatted approval comment) is not yet understood
+by gate②. Custom verdict formats are out of scope here; see v1.x reviewer adapters.
 
 ## `merge`
 

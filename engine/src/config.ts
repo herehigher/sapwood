@@ -136,6 +136,12 @@ const Reviewer = z.object({
   // sapwood.config.yaml's checked-in `mode: different-model-codex` still parses; nothing ever
   // shipped `mode: produce-pr-and-stop` here.
   mode: z.enum(["different-model-codex", "same-model-trusted", "human"]).default("different-model-codex"),
+  // #156: the PR-comment text that requests a review (buildReviewTriggerComment in reviewer.ts).
+  // Default matches today's hardcoded `@codex review` byte-for-byte. Lets an operator point the
+  // trigger at any bot/reviewer entry point — the verdict PARSER stays Codex-shaped regardless
+  // (COMMENTED/APPROVED states, Codex-bot identity); a custom trigger with a different verdict
+  // format is out of scope here (v1.x reviewer adapters).
+  triggerCommand: z.string().min(1).default("@codex review"),
   trustedReviewers: z.array(z.string()).default([]),
   // How often the Conductor's tick re-polls a triggered review (documents the operational
   // policy; the actual re-poll cadence is driven by the tick loop itself, not a timer here).

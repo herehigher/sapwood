@@ -131,6 +131,27 @@ test("#13: reviewer/merge defaults — codex reviewer, conductor-merge, sane pol
   assert.equal(cfg.merge.mode, "conductor-merge");
 });
 
+// ── #156: reviewer.triggerCommand — user-defined review trigger entry point ─────────────────
+
+test("#156: reviewer.triggerCommand defaults to `@codex review` (byte-for-byte today's hardcoded trigger)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.reviewer.triggerCommand, "@codex review");
+});
+
+test("#156: reviewer.triggerCommand accepts a custom value", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { triggerCommand: '/review-please' }",
+  );
+  assert.equal(cfg.reviewer.triggerCommand, "/review-please");
+});
+
+test("#156: reviewer.triggerCommand rejects an empty string", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { triggerCommand: '' }"),
+    /reviewer/,
+  );
+});
+
 test("#13: produce-pr-and-stop is a merge.mode value, not a reviewer.mode value", () => {
   assert.throws(
     () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: produce-pr-and-stop }"),
