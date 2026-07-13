@@ -121,6 +121,9 @@ test("buildRoundArtifact (#123, ex-gatherRoundFacts): sums PRs opened/merged, sp
   // started_at must also be a real-clock timestamp strictly after this event (the small sleep
   // guarantees a later millisecond).
   state.appendEvent("merged", { worker: "lane-x", issue: 99, pr: 1, headOid: "h" });
+  // Pre-round spend — must be excluded. The window is the id CURSOR captured at startRound
+  // (Codex P2, PR #152), so exclusion follows insertion order, not the row's timestamp.
+  state.recordSpend("lane-x", 99, 1000, "2026-07-09T00:00:00.000Z");
   await new Promise((r) => setTimeout(r, 5));
   const round = state.startRound(new Date().toISOString());
 
@@ -135,7 +138,6 @@ test("buildRoundArtifact (#123, ex-gatherRoundFacts): sums PRs opened/merged, sp
   state.appendEvent("drive-needs-human", { worker: "lane-f", issue: 6, pr: 12, reason: "still open" }); // same issue twice
   state.recordSpend("lane-a", 1, 4, new Date().toISOString());
   state.recordSpend("lane-b", 2, 3, new Date().toISOString());
-  state.recordSpend("lane-x", 99, 1000, "2026-07-09T00:00:00.000Z"); // before round start — excluded
 
   const artifact = buildRoundArtifact(state, round, 30, null);
   assert.equal(artifact.roundId, round.round_id);
