@@ -427,14 +427,14 @@ test("createArchitectStub #126: no directive file -> the rendered prompt carries
   }
 });
 
-test("createArchitectStub #126: a directive file is substituted into the architect prompt, recorded as one directive-applied event, and archived out of the live path", async () => {
+test("createArchitectStub #126: with the PO role DISABLED (#127, aligning never runs) the architect is the round's designated first consumer — the directive is substituted, recorded as one directive-applied event, and archived out of the live path", async () => {
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 7, title: "t", labels: [] }];
   const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-directive-"));
   try {
     const directiveFile = join(dir, "DIRECTIVE.md");
     writeFileSync(directiveFile, "Weigh the payments-module candidates first.", "utf8");
-    const cfg = mkCfg({ round: { directiveFile } });
+    const cfg = mkCfg({ round: { directiveFile }, roles: { po: { enabled: false } } });
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
     const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
@@ -446,6 +446,30 @@ test("createArchitectStub #126: a directive file is substituted into the archite
     assert.equal(payload.round_id, 6);
     assert.equal(payload.content, "Weigh the payments-module candidates first.");
     assert.equal(existsSync(directiveFile), false, "consumed: archived out of the live path");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createArchitectStub #126 gate② I2: with the PO role ENABLED, a directive dropped mid-round (after aligning ran with none) is NOT consumed by the architect — placeholder rendered, file untouched, no event; it waits for the next round's opener", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 7, title: "t", labels: [] }];
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-directive-"));
+  try {
+    const directiveFile = join(dir, "DIRECTIVE.md");
+    // Dropped BETWEEN aligning and architecting: no directive-applied event exists (aligning
+    // ran with no file present), but the file is now at the live path.
+    writeFileSync(directiveFile, "dropped between aligning and architecting", "utf8");
+    const cfg = mkCfg({ round: { directiveFile } }); // po enabled (default)
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const state = new State(":memory:");
+    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    await createArchitectStub(deps).run({ roundId: 6, phase: "architecting", marker: null });
+    assert.ok(runner.calls[0]!.prompt.includes("No round directive was provided for this round."));
+    assert.ok(!runner.calls[0]!.prompt.includes("dropped between aligning and architecting"), "never a half-round apply");
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 0);
+    assert.equal(existsSync(directiveFile), true, "the file waits, untouched, for the next round's opener");
     state.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

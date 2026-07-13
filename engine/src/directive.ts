@@ -11,38 +11,45 @@
 // CONSUME-ONCE IS EVENT-SOURCED (crash-rerun designed up front, per this repo's recurring review
 // theme — #123's id-cursor pattern, reused here): the `directive-applied` event this module
 // appends is the SOURCE OF TRUTH for "this round already saw a directive and what it said," not
-// the file's presence/absence on disk. At round open, resolveRoundDirective FIRST checks the
-// event log (state.eventsAfterId(round.start_event_id ?? 0, ["directive-applied"]), filtered to
-// THIS round — the same round-window read align.ts's align-summary / round-artifact.ts's window
-// reads use) for a prior application THIS round. Found -> return its recorded content verbatim,
-// never re-reading or re-archiving the file (idempotent resume: a crash between the event append
-// and the archive rename must not re-apply a second, possibly-edited copy of the file, and must
-// not throw on a missing/already-archived source). Not found -> if the file exists, read it,
-// append the event (event append BEFORE the archive rename, so a crash between the two leaves
-// the event durable and the rename is simply retried — see below), then best-effort archive the
-// source by renaming it out of the live path. Neither present -> an explicit 'none' placeholder,
-// never a silent empty substitution.
+// the file's presence/absence on disk. resolveRoundDirective FIRST checks the event log
+// (state.eventsAfterId(round.start_event_id ?? 0, ["directive-applied"]), filtered to THIS round
+// — the same round-window read align.ts's align-summary / round-artifact.ts's window reads use)
+// for a prior application THIS round. Found -> return its recorded content verbatim, never
+// re-reading the file (idempotent resume: a crash between the event append and the archive
+// rename must not re-apply a second, possibly-edited copy of the file, and must not throw on a
+// missing/already-archived source). Not found -> ONLY the round's designated consumer (see
+// `consume` below) reads the file, appends the event (event append BEFORE the archive rename, so
+// a crash between the two leaves the event durable and the rename is simply retried — see
+// below), then best-effort archives the source by renaming it out of the live path. Neither an
+// event nor (for the consumer) a file -> an explicit 'none' placeholder, never a silent empty
+// substitution.
 //
-// THE RENAME IS IDEMPOTENT, NOT THE READ: every call that finds (or just wrote) the event still
-// attempts the archive rename — skipped silently if the source file is already gone (the normal
-// case: a prior call in this same round already moved it). This is deliberate, not redundant: a
-// crash landing exactly between the event append and the rename leaves the source file BEHIND on
-// disk with a durable event already recorded for this round; if the rename were only attempted on
-// the branch that just wrote the event, that crash would leave the file sitting at its live path
-// forever, and the FIRST NEXT round to check "does the file exist" (this round's own resumed
-// aligning call, or — if the PO role is disabled and this round never reaches aligning's own
-// consumption — a later round's architect call) would read it as a brand-new, unconsumed
-// directive and silently re-apply stale content. Re-attempting the (harmless, skip-if-missing)
-// rename on every call that already has an event closes that gap.
+// EXACTLY ONE CONSUMER PER ROUND (gate② I2 on PR #159): consumption happens at ROUND OPEN only —
+// `consume: true` marks the caller as this round's designated first consumer; `consume: false`
+// callers only ever read BACK a prior event (plus the leftover cleanup below), never the file.
+// align.ts passes consume: true (aligning IS round open); architect.ts passes
+// consume: !cfg.roles.po.enabled (it is the de facto first consumer only when the PO role is
+// disabled, #127, and aligning never runs at all). Without this split, a directive dropped
+// BETWEEN aligning and architecting would be half-applied — aligning saw 'none', architect saw
+// the directive — contradicting the "picked up the next time a round opens" contract; with it,
+// a mid-round drop simply waits, untouched, for the next round's opener.
 //
-// Both align.ts and architect.ts call this same function (round.ts SEQUENCE runs aligning before
-// architecting, so the common case is: aligning does the real read+event+archive, architect's
-// own call is a cheap event-log read of what aligning already recorded). Deliberately NOT
-// threaded through round-defaults.ts (unlike #123's alignedGoals handoff) — each phase already
-// reads its own `deps.state`/`deps.cfg` directly, and the function's own idempotence makes a
-// second, independent call from architect.ts harmless, including in the roles.po.enabled: false
-// case (#127) where aligning never runs at all and architect becomes the round's de facto first
-// consumer.
+// THE LEFTOVER CLEANUP IS SHA-GATED (gate② I1 on PR #159): a call that finds a prior event still
+// re-attempts the archive rename, but ONLY when the live file's raw-content sha256 equals the
+// event's recorded sha256 — that equality is precisely the crash-leftover signature (the process
+// died between the event append and the rename, leaving the exact already-consumed bytes at the
+// live path). Re-attempting it here (on every prior-event call, under BOTH consume values — not
+// just the branch that just wrote the event) closes the crash gap: otherwise the leftover would
+// sit at the live path forever and the next round would re-apply already-consumed content as a
+// brand-new directive. A DIFFERING sha means the operator dropped a FRESH directive after this
+// round's consumption — renaming that would both swallow steering no round ever saw AND
+// overwrite this round's archive with content that doesn't match its event — so it is left in
+// place, untouched, for the next round's opener to consume. Skipped silently when the file is
+// simply gone (the normal case: already archived).
+//
+// Deliberately NOT threaded through round-defaults.ts (unlike #123's alignedGoals handoff) —
+// each phase already reads its own `deps.state`/`deps.cfg` directly, and the prior-event
+// read-back makes architect's second, independent call harmless in the common PO-enabled path.
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -82,13 +89,22 @@ export function directiveArchivePath(directiveFile: string, roundId: number): st
 }
 
 /** Resolve THIS round's directive text for prompt injection — see module doc for the full
- *  event-sourced consume-once contract. Never throws on a missing/absent file (the ordinary,
- *  most-common case, degrades to NO_ROUND_DIRECTIVE) and never throws on an archive-rename
- *  failure (logged, not fatal — the event already recorded is what makes consume-once safe, the
- *  rename is best-effort housekeeping). A state write failure while recording a REAL directive's
- *  FIRST application does throw: the event is the source of truth for it, so silently proceeding
- *  without recording one would let the same file re-apply, unrecorded, on a later round. */
-export function resolveRoundDirective(state: State, cfg: SapwoodConfig, roundId: number): string {
+ *  event-sourced consume-once contract. `opts.consume` marks the caller as this round's
+ *  designated first consumer (module doc, "EXACTLY ONE CONSUMER PER ROUND"): with no prior event
+ *  and consume: false, the function returns NO_ROUND_DIRECTIVE without reading or archiving
+ *  anything; the prior-event path (event read-back + the sha-gated leftover cleanup) runs under
+ *  BOTH values. Never throws on a missing/absent file (the ordinary, most-common case, degrades
+ *  to NO_ROUND_DIRECTIVE) and never throws on an archive-rename/sha-probe failure (logged, not
+ *  fatal — the event already recorded is what makes consume-once safe, the rename is best-effort
+ *  housekeeping). A state write failure while recording a REAL directive's FIRST application
+ *  does throw: the event is the source of truth for it, so silently proceeding without recording
+ *  one would let the same file re-apply, unrecorded, on a later round. */
+export function resolveRoundDirective(
+  state: State,
+  cfg: SapwoodConfig,
+  roundId: number,
+  opts: { consume: boolean },
+): string {
   const round = state.getRound(roundId);
   const startEventId = round?.start_event_id ?? 0;
   const priorApplications = state
@@ -102,6 +118,11 @@ export function resolveRoundDirective(state: State, cfg: SapwoodConfig, roundId:
   if (priorApplications.length > 0) {
     payload = priorApplications[0]!;
   } else {
+    // No prior application this round. Only the designated consumer may perform the first
+    // consumption (module doc, gate② I2) — a non-consumer reaching here means the round opened
+    // with no directive, and whatever file may exist now was dropped mid-round: leave it,
+    // untouched and unread, for the next round's opener.
+    if (!opts.consume) return NO_ROUND_DIRECTIVE;
     if (!existsSync(directivePath)) return NO_ROUND_DIRECTIVE;
     const raw = readFileSync(directivePath, "utf8");
     const sha256 = createHash("sha256").update(raw, "utf8").digest("hex");
@@ -113,15 +134,21 @@ export function resolveRoundDirective(state: State, cfg: SapwoodConfig, roundId:
     state.appendEvent("directive-applied", payload);
   }
 
-  // Best-effort, idempotent archive — see module doc's "THE RENAME IS IDEMPOTENT" section for
-  // why this runs on EVERY call that reaches here (not just the branch that just wrote the
-  // event above). Never throws: a filesystem hiccup here must not lose the already-durable
-  // event, or crash a round over a housekeeping rename.
+  // Best-effort, sha-gated, idempotent archive — see module doc's "THE LEFTOVER CLEANUP IS
+  // SHA-GATED" section: runs on EVERY call that reaches here (fresh consumption above, or a
+  // prior-event call under either consume value), but renames ONLY the exact bytes this round's
+  // event recorded — a differing sha is a FRESH directive awaiting the next round, never touched
+  // (gate② I1: renaming it would swallow unseen steering and overwrite this round's archive).
+  // Never throws: a filesystem hiccup here must not lose the already-durable event, or crash a
+  // round over a housekeeping rename.
   try {
     if (existsSync(directivePath)) {
-      const archivePath = directiveArchivePath(directivePath, roundId);
-      mkdirSync(dirname(archivePath), { recursive: true });
-      renameSync(directivePath, archivePath);
+      const liveSha = createHash("sha256").update(readFileSync(directivePath, "utf8"), "utf8").digest("hex");
+      if (liveSha === payload.sha256) {
+        const archivePath = directiveArchivePath(directivePath, roundId);
+        mkdirSync(dirname(archivePath), { recursive: true });
+        renameSync(directivePath, archivePath);
+      }
     }
   } catch (e) {
     console.error(

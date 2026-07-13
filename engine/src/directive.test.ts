@@ -30,7 +30,7 @@ test("resolveRoundDirective: no file, no event -> NO_ROUND_DIRECTIVE placeholder
   withTmpDir((d) => {
     const state = new State(":memory:");
     const cfg = mkCfg({ round: { directiveFile: join(d, "DIRECTIVE.md") } });
-    const result = resolveRoundDirective(state, cfg, 1);
+    const result = resolveRoundDirective(state, cfg, 1, { consume: true });
     assert.equal(result, NO_ROUND_DIRECTIVE);
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 0);
     state.close();
@@ -43,7 +43,7 @@ test("resolveRoundDirective: file present -> content injected, one directive-app
     writeFileSync(directiveFile, "Focus on the auth flow this round.", "utf8");
     const state = new State(":memory:");
     const cfg = mkCfg({ round: { directiveFile } });
-    const result = resolveRoundDirective(state, cfg, 7);
+    const result = resolveRoundDirective(state, cfg, 7, { consume: true });
     assert.equal(result, "Focus on the auth flow this round.");
 
     const events = state.eventsAfterId(0, ["directive-applied"]);
@@ -71,7 +71,7 @@ test("resolveRoundDirective: oversize directive is deterministically truncated (
     writeFileSync(directiveFile, raw, "utf8");
     const state = new State(":memory:");
     const cfg = mkCfg({ round: { directiveFile, directiveMaxChars: 60 } });
-    const result = resolveRoundDirective(state, cfg, 1);
+    const result = resolveRoundDirective(state, cfg, 1, { consume: true });
     assert.ok(result.length <= 60, `expected <= 60 chars, got ${result.length}`);
     assert.match(result, /truncated/);
 
@@ -88,7 +88,7 @@ test("resolveRoundDirective: consume-once — a second call the SAME round retur
     const state = new State(":memory:");
     const cfg = mkCfg({ round: { directiveFile } });
 
-    const first = resolveRoundDirective(state, cfg, 3);
+    const first = resolveRoundDirective(state, cfg, 3, { consume: true });
     assert.equal(first, "original directive");
     assert.equal(existsSync(directiveFile), false); // archived after the first call
 
@@ -97,7 +97,7 @@ test("resolveRoundDirective: consume-once — a second call the SAME round retur
     // recorded for this round is the source of truth.
     writeFileSync(directiveFile, "a DIFFERENT directive dropped later", "utf8");
 
-    const second = resolveRoundDirective(state, cfg, 3);
+    const second = resolveRoundDirective(state, cfg, 3, { consume: true });
     assert.equal(second, "original directive");
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1, "no duplicate event");
     state.close();
@@ -119,7 +119,7 @@ test("resolveRoundDirective: crash-rerun — event already recorded but the sour
     state.appendEvent("directive-applied", payload);
     writeFileSync(directiveFile, "steer toward the payments module", "utf8");
 
-    const result = resolveRoundDirective(state, cfg, 5);
+    const result = resolveRoundDirective(state, cfg, 5, { consume: true });
     assert.equal(result, "steer toward the payments module");
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1, "no duplicate event on resume");
     // The interrupted rename is completed on this resumed call — never left dangling to be
@@ -142,7 +142,7 @@ test("resolveRoundDirective: crash-rerun — event recorded AND the rename alrea
     state.appendEvent("directive-applied", payload);
     // No file at the live path AND no archive present either (e.g. a human already cleaned it
     // up) — resolveRoundDirective must not throw just because neither exists.
-    const result = resolveRoundDirective(state, cfg, 2);
+    const result = resolveRoundDirective(state, cfg, 2, { consume: true });
     assert.equal(result, "done already");
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1);
     state.close();
@@ -159,7 +159,7 @@ test("resolveRoundDirective: round-scoped — a directive-applied event from a D
     });
     // No file present for THIS round (round 1) and no event scoped to round 1 — falls back to
     // the 'none' placeholder rather than reusing round 99's event.
-    const result = resolveRoundDirective(state, cfg, 1);
+    const result = resolveRoundDirective(state, cfg, 1, { consume: true });
     assert.equal(result, NO_ROUND_DIRECTIVE);
     state.close();
   });
@@ -170,4 +170,85 @@ test("directiveArchivePath: a sibling directives/ dir next to the configured dir
     directiveArchivePath("/repo/data/DIRECTIVE.md", 42),
     "/repo/data/directives/round-42.md",
   );
+});
+
+// ── Gate② I1: the idempotent rename must never swallow a FRESH directive ────────────────────
+
+test("resolveRoundDirective I1: prior event + a live file with a DIFFERENT sha (a fresh directive dropped mid-round) -> file left untouched, archive intact, injected content = the event's; the NEXT round consumes the new file normally", () => {
+  withTmpDir((d) => {
+    const directiveFile = join(d, "DIRECTIVE.md");
+    writeFileSync(directiveFile, "round-1 steering", "utf8");
+    const state = new State(":memory:");
+    const cfg = mkCfg({ round: { directiveFile } });
+
+    // Round 1 consumes normally: event + archive.
+    const first = resolveRoundDirective(state, cfg, 1, { consume: true });
+    assert.equal(first, "round-1 steering");
+    assert.equal(readFileSync(directiveArchivePath(directiveFile, 1), "utf8"), "round-1 steering");
+
+    // The operator drops a NEW directive mid-round, intended for the NEXT round.
+    writeFileSync(directiveFile, "round-2 steering, dropped mid-round-1", "utf8");
+
+    // A later same-round call (e.g. the architect's) finds the prior event. The sha differs,
+    // so the re-attempted rename must NOT run: the fresh file stays at the live path, round 1's
+    // archive is not overwritten, and the injected content is still the event's.
+    const sameRound = resolveRoundDirective(state, cfg, 1, { consume: false });
+    assert.equal(sameRound, "round-1 steering");
+    assert.equal(existsSync(directiveFile), true, "the fresh directive must not be swallowed");
+    assert.equal(readFileSync(directiveFile, "utf8"), "round-2 steering, dropped mid-round-1");
+    assert.equal(
+      readFileSync(directiveArchivePath(directiveFile, 1), "utf8"), "round-1 steering",
+      "round 1's archive must still match round 1's event",
+    );
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1);
+
+    // The NEXT round (different round id -> different round_id filter window) consumes the new
+    // file as a brand-new directive.
+    const nextRound = resolveRoundDirective(state, cfg, 2, { consume: true });
+    assert.equal(nextRound, "round-2 steering, dropped mid-round-1");
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 2);
+    assert.equal(existsSync(directiveFile), false);
+    assert.equal(readFileSync(directiveArchivePath(directiveFile, 2), "utf8"), "round-2 steering, dropped mid-round-1");
+    state.close();
+  });
+});
+
+test("resolveRoundDirective I1: the crash-leftover cleanup (prior event + live file with MATCHING sha) still completes the rename under consume: false too — no duplicate event", () => {
+  withTmpDir((d) => {
+    const directiveFile = join(d, "DIRECTIVE.md");
+    const state = new State(":memory:");
+    const cfg = mkCfg({ round: { directiveFile } });
+    const payload: DirectiveAppliedPayload = {
+      round_id: 4, path: directiveFile, content: "crash leftover",
+      sha256: createHash("sha256").update("crash leftover", "utf8").digest("hex"),
+    };
+    state.appendEvent("directive-applied", payload);
+    writeFileSync(directiveFile, "crash leftover", "utf8");
+
+    // consume: false (an architect call with the PO role enabled) — the prior-event path,
+    // including the sha-matched leftover cleanup, must still run.
+    const result = resolveRoundDirective(state, cfg, 4, { consume: false });
+    assert.equal(result, "crash leftover");
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1, "no duplicate event");
+    assert.equal(existsSync(directiveFile), false, "the sha-matched leftover is still archived");
+    assert.equal(existsSync(directiveArchivePath(directiveFile, 4)), true);
+    state.close();
+  });
+});
+
+// ── Gate② I2: mid-round drops wait for the next round open — never a half-round apply ───────
+
+test("resolveRoundDirective I2: no prior event + consume: false (a mid-round drop reaching a non-consumer) -> NO_ROUND_DIRECTIVE, file untouched, no event", () => {
+  withTmpDir((d) => {
+    const directiveFile = join(d, "DIRECTIVE.md");
+    writeFileSync(directiveFile, "dropped between aligning and architecting", "utf8");
+    const state = new State(":memory:");
+    const cfg = mkCfg({ round: { directiveFile } });
+    const result = resolveRoundDirective(state, cfg, 1, { consume: false });
+    assert.equal(result, NO_ROUND_DIRECTIVE);
+    assert.equal(existsSync(directiveFile), true, "a non-consumer never touches the file");
+    assert.equal(readFileSync(directiveFile, "utf8"), "dropped between aligning and architecting");
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 0);
+    state.close();
+  });
 });

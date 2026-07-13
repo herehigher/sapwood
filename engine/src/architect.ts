@@ -307,13 +307,16 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
   return {
     async run({ roundId, marker }) {
       if (marker != null) return { marker }; // already externalized this round — no duplicate work
-      // #126: this round's directive (human steering, why/what) — resolveRoundDirective is
-      // idempotent and round-scoped (directive.ts's module doc), so calling it here is safe
-      // regardless of whether aligning already consumed it this round (the common case: this
-      // call just reads back the event aligning recorded) or aligning is disabled (#127
-      // roles.po.enabled: false), in which case THIS call becomes the round's de facto first
-      // consumer — never a duplicate application, never a re-read of an already-archived file.
-      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId);
+      // #126: this round's directive (human steering, why/what). Consumption belongs to round
+      // OPEN — with the PO role enabled, aligning already consumed (or established the absence
+      // of) this round's directive, and this call only ever reads BACK that durable event
+      // (consume: false: a file dropped between aligning and architecting must wait for the
+      // next round's opener, never a half-round apply — directive.ts's "EXACTLY ONE CONSUMER
+      // PER ROUND", gate② I2). Only when the PO role is disabled (#127) and aligning never runs
+      // at all does THIS call become the round's designated first consumer.
+      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId, {
+        consume: !deps.cfg.roles.po.enabled,
+      });
       // The candidate pool for this phase is the same "still awaiting gate⓪" set plan_review
       // consumes next in the sequence (aligning -> architecting -> plan_review -> executing):
       // Ready-lane, OPEN, not yet settled needs-human/blocked/verifyNa/planApproved. Sorted by

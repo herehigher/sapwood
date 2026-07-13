@@ -247,12 +247,13 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const now = deps.now ?? ((): Date => new Date());
 
       // #126: this round's directive (human steering, why/what) — resolved ONCE per run() call
-      // and threaded into BOTH prompt renders below (align + every triage session). aligning is
-      // the round's designated "round open" consumer (module doc, directive.ts): event-sourced
-      // consume-once, so a crash-rerun of this exact phase call (marker still null) replays the
-      // SAME recorded content rather than re-reading a possibly-edited file, and a stale
-      // directive can never silently re-apply to a later round once archived.
-      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId);
+      // and threaded into BOTH prompt renders below (align + every triage session). aligning IS
+      // round open, so this call is the round's designated first consumer (consume: true —
+      // directive.ts's "EXACTLY ONE CONSUMER PER ROUND"): event-sourced consume-once, so a
+      // crash-rerun of this exact phase call (marker still null) replays the SAME recorded
+      // content rather than re-reading a possibly-edited file, and a stale directive can never
+      // silently re-apply to a later round once archived.
+      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId, { consume: true });
 
       // ── Alignment/decomposition pass: ONE session, dispatched even with an unscoped round
       // (round.milestone unset) — decomposition still has docs/PLAN.md to work from alone.
