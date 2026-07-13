@@ -484,6 +484,101 @@ test("runRounds stop.afterIssuesMerged: a round already open finishes harvest+re
   deps.state.close();
 });
 
+test("runRounds stop.afterSpendUsd: a round already open finishes harvest+retro before the loop refuses to open a NEW round", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  // done, no PR — recordSpend fires regardless of merge-gate activity, so no ScriptedMergeGate.
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 25 };
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
+    stop: { afterSpendUsd: 20 },
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
+  assert.deepEqual(log.map((l) => l.phase).slice(-2), ["harvesting", "retro"]);
+  assert.equal(result.rounds, 1);
+  deps.state.close();
+});
+
+test("runRounds stop.afterSpendUsd: anchored to THIS run's start — spend already ledgered by a PRIOR run is never inherited", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = []; // isolates the anchor from any dispatch activity
+  const state = new State(":memory:");
+  state.recordSpend("prior-run-worker", 999, 50, new Date().toISOString(), []); // a prior run's spend
+  const deps = baseDeps({ forge, state, sleep, stop: { afterSpendUsd: 10 } });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  // Never fires — this run's own ledgered spend (from its own startup anchor forward) is $0;
+  // the pre-existing $50 belongs to an earlier run/process. boundedStopOnPhase's signal is what
+  // actually ends the loop here.
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.stopCondition, undefined);
+  deps.state.close();
+});
+
+test("runRounds stop.afterSpendUsd: spend ledgered by CLOSING peripherals (after the last tick) still stops at the round boundary — no second round opens (Codex P2, PR #160)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = []; // zero worker spend — the ONLY spend is the retro session's, ledgered post-tick
+  const state = new State(":memory:");
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const peripherals = {
+    ...allPeripherals(log),
+    // Mirrors runSessionWithRetry's role-session ledgering (peripheral.ts): the retro session's
+    // cost lands in spend_ledger AFTER the executing phase's final tick — the exact window a
+    // tick-only check never sees.
+    retro: {
+      async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+        log.push({ phase: "retro" as PeripheralPhase, marker: ctx.marker });
+        state.recordSpend("retro-session-r1", 0, 25, new Date().toISOString(), []);
+        return { marker: `retro-r${ctx.roundId}` };
+      },
+    },
+  };
+  const deps = baseDeps({ forge, state, sleep, stop: { afterSpendUsd: 20 }, peripherals });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
+  assert.equal(result.rounds, 1, "the crossed budget must stop the run at the boundary — never a second round");
+  assert.equal(log.filter((l) => l.phase === "aligning").length, 1, "round 2 never opened its first phase");
+  deps.state.close();
+});
+
+test("runRounds stop.afterSpendUsd: fired MID-round (worker spend crosses during drain) — no further wave dispatches in the SAME round (Codex P1, PR #160; #124/#154 interaction)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [1, 2, 3].map((n) => ({ number: n, title: `i${n}`, labels: ["prio:3-feature"] }));
+  const sup = new AutoCompleteSupervisor();
+  // lanes.max 1, quota 3: wave 1 = issue 1 alone; its reclaim banks $25 ≥ the $20 threshold, so
+  // the run-level condition fires mid-round with quota AND lanes still free for waves 2-3.
+  for (const n of [1, 2, 3]) sup.probes[`lane-${n}-${n}`] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false, costUsd: 25 };
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 3 } }),
+    stop: { afterSpendUsd: 20 },
+  });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(sup.dispatchedIssues, [1], "waves 2-3 must never dispatch after the run-level spend stop fired");
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
+  assert.equal(result.rounds, 1);
+  deps.state.close();
+});
+
 test("runRounds stop.onMilestoneComplete: checked at round boundaries (never mid-round), preempts opening a NEW round", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();

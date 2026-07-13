@@ -107,6 +107,11 @@ both drivers. Combine with --once/--until-idle/--forever (the default) freely; N
                             (NAME must match the milestone title EXACTLY — validated
                             against the repo at startup, before any dispatch). See
                             --milestone above for the scope+stop shortcut.
+  --stop-after-spend N      Stop once $N has been spent this run (ledgered run-spend —
+                            summed from THIS run's own spend_ledger rows only; a restart
+                            never inherits a prior run's total, unlike cost.dailyBudgetUsd's
+                            cross-restart calendar-day cap). N is a dollar amount, not a
+                            count — decimals are fine (25 or 25.50).
 
 N is a floor, not an exact bound: the tick that crosses N has already dispatched its own
 wave (up to lanes.roundDispatchCap lanes), and those finish during the wind-down. With
@@ -121,11 +126,13 @@ never waits for wind-down (stoppedBy stays "once").
  *  dispatches workers is the exact failure Codex PR #50 flagged (thread on cli.ts:46). */
 const RUN_FLAGS = ["--once", "--until-idle", "--dry-run"] as const;
 
-/** #76: the three value-taking `--stop-*` flags, each paired with the StopConfig key it feeds. */
+/** #76/#154: the four value-taking `--stop-*` flags, each paired with the StopConfig key it
+ *  feeds. */
 const STOP_FLAG_SPECS = [
   { flag: "--stop-after-issues", key: "afterIssuesMerged" as const },
   { flag: "--stop-after-prs", key: "afterPRsOpened" as const },
   { flag: "--stop-on-milestone", key: "onMilestoneComplete" as const },
+  { flag: "--stop-after-spend", key: "afterSpendUsd" as const },
 ];
 
 /** Pulls the `--stop-*` flags (and their values) out of a run-subcommand argv, leaving `rest`
@@ -134,8 +141,9 @@ const STOP_FLAG_SPECS = [
  *  synchronous validation, once in runEngine to build the resolved StopConfig) — non-matching
  *  tokens (including "sapwood", "run") just pass through to `rest` unexamined, same tolerance
  *  parseRunStopMode already relies on. Fails closed: a `--stop-*` flag with a missing value, a
- *  value that looks like another flag, or (for the two count flags) a non-positive-integer value
- *  is an `error`, never a silently-ignored/mis-parsed condition. */
+ *  value that looks like another flag, (for the two count flags) a non-positive-integer value,
+ *  or (for --stop-after-spend) a non-positive/non-finite number is an `error`, never a
+ *  silently-ignored/mis-parsed condition. */
 export function parseStopFlags(argv: string[]): { rest: string[]; stop: StopConfig; error?: string } {
   const rest: string[] = [];
   const stop: StopConfig = {};
@@ -152,6 +160,14 @@ export function parseStopFlags(argv: string[]): { rest: string[]; stop: StopConf
     }
     if (spec.key === "onMilestoneComplete") {
       stop.onMilestoneComplete = value;
+    } else if (spec.key === "afterSpendUsd") {
+      // #154: a dollar amount, not a count — finite/positive but NOT integer-only (unlike the
+      // two count flags below), same shape as cost.roundBudgetUsd/dailyBudgetUsd in config.ts.
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) {
+        return { rest, stop, error: `${spec.flag} requires a positive number, got: ${value}` };
+      }
+      stop.afterSpendUsd = n;
     } else {
       const n = Number(value);
       if (!Number.isInteger(n) || n <= 0) {
@@ -565,11 +581,11 @@ export function runExitCode(result: Pick<DriverResult, "ticks" | "tickErrors">, 
   return stopMode === "once" && result.ticks === 0 && result.tickErrors > 0 ? 1 : 0;
 }
 
-/** #76: the resolved StopConfig for a real `sapwood run` — cfg.stop.* as the base, each field
- *  individually overridden by its CLI --stop-* flag when present. Pure + exported for testing,
- *  same split as parseRunStopMode/runExitCode above. `argv` may be the full process.argv (like
- *  parseRunStopMode already tolerates) — parseStopFlags ignores everything that isn't one of
- *  its three flags. */
+/** #76/#154: the resolved StopConfig for a real `sapwood run` — cfg.stop.* as the base, each
+ *  field individually overridden by its CLI --stop-* flag when present. Pure + exported for
+ *  testing, same split as parseRunStopMode/runExitCode above. `argv` may be the full
+ *  process.argv (like parseRunStopMode already tolerates) — parseStopFlags ignores everything
+ *  that isn't one of its four flags. */
 export function resolveStopConfig(argv: string[], cfg: Pick<SapwoodConfig, "stop">): StopConfig {
   const { stop: flags } = parseStopFlags(argv);
   // #129: --milestone is CLI sugar for --stop-on-milestone too. runCli already rejects the two
@@ -582,9 +598,11 @@ export function resolveStopConfig(argv: string[], cfg: Pick<SapwoodConfig, "stop
   const afterIssuesMerged = flags.afterIssuesMerged ?? cfg.stop.afterIssuesMerged;
   const afterPRsOpened = flags.afterPRsOpened ?? cfg.stop.afterPRsOpened;
   const onMilestoneComplete = flags.onMilestoneComplete ?? milestone ?? cfg.stop.onMilestoneComplete;
+  const afterSpendUsd = flags.afterSpendUsd ?? cfg.stop.afterSpendUsd;
   if (afterIssuesMerged !== undefined) resolved.afterIssuesMerged = afterIssuesMerged;
   if (afterPRsOpened !== undefined) resolved.afterPRsOpened = afterPRsOpened;
   if (onMilestoneComplete !== undefined) resolved.onMilestoneComplete = onMilestoneComplete;
+  if (afterSpendUsd !== undefined) resolved.afterSpendUsd = afterSpendUsd;
   return resolved;
 }
 

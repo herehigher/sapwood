@@ -88,8 +88,8 @@ of the soft per-worker budget above.
 | Key | Default | Meaning |
 |---|---|---|
 | `roundBudgetUsd` | `30` | Soft per-round throttle (not the hard safety boundary — see `dailyBudgetUsd`). The gate mechanism exists in the tick, but the live `sapwood run` currently always reports round spend as `0`, so it never triggers in a real run yet — live round-spend tracking is future wiring. |
-| `dailyBudgetUsd` | `100` | Cumulative daily USD cap, summed from completed workers' actual cost and persisted across restarts. Breaching it freezes new dispatch/merges engine-wide and drains in-flight workers. |
-| `maxWallClockSec` | `14400` (4h) | Aggregate wall-clock ceiling over the engine's *active* session (a stop/crash/pause longer than the stale gap resets the session). Independent of `worker.timeoutSec`, which bounds one worker. |
+| `dailyBudgetUsd` | `100` | **Burn-rate cap**, not a total — "$100/day, renews in Xh." Summed from completed workers' actual cost (each worker's terminal `total_cost_usd`, a priced snapshot that settles on that worker's final bill) by **UTC calendar day**, and persisted across restarts (`spend_ledger`), so it renews at the next UTC midnight regardless of any restart in between. A common misreading (2026-07-13 dashboard/cost discussion, #17/#154) is treating this as a run total or an all-time cap — it is neither; see `stop.afterSpendUsd` below for the actual per-run cap. Breaching it freezes new dispatch/merges engine-wide and drains in-flight workers. |
+| `maxWallClockSec` | `14400` (4h) | A **continuous-activity window**, not total run duration. It accumulates only while ticks are actually flowing (executing/drain) and **RESETS on any quiet gap** longer than `max(900s, 2 × engine.tickIntervalSec)` — a deep standby wait or a long peripheral stretch resets it, so an idle-heavy multi-day run never trips it. What it actually detects: "the dispatch/drain machinery has churned 4h without a single quiet quarter-hour" — a runaway/batch-scoping smell, **not a long-run limiter**. (A rapid crash-loop still can't evade it: each tick refreshes the session rather than resetting it.) Independent of `worker.timeoutSec`, which bounds one worker, and of run duration generally — there is no run-duration cap at all; see the knob table below. |
 | `drainWindowSec` | `300` (5min) | Bounded grace window after a ceiling breach (daily budget / wall-clock / kill switch) during which running workers are asked to hand off gracefully before the conductor escalates to a hard process-tree kill. |
 
 ## `stop`
@@ -97,17 +97,18 @@ of the soft per-worker budget above.
 Goal-based **final** stop conditions for `sapwood run` — "when is this run complete."
 All optional; none set is today's behavior exactly (the run only stops on a signal,
 `--once`, or `--until-idle` idleness). Each has a matching CLI flag
-(`--stop-after-issues`, `--stop-after-prs`, `--stop-on-milestone`) that overrides the
-config value for a single invocation. Conditions are OR'd — the first one satisfied wins
-and converts the rest of the run into the same wind-down `--until-idle` uses: stop
-dispatching new lanes, let every in-flight lane finish on its own (never a mid-work
-kill), then exit, naming the condition that fired.
+(`--stop-after-issues`, `--stop-after-prs`, `--stop-on-milestone`, `--stop-after-spend`)
+that overrides the config value for a single invocation. Conditions are OR'd — the first
+one satisfied wins and converts the rest of the run into the same wind-down
+`--until-idle` uses: stop dispatching new lanes, let every in-flight lane finish on its
+own (never a mid-work kill), then exit, naming the condition that fired.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `afterIssuesMerged` | unset | Stop once this many issues have been merged during **this run** (counted from this process's own tick results — a restart starts the counter back at 0). |
 | `afterPRsOpened` | unset | Stop once this many PRs have been opened during this run (counted the first time a lane's PR becomes known to the engine). |
 | `onMilestoneComplete` | unset | Stop once the named milestone has zero open issues left. The name must match the milestone's title **exactly** as GitHub displays it — validated against the repo at startup, before any dispatch; a typo aborts the run with the available titles listed rather than silently never firing. |
+| `afterSpendUsd` | unset | (#154) Stop once **this run's own ledgered spend** reaches `$N` — the missing money unit: a per-run authorization ("this run may spend $X"), distinct from `roundBudgetUsd` (per-round/soft), `dailyBudgetUsd` (a cross-restart calendar-day *rate* cap, never a run total), and every other `stop.*` condition above (which bound work, not money). Summed from THIS run's own `spend_ledger` rows only — an id-cursor captured once at engine startup, so a **restart starts this sum back at $0** even mid-day (the daily cap still applies, unchanged, since it is deliberately not run-scoped). Each worker's contribution is its terminal cost — a priced snapshot that settles on that worker's final bill. |
 
 **Floor semantics:** each count is a floor, not an exact stopping point. Conditions are
 evaluated at tick boundaries, and the tick that crosses the threshold has already run its
@@ -122,6 +123,21 @@ title is a hard startup error, not a condition that silently never fires.
 
 The `--stop-*` CLI flags cannot combine with `--dry-run` (which never runs the loop at
 all); config-file `stop.*` keys are simply ignored by a dry run.
+
+**Time & spend units, at a glance (#154):** the engine bounds work at several different
+granularities, and each one is bounded by a *different* knob (or, for one deliberate
+case, no knob at all) — this table exists because two of these are easy to misread (see
+`cost.dailyBudgetUsd`/`maxWallClockSec` above for the long-form clarifications):
+
+| Unit | Bounded by | Notes |
+|---|---|---|
+| tick | `engine.tickIntervalSec` | The dispatch/reclaim/drive cadence itself — not a duration cap on anything, just how often the loop runs. |
+| worker lane | `worker.timeoutSec` (hard) / `worker.budgetUsdSoft` (soft) | Hard wall-clock kill vs. a soft budget that triggers a graceful handoff, never a mid-work kill. |
+| peripheral session | `worker.timeoutSec` | Peripheral role sessions (aligning/architecting/plan_review/harvesting/retro) reuse the same wall-clock cap as a worker lane. |
+| round | *(deliberately no duration cap)* | Bounded by *work*, not time: `lanes.roundDispatchCap` (dispatch quota) and `cost.roundBudgetUsd` (soft spend throttle) end a round's dispatch; there is no "a round may run at most N minutes" knob, by design — a round's real-world length follows its work. |
+| run | `stop.afterSpendUsd` / `afterIssuesMerged` / `afterPRsOpened` / `onMilestoneComplete` | Goal-based, not time-based — a run ends when one of these conditions fires (or on a signal), never on an elapsed-time budget. |
+| wall-clock window | `cost.maxWallClockSec` | A *continuous-activity* window that resets on any quiet gap — see above. Detects runaway churn, not a long run. |
+| calendar day | `cost.dailyBudgetUsd` | A burn-rate cap that renews at UTC midnight and survives restarts — the one cross-restart ceiling in this table. |
 
 **`run --milestone NAME` (#129):** a shortcut for the single most common bounded-run
 intent — "work only milestone NAME, stop when it's done" — that would otherwise need two

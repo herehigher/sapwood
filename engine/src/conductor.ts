@@ -361,7 +361,7 @@ export type DispatchOutcome =
   | {
       kind: "skipped";
       issue: number;
-      reason: "cap" | "no-lane" | "in-flight" | "over-budget" | "meta-floor" | "ceiling";
+      reason: "cap" | "no-lane" | "in-flight" | "over-budget" | "meta-floor" | "ceiling" | "run-spend-stop";
     };
 
 /** #31: outcome of one durably-persisted recovery-path board mutation this tick (retried from
@@ -456,6 +456,13 @@ export interface TickDeps {
    *  allowance. This is the ONLY mechanism difference between the two drivers — tick() itself
    *  has no notion of "round," just "this call's allowance." */
   dispatchCapOverride?: number;
+  /** #154 (Codex P1, PR #160): has the RUN-level spend stop (stop.afterSpendUsd) crossed? A
+   *  thunk for the same reason roundSpendUsd is one — evaluated post-reclaim, pre-dispatch, so
+   *  spend banked by THIS tick's reclaim freezes THIS tick's refill. Without it the drivers'
+   *  own post-tick check lags one tick and a crossed spend budget still buys one more wave
+   *  (the exact same-tick window #124 gate② P1-2 closed for cost.roundBudgetUsd). Unset (no
+   *  spend stop configured) → no check, no cost. */
+  runSpendStopCrossed?: () => boolean;
 }
 
 /**
@@ -1069,6 +1076,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   (#124 gate② P1-2; see the TickDeps.roundSpendUsd doc comment).
   const dispatched: DispatchOutcome[] = [];
   const overBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
+  // #154: same post-reclaim evaluation point, same rationale — see TickDeps.runSpendStopCrossed.
+  // Kept SEPARATE from overBudget so TickResult.overBudget keeps meaning exactly
+  // cost.roundBudgetUsd (its consumers pre-date the run-level stop family).
+  const runSpendStop = deps.runSpendStopCrossed?.() ?? false;
   if (!paused) {
     // Capacity counts running + driving lanes: a driving lane holds a PR awaiting the review
     // gate and must keep occupying a lane, else reclaiming a PR-producing worker would free a
@@ -1093,6 +1104,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       if (overBudget) {
         dispatched.push({ kind: "skipped", issue: issue.number, reason: "over-budget" });
+        continue;
+      }
+      if (runSpendStop) {
+        dispatched.push({ kind: "skipped", issue: issue.number, reason: "run-spend-stop" });
         continue;
       }
       // #124: dispatchCapOverride (round.ts's remaining round-quota) replaces the plain

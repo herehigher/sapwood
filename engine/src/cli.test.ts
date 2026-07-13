@@ -133,15 +133,50 @@ test("run: --stop-* flags appear in --help usage", () => {
   assert.match(r.stdout, /--stop-after-issues/);
   assert.match(r.stdout, /--stop-after-prs/);
   assert.match(r.stdout, /--stop-on-milestone/);
+  assert.match(r.stdout, /--stop-after-spend/);
 });
 
-test("parseStopFlags: parses all three flags, leaving non-stop tokens in `rest`", () => {
+test("parseStopFlags: parses all four flags, leaving non-stop tokens in `rest`", () => {
   const { rest, stop, error } = parseStopFlags([
     "run", "--once", "--stop-after-issues", "3", "--stop-after-prs", "5", "--stop-on-milestone", "M4",
+    "--stop-after-spend", "25",
   ]);
   assert.equal(error, undefined);
-  assert.deepEqual(stop, { afterIssuesMerged: 3, afterPRsOpened: 5, onMilestoneComplete: "M4" });
+  assert.deepEqual(stop, { afterIssuesMerged: 3, afterPRsOpened: 5, onMilestoneComplete: "M4", afterSpendUsd: 25 });
   assert.deepEqual(rest, ["run", "--once"]);
+});
+
+// ── #154: --stop-after-spend ────────────────────────────────────────────────────────────────
+
+test("parseStopFlags: --stop-after-spend accepts a decimal dollar amount (unlike the two integer count flags)", () => {
+  assert.deepEqual(parseStopFlags(["--stop-after-spend", "25.5"]).stop, { afterSpendUsd: 25.5 });
+  assert.deepEqual(parseStopFlags(["--stop-after-spend", "25"]).stop, { afterSpendUsd: 25 });
+});
+
+test("parseStopFlags: zero, negative-looking, and non-numeric values for --stop-after-spend are rejected", () => {
+  for (const bad of ["0", "nope"]) {
+    assert.match(
+      parseStopFlags(["--stop-after-spend", bad]).error ?? "",
+      /--stop-after-spend requires a positive number/,
+      bad,
+    );
+  }
+  // A literal "-1" is caught by the same "looks like another flag" missing-value guard as the
+  // other three flags (same convention as --config elsewhere).
+  assert.match(parseStopFlags(["--stop-after-spend", "-1"]).error ?? "", /--stop-after-spend requires a value/);
+});
+
+test("resolveStopConfig: --stop-after-spend overrides config's stop.afterSpendUsd for this run only", () => {
+  const cfg = { stop: { afterSpendUsd: 100 } };
+  assert.deepEqual(resolveStopConfig(["run", "--stop-after-spend", "25"], cfg), { afterSpendUsd: 25 });
+  assert.deepEqual(resolveStopConfig(["run"], cfg), { afterSpendUsd: 100 });
+});
+
+test("run: --stop-after-spend combines fine with --once/--until-idle, and is rejected alongside --dry-run", () => {
+  assert.equal(runCli(["node", "sapwood", "run", "--once", "--stop-after-spend", "25"]).code, -1);
+  const r = runCli(["node", "sapwood", "run", "--dry-run", "--stop-after-spend", "25"]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--dry-run cannot combine with --stop-\*/);
 });
 
 test("parseStopFlags: tolerates the full process.argv (like parseRunStopMode) — leading tokens just pass through", () => {

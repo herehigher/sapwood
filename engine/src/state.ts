@@ -946,6 +946,17 @@ export class State {
     return row.total;
   }
 
+  /** #154: the spend_ledger id-cursor anchor for a fresh RUN — same MAX(id) pattern startRound
+   *  uses for its own (per-round) start_spend_id, captured once at engine startup instead of
+   *  once per round. Everything already in spend_ledger at this instant belongs to an EARLIER
+   *  run (or, for a brand-new DB, nothing); `spentUsdAfterId(this value)` from then on is this
+   *  run's own ledgered spend and nothing else — a restart calls this again and gets a fresh
+   *  cursor, so it never inherits a prior run's total (unlike dailyBudgetUsd's cross-restart
+   *  calendar-day sum, which is deliberately NOT id-anchored). */
+  maxSpendLedgerId(): number {
+    return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM spend_ledger").get() as { m: number }).m;
+  }
+
   // ── #123: round summary artifact (round_artifacts, migration 9->10) ─────────────────────
 
   /** Upsert the FINAL round artifact row — one per round (round_id is the PK), so a crash-rerun

@@ -224,6 +224,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   let roundsClosed = 0;
   let issuesMerged = 0;
   let prsOpened = 0;
+  // #154: this run's spend-ledger anchor — same in-memory-constant-for-the-process-lifetime
+  // contract as driver.ts's runDriver (see its own comment): captured ONCE, here, at engine
+  // startup, never re-captured per round. A restart calls runRounds fresh and gets a fresh
+  // anchor (afterSpendUsd starts back at $0), unlike cfg.cost.dailyBudgetUsd's cross-restart sum.
+  const runSpendAnchorId = deps.state.maxSpendLedgerId();
   let finalStopHit: StopConditionHit | undefined;
   // #125 standby: consecutive empty probes since the last time a round actually opened — the
   // exponential-backoff exponent. In-memory only (never persisted): a process restart is a fresh
@@ -257,6 +262,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           finalStopHit = { name: "afterIssuesMerged", threshold: stop.afterIssuesMerged, detail: `merged ${issuesMerged}` };
         } else if (stop?.afterPRsOpened !== undefined && prsOpened >= stop.afterPRsOpened) {
           finalStopHit = { name: "afterPRsOpened", threshold: stop.afterPRsOpened, detail: `opened ${prsOpened}` };
+        } else if (
+          // #154: same live-query style as driver.ts's runDriver — spend is only known at
+          // worker completion, so this reads durable state fresh rather than accumulating a
+          // counter from tick results. Gate② B1 (PR #160): threshold IN the guard like every
+          // sibling branch — this is the chain tail today, but an inconsistent guard style is
+          // exactly how the next appended condition gets silently starved.
+          stop?.afterSpendUsd !== undefined &&
+          deps.state.spentUsdAfterId(runSpendAnchorId) >= stop.afterSpendUsd
+        ) {
+          const runSpendUsd = deps.state.spentUsdAfterId(runSpendAnchorId);
+          finalStopHit = { name: "afterSpendUsd", threshold: stop.afterSpendUsd, detail: `spent $${runSpendUsd.toFixed(2)}` };
         }
       }
       return result;
@@ -266,6 +282,21 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         deps.state.appendEvent("tick-error", { error: String(e) });
       } catch { /* state write failed too — tickErrors still counts it */ }
       return null;
+    }
+  };
+
+  /** #154 (Codex P2, PR #160): re-check the run-spend budget at ROUND boundaries too. The
+   *  tick-level check above can't be the only one: closing peripherals (harvest/retro) ledger
+   *  their role-session spend via runSessionWithRetry AFTER the executing phase's final tick,
+   *  so a budget crossed by that spend would otherwise go unnoticed until the NEXT round's
+   *  first tick — after that round already opened and dispatched a fresh wave. Sync SQLite
+   *  read, no network; same first-hit-wins contract as every other condition. */
+  const checkFinalSpend = (): void => {
+    const threshold = deps.stop?.afterSpendUsd;
+    if (threshold === undefined || finalStopHit) return;
+    const runSpendUsd = deps.state.spentUsdAfterId(runSpendAnchorId);
+    if (runSpendUsd >= threshold) {
+      finalStopHit = { name: "afterSpendUsd", threshold, detail: `spent $${runSpendUsd.toFixed(2)}` };
     }
   };
 
@@ -368,6 +399,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
     ...(over.roundSpendUsd !== undefined ? { roundSpendUsd: over.roundSpendUsd } : {}),
     ...(over.dispatchCapOverride !== undefined ? { dispatchCapOverride: over.dispatchCapOverride } : {}),
+    // #154 (Codex P1, PR #160): the run-level spend stop must freeze a tick's OWN refill the
+    // moment its reclaim phase banks the crossing spend — thunk evaluated inside tick(),
+    // post-reclaim (see TickDeps.runSpendStopCrossed). Only wired when the stop is configured.
+    ...(deps.stop?.afterSpendUsd !== undefined
+      ? { runSpendStopCrossed: () => deps.state.spentUsdAfterId(runSpendAnchorId) >= deps.stop!.afterSpendUsd! }
+      : {}),
   });
 
   /** Run one peripheral phase's stub, persist its marker, fire the observability hook. Returns
@@ -458,7 +495,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // AFTER its reclaim phase and caps there; this function only decides whether tick() is
     // ALLOWED to dispatch at all, never how many lanes it may fill.
     const tryDispatchWave = async (): Promise<boolean> => {
-      if (!freshBatch || stopHit) return false;
+      // #154 (Codex P1, PR #160): finalStopHit — a RUN-level stop condition (afterSpendUsd /
+      // afterIssuesMerged / afterPRsOpened, set by the per-tick check above) — must freeze new
+      // waves in THIS round too, not just withhold the next round. A #124/#154 interaction:
+      // pre-#124 all dispatch happened before any condition could fire mid-round, so the gap
+      // was unreachable; with multi-wave refill, "graceful wind-down" means in-flight lanes
+      // finish but no further wave opens once ANY run-level condition has fired.
+      if (!freshBatch || stopHit || finalStopHit) return false;
       const already = dispatchedThisRound();
       if (already >= cfg.lanes.roundDispatchCap) {
         stopHit = { name: "roundDispatchCap", detail: `dispatched ${already}` };
@@ -542,6 +585,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       let round = deps.state.openRound();
       if (!round) {
+        checkFinalSpend(); // #154: cheapest check first (local read), then the network one
         await checkFinalMilestone();
         if (finalStopHit) {
           return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
