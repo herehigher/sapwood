@@ -1,12 +1,17 @@
 # The role paradigm
 
-sapwood's deterministic engine (`runRounds`, `engine/src/round.ts`) is the only piece
-of code that ever writes to GitHub. Every Claude session it spawns — the six
-peripheral roles below, plus the worker (out of scope here; see
-[`security.md`](security.md)) — is a scoped, bounded subordinate whose judgment
-reaches GitHub only through the engine. This doc is the contract every one of those
-role sessions satisfies today, and the contract a v1.0 user-defined role (governed
-extension points, issue #134) must satisfy to be added safely.
+For the six peripheral roles below, sapwood's deterministic engine (`runRounds`,
+`engine/src/round.ts`) is the only piece of code that ever writes to GitHub on their
+behalf — each role session is a scoped, bounded subordinate whose judgment reaches
+GitHub only through the engine (#110). The **worker is the explicit exception** and is
+out of this doc's scope: worker sessions hold real write grants
+(`Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),...`, with only
+`Bash(gh pr merge*)`/`Bash(gh pr ready*)` deny-listed — `engine/src/worker.ts:211-212`,
+noise-reduction only) and open their own PRs; their actual boundary is tier 2 of the
+ladder below, the fail-closed guard hook intercepting merge/approve/ready — see
+[`security.md`](security.md). This doc is the contract every peripheral role session
+satisfies today, and the contract a v1.0 user-defined role (governed extension
+points, issue #134) must satisfy to be added safely.
 
 Audience: sapwood developers modifying an existing role, and v1.0 extension authors
 writing a new one. This is durable knowledge — what's true on `main` right now — not a
@@ -86,14 +91,24 @@ run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }): Pr
 `round.ts`'s own module doc states the invariant every role's `run()` must honor: a
 crash mid-phase leaves the round's persisted phase cursor at that exact phase; on
 restart, `round.ts` re-invokes the SAME phase's stub fresh — never resuming
-mid-session state. **Idempotency is the stub's own job, keyed by `marker`**: `null`
-means no prior attempt this round externalized anything yet; non-null means a prior
-attempt already externalized this phase's work (a comment, a document, an issue), so
-the correct response is "return the same marker unchanged, do no further writes" —
-never re-running the session or duplicating a side effect. All six roles below use the
-same `<!-- sapwood:round:{roundId}:{phase} -->` marker convention
-(e.g. `align.ts`'s `alignMarker`, `architect.ts`'s `architectMarker`) and the same
-one-line guard at the top of `run()`: `if (marker != null) return { marker };`.
+mid-session state. **Idempotency is the stub's own job, keyed by `marker`**, and the
+semantics are rerun-not-resume, not a no-prior-writes guarantee: `round.ts` persists
+the returned marker only AFTER `stub.run()` completes (`round.ts:421-423`), so a
+crash mid-`run()` can leave real forge writes behind while the marker is still
+`null`. A `null` marker therefore means "no prior attempt this round COMPLETED — the
+phase will run again in full"; a non-null marker means a prior attempt completed and
+externalized this phase's work, so the correct response is "return the same marker
+unchanged, do no further writes". What makes the full rerun safe is each role's own
+per-item behavior, not the round-level marker itself: processed candidates drop out
+of the candidate queries (an approved issue no longer matches gate⓪'s query, a
+drafted triage issue no longer matches triage's), retro's rerun `openPR` for the same
+head branch fails at the forge rather than opening a second PR, and the marker string
+embedded in every posted comment makes any residual duplicate externally attributable
+to its round/phase.
+All six roles below use the same `<!-- sapwood:round:{roundId}:{phase} -->` marker
+convention (e.g. `align.ts`'s `alignMarker`, `architect.ts`'s `architectMarker`) and
+the same one-line guard at the top of `run()`:
+`if (marker != null) return { marker };`.
 
 This is coarse — round-phase granularity, not per-issue — but deliberately so: a
 partially-worked round's remaining candidates are picked up next round (or once
@@ -156,7 +171,7 @@ bounds the loop — at the bound, the engine escalates rather than cycling forev
 
 | Element | Detail |
 |---|---|
-| Responsibility | Round-close summary: briefs the round's needs-human issues with round context (a few lines each, not a report). Write TARGETS are closed-form pre-session — the engine-built round artifact (`round-artifact.ts`) computes the `needsHuman` set from the durable ledger BEFORE the session runs; the session's only latitude is what to SAY, never which issues to brief. `engine/src/harvest.ts:227` `createHarvestStub`. |
+| Responsibility | Round-close summary: briefs the round's needs-human issues with round context (a few lines each, not a report). The write-target BOUND is closed-form pre-session — the engine-built round artifact (`round-artifact.ts`) computes the `needsHuman` set from the durable ledger BEFORE the session runs; the session may brief any subset of that set, including none (an empty `comments` array is valid — the phase closes normally, no degradation event), but never an issue OUTSIDE it. `engine/src/harvest.ts:227` `createHarvestStub`. |
 | Write scope | Tier 1 (unreachable): no tool grant, plus an explicit `HARVEST_DISALLOWED_TOOLS` (`harvest.ts:59`, denies `gh issue edit*` — regression trip-wire; harvest writes comments only, never a label or body edit). Tier 3 choke point: `harvest.ts:createHarvestStub` (`harvest.ts:227`) is the sole caller of `forge.addIssueComment` for this phase; every target is set-checked against the pre-computed `needsHumanIssues` list. |
 | Marker idempotency | `harvestMarker(roundId)` (`harvest.ts:78`), standard convention. No needs-human issues to brief → no session run, but the phase still closes with its marker set (`harvest.ts:230,243`). |
 | Output schema + validation | `HarvestMetadataSchema` (`harvest.ts:137`, `comments: [{issue, body}]`) validated by `validateHarvestOutput` (`harvest.ts:170`) — schema PLUS a set cross-check: every `issue` must be inside the engine's pre-computed `needsHumanIssues` set, or the WHOLE batch fails (never a partial apply); duplicate issue numbers in one batch are also rejected outright. An empty `comments` array is valid ("nothing to brief" is a legitimate outcome). |
