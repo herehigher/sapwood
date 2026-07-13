@@ -27,6 +27,11 @@
 # CLI reports (e.g. "claude-opus-4-8" matches "opus"). A model that matches nothing is priced
 # at the MOST EXPENSIVE tier in this table — over-estimating only costs an earlier graceful
 # handoff; under-estimating (a soft budget that never fires) is the dangerous direction.
+#
+# contextWindow (#155): each model's total context window, in tokens — the dashboard's
+# context-usage % gauge denominator (docs/frontend-design.md §8). Same hand-maintained-
+# snapshot pattern as the USD rates above, and the SAME fail-closed rule: a model entry
+# missing contextWindow fails the whole file's load, exactly like one missing a rate field.
 
 models:
   opus:
@@ -34,13 +39,16 @@ models:
     output: 25 # USD per million output tokens
     cacheWrite: 6.25 # 5-minute ephemeral cache write premium (~1.25x input)
     cacheRead: 0.5 # cache READS are ~10x cheaper than input — never price them as input
+    contextWindow: 200000
   sonnet:
     input: 3
     output: 15
     cacheWrite: 3.75
     cacheRead: 0.3
+    contextWindow: 200000
   haiku:
     input: 1
     output: 5
     cacheWrite: 1.25
     cacheRead: 0.1
+    contextWindow: 200000

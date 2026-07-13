@@ -22,9 +22,9 @@ test("defaultPricingPath: resolves to the shipped pricing.yaml, which exists", (
 
 test("loadPricingTable: unset pricingFile -> the shipped default, matching the current expected rates", () => {
   const table = loadPricingTable(baseCfg());
-  assert.deepEqual(table.opus, { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 });
-  assert.deepEqual(table.sonnet, { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 });
-  assert.deepEqual(table.haiku, { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1 });
+  assert.deepEqual(table.opus, { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200_000 });
+  assert.deepEqual(table.sonnet, { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3, contextWindow: 200_000 });
+  assert.deepEqual(table.haiku, { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1, contextWindow: 200_000 });
 });
 
 test("loadPricingTable: a configured worker.pricingFile WINS over the shipped default, and user-added aliases are allowed", () => {
@@ -35,15 +35,46 @@ test("loadPricingTable: a configured worker.pricingFile WINS over the shipped de
       p,
       [
         "models:",
-        "  opus: { input: 7, output: 30, cacheWrite: 8.75, cacheRead: 0.7 }",
-        "  my-custom-model: { input: 2, output: 4, cacheWrite: 2.5, cacheRead: 0.2 }",
+        "  opus: { input: 7, output: 30, cacheWrite: 8.75, cacheRead: 0.7, contextWindow: 200000 }",
+        "  my-custom-model: { input: 2, output: 4, cacheWrite: 2.5, cacheRead: 0.2, contextWindow: 100000 }",
         "",
       ].join("\n"),
     );
     const table = loadPricingTable(baseCfg(p));
-    assert.deepEqual(table.opus, { input: 7, output: 30, cacheWrite: 8.75, cacheRead: 0.7 });
-    assert.deepEqual(table["my-custom-model"], { input: 2, output: 4, cacheWrite: 2.5, cacheRead: 0.2 });
+    assert.deepEqual(table.opus, { input: 7, output: 30, cacheWrite: 8.75, cacheRead: 0.7, contextWindow: 200_000 });
+    assert.deepEqual(table["my-custom-model"], { input: 2, output: 4, cacheWrite: 2.5, cacheRead: 0.2, contextWindow: 100_000 });
     assert.equal(table.sonnet, undefined, "override REPLACES the table — no silent merge with built-ins");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #155: contextWindow — same file, same fail-closed load rules as the USD rates ──
+
+test("loadPricingTable: a model entry missing contextWindow fails loudly, the SAME failure mode as one missing a rate field", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-pricing-"));
+  try {
+    const p = join(dir, "no-context-window.yaml");
+    writeFileSync(p, "models: { opus: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 } }\n");
+    assert.throws(() => loadPricingTable(baseCfg(p)), /no-context-window\.yaml/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadPricingTable: contextWindow must be a positive integer — zero, negative, and non-integer all fail loudly", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-pricing-"));
+  try {
+    const cases: Array<[string, string]> = [
+      ["cw-zero.yaml", "models: { opus: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 0 } }"],
+      ["cw-negative.yaml", "models: { opus: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: -200000 } }"],
+      ["cw-fractional.yaml", "models: { opus: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000.5 } }"],
+    ];
+    for (const [name, body] of cases) {
+      const p = join(dir, name);
+      writeFileSync(p, body);
+      assert.throws(() => loadPricingTable(baseCfg(p)), new RegExp(name.replace(".", "\\.")), `expected ${name} to fail loudly`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -62,10 +93,10 @@ test("loadPricingTable: malformed YAML / wrong shape / bad rates all fail loudly
       ["not-yaml.yaml", "models: {opus: {input: [unclosed", /not-yaml\.yaml/],
       ["no-models.yaml", "rates: {opus: {input: 1}}", /no-models\.yaml/],
       ["empty-models.yaml", "models: {}", /empty-models\.yaml/],
-      ["negative.yaml", "models: {opus: {input: -5, output: 25, cacheWrite: 6.25, cacheRead: 0.5}}", /negative\.yaml/],
-      ["non-numeric.yaml", "models: {opus: {input: cheap, output: 25, cacheWrite: 6.25, cacheRead: 0.5}}", /non-numeric\.yaml/],
-      ["missing-field.yaml", "models: {opus: {input: 5, output: 25, cacheWrite: 6.25}}", /missing-field\.yaml/],
-      ["extra-field.yaml", "models: {opus: {input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, vibes: 1}}", /extra-field\.yaml/],
+      ["negative.yaml", "models: {opus: {input: -5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000}}", /negative\.yaml/],
+      ["non-numeric.yaml", "models: {opus: {input: cheap, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000}}", /non-numeric\.yaml/],
+      ["missing-field.yaml", "models: {opus: {input: 5, output: 25, cacheWrite: 6.25, contextWindow: 200000}}", /missing-field\.yaml/],
+      ["extra-field.yaml", "models: {opus: {input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000, vibes: 1}}", /extra-field\.yaml/],
       ["scalar.yaml", "just a string", /scalar\.yaml/],
     ];
     for (const [name, body, re] of cases) {
@@ -112,8 +143,8 @@ test("resolveRate: unrecognized model falls back to the most expensive tier of t
       p,
       [
         "models:",
-        "  opus: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 }",
-        "  my-premium: { input: 50, output: 250, cacheWrite: 62.5, cacheRead: 5 }",
+        "  opus: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000 }",
+        "  my-premium: { input: 50, output: 250, cacheWrite: 62.5, cacheRead: 5, contextWindow: 200000 }",
         "",
       ].join("\n"),
     );
