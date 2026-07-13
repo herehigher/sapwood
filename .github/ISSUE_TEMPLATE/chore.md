@@ -14,7 +14,11 @@ dogfooding follow-up.)
 
 - [ ] Concrete, checkable statement of what "done" looks like.
 
-## Verification
+### Verification
+
+<!-- Keep this as a SUBSECTION (###) of Acceptance criteria: gate② extracts one
+     contiguous section from the first Acceptance/Verification heading, so the
+     verification steps must live inside it to travel with the criteria. -->
 
 If this chore is inherently unverifiable (no test/command can prove it — pure
 cleanup, config bump with no behavior change, etc.), say so and apply the

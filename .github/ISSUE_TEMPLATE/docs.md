@@ -15,7 +15,11 @@ or milestone that the docs need to reflect)? Which doc(s) does it touch?
 - [ ] Concrete, checkable statement of what "done" looks like (e.g. which section of
       which doc is added/updated, and what it says).
 
-## Verification
+### Verification
+
+<!-- Keep this as a SUBSECTION (###) of Acceptance criteria: gate② extracts one
+     contiguous section from the first Acceptance/Verification heading, so the
+     verification steps must live inside it to travel with the criteria. -->
 
 Most docs-only work is inherently unverifiable by test/command — if that's the case
 here, say so and apply the `verify:n/a` label instead of filling this section (the
