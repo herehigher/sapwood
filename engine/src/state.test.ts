@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { State, SCHEMA_VERSION, type ModelUsageEntry } from "./state.js";
+import { State, SCHEMA_VERSION, backfillLegacyRoundCursors, type ModelUsageEntry } from "./state.js";
 
 // In-memory DB keeps tests hermetic (no disk, no cleanup). WAL pragma is a no-op on
 // :memory: but the migration/version logic is identical.
@@ -671,6 +671,34 @@ test("spend_ledger model/token columns persist across close/reopen (schema-migra
 });
 
 // ── #86: rounds ledger (round-loop skeleton) ──────────────────────────────────────────────
+
+test("backfillLegacyRoundCursors (#123, Codex round-5 P2): a pre-migration in_progress round gets timestamp-approximate cursors, never whole-history 0", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  const path = join(dir, "s.sqlite");
+  try {
+    const s = new State(path);
+    // Pre-round ledger rows (their ts is strictly before the round's future started_at)…
+    s.appendEvent("merged", { worker: "lane-old", issue: 1, pr: 2, headOid: "h" });
+    s.recordSpend("lane-old", 1, 9, new Date().toISOString());
+    // …then a round that startRound stamps correctly.
+    const round = s.startRound(new Date(Date.now() + 60_000).toISOString());
+    s.close();
+
+    // Simulate the legacy (pre-v10) shape: cursors zeroed, as if the columns were just added.
+    const raw = new DatabaseSync(path);
+    raw.exec("UPDATE rounds SET start_event_id = 0, start_spend_id = 0");
+    backfillLegacyRoundCursors(raw);
+    const row = raw.prepare("SELECT start_event_id, start_spend_id FROM rounds WHERE round_id = ?")
+      .get(round.round_id) as { start_event_id: number; start_spend_id: number };
+    raw.close();
+    // The pre-round event/spend row ids are the cursors again — the resumed round's artifact
+    // window starts after them, never at the whole-history 0.
+    assert.ok(row.start_event_id >= 1, "event cursor covers the pre-round event");
+    assert.ok(row.start_spend_id >= 1, "spend cursor covers the pre-round spend row");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("fresh DB migrates to a schema version that includes the rounds table (#86)", () => {
   const s = mem();

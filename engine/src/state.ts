@@ -13,6 +13,19 @@ import { DatabaseSync } from "node:sqlite";
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
 // never edit a shipped migration, add a new one. user_version (a SQLite builtin) is the
 // on-disk schema version — the migration path #5 asks for.
+/** #123 (v9->v10 backfill, Codex round-5 P2 on PR #152): timestamp-approximate ledger cursors
+ *  for rounds that predate the cursor columns — everything with ts strictly BEFORE the round's
+ *  started_at is pre-round. Exported for direct testing (the migration path itself only runs
+ *  once per DB). Idempotent over legacy rows; never invoked on rows startRound stamped, except
+ *  harmlessly during the one migration that creates the columns. */
+export function backfillLegacyRoundCursors(db: DatabaseSync): void {
+  db.exec(`
+    UPDATE rounds SET
+      start_event_id = COALESCE((SELECT MAX(id) FROM events WHERE ts < rounds.started_at), 0),
+      start_spend_id = COALESCE((SELECT MAX(id) FROM spend_ledger WHERE ts < rounds.started_at), 0);
+  `);
+}
+
 const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // 0 -> 1: initial schema.
   (db) => {
@@ -233,11 +246,16 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       -- timestamp-bounded — events/spend timestamps are millisecond-granular, so a previous
       -- round's tail write landing in the same ms as the next round's started_at would bleed
       -- into the wrong artifact under a ts >= started_at read. startRound stamps the current
-      -- MAX(id) of both tables; the artifact reads strictly-greater ids. DEFAULT 0 for
-      -- pre-migration rounds (all long closed — their artifacts are never rebuilt).
+      -- MAX(id) of both tables; the artifact reads strictly-greater ids.
       ALTER TABLE rounds ADD COLUMN start_event_id INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE rounds ADD COLUMN start_spend_id INTEGER NOT NULL DEFAULT 0;
     `);
+    // Backfill for PRE-migration rows (Codex round-5 P2): an in_progress round can survive an
+    // upgrade (crash -> upgrade -> restart resumes it via openRound), and cursor 0 would make
+    // its resumed harvest/close aggregate the WHOLE historical ledger. Approximate the cursor
+    // from the timestamps the legacy rows do have (ts < started_at = before the round) — the
+    // same-ms ambiguity this migration exists to remove is accepted for legacy rows only.
+    backfillLegacyRoundCursors(db);
   },
 ];
 
