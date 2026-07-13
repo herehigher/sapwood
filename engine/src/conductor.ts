@@ -418,9 +418,17 @@ export interface TickDeps {
   state: State;
   supervisor: Supervisor;
   cfg: SapwoodConfig;
-  /** Cumulative round spend (USD) for the hard round-budget gate. Worker cost sum; caller
-   *  computes it from stream-json (worker.ts). Default 0 (no spend known yet). */
-  roundSpendUsd?: number;
+  /** Cumulative round spend (USD) for the hard round-budget gate — a THUNK, not a snapshot
+   *  (#124 gate② P1-2 on PR #157). tick() evaluates it exactly where `overBudget` is computed:
+   *  AFTER the reclaim phase, BEFORE the dispatch loop. This matters because reclaim runs
+   *  before dispatch inside one tick, and #124's multi-wave refill lets a lane freed by THIS
+   *  tick's reclaim be refilled by THIS tick's dispatch — so spend banked by that reclaim
+   *  (which can cross cfg.cost.roundBudgetUsd) must be visible to the same tick's budget gate,
+   *  or a fresh wave launches after the budget is already blown. A caller-supplied scalar,
+   *  captured before the tick ran, could never see it. round.ts passes `() => spentSoFar()`
+   *  (backed by live durable state, State.spentUsdForWorker); the tick driver (driver.ts)
+   *  never sets this — default 0 (no spend known). */
+  roundSpendUsd?: () => number;
   /** The caller's tick cadence in seconds, when ticks run on a fixed schedule. Scales the
    *  wall-clock session stale gap (engineSessionGapSec: max(900, 2× cadence)) so a legal
    *  slow cadence cannot make every tick look stale and silently void the wall-clock tier
@@ -1055,8 +1063,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   (mirrors the kill-switch tick's dispatched: [] — see its test comment). overBudget is
   //   still reported (cheap, dispatch-independent — just deps.roundSpendUsd vs. the cap), but
   //   nothing below it runs: no Ready-queue read, no claim, no worker spawn.
+  //   The roundSpendUsd THUNK is evaluated exactly HERE — after the reclaim phase above has
+  //   banked any terminal lanes' spend, before the dispatch loop below reads overBudget — so
+  //   a same-tick reclaim that crosses the round budget blocks this same tick's refill
+  //   (#124 gate② P1-2; see the TickDeps.roundSpendUsd doc comment).
   const dispatched: DispatchOutcome[] = [];
-  const overBudget = budgetExceeded(deps.roundSpendUsd ?? 0, cfg.cost.roundBudgetUsd);
+  const overBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
   if (!paused) {
     // Capacity counts running + driving lanes: a driving lane holds a PR awaiting the review
     // gate and must keep occupying a lane, else reclaiming a PR-producing worker would free a

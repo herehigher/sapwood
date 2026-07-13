@@ -336,7 +336,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     }
   };
 
-  const toTickDeps = (over: { forge: IForge; forceDispatchPause?: boolean; roundSpendUsd?: number }): TickDeps => ({
+  const toTickDeps = (over: {
+    forge: IForge;
+    forceDispatchPause?: boolean;
+    roundSpendUsd?: () => number;
+    dispatchCapOverride?: number;
+  }): TickDeps => ({
     forge: over.forge,
     state: deps.state,
     supervisor: deps.supervisor,
@@ -348,6 +353,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
     ...(over.roundSpendUsd !== undefined ? { roundSpendUsd: over.roundSpendUsd } : {}),
+    ...(over.dispatchCapOverride !== undefined ? { dispatchCapOverride: over.dispatchCapOverride } : {}),
   });
 
   /** Run one peripheral phase's stub, persist its marker, fire the observability hook. Returns
@@ -459,14 +465,18 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     };
 
     // Wave 1: a fresh round always attempts its first dispatch tick IMMEDIATELY (no inter-tick
-    // wait) — same zero-latency start as pre-#124's single batch.
+    // wait) — same zero-latency start as pre-#124's single batch. roundSpendUsd is a THUNK
+    // (gate② P1-2 on PR #157): tick() evaluates it AFTER its own reclaim phase, right where
+    // overBudget is computed — spentSoFar reads live durable state (spentUsdForWorker), so
+    // spend banked by THIS tick's reclaim is visible to THIS tick's dispatch gate, and a lane
+    // freed by a budget-blowing reclaim is never refilled in the same tick.
     if (freshBatch) {
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
       const batchResult = await runTick(toTickDeps({
         forge,
         forceDispatchPause: !attempt,
-        roundSpendUsd: spentSoFar(),
+        roundSpendUsd: () => spentSoFar(),
         ...(attempt ? { dispatchCapOverride: remaining } : {}),
       }));
       if (batchResult) {
@@ -489,7 +499,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       const tickResult = await runTick(toTickDeps({
         forge,
         forceDispatchPause: !attempt,
-        roundSpendUsd: spentSoFar(),
+        // Same thunk as wave 1 (gate② P1-2): evaluated inside tick(), post-reclaim, so a
+        // same-tick reclaim that crosses cost.roundBudgetUsd blocks the same tick's refill.
+        roundSpendUsd: () => spentSoFar(),
         ...(attempt ? { dispatchCapOverride: remaining } : {}),
       }));
       if (tickResult) {

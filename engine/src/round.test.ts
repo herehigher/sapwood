@@ -673,6 +673,84 @@ test("runRounds #124: cost.roundBudgetUsd hit mid-wave-2 behaves exactly like a 
   deps.state.close();
 });
 
+test("runRounds #124 gate② P1-1: an UNEVEN final wave dispatches exactly the remaining quota, never a full lanes.max batch — 8 Ready, cap 4, max 3 -> waves [1,2,3] then [4]", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({ number: n, title: `i${n}`, labels: ["prio:3-feature"] }));
+  const sup = new AutoCompleteSupervisor();
+  const hits: RoundStopHit[] = [];
+  const dispatchedPerTick: number[][] = [];
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep,
+    // Quota (4) does NOT divide evenly by lanes.max (3): wave 2 has only 1 quota left but 3
+    // free lanes — without dispatchCapOverride actually reaching tick(), its per-tick cap
+    // falls back to cfg.lanes.roundDispatchCap (4) and wave 2 overshoots to 3 lanes (6 > 4
+    // total). The even 6/6/3 case can never catch this; this uneven split is the regression.
+    cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 4 } }),
+    onRoundStop: (_id, hit) => hits.push(hit),
+    onTick: (r) => dispatchedPerTick.push(
+      r.dispatched.filter((d) => d.kind === "dispatched").map((d) => (d as { issue: number }).issue),
+    ),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+  const waves = dispatchedPerTick.filter((d) => d.length > 0);
+  assert.deepEqual(waves, [[1, 2, 3], [4]], `wave 2 must dispatch EXACTLY the 1 remaining quota, got ${JSON.stringify(dispatchedPerTick)}`);
+  assert.deepEqual(sup.dispatchedIssues, [1, 2, 3, 4]); // issues 5-8 never dispatched this round
+  assert.ok(hits.some((h) => h.name === "roundDispatchCap" && h.detail === "dispatched 4"));
+  assert.equal(result.rounds, 1);
+  deps.state.close();
+});
+
+test("runRounds #124 gate② P1-2: spend banked by a tick's OWN reclaim blocks that same tick's refill — the budget gate reads live post-reclaim state, not a pre-tick snapshot", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  // Two Ready issues, quota headroom (cap 6) and — once lane 1 is reclaimed — lane headroom
+  // (max 1, the reclaim frees the only lane). The ONLY thing standing between issue 2 and a
+  // dispatch is the round budget, and the spend that crosses it lands inside the very tick
+  // that would dispatch it: reclaim (banks $999) runs before dispatch in the same tick() call.
+  forge.ready = [
+    { number: 1, title: "i1", labels: ["prio:3-feature"] },
+    { number: 2, title: "i2", labels: ["prio:3-feature"] },
+  ];
+  const sup = new FakeSupervisor();
+  // No PR (hasPr: false) -> ESCALATE_NOPR reclaim path, which still records spend (same probe
+  // shape as the pre-#124 cost.roundBudgetUsd test above). $50: crosses roundBudgetUsd ($5)
+  // WITHOUT crossing the default cost.dailyBudgetUsd ($100) — a bigger figure would trip the
+  // engine-wide ceiling too, and its "ceiling" skip outranks "over-budget" in the dispatch
+  // loop, masking the exact gate this test isolates.
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 50 };
+  // Safety net for the REGRESSION case only: if the budget gate ever goes stale again and
+  // issue 2 IS dispatched, its lane must still complete — otherwise FakeSupervisor's
+  // runs-forever default would hang the drain loop (injected sleep = busy spin) instead of
+  // letting the assertions below report the failure. Never consulted when the gate works.
+  sup.probes["lane-2-2"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 0 };
+  const hits: RoundStopHit[] = [];
+  const overBudgetSkips: number[] = [];
+  const dispatchedPerTick: number[][] = [];
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 6 }, cost: { roundBudgetUsd: 5 } }),
+    onRoundStop: (_id, hit) => hits.push(hit),
+    onTick: (r) => {
+      dispatchedPerTick.push(r.dispatched.filter((d) => d.kind === "dispatched").map((d) => (d as { issue: number }).issue));
+      for (const d of r.dispatched) if (d.kind === "skipped" && d.reason === "over-budget") overBudgetSkips.push(d.issue);
+    },
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+  // Issue 2 was never dispatched — not in the reclaim tick (whose own banked spend must gate
+  // it) nor by any later wave (the round-level stop hit freezes further dispatch).
+  assert.deepEqual(sup.dispatchedIssues, [1], "the budget-blowing reclaim's tick must not refill the freed lane");
+  assert.deepEqual(dispatchedPerTick.filter((d) => d.length > 0), [[1]]);
+  assert.ok(overBudgetSkips.includes(2), "issue 2 was skipped over-budget IN the reclaim tick itself, not merely never reached");
+  assert.ok(hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $50.00"));
+  assert.equal(result.rounds, 1);
+  deps.state.close();
+});
+
 test("runRounds #124 crash-rerun: a resumed drain (freshBatch=false) never dispatches a new wave, even with quota AND lanes still free", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
   try {
