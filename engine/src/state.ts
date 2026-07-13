@@ -13,6 +13,19 @@ import { DatabaseSync } from "node:sqlite";
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
 // never edit a shipped migration, add a new one. user_version (a SQLite builtin) is the
 // on-disk schema version — the migration path #5 asks for.
+/** #123 (v9->v10 backfill, Codex round-5 P2 on PR #152): timestamp-approximate ledger cursors
+ *  for rounds that predate the cursor columns — everything with ts strictly BEFORE the round's
+ *  started_at is pre-round. Exported for direct testing (the migration path itself only runs
+ *  once per DB). Idempotent over legacy rows; never invoked on rows startRound stamped, except
+ *  harmlessly during the one migration that creates the columns. */
+export function backfillLegacyRoundCursors(db: DatabaseSync): void {
+  db.exec(`
+    UPDATE rounds SET
+      start_event_id = COALESCE((SELECT MAX(id) FROM events WHERE ts < rounds.started_at), 0),
+      start_spend_id = COALESCE((SELECT MAX(id) FROM spend_ledger WHERE ts < rounds.started_at), 0);
+  `);
+}
+
 const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // 0 -> 1: initial schema.
   (db) => {
@@ -214,6 +227,36 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN gated_escalation_labeled INTEGER NOT NULL DEFAULT 0;
     `);
   },
+  // 9 -> 10: round summary artifact (#123, M5 item 3). One row per CLOSED round — the
+  // schema-validated JSON round-artifact.ts assembles from the event ledger at round.ts's
+  // closeRound call site (round-artifact.ts's persistRoundArtifact). `round_id` is the primary
+  // key (one artifact per round, upsert-on-conflict — see State.saveRoundArtifact); `json` is
+  // the full validated object (the source of truth — the on-disk markdown view is always
+  // RE-DERIVED from it, never authored independently); `schema_version` lets a future reader
+  // (the #17 dashboard included) detect an older artifact shape without re-parsing the JSON.
+  (db) => {
+    db.exec(`
+      CREATE TABLE round_artifacts (
+        round_id       INTEGER PRIMARY KEY,
+        schema_version INTEGER NOT NULL,
+        json           TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+      );
+      -- #123 (Codex P2, PR #152): the round's ledger WINDOW is id-cursor-bounded, not
+      -- timestamp-bounded — events/spend timestamps are millisecond-granular, so a previous
+      -- round's tail write landing in the same ms as the next round's started_at would bleed
+      -- into the wrong artifact under a ts >= started_at read. startRound stamps the current
+      -- MAX(id) of both tables; the artifact reads strictly-greater ids.
+      ALTER TABLE rounds ADD COLUMN start_event_id INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE rounds ADD COLUMN start_spend_id INTEGER NOT NULL DEFAULT 0;
+    `);
+    // Backfill for PRE-migration rows (Codex round-5 P2): an in_progress round can survive an
+    // upgrade (crash -> upgrade -> restart resumes it via openRound), and cursor 0 would make
+    // its resumed harvest/close aggregate the WHOLE historical ledger. Approximate the cursor
+    // from the timestamps the legacy rows do have (ts < started_at = before the round) — the
+    // same-ms ambiguity this migration exists to remove is accepted for legacy rows only.
+    backfillLegacyRoundCursors(db);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -377,6 +420,11 @@ export interface RoundRow {
   started_at: string;
   updated_at: string;
   ended_at: string | null;
+  /** #123: id cursors capturing MAX(events.id)/MAX(spend_ledger.id) at startRound — the round's
+   *  ledger window is `id > cursor`, immune to same-millisecond timestamp collisions at round
+   *  boundaries. 0 on rows predating the v9->v10 migration (long closed, never rebuilt). */
+  start_event_id?: number;
+  start_spend_id?: number;
 }
 
 /** A durably-persisted recovery-path board mutation still awaiting success or escalation
@@ -789,11 +837,16 @@ export class State {
   /** Insert a fresh round in phase 'aligning', status 'in_progress', no marker. Returns the
    *  created row (round_id assigned by SQLite). */
   startRound(now: string): RoundRow {
+    // #123: id cursors for the round's ledger window (see the v9->v10 migration comment) —
+    // everything already in events/spend_ledger at this instant belongs to EARLIER rounds
+    // (or the run's own inter-round activity), regardless of timestamp collisions.
+    const startEventId = (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number }).m;
+    const startSpendId = (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM spend_ledger").get() as { m: number }).m;
     const res = this.db
       .prepare(
-        "INSERT INTO rounds (phase, status, artifact_ref, started_at, updated_at) VALUES ('aligning', 'in_progress', NULL, ?, ?)",
+        "INSERT INTO rounds (phase, status, artifact_ref, started_at, updated_at, start_event_id, start_spend_id) VALUES ('aligning', 'in_progress', NULL, ?, ?, ?, ?)",
       )
-      .run(now, now);
+      .run(now, now, startEventId, startSpendId);
     return {
       round_id: Number(res.lastInsertRowid),
       phase: "aligning",
@@ -802,6 +855,8 @@ export class State {
       started_at: now,
       updated_at: now,
       ended_at: null,
+      start_event_id: startEventId,
+      start_spend_id: startSpendId,
     };
   }
 
@@ -869,5 +924,58 @@ export class State {
       .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts >= ?")
       .get(sinceIso) as { total: number };
     return row.total;
+  }
+
+  /** #123: id-cursor variant of eventsSince — strictly-greater-than a captured MAX(id), the
+   *  round-window read the artifact uses (see the v9->v10 migration comment for why ids, not
+   *  timestamps). Same non-empty-kinds guard as eventsSince. */
+  eventsAfterId(afterId: number, kinds: string[]): { kind: string; payload: unknown }[] {
+    if (kinds.length === 0) throw new Error("eventsAfterId: kinds must be non-empty");
+    const placeholders = kinds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(`SELECT kind, payload FROM events WHERE id > ? AND kind IN (${placeholders}) ORDER BY id`)
+      .all(afterId, ...kinds) as { kind: string; payload: string }[];
+    return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
+  }
+
+  /** #123: id-cursor variant of spentUsdSince (same rationale as eventsAfterId). */
+  spentUsdAfterId(afterId: number): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE id > ?")
+      .get(afterId) as { total: number };
+    return row.total;
+  }
+
+  // ── #123: round summary artifact (round_artifacts, migration 9->10) ─────────────────────
+
+  /** Upsert the FINAL round artifact row — one per round (round_id is the PK), so a crash-rerun
+   *  of the close path overwrites rather than duplicates. `json` is the schema-validated object
+   *  (round-artifact.ts validates BEFORE calling this — state stores, never re-validates). */
+  saveRoundArtifact(roundId: number, schemaVersion: number, json: string, updatedAt: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO round_artifacts (round_id, schema_version, json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(round_id) DO UPDATE SET
+           schema_version = excluded.schema_version, json = excluded.json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(roundId, schemaVersion, json, updatedAt);
+  }
+
+  /** The persisted artifact row for a round — undefined when the round never closed (or
+   *  predates #123). `json` is returned RAW (the caller parses/validates against the version
+   *  it understands via `schemaVersion`) — reader for tests and the #17 dashboard. */
+  getRoundArtifact(roundId: number): { schemaVersion: number; json: string } | undefined {
+    const row = this.db
+      .prepare("SELECT schema_version, json FROM round_artifacts WHERE round_id = ?")
+      .get(roundId) as { schema_version: number; json: string } | undefined;
+    return row ? { schemaVersion: row.schema_version, json: row.json } : undefined;
+  }
+
+  /** Where the derived markdown VIEW of a round's artifact lives on disk — null for an
+   *  in-memory State (tests), same convention as killSwitchPath/pausePath above. */
+  roundArtifactMdPath(roundId: number): string | null {
+    return this.dataDir ? join(this.dataDir, "rounds", `round-${roundId}.md`) : null;
   }
 }

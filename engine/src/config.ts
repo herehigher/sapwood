@@ -256,6 +256,11 @@ const Roles = z.object({
     // Same #74 promptFile pattern: unset -> the engine's shipped `prompts/harvest.md`;
     // relative resolves against the CONFIG FILE's directory.
     promptFile: z.string().optional(),
+    // #123: cap on the {{round.artifact}} markdown block substituted into the harvest prompt —
+    // same deterministic-truncation contract (and the same user-tunable-in-config rationale)
+    // as roles.retro.digestMaxChars. The artifact md is naturally small (bounded by the round's
+    // own dispatch cap), so this is a safety valve, not a knob most deployments touch.
+    artifactMaxChars: z.number().int().positive().default(20_000),
   }).strict().default({}),
   // #91 (#77 decision 6): the retrospective/self-evolution peripheral. Its role write scope is
   // intentionally WIDER than the issues-only roles above (git + `gh pr create` — proposals land

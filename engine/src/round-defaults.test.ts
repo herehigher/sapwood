@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDefaultPeripherals } from "./round-defaults.js";
+import { createDefaultPeripherals, renderAlignedGoalsFromSummary } from "./round-defaults.js";
 import { runRounds, noopPeripheralStub, type RoundDeps } from "./round.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -124,6 +124,60 @@ test("createDefaultPeripherals: every PeripheralPhase key is present and none of
     assert.ok(peripherals[phase], `expected a real stub for ${phase}`);
     assert.notEqual(peripherals[phase], noopPeripheralStub, `${phase} must not be the noop stub`);
   }
+  state.close();
+});
+
+test("renderAlignedGoalsFromSummary (#123): renders the align-summary event's per-issue detail; no event (or no round) -> null (pointer-note fallback)", () => {
+  const state = new State(":memory:");
+  assert.equal(renderAlignedGoalsFromSummary(state, 1), null, "no round row -> null");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  assert.equal(renderAlignedGoalsFromSummary(state, round.round_id), null, "no summary event yet -> null");
+  state.appendEvent("align-summary", {
+    round_id: round.round_id,
+    created: [{ issue: 12, title: "Split the parser", hasPlan: true }],
+    triaged: [{ issue: 9, drafted: false }],
+  });
+  const text = renderAlignedGoalsFromSummary(state, round.round_id)!;
+  assert.ok(text.includes("created #12 — Split the parser"));
+  assert.ok(text.includes("triaged #9: still planless"));
+  // A second (crash-rerun) summary MERGES — an empty one never erases the first's content
+  // (Codex round-6 P2 on PR #152), and a fresher triage outcome for the same issue wins.
+  state.appendEvent("align-summary", { round_id: round.round_id, created: [], triaged: [{ issue: 9, drafted: true }] });
+  const merged = renderAlignedGoalsFromSummary(state, round.round_id)!;
+  assert.ok(merged.includes("created #12 — Split the parser"), "first summary's creation survives the rerun");
+  assert.ok(merged.includes("triaged #9: plan drafted"), "the rerun's fresher triage outcome wins");
+  state.close();
+});
+
+test("architecting stub (#123, Codex round-7 P2): resuming directly at architecting still renders the pre-crash align-summary — the handoff is computed at invocation time from state, never a same-process side effect", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  // A gate⓪ candidate so the architect actually dispatches (it short-circuits on none).
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  // Simulate the crash-resume shape: the round + the aligning phase's summary exist in durable
+  // state, but the aligning stub never ran in THIS process.
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("align-summary", {
+    round_id: round.round_id,
+    created: [{ issue: 12, title: "Split the parser", hasPlan: true }],
+    triaged: [],
+  });
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const architectCall = runner.calls.find((c) => c.roleId === "architect");
+  assert.ok(architectCall, "the architect session was dispatched");
+  assert.ok(architectCall!.prompt.includes("created #12 — Split the parser"),
+    "the architect prompt carries the pre-crash summary detail, not the fallback note");
+  state.close();
+});
+
+test("renderAlignedGoalsFromSummary (#123): an all-empty summary renders the explicit 'decomposed nothing' line, never null", () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("align-summary", { round_id: round.round_id, created: [], triaged: [] });
+  assert.ok(renderAlignedGoalsFromSummary(state, round.round_id)!.includes("decomposed nothing"));
   state.close();
 });
 

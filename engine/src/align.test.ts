@@ -206,6 +206,47 @@ test("createAligningStub: a declared issue with a plan section gets stamped orig
   state.close();
 });
 
+test("createAligningStub #123: the phase externalizes ONE align-summary event recording created issues (with hasPlan) and triage outcomes", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [] }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([{ title: "Do the thing", body: PLAN_BODY }])),
+    doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 1, phase: "aligning", marker: null });
+  const summaries = state.eventsSince("2020-01-01T00:00:00.000Z", ["align-summary"]);
+  assert.equal(summaries.length, 1);
+  const p = summaries[0]!.payload as {
+    round_id: number;
+    created: Array<{ issue: number; title: string; hasPlan: boolean }>;
+    triaged: Array<{ issue: number; drafted: boolean }>;
+  };
+  assert.equal(p.round_id, 1);
+  assert.deepEqual(p.created, [{ issue: forge.openIssueNumbers[0]!, title: "Do the thing", hasPlan: true }]);
+  assert.deepEqual(p.triaged, [{ issue: 9, drafted: true }]);
+  state.close();
+});
+
+test("createAligningStub #123: a DEGRADED align pass emits NO align-summary — downstream reads a missing summary, never a successful 'decomposed nothing' (Codex P2, PR #152)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  // Both attempts fail — runSessionWithRetry degrades (po-degraded event fires there).
+  const runner = new ScriptedRunner([
+    { outcome: "failed", costUsd: 0, modelUsage: [], exitCode: 1, name: "po-align-1" },
+    { outcome: "failed", costUsd: 0, modelUsage: [], exitCode: 1, name: "po-align-2" },
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 1, phase: "aligning", marker: null });
+  assert.equal(state.eventsSince("2020-01-01T00:00:00.000Z", ["align-summary"]).length, 0);
+  state.close();
+});
+
 test("createAligningStub: a declared issue WITHOUT a plan section is escalated needs-human, never left silently planless", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();

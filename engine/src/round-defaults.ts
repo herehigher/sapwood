@@ -18,6 +18,7 @@ import type { SapwoodConfig } from "./config.js";
 import type { RoleRunner } from "./peripheral.js";
 import { RoundScopedForge, type PeripheralPhase, type PeripheralStub } from "./round.js";
 import { createAligningStub, alignMarker } from "./align.js";
+import { mergeAlignSummary, type AlignSection } from "./round-artifact.js";
 import { createArchitectStub, type ArchitectDeps } from "./architect.js";
 import { createPlanReviewStub } from "./plan-review.js";
 import { createHarvestStub } from "./harvest.js";
@@ -33,20 +34,42 @@ export interface DefaultPeripheralsDeps {
   now?: () => Date;
 }
 
+/** #123 (supersedes the #104 pointer note): render the architect's `round.alignedGoals` context
+ *  from the aligning phase's own `align-summary` state event(s) — the PO's actual per-issue
+ *  decomposition/triage record, not a pointer. Null when no summary exists for this round
+ *  (degraded align, or a state hiccup — the caller falls back to the deterministic pointer
+ *  note). Pure read; exported for tests. */
+export function renderAlignedGoalsFromSummary(state: State, roundId: number): string | null {
+  try {
+    const round = state.getRound(roundId);
+    if (!round) return null;
+    const summaries = state
+      .eventsAfterId(round.start_event_id ?? 0, ["align-summary"])
+      .filter((e) => (e.payload as { round_id?: number }).round_id === roundId);
+    if (summaries.length === 0) return null;
+    // MERGED across events (Codex round-6 P2 on PR #152) — same helper the artifact assembler
+    // uses, so a crash-rerun's second summary extends rather than erases the first run's work.
+    let merged: AlignSection | null = null;
+    for (const s of summaries) merged = mergeAlignSummary(merged, s.payload);
+    const { created, triaged } = merged!;
+    if (created.length === 0 && triaged.length === 0) {
+      return `This round's PO/goal-alignment pass (round ${roundId}) ran and decomposed nothing: ` +
+        `no issues created, no plans triaged.`;
+    }
+    return [
+      `This round's PO/goal-alignment pass (round ${roundId}) recorded:`,
+      ...created.map((c) => `- created #${c.issue} — ${c.title}${c.hasPlan ? "" : " (no verification plan yet; labelled needs-human)"}`),
+      ...triaged.map((t) => `- triaged #${t.issue}${t.drafted ? ": plan drafted into the body" : ": still planless (re-matches next round)"}`),
+    ].join("\n");
+  } catch {
+    return null; // contained — the caller's pointer-note fallback covers a state read failure
+  }
+}
+
 /** The shipped default peripherals map: every phase (aligning/architecting/plan_review/
  *  harvesting/retro) wired to its real role-session stub — no noop remains. `roles.architect`/
  *  `roles.retro`'s own config keys (planMdPath, everyNRounds) are honored automatically, since
- *  each stub reads them off `deps.cfg` itself; this factory adds no config surface of its own.
- *
- *  Feeds the architect stub `alignedGoals` from the aligning phase's own output WHERE
- *  AVAILABLE (#104 scope item 1): this factory threads through only a short, deterministic,
- *  traceable note — never fabricated analysis — set once THIS round's aligning phase has
- *  actually run, immediately before architecting runs next in round.ts's own SEQUENCE. (#110
- *  PR2: align.ts's session DOES now emit structured output, but wiring the actual per-issue
- *  decomposition detail through to the architect is out of scope for this factory — the note
- *  still points at GitHub for the real detail.) Before the note is set (the very first phase,
- *  or a caller that never wires aligning at all), the architect stub falls back to its own
- *  built-in "not available" placeholder, unchanged. */
+ *  each stub reads them off `deps.cfg` itself; this factory adds no config surface of its own. */
 export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<Record<PeripheralPhase, PeripheralStub>> {
   // #109 gate② P2: scope the PERIPHERALS' forge to cfg.round.milestone, exactly like runRounds
   // scopes its own tick forge (round.ts:runRounds wraps deps.forge independently — that wrap
@@ -77,17 +100,26 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   const architectStub = createArchitectStub(architectDeps);
 
   return {
-    aligning: {
+    aligning: alignStub,
+    architecting: {
       async run(ctx) {
-        const result = await alignStub.run(ctx);
+        // #123 acceptance criterion 3: thread the aligning phase's ACTUAL structured
+        // decomposition detail (its `align-summary` state event — created issues + triage
+        // outcomes) through to the architect, replacing the old deterministic pointer note.
+        // Computed HERE, at architect-invocation time, from durable state — never as a side
+        // effect of the aligning wrapper running in the same process (Codex round-7 P2 on PR
+        // #152: a crash between the phases resumes directly at architecting, and a write-time
+        // handoff would silently fall back even though the summary event survived). The read
+        // is contained: no summary (degraded align, state hiccup) falls back to the pointer
+        // note — never fabricated analysis, never a thrown phase.
         architectDeps.alignedGoals =
+          renderAlignedGoalsFromSummary(deps.state, ctx.roundId) ??
           `This round's PO/goal-alignment peripheral has run (round ${ctx.roundId}, marker ` +
           `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
-          `actual decomposition (this factory doesn't thread per-issue detail through).`;
-        return result;
+          `actual decomposition (no structured summary was recorded this round).`;
+        return architectStub.run(ctx);
       },
     },
-    architecting: architectStub,
     plan_review: createPlanReviewStub(shared),
     harvesting: createHarvestStub(shared),
     retro: createRetroStub(shared),

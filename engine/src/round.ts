@@ -18,6 +18,7 @@
 // mid-session state. The stub is handed the row's persisted marker and is contractually
 // responsible for treating a non-null marker as "already externalized, don't duplicate."
 import { tick, type TickDeps, type TickResult, type Supervisor, type MergeGate } from "./conductor.js";
+import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 import type { IForge, Issue } from "./forge.js";
 import { State, type RoundPhase, type RoundRow } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
@@ -563,7 +564,29 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "kill-switch" };
       }
 
-      deps.state.closeRound(round.round_id, iso());
+      const closedAt = iso();
+      // #123: the FINAL round summary artifact — assembled from the round's own ledger window
+      // and persisted (DB row = source of truth; the markdown view is derived from it inside
+      // persistRoundArtifact). Persisted BEFORE closeRound (Codex P2, PR #152): a process kill
+      // between the two would otherwise leave a status='done' round that openRound never
+      // revisits — the artifact would be lost forever. This order fails toward a RESUMABLE
+      // round instead: crash after persist -> the round is still in_progress, the resume path
+      // re-runs the (marker-idempotent) close and the upsert overwrites with the same window.
+      // Contained: an assembly/validation/persistence BUG still degrades to a durable
+      // tick-error and the round still closes — the artifact is best-effort, the close is not.
+      try {
+        persistRoundArtifact(
+          deps.state,
+          buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, closedAt),
+          closedAt,
+        );
+      } catch (e) {
+        tickErrors++;
+        try {
+          deps.state.appendEvent("tick-error", { error: `round artifact persistence failed: ${String(e)}` });
+        } catch { /* state write failed too — tickErrors still counts it */ }
+      }
+      deps.state.closeRound(round.round_id, closedAt);
       roundsClosed++;
       // #125 idle-round precondition: record whether THIS round dispatched nothing — the gate
       // that lets standby engage at the top of the next iteration (see lastRoundIdle's comment).

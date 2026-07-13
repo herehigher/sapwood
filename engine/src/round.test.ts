@@ -13,6 +13,7 @@ import {
 } from "./round.js";
 import type { Supervisor, LaneProbe, MergeGate } from "./conductor.js";
 import { State } from "./state.js";
+import { RoundArtifactSchema } from "./round-artifact.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
 import type { DriveOutcome } from "./merge-driver.js";
@@ -195,6 +196,21 @@ test("runRounds: a fresh phase always gets a null marker (first attempt)", async
   await runRounds(deps);
   stopSafety();
   assert.ok(log.every((l) => l.marker === null));
+  deps.state.close();
+});
+
+test("runRounds #123: a closed round leaves a persisted, schema-valid round artifact with endedAt set", async () => {
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ sleep });
+  const stopSafety = boundedStopOnPhase(deps, 5); // exactly round 1's five peripheral phases
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1);
+  const row = deps.state.getRoundArtifact(1);
+  assert.ok(row, "the close path persisted a round_artifacts row");
+  const artifact = RoundArtifactSchema.parse(JSON.parse(row!.json));
+  assert.equal(artifact.roundId, 1);
+  assert.ok(artifact.endedAt != null, "the FINAL artifact records the close timestamp");
   deps.state.close();
 });
 
