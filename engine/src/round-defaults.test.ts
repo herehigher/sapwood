@@ -242,6 +242,39 @@ test("renderLastMergedFromArtifact (#132): boundedness — an oversize rendered 
   state.close();
 });
 
+test("renderLastMergedFromArtifact (#132 gate② P2): EVERY branch honors the cap — placeholder branches and the zero-merges sentence are capDigest-bounded too, not just the real-merges render", () => {
+  const cap = 20; // deliberately below every placeholder's length — a degenerate but legal config
+  const state = new State(":memory:");
+
+  // (a) the no-prior placeholder branches: round 1, and a missing prior-round artifact row.
+  const noPrior = renderLastMergedFromArtifact(state, 1, cap);
+  assert.ok(noPrior.length <= cap, `round-1 placeholder capped (got ${noPrior.length} chars)`);
+  state.startRound("2026-07-10T00:00:00.000Z"); // round 1 exists but never persisted an artifact
+  const missingRow = renderLastMergedFromArtifact(state, 2, cap);
+  assert.ok(missingRow.length <= cap, `missing-artifact placeholder capped (got ${missingRow.length} chars)`);
+
+  // (b) the zero-merges sentence.
+  const state2 = new State(":memory:");
+  const r1 = state2.startRound("2026-07-10T00:00:00.000Z");
+  state2.closeRound(r1.round_id, "2026-07-10T01:00:00.000Z");
+  persistRoundArtifact(state2, buildRoundArtifact(state2, r1, 30, "2026-07-10T01:00:00.000Z"), "2026-07-10T01:00:00.000Z");
+  const zeroMerges = renderLastMergedFromArtifact(state2, 2, cap);
+  assert.ok(zeroMerges.length <= cap, `zero-merges sentence capped (got ${zeroMerges.length} chars)`);
+  state2.close();
+
+  // (c) a real merges render (already covered at cap=200 above; pinned here at the same
+  // degenerate cap for branch symmetry).
+  const state3 = new State(":memory:");
+  const r = state3.startRound("2026-07-10T00:00:00.000Z");
+  state3.appendEvent("merged", { worker: "lane-1", issue: 1, pr: 2 });
+  state3.closeRound(r.round_id, "2026-07-10T01:00:00.000Z");
+  persistRoundArtifact(state3, buildRoundArtifact(state3, r, 30, "2026-07-10T01:00:00.000Z"), "2026-07-10T01:00:00.000Z");
+  const merges = renderLastMergedFromArtifact(state3, 2, cap);
+  assert.ok(merges.length <= cap, `real-merges render capped (got ${merges.length} chars)`);
+  state3.close();
+  state.close();
+});
+
 test("architecting stub (#132): the architect prompt carries the prior round's merged-outcome context, engine-assembled from the durable round artifact", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();

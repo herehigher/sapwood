@@ -87,8 +87,18 @@ export function renderAlignedGoalsFromSummary(state: State, roundId: number): st
  *       from the architect's point of view "no prior round" and "prior round's data didn't
  *       survive" are indistinguishable, and both must degrade, never throw.
  *    2. The prior round closed with zero merges -> a DISTINCT "merged nothing" placeholder.
- *    3. One or more merges -> a rendered, deterministically-truncated (capDigest) list. */
+ *    3. One or more merges -> a rendered, deterministically-truncated list.
+ *
+ *  Gate② P2 (PR #166): capDigest is applied at the RETURN BOUNDARY, uniformly to every branch —
+ *  the placeholders and the zero-merges sentence too, not just the merges render — so the
+ *  "bounded assembly" acceptance criterion holds on EVERY path. A cap configured below a
+ *  placeholder's own length is a degenerate-but-legal user choice; it yields the usual
+ *  deterministic marked-cut text rather than an unbounded exception to the configured bound. */
 export function renderLastMergedFromArtifact(state: State, roundId: number, maxChars: number): string {
+  return capDigest(renderLastMergedUncapped(state, roundId), maxChars);
+}
+
+function renderLastMergedUncapped(state: State, roundId: number): string {
   if (roundId <= 1) return NO_PRIOR_ROUND_YET;
   const prevRoundId = roundId - 1;
   let row: { schemaVersion: number; json: string } | undefined;
@@ -107,13 +117,12 @@ export function renderLastMergedFromArtifact(state: State, roundId: number, maxC
   if (artifact.merges.length === 0) {
     return `Round ${prevRoundId} closed with zero merged PRs — nothing to post-review from the prior round.`;
   }
-  const lines = [
+  return [
     `Merged outcomes from round ${prevRoundId} (issue/PR numbers and the dispatched worker only — ` +
     `titles and files-touched are not persisted in the round ledger, so they are not rendered here; ` +
     `this text is engine-assembled from the durable round artifact, never a live forge read):`,
     ...artifact.merges.map((m) => `- issue #${m.issue} merged via PR #${m.pr} (worker: ${m.worker})`),
   ].join("\n");
-  return capDigest(lines, maxChars);
 }
 
 /** The shipped default peripherals map: every phase (aligning/architecting/plan_review/
