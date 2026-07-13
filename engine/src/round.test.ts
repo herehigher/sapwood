@@ -484,6 +484,48 @@ test("runRounds stop.afterIssuesMerged: a round already open finishes harvest+re
   deps.state.close();
 });
 
+test("runRounds stop.afterSpendUsd: a round already open finishes harvest+retro before the loop refuses to open a NEW round", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  // done, no PR — recordSpend fires regardless of merge-gate activity, so no ScriptedMergeGate.
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 25 };
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
+    stop: { afterSpendUsd: 20 },
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
+  assert.deepEqual(log.map((l) => l.phase).slice(-2), ["harvesting", "retro"]);
+  assert.equal(result.rounds, 1);
+  deps.state.close();
+});
+
+test("runRounds stop.afterSpendUsd: anchored to THIS run's start — spend already ledgered by a PRIOR run is never inherited", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = []; // isolates the anchor from any dispatch activity
+  const state = new State(":memory:");
+  state.recordSpend("prior-run-worker", 999, 50, new Date().toISOString(), []); // a prior run's spend
+  const deps = baseDeps({ forge, state, sleep, stop: { afterSpendUsd: 10 } });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  // Never fires — this run's own ledgered spend (from its own startup anchor forward) is $0;
+  // the pre-existing $50 belongs to an earlier run/process. boundedStopOnPhase's signal is what
+  // actually ends the loop here.
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.stopCondition, undefined);
+  deps.state.close();
+});
+
 test("runRounds stop.onMilestoneComplete: checked at round boundaries (never mid-round), preempts opening a NEW round", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();

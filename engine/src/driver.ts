@@ -32,9 +32,19 @@ export interface StopConfig {
   afterIssuesMerged?: number;
   afterPRsOpened?: number;
   onMilestoneComplete?: string;
+  /** #154: the per-run spend budget — see config.ts's Stop.afterSpendUsd for the full
+   *  rationale (distinct from roundBudgetUsd/dailyBudgetUsd). Compared against a RUN-scoped
+   *  ledger sum (State.spentUsdAfterId from an anchor captured once at engine startup,
+   *  State.maxSpendLedgerId) — never engineSessionStart's wall-clock accounting window, which
+   *  deliberately resets on a quiet gap; a run's spend total must never reset mid-run. */
+  afterSpendUsd?: number;
 }
 
-export type StopConditionName = "afterIssuesMerged" | "afterPRsOpened" | "onMilestoneComplete";
+export type StopConditionName =
+  | "afterIssuesMerged"
+  | "afterPRsOpened"
+  | "onMilestoneComplete"
+  | "afterSpendUsd";
 
 /** Which configured stop condition fired first (OR semantics: first hit wins, never
  *  overwritten once wind-down starts). `threshold` echoes the configured value (the N, or the
@@ -201,6 +211,12 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
   // result (a thrown tick produced no TickResult to count from).
   let issuesMerged = 0;
   let prsOpened = 0;
+  // #154: this run's spend-ledger anchor — captured ONCE, here, at engine startup (an in-memory
+  // constant for the process lifetime, deliberately: a restart calls runDriver fresh and gets a
+  // fresh anchor, so afterSpendUsd starts back at $0 — the acceptance criterion, not a bug).
+  // spentUsdAfterId sums spend_ledger rows with id > this cursor, i.e. exactly this run's own
+  // ledgered spend — never engineSessionStart's wall-clock window, which resets on a quiet gap.
+  const runSpendAnchorId = deps.state.maxSpendLedgerId();
   // Set once, the first time any configured stop condition is satisfied (OR semantics — first
   // hit wins, never overwritten by a later condition). From that tick onward every subsequent
   // tick() call is forced dispatch-paused (see the merged tickDeps below): no new lane is
@@ -246,6 +262,16 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
           stopConditionHit = {
             name: "afterPRsOpened", threshold: stop.afterPRsOpened, detail: `opened ${prsOpened}`,
           };
+        } else if (stop?.afterSpendUsd !== undefined) {
+          // #154: a live query, not an accumulated counter — spend is only known at worker
+          // completion (recordSpend), and State is the durable source of truth for it already
+          // (same "read live durable state" style as round.ts's spentSoFar/dailySpendUsd).
+          const runSpendUsd = deps.state.spentUsdAfterId(runSpendAnchorId);
+          if (runSpendUsd >= stop.afterSpendUsd) {
+            stopConditionHit = {
+              name: "afterSpendUsd", threshold: stop.afterSpendUsd, detail: `spent $${runSpendUsd.toFixed(2)}`,
+            };
+          }
         } else if (stop?.onMilestoneComplete && !signalled) {
           // Evaluated at tick boundaries only (never mid-tick), per #76's scope — one extra
           // forge read per tick while configured, same cost class as the DISPATCH phase's own

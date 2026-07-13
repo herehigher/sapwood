@@ -378,6 +378,19 @@ test("recordSpend: different worker names never share a baseline (each lane's de
   s.close();
 });
 
+test("#154 maxSpendLedgerId: 0 on an empty ledger; a captured cursor excludes everything ledgered before it and includes everything after", () => {
+  const s = mem();
+  const day = "2026-07-06T12:00:00.000Z";
+  assert.equal(s.maxSpendLedgerId(), 0); // fresh ledger, nothing recorded yet
+  s.recordSpend("lane-a", 1, 10, day); // "prior run" spend
+  s.recordSpend("lane-b", 2, 4, day);
+  const anchor = s.maxSpendLedgerId(); // captured "at engine startup" for a NEW run
+  assert.equal(s.spentUsdAfterId(anchor), 0); // nothing new yet — the prior spend is excluded
+  s.recordSpend("lane-c", 3, 6, day); // "this run's" own spend
+  assert.equal(s.spentUsdAfterId(anchor), 6); // only the post-anchor row counts
+  s.close();
+});
+
 test("resume cost-delta survives an engine restart between the handoff and the resume (DB-backed baseline)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
   try {

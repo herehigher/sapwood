@@ -490,3 +490,87 @@ test("runDriver stop conditions: OR semantics — whichever fires FIRST wins and
   assert.equal(deps.state.activeWorkers().length, 0);
   deps.state.close();
 });
+
+// ── #154: stop.afterSpendUsd — per-run spend budget ─────────────────────────────────────────
+
+test("runDriver stop.afterSpendUsd: hitting the ledgered run-spend threshold winds the run down (no kill) then exits, naming the condition", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  // done, no PR — reclaimTerminalLane still records the terminal costUsd into spend_ledger
+  // regardless of merge-gate activity, so this test needs no ScriptedMergeGate at all.
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 25 };
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
+    stop: { afterSpendUsd: 20 },
+  });
+  deps.onTick = (r) => {
+    for (const d of r.dispatched) if (d.kind === "dispatched") forge.ready = [];
+  };
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
+  assert.equal(deps.state.activeWorkers().length, 0); // wound down to a clean, idle stop, never killed
+  deps.state.close();
+});
+
+test("runDriver stop.afterSpendUsd: anchored to THIS run's start — spend already ledgered by a PRIOR run is never inherited (a restart starts back at $0)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = []; // isolates the anchor from any dispatch activity
+  const state = new State(":memory:");
+  // A prior run's already-banked spend, well past the $10 threshold this run configures.
+  state.recordSpend("prior-run-worker", 999, 50, new Date().toISOString(), []);
+  const deps = baseDeps({ forge, state, sleep, stop: { afterSpendUsd: 10 } });
+  const stopSafety = boundedStop(deps, 5);
+  const result = await runDriver(deps);
+  stopSafety();
+  // Never fired: this run's OWN ledgered spend (summed from its own startup anchor forward) is
+  // $0 — the pre-existing $50 belongs to an earlier run/process and must not carry over.
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.stopCondition, undefined);
+  deps.state.close();
+});
+
+test("runDriver stop.afterSpendUsd: a quiet gap that resets the wall-clock SESSION mid-run never resets the run-spend total (standby/quiet-gap semantics)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [];
+  let nowMs = new Date("2026-07-13T00:00:00Z").getTime();
+  const now = () => new Date(nowMs);
+  const deps = baseDeps({ forge, sleep, now, tickIntervalSec: 5, stop: { afterSpendUsd: 10 } });
+  // Spy on the underlying session-start bookkeeping to PROVE a reset actually happened, rather
+  // than just asserting the spend total's own behavior.
+  const sessionStarts: string[] = [];
+  const realSessionStart = deps.state.engineSessionStart.bind(deps.state);
+  deps.state.engineSessionStart = (n: Date, gap: number) => {
+    const r = realSessionStart(n, gap);
+    sessionStarts.push(r.toISOString());
+    return r;
+  };
+  let tickCount = 0;
+  deps.onTick = () => {
+    tickCount++;
+    if (tickCount === 1) {
+      deps.state.recordSpend("w1", 1, 6, now().toISOString(), []); // $6 — below the $10 threshold
+      // Jump 20 minutes — past engineSessionGapSec (max(900s, 2*5s) = 900s) — so the NEXT tick's
+      // engineSessionStart call resets the wall-clock session.
+      nowMs += 20 * 60 * 1000;
+    } else if (tickCount === 2) {
+      deps.state.recordSpend("w2", 2, 5, now().toISOString(), []); // +$5 = $11 total, crosses $10
+    }
+  };
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps);
+  stopSafety();
+  assert.notEqual(sessionStarts[0], sessionStarts[sessionStarts.length - 1], "the wall-clock session DID reset mid-run");
+  assert.equal(result.stoppedBy, "stop-condition");
+  // $6 (tick 1) + $5 (tick 2) = $11, summed straight through the session reset — the run-spend
+  // anchor is a separate, session-independent id-cursor.
+  assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 10, detail: "spent $11.00" });
+  deps.state.close();
+});

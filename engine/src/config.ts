@@ -96,19 +96,29 @@ const Cost = z.object({
   // .finite() rejects YAML/JSON overflow (1e999 -> Infinity), which would silently
   // disable the cap (Infinity > any spend). (Codex P2, PR #22.)
   roundBudgetUsd: z.number().finite().positive().default(30),
-  // Cumulative daily USD cap (#14): summed from completed workers' stream-json
-  // total_cost_usd, persisted in State (engine.spend_ledger) so it survives an engine
-  // restart mid-day. Breaching it is an engine-wide dispatch freeze + drain, not just a
-  // per-tick skip (see conductor.ts evaluateCeiling / tick's CEILING step). Enforced
-  // POST-HOC at tick boundaries — cost is only known at worker completion, so bounded
-  // overshoot ≈ lanes.roundDispatchCap × per-worker spend is possible before the freeze.
+  // A BURN-RATE cap (#14, $/calendar-day), not a total: summed from completed workers'
+  // stream-json total_cost_usd (each a priced snapshot that settles on that worker's final
+  // bill, not an estimate) by UTC calendar day (State.dailySpendUsd's ts-prefix match) and
+  // persisted in State (engine.spend_ledger), so it survives an engine restart mid-day AND
+  // renews at the next UTC midnight regardless of restarts — a common misreading (2026-07-13
+  // dashboard/cost discussion, #154) is treating this as a run total; it is not (see
+  // stop.afterSpendUsd for the actual per-run cap, and docs/configuration.md's knob table).
+  // Breaching it is an engine-wide dispatch freeze + drain, not just a per-tick skip (see
+  // conductor.ts evaluateCeiling / tick's CEILING step). Enforced POST-HOC at tick
+  // boundaries — cost is only known at worker completion, so bounded overshoot ≈
+  // lanes.roundDispatchCap × per-worker spend is possible before the freeze.
   dailyBudgetUsd: z.number().finite().positive().default(100),
-  // Aggregate wall-clock ceiling (#14) over the ACTIVE engine session
-  // (State.engineSessionStart: continuous ticking; a stop/crash/pause longer than the stale
-  // gap resets it, so a rapid crash-loop can't evade the cap but a data dir is never
-  // permanently breached). Independent of worker.timeoutSec (which bounds a single worker);
-  // this bounds the engine's total continuous running time as a runaway-time safety net.
-  // Conservative default: 4h.
+  // A CONTINUOUS-ACTIVITY window (#14), not total run duration — a common misreading (2026-07-13
+  // dashboard/cost discussion, #154). It accumulates only while ticks are actually flowing
+  // (State.engineSessionStart: continuous ticking) and RESETS on any quiet gap longer than
+  // engineSessionGapSec (max(900s, 2x tickIntervalSec)) — a deep standby wait or a long
+  // peripheral stretch resets it, so an idle-heavy multi-day run never trips this. What it
+  // actually detects: the dispatch/drain machinery has churned this many seconds without a
+  // single quiet quarter-hour — a runaway/batch-scoping smell, not a long-run limiter (a
+  // rapid crash-loop still can't evade it, since each tick refreshes the session rather than
+  // resetting it). Independent of worker.timeoutSec (which bounds a single worker) and of
+  // stop.afterSpendUsd/run duration (there is no run-duration cap at all — see docs/
+  // configuration.md's knob table). Conservative default: 4h.
   maxWallClockSec: z.number().int().positive().default(14400),
   // Bounded grace window (#14) after a ceiling breach (daily budget / wall-clock / kill
   // switch) is first detected, during which running workers are asked to hand off
@@ -374,6 +384,18 @@ const Stop = z.object({
   // issues remain in it (forge.countOpenIssuesInMilestone), checked at tick boundaries; a failed
   // check (gh outage) is a recorded tick-error, never a fired condition, never a crash.
   onMilestoneComplete: z.string().min(1).optional(),
+  // #154: the per-RUN spend budget — the missing money unit (2026-07-13 dashboard/cost
+  // discussion, #17). Distinct from every other cost knob: roundBudgetUsd is per-round/soft,
+  // dailyBudgetUsd is a cross-restart calendar-day RATE cap (deliberately never a per-run hard
+  // cap — that would reset on every restart and let a crash-loop launder unbounded spend), and
+  // the other stop.* conditions above bound WORK, not money. Summed from THIS run's own
+  // spend_ledger rows only (State.maxSpendLedgerId's id-cursor, captured once at engine
+  // startup — see driver.ts's runDriver / round.ts's runRounds) — a restarted engine starts
+  // this sum back at $0, same process-lifetime scope as afterIssuesMerged/afterPRsOpened above,
+  // never inheriting a prior run's total (unlike dailyBudgetUsd). Same FLOOR semantics as the
+  // count-based conditions: evaluated at tick boundaries, so up to lanes.roundDispatchCap extra
+  // lanes may complete (and add to the ledgered total) during the wind-down.
+  afterSpendUsd: z.number().finite().positive().optional(),
 }).strict();
 
 // #125: standby — the round loop's pre-round probe + exponential backoff. #109's idle throttle

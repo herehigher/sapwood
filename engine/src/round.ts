@@ -224,6 +224,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   let roundsClosed = 0;
   let issuesMerged = 0;
   let prsOpened = 0;
+  // #154: this run's spend-ledger anchor — same in-memory-constant-for-the-process-lifetime
+  // contract as driver.ts's runDriver (see its own comment): captured ONCE, here, at engine
+  // startup, never re-captured per round. A restart calls runRounds fresh and gets a fresh
+  // anchor (afterSpendUsd starts back at $0), unlike cfg.cost.dailyBudgetUsd's cross-restart sum.
+  const runSpendAnchorId = deps.state.maxSpendLedgerId();
   let finalStopHit: StopConditionHit | undefined;
   // #125 standby: consecutive empty probes since the last time a round actually opened — the
   // exponential-backoff exponent. In-memory only (never persisted): a process restart is a fresh
@@ -257,6 +262,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           finalStopHit = { name: "afterIssuesMerged", threshold: stop.afterIssuesMerged, detail: `merged ${issuesMerged}` };
         } else if (stop?.afterPRsOpened !== undefined && prsOpened >= stop.afterPRsOpened) {
           finalStopHit = { name: "afterPRsOpened", threshold: stop.afterPRsOpened, detail: `opened ${prsOpened}` };
+        } else if (stop?.afterSpendUsd !== undefined) {
+          // #154: same live-query style as driver.ts's runDriver — spend is only known at
+          // worker completion, so this reads durable state fresh rather than accumulating a
+          // counter from tick results.
+          const runSpendUsd = deps.state.spentUsdAfterId(runSpendAnchorId);
+          if (runSpendUsd >= stop.afterSpendUsd) {
+            finalStopHit = { name: "afterSpendUsd", threshold: stop.afterSpendUsd, detail: `spent $${runSpendUsd.toFixed(2)}` };
+          }
         }
       }
       return result;
