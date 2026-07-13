@@ -166,6 +166,20 @@ test("assembleRoundArtifact: align-summary populates the align section verbatim;
   assert.equal(withoutAlign.align, null);
 });
 
+test("assembleRoundArtifact: two align-summary events (crash-rerun) MERGE — created unions by issue, triage outcome last-wins (Codex round-6 P2, PR #152)", () => {
+  const artifact = assembleRoundArtifact(
+    [
+      { kind: "align-summary", payload: { round_id: 1, created: [{ issue: 10, title: "a", hasPlan: true }], triaged: [{ issue: 9, drafted: false }] } },
+      { kind: "align-summary", payload: { round_id: 1, created: [{ issue: 11, title: "b", hasPlan: false }], triaged: [{ issue: 9, drafted: true }] } },
+    ],
+    meta, 0, 30,
+  );
+  assert.deepEqual(artifact.align, {
+    created: [{ issue: 10, title: "a", hasPlan: true }, { issue: 11, title: "b", hasPlan: false }],
+    triaged: [{ issue: 9, drafted: true }],
+  });
+});
+
 test("assembleRoundArtifact: an unrecognized event kind is ignored, never throws (forward-compat)", () => {
   const artifact = assembleRoundArtifact([{ kind: "some-future-event", payload: { whatever: true } }], meta, 0, 30);
   const parsed = RoundArtifactSchema.parse(artifact);

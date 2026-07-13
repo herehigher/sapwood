@@ -114,6 +114,30 @@ interface LedgerEvent {
   payload: unknown;
 }
 
+export type AlignSection = NonNullable<RoundArtifact["align"]>;
+
+/** Folds one align-summary payload into an accumulated align section (Codex round-6 P2, PR
+ *  #152): created is a by-issue UNION (a crash-rerun's second summary must never erase the
+ *  first run's already-landed creations); a triage outcome is by-issue LAST-WINS (the rerun's
+ *  fresher attempt supersedes). Shared by the artifact assembler and round-defaults.ts's
+ *  architect-context render, so the two can never disagree on merge semantics. */
+export function mergeAlignSummary(acc: AlignSection | null, payload: unknown): AlignSection {
+  const p = payload as {
+    created?: Array<{ issue: number; title: string; hasPlan: boolean }>;
+    triaged?: Array<{ issue: number; drafted: boolean }>;
+  };
+  const merged: AlignSection = acc ?? { created: [], triaged: [] };
+  for (const c of p.created ?? []) {
+    if (!merged.created.some((x) => x.issue === c.issue)) merged.created.push(c);
+  }
+  for (const t of p.triaged ?? []) {
+    const i = merged.triaged.findIndex((x) => x.issue === t.issue);
+    if (i >= 0) merged.triaged[i] = t;
+    else merged.triaged.push(t);
+  }
+  return merged;
+}
+
 interface RoundMeta {
   roundId: number;
   startedAt: string;
@@ -222,10 +246,11 @@ export function assembleRoundArtifact(
         retroOpened = null;
         break;
       case "align-summary":
-        align = {
-          created: (p.created as Array<{ issue: number; title: string; hasPlan: boolean }>) ?? [],
-          triaged: (p.triaged as Array<{ issue: number; drafted: boolean }>) ?? [],
-        };
+        // MERGED across events, never replaced (Codex round-6 P2): a crash between the
+        // summary append and the phase-marker persist reruns aligning, whose SECOND summary
+        // records only the rerun's work — the first run's already-landed creations must not
+        // vanish from the source of truth. Union by issue; triage outcome: last wins.
+        align = mergeAlignSummary(align, p);
         break;
       case "po-degraded":
       case "triage-degraded":

@@ -140,7 +140,18 @@ test("renderAlignedGoalsFromSummary (#123): renders the align-summary event's pe
   const text = renderAlignedGoalsFromSummary(state, round.round_id)!;
   assert.ok(text.includes("created #12 — Split the parser"));
   assert.ok(text.includes("triaged #9: still planless"));
-  // An empty summary renders the explicit "decomposed nothing" line, never null.
+  // A second (crash-rerun) summary MERGES — an empty one never erases the first's content
+  // (Codex round-6 P2 on PR #152), and a fresher triage outcome for the same issue wins.
+  state.appendEvent("align-summary", { round_id: round.round_id, created: [], triaged: [{ issue: 9, drafted: true }] });
+  const merged = renderAlignedGoalsFromSummary(state, round.round_id)!;
+  assert.ok(merged.includes("created #12 — Split the parser"), "first summary's creation survives the rerun");
+  assert.ok(merged.includes("triaged #9: plan drafted"), "the rerun's fresher triage outcome wins");
+  state.close();
+});
+
+test("renderAlignedGoalsFromSummary (#123): an all-empty summary renders the explicit 'decomposed nothing' line, never null", () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("align-summary", { round_id: round.round_id, created: [], triaged: [] });
   assert.ok(renderAlignedGoalsFromSummary(state, round.round_id)!.includes("decomposed nothing"));
   state.close();
