@@ -636,6 +636,37 @@ test("round: a typo'd key is rejected, not silently dropped (.strict())", () => 
   );
 });
 
+// ── #126: round.directiveFile / round.directiveMaxChars — round directive file ──────────────
+
+test("round.directiveFile: defaults to data/DIRECTIVE.md", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.round.directiveFile, "data/DIRECTIVE.md");
+});
+
+test("round.directiveFile: overridable, and NOT resolved relative to the config file (unlike roles.*.promptFile/planMdPath) — same cwd-relative convention as the engine's own data/sapwood.sqlite default", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveFile: custom/STEER.md }");
+  assert.equal(cfg.round.directiveFile, "custom/STEER.md");
+});
+
+test("round.directiveFile: an empty string is rejected (always has a value, same shape as roles.architect.planMdPath)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveFile: '' }"),
+    /directiveFile/,
+  );
+});
+
+test("round.directiveMaxChars: defaults to 20000, a positive int", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.round.directiveMaxChars, 20_000);
+});
+
+test("round.directiveMaxChars: zero/negative rejected (same positive-int contract as roles.harvest.artifactMaxChars)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveMaxChars: 0 }"),
+    /directiveMaxChars/,
+  );
+});
+
 // ── #104: roles.architect.planMdPath (architecture-doc path, no longer hardcoded to cwd) ───
 
 test("roles.architect.planMdPath: defaults to docs/PLAN.md", () => {

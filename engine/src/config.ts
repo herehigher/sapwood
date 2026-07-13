@@ -401,6 +401,19 @@ const Standby = z.object({
 const Round = z.object({
   milestone: z.string().min(1).optional(),
   standby: Standby.default({}),
+  // #126: round directive file — human steering (why/what) injected into the aligning +
+  // architecting prompts at round open (directive.ts's resolveRoundDirective). Resolved like
+  // other DATA paths in this repo — relative to the process cwd, the same convention
+  // state.ts's own dbPath default ("data/sapwood.sqlite") uses — NOT config-file-relative like
+  // roles.*.promptFile/planMdPath, since this file lives beside the engine's own runtime data
+  // (and gets archived to a sibling `directives/` dir there), not beside a role's shipped
+  // prompt. Always has a value (never "unset"), same shape as roles.architect.planMdPath.
+  directiveFile: z.string().min(1).default("data/DIRECTIVE.md"),
+  // Deterministic-truncation cap (never a silent drop — the cut is marked in the text itself,
+  // directive.ts reuses retro-digest.ts's capDigest) on the directive text substituted into the
+  // prompts. Same user-tunable-in-config, marked-cut contract as roles.harvest.artifactMaxChars
+  // / roles.retro.digestMaxChars.
+  directiveMaxChars: z.number().int().positive().default(20_000),
 }).strict();
 
 const Recovery = z.object({

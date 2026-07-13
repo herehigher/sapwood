@@ -45,6 +45,7 @@ import type { SapwoodConfig } from "./config.js";
 import { runSessionWithRetry, type RoleRunner, type RoleSessionResult } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 import { parseStructuredBlock } from "./structured-output.js";
+import { resolveRoundDirective } from "./directive.js";
 
 export interface ArchitectDeps {
   forge: IForge;
@@ -306,6 +307,13 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
   return {
     async run({ roundId, marker }) {
       if (marker != null) return { marker }; // already externalized this round — no duplicate work
+      // #126: this round's directive (human steering, why/what) — resolveRoundDirective is
+      // idempotent and round-scoped (directive.ts's module doc), so calling it here is safe
+      // regardless of whether aligning already consumed it this round (the common case: this
+      // call just reads back the event aligning recorded) or aligning is disabled (#127
+      // roles.po.enabled: false), in which case THIS call becomes the round's de facto first
+      // consumer — never a duplicate application, never a re-read of an already-archived file.
+      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId);
       // The candidate pool for this phase is the same "still awaiting gate⓪" set plan_review
       // consumes next in the sequence (aligning -> architecting -> plan_review -> executing):
       // Ready-lane, OPEN, not yet settled needs-human/blocked/verifyNa/planApproved. Sorted by
@@ -339,6 +347,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "plan.architectureChapter": architectureChapter,
         "candidates.summary": candidates.map(formatCandidate).join("\n\n---\n\n"),
         "labels.blocked": deps.cfg.labels.blocked,
+        "round.directive": directive,
       });
 
       const role = deps.cfg.roles.architect;

@@ -28,6 +28,17 @@ this prompt already.
   round-scoped note to live). You don't choose this yourself and don't need to name it in your
   output.
 
+## Human steering for this round
+
+A human may drop a short round directive (why/what direction) before or during this round.
+Weigh it alongside the goal alignment and locked architecture below — it can shift emphasis or
+priority, but it never overrides the locked architecture decisions, and it is never itself a
+reason to flag a contradiction that wouldn't otherwise exist.
+
+<round-directive>
+{{round.directive}}
+</round-directive>
+
 ## Goal alignment (from the PO/goal-alignment peripheral, when available)
 
 {{round.alignedGoals}}

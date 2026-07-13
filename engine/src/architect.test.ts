@@ -13,7 +13,7 @@
 // validates it (including the candidate-set check), and performs every forge write itself.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -404,6 +404,77 @@ test("defaultArchitectPromptPath: resolves to a real shipped file with the expec
   assert.ok(template.includes("{{plan.architectureChapter}}"));
   assert.ok(template.includes("{{candidates.summary}}"));
   assert.ok(template.includes("{{labels.blocked}}"));
+  assert.ok(template.includes("{{round.directive}}"), "#126: the shipped architect.md must reference the round directive var");
+});
+
+// ── #126: round directive file — human steering injected at round open ─────────────────────
+
+test("createArchitectStub #126: no directive file -> the rendered prompt carries the explicit 'none' placeholder, no directive-applied event", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 7, title: "t", labels: [] }];
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-directive-"));
+  try {
+    const cfg = mkCfg({ round: { directiveFile: join(dir, "DIRECTIVE.md") } });
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const state = new State(":memory:");
+    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    await createArchitectStub(deps).run({ roundId: 3, phase: "architecting", marker: null });
+    assert.ok(runner.calls[0]!.prompt.includes("No round directive was provided for this round."));
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 0);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createArchitectStub #126: a directive file is substituted into the architect prompt, recorded as one directive-applied event, and archived out of the live path", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 7, title: "t", labels: [] }];
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-directive-"));
+  try {
+    const directiveFile = join(dir, "DIRECTIVE.md");
+    writeFileSync(directiveFile, "Weigh the payments-module candidates first.", "utf8");
+    const cfg = mkCfg({ round: { directiveFile } });
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const state = new State(":memory:");
+    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    await createArchitectStub(deps).run({ roundId: 6, phase: "architecting", marker: null });
+    assert.ok(runner.calls[0]!.prompt.includes("Weigh the payments-module candidates first."));
+    const events = state.eventsAfterId(0, ["directive-applied"]);
+    assert.equal(events.length, 1);
+    const payload = events[0]!.payload as { round_id: number; content: string };
+    assert.equal(payload.round_id, 6);
+    assert.equal(payload.content, "Weigh the payments-module candidates first.");
+    assert.equal(existsSync(directiveFile), false, "consumed: archived out of the live path");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createArchitectStub #126: when aligning already consumed this round's directive, the architect reads back the SAME event — no re-read of the (already-archived, gone) file, no duplicate event", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 7, title: "t", labels: [] }];
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-directive-"));
+  try {
+    const directiveFile = join(dir, "DIRECTIVE.md");
+    const cfg = mkCfg({ round: { directiveFile } });
+    const state = new State(":memory:");
+    // Simulate aligning's own consumption of this round's directive (align.ts calls the SAME
+    // resolveRoundDirective — this test only needs the resulting durable event + archived file,
+    // not align.ts itself).
+    const payload = { round_id: 10, path: directiveFile, content: "steer toward payments", sha256: "a".repeat(64) };
+    state.appendEvent("directive-applied", payload);
+
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    await createArchitectStub(deps).run({ roundId: 10, phase: "architecting", marker: null });
+    assert.ok(runner.calls[0]!.prompt.includes("steer toward payments"));
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1, "no duplicate event");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("loadRolePromptTemplate: a configured-but-missing architect promptFile throws, naming the path (fail-fast, never silent)", () => {

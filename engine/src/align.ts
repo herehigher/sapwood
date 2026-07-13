@@ -38,6 +38,7 @@ import type { RoleRunner, RoleSessionResult } from "./peripheral.js";
 import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "./peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "./plan-review.js";
 import { parseStructuredBlock } from "./structured-output.js";
+import { resolveRoundDirective } from "./directive.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
  *  ledger's persisted marker for this phase, also embedded in every comment this phase posts
@@ -245,6 +246,14 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const mark = alignMarker(roundId);
       const now = deps.now ?? ((): Date => new Date());
 
+      // #126: this round's directive (human steering, why/what) — resolved ONCE per run() call
+      // and threaded into BOTH prompt renders below (align + every triage session). aligning is
+      // the round's designated "round open" consumer (module doc, directive.ts): event-sourced
+      // consume-once, so a crash-rerun of this exact phase call (marker still null) replays the
+      // SAME recorded content rather than re-reading a possibly-edited file, and a stale
+      // directive can never silently re-apply to a later round once archived.
+      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId);
+
       // ── Alignment/decomposition pass: ONE session, dispatched even with an unscoped round
       // (round.milestone unset) — decomposition still has docs/PLAN.md to work from alone.
       // #104: ported to peripheral.ts's shared runSessionWithRetry (outcome-check -> retry-once
@@ -259,6 +268,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         // #104: deps.planMdPath is a TEST override only now — a real caller omits it and gets
         // cfg.roles.architect.planMdPath (the same key architect.ts's own PLAN.md read honors).
         "plan.md": loadPlanMd(deps.planMdPath ?? deps.cfg.roles.architect.planMdPath),
+        "round.directive": directive,
       });
       const alignResult = await runSessionWithRetry({
         runner: deps.runner,
@@ -322,6 +332,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           "po.mode": "triage",
           "round.milestone": deps.cfg.round.milestone ?? "",
           "plan.md": "",
+          "round.directive": directive,
         });
         const triageResult = await runSessionWithRetry({
           runner: deps.runner,
