@@ -99,9 +99,17 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   const alignStub = createAligningStub(shared);
   const architectStub = createArchitectStub(architectDeps);
 
-  return {
-    aligning: alignStub,
-    architecting: {
+  const peripherals: Partial<Record<PeripheralPhase, PeripheralStub>> = {};
+
+  // #127: roles.<role>.enabled toggles — a disabled role's stub is simply OMITTED from the
+  // returned map. round.ts's runPeripheral already defaults any unset phase to
+  // noopPeripheralStub (`peripherals[phase] ?? noopPeripheralStub`), so a disabled phase
+  // no-ops with its marker set exactly like the pre-#127 skeleton did — no round.ts change.
+  // planDrafter has no toggle of its own: it only ever runs from inside the plan_review
+  // stub, so roles.planReviewer.enabled is gate⓪'s ONE unit switch.
+  if (deps.cfg.roles.po.enabled) peripherals.aligning = alignStub;
+  if (deps.cfg.roles.architect.enabled) {
+    peripherals.architecting = {
       async run(ctx) {
         // #123 acceptance criterion 3: thread the aligning phase's ACTUAL structured
         // decomposition detail (its `align-summary` state event — created issues + triage
@@ -119,9 +127,30 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
           `actual decomposition (no structured summary was recorded this round).`;
         return architectStub.run(ctx);
       },
-    },
-    plan_review: createPlanReviewStub(shared),
-    harvesting: createHarvestStub(shared),
-    retro: createRetroStub(shared),
-  };
+    };
+  }
+  if (deps.cfg.roles.planReviewer.enabled) peripherals.plan_review = createPlanReviewStub(shared);
+  if (deps.cfg.roles.harvest.enabled) peripherals.harvesting = createHarvestStub(shared);
+  if (deps.cfg.roles.retro.enabled) peripherals.retro = createRetroStub(shared);
+
+  // #127 acceptance criterion: disabled state logged ONCE here (this factory runs once at
+  // startup, wherever a real caller builds its peripherals map) — never per round/tick.
+  const disabledPhases = (
+    [
+      ["po", "aligning"],
+      ["architect", "architecting"],
+      ["planReviewer", "plan_review"],
+      ["harvest", "harvesting"],
+      ["retro", "retro"],
+    ] as const
+  )
+    .filter(([role]) => !deps.cfg.roles[role].enabled)
+    .map(([, phase]) => phase);
+  if (disabledPhases.length > 0) {
+    console.log(
+      `sapwood: peripheral role(s) disabled by config — these phases will no-op every round: ${disabledPhases.join(", ")}`,
+    );
+  }
+
+  return peripherals;
 }

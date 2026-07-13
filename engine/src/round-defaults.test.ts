@@ -259,6 +259,82 @@ test("runRounds integration: wired with createDefaultPeripherals's output, a def
   state.close();
 });
 
+test("createDefaultPeripherals (#127): roles.<role>.enabled=false omits that phase's stub, leaving the others wired", () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { retro: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  assert.equal(peripherals.retro, undefined, "the disabled phase's stub is omitted entirely");
+  for (const phase of ["aligning", "architecting", "plan_review", "harvesting"] as const) {
+    assert.ok(peripherals[phase], `${phase} stays wired when only retro is disabled`);
+    assert.notEqual(peripherals[phase], noopPeripheralStub);
+  }
+  state.close();
+});
+
+test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits every phase — an all-noop map, same shape as an empty peripherals override", () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg({
+    roles: {
+      po: { enabled: false },
+      architect: { enabled: false },
+      planReviewer: { enabled: false },
+      harvest: { enabled: false },
+      retro: { enabled: false },
+    },
+  });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  for (const phase of ["aligning", "architecting", "plan_review", "harvesting", "retro"] as const) {
+    assert.equal(peripherals[phase], undefined, `${phase} omitted when disabled`);
+  }
+  state.close();
+});
+
+test("runRounds integration (#127): a disabled role spawns no session for its phase, and the round still closes — the phase no-ops via round.ts's existing noopPeripheralStub default, no round.ts change", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 5, title: "candidate", labels: [] }];
+  const cfg = mkCfg({ roles: { retro: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+
+  const deps: RoundDeps = {
+    forge, state, supervisor: new MinimalSupervisor(), cfg, tickIntervalSec: 1,
+    sleep: async () => {}, peripherals,
+  };
+  let stop = () => {};
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.onRoundPhase = (_roundId, phase) => {
+    // Seed a needs-human escalation right after 'aligning' so harvest actually has something
+    // to brief (otherwise it appends only its summary event and dispatches no session — same
+    // pattern as this file's other runRounds integration test).
+    if (phase === "aligning") {
+      state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 7, pr: 1, reason: "x" });
+    }
+    if (phase === "harvesting") stop(); // stop before the disabled retro phase, same
+    // graceful-mid-round pattern as this file's other integration test — the in-flight round
+    // still finishes every remaining phase (including the disabled one) before actually
+    // stopping; only the NEXT round is withheld.
+  };
+
+  const result = await runRounds(deps);
+  assert.equal(result.rounds, 1);
+  const round = state.getRound(1)!;
+  assert.equal(round.phase, "closed", "the round still closes despite the disabled retro peripheral");
+  assert.ok(!runner.calls.some((c) => c.roleId === "retro"), "no retro session was spawned");
+  // Every OTHER phase still ran a real session — proof the disabled toggle is scoped to retro
+  // alone, not a global kill of the peripheral machinery.
+  const roleIdsDispatched = new Set(runner.calls.map((c) => c.roleId));
+  assert.ok(roleIdsDispatched.has("po-align"));
+  assert.ok(roleIdsDispatched.has("architect"));
+  assert.ok(roleIdsDispatched.has("plan-reviewer"));
+  assert.ok(roleIdsDispatched.has("harvest"));
+  state.close();
+});
+
 test("runRounds integration: KILL_SWITCH blocks every real peripheral — none of createDefaultPeripherals's stubs ever runs a session", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-round-defaults-int-"));
   try {

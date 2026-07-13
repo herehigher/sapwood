@@ -235,6 +235,14 @@ local git (branch/checkout/add/commit/push/diff/status/log, for its own worktree
 | `retro.promptFile` | unset | Override the retro/self-evolution peripheral's prompt (same `#74` pattern). Unset uses the engine's shipped `prompts/retro.md`. |
 | `retro.everyNRounds` | `1` | Retro cadence (#104): `1` runs every round; `N > 1` skips every round whose id isn't a multiple of `N` (the phase still closes, marker still set — never wedges the round). |
 | `retro.digestMaxChars` | `60000` | Hard cap, in characters, on the engine-built round-scoped read digest (#111 PR-A) substituted into retro's prompt as `{{round.digest}}` — PR diffs + review signals for every PR the round touched, comments/labels for every escalated issue, and the round's commit history. Oversize digests are truncated **deterministically** (same prefix every time for the same content+cap) and the cut is marked in the digest text itself, never silently dropped. |
+| `po.enabled` | `true` | #127: switch the `aligning` phase (PO goal-alignment + triage) off for this deployment. `false` → `round-defaults.ts`'s `createDefaultPeripherals` OMITS the aligning stub from the peripherals map; `round.ts`'s existing default for an unset phase (`noopPeripheralStub`) takes over, so the phase no-ops — marker set, round never wedges — with no `round.ts` change. |
+| `architect.enabled` | `true` | #127: switch the `architecting` phase off, same mechanism as `po.enabled` above. |
+| `planReviewer.enabled` | `true` | #127: switch the WHOLE gate⓪ unit off — the plan-reviewer AND its plan-drafter, which rides along (the drafter has no toggle of its own; it only ever runs from inside the `plan_review` phase). Same omit-the-stub mechanism as `po.enabled` above. |
+| `harvest.enabled` | `true` | #127: switch the `harvesting` phase off, same mechanism as `po.enabled` above. |
+| `retro.enabled` | `true` | #127: switch the `retro` phase off, same mechanism as `po.enabled` above. |
+
+Every `enabled: false` above is logged **once**, at the point `createDefaultPeripherals`
+builds the peripherals map (engine startup) — never re-logged per round or per tick.
 
 ## `guard`
 

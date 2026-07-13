@@ -109,7 +109,19 @@ labels: # taxonomy used by the loop
 # retro (proposals land exclusively as PRs through gate②, never a direct write). Cheaper defaults
 # than worker.model/effort (real implementation work): every role defaults to sonnet/medium,
 # fully overridable.
+# #127: every role below also takes `enabled: true` (the default) — set `enabled: false` to
+# switch that peripheral role off for this deployment. round-defaults.ts's factory simply
+# OMITS a disabled role's stub from the peripherals map; round.ts's own existing default for
+# an unset phase (noopPeripheralStub) takes over, so the phase no-ops (marker set) rather than
+# wedging the round. planDrafter has no toggle of its own — it rides along with planReviewer
+# (gate⓪ is one unit, `roles.planReviewer.enabled` switches both off together).
 # roles:
+#   po: # aligning phase — goal alignment (decomposition) + round-start plan triage
+#     # promptFile: prompts/my-po.md
+#     #                   Unset = the engine's shipped prompts/po.md.
+#     model: sonnet
+#     effort: medium
+#     enabled: true      # #127: false -> the aligning phase no-ops every round
 #   planReviewer:
 #     # promptFile: prompts/my-plan-reviewer.md
 #     #                   #74-style override; relative paths resolve against THIS config file's
@@ -119,6 +131,7 @@ labels: # taxonomy used by the loop
 #     maxDraftCycles: 2  # #77 Amendment 2: bounded draft->re-review self-heal cycles per issue
 #                        # before the loop gives up and applies needs-human with the attempt
 #                        # trail. Positive int only (0 would disable the self-heal path).
+#     enabled: true      # #127: false -> the WHOLE gate⓪ unit (reviewer + drafter) no-ops
 #   planDrafter:
 #     # promptFile: prompts/my-plan-drafter.md
 #     #                   Unset = the engine's shipped prompts/plan-drafter.md.
@@ -135,6 +148,7 @@ labels: # taxonomy used by the loop
 #                        # promptFile: a relative path resolves against THIS config file's
 #                        # directory. Default docs/PLAN.md — override for target repos that
 #                        # keep their architecture doc somewhere else (or don't have one).
+#     enabled: true      # #127: false -> the architecting phase no-ops every round
 #   harvest: # #91: round-close summary — comments round context onto this round's
 #     #        needs-human issues. Issue-comment writes only (no labels, no body edits).
 #     # promptFile: prompts/my-harvest.md
@@ -145,6 +159,7 @@ labels: # taxonomy used by the loop
 #                             # into the harvest prompt (deterministic truncation, same contract
 #                             # as retro's digestMaxChars). A safety valve — the artifact is
 #                             # naturally small (bounded by the round's own dispatch cap).
+#     enabled: true      # #127: false -> the harvesting phase no-ops every round
 #   retro: # #91: retrospective/self-evolution — analyzes the round and proposes
 #     #      prompt/config/docs improvements EXCLUSIVELY as PRs through gate②
 #     #      (#77 decision 6); it can never write main/docs directly.
@@ -154,6 +169,7 @@ labels: # taxonomy used by the loop
 #     effort: medium
 #     everyNRounds: 1    # #104: retro cadence — 1 (default) runs every round; N>1 thins it to
 #                        # every Nth round (by round id). Positive int only.
+#     enabled: true      # #127: false -> the retro phase no-ops every round
 
 # round-loop scoping (#86 skeleton). Unset = no scoping (every Ready issue is a candidate).
 # round:
