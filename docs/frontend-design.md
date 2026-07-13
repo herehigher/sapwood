@@ -298,7 +298,7 @@ event kind without a copy entry is a type error.
 ## 8. Data contract
 
 Three read-only endpoints, served from the existing SQLite tables
-(schema v10, `engine/src/state.ts` — including `rounds` and
+(schema v11, `engine/src/state.ts` — including `rounds` and
 `round_artifacts`); no dashboard-specific engine tables. Response shapes
 mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
 `sapwood status`.
@@ -329,11 +329,23 @@ mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
       "startedAt": "…", "endedAt": null,
       "costUsd": null,              // SUM(spend_ledger) per worker — real cost, written at
                                     // reclaim; null while in flight
-      "estCostUsd": 0.73            // engine's in-flight #33 estimate (pricing.yaml) — the
-                                    // same signal driving the soft worker budget. Requires
-                                    // the engine to persist its per-probe estimate (small
-                                    // engine change, flagged on #17); until then null and
-                                    // the UI shows the settled value only
+      "estCostUsd": 0.73,           // priced-cost snapshot (#33 pricing pipeline, pricing.yaml) —
+                                    // the same signal driving the soft worker budget. Persisted
+                                    // per probe while the lane runs (#155, workers.est_cost_usd);
+                                    // settles into costUsd (the real bill) at reclaim, and this
+                                    // column is cleared back to null the instant the lane leaves
+                                    // `running` — the UI shows the settled costUsd only from then on
+      "contextTokens": 41000,       // newest assistant message's input + cache_read (+
+                                    // cache_creation) tokens — what the model saw last turn.
+                                    // Deliberately NON-monotonic (a drop marks an auto-compact,
+                                    // itself display-worthy). Denominator for a % gauge is
+                                    // pricing.yaml's per-model contextWindow (#155). null while
+                                    // not running
+      "tokenComposition": {         // cumulative 4-class split for the running lane (#155) — raw
+        "inputTokens": 12000, "outputTokens": 3000,
+        "cacheReadTokens": 90000, "cacheCreationTokens": 4000
+      }                            // totals mislead (cache reads are huge and cheap); null
+                                    // while not running
     }]
   },
   "round": { "id": 12, "phase": "executing" },  // live phase cursor (rounds table);

@@ -683,6 +683,114 @@ test("spend_ledger model/token columns persist across close/reopen (schema-migra
   }
 });
 
+// ── #155: per-probe lane telemetry (priced-cost snapshot, context size, token composition) ──
+
+test("fresh DB migrates to a schema version that includes per-probe lane telemetry columns (#155)", () => {
+  const s = mem();
+  assert.ok(SCHEMA_VERSION >= 11);
+  assert.equal(s.userVersion(), SCHEMA_VERSION);
+  s.close();
+});
+
+test("a pre-existing worker row (upserted with no telemetry fields, e.g. a row predating #155) reads est_cost_usd/context_tokens/token_composition as null — nullable/defaulted, upsertWorker never touches them", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  const row = s.getWorker("a");
+  assert.equal(row?.est_cost_usd, null);
+  assert.equal(row?.context_tokens, null);
+  assert.equal(row?.token_composition, null);
+  // A later, unrelated upsertWorker call (e.g. a state transition) must not touch these columns
+  // either — they are managed EXCLUSIVELY via setLiveTelemetry/clearLiveTelemetry, never
+  // upsertWorker's generic column list (the crash-rerun / stale-spread hazard those two
+  // dedicated methods exist to avoid).
+  s.upsertWorker({ ...row!, state: "driving", pr: 5 });
+  const after = s.getWorker("a");
+  assert.equal(after?.est_cost_usd, null);
+  assert.equal(after?.context_tokens, null);
+  assert.equal(after?.token_composition, null);
+  s.close();
+});
+
+test("setLiveTelemetry: persists the trio (JSON-encoded tokenComposition), update-in-place — re-probing the same lane just overwrites, no history", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  s.setLiveTelemetry("a", {
+    estCostUsd: 0.12,
+    contextTokens: 41000,
+    tokenComposition: { inputTokens: 12000, outputTokens: 3000, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
+  });
+  const row = s.getWorker("a");
+  assert.equal(row?.est_cost_usd, 0.12);
+  assert.equal(row?.context_tokens, 41000);
+  assert.deepEqual(
+    JSON.parse(row!.token_composition!),
+    { inputTokens: 12000, outputTokens: 3000, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
+  );
+
+  // A second probe's numbers simply overwrite — contextTokens is deliberately allowed to DROP
+  // (an auto-compact), never accumulated/maxed.
+  s.setLiveTelemetry("a", {
+    estCostUsd: 0.15,
+    contextTokens: 500,
+    tokenComposition: { inputTokens: 12500, outputTokens: 3100, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
+  });
+  const after = s.getWorker("a");
+  assert.equal(after?.est_cost_usd, 0.15);
+  assert.equal(after?.context_tokens, 500);
+  assert.deepEqual(JSON.parse(after!.token_composition!).inputTokens, 12500);
+  // Other columns (state, pr, etc.) are untouched by setLiveTelemetry.
+  assert.equal(after?.state, "running");
+  s.close();
+});
+
+test("clearLiveTelemetry: nulls all three columns; idempotent on a row that never had telemetry", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  s.setLiveTelemetry("a", {
+    estCostUsd: 0.5, contextTokens: 100,
+    tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
+  });
+  s.clearLiveTelemetry("a");
+  const row = s.getWorker("a");
+  assert.equal(row?.est_cost_usd, null);
+  assert.equal(row?.context_tokens, null);
+  assert.equal(row?.token_composition, null);
+
+  // Idempotent: clearing again (e.g. a lane that never had telemetry, or a double-reclaim) is a
+  // no-op, never throws.
+  s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "running", started_at: "t", ended_at: null });
+  s.clearLiveTelemetry("b");
+  const untouched = s.getWorker("b");
+  assert.equal(untouched?.est_cost_usd, null);
+  assert.equal(untouched?.context_tokens, null);
+  assert.equal(untouched?.token_composition, null);
+  s.close();
+});
+
+test("live telemetry persists across close/reopen (DB-backed, not memory) — a restart doesn't lose a live lane's last-known trio", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const s1 = new State(path);
+    s1.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+    s1.setLiveTelemetry("a", {
+      estCostUsd: 0.42, contextTokens: 8000,
+      tokenComposition: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 900, cacheCreationTokens: 10 },
+    });
+    s1.close();
+
+    const s2 = new State(path);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    const row = s2.getWorker("a");
+    assert.equal(row?.est_cost_usd, 0.42);
+    assert.equal(row?.context_tokens, 8000);
+    assert.deepEqual(JSON.parse(row!.token_composition!), { inputTokens: 100, outputTokens: 50, cacheReadTokens: 900, cacheCreationTokens: 10 });
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #86: rounds ledger (round-loop skeleton) ──────────────────────────────────────────────
 
 test("backfillLegacyRoundCursors (#123, Codex round-5 P2): a pre-migration in_progress round gets timestamp-approximate cursors, never whole-history 0", () => {

@@ -13,7 +13,7 @@
 //    (conductor identity), never a worker. The worker is only ever the injected dispatch fn.
 
 import type { IForge, Issue } from "./forge.js";
-import type { State, BoardStatus, PendingRollback, ModelUsageEntry, WorkerRow } from "./state.js";
+import type { State, BoardStatus, PendingRollback, ModelUsageEntry, WorkerRow, CategorizedTokenUsage } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { DriveOutcome } from "./merge-driver.js";
 import type { ReviewFallbackLock } from "./reviewer.js";
@@ -272,6 +272,17 @@ export interface LaneProbe {
    *  done/failed/handoff; empty while still running or if unknown. Optional for probe
    *  fixtures that predate #47 — treated as []. */
   modelUsage?: ModelUsageEntry[];
+  /** #155: LIVE per-probe telemetry (priced-cost snapshot + context/composition) — present
+   *  only while worker.ts's WorkerSupervisor still holds the lane in-memory (i.e. actually
+   *  running; undefined once terminal, for a detached post-restart lane, or for probe fixtures
+   *  predating #155). Display-only, refreshed fresh on every probe() call — see
+   *  conductor.tick()'s KEEP branch (State.setLiveTelemetry) and reclaim's
+   *  State.clearLiveTelemetry. Never itself consulted by any dispatch/budget gate. */
+  liveTelemetry?: {
+    estCostUsd: number;
+    contextTokens: number;
+    tokenComposition: CategorizedTokenUsage;
+  };
 }
 
 /** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
@@ -587,6 +598,8 @@ async function drainThenEscalate(
       }
       if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
       state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons });
+      // #155: leaving `running` via the ceiling drain — clear the LIVE telemetry trio.
+      state.clearLiveTelemetry(w.name);
       state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
       escalated.push(w.name);
     }
@@ -611,6 +624,9 @@ async function reclaimTerminalLane(
   if (p.handoff) {
     // Soft-budget graceful handoff: terminal-but-resumable. Never killed; the conductor may
     // --resume later. Checked before classifyLane (a handoff is not a failure).
+    // #155: leaving `running` — clear the LIVE telemetry trio (settled real cost stays in
+    // spend_ledger, recordSpend below, unchanged).
+    state.clearLiveTelemetry(w.name);
     state.upsertWorker({ ...w, state: "handoff", ended_at: iso() });
     // M4 --resume TRAP (gate② PR #41 P3): this records the handed-off run's total_cost_usd. If
     // this lane is later resumed and claude reports CUMULATIVE total_cost_usd for the resumed
@@ -623,6 +639,8 @@ async function reclaimTerminalLane(
   }
   const cls = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive);
   if (cls === "DONE") {
+    // #155: leaving `running` either way (driving or done/escalated) — clear LIVE telemetry.
+    state.clearLiveTelemetry(w.name);
     const next = laneOnReclaimDone(p.hasPr);
     if (next === "DRIVING") {
       // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
@@ -638,6 +656,8 @@ async function reclaimTerminalLane(
     return { kind: "done", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
   if (cls === "FAILED") {
+    // #155: leaving `running` either way (rescued to driving, or escalated failed).
+    state.clearLiveTelemetry(w.name);
     let next = laneOnReclaimFailed(p.hasPr);
     // #69 (fable P3-b): a `.failed`-sentinel lane with a PR is rescued to `driving` — but the
     // worker exited NON-ZERO, so it may have left uncommitted WIP alongside its PR. Apply the
@@ -695,6 +715,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       const p = await supervisor.probe(w.name);
       const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
       if (terminal) reclaimed.push(terminal); // KEEP/DEAD lanes stay running -> drained below
+      // #155: no setLiveTelemetry here for a still-running (KEEP) lane — this branch is drain-
+      // only (kill switch engaged); telemetry is left as its last known value until the lane
+      // actually leaves `running` (reclaimTerminalLane above, or drainThenEscalate below —
+      // both clear it). Refreshing display telemetry mid-drain isn't worth a special case.
     }
     // drainThenEscalate re-reads runningWorkers() AFTER the terminal reclaim above transitioned
     // those lanes out of `running`, so a just-recorded handoff/done lane is never re-touched.
@@ -748,6 +772,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     const costUsd = p.costUsd ?? 0;
     const modelUsage = p.modelUsage ?? [];
     if (classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive) === "KEEP") {
+      // #155: refresh the lane's LIVE per-probe telemetry (priced-cost snapshot, context
+      // tokens, token composition) — update-in-place, no history, no per-probe event. Absent
+      // (a DETACHED post-restart lane: the new supervisor has no in-memory Lane, so worker.ts
+      // returns no snapshot — see probe()) -> CLEAR rather than skip (gate② P2 on PR #161):
+      // skipping would leave the PRE-restart trio in place for the lane's whole remaining leg,
+      // a frozen number masquerading as live. NULL means "no live data", which is the truth
+      // for a detached lane — a number we can no longer refresh must not look live.
+      if (p.liveTelemetry) state.setLiveTelemetry(w.name, p.liveTelemetry);
+      else state.clearLiveTelemetry(w.name);
       reclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
       continue;
     }
@@ -755,6 +788,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // down (process-tree kill). If a PR was already opened, rescue it to `driving` rather than
     // requeuing — requeuing would let a second worker race the open PR (Codex R2 P1). Only a
     // dead lane with NO PR is handed back to Ready.
+    // #155: leaving `running` regardless of which of the 3 outcomes below lands — clear the
+    // LIVE telemetry trio (a crashed lane always passes through here, so this single call
+    // covers the "stale telemetry from a dead lane must not survive as live" crash semantics).
+    state.clearLiveTelemetry(w.name);
     // #69 dirty-worktree retention: reclaim() deletes the worktree ONLY when it's provably
     // clean; a possibly-dirty one survives on disk and is escalated to a human here.
     const r = await supervisor.reclaim(w.name);

@@ -257,6 +257,25 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
     // same-ms ambiguity this migration exists to remove is accepted for legacy rows only.
     backfillLegacyRoundCursors(db);
   },
+  // 10 -> 11: per-probe lane telemetry (#155) — the priced-cost snapshot + context/composition
+  // trio a still-`running` lane's dashboard display needs (docs/frontend-design.md §8),
+  // refreshed on every RECLAIM-phase probe (conductor.ts) via State.setLiveTelemetry and
+  // cleared the instant the lane leaves `running` (handoff/done/driving/failed) via
+  // State.clearLiveTelemetry. This is a LIVE DISPLAY CACHE only — the settled real cost for a
+  // finished lane still lives in spend_ledger (recordSpend, unchanged); these three columns are
+  // never read for accounting, only for "what is a live lane doing right now". Update-in-place
+  // (no companion event-per-probe table, unlike spend_ledger/#47's append-only ledger) —
+  // per-tick × per-lane telemetry events would bloat the append-only log for zero replay value
+  // (the issue's own implementation note). Nullable, no default: every pre-existing row reads
+  // as "no live telemetry" — the exact same shape a freshly-cleared row has, so a pre-#155 DB
+  // upgrades with no behavior change until the next probe of a running lane populates them.
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN est_cost_usd REAL;
+      ALTER TABLE workers ADD COLUMN context_tokens INTEGER;
+      ALTER TABLE workers ADD COLUMN token_composition TEXT;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -369,6 +388,22 @@ export interface WorkerRow {
    *  schema v8->v9 migration comment, incl. the deliberate pre-migration back-compat).
    *  Optional; DB default 0. */
   gated_escalation_labeled?: number;
+  /** #155: LIVE priced-cost snapshot (worker.ts's #33 pricing pipeline, baseline-adjusted the
+   *  same way the soft-budget check is) for a still-`running` lane — refreshed on every
+   *  RECLAIM-phase probe via State.setLiveTelemetry. NULL while not running, or once the lane
+   *  is reclaimed (State.clearLiveTelemetry — see the schema v10->v11 migration comment). This
+   *  is a display snapshot ONLY: it settles into the real number spend_ledger holds once the
+   *  lane terminates, and is never itself read for accounting. */
+  est_cost_usd?: number | null;
+  /** #155: the newest assistant message's input + cache_read + cache_creation tokens — what
+   *  the model saw on its last turn. Deliberately NON-monotonic (a drop marks an auto-compact,
+   *  itself display-worthy). NULL while not running / cleared at reclaim. */
+  context_tokens?: number | null;
+  /** #155: cumulative 4-class token split (JSON-encoded `CategorizedTokenUsage`) for a still-
+   *  running lane. NULL while not running / cleared at reclaim. Stored as TEXT (like
+   *  round_artifacts.json) rather than 4 separate columns — one JSON blob read/written
+   *  atomically per probe, and the shape is display-only (never queried by column). */
+  token_composition?: string | null;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -561,6 +596,35 @@ export class State {
     this.db
       .prepare("UPDATE workers SET review_fallback_head = ?, review_fallback_kind = ? WHERE name = ?")
       .run(head, kind, name);
+  }
+
+  /** #155: refresh a still-`running` lane's LIVE per-probe telemetry trio (update-in-place —
+   *  see the schema v10->v11 migration comment for why this is a dedicated pair of methods
+   *  rather than routed through upsertWorker's full-row replace: a generic `{...w, ...changes}`
+   *  call site would silently carry over a STALE trio from the row it just read, exactly the
+   *  crash-rerun hazard this file's migrations avoid elsewhere). Idempotent: re-probing the
+   *  same head just overwrites with the same numbers — no counters, no history, no per-probe
+   *  event. `tokenComposition` is JSON-encoded (see WorkerRow.token_composition doc). Called
+   *  ONLY from conductor.tick()'s RECLAIM-phase KEEP branch, once per probe. */
+  setLiveTelemetry(
+    name: string,
+    t: { estCostUsd: number; contextTokens: number; tokenComposition: CategorizedTokenUsage },
+  ): void {
+    this.db
+      .prepare("UPDATE workers SET est_cost_usd = ?, context_tokens = ?, token_composition = ? WHERE name = ?")
+      .run(t.estCostUsd, t.contextTokens, JSON.stringify(t.tokenComposition), name);
+  }
+
+  /** #155: clear a lane's LIVE telemetry the instant it leaves `running` (handoff / done /
+   *  driving / failed — any reclaim outcome). The settled REAL cost stays in spend_ledger
+   *  (recordSpend, unchanged) — this only clears the live display trio, so a dead/terminal lane
+   *  never shows stale "still running" numbers (the crash semantics the issue calls out: a dead
+   *  lane always passes through reclaim, so clearing here is the one place that needs to run).
+   *  Safe/idempotent on a row that never had telemetry (NULL -> NULL). */
+  clearLiveTelemetry(name: string): void {
+    this.db
+      .prepare("UPDATE workers SET est_cost_usd = NULL, context_tokens = NULL, token_composition = NULL WHERE name = ?")
+      .run(name);
   }
 
   getWorker(name: string): WorkerRow | undefined {

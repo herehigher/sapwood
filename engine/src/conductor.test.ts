@@ -309,6 +309,95 @@ test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+n
   st.close();
 });
 
+// ── #155: per-probe lane telemetry — persisted while KEEP, cleared the instant a lane leaves
+// `running` (any reclaim outcome: done/driving, failed/driving, handoff, dead). ────────────
+
+test("tick reclaim: a KEEP lane's probe-carried liveTelemetry is persisted onto the workers row (update-in-place)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-keep", 1);
+  const telemetry = {
+    estCostUsd: 0.42, contextTokens: 41000,
+    tokenComposition: { inputTokens: 12000, outputTokens: 3000, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
+  };
+  sup.probes["lane-keep"] = { ...DEFAULT_PROBE, liveTelemetry: telemetry };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const row = st.getWorker("lane-keep");
+  assert.equal(row?.state, "running");
+  assert.equal(row?.est_cost_usd, 0.42);
+  assert.equal(row?.context_tokens, 41000);
+  assert.deepEqual(JSON.parse(row!.token_composition!), telemetry.tokenComposition);
+
+  // A later probe's numbers simply overwrite — no history, no per-probe event.
+  sup.probes["lane-keep"] = {
+    ...DEFAULT_PROBE,
+    liveTelemetry: { estCostUsd: 0.5, contextTokens: 500, tokenComposition: { inputTokens: 12500, outputTokens: 3100, cacheReadTokens: 90000, cacheCreationTokens: 4000 } },
+  };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const after = st.getWorker("lane-keep");
+  assert.equal(after?.est_cost_usd, 0.5);
+  assert.equal(after?.context_tokens, 500, "contextTokens dropped — never smoothed into a running max");
+  st.close();
+});
+
+test("tick reclaim: a KEEP lane whose probe carries NO liveTelemetry (detached post-restart lane) CLEARS a previously-persisted trio — a number we can no longer refresh must not look live (gate② P2)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-keep", 1);
+  // A PRE-restart tick persisted a trio; the engine then restarted — the new supervisor has no
+  // in-memory Lane for this name, so probe() carries no liveTelemetry (worker.test.ts's
+  // detached-lane test pins that). Leaving the old numbers in place would show a frozen
+  // cost/context as if live for the lane's whole remaining leg.
+  st.setLiveTelemetry("lane-keep", {
+    estCostUsd: 0.42, contextTokens: 41000,
+    tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
+  });
+  sup.probes["lane-keep"] = { ...DEFAULT_PROBE }; // no liveTelemetry field at all
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(r.reclaimed[0]!.kind, "kept");
+  const row = st.getWorker("lane-keep");
+  assert.equal(row?.state, "running"); // the lane itself is untouched — only the trio is cleared
+  assert.equal(row?.est_cost_usd, null, "stale pre-restart telemetry cleared, never frozen as live");
+  assert.equal(row?.context_tokens, null);
+  assert.equal(row?.token_composition, null);
+  st.close();
+});
+
+test("tick reclaim: DONE+PR (-> driving) clears any previously-persisted live telemetry — settled cost stays in spend_ledger, unchanged", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  st.setLiveTelemetry("lane-a", { estCostUsd: 0.9, contextTokens: 999, tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 } });
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 1.23 };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const row = st.getWorker("lane-a");
+  assert.equal(row?.state, "driving");
+  assert.equal(row?.est_cost_usd, null, "live telemetry cleared on leaving `running`");
+  assert.equal(row?.context_tokens, null);
+  assert.equal(row?.token_composition, null);
+  assert.equal(st.spentUsdForWorker("lane-a"), 1.23, "the SETTLED real cost still lands in spend_ledger, unaffected by the telemetry clear");
+  st.close();
+});
+
+test("tick reclaim: a DEAD lane (rescued to driving, or torn down failed) clears any previously-persisted live telemetry — a crashed lane always passes through reclaim", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-deadpr", 6);
+  st.setLiveTelemetry("lane-deadpr", { estCostUsd: 0.3, contextTokens: 500, tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 } });
+  sup.probes["lane-deadpr"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const row = st.getWorker("lane-deadpr");
+  assert.equal(row?.state, "driving");
+  assert.equal(row?.est_cost_usd, null);
+  assert.equal(row?.context_tokens, null);
+  assert.equal(row?.token_composition, null);
+  st.close();
+});
+
 test("tick reclaim: DEAD lane with NO PR is torn down, board handed back to ready", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

@@ -763,7 +763,7 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
     const ratesPath = join(dir, "expensive.yaml");
     writeFileSync(
       ratesPath,
-      "models: { opus: { input: 500, output: 2500, cacheWrite: 625, cacheRead: 50 } }\n",
+      "models: { opus: { input: 500, output: 2500, cacheWrite: 625, cacheRead: 50, contextWindow: 200000 } }\n",
     );
     // 1000 in + 1000 out at 100x rates = $3.00; the shipped table would price it $0.03 —
     // under this $1 budget. A handoff proves the CUSTOM table is in effect.
@@ -837,6 +837,163 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "new post-resume spend crossing the budget triggers a fresh graceful handoff");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #155: per-probe lane telemetry (priced-cost snapshot, context size, token composition) ──
+
+test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens, tokenComposition) computed from the jsonl-so-far", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":2000}}}'`,
+        `sleep 30`,
+        ``,
+      ].join("\n"),
+    );
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 155, title: "t", labels: [] });
+    // No heartbeat wait needed — probe() re-derives the trio fresh from the jsonl on every call.
+    // Poll until BOTH streamed lines have landed (contextTokens reflects only the newest one).
+    let p = await s.probe(name);
+    for (let i = 0; i < 200 && p.liveTelemetry?.contextTokens !== 2010; i++) {
+      await sleep(20);
+      p = await s.probe(name);
+    }
+    assert.ok(p.liveTelemetry, "a still-running in-memory lane carries live telemetry");
+    // opus: input $5/MTok, output $25/MTok, cacheRead $0.5/MTok (shipped pricing.yaml).
+    // Line 1: 100in+50out -> 0.0005 + 0.00125 = 0.00175
+    // Line 2: 10in+5out+2000cacheRead -> 0.00005 + 0.000125 + 0.001 = 0.001175
+    const expectedCost = 0.00175 + 0.001175;
+    assert.ok(Math.abs(p.liveTelemetry!.estCostUsd - expectedCost) < 1e-9, `estCostUsd ${p.liveTelemetry!.estCostUsd} ~= ${expectedCost}`);
+    // contextTokens: the NEWEST assistant message's input + cache_read + cache_creation only.
+    assert.equal(p.liveTelemetry!.contextTokens, 10 + 2000 + 0);
+    // tokenComposition: cumulative 4-class split across BOTH streamed messages.
+    assert.deepEqual(p.liveTelemetry!.tokenComposition, {
+      inputTokens: 110, outputTokens: 55, cacheCreationTokens: 0, cacheReadTokens: 2000,
+    });
+    await s.reclaim(name);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#155: contextTokens is deliberately NON-monotonic — a later, smaller assistant message (an auto-compact) drops it, never a running max", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const marker = join(dir, "emit-second");
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        // Large first turn: a big context.
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":50000,"output_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        // Wait for the test to observe the large value before compacting.
+        `while [ ! -f "${marker}" ]; do sleep 0.02; done`,
+        // Small second turn (post-compaction context is much smaller).
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":500,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `sleep 30`,
+        ``,
+      ].join("\n"),
+    );
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 156, title: "t", labels: [] });
+    let p = await s.probe(name);
+    for (let i = 0; i < 200 && p.liveTelemetry?.contextTokens !== 50000; i++) {
+      await sleep(20);
+      p = await s.probe(name);
+    }
+    assert.equal(p.liveTelemetry?.contextTokens, 50000, "large first turn -> large context");
+    writeFileSync(marker, "");
+    for (let i = 0; i < 200 && p.liveTelemetry?.contextTokens !== 500; i++) {
+      await sleep(20);
+      p = await s.probe(name);
+    }
+    assert.equal(p.liveTelemetry?.contextTokens, 500, "smaller second turn DROPS contextTokens — never smoothed into a running max");
+    await s.reclaim(name);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (reuses the #33 baseline) — pre-handoff usage alone must not show as live cost", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-155-resume";
+    writeFileSync(
+      join(dir, `${name}.handoff.json`),
+      JSON.stringify({ name, issue: 157, session_id: "22222222-2222-2222-2222-222222222222", total_cost_usd: 0 }),
+    );
+    // Pre-existing (pre-handoff) usage: opus 1000in+1000out ≈ $0.03 — would show as live cost
+    // if the baseline weren't subtracted.
+    writeFileSync(
+      join(dir, `${name}.jsonl`),
+      `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n`,
+    );
+    const marker = join(dir, "emit-new-usage");
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `while [ ! -f "${marker}" ]; do sleep 0.02; done`,
+        // New post-resume usage: opus 200in+0out -> $0.001.
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `sleep 30`,
+        ``,
+      ].join("\n"),
+    );
+    const s = sup(dir, bin);
+    await s.resume({ number: 157, title: "t", labels: [] }, name);
+    // Right after resume, before the stub emits anything new: the whole-file total already
+    // includes the pre-handoff line, but the baseline snapshot cancels it out.
+    const p1 = await s.probe(name);
+    assert.ok(p1.liveTelemetry, "resumed lane is tracked in-memory too");
+    assert.ok(Math.abs(p1.liveTelemetry!.estCostUsd) < 1e-9, `pre-handoff spend must not leak into the resumed leg's live cost (got ${p1.liveTelemetry!.estCostUsd})`);
+    writeFileSync(marker, "");
+    let p2 = await s.probe(name);
+    for (let i = 0; i < 200 && !(p2.liveTelemetry && p2.liveTelemetry.estCostUsd > 0); i++) {
+      await sleep(20);
+      p2 = await s.probe(name);
+    }
+    const expectedNewLegCost = (200 / 1_000_000) * 5; // opus input rate
+    assert.ok(Math.abs(p2.liveTelemetry!.estCostUsd - expectedNewLegCost) < 1e-9, `new-leg estCostUsd ${p2.liveTelemetry!.estCostUsd} ~= ${expectedNewLegCost}`);
+    // contextTokens/tokenComposition are NOT baseline-adjusted — they read the whole jsonl-so-far
+    // (resume APPENDS), so they include the pre-handoff line too.
+    assert.equal(p2.liveTelemetry!.contextTokens, 200); // newest message only
+    assert.deepEqual(p2.liveTelemetry!.tokenComposition, {
+      inputTokens: 1200, outputTokens: 1000, cacheCreationTokens: 0, cacheReadTokens: 0,
+    });
+    await s.reclaim(name);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — never invents a second baseline", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-155-detached";
+    writeFileSync(
+      join(dir, `${name}.running.json`),
+      JSON.stringify({ name, issue: 158, session_id: "s", wrapper_pid: 999999, started_at: new Date().toISOString() }),
+    );
+    writeFileSync(
+      join(dir, `${name}.jsonl`),
+      `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n`,
+    );
+    const s = sup(dir, "claude"); // no dispatch/resume -> no in-memory Lane for this name
+    const p = await s.probe(name);
+    assert.equal(p.liveTelemetry, undefined, "a detached lane has no known baseline -> no live telemetry, never a guessed one");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

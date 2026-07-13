@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import type { Issue } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
 import type { Supervisor, LaneProbe, ReclaimResult } from "./conductor.js";
-import type { ModelUsageEntry } from "./state.js";
+import type { ModelUsageEntry, CategorizedTokenUsage } from "./state.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "./pricing.js";
 
 /** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60/#69: a
@@ -654,6 +654,47 @@ export class WorkerSupervisor implements Supervisor {
     this.checkSoftBudget(name, lane);
   }
 
+  /** #155: the LIVE per-probe telemetry trio — persisted (by conductor.ts, via
+   *  State.setLiveTelemetry) while a lane is still `running`, cleared at reclaim. Computed
+   *  fresh from the lane's jsonl-so-far on every call — the same re-parse-every-tick trade-off
+   *  checkSoftBudget's own comment documents (a per-worker jsonl is small; correctness-by-
+   *  re-derivation beats byte-offset bookkeeping), and no new computation path: this is the
+   *  SAME #33 pricing pipeline checkSoftBudget already used, just packaged for persistence too.
+   *
+   *  `estCostUsd` — the priced-cost snapshot — reuses the EXACT #33 baseline-subtraction
+   *  checkSoftBudget uses (never a second baseline mechanism, CTO decision on #155): the
+   *  whole-jsonl priced total minus `lane.estimateBaselineUsd`, so a RESUMED lane's persisted
+   *  snapshot covers only the current leg, consistent with the soft-budget accounting it shares
+   *  this computation with. It settles into the real number spend_ledger holds once the lane
+   *  terminates (recordSpend); this method never itself feeds accounting.
+   *
+   *  `contextTokens` / `tokenComposition` are read straight off the full jsonl-so-far — no
+   *  baseline subtraction, because resume() APPENDS (never truncates), so they naturally cover
+   *  the whole session, and neither has a comparable "per-run budget" concept to baseline
+   *  against. `contextTokens` is deliberately NON-monotonic (the newest assistant message's
+   *  input + cache-read + cache-creation tokens only — a drop marks an auto-compact, itself
+   *  display-worthy, never smoothed into a running max). `tokenComposition` is the cumulative
+   *  4-class split across every streamed assistant message so far. */
+  private liveTelemetry(
+    lane: Lane,
+  ): { estCostUsd: number; contextTokens: number; tokenComposition: CategorizedTokenUsage } {
+    const deltas = parseAssistantUsageDeltas(this.readJsonl(lane.jsonlPath));
+    const wholeFileUsd = deltas.reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0);
+    const estCostUsd = Math.max(0, wholeFileUsd - lane.estimateBaselineUsd);
+    const last = deltas[deltas.length - 1];
+    const contextTokens = last ? last.inputTokens + last.cacheReadTokens + last.cacheCreationTokens : 0;
+    const tokenComposition = deltas.reduce<CategorizedTokenUsage>(
+      (acc, d) => ({
+        inputTokens: acc.inputTokens + d.inputTokens,
+        outputTokens: acc.outputTokens + d.outputTokens,
+        cacheCreationTokens: acc.cacheCreationTokens + d.cacheCreationTokens,
+        cacheReadTokens: acc.cacheReadTokens + d.cacheReadTokens,
+      }),
+      { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+    );
+    return { estCostUsd, contextTokens, tokenComposition };
+  }
+
   /** #33: soft per-worker budget auto-enforcement via LIVE token estimation. stream-json never
    *  carries an in-progress `total_cost_usd` (only the terminal `result` line has it), so this
    *  re-derives a running USD estimate from every streamed `assistant` message's token usage
@@ -673,13 +714,10 @@ export class WorkerSupervisor implements Supervisor {
    *  parse here is pure waste avoidance once the outcome is already decided). */
   private checkSoftBudget(name: string, lane: Lane): void {
     if (lane.handoffRequested) return;
-    const deltas = parseAssistantUsageDeltas(this.readJsonl(lane.jsonlPath));
-    const wholeFileUsd = deltas.reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0);
-    // PER-RUN spend: the whole-file total minus what was already in the jsonl when this run
-    // started (0 on a fresh dispatch; the pre-handoff stream's total on a resume — see
-    // Lane.estimateBaselineUsd). The soft budget bounds spend per run, not per issue lifetime;
-    // comparing the whole file would instantly re-trigger on any resumed budget handoff.
-    lane.estimatedCostUsd = Math.max(0, wholeFileUsd - lane.estimateBaselineUsd);
+    // #155: shares its computation with liveTelemetry() (the per-probe persistence path) so the
+    // soft-budget figure and the persisted priced-cost snapshot can never drift apart — see
+    // liveTelemetry's comment for the PER-RUN (baseline-subtracted) rationale.
+    lane.estimatedCostUsd = this.liveTelemetry(lane).estCostUsd;
     if (lane.estimatedCostUsd >= this.deps.cfg.worker.budgetUsdSoft) {
       console.error(
         `[sapwood:worker] lane ${name}: estimated spend $${lane.estimatedCostUsd.toFixed(4)} this run ` +
@@ -844,9 +882,18 @@ export class WorkerSupervisor implements Supervisor {
     }
     const costUsd = this.terminalCostUsd({ done, failed, handoff }, name);
     const modelUsage = this.terminalModelUsage({ done, failed, handoff }, name);
+    // #155: LIVE telemetry only for a lane THIS supervisor still holds in-memory (this.lanes —
+    // i.e. actually running; onExit deletes the entry the instant the process exits, terminal
+    // or not). A DETACHED lane (persisted running.json, no in-memory handle — the engine
+    // restarted while the worker kept running) has no known estimateBaselineUsd to reuse, so
+    // it's left undefined here rather than inventing a second baseline (assuming a fresh-dispatch
+    // baseline of 0 would misprice a resumed detached lane's current leg).
+    const lane = this.lanes.get(name);
+    const liveTelemetry = lane ? this.liveTelemetry(lane) : undefined;
     return {
       done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd, modelUsage,
       ...(prNumber != null ? { prNumber } : {}),
+      ...(liveTelemetry ? { liveTelemetry } : {}),
     };
   }
 
