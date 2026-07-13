@@ -100,23 +100,26 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   const architectStub = createArchitectStub(architectDeps);
 
   return {
-    aligning: {
+    aligning: alignStub,
+    architecting: {
       async run(ctx) {
-        const result = await alignStub.run(ctx);
         // #123 acceptance criterion 3: thread the aligning phase's ACTUAL structured
         // decomposition detail (its `align-summary` state event — created issues + triage
         // outcomes) through to the architect, replacing the old deterministic pointer note.
-        // The event read is contained: a missing event (degraded align, state hiccup) falls
-        // back to the pointer note — never fabricated analysis, never a thrown phase.
+        // Computed HERE, at architect-invocation time, from durable state — never as a side
+        // effect of the aligning wrapper running in the same process (Codex round-7 P2 on PR
+        // #152: a crash between the phases resumes directly at architecting, and a write-time
+        // handoff would silently fall back even though the summary event survived). The read
+        // is contained: no summary (degraded align, state hiccup) falls back to the pointer
+        // note — never fabricated analysis, never a thrown phase.
         architectDeps.alignedGoals =
           renderAlignedGoalsFromSummary(deps.state, ctx.roundId) ??
           `This round's PO/goal-alignment peripheral has run (round ${ctx.roundId}, marker ` +
           `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
           `actual decomposition (no structured summary was recorded this round).`;
-        return result;
+        return architectStub.run(ctx);
       },
     },
-    architecting: architectStub,
     plan_review: createPlanReviewStub(shared),
     harvesting: createHarvestStub(shared),
     retro: createRetroStub(shared),

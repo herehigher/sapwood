@@ -149,6 +149,30 @@ test("renderAlignedGoalsFromSummary (#123): renders the align-summary event's pe
   state.close();
 });
 
+test("architecting stub (#123, Codex round-7 P2): resuming directly at architecting still renders the pre-crash align-summary — the handoff is computed at invocation time from state, never a same-process side effect", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  // A gate⓪ candidate so the architect actually dispatches (it short-circuits on none).
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  // Simulate the crash-resume shape: the round + the aligning phase's summary exist in durable
+  // state, but the aligning stub never ran in THIS process.
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("align-summary", {
+    round_id: round.round_id,
+    created: [{ issue: 12, title: "Split the parser", hasPlan: true }],
+    triaged: [],
+  });
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const architectCall = runner.calls.find((c) => c.roleId === "architect");
+  assert.ok(architectCall, "the architect session was dispatched");
+  assert.ok(architectCall!.prompt.includes("created #12 — Split the parser"),
+    "the architect prompt carries the pre-crash summary detail, not the fallback note");
+  state.close();
+});
+
 test("renderAlignedGoalsFromSummary (#123): an all-empty summary renders the explicit 'decomposed nothing' line, never null", () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
