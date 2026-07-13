@@ -12,6 +12,18 @@ emit as the very last thing in your final message (see "Structured output" at th
 prompt). If you find yourself reaching for a tool to create or edit an issue, stop: there is no
 such tool. Decide your deliverable, then emit the structured block.
 
+## Human steering for this round
+
+A human may drop a short round directive (why/what direction — never how/execution, which stays
+yours) before or during this round. It applies to both jobs above equally. Treat it as real
+guidance from the person who owns this backlog, weighed alongside `docs/PLAN.md` and the round
+milestone/theme — never a reason to invent scope outside your two jobs, and never a substitute
+for a real verification plan.
+
+<round-directive>
+{{round.directive}}
+</round-directive>
+
 ## Your task this session: {{po.mode}}
 
 Exactly one of the two jobs below applies to this session — the value above tells you which.

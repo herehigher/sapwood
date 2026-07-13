@@ -10,7 +10,7 @@
 // performs every forge write itself — exactly what createAligningStub is being tested for here.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -606,6 +606,99 @@ test("defaultPoPromptPath: resolves to a real shipped file with both align and t
   assert.ok(template.includes("{{plan.md}}"));
   assert.ok(template.includes("{{issue.number}}"));
   assert.ok(template.includes("{{issue.body}}"));
+  assert.ok(template.includes("{{round.directive}}"), "#126: the shipped po.md must reference the round directive var");
+});
+
+// ── #126: round directive file — human steering injected at round open ─────────────────────
+
+test("createAligningStub #126: no directive file -> both the align session AND every triage session render the explicit 'none' placeholder, no directive-applied event", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [] }];
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-directive-"));
+  try {
+    const cfg = mkCfg({ round: { directiveFile: join(dir, "DIRECTIVE.md") } });
+    const runner = new ScriptedRunner([
+      doneResult("po-align-1", alignResultText([])),
+      doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
+    ]);
+    const state = new State(":memory:");
+    const deps: AlignDeps = { forge, state, cfg, runner };
+    const stub = createAligningStub(deps);
+    await stub.run({ roundId: 1, phase: "aligning", marker: null });
+    assert.equal(runner.calls.length, 2);
+    for (const call of runner.calls) {
+      assert.ok(call.prompt.includes("No round directive was provided for this round."));
+    }
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 0);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createAligningStub #126: a directive file is substituted into BOTH the align and triage prompts, one directive-applied event recorded, and the file is archived out of the live path", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [] }];
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-directive-"));
+  try {
+    const directiveFile = join(dir, "DIRECTIVE.md");
+    writeFileSync(directiveFile, "Prioritize the payments module this round.", "utf8");
+    const cfg = mkCfg({ round: { directiveFile } });
+    const runner = new ScriptedRunner([
+      doneResult("po-align-1", alignResultText([])),
+      doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
+    ]);
+    const state = new State(":memory:");
+    const deps: AlignDeps = { forge, state, cfg, runner };
+    const stub = createAligningStub(deps);
+    await stub.run({ roundId: 4, phase: "aligning", marker: null });
+    assert.equal(runner.calls.length, 2);
+    for (const call of runner.calls) {
+      assert.ok(call.prompt.includes("Prioritize the payments module this round."));
+    }
+    const events = state.eventsAfterId(0, ["directive-applied"]);
+    assert.equal(events.length, 1);
+    const payload = events[0]!.payload as { round_id: number; path: string; content: string; sha256: string };
+    assert.equal(payload.round_id, 4);
+    assert.equal(payload.path, directiveFile);
+    assert.equal(payload.content, "Prioritize the payments module this round.");
+    assert.match(payload.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(existsSync(directiveFile), false, "consumed: archived out of the live path");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createAligningStub #126: crash-rerun — a resumed call for the SAME round (marker still null) reuses the recorded directive content, never a duplicate event, even if the live file is re-dropped in between", async () => {
+  const forge = new FakeForge();
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-directive-"));
+  try {
+    const directiveFile = join(dir, "DIRECTIVE.md");
+    writeFileSync(directiveFile, "original steering", "utf8");
+    const cfg = mkCfg({ round: { directiveFile } });
+    const state = new State(":memory:");
+
+    const runner1 = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+    const deps1: AlignDeps = { forge, state, cfg, runner: runner1 };
+    await createAligningStub(deps1).run({ roundId: 2, phase: "aligning", marker: null });
+    assert.ok(runner1.calls[0]!.prompt.includes("original steering"));
+
+    // Simulate a crash-then-resume: the SAME round is re-entered at aligning (marker still
+    // null — the earlier attempt never got far enough to persist one) after an operator (or a
+    // race) leaves a DIFFERENT file at the live path.
+    writeFileSync(directiveFile, "a later, different directive", "utf8");
+    const runner2 = new ScriptedRunner([doneResult("po-align-2", alignResultText([]))]);
+    const deps2: AlignDeps = { forge, state, cfg, runner: runner2 };
+    await createAligningStub(deps2).run({ roundId: 2, phase: "aligning", marker: null });
+    assert.ok(runner2.calls[0]!.prompt.includes("original steering"));
+    assert.ok(!runner2.calls[0]!.prompt.includes("a later, different directive"));
+
+    assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1, "no duplicate event across the resumed call");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("loadPlanMd: reads a real file; a missing path degrades to empty string (contained, never throws)", () => {

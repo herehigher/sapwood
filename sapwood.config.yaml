@@ -194,6 +194,17 @@ labels: # taxonomy used by the loop
 #     enabled: true
 #     backoffCapSec: 1800 # cap on engine.tickIntervalSec * 2^n (n = consecutive empty
 #                         # probes); any probe hit resets the exponent. Default 30min.
+#   directiveFile: data/DIRECTIVE.md # #126: drop a short round directive (human why/what
+#                         # steering, never how/execution) here before or during a round; the
+#                         # engine reads it at round open, injects it into the aligning +
+#                         # architecting prompts as {{round.directive}}, then archives it to
+#                         # data/directives/round-N.md so it never silently re-applies to a
+#                         # later round. Absent -> prompts render an explicit 'none' placeholder,
+#                         # behavior unchanged. Relative to the process cwd, like the engine's
+#                         # own data/sapwood.sqlite (NOT resolved relative to this config file).
+#   directiveMaxChars: 20000 # deterministic truncation cap on the directive text (same
+#                         # marked-cut-never-silent-drop contract as roles.harvest.artifactMaxChars
+#                         # / roles.retro.digestMaxChars).
 
 escalation:
   humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human

@@ -45,6 +45,7 @@ import type { SapwoodConfig } from "./config.js";
 import { runSessionWithRetry, type RoleRunner, type RoleSessionResult } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 import { parseStructuredBlock } from "./structured-output.js";
+import { resolveRoundDirective } from "./directive.js";
 
 export interface ArchitectDeps {
   forge: IForge;
@@ -306,6 +307,16 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
   return {
     async run({ roundId, marker }) {
       if (marker != null) return { marker }; // already externalized this round — no duplicate work
+      // #126: this round's directive (human steering, why/what). Consumption belongs to round
+      // OPEN — with the PO role enabled, aligning already consumed (or established the absence
+      // of) this round's directive, and this call only ever reads BACK that durable event
+      // (consume: false: a file dropped between aligning and architecting must wait for the
+      // next round's opener, never a half-round apply — directive.ts's "EXACTLY ONE CONSUMER
+      // PER ROUND", gate② I2). Only when the PO role is disabled (#127) and aligning never runs
+      // at all does THIS call become the round's designated first consumer.
+      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId, {
+        consume: !deps.cfg.roles.po.enabled,
+      });
       // The candidate pool for this phase is the same "still awaiting gate⓪" set plan_review
       // consumes next in the sequence (aligning -> architecting -> plan_review -> executing):
       // Ready-lane, OPEN, not yet settled needs-human/blocked/verifyNa/planApproved. Sorted by
@@ -339,6 +350,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "plan.architectureChapter": architectureChapter,
         "candidates.summary": candidates.map(formatCandidate).join("\n\n---\n\n"),
         "labels.blocked": deps.cfg.labels.blocked,
+        "round.directive": directive,
       });
 
       const role = deps.cfg.roles.architect;
