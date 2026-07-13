@@ -536,6 +536,23 @@ test("runDriver stop.afterSpendUsd: anchored to THIS run's start — spend alrea
   deps.state.close();
 });
 
+test("runDriver stop.afterSpendUsd: configured-but-uncrossed NEVER swallows the chain — a later condition (onMilestoneComplete) still fires (gate② B1 on PR #160)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = []; // no dispatch/spend at all — afterSpendUsd stays configured-but-uncrossed forever
+  forge.milestoneOpenCounts = [1, 0]; // tick 1: not complete; tick 2: completes mid-run
+  const deps = baseDeps({ forge, sleep, stop: { afterSpendUsd: 100, onMilestoneComplete: "M5" } });
+  const stopSafety = boundedStop(deps, 10);
+  const result = await runDriver(deps);
+  stopSafety();
+  // The broken else-if chain would terminate at the uncrossed spend branch every tick and
+  // never evaluate the milestone at all (boundedStop's signal would end the run instead).
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M5", detail: "0 open issues left" });
+  assert.deepEqual(forge.milestoneQueries, ["M5", "M5"]); // evaluated every tick, not starved
+  deps.state.close();
+});
+
 test("runDriver stop.afterSpendUsd: a quiet gap that resets the wall-clock SESSION mid-run never resets the run-spend total (standby/quiet-gap semantics)", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();

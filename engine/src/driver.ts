@@ -262,16 +262,20 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
           stopConditionHit = {
             name: "afterPRsOpened", threshold: stop.afterPRsOpened, detail: `opened ${prsOpened}`,
           };
-        } else if (stop?.afterSpendUsd !== undefined) {
+        } else if (
           // #154: a live query, not an accumulated counter — spend is only known at worker
           // completion (recordSpend), and State is the durable source of truth for it already
           // (same "read live durable state" style as round.ts's spentSoFar/dailySpendUsd).
+          // Gate② B1 (PR #160): the threshold lives IN the guard, like every sibling branch —
+          // configured-but-uncrossed must fall through, or a later condition (the milestone
+          // branch below) is never evaluated for the whole run.
+          stop?.afterSpendUsd !== undefined &&
+          deps.state.spentUsdAfterId(runSpendAnchorId) >= stop.afterSpendUsd
+        ) {
           const runSpendUsd = deps.state.spentUsdAfterId(runSpendAnchorId);
-          if (runSpendUsd >= stop.afterSpendUsd) {
-            stopConditionHit = {
-              name: "afterSpendUsd", threshold: stop.afterSpendUsd, detail: `spent $${runSpendUsd.toFixed(2)}`,
-            };
-          }
+          stopConditionHit = {
+            name: "afterSpendUsd", threshold: stop.afterSpendUsd, detail: `spent $${runSpendUsd.toFixed(2)}`,
+          };
         } else if (stop?.onMilestoneComplete && !signalled) {
           // Evaluated at tick boundaries only (never mid-tick), per #76's scope — one extra
           // forge read per tick while configured, same cost class as the DISPATCH phase's own

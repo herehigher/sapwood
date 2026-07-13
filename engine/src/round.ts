@@ -262,14 +262,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           finalStopHit = { name: "afterIssuesMerged", threshold: stop.afterIssuesMerged, detail: `merged ${issuesMerged}` };
         } else if (stop?.afterPRsOpened !== undefined && prsOpened >= stop.afterPRsOpened) {
           finalStopHit = { name: "afterPRsOpened", threshold: stop.afterPRsOpened, detail: `opened ${prsOpened}` };
-        } else if (stop?.afterSpendUsd !== undefined) {
+        } else if (
           // #154: same live-query style as driver.ts's runDriver — spend is only known at
           // worker completion, so this reads durable state fresh rather than accumulating a
-          // counter from tick results.
+          // counter from tick results. Gate② B1 (PR #160): threshold IN the guard like every
+          // sibling branch — this is the chain tail today, but an inconsistent guard style is
+          // exactly how the next appended condition gets silently starved.
+          stop?.afterSpendUsd !== undefined &&
+          deps.state.spentUsdAfterId(runSpendAnchorId) >= stop.afterSpendUsd
+        ) {
           const runSpendUsd = deps.state.spentUsdAfterId(runSpendAnchorId);
-          if (runSpendUsd >= stop.afterSpendUsd) {
-            finalStopHit = { name: "afterSpendUsd", threshold: stop.afterSpendUsd, detail: `spent $${runSpendUsd.toFixed(2)}` };
-          }
+          finalStopHit = { name: "afterSpendUsd", threshold: stop.afterSpendUsd, detail: `spent $${runSpendUsd.toFixed(2)}` };
         }
       }
       return result;
