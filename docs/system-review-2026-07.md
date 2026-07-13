@@ -79,15 +79,25 @@ recovered once given away.
 
 ## Mechanism clarifications (state of the world, post-#119)
 
-- **One dispatch batch per round (current).** `runExecuting` runs one
-  dispatch-enabled tick, then drain-only ticks. Under the rounds driver,
-  `lanes.roundDispatchCap` therefore collapses into "round size" and
-  `lanes.max` rarely binds — the two knobs overlap. Intended semantics
-  (M5): `lanes.max` = concurrency only; `roundDispatchCap` = per-round work
-  quota with multi-wave refill. Governance-compatible: `plan:approved` is
-  issue-level and persistent; the architect pass covers all candidates.
-  Trade-off to tune: bigger rounds amortize peripheral cost but slow the
-  retro feedback loop — quota is feedback granularity.
+- **Round dispatch quota, multi-wave refill (#124, shipped).** `runExecuting`
+  dispatches in waves: `lanes.max` bounds CONCURRENCY only (unchanged —
+  tick()'s own lane-ceiling check); `roundDispatchCap` is the round's total
+  work QUOTA, refilled wave-by-wave as lanes free, drawn from the same
+  `plan:approved` pool the whole round through (governance-compatible:
+  approval is issue-level and persistent; the architect pass already covered
+  every candidate). The durable per-round dispatch count needed no new
+  schema — it's read fresh, every wave decision, from the round's existing
+  #123 ledger-window cursor (`start_event_id`) counting `dispatched` events,
+  so a crash/restart mid-round never resets the quota nor lets a resumed
+  drain (`freshBatch=false`) dispatch a further wave. The tick-driver
+  (`driver.ts`, `engine.driver: tick`) is UNCHANGED: outside round.ts,
+  `roundDispatchCap` stays a flat per-tick rate limit, re-armed every call —
+  round.ts is the only caller that reinterprets it as a cross-tick quota,
+  via `TickDeps.dispatchCapOverride`. Default raised 2 -> 6 (2x `lanes.max`'s
+  own default: two full concurrency-wide waves) now that the cap is a real
+  quota, not "round size" in disguise. Trade-off to tune: bigger rounds
+  amortize peripheral cost but slow the retro feedback loop — quota is
+  feedback granularity.
 - **Stop vs scope are orthogonal.** `--stop-on-milestone M` = terminate when
   M has zero open issues (constrains nothing else); `round.milestone` (config
   only) = scope dispatch *and* peripherals to M. "Work only M, stop when
@@ -151,7 +161,7 @@ flowchart TB
     PH1["aligning — PO: north-star doc + round.milestone<br/>→ decompose goals, triage plan-less issues"]
     PH2["architecting — one cross-issue design pass<br/>(+ last round's merged outcomes, M5 #132)"]
     PH3["plan_review — gate0:<br/>reviewer ⇄ drafter self-heal ≤ maxDraftCycles<br/>→ plan:approved | needs-human"]
-    EX1["executing — ONE dispatch batch ≤ roundDispatchCap<br/>(M5 #124: multi-wave refill; lanes.max = concurrency)"]
+    EX1["executing — multi-wave quota (#124):<br/>lanes.max = concurrency; roundDispatchCap = round quota,<br/>refilled wave-by-wave as lanes free"]
     EX2["drain ticks (dispatch frozen):<br/>reclaim by 4 lane signals → DRIVE gate2:<br/>CI green + fresh cross-model review → merge<br/>… until 0 lanes in flight"]
     PH4["harvesting — ledger-sourced summary,<br/>needs-human briefings (M5 #123 slims it)"]
     PH5["retro — engine-built bounded digest in;<br/>scratch-file proposal out → engine verifies branch,<br/>creates PR → gate2"]

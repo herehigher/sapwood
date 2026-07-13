@@ -437,6 +437,17 @@ export interface TickDeps {
    *  sentinel. Reclaim/drive (in-flight lanes, PR review/merge progression) are untouched either
    *  way; only new-lane dispatch is suppressed. Default false (today's behavior unchanged). */
   forceDispatchPause?: boolean;
+  /** #124: per-CALL override for the DISPATCH loop's cap check below, replacing
+   *  cfg.lanes.roundDispatchCap for this one tick only. Omitted (the tick-driver's path,
+   *  driver.ts) -> cfg.lanes.roundDispatchCap applies unchanged, its original meaning: a flat
+   *  PER-TICK rate limit, re-armed fresh every call, no cross-tick memory. round.ts (the rounds
+   *  driver) is the one caller that sets this — it passes the QUOTA REMAINING this round
+   *  (cfg.lanes.roundDispatchCap minus a durable per-round dispatch count it tracks itself),
+   *  so repeated dispatch-enabled ticks across a round's multiple waves cumulatively respect one
+   *  round-wide quota instead of each tick getting its own fresh cfg.lanes.roundDispatchCap
+   *  allowance. This is the ONLY mechanism difference between the two drivers — tick() itself
+   *  has no notion of "round," just "this call's allowance." */
+  dispatchCapOverride?: number;
 }
 
 /**
@@ -1072,7 +1083,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         dispatched.push({ kind: "skipped", issue: issue.number, reason: "over-budget" });
         continue;
       }
-      if (dispatchedThisTick >= cfg.lanes.roundDispatchCap) {
+      // #124: dispatchCapOverride (round.ts's remaining round-quota) replaces the plain
+      // cfg.lanes.roundDispatchCap for a caller that tracks quota ACROSS ticks; unset (the
+      // tick-driver, driver.ts) leaves this a flat per-tick rate limit, exactly as before.
+      if (dispatchedThisTick >= (deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap)) {
         dispatched.push({ kind: "skipped", issue: issue.number, reason: "cap" });
         continue;
       }

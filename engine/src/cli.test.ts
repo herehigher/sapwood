@@ -520,7 +520,7 @@ test("computeDryRunPreview: candidates follow orderForDispatch's priority orderi
     { number: 10, title: "default prio", labels: [] }, // prio 3 (no label)
     { number: 11, title: "urgent", labels: ["prio:0"] },
   ];
-  const preview = computeDryRunPreview(ready, baseCfg); // roundDispatchCap default = 2
+  const preview = computeDryRunPreview(ready, baseCfg); // roundDispatchCap default = 6 (#124), both ready issues under it
   assert.deepEqual(preview.candidates.map((i) => i.number), [11, 10]); // prio:0 first
 });
 
