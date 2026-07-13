@@ -6,9 +6,9 @@
 // ensure ProjectV2 board (Status lanes) -> write starter config.
 // The guard PreToolUse hook is wired in M1 (guard.ts does not exist yet) — deferred here
 // with a clear note, and is human-merge-only per CLAUDE.md.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import { gh, ghText, type GhRunner } from "./gh.js";
 import type { OwnerKind } from "./forge.js";
@@ -238,6 +238,43 @@ function sampleConfig(): string {
   return "board:\n  owner: CHANGEME\n  repo: CHANGEME\n  projectNumber: 0\n";
 }
 
+// ---- #128: north-star goal file scaffold ----------------------------------------------------
+
+/** Resolves the shipped goal-file template — `engine/prompts/goal-template.md` inside the
+ *  engine package, same "next to the shipped prompts" resolution as worker.ts's
+ *  defaultPromptPath (`here` is one level below `engine/` in both `engine/src` (tsx) and
+ *  `engine/dist` (built), so this join lands on `engine/prompts` either way). A module constant
+ *  would work too, but this repo already ships every other role's starter content as a file
+ *  next to worker.md/architect.md/etc — reusing that pattern costs nothing and keeps the
+ *  template's prose out of init.ts's diff noise. */
+export function defaultGoalTemplatePath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "prompts", "goal-template.md");
+}
+
+/** cfg.goal.file is config-file-relative resolved by loadConfig (#128) for a REAL run, but a
+ *  cfg built directly via parseConfig/ConfigSchema (no file on disk — every init.test.ts case,
+ *  and any future direct caller) leaves it exactly as configured, which may still be relative.
+ *  Absolute -> used as-is; relative -> resolved against `cwd`, the same directory ensureConfig
+ *  above writes the starter config into (the ordinary case: config and goal file share a repo
+ *  root). */
+export function resolveGoalFilePath(goalFile: string, cwd: string): string {
+  return isAbsolute(goalFile) ? goalFile : join(cwd, goalFile);
+}
+
+/** Scaffold the north-star goal-file template IFF the resolved path is missing. Never
+ *  overwrites an existing file (it's the user's document, not sapwood's) — this IS the
+ *  idempotence: a second `sapwood init` run against a repo that already has the file (whether
+ *  sapwood wrote it or a human did) is a byte-for-byte no-op. Returns the path written, or null
+ *  when the file already existed. */
+function ensureGoalFile(cfg: SapwoodConfig, cwd: string): string | null {
+  const target = resolveGoalFilePath(cfg.goal.file, cwd);
+  if (existsSync(target)) return null;
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, readFileSync(defaultGoalTemplatePath(), "utf8"));
+  return target;
+}
+
 // ---- orchestrator ---------------------------------------------------------------
 
 export interface InitResult {
@@ -268,6 +305,12 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
 
   const written = ensureConfig(cwd);
   actions.push(written ? `wrote starter config ${written}` : "config already present");
+
+  // #128: the north-star goal file — scaffolded iff missing, never overwriting a user's doc.
+  const goalWritten = ensureGoalFile(cfg, cwd);
+  actions.push(
+    goalWritten ? `wrote starter goal file ${goalWritten}` : `goal file already present (${resolveGoalFilePath(cfg.goal.file, cwd)})`,
+  );
 
   actions.push("guard hook: deferred to M1 (guard.ts not built yet) — human-merge-only when wired");
   return { actions };

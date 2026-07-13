@@ -703,6 +703,15 @@ is exactly what this principle exists to catch.
   alternatives), never silently ignored (gate② P2 on the #106 PR: a trust-ramp user
   typing `--once` must never silently get a long-running round loop instead of a
   bounded tick); `--dry-run` and the `stop.*` final conditions apply to both.
+  **#128 promoted the architecture-doc path to a top-level `goal.file` config key** — the
+  loop's north-star goal file (Goal / Non-goals / Constraints / Current milestone),
+  read by both the aligning (PO) and architecting peripherals, and cited by retro
+  proposals as their basis. `roles.architect.planMdPath` (#104, above) is deprecated
+  back-compat only: config load reconciles the two into the single resolved
+  `cfg.goal.file` every consumer reads (hard error if both are set and disagree; one
+  deprecation line if only the old key is set). `sapwood init` scaffolds a starter
+  template at the resolved path **iff it's missing** — the onboarding step for a repo
+  with no `PLAN.md` yet (see [`configuration.md`](configuration.md#goal)).
 
 ## v0.2 north star: the round orchestrator
 

@@ -169,8 +169,32 @@ without reasoning about the two mechanisms separately.
 | `milestone` | unset | Milestone TITLE (exact match, same mechanism `stop.onMilestoneComplete` validates against) that scopes this run's dispatch candidates — `sapwood run` only claims/dispatches `Ready` issues in this milestone; every other issue is left untouched. Also skips a round's dispatch batch once the milestone has zero open issues left (a round-level pause, distinct from `stop.onMilestoneComplete`'s run-ending final condition). Unset (the default) scopes nothing — every `Ready` issue is a candidate, today's behavior. Round-orchestrator only (`engine.driver: rounds`); has no effect under the `tick` escape hatch. |
 | `standby.enabled` | `true` | Pre-round probe (#125): before opening a NEW round, a pure-GitHub-API check — any Ready issue? any plan-review candidate? any open plan-less issue awaiting PO triage? (when `milestone` is set) any open issue left in it? — decides whether there is provably anything for the round to do. All empty -> the round is withheld (an exponential backoff wait, below) instead of opening and running all five peripheral role sessions for nothing. Standby only engages after a round this run already completed with nothing dispatched — the first round always opens, so the PO gets its plan-doc decomposition pass even on a completely empty repo. A probe API failure fails open — the round opens normally (recorded as a `tick-error` event). Known ceiling: a plan-doc edit made *during* standby is invisible to the pure-API probe — file an issue (any probe signal) or restart the run to wake the PO. `false` restores the pre-#125 behavior: a round always opens immediately. |
 | `standby.backoffCapSec` | `1800` (30min) | Cap on the standby wait: `engine.tickIntervalSec * 2^n` (n = consecutive empty probes), capped here. Any probe hit (a Ready issue appears, etc.) resets the exponent and opens the round immediately — no extra wait. Standby entries/waits/exits are recorded in the event log (`standby-wait`/`standby-exit`). KILL_SWITCH bypasses standby entirely: a round still opens and blocks at its first peripheral phase, same as `standby.enabled: false`. |
-| `directiveFile` | `data/DIRECTIVE.md` | #126: a round directive — human steering (why/what direction; execution stays the agents') dropped at this path before or during a round. At round open the engine reads it, substitutes it into both the aligning (`po.md`) and architecting (`architect.md`) prompts as `{{round.directive}}`, then archives it to `data/directives/round-N.md` so it never silently re-applies to a later round. Consume-once is event-sourced (a durable `directive-applied` event, not the file's presence, is the source of truth), so a crash mid-archive is safe to resume. Absent -> prompts render an explicit "No round directive was provided for this round." placeholder, behavior otherwise unchanged. Relative to the process's cwd (same convention as the engine's own `data/sapwood.sqlite` default), **not** resolved relative to this config file like `roles.*.promptFile`/`planMdPath`. |
+| `directiveFile` | `data/DIRECTIVE.md` | #126: a round directive — human steering (why/what direction; execution stays the agents') dropped at this path before or during a round. At round open the engine reads it, substitutes it into both the aligning (`po.md`) and architecting (`architect.md`) prompts as `{{round.directive}}`, then archives it to `data/directives/round-N.md` so it never silently re-applies to a later round. Consume-once is event-sourced (a durable `directive-applied` event, not the file's presence, is the source of truth), so a crash mid-archive is safe to resume. Absent -> prompts render an explicit "No round directive was provided for this round." placeholder, behavior otherwise unchanged. Relative to the process's cwd (same convention as the engine's own `data/sapwood.sqlite` default), **not** resolved relative to this config file like `roles.*.promptFile`/`goal.file`. |
 | `directiveMaxChars` | `20000` | Deterministic truncation cap, in characters, on the directive text substituted into the prompts — same marked-cut-never-silent-drop contract as `roles.harvest.artifactMaxChars` / `roles.retro.digestMaxChars` above. |
+
+## `goal`
+
+The loop's **north-star goal file** (#128) — the alignment yardstick the aligning (PO) and
+architecting peripherals read every round, and the entry retro proposals must cite as their
+basis.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `file` | `docs/PLAN.md` | Path to the project's north-star goal file. Same `#74`-style resolution as `worker.promptFile`: a relative path resolves against **the config file's own directory**, not the CLI's cwd. `sapwood init` scaffolds a starter template here — Goal / Non-goals / Constraints / Current milestone, each a short commented section — **iff the resolved path is missing**; it never overwrites an existing file (a second `init` run, or a crash-rerun, is a byte-for-byte no-op once the file exists). |
+
+**Deprecated back-compat key:** `roles.architect.planMdPath` (#104) was the pre-#128 home for
+this same path — it is still accepted, and the two keys are reconciled at config load into the
+single resolved `cfg.goal.file` every consumer reads (align.ts's goal-alignment pass and
+architect.ts's architecture-chapter extraction no longer read `roles.architect.planMdPath`
+directly):
+
+- Only `goal.file` set (or neither, defaulting to `docs/PLAN.md`) — nothing to reconcile.
+- Only `roles.architect.planMdPath` set — it wins (today's pre-#128 behavior, unbroken), and
+  config load logs exactly **one** deprecation line pointing at `goal.file`.
+- Both set and they **agree** — resolves cleanly, no error, no deprecation noise.
+- Both set and they **disagree** — a **hard config error at load**, naming both keys, rather
+  than silently preferring one (an operator who set both almost certainly meant to change one
+  and forgot the other was still there).
 
 ## `recovery`
 

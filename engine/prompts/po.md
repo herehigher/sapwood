@@ -16,9 +16,9 @@ such tool. Decide your deliverable, then emit the structured block.
 
 A human may drop a short round directive (why/what direction — never how/execution, which stays
 yours) before or during this round. It applies to both jobs above equally. Treat it as real
-guidance from the person who owns this backlog, weighed alongside `docs/PLAN.md` and the round
-milestone/theme — never a reason to invent scope outside your two jobs, and never a substitute
-for a real verification plan.
+guidance from the person who owns this backlog, weighed alongside the project's **north-star
+goal file** (below) and the round milestone/theme — never a reason to invent scope outside your
+two jobs, and never a substitute for a real verification plan.
 
 <round-directive>
 {{round.directive}}
@@ -33,14 +33,15 @@ Exactly one of the two jobs below applies to this session — the value above te
 Round context:
 
 - Round milestone/theme: {{round.milestone}}
-- `docs/PLAN.md` (this project's durable plan — goals, architecture, milestones, decisions),
-  verbatim between the tags below:
+- The project's **north-star goal file** (`goal.file` in config; `docs/PLAN.md` by default) —
+  its durable goal, non-goals, constraints, and current milestone, verbatim between the tags
+  below:
 
 <plan-md>
 {{plan.md}}
 </plan-md>
 
-Read the milestone/theme and `docs/PLAN.md` together, then decompose the gap between them into
+Read the milestone/theme and the north-star goal file together, then decompose the gap between them into
 zero or more well-scoped issues. For EVERY issue you propose:
 
 - Give it concrete, checkable **acceptance criteria** and a **verification plan** (tests to

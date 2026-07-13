@@ -226,9 +226,10 @@ export interface AlignDeps {
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
   /** Override for loadPlanMd's path — tests inject a fixed string via a temp file. A real
-   *  caller omits this and gets `cfg.roles.architect.planMdPath` (#104): align.ts and
-   *  architect.ts both read the repo's architecture doc, so they honor the SAME config key
-   *  rather than each hardcoding their own default. */
+   *  caller omits this and gets `cfg.goal.file` (#128, promoted out of the #104-era
+   *  `roles.architect.planMdPath`): align.ts and architect.ts both read the project's
+   *  north-star goal file, so they honor the SAME resolved config value rather than each
+   *  hardcoding their own default. */
   planMdPath?: string;
 }
 
@@ -266,9 +267,9 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
         "po.mode": "align",
         "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
-        // #104: deps.planMdPath is a TEST override only now — a real caller omits it and gets
-        // cfg.roles.architect.planMdPath (the same key architect.ts's own PLAN.md read honors).
-        "plan.md": loadPlanMd(deps.planMdPath ?? deps.cfg.roles.architect.planMdPath),
+        // #128: deps.planMdPath is a TEST override only now — a real caller omits it and gets
+        // cfg.goal.file (the same resolved value architect.ts's own goal-file read honors).
+        "plan.md": loadPlanMd(deps.planMdPath ?? deps.cfg.goal.file),
         "round.directive": directive,
       });
       const alignResult = await runSessionWithRetry({

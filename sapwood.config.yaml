@@ -149,11 +149,11 @@ labels: # taxonomy used by the loop
 #     #                   Unset = the engine's shipped prompts/architect.md.
 #     model: sonnet
 #     effort: medium
-#     planMdPath: docs/PLAN.md # #104: the architecture-doc path the architect (and the PO's
-#                        # alignment pass) read for context. Same #74-style resolution as
-#                        # promptFile: a relative path resolves against THIS config file's
-#                        # directory. Default docs/PLAN.md — override for target repos that
-#                        # keep their architecture doc somewhere else (or don't have one).
+#     # planMdPath: docs/PLAN.md
+#                        # DEPRECATED (#128): use the top-level `goal.file` above instead. Still
+#                        # accepted for back-compat: if only this key is set, it wins (one
+#                        # deprecation line logged at config load); if goal.file is ALSO set and
+#                        # disagrees, config load is a hard error naming both keys.
 #     enabled: true      # #127: false -> the architecting phase no-ops every round
 #   harvest: # #91: round-close summary — comments round context onto this round's
 #     #        needs-human issues. Issue-comment writes only (no labels, no body edits).
@@ -205,6 +205,16 @@ labels: # taxonomy used by the loop
 #   directiveMaxChars: 20000 # deterministic truncation cap on the directive text (same
 #                         # marked-cut-never-silent-drop contract as roles.harvest.artifactMaxChars
 #                         # / roles.retro.digestMaxChars).
+
+# #128: the loop's north-star goal file — the alignment yardstick the aligning (PO) and
+# architecting peripherals read every round, and the entry retro proposals must cite as their
+# basis. Same #74-style resolution as promptFile: a relative path resolves against THIS config
+# file's directory, not the CLI's cwd. `sapwood init` scaffolds a starter template (Goal /
+# Non-goals / Constraints / Current milestone) at this path iff it's missing — never overwrites
+# an existing file. Supersedes the deprecated roles.architect.planMdPath (still accepted for
+# back-compat — see that key's own comment below).
+# goal:
+#   file: docs/PLAN.md
 
 escalation:
   humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human
