@@ -149,8 +149,8 @@ one job:
 Derivation rule: **files beat DB beats staleness** — sentinels are absolute;
 then the newest relevant event; a stale `lastTickAt` overrides everything
 ("whatever the DB says it was doing, it isn't"). The header's one-word state
-in frontend-design.md §3-A must be computed from exactly this table —
-`standby` needs adding to that vocabulary (the spec predates #125).
+in frontend-design.md §3-A/§8 is computed from exactly this table and carries
+the matching vocabulary.
 
 ## 7. Frontend responsibilities and boundaries
 
@@ -174,14 +174,3 @@ in frontend-design.md §3-A must be computed from exactly this table —
   append-only; replay re-drives the same UI from any point. Same renderer,
   two clocks — live polling vs. event-time scrubbing. `round_artifacts`
   gives replay its chapter marks (one chapter per round).
-
-## 8. Known spec drift (frontend-design.md, locked 07-10, pre-#123/#125/#147)
-
-1. §2-2 "round-orchestrator roles have no data yet (`rounds` ledger is
-   unbuilt)" — **stale**: `rounds` (live phase cursor) and `round_artifacts`
-   (per-round history) both exist; peripheral roles can render real state.
-2. §7's copy map covers 19 event kinds — main now emits **29** (standby,
-   gated re-entry, retro-PR, align-summary, triage-degraded, …).
-3. §3-A header vocabulary lacks `standby` (and conflates it with `stalled`).
-
-These are spec amendments for #17, not blockers.

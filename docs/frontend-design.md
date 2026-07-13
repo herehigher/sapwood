@@ -9,6 +9,11 @@ and duplicates nothing from it.
 Status: **design locked for v0.2 implementation issues; pixels may evolve, scope
 decisions and the data contract only change by amending this doc.**
 
+Amended 2026-07-13 (post-M5 wave 2): the rounds ledger + round artifacts
+landed (#123), standby (#125), gated re-entry (#147), and live in-flight cost
+estimates (#33) are engine reality on `main` — sections below updated to
+match; the stacked budget-bar rule (§3 E) was decided on issue #17.
+
 ---
 
 ## 1. Goals & audiences
@@ -35,8 +40,8 @@ in/out call:
 | # | Suggestion | Decision | Rationale |
 |---|---|---|---|
 | 1 | Dynamic visual of the whole flow (anime.js) | **IN — the hero.** One animated Loop scene: Backlog → Lanes → Gate ① → Gate ② → Merged. | The promo centerpiece. anime.js (~10 kB) is the single animation dependency, scoped to this scene; all other motion is CSS. |
-| 2 | See the agent roles interacting | **IN, real roles only**: conductor, worker, reviewer, merge driver — as actors in the hero scene and lane cards. | The round-orchestrator roles (PO/architect/harvest/retro) have no data yet (`rounds` ledger is unbuilt). The scene layout reserves labeled slots for them; we never render fake state. |
-| 3 | Per-node status, output summary, cost | **IN**: lane board from `workers` (+ per-lane cost from `spend_ledger`); header status strip with daily-spend meter. | All columns exist in schema v7 today. Caveat: spend is recorded **at reclaim** (lane end) — in-flight lanes show cost as "—, settles when the lane ends"; live in-flight cost is gated on #33. |
+| 2 | See the agent roles interacting | **IN**: conductor, worker, reviewer, merge driver as actors in the hero scene and lane cards; the round-orchestrator roles (PO/architect/plan review/harvest/retro) as a phase strip lit from live data. | The `rounds` table carries the live phase cursor and `round_artifacts` the per-round history (#123, [round-artifact.md](round-artifact.md)) — the phase strip renders real state, never fake animation. Deep round-browse views stay deferred (§10). |
+| 3 | Per-node status, output summary, cost | **IN**: lane board from `workers` (+ per-lane cost from `spend_ledger`); header status strip with daily-spend meter. | Settled (real) cost comes from `spend_ledger` at lane end; **in-flight cost is the engine's #33 estimate** (the pricing.yaml table that already drives the soft worker budget), shown marked `est` and settling to real when the lane ends. |
 | 4 | Browse past loop rounds | **IN via replay, not metrics.** The `events` table is a complete append-only history → a replay player (play/pause/scrub) re-drives the whole UI from any point. | History-*aggregation* metrics (cycle time, merge/rework rate) stay **OUT** — PLAN.md defers them to a later phase gated on GitHub-history work. |
 | 5 | Config panel | **IN as read-only.** Grouped, plain-language view of the resolved config. **Editing is OUT.** | A write path would break the dashboard's read-only security posture, and security-relevant config is human-merge-only territory. Edit via the YAML file, where review applies. |
 | 6 | Avoid jargon | **IN as a copy layer**: one map from the 19 event kinds to plain sentences (§7). UI language is English (repo/launch artifact); the map is a single module, trivially localizable later — no i18n framework. | |
@@ -77,8 +82,9 @@ Single page, no routing. Five modules, one screen:
 ```
 
 - **A — Header.** Wordmark; engine state as one word + dot (`running` /
-  `stalled` / `paused` / `winding down` / `stopping` / `stopped` — derived
-  from sentinels, ceiling breach, and `lastTickAt` age, §8); daily-spend meter
+  `standby` / `stalled` / `paused` / `winding down` / `stopping` / `stopped` —
+  derived from sentinels, ceiling breach, standby events, and `lastTickAt`
+  age, §8; `standby` renders calm, never as an error); daily-spend meter
   (today vs `cost.dailyBudgetUsd`); the Live ↔ Replay toggle.
 - **B — Hero: the Loop.** The whole pipeline as one horizontal scene (§6).
   Fixed stage; real events move tokens through it. Ends in the **trunk
@@ -86,9 +92,9 @@ Single page, no routing. Five modules, one screen:
 - **C — Lane board.** One card per lane up to `lanes.max`; empty lanes render
   as quiet outlines ("an empty lane is capacity, not absence"). Card: issue
   number (linking to GitHub — title enrichment is deferred, §10), state word,
-  PR link when driving, elapsed time, and cost — shown as "—, settles when the
-  lane ends" while in flight, the `spend_ledger` sum once reclaimed (spend is
-  written at reclaim only; live in-flight cost is gated on #33).
+  PR link when driving, elapsed time, and cost — the engine's in-flight
+  **estimate** (marked `est`, #33) while running, settling to the
+  `spend_ledger` real sum when the lane ends.
 - **D — Activity feed.** The `events` stream through the copy map (§7),
   newest first, relative timestamps; kind-colored dot per entry. Payload
   details (worker, head, mode) collapse behind each entry — never in the
@@ -102,6 +108,16 @@ Single page, no routing. Five modules, one screen:
   its plain-language caption
   (e.g. `worker.budgetUsdSoft` → "Budget per worker — reaching it asks the
   worker to wrap up and hand off, never kills it mid-work").
+
+  **Budget bars — one grammar at every tier** (decided on #17): settled real
+  cost draws solid; the in-flight estimate stacks after it in the same hue at
+  ~40 % alpha (or hatched) — translucency reads as "not final", which a
+  lighter shade alone doesn't. Ceiling tick marks apply to the **settled
+  segment only**: the hard tiers settle on real cost, so the est segment may
+  legitimately cross the tick without a freeze (tooltip: "ceiling fires on
+  settled cost only"). Worker-card bars are all-estimate — no split; the
+  header daily meter (and a round meter, if shown) use the split. When a lane
+  settles, one feed line calibrates the estimate ("est $1.10 → real $0.97").
 
 Empty/error states are directions, not moods: fresh DB → hero idles with
 "Waiting for the first dispatch — point sapwood at a Ready issue"; API
@@ -173,7 +189,8 @@ contrast tool at implementation, per theme**, `prefers-reduced-motion` honored
 (§6). Color is never the sole carrier: gate resolutions get a ✓/✕ glyph,
 failed lanes a static ✕ (moss/rust is deuteranopia-ambiguous), and the
 activity feed is the hero's accessible text channel (`aria-live="polite"` on
-new entries).
+new entries). The est/settled budget-bar split (§3 E) also never relies on
+color alone — the est segment carries a texture (hatch) or the `est` label.
 
 ## 6. Motion spec — the hero Loop
 
@@ -181,9 +198,12 @@ The hero is a fixed stage (SVG): backlog stack → lane channels (`lanes.max`
 of them) → gate ① (checks) → gate ② (review) → trunk cross-section. Roles are
 labeled *on the stage itself* in plain words: the conductor is the stage (it
 schedules everything); workers are the lane channels; the reviewer sits at
-gate ②; the merge driver is the arm between gate ② and the trunk. A reserved,
-dimmed slot row above the stage is labeled "planning roles — coming with
-rounds" (round orchestrator, unbuilt; never animated).
+gate ②; the merge driver is the arm between gate ② and the trunk. A slot row above
+the stage names the round phases (PO · goal alignment → architect → gate⓪
+plan review → harvest → retro); the slot matching the open round's
+`rounds.phase` is lit, the rest stay dimmed. Illumination only — phase slots
+never animate droplets (peripheral work externalizes as issues and comments,
+not lanes).
 
 An issue is a **sap droplet** (amber dot with the issue number). Real events
 drive it, via one anime.js timeline per transition:
@@ -212,8 +232,9 @@ rings appear without stroke animation; ambient shimmer off. The scene remains
 fully legible — motion is commentary, never the only carrier of state.
 
 **Replay mode** drives the identical scene from historical events: a transport
-(play/pause, speed ×1/×4/×16, scrub bar spanning the event log) replaces the
-polling source. Scrubbing rebuilds state by folding events up to the cursor —
+(play/pause, speed ×1/×4/×16, scrub bar spanning the event log — with chapter
+marks, one per closed round from `round_artifacts`) replaces the polling
+source. Scrubbing rebuilds state by folding events up to the cursor —
 same reducer as live mode, one code path; the fold keeps periodic checkpoints
 (every ~500 events) so scrubbing stays O(distance), not O(log-length).
 **Replay covers event-backed panels only** — hero, lane narrative, feed, ring
@@ -232,7 +253,9 @@ is the mechanism either way.
 
 All user-visible sentences live in one module (`copy.ts`), keyed by event
 kind. Voice: active, specific, no system internals (say "lane", "checks",
-"review", never "reclaim", "tick", "worktree"). The 19 kinds:
+"review", never "reclaim", "tick", "worktree"). The 31 kinds (12 added
+post-lock by #110/#123/#125/#147 — **every engine PR that adds an event kind
+must extend this map; make it a gate② checklist item**):
 
 | Event kind | Feed sentence |
 |---|---|
@@ -255,6 +278,18 @@ kind. Voice: active, specific, no system internals (say "lane", "checks",
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
 | `tick-error` | The engine hit an error this cycle — it will retry |
+| `standby-wait` | Nothing to work on — checking again in {waitSec} s |
+| `standby-exit` | Work appeared — resuming after {attempts} quiet check(s) |
+| `round-stop` | This round reached its limit ({detail}) — no new work this round |
+| `align-summary` | Planning pass: {n} issue(s) created, {m} plan(s) drafted |
+| `triage-degraded` | A planning session had trouble — some issues keep their old plans |
+| `no-plan-after-draft` | Issue #{issue} still has no usable plan after a drafting attempt |
+| `plan-review-escalated` | Issue #{issue}'s plan needs a human — automated review couldn't approve it |
+| `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
+| `gated-reentry-capped` | Issue #{issue} was unblocked too many times without landing — flagged for a human |
+| `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |
+| `retro-pr-opened` | The loop proposed an improvement to itself — PR #{pr} awaits review |
+| `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
 
 The same module captions lane states (`running` → "writing", `driving` → "PR
 under review", `handoff` → "handed off") and config keys (§3 E). Adding an
@@ -262,22 +297,27 @@ event kind without a copy entry is a type error.
 
 ## 8. Data contract
 
-Two read-only endpoints, as locked in PLAN.md — both served from the existing
-SQLite tables (schema v7, `engine/src/state.ts`); no new engine tables.
-Response shapes mirror what `StatusSnapshot` (`engine/src/cli.ts`) already
-computes for `sapwood status`.
+Three read-only endpoints, served from the existing SQLite tables
+(schema v10, `engine/src/state.ts` — including `rounds` and
+`round_artifacts`); no dashboard-specific engine tables. Response shapes
+mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
+`sapwood status`.
 
 **`GET /api/loop/state`** — everything current, one poll:
 
 ```jsonc
 {
   "engine": {
-    "state": "running",            // running | stalled | paused | winding-down | stopping | stopped
+    "state": "running",            // running | standby | stalled | paused | winding-down | stopping | stopped
                                     // derived: KILL_SWITCH + active lanes → stopping (drain in
                                     // progress); KILL_SWITCH + none → stopped; ceiling_breach →
                                     // winding-down; PAUSE → paused; lastTickAt older than the
                                     // engine's stale-gap threshold → stalled (dead engine must
-                                    // not read as a green "running"); else running
+                                    // not read as a green "running"); no open round + newest
+                                    // standby-wait newer than any standby-exit → standby
+                                    // (parked, healthy — #125); else running.
+                                    // Precedence: sentinel files > newest event > staleness
+                                    // overrides everything (docs/loop-walkthrough-v0.2.md §6)
     "reasons": [],                  // ceiling_breach.reasons when winding-down
     "lastTickAt": "2026-07-09T08:12:00Z"   // engine_session.last_tick_at
   },
@@ -287,11 +327,17 @@ computes for `sapwood status`.
       "lane": "w1", "issue": 86,    // numbers link out to GitHub; no title (deferred, §10)
       "state": "driving", "pr": 97,
       "startedAt": "…", "endedAt": null,
-      "costUsd": null               // SUM(spend_ledger) per worker — spend is written at
-                                    // reclaim, so in-flight lanes are null ("settles when
-                                    // the lane ends"); live in-flight cost is #33-gated
+      "costUsd": null,              // SUM(spend_ledger) per worker — real cost, written at
+                                    // reclaim; null while in flight
+      "estCostUsd": 0.73            // engine's in-flight #33 estimate (pricing.yaml) — the
+                                    // same signal driving the soft worker budget. Requires
+                                    // the engine to persist its per-probe estimate (small
+                                    // engine change, flagged on #17); until then null and
+                                    // the UI shows the settled value only
     }]
   },
+  "round": { "id": 12, "phase": "executing" },  // live phase cursor (rounds table);
+                                                 // null when no round is open (standby)
   "spend": {
     "todayUsd": 12.4,               // dailySpendUsd()
     "dailyBudgetUsd": 100,          // config (null if unreadable)
@@ -312,6 +358,17 @@ by `id`; live mode polls with the last seen id, replay mode pages from
 { "events": [{ "id": 512, "ts": "…", "kind": "merged",
                "payload": { /* stored JSON, verbatim */ } }],
   "lastId": 512 }
+```
+
+**`GET /api/rounds`** — replay chapter marks and (deferred) round browsing;
+one row per closed round from `round_artifacts`, ascending:
+
+```jsonc
+{ "rounds": [{ "roundId": 12, "schemaVersion": 1,
+               "artifact": { /* the validated JSON, verbatim —
+                                docs/round-artifact.md is the contract; the UI
+                                checks schemaVersion and says "newer schema —
+                                update the dashboard" rather than mis-render */ } }] }
 ```
 
 Server: `node:http` on `127.0.0.1` (port configurable, default 4517), SQLite
@@ -350,8 +407,9 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 
 - **Config editing** — needs a write path + auth story; contradicts v0.2's
   read-only posture.
-- **Round-orchestrator views** (PO/architect/harvest/retro, round phases) —
-  blocked on the `rounds` ledger; the hero already reserves the slot row.
+- **Deep round-browse views** (per-round drill-down pages beyond the lit
+  phase strip and replay chapters, which are IN for v0.2) — the
+  `round_artifacts` data exists; the additional UI surface is not v0.2 scope.
 - **History-aggregation metrics** (cycle time, merge/rework rate) — deferred
   by PLAN.md, gated on GitHub-history work.
 - **WebSocket push** — polling at 3 s is indistinguishable for a local
@@ -363,6 +421,4 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
   waiting state (§6).
 - **Replayable cost panels** — needs cost folded into `merged`/reclaim event
   payloads; v0.2 greys spend panels in replay.
-- **Live in-flight lane cost** — gated on the live cost signal (#33); v0.2
-  shows "settles when the lane ends".
 - **Localization** — the copy map is the seam; add locales when someone asks.
