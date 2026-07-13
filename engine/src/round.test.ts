@@ -526,6 +526,36 @@ test("runRounds stop.afterSpendUsd: anchored to THIS run's start — spend alrea
   deps.state.close();
 });
 
+test("runRounds stop.afterSpendUsd: spend ledgered by CLOSING peripherals (after the last tick) still stops at the round boundary — no second round opens (Codex P2, PR #160)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = []; // zero worker spend — the ONLY spend is the retro session's, ledgered post-tick
+  const state = new State(":memory:");
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const peripherals = {
+    ...allPeripherals(log),
+    // Mirrors runSessionWithRetry's role-session ledgering (peripheral.ts): the retro session's
+    // cost lands in spend_ledger AFTER the executing phase's final tick — the exact window a
+    // tick-only check never sees.
+    retro: {
+      async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+        log.push({ phase: "retro" as PeripheralPhase, marker: ctx.marker });
+        state.recordSpend("retro-session-r1", 0, 25, new Date().toISOString(), []);
+        return { marker: `retro-r${ctx.roundId}` };
+      },
+    },
+  };
+  const deps = baseDeps({ forge, state, sleep, stop: { afterSpendUsd: 20 }, peripherals });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
+  assert.equal(result.rounds, 1, "the crossed budget must stop the run at the boundary — never a second round");
+  assert.equal(log.filter((l) => l.phase === "aligning").length, 1, "round 2 never opened its first phase");
+  deps.state.close();
+});
+
 test("runRounds stop.onMilestoneComplete: checked at round boundaries (never mid-round), preempts opening a NEW round", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();

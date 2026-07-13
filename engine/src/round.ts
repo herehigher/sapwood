@@ -285,6 +285,21 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     }
   };
 
+  /** #154 (Codex P2, PR #160): re-check the run-spend budget at ROUND boundaries too. The
+   *  tick-level check above can't be the only one: closing peripherals (harvest/retro) ledger
+   *  their role-session spend via runSessionWithRetry AFTER the executing phase's final tick,
+   *  so a budget crossed by that spend would otherwise go unnoticed until the NEXT round's
+   *  first tick — after that round already opened and dispatched a fresh wave. Sync SQLite
+   *  read, no network; same first-hit-wins contract as every other condition. */
+  const checkFinalSpend = (): void => {
+    const threshold = deps.stop?.afterSpendUsd;
+    if (threshold === undefined || finalStopHit) return;
+    const runSpendUsd = deps.state.spentUsdAfterId(runSpendAnchorId);
+    if (runSpendUsd >= threshold) {
+      finalStopHit = { name: "afterSpendUsd", threshold, detail: `spent $${runSpendUsd.toFixed(2)}` };
+    }
+  };
+
   /** #76-style onMilestoneComplete, checked at ROUND boundaries (not every tick) — this run's
    *  FINAL condition, distinct from cfg.round.milestone's per-round scoping. Contained: a
    *  throwing read is a tick-error, never a fired condition, never a crash. */
@@ -558,6 +573,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       let round = deps.state.openRound();
       if (!round) {
+        checkFinalSpend(); // #154: cheapest check first (local read), then the network one
         await checkFinalMilestone();
         if (finalStopHit) {
           return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
