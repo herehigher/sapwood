@@ -399,6 +399,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
     ...(over.roundSpendUsd !== undefined ? { roundSpendUsd: over.roundSpendUsd } : {}),
     ...(over.dispatchCapOverride !== undefined ? { dispatchCapOverride: over.dispatchCapOverride } : {}),
+    // #154 (Codex P1, PR #160): the run-level spend stop must freeze a tick's OWN refill the
+    // moment its reclaim phase banks the crossing spend — thunk evaluated inside tick(),
+    // post-reclaim (see TickDeps.runSpendStopCrossed). Only wired when the stop is configured.
+    ...(deps.stop?.afterSpendUsd !== undefined
+      ? { runSpendStopCrossed: () => deps.state.spentUsdAfterId(runSpendAnchorId) >= deps.stop!.afterSpendUsd! }
+      : {}),
   });
 
   /** Run one peripheral phase's stub, persist its marker, fire the observability hook. Returns
@@ -489,7 +495,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // AFTER its reclaim phase and caps there; this function only decides whether tick() is
     // ALLOWED to dispatch at all, never how many lanes it may fill.
     const tryDispatchWave = async (): Promise<boolean> => {
-      if (!freshBatch || stopHit) return false;
+      // #154 (Codex P1, PR #160): finalStopHit — a RUN-level stop condition (afterSpendUsd /
+      // afterIssuesMerged / afterPRsOpened, set by the per-tick check above) — must freeze new
+      // waves in THIS round too, not just withhold the next round. A #124/#154 interaction:
+      // pre-#124 all dispatch happened before any condition could fire mid-round, so the gap
+      // was unreachable; with multi-wave refill, "graceful wind-down" means in-flight lanes
+      // finish but no further wave opens once ANY run-level condition has fired.
+      if (!freshBatch || stopHit || finalStopHit) return false;
       const already = dispatchedThisRound();
       if (already >= cfg.lanes.roundDispatchCap) {
         stopHit = { name: "roundDispatchCap", detail: `dispatched ${already}` };

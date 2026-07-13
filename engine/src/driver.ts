@@ -234,9 +234,17 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
       // re-armed fresh every call, no cross-tick quota memory. The rounds driver (round.ts)
       // reinterprets the same config key as a per-ROUND quota by passing dispatchCapOverride
       // itself; this driver is intentionally untouched by that reinterpretation.
+      // #154 (Codex P1, PR #160): same same-tick window as the rounds driver — a lane reclaimed
+      // by THIS tick can bank the spend that crosses stop.afterSpendUsd, and this driver's own
+      // post-tick check below lags one tick; the thunk lets tick() freeze its own refill
+      // post-reclaim. Only wired when the stop is configured.
+      const spendStopThunk: Pick<TickDeps, "runSpendStopCrossed"> =
+        deps.stop?.afterSpendUsd !== undefined
+          ? { runSpendStopCrossed: () => deps.state.spentUsdAfterId(runSpendAnchorId) >= deps.stop!.afterSpendUsd! }
+          : {};
       const tickDeps: TickDeps = stopConditionHit
-        ? { ...deps, forceDispatchPause: true }
-        : deps;
+        ? { ...deps, ...spendStopThunk, forceDispatchPause: true }
+        : { ...deps, ...spendStopThunk };
       try {
         result = await tick(tickDeps);
         ticks++;

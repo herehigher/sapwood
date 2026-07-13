@@ -556,6 +556,29 @@ test("runRounds stop.afterSpendUsd: spend ledgered by CLOSING peripherals (after
   deps.state.close();
 });
 
+test("runRounds stop.afterSpendUsd: fired MID-round (worker spend crosses during drain) — no further wave dispatches in the SAME round (Codex P1, PR #160; #124/#154 interaction)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [1, 2, 3].map((n) => ({ number: n, title: `i${n}`, labels: ["prio:3-feature"] }));
+  const sup = new AutoCompleteSupervisor();
+  // lanes.max 1, quota 3: wave 1 = issue 1 alone; its reclaim banks $25 ≥ the $20 threshold, so
+  // the run-level condition fires mid-round with quota AND lanes still free for waves 2-3.
+  for (const n of [1, 2, 3]) sup.probes[`lane-${n}-${n}`] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false, costUsd: 25 };
+  const deps = baseDeps({
+    forge, supervisor: sup, sleep,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 3 } }),
+    stop: { afterSpendUsd: 20 },
+  });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(sup.dispatchedIssues, [1], "waves 2-3 must never dispatch after the run-level spend stop fired");
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 20, detail: "spent $25.00" });
+  assert.equal(result.rounds, 1);
+  deps.state.close();
+});
+
 test("runRounds stop.onMilestoneComplete: checked at round boundaries (never mid-round), preempts opening a NEW round", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
