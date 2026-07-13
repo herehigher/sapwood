@@ -18,8 +18,9 @@ import type { SapwoodConfig } from "./config.js";
 import type { RoleRunner } from "./peripheral.js";
 import { RoundScopedForge, type PeripheralPhase, type PeripheralStub } from "./round.js";
 import { createAligningStub, alignMarker } from "./align.js";
-import { mergeAlignSummary, type AlignSection } from "./round-artifact.js";
-import { createArchitectStub, type ArchitectDeps } from "./architect.js";
+import { mergeAlignSummary, RoundArtifactSchema, type AlignSection, type RoundArtifact } from "./round-artifact.js";
+import { capDigest } from "./retro-digest.js";
+import { createArchitectStub, NO_PRIOR_ROUND_YET, type ArchitectDeps } from "./architect.js";
 import { createPlanReviewStub } from "./plan-review.js";
 import { createHarvestStub } from "./harvest.js";
 import { createRetroStub } from "./retro.js";
@@ -64,6 +65,55 @@ export function renderAlignedGoalsFromSummary(state: State, roundId: number): st
   } catch {
     return null; // contained — the caller's pointer-note fallback covers a state read failure
   }
+}
+
+/** #132 (M5 item 12 — "the architect's second mission"): renders the architect's
+ *  `round.lastMerged` context from the PREVIOUS round's persisted summary artifact
+ *  (round-artifact.ts's `round_artifacts` table / RoundArtifactSchema, #123's durable ledger) —
+ *  never a live forge read (the architect session itself fetches nothing; this is engine-side,
+ *  deterministic, compute-at-read assembly, same shape as renderAlignedGoalsFromSummary above:
+ *  no new writes, no counters, so a crash-rerun of the architecting phase re-assembles
+ *  identically). Scoped deliberately to what the artifact's `merges` field actually stores —
+ *  `{issue, worker, pr}` triples (conductor.ts's "merged" event payload carries no title and no
+ *  files-touched, so neither is persisted anywhere this reads from); a live forge call to
+ *  backfill those would violate the "session fetches nothing" invariant for a nice-to-have, so
+ *  this module deliberately does not add one. Titles/files-touched are NOT rendered — numbers
+ *  and outcomes only, sufficient for a drift review, not a diff review.
+ *
+ *  Three outcomes, exported for tests:
+ *    1. `roundId <= 1` (no possible prior round) OR the prior round's artifact row is simply
+ *       missing (harvest disabled — #127 — or persistence failed, or a corrupt/unparseable row)
+ *       -> the SAME explicit `NO_PRIOR_ROUND_YET` placeholder architect.ts's own default uses —
+ *       from the architect's point of view "no prior round" and "prior round's data didn't
+ *       survive" are indistinguishable, and both must degrade, never throw.
+ *    2. The prior round closed with zero merges -> a DISTINCT "merged nothing" placeholder.
+ *    3. One or more merges -> a rendered, deterministically-truncated (capDigest) list. */
+export function renderLastMergedFromArtifact(state: State, roundId: number, maxChars: number): string {
+  if (roundId <= 1) return NO_PRIOR_ROUND_YET;
+  const prevRoundId = roundId - 1;
+  let row: { schemaVersion: number; json: string } | undefined;
+  try {
+    row = state.getRoundArtifact(prevRoundId);
+  } catch {
+    return NO_PRIOR_ROUND_YET; // contained — a state read failure degrades, never throws
+  }
+  if (!row) return NO_PRIOR_ROUND_YET;
+  let artifact: RoundArtifact;
+  try {
+    artifact = RoundArtifactSchema.parse(JSON.parse(row.json));
+  } catch {
+    return NO_PRIOR_ROUND_YET; // corrupt/unparseable row — same degrade, never throws
+  }
+  if (artifact.merges.length === 0) {
+    return `Round ${prevRoundId} closed with zero merged PRs — nothing to post-review from the prior round.`;
+  }
+  const lines = [
+    `Merged outcomes from round ${prevRoundId} (issue/PR numbers and the dispatched worker only — ` +
+    `titles and files-touched are not persisted in the round ledger, so they are not rendered here; ` +
+    `this text is engine-assembled from the durable round artifact, never a live forge read):`,
+    ...artifact.merges.map((m) => `- issue #${m.issue} merged via PR #${m.pr} (worker: ${m.worker})`),
+  ].join("\n");
+  return capDigest(lines, maxChars);
 }
 
 /** The shipped default peripherals map: every phase (aligning/architecting/plan_review/
@@ -135,6 +185,14 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
             `This round's PO/goal-alignment peripheral has run (round ${ctx.roundId}, marker ` +
             `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
             `actual decomposition (no structured summary was recorded this round).`;
+        // #132: the PREVIOUS round's merged-PR outcomes (round-artifact.ts's persisted
+        // round_artifacts row), computed HERE at architect-invocation time from durable state —
+        // same "compute at read, never a same-process side effect" rationale as alignedGoals
+        // above (a crash-rerun that resumes directly at architecting must see the same context
+        // a from-scratch run would).
+        architectDeps.lastMerged = renderLastMergedFromArtifact(
+          deps.state, ctx.roundId, deps.cfg.roles.architect.lastMergedMaxChars,
+        );
         return architectStub.run(ctx);
       },
     };

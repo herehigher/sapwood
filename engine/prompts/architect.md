@@ -43,6 +43,23 @@ reason to flag a contradiction that wouldn't otherwise exist.
 
 {{round.alignedGoals}}
 
+## Post-review: last round's merged work
+
+The engine-assembled summary below is your OTHER mission alongside the pre-dispatch design
+review: post-review of what actually landed last round. Flag ARCHITECTURAL DRIFT — a merged
+outcome whose shape now contradicts the goal file's Architecture chapter below — using the same
+per-issue contradiction mechanism as your pre-dispatch flags (name the issue from THIS round's
+candidate list if a follow-up is warranted; you cannot flag a PAST issue directly, only note the
+drift in your round design note and flag whichever current candidate should address it). This is
+numbers-only context (issue/PR numbers and the worker, no titles, no diffs, no files-touched — it
+is deliberately bounded to what the engine's durable ledger already records, never a live GitHub
+read): treat it as a prompt to ask "does this shape still match the locked architecture", not as
+a full code review.
+
+<round-lastMerged>
+{{round.lastMerged}}
+</round-lastMerged>
+
 ## Locked architecture (the north-star goal file's architecture chapter)
 
 The project's north-star goal file (`goal.file` in config; `docs/PLAN.md` by default) is the

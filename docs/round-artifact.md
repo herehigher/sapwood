@@ -52,5 +52,10 @@ Scope: strictly the events between the round's own open and close. Run-scoped ev
   The pre-#123 `harvest-summary` event is gone; the persisted row is the machine-readable
   round record.
 - **Architect**: receives the aligning phase's structured decomposition detail
-  (`align-summary` → `{{round.alignedGoals}}`) instead of a pointer note.
+  (`align-summary` → `{{round.alignedGoals}}`) instead of a pointer note. It also receives the
+  **previous** round's `merges` (issue/PR/worker only — no titles, no files-touched, neither is
+  persisted anywhere the ledger reads from) as `{{round.lastMerged}}` (#132) — post-review context
+  for architectural drift, bounded by `roles.architect.lastMergedMaxChars`. First round / no prior
+  round / a missing prior-round artifact all render an explicit placeholder, never an empty
+  substitution or a live forge read.
 - **Dashboard (#17)**: reads `round_artifacts` rows directly; this schema is the contract.
