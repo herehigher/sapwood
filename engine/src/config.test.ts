@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadConfig, parseConfig } from "./config.js";
+import { DEFAULT_GOAL_FILE, loadConfig, parseConfig } from "./config.js";
 
 test("applies defaults when only required board fields given", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
@@ -667,55 +667,119 @@ test("round.directiveMaxChars: zero/negative rejected (same positive-int contrac
   );
 });
 
-// ── #104: roles.architect.planMdPath (architecture-doc path, no longer hardcoded to cwd) ───
+// ── #128: goal.file (top-level north-star goal file, promoted out of the #104-era
+// roles.architect.planMdPath) — precedence, deprecation, config-file-relative resolution ───────
 
-test("roles.architect.planMdPath: defaults to docs/PLAN.md", () => {
+test("goal.file: defaults to docs/PLAN.md when neither key is set", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.roles.architect.planMdPath, "docs/PLAN.md");
+  assert.equal(cfg.goal.file, DEFAULT_GOAL_FILE);
+  assert.equal(cfg.goal.file, "docs/PLAN.md");
 });
 
-test("roles.architect.planMdPath: overridable, same #74-style key as promptFile", () => {
+test("goal.file: only the new key set — it wins, no error, no deprecation noise", () => {
+  const calls: unknown[][] = [];
+  const orig = console.error;
+  console.error = (...args: unknown[]) => calls.push(args);
+  try {
+    const cfg = parseConfig(
+      "board: { owner: a, repo: r, projectNumber: 1 }\ngoal: { file: notes/GOAL.md }",
+    );
+    assert.equal(cfg.goal.file, "notes/GOAL.md");
+    assert.equal(calls.length, 0, "no deprecation line when only the new key is set");
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("goal.file: only the OLD key (roles.architect.planMdPath) set — it wins, and exactly ONE deprecation line is logged", () => {
+  const calls: unknown[][] = [];
+  const orig = console.error;
+  console.error = (...args: unknown[]) => calls.push(args);
+  try {
+    const cfg = parseConfig(
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: notes/ARCH.md } }",
+    );
+    assert.equal(cfg.goal.file, "notes/ARCH.md");
+    assert.equal(calls.length, 1, "exactly one deprecation line");
+    assert.match(String(calls[0]![0]), /goal\.file/);
+    assert.match(String(calls[0]![0]), /roles\.architect\.planMdPath|deprecat/i);
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("goal.file: both keys set and they AGREE — resolves cleanly, no error", () => {
   const cfg = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: notes/ARCH.md } }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+      "goal: { file: notes/SAME.md }\nroles: { architect: { planMdPath: notes/SAME.md } }",
   );
-  assert.equal(cfg.roles.architect.planMdPath, "notes/ARCH.md");
+  assert.equal(cfg.goal.file, "notes/SAME.md");
 });
 
-test("roles.architect.planMdPath: a relative path resolves against the config file's directory, not cwd (same rule as promptFile)", () => {
+test("goal.file: both keys set and they DISAGREE — hard config error naming both keys", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+          "goal: { file: notes/NEW.md }\nroles: { architect: { planMdPath: notes/OLD.md } }",
+      ),
+    (e: Error) => /goal\.file/.test(e.message) && /roles\.architect\.planMdPath/.test(e.message),
+  );
+});
+
+test("goal.file: a relative path resolves against the config file's directory, not cwd (same #74 pattern as promptFile)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {
     const cfgPath = join(dir, "sapwood.config.yaml");
     writeFileSync(
       cfgPath,
-      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: my-plan.md } }\n",
+      "board: { owner: a, repo: r, projectNumber: 1 }\ngoal: { file: my-plan.md }\n",
     );
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.roles.architect.planMdPath, join(dir, "my-plan.md"));
+    assert.equal(cfg.goal.file, join(dir, "my-plan.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("roles.architect.planMdPath: the DEFAULT value is also resolved relative to the config file's directory (not left cwd-relative)", () => {
+test("goal.file: the DEFAULT value is also resolved relative to the config file's directory (not left cwd-relative)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {
     const cfgPath = join(dir, "sapwood.config.yaml");
     writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\n");
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.roles.architect.planMdPath, join(dir, "docs", "PLAN.md"));
+    assert.equal(cfg.goal.file, join(dir, "docs", "PLAN.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("roles.architect: an absolute planMdPath is left untouched", () => {
+test("goal.file: resolved from the deprecated old key is ALSO config-file-relative resolved", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  const orig = console.error;
+  console.error = () => {}; // silence the expected deprecation line for this test
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: notes/ARCH.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.goal.file, join(dir, "notes", "ARCH.md"));
+  } finally {
+    console.error = orig;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal.file: an absolute path is left untouched", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {
     const cfgPath = join(dir, "sapwood.config.yaml");
-    const absPath = join(dir, "elsewhere", "PLAN.md");
-    writeFileSync(cfgPath, `board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: ${absPath} } }\n`);
+    const absPath = join(dir, "elsewhere", "GOAL.md");
+    writeFileSync(cfgPath, `board: { owner: a, repo: r, projectNumber: 1 }\ngoal: { file: ${absPath} }\n`);
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.roles.architect.planMdPath, absPath);
+    assert.equal(cfg.goal.file, absPath);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

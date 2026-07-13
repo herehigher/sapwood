@@ -595,6 +595,28 @@ test("loadArchitectureChapter: missing file degrades to an explicit placeholder,
   assert.ok(chapter.includes("not found"));
 });
 
+test("#128: a real caller (deps.planMdPath omitted) renders {{plan.architectureChapter}} from cfg.goal.file, the single resolved north-star path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalfile-"));
+  try {
+    const goalPath = join(dir, "GOAL.md");
+    writeFileSync(goalPath, "# Goal\n\n## Architecture\nOnly the engine performs GitHub writes.\n");
+    const forge = new FakeForge();
+    forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
+    // cfg.goal.file is config-file-relative resolved by loadConfig in a real run; here we set
+    // it directly to an absolute path, mirroring what loadConfig would have produced.
+    const cfg = mkCfg({ goal: { file: goalPath } });
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const state = new State(":memory:");
+    const deps: ArchitectDeps = { forge, state, cfg, runner }; // no deps.planMdPath override
+    const stub = createArchitectStub(deps);
+    await stub.run({ roundId: 1, phase: "architecting", marker: null });
+    assert.ok(runner.calls[0]!.prompt.includes("Only the engine performs GitHub writes."));
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("renderArchitectPrompt: substitutes every var; fails closed on an unknown var", () => {
   const out = renderArchitectPrompt("{{a}}-{{b}}", { a: "1", b: "2" });
   assert.equal(out, "1-2");

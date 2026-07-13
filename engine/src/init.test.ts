@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseConfig } from "./config.js";
-import { init, missing, parseAuthScopes, preflight, requiredLabels, setStatusOptionsArgs, InitError } from "./init.js";
+import {
+  defaultGoalTemplatePath,
+  init,
+  missing,
+  parseAuthScopes,
+  preflight,
+  requiredLabels,
+  resolveGoalFilePath,
+  setStatusOptionsArgs,
+  InitError,
+} from "./init.js";
 import type { GhRunner } from "./gh.js";
 
 const cfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");
@@ -190,6 +200,86 @@ test("init reports a missing board instead of silently creating a mismatched one
     const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
     assert.ok(actions.some((a) => /no ProjectV2 #7 found/.test(a)));
     assert.ok(!calls.some((c) => c.join(" ").includes("mutation")), "did not mutate a board");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #128: north-star goal-file scaffold — init creates it iff missing, never overwrites ────────
+
+test("resolveGoalFilePath: a relative goal.file resolves against cwd; an absolute one is left untouched", () => {
+  assert.equal(resolveGoalFilePath("docs/PLAN.md", "/repo"), join("/repo", "docs", "PLAN.md"));
+  assert.equal(resolveGoalFilePath("/elsewhere/GOAL.md", "/repo"), "/elsewhere/GOAL.md");
+});
+
+test("defaultGoalTemplatePath resolves to a real, readable shipped file with the expected sections", () => {
+  const path = defaultGoalTemplatePath();
+  assert.ok(existsSync(path), `expected shipped template at ${path}`);
+  const text = readFileSync(path, "utf8");
+  assert.match(text, /^# Goal/m);
+  assert.match(text, /^## Non-goals/m);
+  assert.match(text, /^## Constraints/m);
+  assert.match(text, /^## Current milestone/m);
+});
+
+test("init scaffolds the goal-file template when the resolved path is missing", async () => {
+  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const goalPath = join(dir, "docs", "PLAN.md"); // cfg.goal.file defaults to docs/PLAN.md
+    assert.ok(existsSync(goalPath), "goal file was scaffolded");
+    assert.match(readFileSync(goalPath, "utf8"), /^# Goal/m);
+    assert.ok(actions.some((a) => /wrote starter goal file/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init never overwrites an existing goal file — byte-for-byte untouched, even with different content (idempotent, crash-rerun safe)", async () => {
+  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    const goalPath = join(dir, "docs", "PLAN.md");
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    const userContent = "# My own plan\n\nThis is a user's real document, not a template.\n";
+    writeFileSync(goalPath, userContent);
+
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+
+    assert.equal(readFileSync(goalPath, "utf8"), userContent, "existing goal file must be byte-for-byte untouched");
+    assert.ok(actions.some((a) => /goal file already present/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: a second run against a repo where init itself scaffolded the goal file is also a no-op (re-running init twice never overwrites)", async () => {
+  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const goalPath = join(dir, "docs", "PLAN.md");
+    const firstWrite = readFileSync(goalPath, "utf8");
+
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+
+    assert.equal(readFileSync(goalPath, "utf8"), firstWrite);
+    assert.ok(actions.some((a) => /goal file already present/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init scaffolds the goal file at a custom goal.file location, creating intermediate directories", async () => {
+  const customCfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\ngoal: { file: notes/nested/GOAL.md }");
+  const { run } = fakeRun({ labels: requiredLabels(customCfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(customCfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const goalPath = join(dir, "notes", "nested", "GOAL.md");
+    assert.ok(existsSync(goalPath));
+    assert.ok(actions.some((a) => /wrote starter goal file/.test(a)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

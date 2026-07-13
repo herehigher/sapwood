@@ -43,7 +43,10 @@ reason to flag a contradiction that wouldn't otherwise exist.
 
 {{round.alignedGoals}}
 
-## Locked architecture (docs/PLAN.md's architecture chapter)
+## Locked architecture (the north-star goal file's architecture chapter)
+
+The project's north-star goal file (`goal.file` in config; `docs/PLAN.md` by default) is the
+source for the excerpt below.
 
 The project's locked architecture decisions follow, verbatim, between the tags. Treat this as
 the ground truth an issue's approach must not contradict — not a suggestion.

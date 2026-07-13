@@ -55,13 +55,13 @@ export interface ArchitectDeps {
    *  CLI" split plan-review.ts/conductor.test.ts use). */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
-  /** Path to the repo's PLAN.md — the architecture-chapter source. Override for tests; a real
-   *  caller omits this and gets `cfg.roles.architect.planMdPath` (#104 — was a hardcoded
-   *  `<cwd>/docs/PLAN.md`, which broke for any target repo keeping its architecture doc
-   *  elsewhere; now a real, config-file-relative-resolved config key, same one align.ts's
-   *  PLAN.md read honors). Architecture review stays advisory either way: a missing/unreadable
-   *  file degrades to an explicit placeholder (see loadArchitectureChapter) rather than failing
-   *  the round. */
+  /** Path to the repo's north-star goal file — the architecture-chapter source. Override for
+   *  tests; a real caller omits this and gets `cfg.goal.file` (#128, promoted out of the
+   *  #104-era `roles.architect.planMdPath` — was a hardcoded `<cwd>/docs/PLAN.md`, which broke
+   *  for any target repo keeping its architecture doc elsewhere; now a real,
+   *  config-file-relative-resolved top-level config key, the same one align.ts's goal-file read
+   *  honors). Architecture review stays advisory either way: a missing/unreadable file degrades
+   *  to an explicit placeholder (see loadArchitectureChapter) rather than failing the round. */
   planMdPath?: string;
   /** The round's aligned-goals text from the (not yet shipped, #89) PO/goal-alignment
    *  peripheral. Default: an explicit "not available yet" placeholder — #89 hasn't landed, so
@@ -326,11 +326,11 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       if (candidates.length === 0) return { marker: architectMarker(roundId) };
 
       const template = loadRolePromptTemplate(deps.cfg.roles.architect.promptFile, defaultArchitectPromptPath());
-      // #104: deps.planMdPath is a TEST override only now — a real caller omits it and gets
-      // cfg.roles.architect.planMdPath (config-file-relative resolved, default "docs/PLAN.md";
-      // was a hardcoded <cwd>/docs/PLAN.md, which broke for any target repo keeping its
-      // architecture doc elsewhere).
-      const architectureChapter = loadArchitectureChapter(deps.planMdPath ?? deps.cfg.roles.architect.planMdPath);
+      // #128: deps.planMdPath is a TEST override only now — a real caller omits it and gets
+      // cfg.goal.file (config-file-relative resolved, default "docs/PLAN.md"; was a hardcoded
+      // <cwd>/docs/PLAN.md, then roles.architect.planMdPath (#104), which broke for any target
+      // repo keeping its architecture doc elsewhere).
+      const architectureChapter = loadArchitectureChapter(deps.planMdPath ?? deps.cfg.goal.file);
       // The round design note needs SOME issue to live on (GitHub has no round/project-level
       // comment surface this role can write to — its writes are issue comment/label edit only);
       // the lowest-numbered candidate is an arbitrary but deterministic, reproducible anchor —

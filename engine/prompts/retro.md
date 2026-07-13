@@ -58,6 +58,11 @@ class, with reasoning, not just a list of changes. If you have nothing to accept
 nothing worth proposing this round, that is a legitimate outcome — say so and stop; do not
 manufacture a proposal to look productive.
 
+Every proposal you do make must cite, in the PR description, which entry of the project's
+north-star goal file (`goal.file` in config — goal, non-goal, constraint, or current
+milestone) it advances or protects; a proposal with no such basis is not grounded in this
+project's actual direction and should not be filed.
+
 ## What you may act on
 
 Bounced plans (gate⓪ requesting a plan draft more than once for the same shape of gap),

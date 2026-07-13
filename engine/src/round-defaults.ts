@@ -67,9 +67,10 @@ export function renderAlignedGoalsFromSummary(state: State, roundId: number): st
 }
 
 /** The shipped default peripherals map: every phase (aligning/architecting/plan_review/
- *  harvesting/retro) wired to its real role-session stub — no noop remains. `roles.architect`/
- *  `roles.retro`'s own config keys (planMdPath, everyNRounds) are honored automatically, since
- *  each stub reads them off `deps.cfg` itself; this factory adds no config surface of its own. */
+ *  harvesting/retro) wired to its real role-session stub — no noop remains. The top-level
+ *  `goal.file` (#128) and `roles.retro`'s own config keys (everyNRounds, etc.) are honored
+ *  automatically, since each stub reads them off `deps.cfg` itself; this factory adds no config
+ *  surface of its own. */
 export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<Record<PeripheralPhase, PeripheralStub>> {
   // #109 gate② P2: scope the PERIPHERALS' forge to cfg.round.milestone, exactly like runRounds
   // scopes its own tick forge (round.ts:runRounds wraps deps.forge independently — that wrap

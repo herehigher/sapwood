@@ -609,6 +609,27 @@ test("defaultPoPromptPath: resolves to a real shipped file with both align and t
   assert.ok(template.includes("{{round.directive}}"), "#126: the shipped po.md must reference the round directive var");
 });
 
+test("#128: a real caller (deps.planMdPath omitted) renders {{plan.md}} from cfg.goal.file, the single resolved north-star path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalfile-"));
+  try {
+    const goalPath = join(dir, "GOAL.md");
+    writeFileSync(goalPath, "# North star\nOnly ship what advances the north star.\n");
+    const forge = new FakeForge();
+    // cfg.goal.file is config-file-relative resolved by loadConfig in a real run; here we set
+    // it directly to an absolute path, mirroring what loadConfig would have produced.
+    const cfg = mkCfg({ goal: { file: goalPath } });
+    const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+    const state = new State(":memory:");
+    const deps: AlignDeps = { forge, state, cfg, runner }; // no deps.planMdPath override
+    const stub = createAligningStub(deps);
+    await stub.run({ roundId: 1, phase: "aligning", marker: null });
+    assert.ok(runner.calls[0]!.prompt.includes("Only ship what advances the north star."));
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #126: round directive file — human steering injected at round open ─────────────────────
 
 test("createAligningStub #126: no directive file -> both the align session AND every triage session render the explicit 'none' placeholder, no directive-applied event", async () => {
