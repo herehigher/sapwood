@@ -341,16 +341,25 @@ test("tick reclaim: a KEEP lane's probe-carried liveTelemetry is persisted onto 
   st.close();
 });
 
-test("tick reclaim: a KEEP lane whose probe carries NO liveTelemetry (detached/pre-#155 fixture) leaves the row's telemetry untouched — never errors, never zeroes it out", async () => {
+test("tick reclaim: a KEEP lane whose probe carries NO liveTelemetry (detached post-restart lane) CLEARS a previously-persisted trio — a number we can no longer refresh must not look live (gate② P2)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-keep", 1);
+  // A PRE-restart tick persisted a trio; the engine then restarted — the new supervisor has no
+  // in-memory Lane for this name, so probe() carries no liveTelemetry (worker.test.ts's
+  // detached-lane test pins that). Leaving the old numbers in place would show a frozen
+  // cost/context as if live for the lane's whole remaining leg.
+  st.setLiveTelemetry("lane-keep", {
+    estCostUsd: 0.42, contextTokens: 41000,
+    tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
+  });
   sup.probes["lane-keep"] = { ...DEFAULT_PROBE }; // no liveTelemetry field at all
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.equal(r.reclaimed[0]!.kind, "kept");
   const row = st.getWorker("lane-keep");
-  assert.equal(row?.est_cost_usd, null);
+  assert.equal(row?.state, "running"); // the lane itself is untouched — only the trio is cleared
+  assert.equal(row?.est_cost_usd, null, "stale pre-restart telemetry cleared, never frozen as live");
   assert.equal(row?.context_tokens, null);
   assert.equal(row?.token_composition, null);
   st.close();

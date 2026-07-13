@@ -774,9 +774,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     if (classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive) === "KEEP") {
       // #155: refresh the lane's LIVE per-probe telemetry (priced-cost snapshot, context
       // tokens, token composition) — update-in-place, no history, no per-probe event. Absent
-      // (e.g. a detached post-restart lane worker.ts can't price) -> leave the row untouched
-      // rather than writing zeros over a possibly-stale-but-real prior value.
+      // (a DETACHED post-restart lane: the new supervisor has no in-memory Lane, so worker.ts
+      // returns no snapshot — see probe()) -> CLEAR rather than skip (gate② P2 on PR #161):
+      // skipping would leave the PRE-restart trio in place for the lane's whole remaining leg,
+      // a frozen number masquerading as live. NULL means "no live data", which is the truth
+      // for a detached lane — a number we can no longer refresh must not look live.
       if (p.liveTelemetry) state.setLiveTelemetry(w.name, p.liveTelemetry);
+      else state.clearLiveTelemetry(w.name);
       reclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
       continue;
     }
