@@ -240,6 +240,20 @@ test("buildRoundArtifact: events strictly before round.started_at are excluded",
 
 // ── persistRoundArtifact: DB row (source of truth) + on-disk md view ───────────────────────
 
+test("buildRoundArtifact (Codex P2, PR #152): a previous round's write in the SAME millisecond as started_at is excluded — the window is the id cursor, not the timestamp", () => {
+  const state = new State(":memory:");
+  // The tail write of a previous round…
+  state.appendEvent("merged", { worker: "lane-prev", issue: 1, pr: 9, headOid: "h" });
+  state.recordSpend("lane-prev", 1, 5, new Date().toISOString());
+  // …and the next round opening in (at worst) the very same millisecond: a ts >= started_at
+  // read could not tell these apart; the id cursor can.
+  const round = state.startRound(new Date().toISOString());
+  const artifact = buildRoundArtifact(state, round, 30, null);
+  assert.deepEqual(artifact.merges, []);
+  assert.equal(artifact.spendUsd, 0);
+  state.close();
+});
+
 test("persistRoundArtifact: writes a DB row State.getRoundArtifact can read back, schema-validated", () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");

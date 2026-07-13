@@ -294,8 +294,13 @@ export function buildRoundArtifact(
   roundBudgetUsd: number,
   endedAt: string | null,
 ): RoundArtifact {
-  const events = state.eventsSince(round.started_at, ROUND_ARTIFACT_EVENT_KINDS);
-  const spendUsd = state.spentUsdSince(round.started_at);
+  // Id-cursor window, not a timestamp window (Codex P2, PR #152): events/spend timestamps are
+  // ms-granular, so a previous round's tail write in the same ms as this round's started_at
+  // would bleed into this artifact under ts >= started_at. The cursors captured at startRound
+  // are collision-free. `?? 0` covers rows read back before the v9->v10 columns existed —
+  // degrades to the old whole-ledger lower bound, never throws.
+  const events = state.eventsAfterId(round.start_event_id ?? 0, ROUND_ARTIFACT_EVENT_KINDS);
+  const spendUsd = state.spentUsdAfterId(round.start_spend_id ?? 0);
   return assembleRoundArtifact(
     events,
     { roundId: round.round_id, startedAt: round.started_at, endedAt },

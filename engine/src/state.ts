@@ -229,6 +229,14 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         json           TEXT NOT NULL,
         updated_at     TEXT NOT NULL
       );
+      -- #123 (Codex P2, PR #152): the round's ledger WINDOW is id-cursor-bounded, not
+      -- timestamp-bounded — events/spend timestamps are millisecond-granular, so a previous
+      -- round's tail write landing in the same ms as the next round's started_at would bleed
+      -- into the wrong artifact under a ts >= started_at read. startRound stamps the current
+      -- MAX(id) of both tables; the artifact reads strictly-greater ids. DEFAULT 0 for
+      -- pre-migration rounds (all long closed — their artifacts are never rebuilt).
+      ALTER TABLE rounds ADD COLUMN start_event_id INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE rounds ADD COLUMN start_spend_id INTEGER NOT NULL DEFAULT 0;
     `);
   },
 ];
@@ -394,6 +402,11 @@ export interface RoundRow {
   started_at: string;
   updated_at: string;
   ended_at: string | null;
+  /** #123: id cursors capturing MAX(events.id)/MAX(spend_ledger.id) at startRound — the round's
+   *  ledger window is `id > cursor`, immune to same-millisecond timestamp collisions at round
+   *  boundaries. 0 on rows predating the v9->v10 migration (long closed, never rebuilt). */
+  start_event_id?: number;
+  start_spend_id?: number;
 }
 
 /** A durably-persisted recovery-path board mutation still awaiting success or escalation
@@ -806,11 +819,16 @@ export class State {
   /** Insert a fresh round in phase 'aligning', status 'in_progress', no marker. Returns the
    *  created row (round_id assigned by SQLite). */
   startRound(now: string): RoundRow {
+    // #123: id cursors for the round's ledger window (see the v9->v10 migration comment) —
+    // everything already in events/spend_ledger at this instant belongs to EARLIER rounds
+    // (or the run's own inter-round activity), regardless of timestamp collisions.
+    const startEventId = (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number }).m;
+    const startSpendId = (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM spend_ledger").get() as { m: number }).m;
     const res = this.db
       .prepare(
-        "INSERT INTO rounds (phase, status, artifact_ref, started_at, updated_at) VALUES ('aligning', 'in_progress', NULL, ?, ?)",
+        "INSERT INTO rounds (phase, status, artifact_ref, started_at, updated_at, start_event_id, start_spend_id) VALUES ('aligning', 'in_progress', NULL, ?, ?, ?, ?)",
       )
-      .run(now, now);
+      .run(now, now, startEventId, startSpendId);
     return {
       round_id: Number(res.lastInsertRowid),
       phase: "aligning",
@@ -819,6 +837,8 @@ export class State {
       started_at: now,
       updated_at: now,
       ended_at: null,
+      start_event_id: startEventId,
+      start_spend_id: startSpendId,
     };
   }
 
@@ -885,6 +905,26 @@ export class State {
     const row = this.db
       .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts >= ?")
       .get(sinceIso) as { total: number };
+    return row.total;
+  }
+
+  /** #123: id-cursor variant of eventsSince — strictly-greater-than a captured MAX(id), the
+   *  round-window read the artifact uses (see the v9->v10 migration comment for why ids, not
+   *  timestamps). Same non-empty-kinds guard as eventsSince. */
+  eventsAfterId(afterId: number, kinds: string[]): { kind: string; payload: unknown }[] {
+    if (kinds.length === 0) throw new Error("eventsAfterId: kinds must be non-empty");
+    const placeholders = kinds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(`SELECT kind, payload FROM events WHERE id > ? AND kind IN (${placeholders}) ORDER BY id`)
+      .all(afterId, ...kinds) as { kind: string; payload: string }[];
+    return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
+  }
+
+  /** #123: id-cursor variant of spentUsdSince (same rationale as eventsAfterId). */
+  spentUsdAfterId(afterId: number): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE id > ?")
+      .get(afterId) as { total: number };
     return row.total;
   }
 
