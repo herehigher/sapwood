@@ -721,3 +721,50 @@ test("roles.retro.everyNRounds: a non-integer is rejected", () => {
     /everyNRounds/,
   );
 });
+
+// ── #127: roles.<role>.enabled toggles — switch peripheral roles off per deployment ────────
+
+test("roles.*.enabled: defaults to true for every toggleable role (po/architect/planReviewer/harvest/retro)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.po.enabled, true);
+  assert.equal(cfg.roles.architect.enabled, true);
+  assert.equal(cfg.roles.planReviewer.enabled, true);
+  assert.equal(cfg.roles.harvest.enabled, true);
+  assert.equal(cfg.roles.retro.enabled, true);
+});
+
+test("roles.*.enabled: explicit false is honored for each toggleable role", () => {
+  for (const role of ["po", "architect", "planReviewer", "harvest", "retro"] as const) {
+    const cfg = parseConfig(
+      `board: { owner: a, repo: r, projectNumber: 1 }\nroles: { ${role}: { enabled: false } }`,
+    );
+    assert.equal(cfg.roles[role].enabled, false, `roles.${role}.enabled should be false`);
+  }
+});
+
+test("roles.*.enabled: an unknown role key under roles is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { notARole: { enabled: false } }",
+      ),
+    /notARole|[Uu]nrecognized/,
+  );
+});
+
+test("roles.planReviewer.enabled: a typo'd key is rejected, not silently dropped (.strict())", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { planReviewer: { enable: false } }",
+      ),
+    /enable\b|[Uu]nrecognized/,
+  );
+});
+
+test("roles.*.enabled: a non-boolean value is rejected", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { retro: { enabled: \"nope\" } }"),
+    /enabled/,
+  );
+});

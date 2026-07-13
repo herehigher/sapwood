@@ -259,6 +259,133 @@ test("runRounds integration: wired with createDefaultPeripherals's output, a def
   state.close();
 });
 
+test("createDefaultPeripherals (#127): roles.<role>.enabled=false omits that phase's stub, leaving the others wired", () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { retro: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  assert.equal(peripherals.retro, undefined, "the disabled phase's stub is omitted entirely");
+  for (const phase of ["aligning", "architecting", "plan_review", "harvesting"] as const) {
+    assert.ok(peripherals[phase], `${phase} stays wired when only retro is disabled`);
+    assert.notEqual(peripherals[phase], noopPeripheralStub);
+  }
+  state.close();
+});
+
+test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits every phase — an all-noop map, same shape as an empty peripherals override", () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg({
+    roles: {
+      po: { enabled: false },
+      architect: { enabled: false },
+      planReviewer: { enabled: false },
+      harvest: { enabled: false },
+      retro: { enabled: false },
+    },
+  });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  for (const phase of ["aligning", "architecting", "plan_review", "harvesting", "retro"] as const) {
+    assert.equal(peripherals[phase], undefined, `${phase} omitted when disabled`);
+  }
+  state.close();
+});
+
+test("architecting stub (#127 gate② F3): with roles.po.enabled=false the architect context states the aligning phase is switched off — never the 'ran but recorded no summary' fallback (a fabricated phase)", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  // A gate⓪ candidate so the architect actually dispatches (it short-circuits on none).
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  const cfg = mkCfg({ roles: { po: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  assert.equal(peripherals.aligning, undefined, "the disabled PO's aligning stub is omitted");
+  const round = state.startRound("2026-07-13T00:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const architectCall = runner.calls.find((c) => c.roleId === "architect");
+  assert.ok(architectCall, "the architect session was dispatched");
+  assert.match(architectCall!.prompt, /PO\/goal-alignment peripheral switched off/,
+    "the architect context names the switched-off deployment state");
+  assert.doesNotMatch(architectCall!.prompt, /no structured summary was recorded/,
+    "never the fallback wording that implies the aligning pass ran");
+  state.close();
+});
+
+test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exactly ONCE — one line naming every disabled phase, carrying the gate⓪ dispatch-starvation warning when planReviewer is among them; nothing logged when all roles are enabled", () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const logged: string[] = [];
+  const realLog = console.log;
+  console.log = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    // #127 gate② R3: CUSTOM label names — the warning must render cfg.labels.planApproved/
+    // verifyNa, so a hardcoded "plan:approved"/"verify:n/a" string in round-defaults.ts would
+    // fail this test (the repo's no-hardcoded-label-at-call-sites rule, fable PR #101 P3).
+    const cfg = mkCfg({
+      roles: { planReviewer: { enabled: false }, retro: { enabled: false } },
+      labels: { planApproved: "ok-to-build", verifyNa: "no-verify" },
+    });
+    createDefaultPeripherals({ forge, state, cfg, runner: new ScriptedRunner(forge, cfg) });
+    assert.equal(logged.length, 1, "exactly one startup log line for two disabled roles");
+    assert.match(logged[0]!, /plan_review/);
+    assert.match(logged[0]!, /retro/);
+    assert.match(logged[0]!, /ok-to-build/,
+      "the planReviewer warning names the CONFIGURED planApproved label a human/external process must now apply");
+    assert.match(logged[0]!, /no-verify/, "the configured verifyNa label too");
+    assert.doesNotMatch(logged[0]!, /plan:approved/, "never the hardcoded default label name");
+    const allOn = mkCfg();
+    createDefaultPeripherals({ forge, state, cfg: allOn, runner: new ScriptedRunner(forge, allOn) });
+    assert.equal(logged.length, 1, "an all-enabled factory logs nothing");
+  } finally {
+    console.log = realLog;
+  }
+  state.close();
+});
+
+test("runRounds integration (#127): a disabled role spawns no session for its phase, and the round still closes — the phase no-ops via round.ts's existing noopPeripheralStub default, no round.ts change", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 5, title: "candidate", labels: [] }];
+  const cfg = mkCfg({ roles: { retro: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+
+  const deps: RoundDeps = {
+    forge, state, supervisor: new MinimalSupervisor(), cfg, tickIntervalSec: 1,
+    sleep: async () => {}, peripherals,
+  };
+  let stop = () => {};
+  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.onRoundPhase = (_roundId, phase) => {
+    // Seed a needs-human escalation right after 'aligning' so harvest actually has something
+    // to brief (otherwise it appends only its summary event and dispatches no session — same
+    // pattern as this file's other runRounds integration test).
+    if (phase === "aligning") {
+      state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 7, pr: 1, reason: "x" });
+    }
+    if (phase === "harvesting") stop(); // stop before the disabled retro phase, same
+    // graceful-mid-round pattern as this file's other integration test — the in-flight round
+    // still finishes every remaining phase (including the disabled one) before actually
+    // stopping; only the NEXT round is withheld.
+  };
+
+  const result = await runRounds(deps);
+  assert.equal(result.rounds, 1);
+  const round = state.getRound(1)!;
+  assert.equal(round.phase, "closed", "the round still closes despite the disabled retro peripheral");
+  assert.ok(!runner.calls.some((c) => c.roleId === "retro"), "no retro session was spawned");
+  // Every OTHER phase still ran a real session — proof the disabled toggle is scoped to retro
+  // alone, not a global kill of the peripheral machinery.
+  const roleIdsDispatched = new Set(runner.calls.map((c) => c.roleId));
+  assert.ok(roleIdsDispatched.has("po-align"));
+  assert.ok(roleIdsDispatched.has("architect"));
+  assert.ok(roleIdsDispatched.has("plan-reviewer"));
+  assert.ok(roleIdsDispatched.has("harvest"));
+  state.close();
+});
+
 test("runRounds integration: KILL_SWITCH blocks every real peripheral — none of createDefaultPeripherals's stubs ever runs a session", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-round-defaults-int-"));
   try {

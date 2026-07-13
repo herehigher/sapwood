@@ -321,9 +321,23 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // Local SQLite read: the cheapest signal, checked first.
       if (deps.state.pendingRollbacks().length > 0) return true;
       if ((await forge.getReadyIssues()).length > 0) return true;
-      if ((await forge.getIssuesNeedingPlanReview()).length > 0) return true;
-      if ((await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
-      if (cfg.round.milestone) {
+      // #127 gate② F2: each candidate signal below only counts as work when the role that
+      // CONSUMES it is enabled. A plan-review candidate is only ever consumed by the
+      // plan-reviewer (gate⓪), a triage candidate only by the PO's aligning pass — with that
+      // role disabled (roles.<role>.enabled: false) the candidate can never be consumed, so
+      // counting it would pin this probe true forever: standby never engages and every round
+      // burns the remaining peripheral sessions doing nothing, indefinitely.
+      if (cfg.roles.planReviewer.enabled && (await forge.getIssuesNeedingPlanReview()).length > 0) return true;
+      if (cfg.roles.po.enabled && (await forge.getIssuesNeedingPlanTriage()).length > 0) return true;
+      // #127 gate② R1 (same disabled-consumer rule): the milestone catch-all exists because an
+      // open not-yet-Ready issue in the round's milestone is exactly what the PO/aligning pass
+      // decomposes (or gate⓪ approves) — with BOTH gate⓪ roles off, nothing enabled can consume
+      // that signal either; the only consumable signal left is Ready+dispatchable, already
+      // covered by the getReadyIssues check above. Counting it anyway would pin the probe true
+      // and defeat standby, the same failure class as the two role-gated signals above.
+      // Residual imprecision (pre-existing, intentionally untouched): with the roles ENABLED, a
+      // milestone holding only needs-human/blocked issues still pins the probe true.
+      if (cfg.round.milestone && (cfg.roles.po.enabled || cfg.roles.planReviewer.enabled)) {
         return (await forge.countOpenIssuesInMilestone(cfg.round.milestone)) > 0;
       }
       return false;

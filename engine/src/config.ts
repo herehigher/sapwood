@@ -218,6 +218,13 @@ const Roles = z.object({
     // needs-human, silently disabling the self-heal path. Enforced by the #87 role
     // runner's plan_review phase.
     maxDraftCycles: z.number().int().positive().default(2),
+    // #127: switches the WHOLE gate⓪ unit off (plan-reviewer + its plan-drafter, which rides
+    // along — the drafter has no toggle of its own, it only ever runs from inside the
+    // plan_review phase). false -> round-defaults.ts's createDefaultPeripherals OMITS the
+    // plan_review stub; round.ts's own existing default (an unset phase falls back to
+    // noopPeripheralStub) takes over, so the phase no-ops with its marker set — never a
+    // round.ts change, never a wedged round.
+    enabled: z.boolean().default(true),
   }).strict().default({}),
   // #87 (#77 Amendment 2's self-heal): the plan-drafter peripheral — issues-only writes, a
   // session distinct from the plan-reviewer, briefed by the reviewer's bounce comment to
@@ -242,6 +249,10 @@ const Roles = z.object({
     // default": the target repo's own doc, not a file sapwood ships). align.ts's PLAN.md read
     // honors this same key (the two peripherals must read the SAME architecture doc).
     planMdPath: z.string().min(1).default("docs/PLAN.md"),
+    // #127: false -> round-defaults.ts omits the architecting stub; the phase no-ops via
+    // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
+    // for the shared rationale).
+    enabled: z.boolean().default(true),
   }).strict().default({}),
   // #89: the PO (product-owner) peripheral — goal alignment/decomposition at round start
   // (reads the round milestone/theme + docs/PLAN.md, creates issues) plus the round-start
@@ -252,6 +263,10 @@ const Roles = z.object({
   // CONFIG FILE's directory (see loadConfig below), not the CLI's cwd.
   po: RoleSession.extend({
     promptFile: z.string().optional(),
+    // #127: false -> round-defaults.ts omits the aligning stub; the phase no-ops via
+    // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
+    // for the shared rationale).
+    enabled: z.boolean().default(true),
   }).strict().default({}),
   // #91: round-close peripheral roles (#77 decision 2's harvest / decision 6's retro). Config
   // key + path resolution + shipped default prompt only — same "accepted, not yet wired" shape
@@ -267,6 +282,10 @@ const Roles = z.object({
     // as roles.retro.digestMaxChars. The artifact md is naturally small (bounded by the round's
     // own dispatch cap), so this is a safety valve, not a knob most deployments touch.
     artifactMaxChars: z.number().int().positive().default(20_000),
+    // #127: false -> round-defaults.ts omits the harvesting stub; the phase no-ops via
+    // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
+    // for the shared rationale).
+    enabled: z.boolean().default(true),
   }).strict().default({}),
   // #91 (#77 decision 6): the retrospective/self-evolution peripheral. Its role write scope is
   // intentionally WIDER than the issues-only roles above (git + `gh pr create` — proposals land
@@ -293,6 +312,10 @@ const Roles = z.object({
     // digest text itself) rather than growing the prompt unboundedly. Positive int only — 0
     // would produce an empty, useless digest.
     digestMaxChars: z.number().int().positive().default(60_000),
+    // #127: false -> round-defaults.ts omits the retro stub; the phase no-ops via round.ts's
+    // existing noopPeripheralStub default (see roles.planReviewer.enabled above for the
+    // shared rationale).
+    enabled: z.boolean().default(true),
   }).strict().default({}),
 }).strict();
 
