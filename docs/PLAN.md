@@ -499,6 +499,10 @@ invariant + identity), and weight falls in step with validation down the table. 
 future change that inverts that ordering — a heavier write behind lighter validation —
 is exactly what this principle exists to catch.
 
+For the full per-role contract behind this table (responsibility, write-scope tier,
+marker idempotency, output schema, escalation path) see
+[`docs/role-paradigm.md`](role-paradigm.md).
+
 ## Onboarding / DX (v1)
 
 - **`/sapwood-init` + `sapwood init`** must be credible and idempotent:

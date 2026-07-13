@@ -51,6 +51,9 @@ GitHub issue (Ready)
   semantics.
 - [`docs/security.md`](docs/security.md) — the trust/governance model: guard hook,
   human-merge-only paths, kill switch vs. pause, cost ceilings.
+- [`docs/role-paradigm.md`](docs/role-paradigm.md) — the five-element contract every
+  peripheral role follows (responsibility, write scope, idempotency, output
+  validation, escalation).
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — common failures and what they
   mean.
 
