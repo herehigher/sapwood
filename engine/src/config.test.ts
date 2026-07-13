@@ -10,7 +10,7 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.board.owner, "acme");
   assert.equal(cfg.board.repo, "widgets");
   assert.equal(cfg.board.status.ready, "Ready"); // default
-  assert.equal(cfg.lanes.roundDispatchCap, 2); // conservative default
+  assert.equal(cfg.lanes.roundDispatchCap, 6); // #124: per-round quota, 2x lanes.max default
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.reviewer.mode, "different-model-codex");
   assert.equal(cfg.labels.verifyNa, "verify:n/a");

@@ -418,9 +418,17 @@ export interface TickDeps {
   state: State;
   supervisor: Supervisor;
   cfg: SapwoodConfig;
-  /** Cumulative round spend (USD) for the hard round-budget gate. Worker cost sum; caller
-   *  computes it from stream-json (worker.ts). Default 0 (no spend known yet). */
-  roundSpendUsd?: number;
+  /** Cumulative round spend (USD) for the hard round-budget gate — a THUNK, not a snapshot
+   *  (#124 gate② P1-2 on PR #157). tick() evaluates it exactly where `overBudget` is computed:
+   *  AFTER the reclaim phase, BEFORE the dispatch loop. This matters because reclaim runs
+   *  before dispatch inside one tick, and #124's multi-wave refill lets a lane freed by THIS
+   *  tick's reclaim be refilled by THIS tick's dispatch — so spend banked by that reclaim
+   *  (which can cross cfg.cost.roundBudgetUsd) must be visible to the same tick's budget gate,
+   *  or a fresh wave launches after the budget is already blown. A caller-supplied scalar,
+   *  captured before the tick ran, could never see it. round.ts passes `() => spentSoFar()`
+   *  (backed by live durable state, State.spentUsdForWorker); the tick driver (driver.ts)
+   *  never sets this — default 0 (no spend known). */
+  roundSpendUsd?: () => number;
   /** The caller's tick cadence in seconds, when ticks run on a fixed schedule. Scales the
    *  wall-clock session stale gap (engineSessionGapSec: max(900, 2× cadence)) so a legal
    *  slow cadence cannot make every tick look stale and silently void the wall-clock tier
@@ -437,6 +445,17 @@ export interface TickDeps {
    *  sentinel. Reclaim/drive (in-flight lanes, PR review/merge progression) are untouched either
    *  way; only new-lane dispatch is suppressed. Default false (today's behavior unchanged). */
   forceDispatchPause?: boolean;
+  /** #124: per-CALL override for the DISPATCH loop's cap check below, replacing
+   *  cfg.lanes.roundDispatchCap for this one tick only. Omitted (the tick-driver's path,
+   *  driver.ts) -> cfg.lanes.roundDispatchCap applies unchanged, its original meaning: a flat
+   *  PER-TICK rate limit, re-armed fresh every call, no cross-tick memory. round.ts (the rounds
+   *  driver) is the one caller that sets this — it passes the QUOTA REMAINING this round
+   *  (cfg.lanes.roundDispatchCap minus a durable per-round dispatch count it tracks itself),
+   *  so repeated dispatch-enabled ticks across a round's multiple waves cumulatively respect one
+   *  round-wide quota instead of each tick getting its own fresh cfg.lanes.roundDispatchCap
+   *  allowance. This is the ONLY mechanism difference between the two drivers — tick() itself
+   *  has no notion of "round," just "this call's allowance." */
+  dispatchCapOverride?: number;
 }
 
 /**
@@ -1044,8 +1063,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   (mirrors the kill-switch tick's dispatched: [] — see its test comment). overBudget is
   //   still reported (cheap, dispatch-independent — just deps.roundSpendUsd vs. the cap), but
   //   nothing below it runs: no Ready-queue read, no claim, no worker spawn.
+  //   The roundSpendUsd THUNK is evaluated exactly HERE — after the reclaim phase above has
+  //   banked any terminal lanes' spend, before the dispatch loop below reads overBudget — so
+  //   a same-tick reclaim that crosses the round budget blocks this same tick's refill
+  //   (#124 gate② P1-2; see the TickDeps.roundSpendUsd doc comment).
   const dispatched: DispatchOutcome[] = [];
-  const overBudget = budgetExceeded(deps.roundSpendUsd ?? 0, cfg.cost.roundBudgetUsd);
+  const overBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
   if (!paused) {
     // Capacity counts running + driving lanes: a driving lane holds a PR awaiting the review
     // gate and must keep occupying a lane, else reclaiming a PR-producing worker would free a
@@ -1072,7 +1095,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         dispatched.push({ kind: "skipped", issue: issue.number, reason: "over-budget" });
         continue;
       }
-      if (dispatchedThisTick >= cfg.lanes.roundDispatchCap) {
+      // #124: dispatchCapOverride (round.ts's remaining round-quota) replaces the plain
+      // cfg.lanes.roundDispatchCap for a caller that tracks quota ACROSS ticks; unset (the
+      // tick-driver, driver.ts) leaves this a flat per-tick rate limit, exactly as before.
+      if (dispatchedThisTick >= (deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap)) {
         dispatched.push({ kind: "skipped", issue: issue.number, reason: "cap" });
         continue;
       }

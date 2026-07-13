@@ -1003,8 +1003,9 @@ test("tick dispatch: skips in-flight issue, respects max lanes, and over-budget 
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-x", 2); // #2 already in flight
   forge.ready = [{ number: 2, title: "", labels: [] }, { number: 3, title: "", labels: [] }];
-  // over budget: roundSpend 50 > default roundBudgetUsd 30
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), roundSpendUsd: 50 });
+  // over budget: roundSpend 50 > default roundBudgetUsd 30 (thunk since #124 gate② P1-2 —
+  // evaluated inside tick(), post-reclaim)
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), roundSpendUsd: () => 50 });
   assert.equal(r.overBudget, true);
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 2 && d.reason === "in-flight"));
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 3 && d.reason === "over-budget"));

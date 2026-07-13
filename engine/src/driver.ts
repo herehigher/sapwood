@@ -213,6 +213,11 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
     let tickErrors = 0;
     for (;;) {
       let result: TickResult | null = null;
+      // #124 tick-driver divergence: this driver never sets TickDeps.dispatchCapOverride, so
+      // cfg.lanes.roundDispatchCap keeps its ORIGINAL meaning here — a flat PER-TICK rate limit,
+      // re-armed fresh every call, no cross-tick quota memory. The rounds driver (round.ts)
+      // reinterprets the same config key as a per-ROUND quota by passing dispatchCapOverride
+      // itself; this driver is intentionally untouched by that reinterpretation.
       const tickDeps: TickDeps = stopConditionHit
         ? { ...deps, forceDispatchPause: true }
         : deps;

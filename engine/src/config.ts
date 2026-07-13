@@ -41,7 +41,13 @@ const Board = z.object({
 
 const Lanes = z.object({
   max: z.number().int().positive().default(3),
-  roundDispatchCap: z.number().int().positive().default(2), // conservative default (PLAN security)
+  // #124: re-justified for MULTI-WAVE quota semantics (round.ts's runExecuting) — this is no
+  // longer "one batch = round size" (2 was sized for that single-batch model), it is the
+  // round's total work quota, refilled in waves as lanes free. Default = 2x lanes.max's own
+  // default: two full concurrency-wide waves is enough work to amortize a round's peripheral
+  // (aligning/architect/harvest/retro) cost without a round running away before the retro loop
+  // reviews it — quota is retro FEEDBACK GRANULARITY, the trade-off this knob actually tunes.
+  roundDispatchCap: z.number().int().positive().default(6),
   reserveCap: z.number().int().nonnegative().default(1),
   prFixCap: z.number().int().nonnegative().default(2),
   frictionMin: z.number().nonnegative().default(0),
