@@ -648,6 +648,31 @@ test("createArchitectStub: an explicitly supplied alignedGoals string reaches th
   assert.ok(runner.calls[0]!.prompt.includes("Focus this round on the dashboard API contract."));
 });
 
+test("createArchitectStub (#132): the rendered prompt carries the no-prior-round-data placeholder when deps.lastMerged is not supplied", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const stub = createArchitectStub(deps);
+  await stub.run({ roundId: 6, phase: "architecting", marker: null });
+  assert.match(runner.calls[0]!.prompt, /no prior round/i);
+});
+
+test("createArchitectStub (#132): an explicitly supplied lastMerged string reaches the prompt verbatim", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = {
+    forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md",
+    lastMerged: "Merged outcomes from round 5: issue #21 merged via PR #55 (worker: lane-21).",
+  };
+  const stub = createArchitectStub(deps);
+  await stub.run({ roundId: 6, phase: "architecting", marker: null });
+  assert.ok(runner.calls[0]!.prompt.includes("issue #21 merged via PR #55"));
+});
+
 // ── validateArchitectOutput: schema/shape validation (unit-level, mirrors plan-review.ts) ──
 
 test("validateArchitectOutput: no structured block at all -> invalid", () => {

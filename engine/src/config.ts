@@ -273,6 +273,15 @@ const Roles = z.object({
     // default string". align.ts/architect.ts no longer read this field directly — every
     // consumer reads the single resolved `cfg.goal.file` instead.
     planMdPath: z.string().min(1).optional(),
+    // #132: cap on the {{round.lastMerged}} text substituted into the architect prompt — the
+    // engine-assembled post-review context (the PREVIOUS round's merged-PR outcomes, read from
+    // its persisted round_artifacts row, #123). Same user-tunable-in-config, marked-cut contract
+    // as roles.harvest.artifactMaxChars / roles.retro.digestMaxChars (round-defaults.ts's
+    // renderLastMergedFromArtifact reuses retro-digest.ts's capDigest, never a bespoke
+    // truncation). Deliberately smaller than either sibling default: this context is just
+    // issue/PR/worker triples (no titles or diffs — see renderLastMergedFromArtifact's doc
+    // comment for why), so even a large round's merge list stays well under a modest cap.
+    lastMergedMaxChars: z.number().int().positive().default(10_000),
     // #127: false -> round-defaults.ts omits the architecting stub; the phase no-ops via
     // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
     // for the shared rationale).

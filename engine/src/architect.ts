@@ -68,7 +68,26 @@ export interface ArchitectDeps {
    *  round.ts's `aligning` phase is still noopPeripheralStub and has nothing real to hand off.
    *  Once #89 ships, its caller wires this through without any architect.ts change. */
   alignedGoals?: string;
+  /** #132: the PREVIOUS round's merged-PR outcomes — engine-assembled, deterministic, bounded
+   *  post-review context (M5 item 12: "nobody reviews merged work for architectural drift").
+   *  Same threading shape as `alignedGoals` above: a real caller (round-defaults.ts's
+   *  createDefaultPeripherals) computes this at invocation time from the durable round-artifact
+   *  ledger (round-artifact.ts's `round_artifacts` table, #123) and assigns it before calling
+   *  this stub; a caller that omits it (every direct unit test in this file, and any consumer
+   *  that hasn't wired round-defaults.ts) gets the explicit `NO_PRIOR_ROUND_YET` placeholder
+   *  below — never an empty substitution. This module itself fetches nothing to produce this
+   *  string; it only renders whatever the caller hands it (or the placeholder). */
+  lastMerged?: string;
 }
+
+/** #132: the explicit placeholder used both when there IS no possible prior round (round 1) and
+ *  when a real caller hasn't threaded `deps.lastMerged` at all — see the field's own doc comment
+ *  above. round-defaults.ts's renderLastMergedFromArtifact uses this SAME wording (not a
+ *  reimplementation) for its own "no prior round" cases, so the placeholder text is identical
+ *  regardless of which layer produced it. */
+export const NO_PRIOR_ROUND_YET =
+  "(No prior round's merged-outcome data is available — this is round 1, or no prior round's " +
+  "summary artifact could be found. There is nothing to post-review yet.)";
 
 /** The round-scoped idempotency marker (#77 decision 4's `<!-- sapwood:round:N:<phase> -->`
  *  convention, same as plan-review.ts's planReviewMarker) — embedded verbatim in the round
@@ -347,6 +366,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "round.marker": marker_,
         "round.designNoteIssue": String(anchor.number),
         "round.alignedGoals": deps.alignedGoals ?? NO_ALIGNED_GOALS_YET,
+        "round.lastMerged": deps.lastMerged ?? NO_PRIOR_ROUND_YET,
         "plan.architectureChapter": architectureChapter,
         "candidates.summary": candidates.map(formatCandidate).join("\n\n---\n\n"),
         "labels.blocked": deps.cfg.labels.blocked,

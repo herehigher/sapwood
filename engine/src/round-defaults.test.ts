@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDefaultPeripherals, renderAlignedGoalsFromSummary } from "./round-defaults.js";
+import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMergedFromArtifact } from "./round-defaults.js";
 import { runRounds, noopPeripheralStub, type RoundDeps } from "./round.js";
 import { State } from "./state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -18,6 +18,7 @@ import type { Supervisor, LaneProbe } from "./conductor.js";
 import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "./peripheral.js";
 import { RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END } from "./structured-output.js";
+import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
@@ -178,6 +179,120 @@ test("renderAlignedGoalsFromSummary (#123): an all-empty summary renders the exp
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("align-summary", { round_id: round.round_id, created: [], triaged: [] });
   assert.ok(renderAlignedGoalsFromSummary(state, round.round_id)!.includes("decomposed nothing"));
+  state.close();
+});
+
+// ── renderLastMergedFromArtifact (#132): architect post-review context ────────────────────
+
+test("renderLastMergedFromArtifact (#132): round 1 (no possible prior round) -> the explicit 'no prior round' placeholder", () => {
+  const state = new State(":memory:");
+  const text = renderLastMergedFromArtifact(state, 1, 20_000);
+  assert.match(text, /no prior round/i);
+  state.close();
+});
+
+test("renderLastMergedFromArtifact (#132): prior round's artifact row is missing (harvest disabled, or persistence failed) -> the SAME 'no prior round' placeholder, never a throw", () => {
+  const state = new State(":memory:");
+  state.startRound("2026-07-10T00:00:00.000Z"); // round 1, no artifact ever persisted for it
+  const text = renderLastMergedFromArtifact(state, 2, 20_000);
+  assert.match(text, /no prior round/i);
+  state.close();
+});
+
+test("renderLastMergedFromArtifact (#132): prior round persisted with zero merges -> a DISTINCT 'merged nothing' placeholder, never the no-prior-round text", () => {
+  const state = new State(":memory:");
+  const round1 = state.startRound("2026-07-10T00:00:00.000Z");
+  state.closeRound(round1.round_id, "2026-07-10T01:00:00.000Z");
+  const artifact = buildRoundArtifact(state, round1, 30, "2026-07-10T01:00:00.000Z");
+  persistRoundArtifact(state, artifact, "2026-07-10T01:00:00.000Z");
+  const text = renderLastMergedFromArtifact(state, 2, 20_000);
+  assert.match(text, /merged nothing|zero merged/i);
+  assert.doesNotMatch(text, /no prior round/i, "must be wordy-distinct from the no-prior-round case");
+  state.close();
+});
+
+test("renderLastMergedFromArtifact (#132): prior round's merged PRs render as issue/pr/worker lines", () => {
+  const state = new State(":memory:");
+  const round1 = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("merged", { worker: "lane-12", issue: 12, pr: 34 });
+  state.appendEvent("merged", { worker: "lane-9", issue: 9, pr: 30 });
+  state.closeRound(round1.round_id, "2026-07-10T01:00:00.000Z");
+  const artifact = buildRoundArtifact(state, round1, 30, "2026-07-10T01:00:00.000Z");
+  persistRoundArtifact(state, artifact, "2026-07-10T01:00:00.000Z");
+  const text = renderLastMergedFromArtifact(state, round1.round_id + 1, 20_000);
+  assert.ok(text.includes("#12"));
+  assert.ok(text.includes("PR #34"));
+  assert.ok(text.includes("#9"));
+  assert.ok(text.includes("PR #30"));
+  state.close();
+});
+
+test("renderLastMergedFromArtifact (#132): boundedness — an oversize rendered digest is deterministically truncated, the cut marked in the text", () => {
+  const state = new State(":memory:");
+  const round1 = state.startRound("2026-07-10T00:00:00.000Z");
+  for (let i = 0; i < 200; i++) {
+    state.appendEvent("merged", { worker: `lane-${i}`, issue: 1000 + i, pr: 2000 + i });
+  }
+  state.closeRound(round1.round_id, "2026-07-10T01:00:00.000Z");
+  const artifact = buildRoundArtifact(state, round1, 30, "2026-07-10T01:00:00.000Z");
+  persistRoundArtifact(state, artifact, "2026-07-10T01:00:00.000Z");
+  const text = renderLastMergedFromArtifact(state, round1.round_id + 1, 200);
+  assert.ok(text.length <= 200, "capped at maxChars");
+  assert.match(text, /truncated/i);
+  state.close();
+});
+
+test("renderLastMergedFromArtifact (#132 gate② P2): EVERY branch honors the cap — placeholder branches and the zero-merges sentence are capDigest-bounded too, not just the real-merges render", () => {
+  const cap = 20; // deliberately below every placeholder's length — a degenerate but legal config
+  const state = new State(":memory:");
+
+  // (a) the no-prior placeholder branches: round 1, and a missing prior-round artifact row.
+  const noPrior = renderLastMergedFromArtifact(state, 1, cap);
+  assert.ok(noPrior.length <= cap, `round-1 placeholder capped (got ${noPrior.length} chars)`);
+  state.startRound("2026-07-10T00:00:00.000Z"); // round 1 exists but never persisted an artifact
+  const missingRow = renderLastMergedFromArtifact(state, 2, cap);
+  assert.ok(missingRow.length <= cap, `missing-artifact placeholder capped (got ${missingRow.length} chars)`);
+
+  // (b) the zero-merges sentence.
+  const state2 = new State(":memory:");
+  const r1 = state2.startRound("2026-07-10T00:00:00.000Z");
+  state2.closeRound(r1.round_id, "2026-07-10T01:00:00.000Z");
+  persistRoundArtifact(state2, buildRoundArtifact(state2, r1, 30, "2026-07-10T01:00:00.000Z"), "2026-07-10T01:00:00.000Z");
+  const zeroMerges = renderLastMergedFromArtifact(state2, 2, cap);
+  assert.ok(zeroMerges.length <= cap, `zero-merges sentence capped (got ${zeroMerges.length} chars)`);
+  state2.close();
+
+  // (c) a real merges render (already covered at cap=200 above; pinned here at the same
+  // degenerate cap for branch symmetry).
+  const state3 = new State(":memory:");
+  const r = state3.startRound("2026-07-10T00:00:00.000Z");
+  state3.appendEvent("merged", { worker: "lane-1", issue: 1, pr: 2 });
+  state3.closeRound(r.round_id, "2026-07-10T01:00:00.000Z");
+  persistRoundArtifact(state3, buildRoundArtifact(state3, r, 30, "2026-07-10T01:00:00.000Z"), "2026-07-10T01:00:00.000Z");
+  const merges = renderLastMergedFromArtifact(state3, 2, cap);
+  assert.ok(merges.length <= cap, `real-merges render capped (got ${merges.length} chars)`);
+  state3.close();
+  state.close();
+});
+
+test("architecting stub (#132): the architect prompt carries the prior round's merged-outcome context, engine-assembled from the durable round artifact", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  const round1 = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("merged", { worker: "lane-21", issue: 21, pr: 55 });
+  state.closeRound(round1.round_id, "2026-07-10T01:00:00.000Z");
+  const artifact = buildRoundArtifact(state, round1, 30, "2026-07-10T01:00:00.000Z");
+  persistRoundArtifact(state, artifact, "2026-07-10T01:00:00.000Z");
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  const round2 = state.startRound("2026-07-10T02:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round2.round_id, phase: "architecting", marker: null });
+  const architectCall = runner.calls.find((c) => c.roleId === "architect");
+  assert.ok(architectCall, "the architect session was dispatched");
+  assert.ok(architectCall!.prompt.includes("#21"), "the prior round's merged issue number reaches the prompt");
+  assert.ok(architectCall!.prompt.includes("PR #55"), "the prior round's merged PR number reaches the prompt");
   state.close();
 });
 
