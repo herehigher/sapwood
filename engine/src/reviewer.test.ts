@@ -172,6 +172,23 @@ test("buildReviewTriggerComment: null plan -> an explicit fallback sentence, nev
   assert.match(body, /issue #46/);
 });
 
+// #156: reviewer.triggerCommand — the trigger text is now a parameter (default unchanged).
+test("buildReviewTriggerComment: default triggerCommand is byte-for-byte identical to today's hardcoded `@codex review`", () => {
+  const body = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
+  assert.equal(
+    body,
+    "@codex review\n\nVerify this PR against issue #46's verification plan below:\n\n## Verification\nrun the test suite",
+  );
+});
+
+test("buildReviewTriggerComment: a custom triggerCommand replaces the default `@codex review` line, instruction unchanged", () => {
+  const body = buildReviewTriggerComment(46, "## Verification\nrun the test suite", "/review-please");
+  assert.equal(
+    body,
+    "/review-please\n\nVerify this PR against issue #46's verification plan below:\n\n## Verification\nrun the test suite",
+  );
+});
+
 // ── Reviewer implementations ───────────────────────────────────────────────────────────────
 
 const mkData = (over: Partial<PRReviewData> = {}): PRReviewData => ({
@@ -437,6 +454,31 @@ test("CodexReviewer: triggerReview still fires (with the fallback text) when get
   assert.equal(calls.length, 1); // the trigger still posts — never silently skipped
   assert.match(calls[0]![1], /^@codex review/);
   assert.match(calls[0]![1], /No extractable verification plan/i);
+});
+
+test("CodexReviewer: a custom triggerCommand (#156 reviewer.triggerCommand) is used instead of the default `@codex review`", async () => {
+  const calls: Array<[number, string]> = [];
+  const forge = {
+    addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
+    getIssueBody: async () => "no plan section here",
+  } as unknown as IForge;
+  await new CodexReviewer([], "/review-please").triggerReview(forge, 42, 46);
+  assert.match(calls[0]![1], /^\/review-please/);
+  assert.doesNotMatch(calls[0]![1], /@codex review/);
+});
+
+test("makeReviewer: threads cfg.reviewer.triggerCommand into the built CodexReviewer's trigger comment", async () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    reviewer: { triggerCommand: "/review-please" },
+  });
+  const calls: Array<[number, string]> = [];
+  const forge = {
+    addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
+    getIssueBody: async () => "no plan section here",
+  } as unknown as IForge;
+  await makeReviewer(cfg).triggerReview(forge, 42, 46);
+  assert.match(calls[0]![1], /^\/review-please/);
 });
 
 test("HumanReviewer: only an explicit APPROVED state counts — a mere COMMENTED does not", () => {

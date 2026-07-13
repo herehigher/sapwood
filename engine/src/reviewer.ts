@@ -154,19 +154,24 @@ export function normalizeLogin(login: string): string {
 export const CODEX_REVIEWER_LOGINS = ["chatgpt-codex-connector"] as const;
 
 /**
- * Build the review-trigger comment body (#46, Decision #8): `@codex review` plus the issue's
- * verification plan, so gate② re-checks the finished PR against the SAME plan the `Ready` gate
- * required at dispatch (getReadyIssues / hasVerificationPlan) — until now gate② only checked
- * "fresh non-author review + CI", not plan conformance (PLAN.md M3 deferred list). `planText`
- * null (no extractable Verification/Acceptance section — e.g. a verify:n/a issue, or a
- * malformed body) still gets an EXPLICIT fallback sentence, never a silently plan-less trigger.
+ * Build the review-trigger comment body (#46, Decision #8): `triggerCommand` (default
+ * `@codex review`, #156 reviewer.triggerCommand) plus the issue's verification plan, so gate②
+ * re-checks the finished PR against the SAME plan the `Ready` gate required at dispatch
+ * (getReadyIssues / hasVerificationPlan) — until now gate② only checked "fresh non-author
+ * review + CI", not plan conformance (PLAN.md M3 deferred list). `planText` null (no extractable
+ * Verification/Acceptance section — e.g. a verify:n/a issue, or a malformed body) still gets an
+ * EXPLICIT fallback sentence, never a silently plan-less trigger.
  * Pure + exported so the shape is unit-testable without a fake IForge.
  */
-export function buildReviewTriggerComment(issue: number, planText: string | null): string {
+export function buildReviewTriggerComment(
+  issue: number,
+  planText: string | null,
+  triggerCommand: string = "@codex review",
+): string {
   const instruction = planText
     ? `Verify this PR against issue #${issue}'s verification plan below:\n\n${planText}`
     : `No extractable verification plan was found on issue #${issue} — review this PR on its own merits.`;
-  return `@codex review\n\n${instruction}`;
+  return `${triggerCommand}\n\n${instruction}`;
 }
 
 /**
@@ -262,8 +267,12 @@ export class CodexReviewer implements Reviewer {
   private readonly allowedLogins: string[];
 
   /** `extraTrustedLogins` (cfg.reviewer.trustedReviewers) extends — never replaces — the
-   *  Codex bot's own login. */
-  constructor(extraTrustedLogins: readonly string[] = []) {
+   *  Codex bot's own login. `triggerCommand` (cfg.reviewer.triggerCommand, #156) is the posted
+   *  trigger-comment text; default matches today's hardcoded `@codex review` byte-for-byte. */
+  constructor(
+    extraTrustedLogins: readonly string[] = [],
+    private readonly triggerCommand: string = "@codex review",
+  ) {
     this.allowedLogins = [...CODEX_REVIEWER_LOGINS, ...extraTrustedLogins].map(normalizeLogin);
   }
 
@@ -273,7 +282,10 @@ export class CodexReviewer implements Reviewer {
     // silently retrying forever or skipping the comment (#46 Decision #8: the trigger always
     // posts, never a swallowed no-op).
     const body = await forge.getIssueBody(issue).catch(() => "");
-    await forge.addPRComment(pr, buildReviewTriggerComment(issue, extractVerificationPlan(body)));
+    await forge.addPRComment(
+      pr,
+      buildReviewTriggerComment(issue, extractVerificationPlan(body), this.triggerCommand),
+    );
   }
 
   verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict {
@@ -334,7 +346,11 @@ export type ReviewerKind = Reviewer["kind"];
  *  and the reviewer-fallback chain (cfg.reviewer.fallback) both call, so a fallback entry gets
  *  the EXACT SAME mode implementation/semantics as picking that kind as the primary
  *  (reviewer.mode) would — reused, never forked. */
-export function buildReviewerByKind(kind: ReviewerKind, trustedReviewers: readonly string[]): Reviewer {
+export function buildReviewerByKind(
+  kind: ReviewerKind,
+  trustedReviewers: readonly string[],
+  triggerCommand: string = "@codex review",
+): Reviewer {
   switch (kind) {
     case "human":
       return new HumanReviewer();
@@ -344,14 +360,14 @@ export function buildReviewerByKind(kind: ReviewerKind, trustedReviewers: readon
     default:
       // trustedReviewers EXTENDS the Codex-bot allowlist in this mode (public-repo hardening:
       // gate② acceptance is identity-checked, not merely non-author — Codex PR #42 P1).
-      return new CodexReviewer(trustedReviewers);
+      return new CodexReviewer(trustedReviewers, triggerCommand);
   }
 }
 
 /** Construct the configured PRIMARY reviewer (reviewer.mode). Default = CodexReviewer, matching
  *  the locked decision (0day-style fresh different-model review). */
 export function makeReviewer(cfg: SapwoodConfig): Reviewer {
-  return buildReviewerByKind(cfg.reviewer.mode, cfg.reviewer.trustedReviewers);
+  return buildReviewerByKind(cfg.reviewer.mode, cfg.reviewer.trustedReviewers, cfg.reviewer.triggerCommand);
 }
 
 /** Construct the configured FALLBACK chain (cfg.reviewer.fallback, #54) — one Reviewer per
@@ -360,7 +376,9 @@ export function makeReviewer(cfg: SapwoodConfig): Reviewer {
  *  decisive verdict wins). Empty by default -> resolveReviewVerdict behaves identically to
  *  calling the primary reviewer directly (no #54 behavior change from before this existed). */
 export function makeFallbackReviewers(cfg: SapwoodConfig): Reviewer[] {
-  return cfg.reviewer.fallback.map((kind) => buildReviewerByKind(kind, cfg.reviewer.trustedReviewers));
+  return cfg.reviewer.fallback.map((kind) =>
+    buildReviewerByKind(kind, cfg.reviewer.trustedReviewers, cfg.reviewer.triggerCommand),
+  );
 }
 
 // ── Reviewer failover (#54) ──────────────────────────────────────────────────────────────────
