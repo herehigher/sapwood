@@ -584,7 +584,7 @@ test("extractArchitectureChapter: no matching heading -> null (caller supplies t
 });
 
 test("loadArchitectureChapter: a real docs/PLAN.md resolves to a non-empty chapter mentioning locked decisions", () => {
-  // The repo's own docs/PLAN.md — engine/src/architect.test.ts -> engine/../docs/PLAN.md.
+  // The repo's own docs/PLAN.md — engine/src/roles/architect.test.ts -> engine/../docs/PLAN.md.
   const here = dirname(fileURLToPath(import.meta.url));
   const planPath = join(here, "..", "..", "..", "docs", "PLAN.md");
   const chapter = loadArchitectureChapter(planPath);

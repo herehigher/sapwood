@@ -5,7 +5,7 @@ allowed-tools: Bash(mkdir:*), Bash(touch:*), Bash(rm:*), Bash(echo:*)
 ---
 
 sapwood has two tiers of human control, both plain file sentinels next to the engine's
-state DB (`engine/src/state.ts`) — no config edit needed for either:
+state DB (`engine/src/state/state.ts`) — no config edit needed for either:
 
 - **kill switch** (`data/KILL_SWITCH`, `killSwitchPath`) — the strict tier. Freezes ALL new
   dispatch and merges; running workers are asked to hand off gracefully within

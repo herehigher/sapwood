@@ -81,7 +81,7 @@ export function harvestMarker(roundId: number): string {
 
 export function defaultHarvestPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  // engine/src (tsx) and engine/dist (built) are both one level below engine/ — same
+  // engine/src/<domain> (tsx) and engine/dist/<domain> (built) are both two levels below engine/ — same
   // resolution rationale as plan-review.ts's defaultPlanReviewerPromptPath.
   return join(here, "..", "..", "prompts", "harvest.md");
 }

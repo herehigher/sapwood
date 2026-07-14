@@ -111,7 +111,7 @@ export function architectMarker(roundId: number): string {
 
 export function defaultArchitectPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  // engine/src (tsx) and engine/dist (built) are both one level below engine/ — same
+  // engine/src/<domain> (tsx) and engine/dist/<domain> (built) are both two levels below engine/ — same
   // resolution rationale as worker.ts's defaultPromptPath / plan-review.ts's own default paths.
   return join(here, "..", "..", "prompts", "architect.md");
 }

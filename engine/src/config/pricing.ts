@@ -64,7 +64,7 @@ export type PricingTable = Readonly<Record<string, ModelRateUsdPerMTok>>;
 
 /** Resolves the shipped default rate table — `engine/pricing.yaml` inside the engine package,
  *  NOT relative to the target repo the engine is orchestrating (same resolution rule as
- *  worker.ts's defaultPromptPath: src/ and dist/ are both one level below engine/, and the
+ *  worker.ts's defaultPromptPath: src/config/ and dist/config/ are both two levels below engine/, and the
  *  file living INSIDE the engine package means `npm pack` ships it). */
 export function defaultPricingPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));

@@ -242,7 +242,7 @@ function sampleConfig(): string {
 
 /** Resolves the shipped goal-file template — `engine/prompts/goal-template.md` inside the
  *  engine package, same "next to the shipped prompts" resolution as worker.ts's
- *  defaultPromptPath (`here` is one level below `engine/` in both `engine/src` (tsx) and
+ *  defaultPromptPath (`here` is two levels below `engine/` in both `engine/src/loop` (tsx) and
  *  `engine/dist` (built), so this join lands on `engine/prompts` either way). A module constant
  *  would work too, but this repo already ships every other role's starter content as a file
  *  next to worker.md/architect.md/etc — reusing that pattern costs nothing and keeps the

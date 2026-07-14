@@ -1392,7 +1392,7 @@ export function renderPromptTemplate(template: string, issue: Issue): string {
  *  package, NOT relative to the target repo the engine is orchestrating. */
 export function defaultPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  // engine/src (tsx) and engine/dist (built) are both one level below engine/ —
+  // engine/src/<domain> (tsx) and engine/dist/<domain> (built) are both two levels below engine/ —
   // the prompt lives INSIDE the engine package so `npm pack --workspace engine`
   // ships it (a repo-root prompts/ would be absent from packaged installs).
   return join(here, "..", "..", "prompts", "worker.md");
