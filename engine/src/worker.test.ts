@@ -1747,10 +1747,12 @@ test("buildRenderPrompt: an oversized doctrine.file is deterministically truncat
     const scfg = ConfigSchema.parse({
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { promptFile: p },
-      doctrine: { file: doctrinePath, maxChars: 50 },
+      // #167 review (Codex P3): doctrine.maxChars now has a 200-char floor (config.ts) so the
+      // truncation marker itself always fits — 200 is the smallest legal value here.
+      doctrine: { file: doctrinePath, maxChars: 200 },
     });
     const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
-    assert.ok(rendered.length <= 50, `expected <= 50 chars, got ${rendered.length}`);
+    assert.ok(rendered.length <= 200, `expected <= 200 chars, got ${rendered.length}`);
     assert.match(rendered, /truncated/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });

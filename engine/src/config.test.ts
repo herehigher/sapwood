@@ -829,6 +829,20 @@ test("doctrine.maxChars: rejects non-positive-int", () => {
   );
 });
 
+// #167 review (Codex P3): a cap below the floor could crowd out capDigest's own truncation
+// marker (retro-digest.ts), silently defeating the "marked cut, never a silent drop" contract
+// doctrine.maxChars's doc comment promises. 200 is the floor.
+test("doctrine.maxChars: rejects a value below the 200-char floor (would crowd out capDigest's truncation marker)", () => {
+  assert.throws(() =>
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ndoctrine: { maxChars: 199 }"),
+  );
+});
+
+test("doctrine.maxChars: accepts exactly the 200-char floor", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ndoctrine: { maxChars: 200 }");
+  assert.equal(cfg.doctrine.maxChars, 200);
+});
+
 test("doctrine.file: a relative path resolves against the config file's directory, not cwd (same #74 pattern as goal.file/promptFile)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {

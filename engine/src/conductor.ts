@@ -12,6 +12,7 @@
 //  - producer != merger: the tick may *decide* MERGE, but the actual merge is forge.mergePR
 //    (conductor identity), never a worker. The worker is only ever the injected dispatch fn.
 
+import { existsSync } from "node:fs";
 import type { IForge, Issue } from "./forge.js";
 import type { State, BoardStatus, PendingRollback, ModelUsageEntry, WorkerRow, CategorizedTokenUsage } from "./state.js";
 import type { SapwoodConfig } from "./config.js";
@@ -474,6 +475,35 @@ export interface TickDeps {
    *  (the exact same-tick window #124 gate② P1-2 closed for cost.roundBudgetUsd). Unset (no
    *  spend stop configured) → no check, no cost. */
   runSpendStopCrossed?: () => boolean;
+}
+
+/** #167 review (Codex P2+P3 adjudication): the gated-reentry-cap-hit escalation note appended
+ *  to the re-escalation comment once the last automatic reentry attempt is spent. The original
+ *  version unconditionally cited "this repo's review doctrine, adjudication point 4" and the
+ *  RESOLVED ABSOLUTE `cfg.doctrine.file` path — two defects: (a) a repo can legally have no
+ *  doctrine file adopted (doctrine.ts's NO_DOCTRINE is a common, expected state) or have
+ *  rewritten one that no longer uses this exact numbering, so citing it unconditionally can be
+ *  false; (b) an absolute local filesystem path posted to a public GitHub issue comment leaks
+ *  this machine's directory layout. Fixed by splitting the message: the PRINCIPLE (repeated fix
+ *  rounds -> re-examine design/direction, not more patches) is stated inline and
+ *  self-contained, true regardless of doctrine adoption; the doctrine pointer is ADDITIVE,
+ *  appended ONLY when a doctrine file was actually loaded — `existsSync` on the RESOLVED path,
+ *  the same presence check doctrine.ts's own `loadDoctrine` makes — and cites the RAW,
+ *  pre-resolution path exactly as the user wrote it in config (`cfg.doctrine.fileRaw`, set by
+ *  config.ts's `loadConfig` before it absolutizes `cfg.doctrine.file`; falls back to
+ *  `cfg.doctrine.file` itself for a caller that built `cfg` via `ConfigSchema.parse` directly —
+ *  every test in this file, and any consumer that skipped `loadConfig` — where that field is
+ *  already the raw, un-resolved value since no resolution step ran). Never the resolved
+ *  absolute path either way. */
+export function capHitEscalationNote(cfg: SapwoodConfig): string {
+  const principle =
+    "That was the last automatic attempt; a further reentry will be rejected. Repeated fix " +
+    "rounds that keep missing the same finding are usually a signal to re-examine the " +
+    "feature's design or technical direction at the top of the loop, not to grind through " +
+    "more automatic patch attempts.";
+  if (!existsSync(cfg.doctrine.file)) return principle;
+  const rawPath = cfg.doctrine.fileRaw ?? cfg.doctrine.file;
+  return `${principle} See this repo's review doctrine (\`${rawPath}\`) for more on how repeated findings should be adjudicated.`;
 }
 
 /**
@@ -1044,17 +1074,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 `sapwood: gated-PR reentry attempt ${gatedAttempts}/${cap} for PR #${pr} ` +
                   `re-escalated \`${cfg.labels.needsHuman}\` — ${outcome.reason}. ` +
                   (gatedAttempts >= cap
-                    ? // #167: cap reached — the same repeated-fix-round shape the review
-                      // doctrine's adjudication point 4 names (this codebase's nearest
-                      // mechanism to 0day's prFixCap→needs-human). Cite it explicitly rather
-                      // than just stopping: the doctrine's actual recommendation is design
-                      // re-entry (architect/plan re-review), not another automatic patch
-                      // attempt — which is exactly what this cap refuses to keep granting.
-                      `That was the last automatic attempt; a further reentry will be rejected. ` +
-                        `Per this repo's review doctrine (adjudication point 4 — see ` +
-                        `\`${cfg.doctrine.file}\`): repeated fix rounds that keep missing are a ` +
-                        `signal to re-examine the design/technical direction at the top of the ` +
-                        `loop, not to grind through more patches.`
+                    ? // #167 review (Codex P2+P3): cap reached — see capHitEscalationNote's
+                      // doc comment for why this is a helper, not inline text.
+                      capHitEscalationNote(cfg)
                     : `Remove \`${cfg.labels.needsHuman}\` again once it's addressed to retry.`),
               )
               .catch(() => {});

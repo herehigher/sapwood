@@ -4,7 +4,7 @@
 // disagrees with the bash row it mirrors, that's a parity regression.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -22,6 +22,7 @@ import {
   laneOnReclaimFailed,
   driveDecision,
   gatedReentryDecision,
+  capHitEscalationNote,
   tick,
   orderForDispatch,
   evaluateCeiling,
@@ -34,7 +35,7 @@ import {
   type ReclaimResult,
 } from "./conductor.js";
 import { State } from "./state.js";
-import { ConfigSchema, type SapwoodConfig } from "./config.js";
+import { ConfigSchema, loadConfig, type SapwoodConfig } from "./config.js";
 import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "./forge.js";
 import { MergeDriver, type DriveOutcome } from "./merge-driver.js";
 import { CodexReviewer, CODEX_REVIEWER_LOGINS } from "./reviewer.js";
@@ -1717,12 +1718,16 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   assert.equal(forge.issueComments.length, 1);
   assert.match(forge.issueComments[0]![1], /attempt 1\/1/);
   assert.match(forge.issueComments[0]![1], /last automatic attempt/);
-  // #167: cap-hit is this codebase's nearest mechanism to the review doctrine's prFixCap→
-  // needs-human pattern — the escalation comment cites adjudication point 4 (re-examine the
-  // design/technical direction, not more patches) rather than just announcing the stop.
-  assert.match(forge.issueComments[0]![1], /review doctrine/i);
-  assert.match(forge.issueComments[0]![1], /point 4/i);
-  assert.match(forge.issueComments[0]![1], /re-examine the design/i);
+  // #167 review (Codex P2+P3 adjudication): cap-hit is this codebase's nearest mechanism to
+  // the review doctrine's prFixCap→needs-human pattern — the escalation comment states the
+  // principle (re-examine design/technical direction, not more patches) SELF-CONTAINED, true
+  // regardless of doctrine adoption. mkCfg() here builds cfg via ConfigSchema.parse with no
+  // doctrine file on disk at the default path — the legal, common "no doctrine adopted" case
+  // (doctrine.ts's NO_DOCTRINE) — so the comment must NOT cite a doctrine file that doesn't
+  // exist.
+  assert.match(forge.issueComments[0]![1], /re-examine the feature's design/i);
+  assert.doesNotMatch(forge.issueComments[0]![1], /review doctrine/i);
+  assert.doesNotMatch(forge.issueComments[0]![1], /point 4/i);
   assert.equal(sup.dispatched.length, 0); // never a new worker, even across the re-escalation
 
   // Human removes needs-human a SECOND time — but the cap (1) is already spent.
@@ -1741,6 +1746,70 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   assert.deepEqual(r4.gatedReclaimed, []);
   assert.equal(st.getWorker("lane-b")?.state, "failed");
   st.close();
+});
+
+// #167 review (Codex P2+P3 adjudication): capHitEscalationNote — direct unit tests for the
+// helper extracted from the gated-reentry-cap escalation comment above. Covers the two
+// defects the review found: (a) unconditionally citing "review doctrine, adjudication point
+// 4" even when no doctrine file exists; (b) leaking the RESOLVED ABSOLUTE `cfg.doctrine.file`
+// path (loadConfig absolutizes it) instead of the raw path as the user wrote it in config.
+
+test("capHitEscalationNote: no doctrine file present -> principle stated self-contained, no doctrine citation", () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    doctrine: { file: "/nonexistent/REVIEW-DOCTRINE.md" },
+  });
+  const note = capHitEscalationNote(cfg);
+  assert.match(note, /last automatic attempt/i);
+  assert.match(note, /re-examine the feature's design/i);
+  assert.doesNotMatch(note, /review doctrine/i);
+  assert.doesNotMatch(note, /\/nonexistent\/REVIEW-DOCTRINE\.md/);
+});
+
+test("capHitEscalationNote: a doctrine file loaded via loadConfig -> cites the RAW, pre-resolution path, never the resolved absolute path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const docsDir = join(dir, "docs");
+    mkdirSync(docsDir, { recursive: true });
+    writeFileSync(join(docsDir, "REVIEW-DOCTRINE.md"), "# doctrine\nadjudication point 4: re-examine design.\n");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: o, repo: r, projectNumber: 4 }\ndoctrine: { file: docs/REVIEW-DOCTRINE.md }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    // Sanity: loadConfig really did resolve the path to an absolute one under dir.
+    assert.equal(cfg.doctrine.file, join(docsDir, "REVIEW-DOCTRINE.md"));
+
+    const note = capHitEscalationNote(cfg);
+    assert.match(note, /last automatic attempt/i);
+    assert.match(note, /review doctrine/i);
+    // The RAW, as-configured (relative) path is cited...
+    assert.match(note, /`docs\/REVIEW-DOCTRINE\.md`/);
+    // ...but the RESOLVED ABSOLUTE path (which would leak this machine's directory layout onto
+    // a public GitHub comment) never appears.
+    assert.doesNotMatch(note, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("capHitEscalationNote: cfg built via ConfigSchema.parse directly (no loadConfig, no fileRaw) still never cites a resolved absolute path — falls back to cfg.doctrine.file, which is already the raw value in this path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const path = join(dir, "REVIEW-DOCTRINE.md");
+    writeFileSync(path, "doctrine content");
+    const cfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      doctrine: { file: path },
+    });
+    assert.equal(cfg.doctrine.fileRaw, undefined); // never set outside loadConfig
+    const note = capHitEscalationNote(cfg);
+    assert.match(note, /review doctrine/i);
+    assert.match(note, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))); // cfg.doctrine.file IS the raw value here
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("#147 round-3 P2 (Codex PR #151): CAPPED latches ONLY after the needs-human label provably lands — a transient label failure retries next tick instead of permanently hiding the PR from human triage", async () => {

@@ -488,8 +488,13 @@ const Doctrine = z.object({
   // doctrine.ts's loadDoctrine reuses retro-digest.ts's capDigest) on the doctrine text
   // substituted into the worker/architect prompts. Same user-tunable-in-config, marked-cut
   // contract as round.directiveMaxChars / roles.architect.lastMergedMaxChars /
-  // roles.retro.digestMaxChars.
-  maxChars: z.number().int().positive().default(20_000),
+  // roles.retro.digestMaxChars. #167 review (Codex P3): `.positive()` alone let an operator
+  // configure a cap so small the truncation MARKER itself (capDigest's "...[truncated N
+  // chars]" suffix, comfortably under 100 chars) couldn't fit, silently defeating the
+  // "marked cut, never a silent drop" contract this comment promises. 200 is a floor
+  // comfortably above the marker length with real headroom to spare — not a tight fit users
+  // could still trip.
+  maxChars: z.number().int().min(200).default(20_000),
 }).strict();
 
 const Recovery = z.object({
@@ -542,7 +547,20 @@ const ConfigSchemaRaw = z.object({
 // comment above) so the two keys' presence can be told apart during resolution. This override
 // is the "single resolved value" the CLAUDE.md/issue #128 design calls for: every consumer
 // reads `cfg.goal.file: string`, never the schema-inferred `string | undefined`.
-export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal"> & { goal: { file: string } };
+// #167 review (Codex P2+P3 adjudication): `doctrine.fileRaw` is NOT a schema field — it's a
+// loadConfig-only annotation (see loadConfig below) preserving the pre-resolution path exactly
+// as the user wrote it in config, for callers that need to cite the path back to the user
+// (e.g. conductor.ts's gated-reentry-cap escalation comment) without leaking the resolved
+// ABSOLUTE local filesystem path onto GitHub. Optional: a caller that builds `cfg` via
+// `ConfigSchema.parse` directly (every test in this file, any consumer that skips loadConfig)
+// never gets it set — but `cfg.doctrine.file` is already the raw, un-resolved value in that
+// path (only loadConfig's relative-to-config-file resolution mutates it), so a reader falls
+// back to `cfg.doctrine.file` itself and still never sees a resolved absolute path it didn't
+// ask for.
+export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine"> & {
+  goal: { file: string };
+  doctrine: { file: string; maxChars: number; fileRaw?: string };
+};
 
 export const DEFAULT_GOAL_FILE = "docs/PLAN.md";
 
@@ -663,6 +681,11 @@ export function loadConfig(path?: string): SapwoodConfig {
   // #167: same rule for the resolved review-doctrine file — always has a value (it carries a
   // real `.default()`, not `goal.file`'s optional-then-resolved shape), so every non-absolute
   // value, default or explicit, resolves against the config file's directory, not the CLI's cwd.
+  // #167 review (Codex P2+P3): capture the RAW pre-resolution value FIRST — conductor.ts's
+  // gated-reentry-cap escalation comment cites this (never the resolved absolute path below) so
+  // a public GitHub comment never leaks this machine's local directory layout. See
+  // `SapwoodConfig`'s `doctrine.fileRaw` doc comment above for the full contract.
+  cfg.doctrine.fileRaw = cfg.doctrine.file;
   if (!isAbsolute(cfg.doctrine.file)) {
     cfg.doctrine.file = resolve(dirname(file), cfg.doctrine.file);
   }
