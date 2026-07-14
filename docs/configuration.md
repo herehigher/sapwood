@@ -201,9 +201,16 @@ directly):
 The loop's **repo-level review doctrine** (#167) — durable review knowledge (recurring technical
 invariants + adjudication doctrine for how findings get treated) carried forward across rounds
 instead of living only in a human/conductor's memory. Prose for LLM readers, deliberately never
-a lint/DSL. Injected into the worker dispatch brief (`{{doctrine}}`) and the architect pass
-(`{{round.doctrine}}`), and cited by name in the gated-PR-reentry-cap escalation comment when
-automatic fix attempts are exhausted.
+a lint/DSL. Injected into the worker dispatch brief (`{{doctrine}}`), the architect pass
+(`{{round.doctrine}}`), and the gate② review-trigger comment (`different-model-codex` mode,
+appended after the issue's verification plan so the reviewing bot's attention is aimed at
+historical failure zones on top of this PR's own acceptance criteria) — and cited by name in
+the gated-PR-reentry-cap escalation comment when automatic fix attempts are exhausted. When no
+doctrine file is adopted, the two **internal** prompt surfaces (worker brief, architect pass)
+render an explicit "no review doctrine available" placeholder — never a silent empty
+substitution — while the **public** gate② trigger comment (posted on the PR) instead appends
+nothing at all, byte-identical to before doctrine existed: the internal placeholder text never
+appears in a public PR comment.
 
 | Key | Default | Meaning |
 |---|---|---|
