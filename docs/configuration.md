@@ -387,7 +387,10 @@ validate` catches all three).
   genuine recovery signal and clears the forge episode outright. While a forge episode is open,
   env-failure issue-requeues are **suspended** (persisted durably, zero forge writes, retry
   counter frozen) and drain automatically on resume; they are exempt from the rollback retry cap
-  and never degrade to `needs-human`.
+  and never degrade to `needs-human`. Dispatch resumes on the tick **after** the recovery
+  probe, not the recovery tick itself — that ordering lets the outage victim's held requeue
+  drain (rollback retry runs at the top of a tick, before dispatch) so other Ready issues can't
+  race it into the freed lanes.
 - **`llm`** — the probe is a **minimal inference ping** (same `CLAUDE_BIN` resolution as a real
   dispatch):
 
@@ -399,12 +402,20 @@ validate` catches all three).
     "Respond with the single word 'pong' and nothing else."
   ```
 
-  Success = clean exit + a "pong" reply. The custom system prompt replaces the CLI's default
-  one and `--strict-mcp-config`/`--tools ""` strip MCP servers and tool schemas — the smallest
-  request the CLI supports; `--no-session-persistence` keeps probe runs off the disk. **Honest
-  cost:** ~$0.016 per ping measured (the CLI still sends ~7.4k scaffolding tokens plus ~240
-  output tokens even fully stripped) — at `probeBackoffMaxSec` pacing that is still negligible
-  per day. The ping proves network + auth + *some* account capacity on the cheapest model —
+  Success = clean exit + a reply that is exactly `pong` (case/whitespace-normalized equality —
+  a refusal *containing* the word never counts). The custom system prompt replaces the CLI's
+  default one and `--strict-mcp-config`/`--tools ""` strip MCP servers and tool schemas — the
+  smallest request the CLI supports; `--no-session-persistence` keeps probe runs off the disk.
+  **Honest cost:** ~$0.016 per ping measured (the CLI still sends ~7.4k scaffolding tokens plus
+  ~240 output tokens even fully stripped) — at `probeBackoffMaxSec` pacing that is still
+  negligible per day. Because the ping is *paid*, it is suppressed while a hard cost/wall-clock
+  ceiling breach is active (a spend-safety boundary must not itself keep spending) and while
+  dispatch is paused (`data/PAUSE` blocks the canary the ping exists to unlock) — the free
+  forge probe keeps running in both states, and duration escalation is unaffected. A canary
+  stopped by a **drain** (kill switch / ceiling) is settled *inconclusive*: the canary slot is
+  released and the episode continues unchanged — a drain says nothing about the provider, so
+  it neither clears the episode nor grows the backoff; the next backoff step simply pings
+  again. The ping proves network + auth + *some* account capacity on the cheapest model —
   but **not** that the worker's own model/tier has quota (model-specific caps,
   primary-model-only overload), so a green ping is only a *gate*, never a recovery signal.
   When the backoff interval elapses and the ping succeeds (and no forge episode is open), the

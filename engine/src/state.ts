@@ -1010,6 +1010,34 @@ export class State {
     this.db.prepare("UPDATE park_state SET canary_worker = ? WHERE source = ?").run(worker, source);
   }
 
+  /** #168 (PR #180 round-3 P2-A): register a freshly-dispatched CANARY lane atomically — the
+   *  worker row, the episode's canary_worker assignment, and both dispatch events land in ONE
+   *  SQLite transaction. Separate writes had a crash window: a worker row persisted without
+   *  its canary_worker assignment left a LIVE canary the restarted engine didn't know about,
+   *  so the next backoff step launched a second one ("exactly one canary" broken). This method
+   *  makes that partial state unrepresentable: it either all lands or none of it does —
+   *  including the case where no `source` episode row exists to attach to (the UPDATE matches
+   *  zero rows -> the whole registration, worker row included, rolls back and this throws;
+   *  a canary must never exist without the episode it is testing). */
+  registerCanaryDispatch(row: WorkerRow, source: EnvFailureSource): void {
+    this.db.exec("BEGIN");
+    try {
+      this.upsertWorker(row);
+      const res = this.db
+        .prepare("UPDATE park_state SET canary_worker = ? WHERE source = ?")
+        .run(row.name, source);
+      if (res.changes === 0) {
+        throw new Error(`registerCanaryDispatch: no open ${source} park episode to attach canary ${row.name} to`);
+      }
+      this.appendEvent("dispatched", { worker: row.name, issue: row.issue });
+      this.appendEvent("park-canary", { worker: row.name, issue: row.issue });
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   /** One-way latch: the duration-based human notification has fired for this source's episode.
    *  Never re-fires for the same episode (conductor.ts's escalatePark checks escalatedAt == null
    *  before calling this) — additive, not a state transition: probing/auto-resume are unaffected

@@ -202,8 +202,9 @@ const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
  *  surface and the fewest failure modes the CLI supports. (--max-tokens does NOT exist in the
  *  CLI — verified unknown-option error — and must not be added.)
  *
- *  Success = exit code 0 AND the trimmed stdout containing "pong" (case-insensitive — the
- *  strict prompt minimizes output tokens; the contains-check keeps tolerance). This replaced
+ *  Success = exit code 0 AND the trimmed, lowercased stdout being EXACTLY "pong" (PR #180
+ *  round-3 P3: a contains-check passed refusals like "I cannot return only pong"; normalized
+ *  equality cannot). This replaced
  *  the original `claude --version` check, which proves nothing about the PROVIDER — the CLI
  *  stays installed and executable throughout a rate-limit/credit outage. The ping proves
  *  network + auth + some account capacity on the cheapest model (cfg.envFailure.probeModel,
@@ -275,7 +276,7 @@ export function probeLlmPing(
     });
     child.on("exit", (code) => {
       clearTimeout(timer);
-      if (code === 0 && stdout.trim().toLowerCase().includes("pong")) {
+      if (code === 0 && stdout.trim().toLowerCase() === "pong") {
         finish({ ok: true });
         return;
       }

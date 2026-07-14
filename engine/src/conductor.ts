@@ -649,6 +649,12 @@ async function drainThenEscalate(
   const escalated: string[] = [];
   const stillRunning = state.runningWorkers();
   for (const w of stillRunning) {
+    // #168 P1-B: a drained lane that happens to be the llm episode's CANARY is settled
+    // INCONCLUSIVE right here, at drain-request time — see releaseCanaryInconclusive's doc
+    // comment for the two corruption modes this closes (false-clear via the later .handoff
+    // reclaim; permanent wedge via the hard kill below). Idempotent no-op for every other lane
+    // and for repeat drain ticks.
+    releaseCanaryInconclusive(state, w.name);
     if (supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
   }
   const breach = state.ceilingBreach();
@@ -735,6 +741,28 @@ function settleCanary(state: State, workerName: string, envClassified: boolean, 
     state.clearPark("llm"); // also clears the local escalation marker when this was the last row
     state.appendEvent("park-resumed", { source: "llm", enteredAt: llm.enteredAt, via: "canary" });
   }
+}
+
+/** #168 (PR #180 round-3 P1-B): the THIRD canary disposition — INCONCLUSIVE. A drain (kill
+ *  switch or cost/wall-clock ceiling) stopping a live canary says NOTHING about the provider:
+ *  the lane was stopped for a safety reason, not because it answered or env-failed. Without
+ *  this, the two drain modes each corrupted the episode differently: a graceful drain's
+ *  .handoff sentinel landed in reclaimTerminalLane's settleCanary(..., false) and FALSELY
+ *  CLEARED the llm episode with zero recovery evidence, and a hard drain (drainThenEscalate's
+ *  kill + direct `failed` upsert) never touched the canary slot at all — leaving canary_worker
+ *  pointing at a dead lane forever, which the PARK section reads as "canary still in flight"
+ *  and never probes again: a PERMANENTLY WEDGED episode. Inconclusive = release the slot
+ *  (clear canary_worker) while preserving the episode row UNCHANGED: no probe_attempts bump
+ *  (a drain is not a probe result), entered_at/escalated_at untouched — the next backoff step
+ *  simply pings again. Called from drainThenEscalate for every lane it drains (idempotent
+ *  no-op for non-canaries), which covers BOTH modes: the slot is released at drain-REQUEST
+ *  time, so the later .handoff reclaim's settleCanary no-ops (no false clear), and a hard
+ *  kill leaves no dangling slot (no wedge). */
+function releaseCanaryInconclusive(state: State, workerName: string): void {
+  const llm = state.parkRow("llm");
+  if (!llm || llm.canaryWorker !== workerName) return;
+  state.setParkCanary("llm", null);
+  state.appendEvent("park-canary-inconclusive", { worker: workerName });
 }
 
 /** #168: park-duration escalation — the channel ladder (env-failure.ts's escalationChannel):
@@ -1429,6 +1457,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   Escalation is per episode, duration-based (not probe count), additive — probing and
   //   auto-resume continue unaffected either side of it.
   let canaryBudget = 0;
+  // #168 P2-B: parked-ness is ALSO captured before the probes run — see the dispatch gate
+  // below: a recovery observed by THIS tick's probes takes effect NEXT tick, never this one.
+  const parkedBeforeProbes = state.isParked();
   {
     const forgeEpisode = state.parkRow("forge");
     if (forgeEpisode) {
@@ -1456,7 +1487,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // always-failing attempt; the duration escalation still fires regardless. Also skipped
     // while a canary is already in flight — its terminal settlement (settleCanary) is the only
     // thing that can advance the episode then.
-    if (llmEpisode && llmEpisode.canaryWorker == null && deps.probeLlmReachable) {
+    //
+    // #168 P1-A: the llm ping is PAID (~$0.016/ping, a real API call) — it is suppressed while
+    // a hard cost/wall-clock ceiling breach is active (the engine is draining for SPEND
+    // reasons; a safety boundary must not itself keep spending) and while dispatch is PAUSED
+    // (pause blocks the canary the ping exists to unlock, so a green ping would be pure spend
+    // with no consumer — the disabled-consumer rule again). The FREE forge read-probe above
+    // keeps running in both states, and the kill switch needs no gate here: an active switch
+    // returns from the top of tick() before this section ever runs. Duration escalation is
+    // unaffected either way.
+    if (llmEpisode && llmEpisode.canaryWorker == null && deps.probeLlmReachable && !ceilingBreached && !paused) {
       const backoffSec = probeBackoffSec(
         llmEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec,
       );
@@ -1494,10 +1534,20 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
     }
   }
-  // Same-tick-fresh read for the DISPATCH gate just below — a probe above (or a canary
-  // settlement in this tick's own reclaim phase) may have just cleared the last episode, and
-  // that must be visible to THIS tick's dispatch, not just the next one.
-  const parkActive = state.isParked();
+  // #168 P2-B (PR #180 round 3): a recovery observed by THIS tick's probes takes effect NEXT
+  // tick, not this one — `parkActive` ORs the pre-probe capture with the post-probe read, so a
+  // forge probe that just succeeded leaves this tick's dispatch gated. Rationale: env-failure
+  // requeues suspended by the forge outage drain in the ROLLBACK RETRY phase, which runs at
+  // the TOP of a tick — before this tick's probes could have cleared the episode — so a
+  // same-tick resume would fill the lanes with whatever else was Ready while the outage
+  // VICTIM's requeue only lands next tick. Deferring one tick makes the next tick's ordering
+  // (rollback retry, THEN dispatch) do the fairness work with zero new machinery. The one
+  // same-tick resume that remains legal: an llm episode cleared by its CANARY during this
+  // tick's own RECLAIM phase (before the pre-probe capture) — safe, because an llm-only park
+  // never suspends requeues (they were attempted inline, forge healthy). The canary path
+  // itself still needs `parkActive` true + `canaryBudget` to open the loop for exactly one
+  // lane.
+  const parkActive = parkedBeforeProbes || state.isParked();
 
   // ── DISPATCH: fill free lanes from the Ready queue, by priority, within caps + budget ──
   //   #75/#168: skipped entirely while `paused` OR `parkActive` — no new lane dispatch, not even
@@ -1603,18 +1653,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         throw e;
       }
       const { name, sessionId } = dispatchRes;
-      state.upsertWorker({
+      const workerRow: WorkerRow = {
         name, issue: issue.number, session_id: sessionId, state: "running",
         started_at: iso(), ended_at: null,
-      });
-      state.appendEvent("dispatched", { worker: name, issue: issue.number });
-      // #168 P1-1: a lane dispatched while still parked IS the llm episode's canary — record
-      // it durably on the episode row the moment it launches, so its terminal reclaim
+      };
+      // #168 P1-1: a lane dispatched while still parked IS the llm episode's canary — recorded
+      // durably on the episode row the moment it launches, so its terminal reclaim
       // (settleCanary) can recognize it and no second canary can launch while it's in flight
       // (the PARK section skips probing while canary_worker is set), across restarts too.
+      // P2-A (round 3): worker row + canary assignment + events land in ONE transaction
+      // (state.registerCanaryDispatch) — a crash can no longer leave a live canary the
+      // restarted engine doesn't know about (which would break "exactly one canary").
       if (parkActive) {
-        state.setParkCanary("llm", name);
-        state.appendEvent("park-canary", { worker: name, issue: issue.number });
+        state.registerCanaryDispatch(workerRow, "llm");
+      } else {
+        state.upsertWorker(workerRow);
+        state.appendEvent("dispatched", { worker: name, issue: issue.number });
       }
       inFlightIssues.add(issue.number);
       lanesUsed++;

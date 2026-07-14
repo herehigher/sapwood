@@ -1033,6 +1033,35 @@ test("park: setParkCanary round-trips the in-flight canary lane name; bump/touch
   s.close();
 });
 
+test("park (P2-A): registerCanaryDispatch is ATOMIC — worker row + canary assignment + events land together; a missing episode rolls the WHOLE registration back (partial state unrepresentable)", () => {
+  const s = mem();
+  // Happy path: one call, everything lands.
+  s.enterPark("llm", "rate_limit_error", 42, "2026-07-14T00:00:00Z");
+  s.registerCanaryDispatch(
+    { name: "lane-1", issue: 42, session_id: "sess-1", state: "running", started_at: "2026-07-14T00:01:00Z", ended_at: null },
+    "llm",
+  );
+  assert.equal(s.getWorker("lane-1")?.state, "running");
+  assert.equal(s.parkRow("llm")?.canaryWorker, "lane-1");
+  assert.equal(s.eventsSince("2020-01-01T00:00:00Z", ["dispatched"]).length, 1);
+  assert.equal(s.eventsSince("2020-01-01T00:00:00Z", ["park-canary"]).length, 1);
+
+  // Unrepresentable partial state: registering against a MISSING episode throws and leaves NO
+  // worker row and NO events — the crash-window shape (worker row present, canary_worker null)
+  // cannot be produced through this method.
+  s.clearPark("llm");
+  assert.throws(
+    () => s.registerCanaryDispatch(
+      { name: "lane-2", issue: 43, session_id: "sess-2", state: "running", started_at: "2026-07-14T00:02:00Z", ended_at: null },
+      "llm",
+    ),
+    /no open llm park episode/,
+  );
+  assert.equal(s.getWorker("lane-2"), undefined, "the worker row rolled back with the failed canary assignment");
+  assert.equal(s.eventsSince("2020-01-01T00:00:00Z", ["dispatched"]).length, 1, "no orphan events either");
+  s.close();
+});
+
 test("park: a fresh episode after clearPark starts with its own clean enteredAt/probeAttempts", () => {
   const s = mem();
   s.enterPark("llm", "first episode", 1, "2026-07-14T00:00:00Z");

@@ -280,6 +280,18 @@ test("probeLlmPing: exit 0 but NON-pong stdout -> failure, detail carries the fi
   }
 });
 
+test("probeLlmPing (P3): a sentence CONTAINING 'pong' is a failure — success requires the normalized output to EQUAL 'pong'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "I cannot return only pong"\nexit 0\n`);
+    const r = await probeLlmPing(bin, "haiku", 0.05, 30);
+    assert.equal(r.ok, false, "a refusal mentioning 'pong' must never read as provider health");
+    assert.ok(r.detail?.includes("I cannot return only pong"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("probeLlmPing: non-zero exit -> failure even with 'pong' on stdout; detail prefers the STDERR error line (the 'Exceeded USD budget' / 'unknown option' operator signal)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   try {
