@@ -167,10 +167,14 @@ export const CODEX_REVIEWER_LOGINS = ["chatgpt-codex-connector"] as const;
  * doctrine, same content injected into the worker brief and architect pass (doctrine.ts) —
  * appended AFTER the verification plan so the reviewing bot's attention is aimed at historical
  * failure zones on top of this PR's own acceptance criteria. Omitted/null/empty -> nothing is
- * appended, byte-for-byte the pre-#167 comment: this function is PURE and never sees
- * doctrine.ts's NO_DOCTRINE placeholder — a public PR comment must not carry that internal
- * sentence, so the caller (makeReviewer/makeFallbackReviewers below) maps the placeholder to
- * `undefined` BEFORE it ever reaches here.
+ * appended, byte-for-byte the pre-#167 comment. The NO_DOCTRINE-never-leaks invariant (a public
+ * PR comment must not carry doctrine.ts's internal placeholder sentence) is enforced at BOTH
+ * ends — defense in depth (#177 review, Codex P2): the construction boundary
+ * (makeReviewer/makeFallbackReviewers' loadReviewDoctrine maps the placeholder to `undefined`
+ * before constructing a CodexReviewer) AND structurally here — a `doctrine` value equal to
+ * NO_DOCTRINE itself is treated exactly like undefined/null, so a future caller that forgets
+ * the boundary mapping still cannot leak the placeholder into a posted comment. Still pure:
+ * NO_DOCTRINE is a module constant, not I/O.
  * Pure + exported so the shape is unit-testable without a fake IForge.
  */
 export function buildReviewTriggerComment(
@@ -182,9 +186,10 @@ export function buildReviewTriggerComment(
   const instruction = planText
     ? `Verify this PR against issue #${issue}'s verification plan below:\n\n${planText}`
     : `No extractable verification plan was found on issue #${issue} — review this PR on its own merits.`;
-  const doctrineBlock = doctrine
-    ? `\n\nThis repo's review doctrine — historical failure classes and adjudication guidance to keep in mind while reviewing:\n\n${doctrine}`
-    : "";
+  const doctrineBlock =
+    doctrine && doctrine !== NO_DOCTRINE
+      ? `\n\nThis repo's review doctrine — historical failure classes and adjudication guidance to keep in mind while reviewing:\n\n${doctrine}`
+      : "";
   return `${triggerCommand}\n\n${instruction}${doctrineBlock}`;
 }
 
@@ -390,9 +395,11 @@ export function buildReviewerByKind(
 /** Resolve this repo's review-doctrine text for gate② trigger-comment injection (#167). Reuses
  *  doctrine.ts's `loadDoctrine` — the SAME load site worker.ts and round-defaults.ts already
  *  call, never duplicated — and maps its `NO_DOCTRINE` placeholder to `undefined` HERE, at the
- *  construction-site boundary: `buildReviewTriggerComment` stays pure and never sees the
- *  placeholder, because a public PR comment must never carry the internal "(No review doctrine
- *  file is configured...)" sentence. No doctrine adopted -> `undefined` -> the trigger comment
+ *  construction-site boundary, because a public PR comment must never carry the internal "(No
+ *  review doctrine file is configured...)" sentence. `buildReviewTriggerComment` ALSO enforces
+ *  that invariant structurally (it treats a NO_DOCTRINE-valued argument like undefined —
+ *  defense in depth, #177 review Codex P2); this boundary mapping stays anyway so a constructed
+ *  CodexReviewer never even carries the placeholder. No doctrine adopted -> `undefined` -> the trigger comment
  *  is byte-for-byte identical to the pre-#167 comment. A present-but-unreadable doctrine file
  *  still fails fast here (loadDoctrine's contract), same as it already does for the worker
  *  brief and architect pass. */

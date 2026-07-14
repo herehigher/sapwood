@@ -206,9 +206,11 @@ a lint/DSL. Injected into the worker dispatch brief (`{{doctrine}}`), the archit
 appended after the issue's verification plan so the reviewing bot's attention is aimed at
 historical failure zones on top of this PR's own acceptance criteria) — and cited by name in
 the gated-PR-reentry-cap escalation comment when automatic fix attempts are exhausted. When no
-doctrine file is adopted, none of these surfaces ever carry the internal "no doctrine
-available" placeholder text — the gate② trigger comment in particular is public (posted on the
-PR), so absence degrades to nothing appended, byte-identical to before doctrine existed.
+doctrine file is adopted, the two **internal** prompt surfaces (worker brief, architect pass)
+render an explicit "no review doctrine available" placeholder — never a silent empty
+substitution — while the **public** gate② trigger comment (posted on the PR) instead appends
+nothing at all, byte-identical to before doctrine existed: the internal placeholder text never
+appears in a public PR comment.
 
 | Key | Default | Meaning |
 |---|---|---|

@@ -25,6 +25,7 @@ import {
   buildReviewTriggerComment,
 } from "./reviewer.js";
 import { ConfigSchema } from "./config.js";
+import { NO_DOCTRINE } from "./doctrine.js";
 import type { IForge, PRReview, PRReviewData } from "./forge.js";
 import type { Reviewer, ReviewVerdict, ReviewAction, ReviewFallbackLock } from "./reviewer.js";
 
@@ -219,6 +220,16 @@ test("buildReviewTriggerComment: doctrine null or empty string -> also appends n
   const base = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
   assert.equal(buildReviewTriggerComment(46, "## Verification\nrun the test suite", "@codex review", null), base);
   assert.equal(buildReviewTriggerComment(46, "## Verification\nrun the test suite", "@codex review", ""), base);
+});
+
+// #177 review (Codex P2): the never-leaks invariant is structural, not just a caller convention
+// — the pure builder itself treats the NO_DOCTRINE placeholder like undefined, so even a caller
+// that forgets the construction-boundary mapping cannot leak it into a posted comment.
+test("buildReviewTriggerComment: the NO_DOCTRINE placeholder passed DIRECTLY is treated like undefined — byte-for-byte the no-doctrine comment", () => {
+  const base = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
+  const withPlaceholder = buildReviewTriggerComment(46, "## Verification\nrun the test suite", "@codex review", NO_DOCTRINE);
+  assert.equal(withPlaceholder, base);
+  assert.doesNotMatch(withPlaceholder, /No review doctrine file is configured/i);
 });
 
 // ── Reviewer implementations ───────────────────────────────────────────────────────────────

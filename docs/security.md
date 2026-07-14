@@ -131,6 +131,18 @@ position-independently so a wrapper can't hide the write) — but the human-merg
 rule is also a process rule: even a PR that touches these files and somehow passes CI
 and review is not something the conductor should be configured to auto-merge.
 
+### The review-doctrine file is trusted prompt input (#167)
+
+The review-doctrine file (`doctrine.file`, default `docs/REVIEW-DOCTRINE.md`) is
+user-editable repo prose and is **not** guard-protected — yet its content is injected
+verbatim into the gate② review-trigger comment that the review bot reads, so it can
+influence the gate verdict (it could, in principle, instruct the reviewer to wave
+things through). It sits inside this page's trusted-repo assumption: doctrine content
+is trusted exactly like the rest of the repo's prose, and changes to it deserve the
+same review scrutiny as review-gate configuration (`reviewer.*`, `merge.*`). It is
+deliberately not sanitized — it's prose written *for* LLM readers, and gate② stays
+semantic, not a rules engine.
+
 ## Two-tier human controls
 
 sapwood has two independent file-sentinel controls, both living next to the engine's
