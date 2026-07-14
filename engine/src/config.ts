@@ -473,6 +473,25 @@ const Goal = z.object({
   file: z.string().min(1).optional(),
 }).strict();
 
+// #167: repo-level review doctrine — technical invariants (disabled-consumer rule, same-tick
+// window rule, crash-rerun set) and adjudication doctrine (how the loop treats review findings),
+// authored as prose for LLM readers, deliberately never a lint/DSL. Top-level (not scoped under
+// `roles.*`) since it's injected into more than one role's prompt (worker brief + architect
+// pass) and cited by name in the prFixCap-style escalation comment — same rationale #128 moved
+// `goal.file` out of `roles.architect`. UNLIKE `goal.file`, `file` here carries a real
+// `.default()` rather than `.optional()` + a separate resolution step: there is no deprecated
+// back-compat key to reconcile against, so there's nothing gained by telling "unset" apart from
+// "defaulted" — every reader always sees a concrete path.
+const Doctrine = z.object({
+  file: z.string().min(1).default("docs/REVIEW-DOCTRINE.md"),
+  // Deterministic-truncation cap (never a silent drop — the cut is marked in the text itself,
+  // doctrine.ts's loadDoctrine reuses retro-digest.ts's capDigest) on the doctrine text
+  // substituted into the worker/architect prompts. Same user-tunable-in-config, marked-cut
+  // contract as round.directiveMaxChars / roles.architect.lastMergedMaxChars /
+  // roles.retro.digestMaxChars.
+  maxChars: z.number().int().positive().default(20_000),
+}).strict();
+
 const Recovery = z.object({
   // #31: bounded retry count for a durably-persisted rollback/requeue (a recovery-path board
   // mutation, e.g. rolling a dispatch-failed claim back to Ready, or requeuing a dead lane).
@@ -500,6 +519,7 @@ const ConfigSchemaRaw = z.object({
   stop: Stop.default({}),
   round: Round.default({}),
   goal: Goal.default({}),
+  doctrine: Doctrine.default({}),
   recovery: Recovery.default({}),
   reviewer: Reviewer.default({}),
   merge: Merge.default({}),
@@ -639,6 +659,12 @@ export function loadConfig(path?: string): SapwoodConfig {
   // align.ts/architect.ts now read cfg.goal.file only.
   if (!isAbsolute(cfg.goal.file)) {
     cfg.goal.file = resolve(dirname(file), cfg.goal.file);
+  }
+  // #167: same rule for the resolved review-doctrine file — always has a value (it carries a
+  // real `.default()`, not `goal.file`'s optional-then-resolved shape), so every non-absolute
+  // value, default or explicit, resolves against the config file's directory, not the CLI's cwd.
+  if (!isAbsolute(cfg.doctrine.file)) {
+    cfg.doctrine.file = resolve(dirname(file), cfg.doctrine.file);
   }
   // #89: same rule for the PO prompt.
   if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {

@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parseConfig } from "./config.js";
 import {
+  defaultDoctrineTemplatePath,
   defaultGoalTemplatePath,
   init,
   missing,
   parseAuthScopes,
   preflight,
   requiredLabels,
+  resolveDoctrineFilePath,
   resolveGoalFilePath,
   setStatusOptionsArgs,
   InitError,
@@ -289,6 +291,90 @@ test("init scaffolds the goal file at a custom goal.file location, creating inte
     const goalPath = join(dir, "notes", "nested", "GOAL.md");
     assert.ok(existsSync(goalPath));
     assert.ok(actions.some((a) => /wrote starter goal file/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #167: repo-level review-doctrine file scaffold — same iff-missing/never-overwrite shape ────
+
+test("resolveDoctrineFilePath: a relative doctrine.file resolves against cwd; an absolute one is left untouched", () => {
+  assert.equal(resolveDoctrineFilePath("docs/REVIEW-DOCTRINE.md", "/repo"), join("/repo", "docs", "REVIEW-DOCTRINE.md"));
+  assert.equal(resolveDoctrineFilePath("/elsewhere/DOCTRINE.md", "/repo"), "/elsewhere/DOCTRINE.md");
+});
+
+test("defaultDoctrineTemplatePath resolves to a real, readable shipped file with the seed content", () => {
+  const path = defaultDoctrineTemplatePath();
+  assert.ok(existsSync(path), `expected shipped template at ${path}`);
+  const text = readFileSync(path, "utf8");
+  assert.match(text, /^# Review doctrine/m);
+  assert.match(text, /^## Technical invariants/m);
+  assert.match(text, /disabled-consumer rule/i);
+  assert.match(text, /same-tick window rule/i);
+  assert.match(text, /crash-rerun set/i);
+  assert.match(text, /^## Adjudication doctrine/m);
+  assert.match(text, /inputs, not truth/i);
+});
+
+test("init scaffolds the doctrine-file template when the resolved path is missing", async () => {
+  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const doctrinePath = join(dir, "docs", "REVIEW-DOCTRINE.md"); // cfg.doctrine.file defaults to docs/REVIEW-DOCTRINE.md
+    assert.ok(existsSync(doctrinePath), "doctrine file was scaffolded");
+    const scaffolded = readFileSync(doctrinePath, "utf8");
+    assert.match(scaffolded, /^# Review doctrine/m);
+    assert.ok(actions.some((a) => /wrote starter doctrine file/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init never overwrites an existing doctrine file — byte-for-byte untouched, even with different content (idempotent, crash-rerun safe)", async () => {
+  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    const doctrinePath = join(dir, "docs", "REVIEW-DOCTRINE.md");
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    const userContent = "# Our own doctrine\n\nA repo's real, edited doctrine document.\n";
+    writeFileSync(doctrinePath, userContent);
+
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+
+    assert.equal(readFileSync(doctrinePath, "utf8"), userContent, "existing doctrine file must be byte-for-byte untouched");
+    assert.ok(actions.some((a) => /doctrine file already present/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: a second run against a repo where init itself scaffolded the doctrine file is also a no-op (re-running init twice never overwrites)", async () => {
+  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const doctrinePath = join(dir, "docs", "REVIEW-DOCTRINE.md");
+    const firstWrite = readFileSync(doctrinePath, "utf8");
+
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+
+    assert.equal(readFileSync(doctrinePath, "utf8"), firstWrite);
+    assert.ok(actions.some((a) => /doctrine file already present/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init scaffolds the doctrine file at a custom doctrine.file location, creating intermediate directories", async () => {
+  const customCfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\ndoctrine: { file: notes/nested/DOCTRINE.md }");
+  const { run } = fakeRun({ labels: requiredLabels(customCfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(customCfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const doctrinePath = join(dir, "notes", "nested", "DOCTRINE.md");
+    assert.ok(existsSync(doctrinePath));
+    assert.ok(actions.some((a) => /wrote starter doctrine file/.test(a)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

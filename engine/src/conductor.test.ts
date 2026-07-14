@@ -1717,6 +1717,12 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   assert.equal(forge.issueComments.length, 1);
   assert.match(forge.issueComments[0]![1], /attempt 1\/1/);
   assert.match(forge.issueComments[0]![1], /last automatic attempt/);
+  // #167: cap-hit is this codebase's nearest mechanism to the review doctrine's prFixCap→
+  // needs-human pattern — the escalation comment cites adjudication point 4 (re-examine the
+  // design/technical direction, not more patches) rather than just announcing the stop.
+  assert.match(forge.issueComments[0]![1], /review doctrine/i);
+  assert.match(forge.issueComments[0]![1], /point 4/i);
+  assert.match(forge.issueComments[0]![1], /re-examine the design/i);
   assert.equal(sup.dispatched.length, 0); // never a new worker, even across the re-escalation
 
   // Human removes needs-human a SECOND time — but the cap (1) is already spent.

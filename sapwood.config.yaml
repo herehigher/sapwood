@@ -223,6 +223,19 @@ labels: # taxonomy used by the loop
 # goal:
 #   file: docs/PLAN.md
 
+# #167: repo-level review doctrine — recurring technical invariants + adjudication doctrine
+# (how the loop treats review findings), prose for LLM readers, never a lint/DSL. Same #74-style
+# resolution as promptFile: a relative path resolves against THIS config file's directory.
+# `sapwood init` scaffolds a starter template (seeded from the loop's own distilled review
+# history) at this path iff it's missing — never overwrites an existing file. UNLIKE goal.file /
+# promptFile, a missing file is not an error: prompts render an explicit "no doctrine available"
+# placeholder, behavior otherwise unchanged. Injected into the worker brief and the architect
+# pass, and cited by name in the gated-PR-reentry-cap escalation comment.
+# doctrine:
+#   file: docs/REVIEW-DOCTRINE.md
+#   maxChars: 20000 # deterministic truncation cap (same marked-cut-never-silent-drop contract
+#                    # as round.directiveMaxChars / roles.architect.lastMergedMaxChars).
+
 escalation:
   humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human
 

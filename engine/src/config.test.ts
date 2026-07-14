@@ -806,6 +806,69 @@ test("goal.file: an absolute path is left untouched", () => {
   }
 });
 
+// ── #167: doctrine.file (repo-level review doctrine) — same top-level, always-resolved shape
+// as goal.file, but with a real .default() (no deprecated back-compat key to reconcile) ────────
+
+test("doctrine.file: defaults to docs/REVIEW-DOCTRINE.md and doctrine.maxChars defaults to 20000", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.doctrine.file, "docs/REVIEW-DOCTRINE.md");
+  assert.equal(cfg.doctrine.maxChars, 20_000);
+});
+
+test("doctrine.file/maxChars: both overridable", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\ndoctrine: { file: notes/DOCTRINE.md, maxChars: 500 }",
+  );
+  assert.equal(cfg.doctrine.file, "notes/DOCTRINE.md");
+  assert.equal(cfg.doctrine.maxChars, 500);
+});
+
+test("doctrine.maxChars: rejects non-positive-int", () => {
+  assert.throws(() =>
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ndoctrine: { maxChars: 0 }"),
+  );
+});
+
+test("doctrine.file: a relative path resolves against the config file's directory, not cwd (same #74 pattern as goal.file/promptFile)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\ndoctrine: { file: my-doctrine.md }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.doctrine.file, join(dir, "my-doctrine.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctrine.file: the DEFAULT value is also resolved relative to the config file's directory (not left cwd-relative)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\n");
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.doctrine.file, join(dir, "docs", "REVIEW-DOCTRINE.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctrine.file: an absolute path is left untouched", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    const absPath = join(dir, "elsewhere", "DOCTRINE.md");
+    writeFileSync(cfgPath, `board: { owner: a, repo: r, projectNumber: 1 }\ndoctrine: { file: ${absPath} }\n`);
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.doctrine.file, absPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #104: roles.retro.everyNRounds (retro cadence) ──────────────────────────────────────────
 
 test("roles.retro.everyNRounds: defaults to 1 (every round)", () => {

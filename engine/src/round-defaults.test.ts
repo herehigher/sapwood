@@ -296,6 +296,31 @@ test("architecting stub (#132): the architect prompt carries the prior round's m
   state.close();
 });
 
+test("architecting stub (#167): the architect prompt carries this repo's review-doctrine text, loaded fresh at architect-invocation time from cfg.doctrine.file", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-defaults-doctrine-"));
+  try {
+    const doctrinePath = join(dir, "DOCTRINE.md");
+    writeFileSync(doctrinePath, "same-tick window rule: gate on a post-reclaim thunk, never a pre-tick scalar.");
+    const state = new State(":memory:");
+    const forge = new FakeForge();
+    const cfg = mkCfg({ doctrine: { file: doctrinePath } });
+    const runner = new ScriptedRunner(forge, cfg);
+    const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+    forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+    const round = state.startRound("2026-07-10T00:00:00.000Z");
+    await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+    const architectCall = runner.calls.find((c) => c.roleId === "architect");
+    assert.ok(architectCall, "the architect session was dispatched");
+    assert.ok(
+      architectCall!.prompt.includes("same-tick window rule: gate on a post-reclaim thunk, never a pre-tick scalar."),
+      "the doctrine file's content reaches the architect prompt",
+    );
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("createDefaultPeripherals (#109 gate② P2): with round.milestone set, the peripherals' forge is milestone-scoped — plan review and PO triage never touch issues outside the round's milestone", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();

@@ -28,6 +28,7 @@ import type { SapwoodConfig } from "./config.js";
 import type { Supervisor, LaneProbe, ReclaimResult } from "./conductor.js";
 import type { ModelUsageEntry, CategorizedTokenUsage } from "./state.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "./pricing.js";
+import { loadDoctrine } from "./doctrine.js";
 
 /** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60/#69: a
  *  lane that's hard-killed (escalated past drain, or never resumed after a handoff) before ever
@@ -1237,6 +1238,13 @@ export function loadWorkerPromptTemplate(cfg: SapwoodConfig): string {
  *  that names ITS label. */
 const CONFIG_VARS: Record<string, (cfg: SapwoodConfig) => string> = {
   "labels.verifyNa": (cfg) => cfg.labels.verifyNa,
+  // #167: the repo-level review doctrine (technical invariants + adjudication doctrine) —
+  // loaded fresh per render (doctrine.ts's loadDoctrine, config-file-relative-resolved
+  // `cfg.doctrine.file`, capped/deterministically-truncated at `cfg.doctrine.maxChars`). Missing
+  // file is NOT an error, unlike `worker.promptFile` above — it degrades to doctrine.ts's
+  // explicit NO_DOCTRINE placeholder (see that module's doc comment), never a silent empty
+  // substitution and never a startup throw.
+  "doctrine": (cfg) => loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars),
 };
 
 /** Builds the `WorkerDeps.renderPrompt` closure (#74): loads the template ONCE, eagerly —

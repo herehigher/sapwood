@@ -1044,7 +1044,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 `sapwood: gated-PR reentry attempt ${gatedAttempts}/${cap} for PR #${pr} ` +
                   `re-escalated \`${cfg.labels.needsHuman}\` — ${outcome.reason}. ` +
                   (gatedAttempts >= cap
-                    ? `That was the last automatic attempt; a further reentry will be rejected.`
+                    ? // #167: cap reached — the same repeated-fix-round shape the review
+                      // doctrine's adjudication point 4 names (this codebase's nearest
+                      // mechanism to 0day's prFixCap→needs-human). Cite it explicitly rather
+                      // than just stopping: the doctrine's actual recommendation is design
+                      // re-entry (architect/plan re-review), not another automatic patch
+                      // attempt — which is exactly what this cap refuses to keep granting.
+                      `That was the last automatic attempt; a further reentry will be rejected. ` +
+                        `Per this repo's review doctrine (adjudication point 4 — see ` +
+                        `\`${cfg.doctrine.file}\`): repeated fix rounds that keep missing are a ` +
+                        `signal to re-examine the design/technical direction at the top of the ` +
+                        `loop, not to grind through more patches.`
                     : `Remove \`${cfg.labels.needsHuman}\` again once it's addressed to retry.`),
               )
               .catch(() => {});
