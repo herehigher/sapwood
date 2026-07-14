@@ -1450,7 +1450,7 @@ test("runRounds standby: a truly exhausted round.milestone (0 open issues) contr
 
 // ── #168: RoundDeps.probeLlmReachable passthrough — reaches every tick's TickDeps unchanged ──
 
-test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-parked (llm) episode's --version check runs during the round's executing phase (park itself persists: --version is not a recovery signal)", async () => {
+test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-parked (llm) episode's ping probe runs during the round's executing phase (park itself persists: a green ping is not a recovery signal)", async () => {
   const { sleep } = mkSleepSpy();
   const state = new State(":memory:");
   // Entered far in the past so the base backoff has long elapsed by the time the round ticks.
@@ -1464,7 +1464,7 @@ test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-pa
   await runRounds(deps);
   stopSafety();
   assert.ok(probeCalls >= 1, "the round loop's own tick() calls reached RoundDeps.probeLlmReachable");
-  // P1-1: --version success alone never clears the episode — with no Ready issues there is no
+  // P1-1: a green ping alone never clears the episode — with no Ready issues there is no
   // canary to launch, so the park (correctly) persists until a real lane proves recovery.
   assert.equal(state.isParked(), true);
   state.close();

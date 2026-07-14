@@ -2166,7 +2166,7 @@ test("#168 disabled-consumer rule: with no probeLlmReachable wired, tick() never
   st.close();
 });
 
-test("#168 P1-1 canary: --version success does NOT clear the llm episode — it launches exactly ONE canary lane; the episode clears only when the canary reaches a non-env terminal", async () => {
+test("#168 P1-1 canary: a green ping does NOT clear the llm episode — it launches exactly ONE canary lane; the episode clears only when the canary reaches a non-env terminal", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   forge.ready = [{ number: 800, title: "", labels: ["prio:3-feature"] }];
@@ -2179,11 +2179,11 @@ test("#168 P1-1 canary: --version success does NOT clear the llm episode — it 
     probeLlmReachable: async () => { versionChecks++; return true; },
   };
 
-  // Tick 1 (past base backoff): --version ok -> ONE canary dispatched; STILL PARKED.
+  // Tick 1 (past base backoff): ping ok -> ONE canary dispatched; STILL PARKED.
   const r1 = await tick({ ...deps, now: () => new Date(t0.getTime() + 31_000) });
   assert.equal(versionChecks, 1);
   assert.deepEqual(sup.dispatched.map((i) => i.number), [800]);
-  assert.equal(st.isParked(), true, "--version success is NOT a recovery signal — still parked");
+  assert.equal(st.isParked(), true, "a green ping is NOT a recovery signal — still parked");
   assert.equal(st.parkRow("llm")?.canaryWorker, "lane-1");
   assert.equal(st.parkRow("llm")?.probeAttempts, 0); // arming a canary never grows the exponent
   assert.equal(r1.dispatched.filter((d) => d.kind === "dispatched").length, 1);
@@ -2205,7 +2205,7 @@ test("#168 P1-1 canary: --version success does NOT clear the llm episode — it 
   st.close();
 });
 
-test("#168 P1-1 oscillation regression: provider stays down while --version always succeeds -> exactly ONE canary per backoff step, SAME episode throughout (entered_at stable, attempts grow), duration escalation fires on wall-clock since FIRST entry", async () => {
+test("#168 P1-1 oscillation regression: provider stays down while the ping always succeeds -> exactly ONE canary per backoff step, SAME episode throughout (entered_at stable, attempts grow), duration escalation fires on wall-clock since FIRST entry", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   forge.ready = [{ number: 900, title: "", labels: ["prio:3-feature"] }];
@@ -2222,7 +2222,7 @@ test("#168 P1-1 oscillation regression: provider stays down while --version alwa
   assert.deepEqual(sup.dispatched, []); // parked from this tick's own reclaim -> no dispatch
 
   // t0+5: backoff (10s) not yet elapsed -> NO canary, NO full dispatch. The old design cleared
-  // park here (--version succeeds) and re-dispatched the full queue — the oscillation.
+  // park here (probe success) and re-dispatched the full queue — the oscillation.
   await tick({ ...deps, now: () => new Date(t0.getTime() + 5_000) });
   assert.deepEqual(sup.dispatched, []);
   assert.equal(st.isParked(), true);
@@ -2278,7 +2278,7 @@ test("#168 P1-1a mixed storm end-to-end: llm episode + forge failure -> BOTH row
   st.enterPark("forge", "could not resolve host", 950, t0.toISOString());
   const deps = { forge, state: st, supervisor: sup, cfg, probeLlmReachable: async () => true };
 
-  // While the FORGE episode is open, --version success must NOT arm a canary (it couldn't
+  // While the FORGE episode is open, a green ping must NOT arm a canary (it couldn't
   // even claim an issue) — both episodes persist, zero dispatch.
   await tick({ ...deps, now: () => new Date(t0.getTime() + 11_000) });
   assert.equal(st.parkedSources().length, 2);

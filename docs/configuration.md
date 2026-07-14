@@ -377,6 +377,8 @@ validate` catches all three).
 | `parkEscalateAfterSec` | `3600` (1h) | Park **duration** per episode (not probe count — bounded exponential backoff makes a count an ambiguous measure of elapsed time) past which the engine additionally notifies a human via the channel ladder. Additive, never a state transition — probing/auto-resume continue unaffected either side of an escalation. The clock runs from the episode's FIRST detection and is never reset by further failures (including failed recovery canaries) within the same episode. |
 | `probeBackoffBaseSec` | `30` | Initial probe interval while parked (the first probe waits a full base interval — never fires on the same tick the park began). |
 | `probeBackoffMaxSec` | `1800` (30min) | Cap on the bounded exponential backoff (`base * 2^attempts`, capped here). Must be >= `probeBackoffBaseSec` (validated at load). |
+| `probeModel` | `haiku` | The model the llm-source **ping probe** runs on — deliberately the cheapest tier (~10 tokens per ping), independent of `worker.model`. Point it at whatever your account's cheapest alias is. |
+| `probeTimeoutSec` | `30` | Hard timeout on one ping — a hung CLI is killed and counted as a failed probe, never allowed to wedge a tick. |
 
 **How each source recovers:**
 
@@ -385,14 +387,18 @@ validate` catches all three).
   env-failure issue-requeues are **suspended** (persisted durably, zero forge writes, retry
   counter frozen) and drain automatically on resume; they are exempt from the rollback retry cap
   and never degrade to `needs-human`.
-- **`llm`** — `claude --version` (no API call, zero token spend, same `CLAUDE_BIN` resolution as
-  a real dispatch) is only a *liveness gate*, **not** a recovery signal: it keeps succeeding
-  throughout a rate-limit/credit outage. When the backoff interval elapses and `--version`
-  succeeds (and no forge episode is open), the engine dispatches exactly **one canary lane**.
-  The llm episode clears only when that canary reaches a terminal state that is *not* itself
-  env-classified; a canary that env-fails continues the *same* episode — the entry time (and
-  therefore the escalation clock) is preserved and the backoff keeps growing, so a persistent
-  outage costs one canary per backoff step, never a full-queue redispatch cycle.
+- **`llm`** — the probe is a **minimal inference ping**: `claude -p --model <probeModel>
+  "respond with 'pong' only" --output-format text` (same `CLAUDE_BIN` resolution as a real
+  dispatch); success = clean exit + a "pong" reply. It proves network + auth + *some* account
+  capacity for ~10 tokens on the cheapest model — but **not** that the worker's own model/tier
+  has quota (model-specific caps, primary-model-only overload), so a green ping is only a
+  *gate*, never a recovery signal. When the backoff interval elapses and the ping succeeds (and
+  no forge episode is open), the engine dispatches exactly **one canary lane**. The llm episode
+  clears only when that canary reaches a terminal state that is *not* itself env-classified; a
+  canary that env-fails continues the *same* episode — the entry time (and therefore the
+  escalation clock) is preserved and the backoff keeps growing, so a persistent outage costs one
+  ping + one canary per backoff step, never a full-queue redispatch cycle. A broken CLI needs no
+  separate check: the ping simply fails.
 
 **Escalation channel ladder:** an `llm`-sourced escalation with the forge healthy notifies via a
 comment on the issue whose lane triggered the episode; a `forge`-sourced escalation — or an

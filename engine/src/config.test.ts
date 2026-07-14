@@ -964,13 +964,29 @@ test("roles.*.enabled: a non-boolean value is rejected", () => {
 
 // ── #168 (PR #180 review P3-1): envFailure config validation — fail-fast at load ────────────
 
-test("envFailure: defaults apply (patterns non-empty, escalate 1h, backoff 30s..30min)", () => {
+test("envFailure: defaults apply (patterns non-empty, escalate 1h, backoff 30s..30min, ping on haiku with a 30s timeout)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.ok(cfg.envFailure.llmPatterns.length > 0);
   assert.ok(cfg.envFailure.forgePatterns.length > 0);
   assert.equal(cfg.envFailure.parkEscalateAfterSec, 3600);
   assert.equal(cfg.envFailure.probeBackoffBaseSec, 30);
   assert.equal(cfg.envFailure.probeBackoffMaxSec, 1800);
+  assert.equal(cfg.envFailure.probeModel, "haiku");
+  assert.equal(cfg.envFailure.probeTimeoutSec, 30);
+});
+
+test("envFailure: probeModel/probeTimeoutSec are overridable; empty model and non-positive timeout are rejected at load", () => {
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { probeModel: my-cheap-alias, probeTimeoutSec: 10 }",
+  );
+  assert.equal(over.envFailure.probeModel, "my-cheap-alias");
+  assert.equal(over.envFailure.probeTimeoutSec, 10);
+  assert.throws(
+    () => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { probeModel: "" }'),
+  );
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { probeTimeoutSec: 0 }"),
+  );
 });
 
 test("envFailure: a custom valid override parses; a MALFORMED regex pattern is a fail-fast load error naming the entry (never a silent literal-substring degradation)", () => {

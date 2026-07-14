@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import {
-  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, probeClaudeCliReachable, extractFailureText, claudeArgs, guardSettings, shellSingleQuote,
+  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, probeLlmPing, extractFailureText, claudeArgs, guardSettings, shellSingleQuote,
   WorkerSupervisor, renderPromptTemplate, defaultPromptPath, loadWorkerPromptTemplate, buildRenderPrompt,
 } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -253,51 +253,64 @@ const mkHook = (dir: string): string => {
   return p;
 };
 
-// ── #168: probeClaudeCliReachable — the LLM-source park probe's real implementation ──────────
+// ── #168 (P1-1 amendment): probeLlmPing — the LLM-source park probe's real implementation:
+//    a minimal inference ping (`claude -p --model <probeModel> "respond with 'pong' only"
+//    --output-format text`); success = exit 0 AND trimmed stdout containing "pong". ──────────
 
-test("probeClaudeCliReachable: exit 0 -> true", async () => {
+test("probeLlmPing: exit 0 + 'pong' on stdout -> true (case-insensitive, whitespace-tolerant)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 0\n`);
-    assert.equal(await probeClaudeCliReachable(bin), true);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "  Pong  "\nexit 0\n`);
+    assert.equal(await probeLlmPing(bin, "haiku", 30), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("probeClaudeCliReachable: non-zero exit -> false", async () => {
+test("probeLlmPing: exit 0 but NON-pong stdout -> false (a chatty/errored response is not a pong)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 1\n`);
-    assert.equal(await probeClaudeCliReachable(bin), false);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "I'm sorry, I can't help with that."\nexit 0\n`);
+    assert.equal(await probeLlmPing(bin, "haiku", 30), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("probeClaudeCliReachable: a nonexistent binary -> false, never throws", async () => {
-  assert.equal(await probeClaudeCliReachable("/no/such/binary/sapwood-168"), false);
-});
-
-test("probeClaudeCliReachable: a hang past timeoutMs is killed and resolves false, never left dangling", async () => {
+test("probeLlmPing: non-zero exit -> false, even with 'pong' on stdout", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho pong\nexit 1\n`);
+    assert.equal(await probeLlmPing(bin, "haiku", 30), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing: a nonexistent binary -> false, never throws", async () => {
+  assert.equal(await probeLlmPing("/no/such/binary/sapwood-168", "haiku", 30), false);
+});
+
+test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves false, never left dangling", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\necho pong\n`);
     const start = Date.now();
-    assert.equal(await probeClaudeCliReachable(bin, 100), false);
-    assert.ok(Date.now() - start < 5_000, "resolved via the timeout, not by waiting out the 30s sleep");
+    assert.equal(await probeLlmPing(bin, "haiku", 1), false); // 1s timeout vs a 30s hang
+    assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("probeClaudeCliReachable: spends zero tokens/no -p prompt — invoked with exactly ['--version'], nothing else", async () => {
+test("probeLlmPing: invoked with exactly the documented argv — -p, --model <probeModel>, the pong prompt, --output-format text (and NO --no-session-persistence, which the current CLI rejects)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   const argsFile = join(dir, "args.txt");
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argsFile}"\nexit 0\n`);
-    await probeClaudeCliReachable(bin);
-    assert.equal(readFileSync(argsFile, "utf8").trim(), "--version");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argsFile}"\necho pong\nexit 0\n`);
+    assert.equal(await probeLlmPing(bin, "my-cheap-model", 30), true);
+    const argv = readFileSync(argsFile, "utf8").trim().split("\n");
+    assert.deepEqual(argv, ["-p", "--model", "my-cheap-model", "respond with 'pong' only", "--output-format", "text"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

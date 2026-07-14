@@ -118,13 +118,15 @@ engine re-checks the failed source on a bounded exponential backoff
 
 - A **forge** episode clears the moment a lightweight read-only GitHub call succeeds again —
   dispatch resumes that same tick, and any requeues held during the outage drain right after.
-- An **llm** episode is stricter, because `claude --version` keeps succeeding during a
-  rate-limit/credit outage and so proves nothing: at each backoff step (CLI liveness
-  permitting), sapwood dispatches exactly **one canary lane**. If it completes without an
-  env-classified failure, the provider is provably back and the episode clears; if the canary
-  itself env-fails, the same episode continues with a longer backoff. You may therefore see a
-  single `canary lane <name> in flight` note in `sapwood status` while parked — that is the
-  recovery test, not a dispatch leak.
+- An **llm** episode is stricter. At each backoff step sapwood first sends a **minimal
+  inference ping** (~10 tokens on `envFailure.probeModel`, default `haiku`); a failed ping
+  means the provider is still down, costing nothing further. A green ping proves basic
+  network/auth/capacity but *not* that your worker's model/tier has quota — so it only unlocks
+  exactly **one canary lane**. If the canary completes without an env-classified failure, the
+  provider is provably back and the episode clears; if the canary itself env-fails, the same
+  episode continues with a longer backoff. You may therefore see a single `canary lane <name>
+  in flight` note in `sapwood status` while parked — that is the recovery test, not a dispatch
+  leak.
 
 Most outages (a `gh` blip, a temporary rate-limit window) resolve this way with zero human
 involvement.

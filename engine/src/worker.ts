@@ -172,19 +172,30 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
-/** #168: the LLM-source reachability probe for conductor.ts's park machinery
- *  (TickDeps.probeLlmReachable) — deliberately the CHEAPEST possible check: `claude --version`,
- *  which never calls the API and spends zero tokens. Issue #168 decision 2 is explicit that the
- *  diagnostic "must not spend tokens to ask whether tokens exist" — a probe that itself burns a
- *  completion would be self-defeating (worse: it would burn one on EVERY backoff tick while
- *  parked for exactly the reason tokens/credits are unavailable). The documented trade-off: this
- *  only proves the CLI binary is present and executable, not that the account's rate limit/
- *  credit/usage-window has actually cleared — a false-positive resume is not a wedge, though: the
- *  very next real dispatch that still hits the limit re-classifies as env-failure and re-parks
- *  through the ordinary FAILED-lane path (conductor.ts), so this degrades to "one extra park
- *  episode," never a silent failure to notice. Never throws — any spawn error, non-zero exit, or
- *  hang past `timeoutMs` resolves `false`. */
-export function probeClaudeCliReachable(claudeBin: string, timeoutMs = 5_000): Promise<boolean> {
+/** #168 (PR #180 review, P1-1 amendment): the LLM-source probe for conductor.ts's park
+ *  machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping:
+ *
+ *      claude -p --model <probeModel> "respond with 'pong' only" --output-format text
+ *
+ *  Success = exit code 0 AND the trimmed stdout containing "pong" (case-insensitive). This
+ *  replaced the original `claude --version` check, which proves nothing about the PROVIDER —
+ *  the CLI stays installed and executable throughout a rate-limit/credit outage. The ping
+ *  proves network + auth + some account capacity for ~10 tokens on the cheapest model
+ *  (cfg.envFailure.probeModel, default "haiku"). It deliberately does NOT prove the WORKER's
+ *  model/tier has quota (model-specific caps, primary-model-only overload) — exactly why the
+ *  canary + episode-continuity layers above it remain: ping (cheap filter, paced by backoff)
+ *  -> success unlocks ONE canary lane -> only the canary reaching a non-env terminal clears
+ *  the llm episode. A false-positive ping costs one bounded canary spawn and never resets the
+ *  episode clock. The ping subsumes CLI-breakage detection too (broken CLI = ping fails).
+ *
+ *  NOTE: no `--no-session-persistence` flag — it does not exist in the current CLI (verified
+ *  via --help; passing it would make every probe fail). `-p` runs are stateless per
+ *  invocation, so there is no context-carryover concern. The prompt string is deliberately
+ *  engine-internal, not config.
+ *
+ *  Never throws — any spawn error, non-zero exit, non-"pong" output, or a hang past
+ *  `timeoutSec` (hard kill) resolves `false`. */
+export function probeLlmPing(claudeBin: string, probeModel: string, timeoutSec: number): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (ok: boolean): void => {
@@ -194,11 +205,19 @@ export function probeClaudeCliReachable(claudeBin: string, timeoutMs = 5_000): P
     };
     let child: ChildProcess;
     try {
-      child = spawn(claudeBin, ["--version"], { stdio: "ignore" });
+      child = spawn(
+        claudeBin,
+        ["-p", "--model", probeModel, "respond with 'pong' only", "--output-format", "text"],
+        { stdio: ["ignore", "pipe", "ignore"] },
+      );
     } catch {
       finish(false);
       return;
     }
+    let stdout = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
     const timer = setTimeout(() => {
       try {
         child.kill("SIGKILL");
@@ -206,14 +225,14 @@ export function probeClaudeCliReachable(claudeBin: string, timeoutMs = 5_000): P
         /* already gone */
       }
       finish(false);
-    }, timeoutMs);
+    }, timeoutSec * 1000);
     child.on("error", () => {
       clearTimeout(timer);
       finish(false);
     });
     child.on("exit", (code) => {
       clearTimeout(timer);
-      finish(code === 0);
+      finish(code === 0 && stdout.trim().toLowerCase().includes("pong"));
     });
   });
 }

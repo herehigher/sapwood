@@ -305,9 +305,9 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // re-fires after (additive, not a state transition — probing and auto-resume continue
   // unaffected either way). `canary_worker` (llm rows only; PR #180 review P1-1b): the ONE
   // in-flight canary lane's name while an llm-park recovery attempt is being tested — see
-  // conductor.ts's PARK section for the canary contract (`claude --version` is a liveness
-  // check, never a recovery signal; only a real lane reaching a non-env-classified terminal
-  // state clears the llm row).
+  // conductor.ts's PARK section for the canary contract (the cheap-model inference ping is a
+  // capacity filter, never a recovery signal; only a real lane reaching a non-env-classified
+  // terminal state clears the llm row).
   (db) => {
     db.exec(`
       CREATE TABLE park_state (
@@ -997,7 +997,7 @@ export class State {
       .run(at, source);
   }
 
-  /** Stamp last_probe_at WITHOUT bumping probe_attempts — the llm path's "--version succeeded,
+  /** Stamp last_probe_at WITHOUT bumping probe_attempts — the llm path's "ping succeeded,
    *  canary armed" case (PR #180 review P1-1b): pacing must advance (no re-probe every tick
    *  while the canary is pending/launching) but the backoff exponent only grows on a FAILED
    *  outcome (probe failure or canary env-failure), never on the mere act of arming one. */

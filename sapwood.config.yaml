@@ -244,8 +244,9 @@ labels: # taxonomy used by the loop
 # records, never the worker's own message content) — patterns are validated (compiled) at load;
 # a malformed regex or an empty array is a startup error. Recovery: a forge episode clears on a
 # successful read-only probe; an llm episode clears only when a single CANARY lane (one per
-# backoff step, gated on `claude --version` liveness) completes without env-failing — --version
-# alone is never trusted as recovery, it succeeds throughout a rate-limit outage.
+# backoff step, gated on a minimal ~10-token inference ping on probeModel) completes without
+# env-failing — a green ping alone is never trusted as recovery, since the WORKER's model/tier
+# can still be capped while the cheapest model answers fine.
 # envFailure:
 #   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
 #                 "credit balance is too low", insufficient_quota, overloaded_error,
@@ -259,6 +260,9 @@ labels: # taxonomy used by the loop
 #                              # stops probing/auto-resume
 #   probeBackoffBaseSec: 30    # bounded exponential backoff for probes/canaries while parked
 #   probeBackoffMaxSec: 1800   # cap; must be >= probeBackoffBaseSec (validated at load)
+#   probeModel: haiku          # model for the llm ping probe — the cheapest tier you have,
+#                              # independent of worker.model
+#   probeTimeoutSec: 30        # hard timeout per ping (kill + count as a failed probe)
 
 escalation:
   humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human

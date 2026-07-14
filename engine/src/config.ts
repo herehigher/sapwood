@@ -534,6 +534,16 @@ const EnvFailure = z.object({
   // probeBackoffSec): base * 2^attempts, capped at max.
   probeBackoffBaseSec: z.number().int().positive().default(30),
   probeBackoffMaxSec: z.number().int().positive().default(1800),
+  // #168 P1-1 amendment: the llm-source probe is a REAL minimal inference ping (worker.ts's
+  // probeLlmPing — `claude -p --model <probeModel> "respond with 'pong' only"`), not a
+  // --version check: it proves network + auth + some account capacity for ~10 tokens on the
+  // CHEAPEST model, while the worker's own (possibly capped) model/tier is still verified by
+  // the canary lane the ping merely unlocks. User-tunable per the config rule — an operator
+  // whose cheapest available alias differs points this at it.
+  probeModel: z.string().min(1).default("haiku"),
+  // Hard timeout on one ping (kill + treat as a failed probe). A hung CLI must never wedge a
+  // tick — the ping is called inline from tick()'s PARK section.
+  probeTimeoutSec: z.number().int().positive().default(30),
 }).strict().superRefine((v, ctx) => {
   // PR #180 review P3-1: every pattern must COMPILE at config load — a malformed regex is a
   // fail-fast startup error (`sapwood validate` catches it too), never a silent degradation to

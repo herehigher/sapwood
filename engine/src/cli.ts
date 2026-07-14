@@ -11,7 +11,7 @@ import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.j
 import { init, InitError } from "./init.js";
 import { State, SCHEMA_VERSION, type WorkerRow, type ParkRow } from "./state.js";
 import { GithubForge, type IForge, type Issue } from "./forge.js";
-import { WorkerSupervisor, buildRenderPrompt, discoverClaudeBin, probeClaudeCliReachable } from "./worker.js";
+import { WorkerSupervisor, buildRenderPrompt, discoverClaudeBin, probeLlmPing } from "./worker.js";
 import { loadPricingTable } from "./pricing.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
@@ -754,9 +754,11 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // engine-wide daily/wall-clock/kill-switch ceiling (cfg.cost.dailyBudgetUsd /
   // maxWallClockSec / KILL_SWITCH) is fully live regardless — that's the actual hard safety
   // boundary; roundBudgetUsd is a softer per-round throttle.
-  // #168: the real LLM-source park probe — the cheapest possible check (`claude --version`, no
-  // API call), resolved against the SAME claude binary WorkerSupervisor's dispatch() would use.
-  const probeLlmReachable = (): Promise<boolean> => probeClaudeCliReachable(discoverClaudeBin(process.env));
+  // #168 (P1-1 amendment): the real LLM-source park probe — a minimal inference ping on the
+  // cheapest model (worker.ts's probeLlmPing), resolved against the SAME claude binary
+  // WorkerSupervisor's dispatch() would use.
+  const probeLlmReachable = (): Promise<boolean> =>
+    probeLlmPing(discoverClaudeBin(process.env), cfg.envFailure.probeModel, cfg.envFailure.probeTimeoutSec);
   const result = await runDriver({
     forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, stopMode, stop,
     probeLlmReachable,
@@ -801,8 +803,9 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
   await assertStopMilestoneExists(forge, stop);
   console.log(`sapwood run: driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
-  // #168: same real LLM-source probe as the tick driver above.
-  const probeLlmReachable = (): Promise<boolean> => probeClaudeCliReachable(discoverClaudeBin(process.env));
+  // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
+  const probeLlmReachable = (): Promise<boolean> =>
+    probeLlmPing(discoverClaudeBin(process.env), cfg.envFailure.probeModel, cfg.envFailure.probeTimeoutSec);
   const result = await runRounds({
     forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, peripherals, stop,
     probeLlmReachable,

@@ -494,11 +494,14 @@ export interface TickDeps {
    *  (the exact same-tick window #124 gate② P1-2 closed for cost.roundBudgetUsd). Unset (no
    *  spend stop configured) → no check, no cost. */
   runSpendStopCrossed?: () => boolean;
-  /** #168: the LLM reachability probe — a cheap, deterministic check (no LLM judgment; the
-   *  caller's own real implementation is expected to be something like `claude --version`, or
-   *  an auth/version check — never a priced API call) consulted only while parked for `source:
-   *  "llm"`. Disabled-consumer rule (doctrine): omitted -> tick() never probes the LLM source at
-   *  all (there is no consumer for the result) — the park stays in place until either a human
+  /** #168: the LLM reachability probe — a deterministic check (no LLM JUDGMENT: success is
+   *  "did the process exit 0 and print pong", never a model's opinion). The real
+   *  implementation (worker.ts's probeLlmPing, wired by cli.ts) is a minimal inference ping on
+   *  the cheapest model (cfg.envFailure.probeModel): it proves network + auth + some account
+   *  capacity for ~10 tokens, and merely GATES the canary — it is never itself a recovery
+   *  signal (see the PARK section). Consulted only while parked for `source: "llm"`.
+   *  Disabled-consumer rule (doctrine): omitted -> tick() never probes the LLM source at all
+   *  (there is no consumer for the result) — the park stays in place until either a human
    *  intervenes or the duration-based escalation notifies one; the forge probe is UNCONDITIONAL
    *  (see conductor.ts's PARK section) since `forge` above is a required field, never optional,
    *  so it always has a consumer. */
@@ -703,11 +706,12 @@ async function probeForgeReachable(forge: IForge): Promise<boolean> {
 }
 
 /** #168 (PR #180 review P1-1b): settle an llm-park CANARY lane at its terminal transition.
- *  `claude --version` succeeding is NOT a recovery signal for a rate-limit/credit outage (the
- *  CLI stays installed and executable throughout one), so an llm episode is cleared ONLY by
- *  this function — when the lane recorded as the episode's canary reaches a terminal state
- *  that is NOT env-classified (done, ordinary task failure, handoff, DEAD): the one signal
- *  that a real `claude -p` run actually got through to the provider. An env-classified canary
+ *  The ping probe succeeding is NOT a recovery signal for the WORKER's model/tier (the ping
+ *  runs on the cheapest model — model-specific caps and primary-model-only overload can leave
+ *  it green while real dispatch still fails), so an llm episode is cleared ONLY by this
+ *  function — when the lane recorded as the episode's canary reaches a terminal state that is
+ *  NOT env-classified (done, ordinary task failure, handoff, DEAD): the one signal that a real
+ *  worker-class run actually got through to the provider. An env-classified canary
  *  failure is the SAME episode continuing: entered_at and escalated_at are preserved untouched
  *  (the duration-escalation clock keeps running from FIRST entry), probe_attempts is bumped so
  *  the backoff keeps growing, and the canary slot is freed for the next backoff step. No-op
@@ -1402,11 +1406,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //
   //   forge source: the cheap IForge read is a GENUINE recovery signal — success clears the
   //   forge episode outright, failure bumps the backoff.
-  //   llm source (P1-1 design change): `claude --version` succeeds throughout a rate-limit/
-  //   credit outage, so it is NEVER a recovery signal — it only GATES a canary. When the
-  //   backoff interval elapses AND --version succeeds AND no forge episode is open (a canary
-  //   needs the forge to claim its issue) AND no canary is already in flight, the dispatch
-  //   phase below is allowed exactly ONE lane. The llm episode clears only when that canary
+  //   llm source (P1-1 design change, amended to a real ping): the probe is a minimal
+  //   inference ping on the cheapest model (worker.ts's probeLlmPing) — it proves network +
+  //   auth + some account capacity, but NOT that the WORKER's model/tier has quota
+  //   (model-specific caps, primary-model-only overload), so it is NEVER a recovery signal —
+  //   it only GATES a canary. When the backoff interval elapses AND the ping succeeds AND no
+  //   forge episode is open (a canary needs the forge to claim its issue) AND no canary is
+  //   already in flight, the dispatch phase below is allowed exactly ONE lane. The llm episode clears only when that canary
   //   reaches a non-env-classified terminal state (settleCanary, reclaim phase); a canary that
   //   env-fails CONTINUES the same episode — entered_at/escalated_at preserved, backoff grown —
   //   so the duration escalation accrues on wall-clock since FIRST entry, and the per-cycle
@@ -1436,7 +1442,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
     }
     const llmEpisode = state.parkRow("llm");
-    // Disabled-consumer rule (doctrine): the --version check only runs when a caller actually
+    // Disabled-consumer rule (doctrine): the ping probe only runs when a caller actually
     // wired one (deps.probeLlmReachable) — with none wired, tick() does not touch the llm
     // episode at all (no bump, no event, no canary) rather than recording a synthetic
     // always-failing attempt; the duration escalation still fires regardless. Also skipped
@@ -1447,16 +1453,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         llmEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec,
       );
       if (probeDue(llmEpisode.lastProbeAt, nowDate.getTime(), backoffSec)) {
-        const versionOk = await deps.probeLlmReachable();
+        const pingOk = await deps.probeLlmReachable();
         state.appendEvent("park-probe", {
-          source: "llm", success: versionOk,
-          attempts: versionOk ? llmEpisode.probeAttempts : llmEpisode.probeAttempts + 1,
+          source: "llm", success: pingOk,
+          attempts: pingOk ? llmEpisode.probeAttempts : llmEpisode.probeAttempts + 1,
         });
-        if (!versionOk) {
-          // CLI itself unreachable — no canary spent, backoff grows.
+        if (!pingOk) {
+          // Ping failed (network/auth/CLI/no capacity at all) — no canary spent, backoff grows.
           state.bumpParkProbe("llm", iso());
         } else {
-          // --version up: pace the next check (touch, NOT bump — the exponent only grows on a
+          // Ping green: pace the next check (touch, NOT bump — the exponent only grows on a
           // FAILED outcome) and, forge permitting, arm exactly one canary for DISPATCH below.
           state.touchParkProbe("llm", iso());
           if (state.parkRow("forge") == null) canaryBudget = 1;
