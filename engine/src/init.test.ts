@@ -313,6 +313,8 @@ test("defaultDoctrineTemplatePath resolves to a real, readable shipped file with
   assert.match(text, /same-tick window rule/i);
   assert.match(text, /crash-rerun set/i);
   assert.match(text, /doctrine self-modification rule/i);
+  assert.match(text, /safety-layer cross-check rule/i);
+  assert.match(text, /unwired-function rule/i);
   assert.match(text, /^## Adjudication doctrine/m);
   assert.match(text, /inputs, not truth/i);
 });

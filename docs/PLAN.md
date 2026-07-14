@@ -717,6 +717,31 @@ marker idempotency, output schema, escalation path) see
   template at the resolved path **iff it's missing** — the onboarding step for a repo
   with no `PLAN.md` yet (see [`configuration.md`](configuration.md#goal)).
 
+  **M6 review-knowledge + environment resilience (2026-07-14):** `#167` shipped the
+  repo-level **review doctrine** (`doctrine.file`, default `docs/REVIEW-DOCTRINE.md`,
+  scaffolded-iff-missing like the goal file) injected into four prompt surfaces: worker
+  brief, architect pass, gated-reentry-cap escalation comment, and the gate② review
+  trigger comment (reviewer.ts leg human-merged). Decision recorded on `#178`: the
+  doctrine file is deliberately NOT guard-protected — the reviewer applies the doctrine
+  loaded at engine construction (never the PR branch's version), so a doctrine-weakening
+  PR can't self-approve; a seed invariant tells reviewers to flag doctrine-touching PRs
+  toward `needs-human`. `#168` shipped **environment-failure park**: deterministic
+  signature classification (structured terminal/error records + stderr only, never
+  assistant text) splits "environment broke" from "task broke" — env failures never
+  label `needs-human`, never burn reentry attempts; the engine parks (SQLite
+  `park_state`, one row per source llm|forge, restart-safe), probes with bounded
+  backoff (forge: free read; LLM: a stripped budget-capped `haiku` "pong" ping —
+  ~$0.016 measured — suppressed while paused or ceiling-breached), and recovery is
+  **episode-continuous**: a green ping only unlocks a single canary lane, only a
+  canary reaching a non-env terminal clears the episode, drains release the canary
+  as INCONCLUSIVE (never false-clear, never wedge), and duration-based human
+  escalation (`parkEscalateAfterSec`) is additive — probing and auto-resume continue
+  after it. Channel ladder: forge up → issue comment; forge down → local-only
+  (status + `data/ESCALATION` marker + log); while forge-parked, env-failure
+  requeues and escalation are write-suppressed (frozen durable, never degraded to
+  `needs-human`) — in-flight DRIVE activity and non-env rollbacks keep their
+  existing retry behavior.
+
 ## v0.2 north star: the round orchestrator
 
 Locked design (2026-07-08, issue #77; gate⓪ amendment locked 2026-07-09) for v0.2's
