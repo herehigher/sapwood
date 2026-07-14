@@ -497,15 +497,23 @@ export interface TickDeps {
   /** #168: the LLM reachability probe — a deterministic check (no LLM JUDGMENT: success is
    *  "did the process exit 0 and print pong", never a model's opinion). The real
    *  implementation (worker.ts's probeLlmPing, wired by cli.ts) is a minimal inference ping on
-   *  the cheapest model (cfg.envFailure.probeModel): it proves network + auth + some account
-   *  capacity for ~10 tokens, and merely GATES the canary — it is never itself a recovery
-   *  signal (see the PARK section). Consulted only while parked for `source: "llm"`.
-   *  Disabled-consumer rule (doctrine): omitted -> tick() never probes the LLM source at all
-   *  (there is no consumer for the result) — the park stays in place until either a human
-   *  intervenes or the duration-based escalation notifies one; the forge probe is UNCONDITIONAL
-   *  (see conductor.ts's PARK section) since `forge` above is a required field, never optional,
-   *  so it always has a consumer. */
-  probeLlmReachable?: () => Promise<boolean>;
+   *  the cheapest model (cfg.envFailure.probeModel, ~$0.016 measured per ping, bounded by
+   *  probeMaxBudgetUsd): it proves network + auth + some account capacity, and merely GATES
+   *  the canary — it is never itself a recovery signal (see the PARK section).
+   *
+   *  Return shape: a bare boolean, or `{ ok, detail? }` — `detail` (failure only) is the
+   *  probe's first stderr/error line, recorded in the park-probe event so an operator can
+   *  distinguish "provider still down" (a 429) from a local misconfiguration ("Exceeded USD
+   *  budget" = probeMaxBudgetUsd too low; "unknown option" = an older CLI missing the ping's
+   *  flags). Bare booleans keep every existing fake/test valid.
+   *
+   *  Consulted only while parked for `source: "llm"`. Disabled-consumer rule (doctrine):
+   *  omitted -> tick() never probes the LLM source at all (there is no consumer for the
+   *  result) — the park stays in place until either a human intervenes or the duration-based
+   *  escalation notifies one; the forge probe is UNCONDITIONAL (see conductor.ts's PARK
+   *  section) since `forge` above is a required field, never optional, so it always has a
+   *  consumer. */
+  probeLlmReachable?: () => Promise<boolean | { ok: boolean; detail?: string }>;
 }
 
 /** #167 review (Codex P2+P3 adjudication): the gated-reentry-cap-hit escalation note appended
@@ -1453,10 +1461,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         llmEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec,
       );
       if (probeDue(llmEpisode.lastProbeAt, nowDate.getTime(), backoffSec)) {
-        const pingOk = await deps.probeLlmReachable();
+        const raw = await deps.probeLlmReachable();
+        const pingOk = typeof raw === "boolean" ? raw : raw.ok;
+        // Amendment 2: on failure, the probe's own first error line rides along in the event —
+        // an operator reading the ledger can tell "provider still down" (429/overloaded) from
+        // a local misconfiguration ("Exceeded USD budget" -> probeMaxBudgetUsd too low;
+        // "unknown option" -> CLI too old for the ping's flags).
+        const pingDetail = typeof raw === "boolean" ? undefined : raw.detail;
         state.appendEvent("park-probe", {
           source: "llm", success: pingOk,
           attempts: pingOk ? llmEpisode.probeAttempts : llmEpisode.probeAttempts + 1,
+          ...(!pingOk && pingDetail != null ? { reason: pingDetail } : {}),
         });
         if (!pingOk) {
           // Ping failed (network/auth/CLI/no capacity at all) — no canary spent, backoff grows.

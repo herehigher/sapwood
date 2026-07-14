@@ -377,8 +377,9 @@ validate` catches all three).
 | `parkEscalateAfterSec` | `3600` (1h) | Park **duration** per episode (not probe count — bounded exponential backoff makes a count an ambiguous measure of elapsed time) past which the engine additionally notifies a human via the channel ladder. Additive, never a state transition — probing/auto-resume continue unaffected either side of an escalation. The clock runs from the episode's FIRST detection and is never reset by further failures (including failed recovery canaries) within the same episode. |
 | `probeBackoffBaseSec` | `30` | Initial probe interval while parked (the first probe waits a full base interval — never fires on the same tick the park began). |
 | `probeBackoffMaxSec` | `1800` (30min) | Cap on the bounded exponential backoff (`base * 2^attempts`, capped here). Must be >= `probeBackoffBaseSec` (validated at load). |
-| `probeModel` | `haiku` | The model the llm-source **ping probe** runs on — deliberately the cheapest tier (~10 tokens per ping), independent of `worker.model`. Point it at whatever your account's cheapest alias is. |
+| `probeModel` | `haiku` | The model the llm-source **ping probe** runs on — deliberately the cheapest tier, independent of `worker.model`. Point it at whatever your account's cheapest alias is. |
 | `probeTimeoutSec` | `30` | Hard timeout on one ping — a hung CLI is killed and counted as a failed probe, never allowed to wedge a tick. |
+| `probeMaxBudgetUsd` | `0.05` | `--max-budget-usd` for one ping. **Don't set this below ~$0.02**: even fully stripped, a `-p` invocation still carries ~7.4k CLI scaffolding tokens, so the real floor is >$0.01 (~$0.016 measured) — a too-low cap makes **every** probe fail with `Error: Exceeded USD budget (…)` and the engine stays parked until the duration escalation notifies a human (fail-safe, but confusing). The failing probe's error line is recorded in each `park-probe` event so the symptom names itself. |
 
 **How each source recovers:**
 
@@ -387,18 +388,37 @@ validate` catches all three).
   env-failure issue-requeues are **suspended** (persisted durably, zero forge writes, retry
   counter frozen) and drain automatically on resume; they are exempt from the rollback retry cap
   and never degrade to `needs-human`.
-- **`llm`** — the probe is a **minimal inference ping**: `claude -p --model <probeModel>
-  "respond with 'pong' only" --output-format text` (same `CLAUDE_BIN` resolution as a real
-  dispatch); success = clean exit + a "pong" reply. It proves network + auth + *some* account
-  capacity for ~10 tokens on the cheapest model — but **not** that the worker's own model/tier
-  has quota (model-specific caps, primary-model-only overload), so a green ping is only a
-  *gate*, never a recovery signal. When the backoff interval elapses and the ping succeeds (and
-  no forge episode is open), the engine dispatches exactly **one canary lane**. The llm episode
-  clears only when that canary reaches a terminal state that is *not* itself env-classified; a
-  canary that env-fails continues the *same* episode — the entry time (and therefore the
-  escalation clock) is preserved and the backoff keeps growing, so a persistent outage costs one
-  ping + one canary per backoff step, never a full-queue redispatch cycle. A broken CLI needs no
-  separate check: the ping simply fails.
+- **`llm`** — the probe is a **minimal inference ping** (same `CLAUDE_BIN` resolution as a real
+  dispatch):
+
+  ```
+  claude -p --model <probeModel> --no-session-persistence \
+    --system-prompt "You are a heartbeat responder. Only output the requested word." \
+    --strict-mcp-config --tools "" \
+    --max-budget-usd <probeMaxBudgetUsd> --output-format text \
+    "Respond with the single word 'pong' and nothing else."
+  ```
+
+  Success = clean exit + a "pong" reply. The custom system prompt replaces the CLI's default
+  one and `--strict-mcp-config`/`--tools ""` strip MCP servers and tool schemas — the smallest
+  request the CLI supports; `--no-session-persistence` keeps probe runs off the disk. **Honest
+  cost:** ~$0.016 per ping measured (the CLI still sends ~7.4k scaffolding tokens plus ~240
+  output tokens even fully stripped) — at `probeBackoffMaxSec` pacing that is still negligible
+  per day. The ping proves network + auth + *some* account capacity on the cheapest model —
+  but **not** that the worker's own model/tier has quota (model-specific caps,
+  primary-model-only overload), so a green ping is only a *gate*, never a recovery signal.
+  When the backoff interval elapses and the ping succeeds (and no forge episode is open), the
+  engine dispatches exactly **one canary lane**. The llm episode clears only when that canary
+  reaches a terminal state that is *not* itself env-classified; a canary that env-fails
+  continues the *same* episode — the entry time (and therefore the escalation clock) is
+  preserved and the backoff keeps growing, so a persistent outage costs one ping + one canary
+  per backoff step, never a full-queue redispatch cycle. A broken CLI needs no separate check:
+  the ping simply fails — and an **older CLI lacking these flags** fails every probe with
+  `error: unknown option …` (the symptom is a permanently parked engine whose `park-probe`
+  events name the unknown option; the remedy is upgrading the CLI — these flags exist as of
+  2.x). Every failed ping records its first error line in the `park-probe` event, so
+  "provider still down" (a 429), "budget cap too low" (`Exceeded USD budget`), and "CLI too
+  old" (`unknown option`) are all distinguishable from the event ledger.
 
 **Escalation channel ladder:** an `llm`-sourced escalation with the forge healthy notifies via a
 comment on the issue whose lane triggered the episode; a `forge`-sourced escalation — or an

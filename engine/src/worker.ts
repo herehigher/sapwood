@@ -172,51 +172,94 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
-/** #168 (PR #180 review, P1-1 amendment): the LLM-source probe for conductor.ts's park
- *  machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping:
+/** #168: the ping probe's outcome. `detail` is set on FAILURE only — the first stderr (or
+ *  stdout) error line, a timeout note, or a spawn error — so the recorded probe event lets an
+ *  operator distinguish "provider still down" (a 429/overloaded error) from a local
+ *  misconfiguration ("Error: Exceeded USD budget (0.01)" = envFailure.probeMaxBudgetUsd set
+ *  too low; see docs/configuration.md). */
+export interface LlmPingResult {
+  ok: boolean;
+  detail?: string;
+}
+
+/** The ping's fixed prompt pair — deliberately strict so the response is a single word
+ *  (minimum output tokens) and deliberately engine-internal, not config. The custom
+ *  --system-prompt REPLACES the CLI's default (much larger) system prompt. */
+const LLM_PING_SYSTEM_PROMPT = "You are a heartbeat responder. Only output the requested word.";
+const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
+
+/** #168 (PR #180 review, P1-1 amendment — final form): the LLM-source probe for conductor.ts's
+ *  park machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping, verified
+ *  working against claude CLI 2.1.209 in exactly this form (returns "pong", exit 0):
  *
- *      claude -p --model <probeModel> "respond with 'pong' only" --output-format text
+ *      claude -p --model <probeModel> --no-session-persistence \
+ *        --system-prompt "<LLM_PING_SYSTEM_PROMPT>" --strict-mcp-config --tools "" \
+ *        --max-budget-usd <probeMaxBudgetUsd> --output-format text "<LLM_PING_PROMPT>"
  *
- *  Success = exit code 0 AND the trimmed stdout containing "pong" (case-insensitive). This
- *  replaced the original `claude --version` check, which proves nothing about the PROVIDER —
- *  the CLI stays installed and executable throughout a rate-limit/credit outage. The ping
- *  proves network + auth + some account capacity for ~10 tokens on the cheapest model
- *  (cfg.envFailure.probeModel, default "haiku"). It deliberately does NOT prove the WORKER's
- *  model/tier has quota (model-specific caps, primary-model-only overload) — exactly why the
- *  canary + episode-continuity layers above it remain: ping (cheap filter, paced by backoff)
- *  -> success unlocks ONE canary lane -> only the canary reaching a non-env terminal clears
- *  the llm episode. A false-positive ping costs one bounded canary spawn and never resets the
+ *  Flag rationale: --no-session-persistence keeps probe runs off the disk (no session files);
+ *  --system-prompt REPLACES the CLI's default full system prompt; --strict-mcp-config +
+ *  --tools "" strip MCP servers and tool schemas from the request — the smallest prompt
+ *  surface and the fewest failure modes the CLI supports. (--max-tokens does NOT exist in the
+ *  CLI — verified unknown-option error — and must not be added.)
+ *
+ *  Success = exit code 0 AND the trimmed stdout containing "pong" (case-insensitive — the
+ *  strict prompt minimizes output tokens; the contains-check keeps tolerance). This replaced
+ *  the original `claude --version` check, which proves nothing about the PROVIDER — the CLI
+ *  stays installed and executable throughout a rate-limit/credit outage. The ping proves
+ *  network + auth + some account capacity on the cheapest model (cfg.envFailure.probeModel,
+ *  default "haiku"). It deliberately does NOT prove the WORKER's model/tier has quota
+ *  (model-specific caps, primary-model-only overload) — exactly why the canary +
+ *  episode-continuity layers above it remain: ping (cheap filter, paced by backoff) ->
+ *  success unlocks ONE canary lane -> only the canary reaching a non-env terminal clears the
+ *  llm episode. A false-positive ping costs one bounded canary spawn and never resets the
  *  episode clock. The ping subsumes CLI-breakage detection too (broken CLI = ping fails).
  *
- *  NOTE: no `--no-session-persistence` flag — it does not exist in the current CLI (verified
- *  via --help; passing it would make every probe fail). `-p` runs are stateless per
- *  invocation, so there is no context-carryover concern. The prompt string is deliberately
- *  engine-internal, not config.
+ *  COST (empirical, honest number): ~$0.016 measured per probe even fully stripped — the CLI
+ *  still sends ~7.4k scaffolding tokens as cache-creation plus ~240 output tokens, so the
+ *  floor is >$0.01, never "a few tokens". `--max-budget-usd` bounds it
+ *  (cfg.envFailure.probeMaxBudgetUsd, default 0.05): a cap at or below the floor (e.g. 0.01)
+ *  empirically FAILS every probe with "Error: Exceeded USD budget (0.01)" exit 1 — which is
+ *  why the failure detail is surfaced: a too-low cap keeps the engine parked, a fail-safe but
+ *  confusing state without the stderr line in the event. An OLDER CLI lacking these flags
+ *  fails every probe with "error: unknown option ..." — same surfacing, remedy is a CLI
+ *  upgrade (see docs/configuration.md).
  *
  *  Never throws — any spawn error, non-zero exit, non-"pong" output, or a hang past
- *  `timeoutSec` (hard kill) resolves `false`. */
-export function probeLlmPing(claudeBin: string, probeModel: string, timeoutSec: number): Promise<boolean> {
+ *  `timeoutSec` (hard kill) resolves `{ ok: false, detail }`. */
+export function probeLlmPing(
+  claudeBin: string, probeModel: string, probeMaxBudgetUsd: number, timeoutSec: number,
+): Promise<LlmPingResult> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (ok: boolean): void => {
+    const finish = (r: LlmPingResult): void => {
       if (settled) return;
       settled = true;
-      resolve(ok);
+      resolve(r);
     };
+    const firstLine = (s: string): string => s.trim().split("\n")[0]?.trim() ?? "";
     let child: ChildProcess;
     try {
       child = spawn(
         claudeBin,
-        ["-p", "--model", probeModel, "respond with 'pong' only", "--output-format", "text"],
-        { stdio: ["ignore", "pipe", "ignore"] },
+        [
+          "-p", "--model", probeModel, "--no-session-persistence",
+          "--system-prompt", LLM_PING_SYSTEM_PROMPT, "--strict-mcp-config", "--tools", "",
+          "--max-budget-usd", String(probeMaxBudgetUsd), "--output-format", "text",
+          LLM_PING_PROMPT,
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
       );
-    } catch {
-      finish(false);
+    } catch (e) {
+      finish({ ok: false, detail: `ping spawn failed: ${e instanceof Error ? e.message : String(e)}` });
       return;
     }
     let stdout = "";
+    let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
     });
     const timer = setTimeout(() => {
       try {
@@ -224,15 +267,22 @@ export function probeLlmPing(claudeBin: string, probeModel: string, timeoutSec: 
       } catch {
         /* already gone */
       }
-      finish(false);
+      finish({ ok: false, detail: `ping timed out after ${timeoutSec}s (hard-killed)` });
     }, timeoutSec * 1000);
-    child.on("error", () => {
+    child.on("error", (e) => {
       clearTimeout(timer);
-      finish(false);
+      finish({ ok: false, detail: `ping spawn error: ${e.message}` });
     });
     child.on("exit", (code) => {
       clearTimeout(timer);
-      finish(code === 0 && stdout.trim().toLowerCase().includes("pong"));
+      if (code === 0 && stdout.trim().toLowerCase().includes("pong")) {
+        finish({ ok: true });
+        return;
+      }
+      // Failure detail: prefer the first stderr error line (where "Exceeded USD budget" and
+      // API errors land), else the first stdout line, else the bare exit code.
+      const detail = firstLine(stderr) || firstLine(stdout) || `ping exited ${code} with no output`;
+      finish({ ok: false, detail });
     });
   });
 }

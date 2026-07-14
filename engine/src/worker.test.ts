@@ -253,64 +253,93 @@ const mkHook = (dir: string): string => {
   return p;
 };
 
-// ── #168 (P1-1 amendment): probeLlmPing — the LLM-source park probe's real implementation:
-//    a minimal inference ping (`claude -p --model <probeModel> "respond with 'pong' only"
-//    --output-format text`); success = exit 0 AND trimmed stdout containing "pong". ──────────
+// ── #168 (P1-1 amendment, final form): probeLlmPing — the LLM-source park probe's real
+//    implementation: a minimal stripped inference ping; success = exit 0 AND trimmed stdout
+//    containing "pong" (case-insensitive). Failure carries a `detail` (first stderr/error
+//    line) so the park-probe event can name its own cause. ──────────────────────────────────
 
-test("probeLlmPing: exit 0 + 'pong' on stdout -> true (case-insensitive, whitespace-tolerant)", async () => {
+test("probeLlmPing: exit 0 + 'pong' on stdout -> ok (case-insensitive, whitespace-tolerant), no detail", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho "  Pong  "\nexit 0\n`);
-    assert.equal(await probeLlmPing(bin, "haiku", 30), true);
+    assert.deepEqual(await probeLlmPing(bin, "haiku", 0.05, 30), { ok: true });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("probeLlmPing: exit 0 but NON-pong stdout -> false (a chatty/errored response is not a pong)", async () => {
+test("probeLlmPing: exit 0 but NON-pong stdout -> failure, detail carries the first output line", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho "I'm sorry, I can't help with that."\nexit 0\n`);
-    assert.equal(await probeLlmPing(bin, "haiku", 30), false);
+    const r = await probeLlmPing(bin, "haiku", 0.05, 30);
+    assert.equal(r.ok, false);
+    assert.ok(r.detail?.includes("I'm sorry"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("probeLlmPing: non-zero exit -> false, even with 'pong' on stdout", async () => {
+test("probeLlmPing: non-zero exit -> failure even with 'pong' on stdout; detail prefers the STDERR error line (the 'Exceeded USD budget' / 'unknown option' operator signal)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\necho pong\nexit 1\n`);
-    assert.equal(await probeLlmPing(bin, "haiku", 30), false);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho pong\necho "Error: Exceeded USD budget (0.01)" >&2\nexit 1\n`);
+    const r = await probeLlmPing(bin, "haiku", 0.01, 30);
+    assert.equal(r.ok, false);
+    assert.equal(r.detail, "Error: Exceeded USD budget (0.01)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("probeLlmPing: a nonexistent binary -> false, never throws", async () => {
-  assert.equal(await probeLlmPing("/no/such/binary/sapwood-168", "haiku", 30), false);
+test("probeLlmPing: an older CLI rejecting the ping's flags surfaces the unknown-option line as detail", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "error: unknown option '--no-session-persistence'" >&2\nexit 1\n`);
+    const r = await probeLlmPing(bin, "haiku", 0.05, 30);
+    assert.equal(r.ok, false);
+    assert.ok(r.detail?.includes("unknown option"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves false, never left dangling", async () => {
+test("probeLlmPing: a nonexistent binary -> failure with a spawn detail, never throws", async () => {
+  const r = await probeLlmPing("/no/such/binary/sapwood-168", "haiku", 0.05, 30);
+  assert.equal(r.ok, false);
+  assert.ok(r.detail);
+});
+
+test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves failure with a timeout detail, never left dangling", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\necho pong\n`);
     const start = Date.now();
-    assert.equal(await probeLlmPing(bin, "haiku", 1), false); // 1s timeout vs a 30s hang
+    const r = await probeLlmPing(bin, "haiku", 0.05, 1); // 1s timeout vs a 30s hang
+    assert.equal(r.ok, false);
+    assert.ok(r.detail?.includes("timed out"));
     assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("probeLlmPing: invoked with exactly the documented argv — -p, --model <probeModel>, the pong prompt, --output-format text (and NO --no-session-persistence, which the current CLI rejects)", async () => {
+test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no-session-persistence, --system-prompt, --strict-mcp-config, --tools '', --max-budget-usd, --output-format text, prompt (and NO --max-tokens, which the CLI rejects)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   const argsFile = join(dir, "args.txt");
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argsFile}"\necho pong\nexit 0\n`);
-    assert.equal(await probeLlmPing(bin, "my-cheap-model", 30), true);
-    const argv = readFileSync(argsFile, "utf8").trim().split("\n");
-    assert.deepEqual(argv, ["-p", "--model", "my-cheap-model", "respond with 'pong' only", "--output-format", "text"]);
+    // NUL-separated capture: one argv entry is the EMPTY string (--tools ""), which a
+    // newline-separated printf would silently swallow on split.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${argsFile}"\necho pong\nexit 0\n`);
+    assert.deepEqual(await probeLlmPing(bin, "my-cheap-model", 0.05, 30), { ok: true });
+    const argv = readFileSync(argsFile, "utf8").split("\0").slice(0, -1);
+    assert.deepEqual(argv, [
+      "-p", "--model", "my-cheap-model", "--no-session-persistence",
+      "--system-prompt", "You are a heartbeat responder. Only output the requested word.",
+      "--strict-mcp-config", "--tools", "",
+      "--max-budget-usd", "0.05", "--output-format", "text",
+      "Respond with the single word 'pong' and nothing else.",
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

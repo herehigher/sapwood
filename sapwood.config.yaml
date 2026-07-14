@@ -244,9 +244,9 @@ labels: # taxonomy used by the loop
 # records, never the worker's own message content) — patterns are validated (compiled) at load;
 # a malformed regex or an empty array is a startup error. Recovery: a forge episode clears on a
 # successful read-only probe; an llm episode clears only when a single CANARY lane (one per
-# backoff step, gated on a minimal ~10-token inference ping on probeModel) completes without
-# env-failing — a green ping alone is never trusted as recovery, since the WORKER's model/tier
-# can still be capped while the cheapest model answers fine.
+# backoff step, gated on a minimal stripped inference ping on probeModel — ~$0.016/ping
+# measured) completes without env-failing — a green ping alone is never trusted as recovery,
+# since the WORKER's model/tier can still be capped while the cheapest model answers fine.
 # envFailure:
 #   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
 #                 "credit balance is too low", insufficient_quota, overloaded_error,
@@ -263,6 +263,10 @@ labels: # taxonomy used by the loop
 #   probeModel: haiku          # model for the llm ping probe — the cheapest tier you have,
 #                              # independent of worker.model
 #   probeTimeoutSec: 30        # hard timeout per ping (kill + count as a failed probe)
+#   probeMaxBudgetUsd: 0.05    # --max-budget-usd per ping. Floor is >$0.01 (~$0.016 measured:
+#                              # the CLI sends ~7.4k scaffolding tokens even fully stripped) —
+#                              # setting this at/below the floor fails EVERY probe with
+#                              # "Exceeded USD budget" and keeps the engine parked.
 
 escalation:
   humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human

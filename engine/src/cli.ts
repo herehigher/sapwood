@@ -756,9 +756,13 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // boundary; roundBudgetUsd is a softer per-round throttle.
   // #168 (P1-1 amendment): the real LLM-source park probe — a minimal inference ping on the
   // cheapest model (worker.ts's probeLlmPing), resolved against the SAME claude binary
-  // WorkerSupervisor's dispatch() would use.
-  const probeLlmReachable = (): Promise<boolean> =>
-    probeLlmPing(discoverClaudeBin(process.env), cfg.envFailure.probeModel, cfg.envFailure.probeTimeoutSec);
+  // WorkerSupervisor's dispatch() would use. The rich {ok, detail} result flows into the
+  // park-probe event so a failing probe names its own cause.
+  const probeLlmReachable = () =>
+    probeLlmPing(
+      discoverClaudeBin(process.env), cfg.envFailure.probeModel,
+      cfg.envFailure.probeMaxBudgetUsd, cfg.envFailure.probeTimeoutSec,
+    );
   const result = await runDriver({
     forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, stopMode, stop,
     probeLlmReachable,
@@ -804,8 +808,11 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   await assertStopMilestoneExists(forge, stop);
   console.log(`sapwood run: driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
   // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
-  const probeLlmReachable = (): Promise<boolean> =>
-    probeLlmPing(discoverClaudeBin(process.env), cfg.envFailure.probeModel, cfg.envFailure.probeTimeoutSec);
+  const probeLlmReachable = () =>
+    probeLlmPing(
+      discoverClaudeBin(process.env), cfg.envFailure.probeModel,
+      cfg.envFailure.probeMaxBudgetUsd, cfg.envFailure.probeTimeoutSec,
+    );
   const result = await runRounds({
     forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, peripherals, stop,
     probeLlmReachable,

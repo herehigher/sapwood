@@ -2146,6 +2146,43 @@ test("#168 auto-resume (forge): a successful probe clears the episode in the SAM
   st.close();
 });
 
+test("#168 Amendment 2: a FAILED llm ping's detail (first stderr line) is recorded in the park-probe event reason — an operator can tell 'provider down' from 'probeMaxBudgetUsd too low'", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  st.enterPark("llm", "rate_limit_error", 1, t0.toISOString());
+  const r = await tick({
+    forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 31_000),
+    probeLlmReachable: async () => ({ ok: false, detail: "Error: Exceeded USD budget (0.01)" }),
+  });
+  void r;
+  const probes = st.eventsSince("2020-01-01T00:00:00Z", ["park-probe"]);
+  assert.equal(probes.length, 1);
+  const payload = probes[0]?.payload as { success: boolean; reason?: string };
+  assert.equal(payload.success, false);
+  assert.equal(payload.reason, "Error: Exceeded USD budget (0.01)");
+  assert.equal(st.parkRow("llm")?.probeAttempts, 1); // still a plain failed probe otherwise
+  st.close();
+});
+
+test("#168 Amendment 2: a plain-boolean probe fake keeps working (no detail recorded), and a rich {ok:true} arms the canary exactly like `true`", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.ready = [{ number: 810, title: "", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  st.enterPark("llm", "rate_limit_error", 810, t0.toISOString());
+  await tick({
+    forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 31_000),
+    probeLlmReachable: async () => ({ ok: true }),
+  });
+  assert.equal(st.parkRow("llm")?.canaryWorker, "lane-1"); // canary armed off the rich shape
+  const probes = st.eventsSince("2020-01-01T00:00:00Z", ["park-probe"]);
+  assert.equal((probes[0]?.payload as { reason?: string }).reason, undefined); // success carries no reason
+  st.close();
+});
+
 test("#168 disabled-consumer rule: with no probeLlmReachable wired, tick() never touches the llm episode at all (no bump, no canary); duration escalation still fires regardless", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
