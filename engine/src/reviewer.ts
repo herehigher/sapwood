@@ -15,6 +15,7 @@
 import type { IForge, PRReview, PRReviewData } from "./forge.js";
 import { extractVerificationPlan } from "./forge.js";
 import type { SapwoodConfig } from "./config.js";
+import { loadDoctrine, NO_DOCTRINE } from "./doctrine.js";
 
 export type ReviewAction =
   | "MERGE_OK" // fresh, non-author, accepted-state review on the CURRENT head
@@ -161,17 +162,30 @@ export const CODEX_REVIEWER_LOGINS = ["chatgpt-codex-connector"] as const;
  * review + CI", not plan conformance (PLAN.md M3 deferred list). `planText` null (no extractable
  * Verification/Acceptance section — e.g. a verify:n/a issue, or a malformed body) still gets an
  * EXPLICIT fallback sentence, never a silently plan-less trigger.
+ *
+ * `doctrine` (#167) is this repo's review-doctrine text — technical invariants + adjudication
+ * doctrine, same content injected into the worker brief and architect pass (doctrine.ts) —
+ * appended AFTER the verification plan so the reviewing bot's attention is aimed at historical
+ * failure zones on top of this PR's own acceptance criteria. Omitted/null/empty -> nothing is
+ * appended, byte-for-byte the pre-#167 comment: this function is PURE and never sees
+ * doctrine.ts's NO_DOCTRINE placeholder — a public PR comment must not carry that internal
+ * sentence, so the caller (makeReviewer/makeFallbackReviewers below) maps the placeholder to
+ * `undefined` BEFORE it ever reaches here.
  * Pure + exported so the shape is unit-testable without a fake IForge.
  */
 export function buildReviewTriggerComment(
   issue: number,
   planText: string | null,
   triggerCommand: string = "@codex review",
+  doctrine?: string | null,
 ): string {
   const instruction = planText
     ? `Verify this PR against issue #${issue}'s verification plan below:\n\n${planText}`
     : `No extractable verification plan was found on issue #${issue} — review this PR on its own merits.`;
-  return `${triggerCommand}\n\n${instruction}`;
+  const doctrineBlock = doctrine
+    ? `\n\nThis repo's review doctrine — historical failure classes and adjudication guidance to keep in mind while reviewing:\n\n${doctrine}`
+    : "";
+  return `${triggerCommand}\n\n${instruction}${doctrineBlock}`;
 }
 
 /**
@@ -268,10 +282,15 @@ export class CodexReviewer implements Reviewer {
 
   /** `extraTrustedLogins` (cfg.reviewer.trustedReviewers) extends — never replaces — the
    *  Codex bot's own login. `triggerCommand` (cfg.reviewer.triggerCommand, #156) is the posted
-   *  trigger-comment text; default matches today's hardcoded `@codex review` byte-for-byte. */
+   *  trigger-comment text; default matches today's hardcoded `@codex review` byte-for-byte.
+   *  `doctrine` (cfg.doctrine, #167) is this repo's ALREADY-LOADED review-doctrine text (or
+   *  `undefined` when none is adopted) — loaded once by the caller (makeReviewer /
+   *  makeFallbackReviewers) the SAME way triggerCommand is resolved from cfg once at
+   *  construction, never re-loaded per trigger. */
   constructor(
     extraTrustedLogins: readonly string[] = [],
     private readonly triggerCommand: string = "@codex review",
+    private readonly doctrine?: string,
   ) {
     this.allowedLogins = [...CODEX_REVIEWER_LOGINS, ...extraTrustedLogins].map(normalizeLogin);
   }
@@ -284,7 +303,7 @@ export class CodexReviewer implements Reviewer {
     const body = await forge.getIssueBody(issue).catch(() => "");
     await forge.addPRComment(
       pr,
-      buildReviewTriggerComment(issue, extractVerificationPlan(body), this.triggerCommand),
+      buildReviewTriggerComment(issue, extractVerificationPlan(body), this.triggerCommand, this.doctrine),
     );
   }
 
@@ -345,11 +364,15 @@ export type ReviewerKind = Reviewer["kind"];
 /** Build a Reviewer instance for a given KIND (#54) — the shared factory `makeReviewer` (below)
  *  and the reviewer-fallback chain (cfg.reviewer.fallback) both call, so a fallback entry gets
  *  the EXACT SAME mode implementation/semantics as picking that kind as the primary
- *  (reviewer.mode) would — reused, never forked. */
+ *  (reviewer.mode) would — reused, never forked. `doctrine` (#167) is threaded through
+ *  identically to `triggerCommand`; only the `different-model-codex` case does anything with it
+ *  (same-model-trusted / human post no trigger comment, so they have nothing to inject it
+ *  into). */
 export function buildReviewerByKind(
   kind: ReviewerKind,
   trustedReviewers: readonly string[],
   triggerCommand: string = "@codex review",
+  doctrine?: string,
 ): Reviewer {
   switch (kind) {
     case "human":
@@ -360,24 +383,47 @@ export function buildReviewerByKind(
     default:
       // trustedReviewers EXTENDS the Codex-bot allowlist in this mode (public-repo hardening:
       // gate② acceptance is identity-checked, not merely non-author — Codex PR #42 P1).
-      return new CodexReviewer(trustedReviewers, triggerCommand);
+      return new CodexReviewer(trustedReviewers, triggerCommand, doctrine);
   }
+}
+
+/** Resolve this repo's review-doctrine text for gate② trigger-comment injection (#167). Reuses
+ *  doctrine.ts's `loadDoctrine` — the SAME load site worker.ts and round-defaults.ts already
+ *  call, never duplicated — and maps its `NO_DOCTRINE` placeholder to `undefined` HERE, at the
+ *  construction-site boundary: `buildReviewTriggerComment` stays pure and never sees the
+ *  placeholder, because a public PR comment must never carry the internal "(No review doctrine
+ *  file is configured...)" sentence. No doctrine adopted -> `undefined` -> the trigger comment
+ *  is byte-for-byte identical to the pre-#167 comment. A present-but-unreadable doctrine file
+ *  still fails fast here (loadDoctrine's contract), same as it already does for the worker
+ *  brief and architect pass. */
+function loadReviewDoctrine(cfg: SapwoodConfig): string | undefined {
+  const text = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  return text === NO_DOCTRINE ? undefined : text;
 }
 
 /** Construct the configured PRIMARY reviewer (reviewer.mode). Default = CodexReviewer, matching
  *  the locked decision (0day-style fresh different-model review). */
 export function makeReviewer(cfg: SapwoodConfig): Reviewer {
-  return buildReviewerByKind(cfg.reviewer.mode, cfg.reviewer.trustedReviewers, cfg.reviewer.triggerCommand);
+  return buildReviewerByKind(
+    cfg.reviewer.mode,
+    cfg.reviewer.trustedReviewers,
+    cfg.reviewer.triggerCommand,
+    loadReviewDoctrine(cfg),
+  );
 }
 
 /** Construct the configured FALLBACK chain (cfg.reviewer.fallback, #54) — one Reviewer per
  *  entry, in the SAME order as configured (resolveReviewVerdict below preserves that order:
  *  priority, not a retry escalation — the first entry whose OWN mode semantics reaches a
  *  decisive verdict wins). Empty by default -> resolveReviewVerdict behaves identically to
- *  calling the primary reviewer directly (no #54 behavior change from before this existed). */
+ *  calling the primary reviewer directly (no #54 behavior change from before this existed).
+ *  Threads the same resolved doctrine text as makeReviewer (#167) — only relevant to a
+ *  `different-model-codex` fallback entry, and only if triggerReview is ever invoked on a
+ *  fallback in the future; today merge-driver.ts only triggers the primary. */
 export function makeFallbackReviewers(cfg: SapwoodConfig): Reviewer[] {
+  const doctrine = loadReviewDoctrine(cfg);
   return cfg.reviewer.fallback.map((kind) =>
-    buildReviewerByKind(kind, cfg.reviewer.trustedReviewers, cfg.reviewer.triggerCommand),
+    buildReviewerByKind(kind, cfg.reviewer.trustedReviewers, cfg.reviewer.triggerCommand, doctrine),
   );
 }
 
