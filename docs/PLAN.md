@@ -141,7 +141,7 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
   (unknown keys / typos error, never silently drop) and **`.finite()`** on budget
   ceilings (overflow can't disable the cap). `loadConfig()` probes
   `sapwood.config.{yaml,yml,json}`. Every 0day `LOOP_*` env var is a named, defaulted,
-  documented field (mapping in `engine/src/config.ts`).
+  documented field (mapping in `engine/src/config/config.ts`).
 - **Forge:** all subprocess calls use `execFile` with argv arrays — never `shell:true`.
 - **CI-green is fail-closed:** an empty `statusCheckRollup` is **not** green (checks
   may be uncreated on a fresh PR); genuinely CI-less repos opt in via `ci.requireChecks`
@@ -229,7 +229,7 @@ domain (no reserve/SLA/eval-report/HTML machinery).
   own guard). Fail-closed hardening (a 7-round adversarial review) closed **five distinct
   fail-open vectors**: a hook crash → the command maps to exit 2 (blocking); a global
   `disableAllHooks` → forced `false`; and three self-protection writes now blocked by the guard
-  boundary — `sapwood.config.*`, the compiled `engine/dist/guard*.js` artifact, and (removed
+  boundary — `sapwood.config.*`, the compiled `engine/dist/guard/guard*.js` artifact, and (removed
   entirely) the settings file. Dispatch **fails closed** if the compiled hook is missing.
 - **Scope boundaries:** `drive_decision` only — the PR-gate ACTION→action map (0day
   `merge_decision`/`pr_gate`) + parity vs `test_loop_merge_driver.sh` move to **M3** with
@@ -322,7 +322,7 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   **loop/worker spend only** — Codex-review and human-session usage happen outside
   stream-json and are not captured here.
 - **Guard boundary extended (#43)** — the merge path is now inside the worker-unwritable
-  boundary: `merge-driver.ts` source and the *running* `engine/dist/reviewer.js` /
+  boundary: `merge-driver.ts` source and the *running* `engine/dist/roles/reviewer.js` /
   `merge-driver.js` artifacts (same vector class as the guard artifact, closed in #26 R3).
   Also **#39**: the hook's direct-invocation check now compares realpaths — symlink
   invocation can no longer silently no-op the guard.

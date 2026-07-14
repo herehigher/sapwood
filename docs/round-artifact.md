@@ -4,7 +4,7 @@ Every closed round leaves one **engine-built, schema-validated JSON record** of 
 mechanical history — dispatches, merges, retries, review-fallback episodes, escalations,
 spend, degraded phases, the retro proposal outcome, and the PO/aligning phase's
 decomposition summary. It is assembled purely from sapwood's own durable event ledger at
-round close (`engine/src/round-artifact.ts`), never from a session's output and never from
+round close (`engine/src/loop/round-artifact.ts`), never from a session's output and never from
 a live GitHub query.
 
 **JSON is the single source of truth.** The markdown view is a deterministic *render* of
@@ -21,7 +21,7 @@ consumes (`{{round.artifact}}`, capped by
 
 ## The schema — the dashboard (#17) data contract
 
-`RoundArtifactSchema` (zod, `engine/src/round-artifact.ts`) **is** the #17 dashboard's
+`RoundArtifactSchema` (zod, `engine/src/loop/round-artifact.ts`) **is** the #17 dashboard's
 round-view data contract: any change to it is a change to that contract and must bump
 `ROUND_ARTIFACT_SCHEMA_VERSION`. Top-level fields (v1):
 

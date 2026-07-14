@@ -298,7 +298,7 @@ event kind without a copy entry is a type error.
 ## 8. Data contract
 
 Three read-only endpoints, served from the existing SQLite tables
-(schema v11, `engine/src/state.ts` — including `rounds` and
+(schema v11, `engine/src/state/state.ts` — including `rounds` and
 `round_artifacts`); no dashboard-specific engine tables. Response shapes
 mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
 `sapwood status`.
