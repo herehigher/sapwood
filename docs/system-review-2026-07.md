@@ -314,3 +314,47 @@ checklist each addition must update.
 - **Role-prompt self-evolution (A/B) and a cross-round trend role** — both
   need round history that doesn't exist yet.
 - **Event-driven wake** (webhook) to replace standby polling.
+
+## Failure-semantics review (2026-07-14)
+
+A second review pass, focused on one question: *what does the loop do when
+something outside an issue's control fails?* Verified against the code path
+by path; every gap became a v1.0 issue (#168–#174). Distilled decisions:
+
+| Failure | Decision | Issue |
+|---|---|---|
+| Upstream environment dies mid-run (LLM credit/subscription limits, forge outage, auth expiry) | **Environment failure ≠ task failure.** Deterministic signature classification → park the engine (PAUSE pattern) → backoff probe → auto-resume; never escalate issues, never burn reentry attempts. Timed *additive* human escalation (park duration, not probe count); channel degrades to local when the forge itself is down. No LLM anywhere in the diagnosis chain — the diagnostic must not depend on the component being diagnosed. | #168 |
+| Engine crash/restart while workers live | **Restart adopts, never DEAD-kills**: alive detached lanes get a graceful handoff request (existing cross-process machinery), bounded by `worker.timeoutSec`. The unmonitored downtime window is an accepted, *documented* blind spot — honesty event, no new supervisor. | #169 |
+| gate② reviewer silent (fallback unconfigured) | **WAIT is right, silence is not.** Aging escalation: `needs-human` on the PR past a threshold, gate② untouched, lane stays put; human resolves capacity. Dead `reviewer.poll*` config keys deleted (a knob that cannot have an effect must not parse). | #170 |
+| State DB / data dir lost | **No rebuild machinery** — SQLite (+ sentinels) is the runtime truth source, the board is the management-side view the engine never reads back for recovery. Startup *read-only* reconcile reports orphans (In Progress items / open PRs with no worker row; No-Status items; stale role-session debris swept). Known residual risks documented: daily ledger resets; KILL_SWITCH/PAUSE die with the dir. | #171 |
+| Graceful handoff's second half | Biggest find of the round: **`supervisor.resume()` had zero production callers** — every soft-budget/drain handoff stranded its issue In Progress silently. Wire a RESUME tick phase on the #147 gated-reentry paradigm (pure decision fn + cap `worker.maxResumes` + latch); resume precedes dispatch — finishing outranks starting. Blocks #169. | #172 |
+| Status-less board items | **No item may sit in No Status.** Adopt GitHub's default `Todo` lane as the configured backlog (`board.status.backlog`, zero-migration); on-entry placement + engine startup normalization (the move authorizes nothing — the only authorization edge is → Ready, human-exclusive). Ownership matrix + transition diagram now live in loop-walkthrough §7. | #173 |
+| Hardcoded `--fallback-model sonnet` | A silent quality-downgrade channel that bypasses #168's detection. Promote to config (`fallbackModel`, default unchanged); explicit `"none"` fails loud into the env-failure path. | #174 |
+
+**Principles locked by this pass** (join the four from 07-12):
+
+- **Marginal complexity:** a fix mechanism must not become a
+  problem-generating mechanism. Reuse existing paradigms (reentry, sentinel,
+  rollback, park); write "zero new machinery" into acceptance criteria;
+  accept bounded blind spots explicitly rather than building supervision for
+  them.
+- **Loop-startup ordering:** initialize → calibrate/align (reconcile) →
+  recover (adopt, resume) → only then new work. Dispatch is always last;
+  finishing claimed work outranks starting new work.
+- **No decision → don't call a human.** Waiting states (limit windows,
+  provider outages, No-Status normalization) self-heal or self-place;
+  humans are called additively, on a clock, with the engine still probing.
+- **Environment failures are one class**, whichever upstream broke; the
+  disposition machinery is deterministic engine code end-to-end.
+
+**Multi-provider outlook** (discussed, deliberately not scheduled): mixing
+models *across platforms* per stage needs no rewrite. The seams already
+exist — per-stage `model`/`effort` config, the narrow spawn/jsonl/sentinel
+contract, engine-mediated writes (#110), a reviewer tier that is already
+heterogeneous by locked decision. Judgment roles port cheaply behind a
+runner-adapter seam; code-writing workers are the expensive tail (each
+platform needs a guard-hook equivalent, security-reviewed, human-merge-only).
+Sequence it lightweight-first (roles before workers), and let no platform
+difference leak past the adapter layer into the conductor. Prerequisites
+(#168 env classification, #172 handoff closure, #174 explicit fallback)
+happen to be this round's output.

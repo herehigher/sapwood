@@ -159,7 +159,63 @@ then the newest relevant event; a stale `lastTickAt` overrides everything
 in frontend-design.md §3-A/§8 is computed from exactly this table and carries
 the matching vocabulary.
 
-## 7. Frontend responsibilities and boundaries
+## 7. Board Status ownership — who moves what, when
+
+Board Status transitions each have **exactly one owner**, and ownership is
+structural, not conventional: workers and roles carry zero `gh` grants
+(#110), so every Status write can only leave through the engine's
+`setBoardStatus`. The board is the management-side *view*; the runtime truth
+source is SQLite + sentinels (§6) — the engine writes Status but never reads
+it back for recovery (the one read is the Ready lane: the human authorization
+channel, not a recovery channel).
+
+```mermaid
+stateDiagram-v2
+    classDef human fill:#f5e6c8,stroke:#b08c3e,color:#5a4a1a
+    classDef engine fill:#d9e8f5,stroke:#4a7aab,color:#1a3a5a
+
+    state "No Status" as NS
+    state "Todo (backlog)" as Todo
+    state "Ready" as Ready
+    state "In Progress" as IP
+    state "Done" as Done
+
+    [*] --> NS: issue added to board
+    NS --> Todo: human — on entry (auto-normalized at startup once issue 173 lands)
+    Todo --> Ready: HUMAN ONLY — acceptance authorization (locked decision 5)
+    Ready --> IP: engine claimIssue — DISPATCH, before spawn
+    IP --> Ready: engine recovery — dispatch rollback / dead-lane requeue (persisted, retried, cap 5 → needs-human)
+    IP --> Done: engine DRIVE — after the merge actually lands
+    Done --> [*]
+
+    class NS,Todo,Ready human
+    class IP,Done engine
+```
+
+| Transition | Owner | When | Failure semantics |
+|---|---|---|---|
+| → Ready | **Human, exclusively** (no role ever sets Ready — locked decision 5) | acceptance authorization | — the one human→engine handover edge |
+| Ready → In Progress | engine `claimIssue` | DISPATCH, **before** spawn (claim-before-launch: no unowned worker) | spawn failure → rollback to Ready, durably persisted, retried per tick, cap → `needs-human` |
+| In Progress → Ready | engine, recovery paths only | dispatch rollback; no-PR dead-lane requeue | persist-then-attempt (#31); never silently stranded |
+| In Progress → Done | engine DRIVE | after the merge is a durable fact | announcement failures never regress the transition |
+
+Two overlays that are **not** Status moves:
+
+- **Human-hold labels** (`needs-human`, `blocked`) on an In Progress item =
+  parked for a person. Applied by engine escalation or a human; **removed
+  only by a human** — label removal is the explicit act that re-admits
+  automation (#147 reentry semantics). Status stays In Progress, so the
+  column alone under-reads; the truth is Status × hold-labels.
+- **Known "Status lies" sources**: a handoff-stranded lane (resume wiring,
+  #172) and state-DB loss (startup reconcile, #171) can leave In Progress
+  items with no live lane behind them.
+
+No item may sit in No Status (decided 2026-07-14): the default `Todo` lane is
+the configured backlog (`board.status.backlog`, #173) — on-entry placement by
+whoever adds the item, startup normalization by the engine (the move
+authorizes nothing; the only authorization edge is → Ready).
+
+## 8. Frontend responsibilities and boundaries
 
 **The dashboard is a read-only truth renderer.** Its entire authority:
 
