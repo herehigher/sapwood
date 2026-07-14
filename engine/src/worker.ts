@@ -172,6 +172,52 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
+/** #168: the LLM-source reachability probe for conductor.ts's park machinery
+ *  (TickDeps.probeLlmReachable) — deliberately the CHEAPEST possible check: `claude --version`,
+ *  which never calls the API and spends zero tokens. Issue #168 decision 2 is explicit that the
+ *  diagnostic "must not spend tokens to ask whether tokens exist" — a probe that itself burns a
+ *  completion would be self-defeating (worse: it would burn one on EVERY backoff tick while
+ *  parked for exactly the reason tokens/credits are unavailable). The documented trade-off: this
+ *  only proves the CLI binary is present and executable, not that the account's rate limit/
+ *  credit/usage-window has actually cleared — a false-positive resume is not a wedge, though: the
+ *  very next real dispatch that still hits the limit re-classifies as env-failure and re-parks
+ *  through the ordinary FAILED-lane path (conductor.ts), so this degrades to "one extra park
+ *  episode," never a silent failure to notice. Never throws — any spawn error, non-zero exit, or
+ *  hang past `timeoutMs` resolves `false`. */
+export function probeClaudeCliReachable(claudeBin: string, timeoutMs = 5_000): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(claudeBin, ["--version"], { stdio: "ignore" });
+    } catch {
+      finish(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      finish(false);
+    }, timeoutMs);
+    child.on("error", () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      finish(code === 0);
+    });
+  });
+}
+
 export interface ClaudeArgsOpts {
   prompt: string;
   model: string;
@@ -218,6 +264,9 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
 }
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "handoff.json", "heartbeat", "jsonl"];
+
+/** #168: tail cap for terminalFailureText's jsonl read — see its doc comment. */
+const FAILURE_TEXT_TAIL_CHARS = 4000;
 
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
@@ -891,10 +940,16 @@ export class WorkerSupervisor implements Supervisor {
     // baseline of 0 would misprice a resumed detached lane's current leg).
     const lane = this.lanes.get(name);
     const liveTelemetry = lane ? this.liveTelemetry(lane) : undefined;
+    // #168: only for a FAILED lane — a DONE/handoff lane's classification is irrelevant
+    // (env-failure disposition only applies to the FAILED reclaim path, conductor.ts), and
+    // computing it unconditionally would re-read the jsonl on every probe of every lane for no
+    // reason.
+    const failureText = failed ? this.terminalFailureText(name) : undefined;
     return {
       done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd, modelUsage,
       ...(prNumber != null ? { prNumber } : {}),
       ...(liveTelemetry ? { liveTelemetry } : {}),
+      ...(failureText !== undefined ? { failureText } : {}),
     };
   }
 
@@ -927,6 +982,20 @@ export class WorkerSupervisor implements Supervisor {
       if (Array.isArray(r?.model_usage)) return r.model_usage as ModelUsageEntry[];
     }
     return parseModelUsage(this.readJsonl(this.path(name, "jsonl")));
+  }
+
+  /** #168: a FAILED lane's own captured output, for conductor.ts's env-failure classification —
+   *  no new capture mechanism, just a new READ of the jsonl this class already writes (spawn's
+   *  `stdio: ["ignore", jsonlFd, jsonlFd]` merges stdout+stderr onto the same fd, and probe()
+   *  already reads this exact file for terminalCostUsd/terminalModelUsage above) and already
+   *  reads for cost/model-usage parsing. Tail-capped: an environment failure (429/network/auth)
+   *  is almost always the LAST thing the process emits before dying, and a long session's full
+   *  jsonl can be large — no reason to carry the whole thing through LaneProbe just to regex the
+   *  end of it. Not gated on the `failed` flag here (the caller in probe() only invokes this for
+   *  a failed lane) — this method itself is unconditional so it's independently testable. */
+  private terminalFailureText(name: string): string {
+    const jsonl = this.readJsonl(this.path(name, "jsonl"));
+    return jsonl.length > FAILURE_TEXT_TAIL_CHARS ? jsonl.slice(-FAILURE_TEXT_TAIL_CHARS) : jsonl;
   }
 
   /** #69: tears the lane's process down, THEN decides its worktree's fate — see

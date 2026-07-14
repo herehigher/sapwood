@@ -764,11 +764,13 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    parked: null,
   };
   const out = formatStatus(snapshot);
   assert.match(out, /kill switch: ACTIVE/);
   assert.match(out, /pause: inactive/);
   assert.match(out, /ceiling breach: daily-budget, kill-switch \(since 2026-07-07T00:00:00\.000Z\)/);
+  assert.match(out, /park: inactive/);
 });
 
 test("formatStatus: PAUSE active renders distinctly from kill switch, both can be reported independently", () => {
@@ -783,10 +785,77 @@ test("formatStatus: PAUSE active renders distinctly from kill switch, both can b
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    parked: null,
   };
   const out = formatStatus(snapshot);
   assert.match(out, /kill switch: inactive/);
   assert.match(out, /pause: PAUSED/);
+});
+
+// ── #168: sapwood status surfaces the parked state ──────────────────────────────────────────
+
+test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", () => {
+  const snapshot: StatusSnapshot = {
+    dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
+    killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
+    lanesMax: 3, dailyBudgetUsd: 100,
+    parked: {
+      source: "llm", reason: "rate_limit_error", triggerIssue: 42,
+      enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: null, probeAttempts: 0, escalatedAt: null,
+    },
+  };
+  const out = formatStatus(snapshot);
+  assert.match(out, /park: PARKED \(llm\) since 2026-07-14T00:00:00\.000Z/);
+  assert.match(out, /reason: rate_limit_error/);
+  assert.doesNotMatch(out, /escalated to a human/);
+});
+
+test("formatStatus: parked + escalated renders the escalation timestamp", () => {
+  const snapshot: StatusSnapshot = {
+    dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
+    killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
+    lanesMax: 3, dailyBudgetUsd: 100,
+    parked: {
+      source: "forge", reason: "could not resolve host", triggerIssue: 7,
+      enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: "2026-07-14T00:05:00.000Z",
+      probeAttempts: 4, escalatedAt: "2026-07-14T01:00:00.000Z",
+    },
+  };
+  const out = formatStatus(snapshot);
+  assert.match(out, /park: PARKED \(forge\)/);
+  assert.match(out, /escalated to a human at 2026-07-14T01:00:00\.000Z/);
+});
+
+test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => {
+  const snapshot: StatusSnapshot = {
+    dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
+    killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
+    lanesMax: 3, dailyBudgetUsd: 100, parked: null,
+  };
+  assert.match(formatStatus(snapshot), /park: inactive/);
+});
+
+test("runStatus: reports a live parked state read straight off the DB, and clears once resumed (#168)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-park-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const seed = new State(dbPath);
+  seed.enterPark("forge", "could not resolve host", 42, "2026-07-14T00:00:00.000Z");
+  seed.close();
+  try {
+    const r = runStatus(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /park: PARKED \(forge\)/);
+    assert.match(r.stdout, /reason: could not resolve host/);
+
+    // Resume (a probe would normally do this) — status must reflect it on the very next read.
+    const s2 = new State(dbPath);
+    s2.clearPark();
+    s2.close();
+    const r2 = runStatus(["node", "sapwood", "status", dbPath]);
+    assert.match(r2.stdout, /park: inactive/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("runStatus: exported directly (not just via runCli) for the same result", () => {

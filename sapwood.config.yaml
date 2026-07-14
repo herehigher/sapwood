@@ -236,6 +236,26 @@ labels: # taxonomy used by the loop
 #   maxChars: 20000 # deterministic truncation cap (same marked-cut-never-silent-drop contract
 #                    # as round.directiveMaxChars / roles.architect.lastMergedMaxChars).
 
+# #168: environment-failure park — an LLM-provider outage (429/usage-limit/credit-exhausted) or
+# a forge outage (GitHub down, network partition, gh token expiry) is ONE class: never escalate
+# the issue, never spend a gated-reentry attempt, park the engine (no new dispatch) instead and
+# self-heal via probing. Signature matching is deterministic (regex over a FAILED lane's own
+# captured output, never an LLM judgment) — patterns below are deliberately signature-shaped
+# (API/CLI error identifiers, full HTTP-error phrases), not bare words like "rate limit", so a
+# worker's own prose discussing rate limits stays an ordinary task failure.
+# envFailure:
+#   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
+#                 "credit balance is too low", insufficient_quota, overloaded_error,
+#                 "429 too many requests"]
+#   forgePatterns: ["could not resolve host", "connection refused", "network is unreachable",
+#                   "temporary failure in name resolution", "bad gateway", "gateway timeout",
+#                   "service unavailable", "bad credentials", "401 unauthorized",
+#                   "gh auth login", "saml enforcement"]
+#   parkEscalateAfterSec: 3600 # park DURATION (not probe count) past which a human is notified —
+#                              # additive, never stops probing/auto-resume
+#   probeBackoffBaseSec: 30    # bounded exponential backoff for the probe cadence while parked
+#   probeBackoffMaxSec: 1800
+
 escalation:
   humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human
 

@@ -1447,3 +1447,35 @@ test("runRounds standby: a truly exhausted round.milestone (0 open issues) contr
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 1, "the second wait WAS a standby wait");
   state.close();
 });
+
+// ── #168: RoundDeps.probeLlmReachable passthrough — reaches every tick's TickDeps unchanged ──
+
+test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-parked (llm) state gets probed during the round's executing phase", async () => {
+  const { sleep } = mkSleepSpy();
+  const state = new State(":memory:");
+  state.enterPark("llm", "rate_limit_error", 1, "2026-07-14T00:00:00.000Z");
+  let probeCalls = 0;
+  const deps = baseDeps({
+    state, sleep,
+    probeLlmReachable: async () => { probeCalls++; return true; },
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.ok(probeCalls >= 1, "the round loop's own tick() calls reached RoundDeps.probeLlmReachable");
+  assert.equal(state.isParked(), false, "the wired probe succeeded -> auto-resumed");
+  state.close();
+});
+
+test("#168: RoundDeps.probeLlmReachable omitted -> a pre-parked (llm) state is never probed (disabled-consumer rule holds through the round loop too)", async () => {
+  const { sleep } = mkSleepSpy();
+  const state = new State(":memory:");
+  state.enterPark("llm", "rate_limit_error", 1, "2026-07-14T00:00:00.000Z");
+  const deps = baseDeps({ state, sleep }); // no probeLlmReachable
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.equal(state.isParked(), true, "never probed -> never auto-resumed");
+  assert.equal(state.parkState()?.probeAttempts, 0);
+  state.close();
+});

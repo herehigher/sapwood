@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import {
-  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote,
+  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, probeClaudeCliReachable, claudeArgs, guardSettings, shellSingleQuote,
   WorkerSupervisor, renderPromptTemplate, defaultPromptPath, loadWorkerPromptTemplate, buildRenderPrompt,
 } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
@@ -251,6 +251,56 @@ const mkHook = (dir: string): string => {
   writeFileSync(p, "process.exit(0)\n");
   return p;
 };
+
+// ── #168: probeClaudeCliReachable — the LLM-source park probe's real implementation ──────────
+
+test("probeClaudeCliReachable: exit 0 -> true", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 0\n`);
+    assert.equal(await probeClaudeCliReachable(bin), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeClaudeCliReachable: non-zero exit -> false", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 1\n`);
+    assert.equal(await probeClaudeCliReachable(bin), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeClaudeCliReachable: a nonexistent binary -> false, never throws", async () => {
+  assert.equal(await probeClaudeCliReachable("/no/such/binary/sapwood-168"), false);
+});
+
+test("probeClaudeCliReachable: a hang past timeoutMs is killed and resolves false, never left dangling", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const start = Date.now();
+    assert.equal(await probeClaudeCliReachable(bin, 100), false);
+    assert.ok(Date.now() - start < 5_000, "resolved via the timeout, not by waiting out the 30s sleep");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeClaudeCliReachable: spends zero tokens/no -p prompt — invoked with exactly ['--version'], nothing else", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  const argsFile = join(dir, "args.txt");
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argsFile}"\nexit 0\n`);
+    await probeClaudeCliReachable(bin);
+    assert.equal(readFileSync(argsFile, "utf8").trim(), "--version");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 const sup = (dir: string, claudeBin: string, hasPr = false, worktreeRoot?: string) =>
   new WorkerSupervisor({
@@ -994,6 +1044,70 @@ test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — 
     const s = sup(dir, "claude"); // no dispatch/resume -> no in-memory Lane for this name
     const p = await s.probe(name);
     assert.equal(p.liveTelemetry, undefined, "a detached lane has no known baseline -> no live telemetry, never a guessed one");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #168: environment-failure failureText capture — probe() reads the SAME jsonl already used
+//    for terminalCostUsd/terminalModelUsage (no new capture mechanism), only for a FAILED lane.
+
+test("#168: probe() of a FAILED lane surfaces failureText from the jsonl (stdout+stderr merged)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-168-failed";
+    writeFileSync(
+      join(dir, `${name}.failed.json`),
+      JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0, exit_code: 1 }),
+    );
+    writeFileSync(
+      join(dir, `${name}.jsonl`),
+      `{"type":"system","subtype":"init"}\n` +
+        `API Error: 429 too many requests — rate_limit_error\n` + // raw stderr, non-JSON line
+        `{"type":"result","subtype":"error","is_error":true,"result":"request failed"}\n`,
+    );
+    const s = sup(dir, "claude"); // no live process — a static terminal sentinel + jsonl is enough
+    const p = await s.probe(name);
+    assert.equal(p.failed, true);
+    assert.ok(p.failureText?.includes("429 too many requests"), "raw non-JSON stderr lines are captured, not just parsed JSON fields");
+    assert.ok(p.failureText?.includes("rate_limit_error"));
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#168: probe() of a DONE (non-failed) lane never populates failureText", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-168-done";
+    writeFileSync(
+      join(dir, `${name}.done.json`),
+      JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0.01, exit_code: 0 }),
+    );
+    writeFileSync(join(dir, `${name}.jsonl`), `{"type":"result","subtype":"success","total_cost_usd":0.01}\n`);
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.equal(p.done, true);
+    assert.equal(p.failureText, undefined);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#168: failureText is tail-capped for a large jsonl — the classifiable error near the end still comes through", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-168-tail";
+    writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0 }));
+    const padding = "x".repeat(10_000);
+    writeFileSync(join(dir, `${name}.jsonl`), `${padding}\nCould not resolve host: github.com\n`);
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.ok(p.failureText && p.failureText.length <= 4000, "capped, not the whole 10k+ jsonl");
+    assert.ok(p.failureText?.includes("Could not resolve host"), "the tail (where the error actually is) survives the cap");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

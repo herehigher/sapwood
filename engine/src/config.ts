@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { DEFAULT_LLM_FAILURE_PATTERNS, DEFAULT_FORGE_FAILURE_PATTERNS } from "./env-failure.js";
 
 const Board = z.object({
   // Removes 0day's hard-coded PROJECT_NUMBER / user-vs-org / literal status names.
@@ -506,6 +507,33 @@ const Recovery = z.object({
   rollbackRetryCap: z.number().int().positive().default(5),
 }).strict();
 
+// #168: environment-failure park — detect (signature pattern sets per source), park, probe,
+// auto-resume, timed human escalation. User-tunable-in-config (same shipped-commented-YAML
+// precedent as labels.*/pricing.yaml): patterns are matched deterministically (env-failure.ts's
+// classifyEnvFailure — regex, case-insensitive) against a FAILED lane's own captured output
+// (worker.ts's stream-json jsonl, which already merges stdout+stderr onto one fd) — never an LLM
+// judgment call (issue #168 decision 2). Defaults are deliberately signature-shaped (API/CLI
+// error identifiers, full HTTP-error phrases) rather than bare words like "rate limit" — a
+// worker's own prose discussing "the rate limiter" or a test asserting "expected 429, got 500"
+// must NOT match (issue #168's required negative test case).
+const EnvFailure = z.object({
+  // Defaults live in env-failure.ts (the classifier's own module) so the shipped pattern set and
+  // the code that matches against it can never drift apart — this schema only wraps them in a
+  // user-overridable array default.
+  llmPatterns: z.array(z.string()).default([...DEFAULT_LLM_FAILURE_PATTERNS]),
+  forgePatterns: z.array(z.string()).default([...DEFAULT_FORGE_FAILURE_PATTERNS]),
+  // Park DURATION (not probe count — bounded exponential backoff makes a probe COUNT an
+  // ambiguous measure of elapsed time, issue #168 decision 3) past which the engine additionally
+  // notifies a human via the channel ladder (conductor.ts's escalatePark). Additive, never a
+  // state transition — probing continues unchanged, auto-resume still fires the instant a probe
+  // succeeds, escalated or not. Conservative default: 1h.
+  parkEscalateAfterSec: z.number().int().positive().default(3600),
+  // Bounded exponential backoff for the probe cadence while parked (env-failure.ts's
+  // probeBackoffSec): base * 2^attempts, capped at max.
+  probeBackoffBaseSec: z.number().int().positive().default(30),
+  probeBackoffMaxSec: z.number().int().positive().default(1800),
+}).strict();
+
 // Raw (untransformed) schema — kept internal. `goal.file` and `roles.architect.planMdPath` are
 // both still `.optional()` here (see their own doc comments); `ConfigSchema` below wraps this in
 // a `.transform(resolveGoalFile)` so EVERY caller of `ConfigSchema.parse`/`.safeParse` — not just
@@ -530,6 +558,7 @@ const ConfigSchemaRaw = z.object({
   merge: Merge.default({}),
   labels: Labels.default({}),
   roles: Roles.default({}),
+  envFailure: EnvFailure.default({}),
   escalation: z
     .object({ humanLabels: z.array(z.string()).default(["needs-human", "blocked"]) })
     .strict()

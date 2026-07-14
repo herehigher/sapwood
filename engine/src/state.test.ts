@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -954,4 +954,126 @@ test("spentUsdSince: sums spend_ledger rows at or after the cutoff, excludes ear
   assert.equal(s.spentUsdSince("2026-07-06T00:00:00.000Z"), 12);
   assert.equal(s.spentUsdSince("2999-01-01T00:00:00.000Z"), 0);
   s.close();
+});
+
+// ── #168: environment-failure park ──────────────────────────────────────────────────────────
+
+test("park: not parked initially; enterPark persists source/reason/triggerIssue/enteredAt", () => {
+  const s = mem();
+  assert.equal(s.isParked(), false);
+  assert.equal(s.parkState(), null);
+  const inserted = s.enterPark("llm", "rate_limit_error seen", 42, "2026-07-14T00:00:00Z");
+  assert.equal(inserted, true);
+  assert.equal(s.isParked(), true);
+  const p = s.parkState();
+  assert.equal(p?.source, "llm");
+  assert.equal(p?.reason, "rate_limit_error seen");
+  assert.equal(p?.triggerIssue, 42);
+  assert.equal(p?.enteredAt, "2026-07-14T00:00:00Z");
+  assert.equal(p?.lastProbeAt, null);
+  assert.equal(p?.probeAttempts, 0);
+  assert.equal(p?.escalatedAt, null);
+  s.close();
+});
+
+test("park: re-entering while already parked is a no-op (first detection wins, enteredAt never resets — storm-safe)", () => {
+  const s = mem();
+  s.enterPark("llm", "first reason", 1, "2026-07-14T00:00:00Z");
+  const insertedAgain = s.enterPark("forge", "a completely different reason", 2, "2026-07-14T01:00:00Z");
+  assert.equal(insertedAgain, false);
+  const p = s.parkState();
+  // Untouched: still the FIRST detection's fields.
+  assert.equal(p?.source, "llm");
+  assert.equal(p?.reason, "first reason");
+  assert.equal(p?.triggerIssue, 1);
+  assert.equal(p?.enteredAt, "2026-07-14T00:00:00Z");
+  s.close();
+});
+
+test("park: recordParkProbe(false) bumps probeAttempts and stamps lastProbeAt, stays parked", () => {
+  const s = mem();
+  s.enterPark("forge", "reason", null, "2026-07-14T00:00:00Z");
+  s.recordParkProbe(false, "2026-07-14T00:00:30Z");
+  let p = s.parkState();
+  assert.equal(p?.probeAttempts, 1);
+  assert.equal(p?.lastProbeAt, "2026-07-14T00:00:30Z");
+  s.recordParkProbe(false, "2026-07-14T00:01:00Z");
+  p = s.parkState();
+  assert.equal(p?.probeAttempts, 2);
+  assert.equal(p?.lastProbeAt, "2026-07-14T00:01:00Z");
+  assert.equal(s.isParked(), true);
+  s.close();
+});
+
+test("park: recordParkProbe(true) auto-resumes — clears the row outright", () => {
+  const s = mem();
+  s.enterPark("llm", "reason", 7, "2026-07-14T00:00:00Z");
+  s.recordParkProbe(false, "2026-07-14T00:00:30Z");
+  s.recordParkProbe(true, "2026-07-14T00:01:00Z");
+  assert.equal(s.isParked(), false);
+  assert.equal(s.parkState(), null);
+  s.close();
+});
+
+test("park: a fresh park episode after auto-resume starts with its own clean entered_at/probeAttempts", () => {
+  const s = mem();
+  s.enterPark("llm", "first episode", 1, "2026-07-14T00:00:00Z");
+  s.recordParkProbe(false, "2026-07-14T00:00:30Z");
+  s.recordParkProbe(true, "2026-07-14T00:01:00Z"); // resumes
+  const inserted = s.enterPark("forge", "second episode", 2, "2026-07-14T02:00:00Z");
+  assert.equal(inserted, true); // a genuinely fresh episode, not blocked by the old (cleared) row
+  const p = s.parkState();
+  assert.equal(p?.source, "forge");
+  assert.equal(p?.reason, "second episode");
+  assert.equal(p?.enteredAt, "2026-07-14T02:00:00Z");
+  assert.equal(p?.probeAttempts, 0);
+  s.close();
+});
+
+test("park: recordParkEscalation is a one-way latch, independent of continued probing", () => {
+  const s = mem();
+  s.enterPark("forge", "reason", null, "2026-07-14T00:00:00Z");
+  assert.equal(s.parkState()?.escalatedAt, null);
+  s.recordParkEscalation("2026-07-14T01:00:00Z");
+  assert.equal(s.parkState()?.escalatedAt, "2026-07-14T01:00:00Z");
+  // Probing continues unaffected — escalation is additive, never a state transition.
+  s.recordParkProbe(false, "2026-07-14T01:00:30Z");
+  assert.equal(s.parkState()?.escalatedAt, "2026-07-14T01:00:00Z"); // unchanged
+  assert.equal(s.parkState()?.probeAttempts, 1);
+  s.close();
+});
+
+test("park: clearPark manually resumes (independent of a successful probe)", () => {
+  const s = mem();
+  s.enterPark("llm", "reason", null, "2026-07-14T00:00:00Z");
+  s.clearPark();
+  assert.equal(s.isParked(), false);
+  s.close();
+});
+
+test("park: in-memory State has no data dir -> escalationMarkerPath is null; writeEscalationMarker is a safe no-op", () => {
+  const s = mem();
+  assert.equal(s.escalationMarkerPath(), null);
+  assert.doesNotThrow(() => s.writeEscalationMarker({ hello: "world" }));
+  assert.doesNotThrow(() => s.clearEscalationMarker());
+  s.close();
+});
+
+test("park: escalation marker is written to (and cleared from) the engine's own data dir, alongside the sentinels", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const s = new State(join(dir, "sapwood.sqlite"));
+    const p = s.escalationMarkerPath();
+    assert.ok(p && p.startsWith(dir));
+    assert.notEqual(p, s.killSwitchPath());
+    assert.notEqual(p, s.pausePath());
+    s.writeEscalationMarker({ source: "forge", reason: "gh outage" });
+    const written = JSON.parse(readFileSync(p!, "utf8"));
+    assert.equal(written.source, "forge");
+    s.clearEscalationMarker();
+    assert.equal(existsSync(p!), false);
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -5,7 +5,7 @@
 //
 // Uses Node's built-in node:sqlite (unflagged since Node 22.13 — see engines floor).
 // ponytail: zero native dep; if the API bites, swap to better-sqlite3 — same call shape.
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -276,6 +276,40 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN token_composition TEXT;
     `);
   },
+  // 11 -> 12: environment-failure park (#168). Singleton row (same pattern as engine_session/
+  // ceiling_breach above) — the CTO architecture directive for #168 is explicit: park state
+  // lives in the STATE DB, never a new control-sentinel file. This repo's locked partition is
+  // "SQLite = runtime-state machine; sentinels = human out-of-band controls (KILL_SWITCH/
+  // PAUSE)" — park state/reason/source/entered-at is runtime state the engine itself derives
+  // (an env-failure classification), not a human control input, so it belongs here. The direct
+  // payoff: an engine restart mid-park resumes probing (never dispatching) purely from normal
+  // state loading — conductor.ts's tick() just re-reads park_state() like any other row, no
+  // bespoke crash-recovery path needed.
+  //
+  // `source`/`reason`/`trigger_issue` are the FIRST detection's classification (see
+  // State.enterPark's INSERT OR IGNORE — re-detecting env-failure while already parked must not
+  // reset `entered_at`, or a storm of failures could push the duration-based escalation
+  // threshold out indefinitely). `last_probe_at`/`probe_attempts` back the bounded exponential
+  // backoff (env-failure.ts's probeBackoffSec/probeDue) — attempts is a COUNT for backoff math
+  // only, never itself the escalation trigger (issue #168 decision 3: escalation is
+  // duration-based, since backoff makes a probe count an ambiguous measure of elapsed time).
+  // `escalated_at` is a one-way latch: null until the duration-based human notification fires
+  // for THIS park episode, never re-fires after (additive, not a state transition — probing and
+  // auto-resume continue unaffected either way).
+  (db) => {
+    db.exec(`
+      CREATE TABLE park_state (
+        id             INTEGER PRIMARY KEY CHECK (id = 1),
+        source         TEXT NOT NULL,        -- llm | forge
+        reason         TEXT NOT NULL,
+        trigger_issue  INTEGER,
+        entered_at     TEXT NOT NULL,
+        last_probe_at  TEXT,
+        probe_attempts INTEGER NOT NULL DEFAULT 0,
+        escalated_at   TEXT
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -472,6 +506,21 @@ export interface PendingRollback {
   attempts: number;
   created_at: string;
   last_attempt_at: string | null;
+}
+
+export type EnvFailureSource = "llm" | "forge";
+
+/** #168: the current environment-failure park episode (state.ts's `park_state` singleton row —
+ *  see the schema v11->v12 migration comment for why this lives in the state DB, not a file
+ *  sentinel). `triggerIssue` is the issue whose lane failure caused this park, or null. */
+export interface ParkRow {
+  source: EnvFailureSource;
+  reason: string;
+  triggerIssue: number | null;
+  enteredAt: string;
+  lastProbeAt: string | null;
+  probeAttempts: number;
+  escalatedAt: string | null;
 }
 
 export class State {
@@ -853,6 +902,116 @@ export class State {
   isPauseActive(): boolean {
     const p = this.pausePath();
     return p != null && existsSync(p);
+  }
+
+  // ── Environment-failure park (#168) ─────────────────────────────────────────────────────
+  // Deliberately NOT a file sentinel (unlike killSwitchPath/pausePath above) — see the schema
+  // v11->v12 migration comment: this is engine-derived runtime state, not a human out-of-band
+  // control, so it belongs in the state DB. `sapwood status` and conductor.ts's tick() both read
+  // it fresh (parkState()/isParked()) — no caching, same "always live" property the file
+  // sentinels have via existsSync.
+
+  /** Enter the parked state. INSERT OR IGNORE — mirrors recordCeilingBreach: re-detecting an
+   *  env-failure while ALREADY parked must NOT reset `entered_at` (a storm of failing lanes, in
+   *  one tick or across many, must never keep pushing the duration-based escalation threshold
+   *  out). The first detection's source/reason/triggerIssue is what's recorded; a later
+   *  detection while parked is a no-op here (its own lane/issue disposition is still handled by
+   *  the caller — see conductor.ts's reclaimTerminalLane). Returns true iff THIS call actually
+   *  inserted the row, so a caller can fire a "park-entered" event exactly once per episode. */
+  enterPark(source: EnvFailureSource, reason: string, triggerIssue: number | null, now: string): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO park_state (id, source, reason, trigger_issue, entered_at, probe_attempts)
+         VALUES (1, ?, ?, ?, ?, 0)`,
+      )
+      .run(source, reason, triggerIssue, now);
+    return res.changes > 0;
+  }
+
+  /** The current park episode, or null when not parked. */
+  parkState(): ParkRow | null {
+    const row = this.db.prepare("SELECT * FROM park_state WHERE id = 1").get() as
+      | {
+          source: string; reason: string; trigger_issue: number | null; entered_at: string;
+          last_probe_at: string | null; probe_attempts: number; escalated_at: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      source: row.source as EnvFailureSource,
+      reason: row.reason,
+      triggerIssue: row.trigger_issue,
+      enteredAt: row.entered_at,
+      lastProbeAt: row.last_probe_at,
+      probeAttempts: row.probe_attempts,
+      escalatedAt: row.escalated_at,
+    };
+  }
+
+  isParked(): boolean {
+    return this.parkState() != null;
+  }
+
+  /** Record one probe attempt's outcome. `success: true` clears the row outright (auto-resume —
+   *  a LATER park, even of the same source, is a fresh episode with its own entered_at/backoff
+   *  count, never a continuation). `success: false` bumps probe_attempts and stamps
+   *  last_probe_at — env-failure.ts's probeBackoffSec/probeDue re-derive the next-due time from
+   *  these two fresh every tick, rather than persisting a separately-computed next-probe
+   *  timestamp, so a restart naturally resumes correct probing with no replay logic of its own. */
+  recordParkProbe(success: boolean, at: string): void {
+    if (success) {
+      this.clearPark();
+      return;
+    }
+    this.db
+      .prepare("UPDATE park_state SET last_probe_at = ?, probe_attempts = probe_attempts + 1 WHERE id = 1")
+      .run(at);
+  }
+
+  /** One-way latch: the duration-based human notification has fired for this park episode.
+   *  Never re-fires for the same episode (conductor.ts's escalatePark checks escalatedAt == null
+   *  before calling this) — additive, not a state transition: probing/auto-resume are unaffected
+   *  either side of this call. */
+  recordParkEscalation(at: string): void {
+    this.db.prepare("UPDATE park_state SET escalated_at = ? WHERE id = 1").run(at);
+  }
+
+  /** Auto-resume / manual clear: delete the park row outright. */
+  clearPark(): void {
+    this.db.prepare("DELETE FROM park_state WHERE id = 1").run();
+  }
+
+  /** #168: the LOCAL escalation fallback marker path — a file in the engine's OWN data dir,
+   *  alongside KILL_SWITCH/PAUSE for filesystem-layout convenience only. UNLIKE those two, this
+   *  file is written BY THE ENGINE (never a human control input) and is read-only informational
+   *  output: nothing in this codebase ever reads it back as a decision input (isParked/
+   *  parkState() consult only the park_state SQLite row above) — a human/dashboard can `cat` it
+   *  to see the last local-fallback escalation without a forge round-trip, during exactly the
+   *  window (forge itself unreachable) where a forge-side notification isn't possible. null dir
+   *  (in-memory State, tests) -> no path, same convention as killSwitchPath/pausePath. */
+  escalationMarkerPath(): string | null {
+    return this.dataDir ? join(this.dataDir, "ESCALATION") : null;
+  }
+
+  /** Write the local escalation fallback marker (#168's channel-ladder local branch,
+   *  conductor.ts's escalatePark). Best-effort content only — this is a side-channel output, not
+   *  sapwood state; the caller does not treat a write failure here as a park/probe failure. */
+  writeEscalationMarker(payload: Record<string, unknown>): void {
+    const p = this.escalationMarkerPath();
+    if (!p) return;
+    writeFileSync(p, JSON.stringify(payload, null, 2) + "\n");
+  }
+
+  /** Best-effort removal of a stale escalation marker once the episode it described has
+   *  resolved (conductor.ts clears it on auto-resume) — a missing file is not an error. */
+  clearEscalationMarker(): void {
+    const p = this.escalationMarkerPath();
+    if (!p) return;
+    try {
+      rmSync(p, { force: true });
+    } catch {
+      /* noop */
+    }
   }
 
   close(): void {

@@ -9,9 +9,9 @@ import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.js";
 import { init, InitError } from "./init.js";
-import { State, SCHEMA_VERSION, type WorkerRow } from "./state.js";
+import { State, SCHEMA_VERSION, type WorkerRow, type ParkRow } from "./state.js";
 import { GithubForge, type IForge, type Issue } from "./forge.js";
-import { WorkerSupervisor, buildRenderPrompt } from "./worker.js";
+import { WorkerSupervisor, buildRenderPrompt, discoverClaudeBin, probeClaudeCliReachable } from "./worker.js";
 import { loadPricingTable } from "./pricing.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
@@ -392,6 +392,10 @@ export interface StatusSnapshot {
   /** null when no config could be loaded — reported as "unknown", never a fabricated default. */
   lanesMax: number | null;
   dailyBudgetUsd: number | null;
+  /** #168: the current environment-failure park episode, or null when not parked. Read straight
+   *  off state.ts's park_state row (State.parkState()) — same "always live, no caching" property
+   *  every other sentinel/flag on this snapshot has. */
+  parked: ParkRow | null;
 }
 
 export function formatStatus(s: StatusSnapshot): string {
@@ -420,6 +424,17 @@ export function formatStatus(s: StatusSnapshot): string {
       ? `ceiling breach: ${s.ceilingBreach.reasons.join(", ")} (since ${s.ceilingBreach.at.toISOString()})`
       : "ceiling breach: none",
   );
+  if (s.parked) {
+    const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(s.parked.enteredAt)) / 1000));
+    lines.push(
+      `park: PARKED (${s.parked.source}) since ${s.parked.enteredAt} (${durationSec}s) — ` +
+        `reason: ${s.parked.reason} — no new dispatch; in-flight lanes proceed normally; ` +
+        `probing on backoff, auto-resumes on the first successful probe` +
+        (s.parked.escalatedAt ? ` — escalated to a human at ${s.parked.escalatedAt}` : ""),
+    );
+  } else {
+    lines.push("park: inactive");
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -473,6 +488,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       dailySpendUsd: state.dailySpendUsd(new Date()),
       lanesMax: cfg?.lanes.max ?? null,
       dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
+      parked: state.parkState(),
     };
     return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
   } finally {
@@ -734,8 +750,12 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // engine-wide daily/wall-clock/kill-switch ceiling (cfg.cost.dailyBudgetUsd /
   // maxWallClockSec / KILL_SWITCH) is fully live regardless — that's the actual hard safety
   // boundary; roundBudgetUsd is a softer per-round throttle.
+  // #168: the real LLM-source park probe — the cheapest possible check (`claude --version`, no
+  // API call), resolved against the SAME claude binary WorkerSupervisor's dispatch() would use.
+  const probeLlmReachable = (): Promise<boolean> => probeClaudeCliReachable(discoverClaudeBin(process.env));
   const result = await runDriver({
     forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, stopMode, stop,
+    probeLlmReachable,
   });
   // #76: name the condition that fired BEFORE the generic stop-summary line, when one did.
   if (result.stopCondition) {
@@ -777,8 +797,11 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
   await assertStopMilestoneExists(forge, stop);
   console.log(`sapwood run: driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
+  // #168: same real LLM-source probe as the tick driver above.
+  const probeLlmReachable = (): Promise<boolean> => probeClaudeCliReachable(discoverClaudeBin(process.env));
   const result = await runRounds({
     forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, peripherals, stop,
+    probeLlmReachable,
     ...(overrides.sleep !== undefined ? { sleep: overrides.sleep } : {}),
     ...(overrides.registerSignals !== undefined ? { registerSignals: overrides.registerSignals } : {}),
     ...(overrides.onRoundPhase !== undefined ? { onRoundPhase: overrides.onRoundPhase } : {}),

@@ -82,6 +82,68 @@ merges are frozen and running workers are being drained. Recovery:
 If a drain escalated to a hard kill (the drain window elapsed before a worker handed
 off), that lane's issue/PR will carry `needs-human` — see above.
 
+## Environment-failure park (#168)
+
+A failure whose captured output matches an environment-failure signature — an LLM-provider
+issue (429 / usage-limit / credit-exhausted) or a forge issue (network unreachable / 5xx / `gh`
+auth errors) — is treated as a fault in *sapwood's own environment*, not in the task the worker
+was doing. This is deliberately a **different** class from an ordinary task failure or the
+kill switch above: the engine never applies `needs-human` and never spends a gated-reentry
+attempt for it — the affected issue goes straight back to `Ready` untouched, and the engine
+**parks** instead: new dispatch stops, but in-flight lanes keep running/draining exactly as
+normal (the same "only DISPATCH is gated" behavior as `PAUSE`, not the kill switch's harder
+freeze-and-drain).
+
+**What a parked engine looks like:**
+
+```
+$ sapwood status
+...
+park: PARKED (forge) since 2026-07-14T09:12:03.000Z (612s) — reason: could not resolve host —
+  no new dispatch; in-flight lanes proceed normally; probing on backoff, auto-resumes on the
+  first successful probe
+```
+
+- `source` is `llm` or `forge` — which upstream tripped the signature match.
+- `reason` is a short excerpt of the matched failure text.
+- The duration shown is wall-clock since the FIRST detection in this episode — a storm of
+  further env-failures while already parked does not reset this clock.
+
+**What sapwood does on its own (no action needed for a transient outage):** while parked, the
+engine probes the failed source on a bounded exponential backoff
+(`envFailure.probeBackoffBaseSec` doubling up to `probeBackoffMaxSec`) and auto-resumes dispatch
+the instant a probe succeeds — the parked issue(s) are re-dispatched on that same tick. Most
+outages (a `gh` blip, a temporary rate-limit window) resolve this way with zero human
+involvement.
+
+**When a human IS notified:** if the park's *duration* (not probe count — backoff makes a count
+an ambiguous measure of elapsed time) exceeds `envFailure.parkEscalateAfterSec` (default 1h),
+sapwood additionally notifies a human — this is **additive**, never a state change: probing
+keeps going, and an auto-resume still fires normally afterward even after an escalation fired.
+The channel depends on what's actually reachable:
+
+- **Forge reachable** (an `llm`-sourced park) — a comment on the issue that triggered the park.
+- **Forge unreachable** (a `forge`-sourced park) — sapwood cannot safely write to GitHub, so it
+  falls back to **local-only** signals: `sapwood status` (above), a plain-text `ESCALATION` file
+  in the engine's data dir (`data/ESCALATION` by default) written by the engine — informational
+  output only, never read back as a control input, unlike `KILL_SWITCH`/`PAUSE` — and a
+  `[sapwood:park]` log line. Zero GitHub writes are attempted on this path.
+
+**What to do:**
+
+1. Run `sapwood status` (or `cat data/ESCALATION` if the forge itself is down) to see the
+   source/reason/duration.
+2. If the underlying outage is a known, expected one (a GitHub incident, an account-level rate
+   limit reset time you already know), you can just wait — sapwood keeps probing and resumes on
+   its own.
+3. If you fix the underlying problem yourself (renew a `gh` token, restore network, wait out a
+   credit/usage window), no action is needed on sapwood's side either — the next scheduled probe
+   picks up the recovery and auto-resumes.
+4. There is no manual "unpark" flag — recovery is always evidenced by a successful probe. If you
+   need to force a resume, restart the engine (a restart does not lose the park state or its
+   duration clock — it resumes probing, not dispatching — but does not, on its own, clear a
+   still-genuinely-broken environment either).
+
 ## Tick errors (`sapwood status` / run summary)
 
 `sapwood run`'s exit line reports a tick-error count:
