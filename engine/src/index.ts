@@ -1,4 +1,4 @@
-export { ConfigSchema, loadConfig, parseConfig, type SapwoodConfig } from "./config.js";
+export { ConfigSchema, loadConfig, parseConfig, type SapwoodConfig } from "./config/config.js";
 export {
   GithubForge,
   parsePRStatus,
@@ -16,7 +16,7 @@ export {
   type PRReview,
   type PRReaction,
   type PRReviewData,
-} from "./forge.js";
+} from "./forge/forge.js";
 export {
   State,
   SCHEMA_VERSION,
@@ -27,7 +27,7 @@ export {
   type RoundPhase,
   type RoundRow,
   type RoundStatus,
-} from "./state.js";
+} from "./state/state.js";
 export {
   tick,
   orderForDispatch,
@@ -57,7 +57,7 @@ export {
   type CeilingReason,
   type MergeGate,
   type DrivenOutcome,
-} from "./conductor.js";
+} from "./loop/conductor.js";
 export {
   CodexReviewer,
   HumanReviewer,
@@ -84,7 +84,7 @@ export {
   type ReviewFallbackLock,
   type ReviewFailoverTransition,
   type ReviewFailoverResult,
-} from "./reviewer.js";
+} from "./roles/reviewer.js";
 export {
   MergeDriver,
   deriveGate,
@@ -92,7 +92,7 @@ export {
   type Gate,
   type DriveOutcome,
   type MergeDriverDeps,
-} from "./merge-driver.js";
+} from "./roles/merge-driver.js";
 export {
   WorkerSupervisor,
   parseCostUsd,
@@ -106,7 +106,7 @@ export {
   buildRenderPrompt,
   type WorkerDeps,
   type ClaudeArgsOpts,
-} from "./worker.js";
+} from "./roles/worker.js";
 export {
   runDriver,
   type DriverDeps,
@@ -116,7 +116,7 @@ export {
   type StopConfig,
   type StopConditionName,
   type StopConditionHit,
-} from "./driver.js";
+} from "./loop/driver.js";
 export {
   runRounds,
   noopPeripheralStub,
@@ -126,13 +126,13 @@ export {
   type PeripheralStub,
   type PeripheralPhase,
   type RoundStopHit,
-} from "./round.js";
+} from "./loop/round.js";
 export {
   createDefaultPeripherals,
   type DefaultPeripheralsDeps,
-} from "./round-defaults.js";
-export { gh, ghText, type GhRunner } from "./gh.js";
-export { guardDecision, safeSplit, type Decision, type GuardInput } from "./guard.js";
+} from "./loop/round-defaults.js";
+export { gh, ghText, type GhRunner } from "./forge/gh.js";
+export { guardDecision, safeSplit, type Decision, type GuardInput } from "./guard/guard.js";
 export {
   hookResponse,
   responseFromText,
@@ -140,7 +140,7 @@ export {
   applyGuardMode,
   type DenyOutput,
   type GuardMode,
-} from "./guard-hook.js";
+} from "./guard/guard-hook.js";
 export {
   init,
   preflight,
@@ -151,4 +151,4 @@ export {
   type InitDeps,
   type InitResult,
   type LabelSpec,
-} from "./init.js";
+} from "./loop/init.js";

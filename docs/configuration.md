@@ -3,7 +3,7 @@
 sapwood is configured by `sapwood.config.yaml` in the repo it operates on. The file is
 YAML (with inline comments), but the loader also accepts JSON (`sapwood.config.json`) —
 YAML is a superset of JSON, so no separate parser is needed. Config is validated with a
-strict [Zod](https://zod.dev) schema (`engine/src/config.ts`): **unknown keys are a
+strict [Zod](https://zod.dev) schema (`engine/src/config/config.ts`): **unknown keys are a
 validation error**, not a silently-dropped typo, and every numeric ceiling rejects
 non-finite values (so `1e999` can't silently disable a budget cap).
 

@@ -98,7 +98,7 @@ its allowedTools (#111, shipped in two halves):
   round start) *before* the session runs, bounded by a hard, deterministically-
   truncated character cap (`roles.retro.digestMaxChars`), and substitutes it into the
   prompt. See [`configuration.md`](configuration.md#roles) for the config key and
-  `engine/src/retro-digest.ts` for the assembly.
+  `engine/src/retro/retro-digest.ts` for the assembly.
 - **Write side (#111 PR-B):** PR creation originates in engine TypeScript, never in
   the session. The session's job ends at commit+push: it writes its intended PR
   (branch/title/body — or an explicit `none` for a quiet round) to a fixed scratch
@@ -174,7 +174,7 @@ and `--resume` takes effect on the very next tick.
 The engine's `data/` directory (which holds both sentinels and the state DB) sits
 outside worker git worktrees as a **permission-layer boundary** — the worker process is
 not launched with `--add-dir data`, so it has no `claude`-tool path into that directory.
-This is **not an OS-level sandbox**, so the guard (`engine/src/guard.ts`) adds
+This is **not an OS-level sandbox**, so the guard (`engine/src/guard/guard.ts`) adds
 defense-in-depth (#81) on top of that boundary: any `Write`/`Edit` targeting
 `data/KILL_SWITCH` or `data/PAUSE` (including via relative traversal, e.g.
 `../../data/PAUSE`) is denied, as is `Bash` `touch`/`rm`/`mv`/`git rm`/redirect-to-path
@@ -251,7 +251,7 @@ not whether it was any good — and `verify:n/a` was self-declared by whoever wr
 issue. A 2026-07-09 amendment to Decision #8 (locked in issue #77's comments) closes
 that gap: a plan must also pass agent quality review before dispatch.
 
-`getReadyIssues` (`engine/src/forge.ts`) now requires, for any issue not labelled
+`getReadyIssues` (`engine/src/forge/forge.ts`) now requires, for any issue not labelled
 `verify:n/a`, **both** a verification-plan section in the body **and** the
 `plan:approved` label — plan presence alone no longer dispatches. `verify:n/a` still
 routes through the doc-gate path, but only when `needs-human` is absent: the

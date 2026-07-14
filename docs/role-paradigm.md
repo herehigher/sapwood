@@ -1,12 +1,12 @@
 # The role paradigm
 
 For the six peripheral roles below, sapwood's deterministic engine (`runRounds`,
-`engine/src/round.ts`) is the only piece of code that ever writes to GitHub on their
+`engine/src/loop/round.ts`) is the only piece of code that ever writes to GitHub on their
 behalf — each role session is a scoped, bounded subordinate whose judgment reaches
 GitHub only through the engine (#110). The **worker is the explicit exception** and is
 out of this doc's scope: worker sessions hold real write grants
 (`Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),...`, with only
-`Bash(gh pr merge*)`/`Bash(gh pr ready*)` deny-listed — `engine/src/worker.ts:211-212`,
+`Bash(gh pr merge*)`/`Bash(gh pr ready*)` deny-listed — `engine/src/roles/worker.ts:211-212`,
 noise-reduction only) and open their own PRs; their actual boundary is tier 2 of the
 ladder below, the fail-closed guard hook intercepting merge/approve/ready — see
 [`security.md`](security.md). This doc is the contract every peripheral role session
@@ -48,9 +48,9 @@ Principle 4). Every role's writes sit at exactly one tier; prefer moving a futur
 role's writes UP this ladder over adding a pattern-level deny.
 
 1. **Unreachable** — no tool channel exists at all. All six peripheral roles in this
-   doc hold `ROLE_ALLOWED_TOOLS = ""` (`engine/src/peripheral.ts:42`) or the
+   doc hold `ROLE_ALLOWED_TOOLS = ""` (`engine/src/roles/peripheral.ts:42`) or the
    worker-class-but-`gh`-free `RETRO_ALLOWED_TOOLS`
-   (`engine/src/retro.ts:68`, no `gh` entry) — there is no shell for the session to
+   (`engine/src/retro/retro.ts:68`, no `gh` entry) — there is no shell for the session to
    reach `gh` through, so a whole bypass class (short-flag aliases, quoting escapes)
    is structurally moot rather than pattern-denied (#110; see
    [`security.md`](security.md#issues-only-role-sessions-carry-no-shell-110)). This is
@@ -82,7 +82,7 @@ validated output.
 ## Marker idempotency (rerun-not-resume)
 
 Every role implements `round.ts`'s `PeripheralStub` contract
-(`engine/src/round.ts:50-52`):
+(`engine/src/loop/round.ts:50-52`):
 
 ```ts
 run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }): Promise<{ marker: string }>
@@ -120,9 +120,9 @@ dispatchable again) rather than risking duplicate sessions/writes on a resume.
 
 | Element | Detail |
 |---|---|
-| Responsibility | Round-open goal decomposition (`align` mode: reads the north-star goal file + round milestone, creates new issues) and a round-start plan-triage pass (`triage` mode: drafts a verification plan directly into an existing plan-less issue's body). Runs first in the round sequence. `engine/src/align.ts:240` `createAligningStub`. |
-| Write scope | Tier 1 (unreachable): `PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS = ""` (`engine/src/peripheral.ts:42,63`) — no tool grant of any kind. Tier 3 choke point: `align.ts:createAligningStub` (`engine/src/align.ts:240`) is the only caller of `forge.createIssue`/`forge.addLabel`/`forge.updateIssueBody`/`forge.addIssueComment` on the PO's behalf. A created issue's `(title, body)` signature has no label field — structurally cannot carry `plan:approved`/`verify:n/a` at creation. Never calls `forge.setBoardStatus` — locked decision "only a human confirms Ready" holds structurally, not by convention. |
-| Marker idempotency | `alignMarker(roundId)` (`engine/src/align.ts:46`), the standard `<!-- sapwood:round:N:aligning -->` convention. Round-phase granularity; additionally, triage is naturally per-issue idempotent — a successfully drafted issue carries a plan section and no longer matches `getIssuesNeedingPlanTriage`'s candidate query on a later run (`align.ts:327-330`). |
+| Responsibility | Round-open goal decomposition (`align` mode: reads the north-star goal file + round milestone, creates new issues) and a round-start plan-triage pass (`triage` mode: drafts a verification plan directly into an existing plan-less issue's body). Runs first in the round sequence. `engine/src/loop/align.ts:240` `createAligningStub`. |
+| Write scope | Tier 1 (unreachable): `PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS = ""` (`engine/src/roles/peripheral.ts:42,63`) — no tool grant of any kind. Tier 3 choke point: `align.ts:createAligningStub` (`engine/src/loop/align.ts:240`) is the only caller of `forge.createIssue`/`forge.addLabel`/`forge.updateIssueBody`/`forge.addIssueComment` on the PO's behalf. A created issue's `(title, body)` signature has no label field — structurally cannot carry `plan:approved`/`verify:n/a` at creation. Never calls `forge.setBoardStatus` — locked decision "only a human confirms Ready" holds structurally, not by convention. |
+| Marker idempotency | `alignMarker(roundId)` (`engine/src/loop/align.ts:46`), the standard `<!-- sapwood:round:N:aligning -->` convention. Round-phase granularity; additionally, triage is naturally per-issue idempotent — a successfully drafted issue carries a plan section and no longer matches `getIssuesNeedingPlanTriage`'s candidate query on a later run (`align.ts:327-330`). |
 | Output schema + validation | Two independent zod schemas around the shared sentinel shape: `AlignMetadataSchema` (`align.ts:95`, array of `{title}`, per-issue bodies split from the BODY block via a nested `<<<ISSUE>>>`/`<<<END_ISSUE>>>` convention, `splitAlignIssueBodies`, `align.ts:110`) and `TriageMetadataSchema` (`align.ts:96`, `{issue}` + full revised body). `validateAlignOutput` (`align.ts:139`) rejects duplicate titles in one batch outright. `validateTriageOutput` (`align.ts:185`) deliberately does NOT content-check for a verification-plan section — a planless draft is a normal per-issue outcome (fenced `needs-human`/re-matched next round), not an invalid session attempt. |
 | Escalation path | Advisory, degrade-and-proceed — pre-Ready, low stakes. A session that fails twice or never validates fires `po-degraded` (align mode) or `triage-degraded` (triage mode) as a durable state event plus a stderr line (`align.ts:207-217`, via `peripheral.ts`'s shared `runSessionWithRetry`); the round is never wedged, and the next round retries naturally. A schema-valid-but-still-planless triage draft is its OWN degradation shape (`triage-degraded`, `no-plan-after-draft`, `align.ts:386-392`) — distinct from a malformed/failed session. |
 
@@ -130,7 +130,7 @@ dispatchable again) rather than risking duplicate sessions/writes on a resume.
 
 | Element | Detail |
 |---|---|
-| Responsibility | One cross-issue design/review pass between goal alignment and dispatch: reads the round's whole candidate batch (issues awaiting gate⓪) plus the north-star goal file's `## Architecture` chapter, produces a round design note, and flags any candidate whose approach contradicts locked architecture (comment; `blocked` label if severe). `engine/src/architect.ts:306` `createArchitectStub`. |
+| Responsibility | One cross-issue design/review pass between goal alignment and dispatch: reads the round's whole candidate batch (issues awaiting gate⓪) plus the north-star goal file's `## Architecture` chapter, produces a round design note, and flags any candidate whose approach contradicts locked architecture (comment; `blocked` label if severe). `engine/src/roles/architect.ts:306` `createArchitectStub`. |
 | Write scope | Tier 1 (unreachable): no tool grant (`ROLE_ALLOWED_TOOLS = ""`). Tier 3 choke point: `architect.ts:createArchitectStub` (`architect.ts:306`) is the sole caller of `forge.addIssueComment`/`forge.addLabel(blocked)` for this role. **The one role whose session chooses write TARGETS from a pool** (every other role writes only what it was dispatched for) — `validateArchitectOutput` (`architect.ts:236`) independently verifies every flagged issue number is a member of the exact candidate set the session's prompt showed it, fail-closed and atomic: one out-of-set number invalidates the WHOLE output, never a partial apply (`architect.ts:271-279`). |
 | Marker idempotency | `architectMarker(roundId)` (`architect.ts:77`), standard convention. No candidates this round → marker set, no session run at all (`architect.ts:326`). |
 | Output schema + validation | `ArchitectMetadataSchema` (`architect.ts:166`, `contradictions: [{issue, severe}]`); free-text design note + per-issue explanations travel in the BODY block via an architect-owned `<<<CONTRADICTION #N>>>` sub-delimiter, parsed by `parseArchitectBody` (`architect.ts:191`) with its own fail-closed containment (empty design note, empty/duplicate section, or a residual embedded sub-delimiter after split all reject). `validateArchitectOutput` (`architect.ts:236`) chains: schema → non-empty body → sub-format parse → metadata/body section-set match → the candidate-set invariant. |
@@ -146,7 +146,7 @@ applies a label or approves. `roles.planReviewer.enabled` (`config.ts:237`) is
 gate⓪'s ONE unit switch — the drafter has no `enabled` toggle of its own because it
 only ever runs from inside the plan_review phase (`round-defaults.ts:109-110`).
 
-**The cycle** (`engine/src/plan-review.ts:279` `reviewOneIssue`, one per Ready-lane
+**The cycle** (`engine/src/roles/plan-review.ts:279` `reviewOneIssue`, one per Ready-lane
 candidate issue): the reviewer session judges the issue's CURRENT body (refetched
 every cycle, never a phase-start snapshot — `plan-review.ts:318-320`) and returns one
 of three decisions: `approve` (write any body revision, apply `plan:approved`, done),
@@ -171,7 +171,7 @@ bounds the loop — at the bound, the engine escalates rather than cycling forev
 
 | Element | Detail |
 |---|---|
-| Responsibility | Round-close summary: briefs the round's needs-human issues with round context (a few lines each, not a report). The write-target BOUND is closed-form pre-session — the engine-built round artifact (`round-artifact.ts`) computes the `needsHuman` set from the durable ledger BEFORE the session runs; the session may brief any subset of that set, including none (an empty `comments` array is valid — the phase closes normally, no degradation event), but never an issue OUTSIDE it. `engine/src/harvest.ts:227` `createHarvestStub`. |
+| Responsibility | Round-close summary: briefs the round's needs-human issues with round context (a few lines each, not a report). The write-target BOUND is closed-form pre-session — the engine-built round artifact (`round-artifact.ts`) computes the `needsHuman` set from the durable ledger BEFORE the session runs; the session may brief any subset of that set, including none (an empty `comments` array is valid — the phase closes normally, no degradation event), but never an issue OUTSIDE it. `engine/src/loop/harvest.ts:227` `createHarvestStub`. |
 | Write scope | Tier 1 (unreachable): no tool grant, plus an explicit `HARVEST_DISALLOWED_TOOLS` (`harvest.ts:59`, denies `gh issue edit*` — regression trip-wire; harvest writes comments only, never a label or body edit). Tier 3 choke point: `harvest.ts:createHarvestStub` (`harvest.ts:227`) is the sole caller of `forge.addIssueComment` for this phase; every target is set-checked against the pre-computed `needsHumanIssues` list. |
 | Marker idempotency | `harvestMarker(roundId)` (`harvest.ts:78`), standard convention. No needs-human issues to brief → no session run, but the phase still closes with its marker set (`harvest.ts:230,243`). |
 | Output schema + validation | `HarvestMetadataSchema` (`harvest.ts:137`, `comments: [{issue, body}]`) validated by `validateHarvestOutput` (`harvest.ts:170`) — schema PLUS a set cross-check: every `issue` must be inside the engine's pre-computed `needsHumanIssues` set, or the WHOLE batch fails (never a partial apply); duplicate issue numbers in one batch are also rejected outright. An empty `comments` array is valid ("nothing to brief" is a legitimate outcome). |
@@ -181,7 +181,7 @@ bounds the loop — at the bound, the engine escalates rather than cycling forev
 
 | Element | Detail |
 |---|---|
-| Responsibility | Self-evolution / retrospective: analyzes the round's engine-built digest (PR diffs, review signals, escalated-issue comments/labels, commits since round start — `retro-digest.ts`'s `buildRetroDigest`) and proposes prompt/config/doc improvements EXCLUSIVELY as a PR through the normal gate② path, never a direct write. Cadence-gated by `roles.retro.everyNRounds` (default 1). `engine/src/retro.ts:249` `createRetroStub`. |
+| Responsibility | Self-evolution / retrospective: analyzes the round's engine-built digest (PR diffs, review signals, escalated-issue comments/labels, commits since round start — `retro-digest.ts`'s `buildRetroDigest`) and proposes prompt/config/doc improvements EXCLUSIVELY as a PR through the normal gate② path, never a direct write. Cadence-gated by `roles.retro.everyNRounds` (default 1). `engine/src/retro/retro.ts:249` `createRetroStub`. |
 | Write scope | **The one role NOT at tier 1** — retro is worker-class (needs real git: branch/commit/push inside its own ephemeral worktree), so its containment is narrower-but-still-strong: `RETRO_ALLOWED_TOOLS` (`retro.ts:68`) grants `Read/Write/Edit/MultiEdit` + local git only, with **zero `gh` entries of any kind** (#111 PR-B removed the last one, `gh pr create`) — `RETRO_DISALLOWED_TOOLS` (`retro.ts:89`) denies pushing to `main`/`master` by name plus every merge/review/approve/edit `gh` verb as a regression trip-wire. Tier 3 choke point: `openProposalPR` (`retro.ts:351`) is the sole caller of `forge.openPR`, and only after an engine-side `forge.branchExists` read verifies the session's claimed push — a session's claim is never trusted as evidence by itself. |
 | Marker idempotency | `retroMarker(roundId)` (`retro.ts:172`), standard convention. A round whose id isn't a multiple of `everyNRounds` skips the session but still sets the marker (`retro.ts:254`) — the phase always closes. **Known gap** (documented in `retro.ts`'s module doc, `retro.ts:242-248`): unlike every issues-only role, retro's ephemeral worktree is unconditionally deleted after the session (`peripheral.ts`), so a session that crashes after editing but before push loses that attempt's draft silently — accepted as low-risk (nothing destructive proposed; next round's retro tries again from the same history), not yet given #69-style dirty-worktree retention. |
 | Output schema + validation | NOT the JSON sentinel block — a fixed scratch file (`RETRO_SCRATCH_FILE = ".sapwood-retro-pr"`, `retro.ts:117`) the session writes mid-session (survives a truncated final message). `parseRetroScratch` (`retro.ts:141`) fail-closed parses either the literal `none` (explicit quiet round) or a labeled `branch:`/`title:`/body proposal, with `invalidBranchReason` (`retro.ts:128`) checking ref-safety, no `..` traversal, and refusing the default branch by name. A missing file is `invalid`, not "quiet round" — the prompt requires the file always be written. |
@@ -197,7 +197,7 @@ bounds the loop — at the bound, the engine escalates rather than cycling forev
   fails closed on any ambiguity (truncated block, trailing content, an embedded
   sentinel inside the body) — never a partial/best-guess slice.
 - **`RoleRunner` and `runSessionWithRetry`.** Every role reuses `engine/src/
-  peripheral.ts`'s `RoleRunner` to spawn its session (one bounded `await`, no
+  roles/peripheral.ts`'s `RoleRunner` to spawn its session (one bounded `await`, no
   probe/resume — a role session never has real work-in-progress, so its worktree is
   always safe to delete afterward) and its shared `runSessionWithRetry` helper
   (`peripheral.ts:387`) for the retry-once-then-degrade mechanics: a session's own
