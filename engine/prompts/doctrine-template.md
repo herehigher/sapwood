@@ -35,6 +35,17 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   timestamps, for resumable reads. A resumed drain must never re-dispatch what an earlier attempt
   already dispatched. Reruns must be idempotent — update-in-place, never a counter derived from
   how many times a probe happened to run.
+- **Safety-layer cross-check rule.** Any new engine state machine or dispatch path must be
+  reviewed against each existing safety layer — kill switch, pause, cost/wall-clock ceiling, and
+  both drain paths (graceful handoff and hard escalation) — one at a time: what does this
+  mechanism do while that layer is active, and what does that layer's firing do to this
+  mechanism's state? (From #168: paid probes running past a breached ceiling, and drains either
+  falsely clearing or permanently wedging a canary episode, were all misses of exactly this
+  cross-product.)
+- **Unwired-function rule.** A shipped recovery/cleanup function with zero production callers is
+  a defect, not a reserve: verify every new cleanup, resume, or clear entry point has a live
+  caller on the path that needs it. (Recurring class: `supervisor.resume()` in #172,
+  `clearEscalationMarker()` in #168's first round.)
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
