@@ -35,6 +35,10 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   timestamps, for resumable reads. A resumed drain must never re-dispatch what an earlier attempt
   already dispatched. Reruns must be idempotent — update-in-place, never a counter derived from
   how many times a probe happened to run.
+- **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
+  be prominently flagged in review, with a recommendation to route it needs-human rather than
+  auto-merge. The reviewer evaluates such a PR under the doctrine loaded from the default branch,
+  so the change cannot approve itself — but a human should still confirm rule changes.
 
 ## Adjudication doctrine
 
