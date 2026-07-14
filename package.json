@@ -3,12 +3,20 @@
   "private": true,
   "version": "0.0.0",
   "description": "sapwood — the autonomous coding loop with governance built in",
-  "workspaces": ["engine"],
-  "engines": { "node": ">=24.0.0" },
+  "workspaces": [
+    "engine"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "typecheck": "npm run -ws typecheck",
+    "lint": "biome ci .",
     "test": "npm run -ws test",
     "build": "npm run -ws build"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.5.3"
+  }
 }

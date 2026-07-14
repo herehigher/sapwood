@@ -8,6 +8,7 @@
   "bin": { "sapwood": "dist/cli.js" },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "biome ci src",
     "build": "tsc",
     "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
