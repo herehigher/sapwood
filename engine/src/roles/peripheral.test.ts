@@ -1,18 +1,26 @@
 // peripheral.test.ts (#87): the role runner — a stub `claude` binary (zero token, same
 // integration style as worker.test.ts) drives the real spawn/sentinel/timeout/cost-parse path.
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { mkdtempSync, writeFileSync, chmodSync, existsSync, readFileSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import {
-  RoleRunner, ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, PLAN_DRAFTER_DISALLOWED_TOOLS,
-  PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry,
-  type RoleRunnerDeps, type RoleSessionOpts, type RoleSessionResult, type RetriedSession,
+  PLAN_DRAFTER_DISALLOWED_TOOLS,
+  PO_ALLOWED_TOOLS,
+  PO_DISALLOWED_TOOLS,
+  type RetriedSession,
+  ROLE_ALLOWED_TOOLS,
+  ROLE_DISALLOWED_TOOLS,
+  RoleRunner,
+  type RoleRunnerDeps,
+  type RoleSessionOpts,
+  type RoleSessionResult,
+  runSessionWithRetry,
 } from "./peripheral.js";
 import { validateReviewerOutput } from "./plan-review.js";
-import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
@@ -42,8 +50,13 @@ const mkHook = (dir: string): string => {
 
 const mkRunner = (dir: string, claudeBin: string, over: Partial<RoleRunnerDeps> = {}): RoleRunner =>
   new RoleRunner({
-    cfg, stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin,
-    heartbeatMs: 50, guardHookPath: mkHook(dir), ...over,
+    cfg,
+    stateDir: dir,
+    worktreeRoot: join(dir, "worktrees"),
+    claudeBin,
+    heartbeatMs: 50,
+    guardHookPath: mkHook(dir),
+    ...over,
   });
 
 test("run: stub claude exits 0 -> outcome done, cost/model usage parsed, running sentinel cleared", async () => {
@@ -89,8 +102,12 @@ test("run: wall-clock timeout kills the tree -> outcome timeout, tagged as a .fa
       worker: { timeoutSec: 1 }, // fires on the first heartbeat tick after 1s elapsed
     });
     const runner = new RoleRunner({
-      cfg: tcfg, stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin: bin,
-      heartbeatMs: 100, guardHookPath: mkHook(dir),
+      cfg: tcfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 100,
+      guardHookPath: mkHook(dir),
     });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
     assert.equal(result.outcome, "timeout");
@@ -120,20 +137,20 @@ test("run: two sequential sessions for the same role never collide (random per-r
 test("run: #110 PR1 — resultText carries the stub's final structured-output text (parseResultText's read side, now wired to a real caller)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
-    const resultText = "<<<SAPWOOD_RESULT>>>\\n{\\\"decision\\\":\\\"approve\\\",\\\"issue\\\":1}\\n<<<END_SAPWOOD_RESULT>>>";
+    const resultText = '<<<SAPWOOD_RESULT>>>\\n{\\"decision\\":\\"approve\\",\\"issue\\":1}\\n<<<END_SAPWOOD_RESULT>>>';
     const bin = mkStub(
       dir,
       `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.001,"result":"${resultText}"}'\nexit 0\n`,
     );
     const runner = mkRunner(dir, bin);
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
-    assert.equal(result.resultText, "<<<SAPWOOD_RESULT>>>\n{\"decision\":\"approve\",\"issue\":1}\n<<<END_SAPWOOD_RESULT>>>");
+    assert.equal(result.resultText, '<<<SAPWOOD_RESULT>>>\n{"decision":"approve","issue":1}\n<<<END_SAPWOOD_RESULT>>>');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("run: #110 PR1 — no result line at all (e.g. a crashed session) -> resultText is \"\", never undefined", async () => {
+test('run: #110 PR1 — no result line at all (e.g. a crashed session) -> resultText is "", never undefined', async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 1\n`);
@@ -151,7 +168,10 @@ test("run: guard hook missing in hard mode -> throws, refuses to spawn an unguar
   try {
     const bin = mkStub(dir, FAST_STUB);
     const runner = new RoleRunner({
-      cfg, stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin: bin,
+      cfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
       guardHookPath: join(dir, "nonexistent-hook.js"),
     });
     await assert.rejects(
@@ -169,7 +189,10 @@ test("run: soft guard mode tolerates a missing hook (no fail-closed refusal)", a
     const bin = mkStub(dir, FAST_STUB);
     const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const runner = new RoleRunner({
-      cfg: softCfg, stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin: bin,
+      cfg: softCfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
       guardHookPath: join(dir, "nonexistent-hook.js"),
     });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
@@ -233,7 +256,10 @@ test("run: a per-role disallowedTools override reaches the argv (the drafter's s
     );
     const runner = mkRunner(dir, bin);
     await runner.run({
-      roleId: "plan-drafter", prompt: "p", model: "sonnet", effort: "medium",
+      roleId: "plan-drafter",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
       disallowedTools: PLAN_DRAFTER_DISALLOWED_TOOLS,
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
@@ -274,7 +300,10 @@ test("PO_DISALLOWED_TOOLS: strict superset of the base denies, closing the `gh i
 // precision the module doc calls out (`*-F*` alone would be too greedy).
 function patternMatchesCommand(pattern: string, command: string): boolean {
   const inner = pattern.replace(/^Bash\(/, "").replace(/\)$/, "");
-  const escaped = inner.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+  const escaped = inner
+    .split("*")
+    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
   return new RegExp(`^${escaped}$`).test(command);
 }
 const anyDenyMatches = (denyList: string, command: string): boolean =>
@@ -287,7 +316,7 @@ test("ROLE_DISALLOWED_TOOLS denies `gh issue comment/edit -F` (#102) — both sp
   assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue edit 12 -F/etc/passwd"), "attached form (no space)");
 });
 
-test("ROLE_DISALLOWED_TOOLS: legitimate role writes (`gh issue comment/edit --body`) still pass, including bodies that merely CONTAIN the substring \"-F\" without it being its own argv token", () => {
+test('ROLE_DISALLOWED_TOOLS: legitimate role writes (`gh issue comment/edit --body`) still pass, including bodies that merely CONTAIN the substring "-F" without it being its own argv token', () => {
   assert.ok(!anyDenyMatches(ROLE_DISALLOWED_TOOLS, `gh issue comment 12 --body "status update"`));
   assert.ok(!anyDenyMatches(ROLE_DISALLOWED_TOOLS, `gh issue edit 12 --body "status update"`));
   // "-F" appears in "PR-Foo" but isn't preceded by a space (not its own token) — the space-
@@ -330,8 +359,12 @@ test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the
     );
     const runner = mkRunner(dir, bin);
     await runner.run({
-      roleId: "po-align", prompt: "p", model: "sonnet", effort: "medium",
-      allowedTools: PO_ALLOWED_TOOLS, disallowedTools: PO_DISALLOWED_TOOLS,
+      roleId: "po-align",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      allowedTools: PO_ALLOWED_TOOLS,
+      disallowedTools: PO_DISALLOWED_TOOLS,
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], PO_ALLOWED_TOOLS);
@@ -352,8 +385,12 @@ test("run: a per-role allowedTools override reaches the argv (#91 — retro's wi
     const runner = mkRunner(dir, bin);
     const widerScope = "Read,Write,Edit,Bash(git *),Bash(gh pr create*)";
     await runner.run({
-      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium",
-      allowedTools: widerScope, disallowedTools: "Bash(gh pr merge*)",
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      allowedTools: widerScope,
+      disallowedTools: "Bash(gh pr merge*)",
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], widerScope);
@@ -384,7 +421,12 @@ exit 0
 `,
     );
     const runner = new RoleRunner({
-      cfg, stateDir: dir, worktreeRoot, claudeBin: bin, heartbeatMs: 50, guardHookPath: mkHook(dir),
+      cfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: bin,
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
     assert.ok(!existsSync(join(worktreeRoot, result.name)), "worktree removed unconditionally after run()");
@@ -418,10 +460,19 @@ exit 0
 `,
     );
     const runner = new RoleRunner({
-      cfg, stateDir: dir, worktreeRoot, claudeBin: bin, heartbeatMs: 50, guardHookPath: mkHook(dir),
+      cfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: bin,
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     const result = await runner.run({
-      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium", scratchFile: ".sapwood-retro-pr",
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      scratchFile: ".sapwood-retro-pr",
     });
     assert.equal(result.scratchText, "branch: retro/x\ntitle: t\n\nbody line\n");
     assert.ok(!existsSync(join(worktreeRoot, result.name)), "worktree still deleted after the scratch read");
@@ -436,7 +487,11 @@ test("run: scratchFile requested but the session never wrote it — scratchText 
     const bin = mkStub(dir, FAST_STUB); // writes no worktree file at all
     const runner = mkRunner(dir, bin);
     const result = await runner.run({
-      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium", scratchFile: ".sapwood-retro-pr",
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      scratchFile: ".sapwood-retro-pr",
     });
     assert.equal(result.outcome, "done");
     assert.equal(result.scratchText, undefined);
@@ -459,10 +514,19 @@ test("run: a ../-escaping scratchFile is refused — the outside file is NOT rea
     writeFileSync(join(dir, "secret"), "engine-private content");
     const bin = mkStub(dir, FAST_STUB);
     const runner = new RoleRunner({
-      cfg, stateDir: dir, worktreeRoot, claudeBin: bin, heartbeatMs: 50, guardHookPath: mkHook(dir),
+      cfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: bin,
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     const result = await runner.run({
-      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium", scratchFile: "../../secret",
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      scratchFile: "../../secret",
     });
     assert.equal(result.outcome, "done");
     assert.equal(result.scratchText, undefined, "an escaping path must read as absent, never as the outside file");
@@ -479,7 +543,11 @@ test("run: an absolute scratchFile is refused — scratchText stays undefined ev
     const bin = mkStub(dir, FAST_STUB);
     const runner = mkRunner(dir, bin);
     const result = await runner.run({
-      roleId: "retro", prompt: "p", model: "sonnet", effort: "medium", scratchFile: outside,
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      scratchFile: outside,
     });
     assert.equal(result.outcome, "done");
     assert.equal(result.scratchText, undefined, "an absolute path must read as absent, never as its target");
@@ -506,7 +574,12 @@ test("run: spend baseline — costUsd is 0 when the stub emits no result line", 
 //    so a real claude-stub binary buys nothing here; contrast the spawn-integration tests above). ──
 
 const mkResult = (over: Partial<RoleSessionResult> = {}): RoleSessionResult => ({
-  outcome: "done", costUsd: 0, modelUsage: [], exitCode: 0, name: "role-x-1", ...over,
+  outcome: "done",
+  costUsd: 0,
+  modelUsage: [],
+  exitCode: 0,
+  name: "role-x-1",
+  ...over,
 });
 
 /** Consumes the next scripted result per call (repeats the last once exhausted) — same
@@ -526,22 +599,27 @@ class FakeRunner {
 class FakeState {
   spends: Array<[string, number, number]> = [];
   events: Array<[string, Record<string, unknown>]> = [];
-  recordSpend(worker: string, issue: number, usd: number): void { this.spends.push([worker, issue, usd]); }
-  appendEvent(kind: string, payload: Record<string, unknown>): void { this.events.push([kind, payload]); }
+  recordSpend(worker: string, issue: number, usd: number): void {
+    this.spends.push([worker, issue, usd]);
+  }
+  appendEvent(kind: string, payload: Record<string, unknown>): void {
+    this.events.push([kind, payload]);
+  }
 }
 
-const mkOpts = (
-  runner: FakeRunner, state: FakeState, isValid: RetriedSession["isValid"],
-): RetriedSession => ({
-  runner, state, session: { roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium" },
-  issue: 0, now: () => new Date("2026-07-11T00:00:00Z"),
+const mkOpts = (runner: FakeRunner, state: FakeState, isValid: RetriedSession["isValid"]): RetriedSession => ({
+  runner,
+  state,
+  session: { roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium" },
+  issue: 0,
+  now: () => new Date("2026-07-11T00:00:00Z"),
   degradeEvent: "test-degraded",
   degradePayload: (result) => ({ attempts: 2, exitCode: result.exitCode }),
   degradeMessage: (result) => `test role degraded: ${result.outcome}`,
   ...(isValid !== undefined ? { isValid } : {}),
 });
 
-test("runSessionWithRetry + isValid: a valid \"done\" result on the FIRST attempt — no retry, no degrade", async () => {
+test('runSessionWithRetry + isValid: a valid "done" result on the FIRST attempt — no retry, no degrade', async () => {
   const runner = new FakeRunner([mkResult()]);
   const state = new FakeState();
   const result = await runSessionWithRetry(mkOpts(runner, state, () => true));
@@ -550,18 +628,23 @@ test("runSessionWithRetry + isValid: a valid \"done\" result on the FIRST attemp
   assert.equal(result.outcome, "done");
 });
 
-test("runSessionWithRetry + isValid: \"done\" but invalid on attempt 1, valid on attempt 2 — exactly one retry, no degrade event", async () => {
+test('runSessionWithRetry + isValid: "done" but invalid on attempt 1, valid on attempt 2 — exactly one retry, no degrade event', async () => {
   const runner = new FakeRunner([mkResult({ name: "role-x-1" }), mkResult({ name: "role-x-2" })]);
   const state = new FakeState();
   let calls = 0;
-  const result = await runSessionWithRetry(mkOpts(runner, state, () => { calls++; return calls >= 2; }));
+  const result = await runSessionWithRetry(
+    mkOpts(runner, state, () => {
+      calls++;
+      return calls >= 2;
+    }),
+  );
   assert.equal(runner.calls.length, 2, "invalid first attempt triggers exactly one retry");
   assert.equal(state.events.length, 0, "eventually-valid result never degrades");
   assert.equal(state.spends.length, 2, "spend is recorded for BOTH attempts regardless of validity");
   assert.equal(result.name, "role-x-2");
 });
 
-test("runSessionWithRetry + isValid: \"done\" but invalid on BOTH attempts — degrades exactly like a non-\"done\" outcome (event + message)", async () => {
+test('runSessionWithRetry + isValid: "done" but invalid on BOTH attempts — degrades exactly like a non-"done" outcome (event + message)', async () => {
   const runner = new FakeRunner([mkResult(), mkResult()]);
   const state = new FakeState();
   const result = await runSessionWithRetry(mkOpts(runner, state, () => false));
@@ -577,7 +660,11 @@ test("runSessionWithRetry + isValid: a THROWING validator counts as invalid — 
   const state = new FakeState();
   // Must resolve normally (a propagated throw would wedge the round, violating #110's
   // "malformed output twice -> degrade path, never a wedged round").
-  const result = await runSessionWithRetry(mkOpts(runner, state, () => { throw new Error("zod.parse blew up"); }));
+  const result = await runSessionWithRetry(
+    mkOpts(runner, state, () => {
+      throw new Error("zod.parse blew up");
+    }),
+  );
   assert.equal(runner.calls.length, 2, "a throwing validator still drives the retry-once path");
   assert.equal(state.events.length, 1);
   assert.equal(state.events[0]![0], "test-degraded");
@@ -588,11 +675,13 @@ test("runSessionWithRetry + isValid: throws on attempt 1, valid on attempt 2 —
   const runner = new FakeRunner([mkResult({ name: "role-x-1" }), mkResult({ name: "role-x-2" })]);
   const state = new FakeState();
   let calls = 0;
-  const result = await runSessionWithRetry(mkOpts(runner, state, () => {
-    calls++;
-    if (calls === 1) throw new Error("malformed first output");
-    return true;
-  }));
+  const result = await runSessionWithRetry(
+    mkOpts(runner, state, () => {
+      calls++;
+      if (calls === 1) throw new Error("malformed first output");
+      return true;
+    }),
+  );
   assert.equal(runner.calls.length, 2, "the throw triggers exactly one retry");
   assert.equal(state.events.length, 0, "an eventually-valid result never degrades");
   assert.equal(result.name, "role-x-2");
@@ -672,8 +761,12 @@ test("#110 PR5 final integration: a role session spawns with empty Bash grants, 
     // plan-review.ts's reviewOneIssue "approve" branch exactly (updateIssueBody + plan:approved).
     const forgeWrites = { updateIssueBody: [] as Array<[number, string]>, labelsAdded: [] as Array<[number, string]> };
     const forge = {
-      updateIssueBody: async (n: number, body: string): Promise<void> => { forgeWrites.updateIssueBody.push([n, body]); },
-      addLabel: async (n: number, l: string): Promise<void> => { forgeWrites.labelsAdded.push([n, l]); },
+      updateIssueBody: async (n: number, body: string): Promise<void> => {
+        forgeWrites.updateIssueBody.push([n, body]);
+      },
+      addLabel: async (n: number, l: string): Promise<void> => {
+        forgeWrites.labelsAdded.push([n, l]);
+      },
     };
     if (validated.decision.body !== undefined) await forge.updateIssueBody(issueNumber, validated.decision.body);
     await forge.addLabel(issueNumber, "plan:approved");

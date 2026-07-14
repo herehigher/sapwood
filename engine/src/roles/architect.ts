@@ -38,15 +38,15 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { PeripheralStub } from "../loop/round.js";
-import type { IForge, Issue } from "../forge/forge.js";
-import type { State } from "../state/state.js";
 import type { SapwoodConfig } from "../config/config.js";
-import { runSessionWithRetry, type RoleRunner, type RoleSessionResult } from "./peripheral.js";
-import { loadRolePromptTemplate } from "./plan-review.js";
-import { parseStructuredBlock } from "../state/structured-output.js";
 import { resolveRoundDirective } from "../config/directive.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
+import type { IForge, Issue } from "../forge/forge.js";
+import type { PeripheralStub } from "../loop/round.js";
+import type { State } from "../state/state.js";
+import { parseStructuredBlock } from "../state/structured-output.js";
+import { type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
+import { loadRolePromptTemplate } from "./plan-review.js";
 
 export interface ArchitectDeps {
   forge: IForge;
@@ -169,9 +169,7 @@ export function renderArchitectPrompt(template: string, vars: Record<string, str
   return template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => {
     const name = raw.trim();
     if (Object.hasOwn(vars, name)) return vars[name]!;
-    throw new Error(
-      `architect prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`,
-    );
+    throw new Error(`architect prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`);
   });
 }
 
@@ -189,14 +187,18 @@ export function renderArchitectPrompt(template: string, vars: Record<string, str
 // the architect prompt always posts the design note, and a declared-but-textless contradiction
 // (or vice versa) is malformed output, not a partial one.
 
-const ArchitectContradictionSchema = z.object({
-  issue: z.number().int().positive(),
-  severe: z.boolean(),
-}).strict();
+const ArchitectContradictionSchema = z
+  .object({
+    issue: z.number().int().positive(),
+    severe: z.boolean(),
+  })
+  .strict();
 
-const ArchitectMetadataSchema = z.object({
-  contradictions: z.array(ArchitectContradictionSchema),
-}).strict();
+const ArchitectMetadataSchema = z
+  .object({
+    contradictions: z.array(ArchitectContradictionSchema),
+  })
+  .strict();
 
 const CONTRADICTION_MARKER_RE = /^<<<CONTRADICTION #(\d+)>>>[ \t]*$/gm;
 const CONTRADICTION_MARKER_SUBSTRING = "<<<CONTRADICTION";
@@ -223,6 +225,7 @@ function parseArchitectBody(body: string): { designNote: string; sections: Map<n
   const markers: Array<{ issue: number; index: number; end: number }> = [];
   CONTRADICTION_MARKER_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: standard RegExp.exec iteration retains each match for its offsets.
   while ((m = CONTRADICTION_MARKER_RE.exec(body)) !== null) {
     markers.push({ issue: Number(m[1]), index: m.index, end: m.index + m[0].length });
   }
@@ -264,10 +267,7 @@ export type ArchitectValidation =
  *  completion and returns ok:false the moment any one fails, so a caller NEVER sees a partial
  *  `ok: true` result to selectively apply — createArchitectStub only ever writes anything after
  *  this returns ok:true for the WHOLE output. */
-export function validateArchitectOutput(
-  text: string,
-  candidateNumbers: ReadonlySet<number>,
-): ArchitectValidation {
+export function validateArchitectOutput(text: string, candidateNumbers: ReadonlySet<number>): ArchitectValidation {
   const block = parseStructuredBlock(text);
   if (!block) return { ok: false, reason: "no structured output block found (missing or truncated sentinel)" };
   let metadata: unknown;
@@ -309,7 +309,9 @@ export function validateArchitectOutput(
     };
   }
   const contradictions: ArchitectContradiction[] = parsed.data.contradictions.map((c) => ({
-    issue: c.issue, severe: c.severe, explanation: parsedBody.sections.get(c.issue)!,
+    issue: c.issue,
+    severe: c.severe,
+    explanation: parsedBody.sections.get(c.issue)!,
   }));
   return { ok: true, designNote: parsedBody.designNote, contradictions };
 }
@@ -408,7 +410,9 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         now: deps.now ?? (() => new Date()),
         degradeEvent: "architect-degraded",
         degradePayload: (r) => ({
-          round_id: roundId, outcome: r.outcome, session: r.name,
+          round_id: roundId,
+          outcome: r.outcome,
+          session: r.name,
           reason: architectDegradeReason(r, candidateNumbers),
         }),
         degradeMessage: (r) =>

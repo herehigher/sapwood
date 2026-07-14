@@ -17,17 +17,13 @@
 // already-completed one) and re-invokes its stub FRESH — never resuming a prior attempt's
 // mid-session state. The stub is handed the row's persisted marker and is contractually
 // responsible for treating a non-null marker as "already externalized, don't duplicate."
-import { tick, type TickDeps, type TickResult, type Supervisor, type MergeGate } from "./conductor.js";
-import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
-import type { IForge, Issue } from "../forge/forge.js";
-import { State, type RoundPhase, type RoundRow } from "../state/state.js";
+
 import type { SapwoodConfig } from "../config/config.js";
-import {
-  issuesMergedThisTick,
-  prsOpenedThisTick,
-  type StopConfig,
-  type StopConditionHit,
-} from "./driver.js";
+import type { IForge, Issue } from "../forge/forge.js";
+import type { RoundPhase, RoundRow, State } from "../state/state.js";
+import { type MergeGate, type Supervisor, type TickDeps, type TickResult, tick } from "./conductor.js";
+import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
+import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 
 export type { RoundPhase, RoundRow } from "../state/state.js";
 
@@ -35,9 +31,7 @@ export type { RoundPhase, RoundRow } from "../state/state.js";
  *  dispatch-batch-then-drain step, no stub; `closed` is terminal). */
 export type PeripheralPhase = Exclude<RoundPhase, "executing" | "closed">;
 
-const SEQUENCE: readonly RoundPhase[] = [
-  "aligning", "architecting", "plan_review", "executing", "harvesting", "retro", "closed",
-];
+const SEQUENCE: readonly RoundPhase[] = ["aligning", "architecting", "plan_review", "executing", "harvesting", "retro", "closed"];
 
 /** One externalized-artifact-producing peripheral role session — STUBBED in #86 (the real
  *  role runner/prompts are a follow-up issue). Rerun-not-resume (#77 decision 4): run() is
@@ -128,35 +122,76 @@ function defaultRegisterSignals(requestStop: () => void): () => void {
  *  delegates unchanged — explicit passthrough, no Proxy magic. milestone undefined ->
  *  passthrough getReadyIssues() too (today's behavior, no scoping). */
 export class RoundScopedForge implements IForge {
-  constructor(private readonly inner: IForge, private readonly milestone: string | undefined) {}
+  constructor(
+    private readonly inner: IForge,
+    private readonly milestone: string | undefined,
+  ) {}
 
   async getReadyIssues(): Promise<Issue[]> {
     const issues = await this.inner.getReadyIssues();
     return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
   }
 
-  detectOwnerKind(owner: string) { return this.inner.detectOwnerKind(owner); }
-  claimIssue(issue: number) { return this.inner.claimIssue(issue); }
+  detectOwnerKind(owner: string) {
+    return this.inner.detectOwnerKind(owner);
+  }
+  claimIssue(issue: number) {
+    return this.inner.claimIssue(issue);
+  }
   setBoardStatus(issue: number, status: Parameters<IForge["setBoardStatus"]>[1]) {
     return this.inner.setBoardStatus(issue, status);
   }
-  addLabel(issue: number, label: string) { return this.inner.addLabel(issue, label); }
-  addPRLabel(pr: number, label: string) { return this.inner.addPRLabel(pr, label); }
-  openPR(branch: string, title: string, body: string) { return this.inner.openPR(branch, title, body); }
-  getPRStatus(pr: number) { return this.inner.getPRStatus(pr); }
-  mergePR(pr: number, headOid: string) { return this.inner.mergePR(pr, headOid); }
-  addPRComment(pr: number, body: string) { return this.inner.addPRComment(pr, body); }
-  addIssueComment(issue: number, body: string) { return this.inner.addIssueComment(issue, body); }
-  getPRReviewData(pr: number) { return this.inner.getPRReviewData(pr); }
-  getPRDiff(pr: number) { return this.inner.getPRDiff(pr); }
-  getCommitsSince(sinceIso: string) { return this.inner.getCommitsSince(sinceIso); }
-  branchExists(branch: string) { return this.inner.branchExists(branch); }
-  getIssueBody(issue: number) { return this.inner.getIssueBody(issue); }
-  updateIssueBody(issue: number, body: string) { return this.inner.updateIssueBody(issue, body); }
-  countOpenIssuesInMilestone(milestone: string) { return this.inner.countOpenIssuesInMilestone(milestone); }
-  listMilestoneTitles() { return this.inner.listMilestoneTitles(); }
-  getIssueLabels(issue: number) { return this.inner.getIssueLabels(issue); }
-  getIssueComments(issue: number) { return this.inner.getIssueComments(issue); }
+  addLabel(issue: number, label: string) {
+    return this.inner.addLabel(issue, label);
+  }
+  addPRLabel(pr: number, label: string) {
+    return this.inner.addPRLabel(pr, label);
+  }
+  openPR(branch: string, title: string, body: string) {
+    return this.inner.openPR(branch, title, body);
+  }
+  getPRStatus(pr: number) {
+    return this.inner.getPRStatus(pr);
+  }
+  mergePR(pr: number, headOid: string) {
+    return this.inner.mergePR(pr, headOid);
+  }
+  addPRComment(pr: number, body: string) {
+    return this.inner.addPRComment(pr, body);
+  }
+  addIssueComment(issue: number, body: string) {
+    return this.inner.addIssueComment(issue, body);
+  }
+  getPRReviewData(pr: number) {
+    return this.inner.getPRReviewData(pr);
+  }
+  getPRDiff(pr: number) {
+    return this.inner.getPRDiff(pr);
+  }
+  getCommitsSince(sinceIso: string) {
+    return this.inner.getCommitsSince(sinceIso);
+  }
+  branchExists(branch: string) {
+    return this.inner.branchExists(branch);
+  }
+  getIssueBody(issue: number) {
+    return this.inner.getIssueBody(issue);
+  }
+  updateIssueBody(issue: number, body: string) {
+    return this.inner.updateIssueBody(issue, body);
+  }
+  countOpenIssuesInMilestone(milestone: string) {
+    return this.inner.countOpenIssuesInMilestone(milestone);
+  }
+  listMilestoneTitles() {
+    return this.inner.listMilestoneTitles();
+  }
+  getIssueLabels(issue: number) {
+    return this.inner.getIssueLabels(issue);
+  }
+  getIssueComments(issue: number) {
+    return this.inner.getIssueComments(issue);
+  }
 
   /** Same milestone scoping as getReadyIssues() above — the plan_review peripheral's
    *  candidates are dispatch candidates too (just for review, not for a worker), so this round
@@ -166,8 +201,12 @@ export class RoundScopedForge implements IForge {
     return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
   }
 
-  createIssue(title: string, body: string) { return this.inner.createIssue(title, body); }
-  listOpenIssueNumbers() { return this.inner.listOpenIssueNumbers(); }
+  createIssue(title: string, body: string) {
+    return this.inner.createIssue(title, body);
+  }
+  listOpenIssueNumbers() {
+    return this.inner.listOpenIssueNumbers();
+  }
 
   /** #89: same milestone scoping as getIssuesNeedingPlanReview above — the PO/triage
    *  peripheral's candidates are dispatch candidates too (just pre-Ready), so a round scoped to
@@ -286,7 +325,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       tickErrors++;
       try {
         deps.state.appendEvent("tick-error", { error: String(e) });
-      } catch { /* state write failed too — tickErrors still counts it */ }
+      } catch {
+        /* state write failed too — tickErrors still counts it */
+      }
       return null;
     }
   };
@@ -319,7 +360,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       tickErrors++;
       try {
         deps.state.appendEvent("tick-error", { error: `stop-condition milestone check failed: ${String(e)}` });
-      } catch { /* state write failed too — tickErrors still counts it */ }
+      } catch {
+        /* state write failed too — tickErrors still counts it */
+      }
     }
   };
 
@@ -382,7 +425,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       tickErrors++;
       try {
         deps.state.appendEvent("tick-error", { error: `standby probe failed: ${String(e)}` });
-      } catch { /* state write failed too — tickErrors still counts it */ }
+      } catch {
+        /* state write failed too — tickErrors still counts it */
+      }
       return true;
     }
   };
@@ -441,7 +486,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   const emitRoundStop = (round: RoundRow, hit: RoundStopHit): void => {
     try {
       deps.state.appendEvent("round-stop", { round_id: round.round_id, name: hit.name, detail: hit.detail });
-    } catch { /* state write failed — the hit still reaches onRoundStop below */ }
+    } catch {
+      /* state write failed — the hit still reaches onRoundStop below */
+    }
     deps.onRoundStop?.(round.round_id, hit);
   };
 
@@ -473,8 +520,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   const runExecuting = async (round: RoundRow, freshBatch: boolean): Promise<number> => {
     let stopHit: RoundStopHit | undefined;
     const dispatchedNames: string[] = [];
-    const spentSoFar = (): number =>
-      dispatchedNames.reduce((sum, n) => sum + deps.state.spentUsdForWorker(n), 0);
+    const spentSoFar = (): number => dispatchedNames.reduce((sum, n) => sum + deps.state.spentUsdForWorker(n), 0);
 
     // #95 follow-up: a resumed drain (crash mid-`executing`, restart resumes directly into this
     // phase — freshBatch false) never runs a dispatch tick, so dispatchedNames would stay
@@ -492,8 +538,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     }
 
     // #124: the durable per-round dispatch count — see this function's own doc comment above.
-    const dispatchedThisRound = (): number =>
-      deps.state.eventsAfterId(round.start_event_id ?? 0, ["dispatched"]).length;
+    const dispatchedThisRound = (): number => deps.state.eventsAfterId(round.start_event_id ?? 0, ["dispatched"]).length;
 
     // #124: may this call attempt ONE MORE dispatch-enabled tick (a fresh wave)? False forever
     // on a resumed drain (freshBatch); otherwise true until the round-quota or the milestone
@@ -524,7 +569,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
             emitRoundStop(round, stopHit);
             return false;
           }
-        } catch { /* contained: fail toward dispatching normally, same stance as driver.ts */ }
+        } catch {
+          /* contained: fail toward dispatching normally, same stance as driver.ts */
+        }
       }
       return true;
     };
@@ -538,12 +585,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     if (freshBatch) {
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
-      const batchResult = await runTick(toTickDeps({
-        forge,
-        forceDispatchPause: !attempt,
-        roundSpendUsd: () => spentSoFar(),
-        ...(attempt ? { dispatchCapOverride: remaining } : {}),
-      }));
+      const batchResult = await runTick(
+        toTickDeps({
+          forge,
+          forceDispatchPause: !attempt,
+          roundSpendUsd: () => spentSoFar(),
+          ...(attempt ? { dispatchCapOverride: remaining } : {}),
+        }),
+      );
       if (batchResult) {
         for (const d of batchResult.dispatched) if (d.kind === "dispatched") dispatchedNames.push(d.worker);
       }
@@ -561,14 +610,16 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       await interTickWait(deps.tickIntervalSec * 1000);
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
-      const tickResult = await runTick(toTickDeps({
-        forge,
-        forceDispatchPause: !attempt,
-        // Same thunk as wave 1 (gate② P1-2): evaluated inside tick(), post-reclaim, so a
-        // same-tick reclaim that crosses cost.roundBudgetUsd blocks the same tick's refill.
-        roundSpendUsd: () => spentSoFar(),
-        ...(attempt ? { dispatchCapOverride: remaining } : {}),
-      }));
+      const tickResult = await runTick(
+        toTickDeps({
+          forge,
+          forceDispatchPause: !attempt,
+          // Same thunk as wave 1 (gate② P1-2): evaluated inside tick(), post-reclaim, so a
+          // same-tick reclaim that crosses cost.roundBudgetUsd blocks the same tick's refill.
+          roundSpendUsd: () => spentSoFar(),
+          ...(attempt ? { dispatchCapOverride: remaining } : {}),
+        }),
+      );
       if (tickResult) {
         for (const d of tickResult.dispatched) if (d.kind === "dispatched") dispatchedNames.push(d.worker);
       }
@@ -612,17 +663,16 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         if (cfg.round.standby.enabled && roundsClosed > 0 && lastRoundIdle && !deps.state.isKillSwitchActive()) {
           while (!(await probeHasWork())) {
             if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
-            const waitSec = Math.min(
-              deps.tickIntervalSec * 2 ** standbyAttempts,
-              cfg.round.standby.backoffCapSec,
-            );
+            const waitSec = Math.min(deps.tickIntervalSec * 2 ** standbyAttempts, cfg.round.standby.backoffCapSec);
             // Observability-only write, best-effort (Codex P2 round 5, PR #150): this block sits
             // outside the contained tick(), so a transient state-write failure here must degrade
             // to a lost telemetry row, never take down an idle daemon — same stance as
             // checkFinalMilestone's nested catch above.
             try {
               deps.state.appendEvent("standby-wait", { attempt: standbyAttempts, waitSec });
-            } catch { /* telemetry only — the wait itself proceeds */ }
+            } catch {
+              /* telemetry only — the wait itself proceeds */
+            }
             standbyAttempts++;
             // Codex P1 (PR #150 round 3): a backoff wait can be minutes long, and a KILL_SWITCH
             // created mid-sleep must not sit unnoticed until it elapses — kill-switch
@@ -656,7 +706,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           if (standbyAttempts > 0) {
             try {
               deps.state.appendEvent("standby-exit", { attempts: standbyAttempts });
-            } catch { /* telemetry only — see the standby-wait catch above */ }
+            } catch {
+              /* telemetry only — see the standby-wait catch above */
+            }
             standbyAttempts = 0;
           }
         }
@@ -710,16 +762,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // Contained: an assembly/validation/persistence BUG still degrades to a durable
       // tick-error and the round still closes — the artifact is best-effort, the close is not.
       try {
-        persistRoundArtifact(
-          deps.state,
-          buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, closedAt),
-          closedAt,
-        );
+        persistRoundArtifact(deps.state, buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, closedAt), closedAt);
       } catch (e) {
         tickErrors++;
         try {
           deps.state.appendEvent("tick-error", { error: `round artifact persistence failed: ${String(e)}` });
-        } catch { /* state write failed too — tickErrors still counts it */ }
+        } catch {
+          /* state write failed too — tickErrors still counts it */
+        }
       }
       deps.state.closeRound(round.round_id, closedAt);
       roundsClosed++;

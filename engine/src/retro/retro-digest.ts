@@ -28,7 +28,7 @@
 // fail-toward-more-work stance as the rest of this codebase (e.g. conductor.ts's
 // `addPRComment(...).catch(() => {})`). A failed item's section says so, in place of its data.
 import type { IForge, PRComment, PRReviewData } from "../forge/forge.js";
-import type { State, RoundRow } from "../state/state.js";
+import type { RoundRow, State } from "../state/state.js";
 
 /** Durable event kinds whose payload carries a `pr` field (conductor.ts's DRIVE-phase
  *  appendEvent call sites) — the digest's "PRs touched this round" source. Deliberately NOT
@@ -68,12 +68,14 @@ export function gatherDigestIssues(state: State, round: RoundRow, kinds: string[
 }
 
 function formatPRSection(pr: number, body: string, diff: string, review: PRReviewData): string {
-  const reviews = review.reviews.length > 0
-    ? review.reviews.map((r) => `  - ${r.author}: ${r.state} (commit ${r.commitOid.slice(0, 7)})`).join("\n")
-    : "  (no reviews)";
-  const comments = (review.comments ?? []).length > 0
-    ? (review.comments ?? []).map((c) => `  - ${c.login} (${c.createdAt}): ${c.body}`).join("\n")
-    : "  (no top-level comments)";
+  const reviews =
+    review.reviews.length > 0
+      ? review.reviews.map((r) => `  - ${r.author}: ${r.state} (commit ${r.commitOid.slice(0, 7)})`).join("\n")
+      : "  (no reviews)";
+  const comments =
+    (review.comments ?? []).length > 0
+      ? (review.comments ?? []).map((c) => `  - ${c.login} (${c.createdAt}): ${c.body}`).join("\n")
+      : "  (no top-level comments)";
   return [
     `### PR #${pr}`,
     `State: ${review.state}${review.isDraft ? " (draft)" : ""} | unresolved review threads: ${review.unresolvedThreads}`,
@@ -92,9 +94,8 @@ function formatPRSection(pr: number, body: string, diff: string, review: PRRevie
 
 function formatIssueSection(issue: number, labels: string[], comments: PRComment[]): string {
   const labelsText = labels.length > 0 ? labels.join(", ") : "(none)";
-  const commentsText = comments.length > 0
-    ? comments.map((c) => `  - ${c.login} (${c.createdAt}): ${c.body}`).join("\n")
-    : "  (no comments)";
+  const commentsText =
+    comments.length > 0 ? comments.map((c) => `  - ${c.login} (${c.createdAt}): ${c.body}`).join("\n") : "  (no comments)";
   return [`### Issue #${issue}`, `Labels: ${labelsText}`, "Comments:", commentsText].join("\n");
 }
 
@@ -107,8 +108,7 @@ function formatIssueSection(issue: number, labels: string[], comments: PRComment
  *  safety net. */
 export function capDigest(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  const marker =
-    `\n\n[... digest truncated: exceeded the ${maxChars}-char cap — ${text.length - maxChars} chars omitted ...]`;
+  const marker = `\n\n[... digest truncated: exceeded the ${maxChars}-char cap — ${text.length - maxChars} chars omitted ...]`;
   if (marker.length >= maxChars) return marker.slice(0, maxChars);
   return text.slice(0, maxChars - marker.length) + marker;
 }
@@ -186,7 +186,9 @@ export async function buildRetroDigest(
       // draft omitted it entirely, since formatPRSection only pulled diff+review data — a live
       // browsing session would have seen it and the digest didn't. Fixed here, not just noted.
       const [body, diff, review] = await Promise.all([
-        deps.forge.getIssueBody(pr), deps.forge.getPRDiff(pr), deps.forge.getPRReviewData(pr),
+        deps.forge.getIssueBody(pr),
+        deps.forge.getPRDiff(pr),
+        deps.forge.getPRReviewData(pr),
       ]);
       prSections.push(capDigest(formatPRSection(pr, body, diff, review), perPrCap));
     } catch (e) {
@@ -197,10 +199,7 @@ export async function buildRetroDigest(
   const issueSections: string[] = [];
   for (const issue of issues) {
     try {
-      const [labels, comments] = await Promise.all([
-        deps.forge.getIssueLabels(issue),
-        deps.forge.getIssueComments(issue),
-      ]);
+      const [labels, comments] = await Promise.all([deps.forge.getIssueLabels(issue), deps.forge.getIssueComments(issue)]);
       issueSections.push(capDigest(formatIssueSection(issue, labels, comments), perIssueCap));
     } catch (e) {
       issueSections.push(`### Issue #${issue}\n(digest fetch failed: ${String(e)})`);
@@ -213,9 +212,7 @@ export async function buildRetroDigest(
     if (commits.length === 0) {
       commitsText = "(no commits)";
     } else {
-      const joined = commits
-        .map((c) => `${c.sha.slice(0, 7)} ${c.date} ${c.author}: ${c.message.split("\n")[0]}`)
-        .join("\n");
+      const joined = commits.map((c) => `${c.sha.slice(0, 7)} ${c.date} ${c.author}: ${c.message.split("\n")[0]}`).join("\n");
       commitsText = capDigest(joined, commitsBudget);
     }
   } catch (e) {

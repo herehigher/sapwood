@@ -12,19 +12,20 @@
 // defaulting): round.ts's only job is the round-loop MECHANICS (phase sequencing, rerun-not-
 // resume, stop conditions) and stays free of every role module's own dependencies; this factory
 // is the wiring layer a real entry point (or an integration test) reaches for instead.
-import type { IForge } from "../forge/forge.js";
-import type { State } from "../state/state.js";
+
 import type { SapwoodConfig } from "../config/config.js";
-import type { RoleRunner } from "../roles/peripheral.js";
-import { RoundScopedForge, type PeripheralPhase, type PeripheralStub } from "./round.js";
-import { createAligningStub, alignMarker } from "./align.js";
-import { mergeAlignSummary, RoundArtifactSchema, type AlignSection, type RoundArtifact } from "./round-artifact.js";
-import { capDigest } from "../retro/retro-digest.js";
-import { createArchitectStub, NO_PRIOR_ROUND_YET, type ArchitectDeps } from "../roles/architect.js";
-import { createPlanReviewStub } from "../roles/plan-review.js";
-import { createHarvestStub } from "./harvest.js";
-import { createRetroStub } from "../retro/retro.js";
 import { loadDoctrine } from "../config/doctrine.js";
+import type { IForge } from "../forge/forge.js";
+import { createRetroStub } from "../retro/retro.js";
+import { capDigest } from "../retro/retro-digest.js";
+import { type ArchitectDeps, createArchitectStub, NO_PRIOR_ROUND_YET } from "../roles/architect.js";
+import type { RoleRunner } from "../roles/peripheral.js";
+import { createPlanReviewStub } from "../roles/plan-review.js";
+import type { State } from "../state/state.js";
+import { alignMarker, createAligningStub } from "./align.js";
+import { createHarvestStub } from "./harvest.js";
+import { type PeripheralPhase, type PeripheralStub, RoundScopedForge } from "./round.js";
+import { type AlignSection, mergeAlignSummary, type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
 
 export interface DefaultPeripheralsDeps {
   forge: IForge;
@@ -55,13 +56,14 @@ export function renderAlignedGoalsFromSummary(state: State, roundId: number): st
     for (const s of summaries) merged = mergeAlignSummary(merged, s.payload);
     const { created, triaged } = merged!;
     if (created.length === 0 && triaged.length === 0) {
-      return `This round's PO/goal-alignment pass (round ${roundId}) ran and decomposed nothing: ` +
-        `no issues created, no plans triaged.`;
+      return `This round's PO/goal-alignment pass (round ${roundId}) ran and decomposed nothing: ` + `no issues created, no plans triaged.`;
     }
     return [
       `This round's PO/goal-alignment pass (round ${roundId}) recorded:`,
       ...created.map((c) => `- created #${c.issue} — ${c.title}${c.hasPlan ? "" : " (no verification plan yet; labelled needs-human)"}`),
-      ...triaged.map((t) => `- triaged #${t.issue}${t.drafted ? ": plan drafted into the body" : ": still planless (re-matches next round)"}`),
+      ...triaged.map(
+        (t) => `- triaged #${t.issue}${t.drafted ? ": plan drafted into the body" : ": still planless (re-matches next round)"}`,
+      ),
     ].join("\n");
   } catch {
     return null; // contained — the caller's pointer-note fallback covers a state read failure
@@ -120,8 +122,8 @@ function renderLastMergedUncapped(state: State, roundId: number): string {
   }
   return [
     `Merged outcomes from round ${prevRoundId} (issue/PR numbers and the dispatched worker only — ` +
-    `titles and files-touched are not persisted in the round ledger, so they are not rendered here; ` +
-    `this text is engine-assembled from the durable round artifact, never a live forge read):`,
+      `titles and files-touched are not persisted in the round ledger, so they are not rendered here; ` +
+      `this text is engine-assembled from the durable round artifact, never a live forge read):`,
     ...artifact.merges.map((m) => `- issue #${m.issue} merged via PR #${m.pr} (worker: ${m.worker})`),
   ].join("\n");
 }
@@ -141,9 +143,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   // already-scoped forge with the same milestone would be harmless (the filter is idempotent),
   // but no caller does that today: runRounds wraps the raw forge for its ticks, this factory
   // wraps the same raw forge for the stubs — two independent single wraps.
-  const forge = deps.cfg.round.milestone
-    ? new RoundScopedForge(deps.forge, deps.cfg.round.milestone)
-    : deps.forge;
+  const forge = deps.cfg.round.milestone ? new RoundScopedForge(deps.forge, deps.cfg.round.milestone) : deps.forge;
   const shared = {
     forge,
     state: deps.state,
@@ -191,18 +191,16 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
             `(roles.po.enabled: false) — the aligning phase no-oped this round ` +
             `(round ${ctx.roundId}). There is no decomposition/triage record to consult; ` +
             `treat the issue backlog as curated outside the loop.`
-          : renderAlignedGoalsFromSummary(deps.state, ctx.roundId) ??
+          : (renderAlignedGoalsFromSummary(deps.state, ctx.roundId) ??
             `This round's PO/goal-alignment peripheral has run (round ${ctx.roundId}, marker ` +
-            `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
-            `actual decomposition (no structured summary was recorded this round).`;
+              `${alignMarker(ctx.roundId)}) — see its issue creations/comments on GitHub for the ` +
+              `actual decomposition (no structured summary was recorded this round).`);
         // #132: the PREVIOUS round's merged-PR outcomes (round-artifact.ts's persisted
         // round_artifacts row), computed HERE at architect-invocation time from durable state —
         // same "compute at read, never a same-process side effect" rationale as alignedGoals
         // above (a crash-rerun that resumes directly at architecting must see the same context
         // a from-scratch run would).
-        architectDeps.lastMerged = renderLastMergedFromArtifact(
-          deps.state, ctx.roundId, deps.cfg.roles.architect.lastMergedMaxChars,
-        );
+        architectDeps.lastMerged = renderLastMergedFromArtifact(deps.state, ctx.roundId, deps.cfg.roles.architect.lastMergedMaxChars);
         // #167: this repo's review-doctrine text — the third engine-assembled block (see
         // ArchitectDeps.doctrine's own doc comment). No round-scoping of its own (the doctrine
         // file doesn't vary per round), but loaded HERE, at architect-invocation time, same as
@@ -231,8 +229,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     .filter(([role]) => !deps.cfg.roles[role].enabled)
     .map(([, phase]) => phase);
   if (disabledPhases.length > 0) {
-    let line =
-      `sapwood: peripheral role(s) disabled by config — these phases will no-op every round: ${disabledPhases.join(", ")}`;
+    let line = `sapwood: peripheral role(s) disabled by config — these phases will no-op every round: ${disabledPhases.join(", ")}`;
     // #127 gate② F1: disabling gate⓪'s roles silently starves ALL dispatch — forge.ts's
     // dispatchability gate still (correctly, PLAN Decision #8) requires the planApproved label
     // (or verifyNa), and only the plan-reviewer applies planApproved; the PO is what triages
@@ -242,13 +239,11 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     if (disabledPhases.includes("plan_review")) {
       gateWarnings.push(
         `with plan_review off nothing in the engine ever applies ${deps.cfg.labels.planApproved} — ` +
-        `a human/external process MUST apply it (or ${deps.cfg.labels.verifyNa}) or NO issue is ever dispatched`,
+          `a human/external process MUST apply it (or ${deps.cfg.labels.verifyNa}) or NO issue is ever dispatched`,
       );
     }
     if (disabledPhases.includes("aligning")) {
-      gateWarnings.push(
-        "with aligning off plan-less issues are never triaged into the gate⓪ pipeline",
-      );
+      gateWarnings.push("with aligning off plan-less issues are never triaged into the gate⓪ pipeline");
     }
     if (gateWarnings.length > 0) line += `. WARNING: ${gateWarnings.join("; ")}.`;
     console.log(line);

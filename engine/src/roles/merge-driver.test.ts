@@ -5,11 +5,11 @@
 //  3. MergeDriver.driveOne — end-to-end with a fake IForge + fake Reviewer (no real gh calls).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mergeDecision, deriveGate, MergeDriver, type DriveOutcome } from "./merge-driver.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision } from "./merge-driver.js";
+import type { ReviewAction, Reviewer, ReviewVerdict } from "./reviewer.js";
 import { CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
-import type { Reviewer, ReviewVerdict, ReviewAction } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
 // 1) mergeDecision parity suite (0day ops/loop/test_loop_merge_driver.sh, 23 assertions)
@@ -123,19 +123,34 @@ class FakeForge implements IForge {
   comments: Array<[number, string]> = [];
   status: PRStatus = { number: 1, headOid: "HEAD", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   reviewData: PRReviewData = {
-    headOid: "HEAD", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-    labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+    headOid: "HEAD",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    reviews: [],
+    unresolvedThreads: 0,
   };
   statusErr: Error | null = null;
   mergeErr: Error | null = null;
 
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
-  async addLabel(n: number, l: string): Promise<void> { this.labelsAdded.push([n, l]); }
+  async addLabel(n: number, l: string): Promise<void> {
+    this.labelsAdded.push([n, l]);
+  }
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
   async getPRStatus(): Promise<PRStatus> {
     if (this.statusErr) throw this.statusErr;
     return this.status;
@@ -144,23 +159,53 @@ class FakeForge implements IForge {
     if (this.mergeErr) throw this.mergeErr;
     this.merged.push([pr, headOid]);
   }
-  async addPRComment(pr: number, body: string): Promise<void> { this.comments.push([pr, body]); }
+  async addPRComment(pr: number, body: string): Promise<void> {
+    this.comments.push([pr, body]);
+  }
   async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> { return ""; }
+  async getIssueBody(): Promise<string> {
+    return "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
-  async getPRReviewData(): Promise<PRReviewData> { return this.reviewData; }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
-  async getIssueLabels(): Promise<string[]> { return []; }
-  async getIssueComments() { return []; }
-  async createIssue(): Promise<number> { return 0; }
-  async listOpenIssueNumbers(): Promise<number[]> { return []; }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
+  async getPRReviewData(): Promise<PRReviewData> {
+    return this.reviewData;
+  }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return [];
+  }
+  async getIssueLabels(): Promise<string[]> {
+    return [];
+  }
+  async getIssueComments() {
+    return [];
+  }
+  async createIssue(): Promise<number> {
+    return 0;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return [];
+  }
 }
 
 class FakeReviewer implements Reviewer {
@@ -174,7 +219,9 @@ class FakeReviewer implements Reviewer {
     this.triggered.push(pr);
     this.triggeredWith.push([pr, issue]);
   }
-  verdictFromData(): ReviewVerdict { return this.verdict; }
+  verdictFromData(): ReviewVerdict {
+    return this.verdict;
+  }
 }
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -354,7 +401,9 @@ test("MergeDriver.driveOne: TOCTOU — head moved between the gate check and the
 
 const REENTRY_PIN = { head: "HEAD", at: "2026-07-02T00:00:00.000Z" };
 const codexReview = (submittedAt?: string) => ({
-  author: "chatgpt-codex-connector", commitOid: "HEAD", state: "COMMENTED",
+  author: "chatgpt-codex-connector",
+  commitOid: "HEAD",
+  state: "COMMENTED",
   ...(submittedAt !== undefined ? { submittedAt } : {}),
 });
 
@@ -485,7 +534,9 @@ test("MergeDriver.driveOne: head change mid-drive re-triggers exactly once per n
   const reviewer = new FakeReviewer();
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg(), now: () => new Date("2026-07-07T10:00:00Z") });
   let pin = { head: null as string | null, at: null as string | null };
-  const record = (h: string, a: string) => { pin = { head: h, at: a }; };
+  const record = (h: string, a: string) => {
+    pin = { head: h, at: a };
+  };
 
   // Tick 1: never triggered -> triggers for "HEAD", queues.
   const t1 = await driver.driveOne(7, 46, pin, record);
@@ -516,9 +567,14 @@ void ((): DriveOutcome => ({ kind: "queued", pr: 1, reason: "x" }));
 /** A Reviewer stand-in with a fixed kind + scripted verdict (unlike FakeReviewer, whose kind
  *  is pinned to "different-model-codex") — lets these tests build a fallback chain. */
 class ScriptedReviewer implements Reviewer {
-  constructor(readonly kind: Reviewer["kind"], private readonly action: ReviewAction) {}
+  constructor(
+    readonly kind: Reviewer["kind"],
+    private readonly action: ReviewAction,
+  ) {}
   async triggerReview(): Promise<void> {}
-  verdictFromData(): ReviewVerdict { return { action: this.action, headOid: this.action === "REVIEW_UNAVAILABLE" ? null : "HEAD" }; }
+  verdictFromData(): ReviewVerdict {
+    return { action: this.action, headOid: this.action === "REVIEW_UNAVAILABLE" ? null : "HEAD" };
+  }
 }
 
 const NO_LOCK = { head: null as string | null, kind: null as string | null };
@@ -610,7 +666,13 @@ test("MergeDriver.driveOne R2: the lock does NOT override fresh blocking signals
   const primary = new CodexReviewer();
   const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
   const recorded: Array<{ head: string | null; kind: string | null }> = [];
-  const driver = new MergeDriver({ forge, reviewer: primary, cfg, fallbackReviewers: [new SameModelTrustedReviewer(["trusted-bot"])], now: NOW });
+  const driver = new MergeDriver({
+    forge,
+    reviewer: primary,
+    cfg,
+    fallbackReviewers: [new SameModelTrustedReviewer(["trusted-bot"])],
+    now: NOW,
+  });
   const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, {
     lock: { head: "HEAD", kind: "same-model-trusted" },
     recordFallback: (l) => recorded.push(l),
@@ -660,7 +722,8 @@ test("MergeDriver.driveOne R2: a head change clears the (now stale) lock in the 
   const recorded: Array<{ head: string | null; kind: string | null }> = [];
   const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new HumanReviewer()], now: NOW });
   const outcome = await driver.driveOne(
-    7, 46,
+    7,
+    46,
     { head: "OLD_HEAD", at: "2026-07-07T07:00:00Z" }, // pin for the old head -> re-trigger branch
     noopRecord,
     { lock: { head: "OLD_HEAD", kind: "human" }, recordFallback: (l) => recorded.push(l) },
@@ -673,7 +736,13 @@ test("MergeDriver.driveOne: primary recovers cleanly (MERGE_OK) with NO prior lo
   const forge = new FakeForge();
   const reviewer = new FakeReviewer(); // default verdict: MERGE_OK
   const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
-  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [new ScriptedReviewer("same-model-trusted", "WAIT_REVIEW")], now: NOW });
+  const driver = new MergeDriver({
+    forge,
+    reviewer,
+    cfg,
+    fallbackReviewers: [new ScriptedReviewer("same-model-trusted", "WAIT_REVIEW")],
+    now: NOW,
+  });
   const outcome = await driver.driveOne(7, 46, TRIGGERED_LONG_AGO, noopRecord, { lock: NO_LOCK, recordFallback: noopRecordFallback });
   assert.equal(outcome.kind, "merged");
   assert.equal(outcome.reviewerTransition, undefined);

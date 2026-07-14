@@ -15,20 +15,31 @@
 // SECURITY: spawn uses an argv array + detached process group — never a shell. The coarse
 // allowed/disallowedTools below are noise-reduction only; the real boundary is the
 // fail-closed PreToolUse guard hook wired in via --settings (#26).
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync,
-  rmSync, statSync, utimesSync, writeFileSync, type Dirent,
+  closeSync,
+  type Dirent,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Issue } from "../forge/forge.js";
 import type { SapwoodConfig } from "../config/config.js";
-import type { Supervisor, LaneProbe, ReclaimResult } from "../loop/conductor.js";
-import type { ModelUsageEntry, CategorizedTokenUsage } from "../state/state.js";
-import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
 import { loadDoctrine } from "../config/doctrine.js";
+import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
+import type { Issue } from "../forge/forge.js";
+import type { LaneProbe, ReclaimResult, Supervisor } from "../loop/conductor.js";
+import type { CategorizedTokenUsage, ModelUsageEntry } from "../state/state.js";
 
 /** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60/#69: a
  *  lane that's hard-killed (escalated past drain, or never resumed after a handoff) before ever
@@ -114,10 +125,7 @@ function extractModelUsage(obj: Record<string, unknown>): ModelUsageEntry[] {
   }
   // Fallback: no (usable) modelUsage map — attribute the flat top-level usage to the
   // session's main model id, or "unknown" if the result line carries no model identifier.
-  const model =
-    (typeof obj.model === "string" && obj.model) ||
-    (typeof obj.modelName === "string" && obj.modelName) ||
-    "unknown";
+  const model = (typeof obj.model === "string" && obj.model) || (typeof obj.modelName === "string" && obj.modelName) || "unknown";
   return [{ model, ...toCategorized(obj.usage) }];
 }
 
@@ -227,9 +235,7 @@ const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
  *
  *  Never throws — any spawn error, non-zero exit, non-"pong" output, or a hang past
  *  `timeoutSec` (hard kill) resolves `{ ok: false, detail }`. */
-export function probeLlmPing(
-  claudeBin: string, probeModel: string, probeMaxBudgetUsd: number, timeoutSec: number,
-): Promise<LlmPingResult> {
+export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudgetUsd: number, timeoutSec: number): Promise<LlmPingResult> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (r: LlmPingResult): void => {
@@ -243,9 +249,19 @@ export function probeLlmPing(
       child = spawn(
         claudeBin,
         [
-          "-p", "--model", probeModel, "--no-session-persistence",
-          "--system-prompt", LLM_PING_SYSTEM_PROMPT, "--strict-mcp-config", "--tools", "",
-          "--max-budget-usd", String(probeMaxBudgetUsd), "--output-format", "text",
+          "-p",
+          "--model",
+          probeModel,
+          "--no-session-persistence",
+          "--system-prompt",
+          LLM_PING_SYSTEM_PROMPT,
+          "--strict-mcp-config",
+          "--tools",
+          "",
+          "--max-budget-usd",
+          String(probeMaxBudgetUsd),
+          "--output-format",
+          "text",
           LLM_PING_PROMPT,
         ],
         { stdio: ["ignore", "pipe", "pipe"] },
@@ -316,20 +332,32 @@ export interface ClaudeArgsOpts {
  *  hard mid-step kill (PLAN.md). The hard ceiling is the conductor's, not the CLI's. */
 export function claudeArgs(o: ClaudeArgsOpts): string[] {
   return [
-    "-p", o.prompt,
-    "--model", o.model,
-    "--effort", o.effort,
-    "--fallback-model", "sonnet",
-    "--worktree", o.worktree,
-    "--name", o.name,
+    "-p",
+    o.prompt,
+    "--model",
+    o.model,
+    "--effort",
+    o.effort,
+    "--fallback-model",
+    "sonnet",
+    "--worktree",
+    o.worktree,
+    "--name",
+    o.name,
     ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : ["--session-id", o.sessionId]),
-    "--permission-mode", "auto",
+    "--permission-mode",
+    "auto",
     // Coarse noise-reduction only — the real boundary is the guard hook (#26).
-    "--allowedTools", o.allowedTools ?? "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)",
-    "--disallowedTools", o.disallowedTools ?? "Bash(gh pr merge*),Bash(gh pr ready*)",
+    "--allowedTools",
+    o.allowedTools ?? "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)",
+    "--disallowedTools",
+    o.disallowedTools ?? "Bash(gh pr merge*),Bash(gh pr ready*)",
     ...(o.addDir ? ["--add-dir", o.addDir] : []),
     ...(o.settings ? ["--settings", o.settings] : []),
-    "--output-format", "stream-json", "--include-hook-events", "--verbose",
+    "--output-format",
+    "stream-json",
+    "--include-hook-events",
+    "--verbose",
   ];
 }
 
@@ -438,11 +466,7 @@ export interface SpawnedSession {
  *  WorkerSupervisor.dispatch/resume use internally (not re-implemented — this function is
  *  exported so peripheral.ts's narrower role-session shape reuses it directly rather than
  *  opening a second `child_process` import site). */
-export function spawnClaudeSession(
-  bin: string,
-  args: string[],
-  opts: { jsonlFd: number; env: NodeJS.ProcessEnv },
-): SpawnedSession {
+export function spawnClaudeSession(bin: string, args: string[], opts: { jsonlFd: number; env: NodeJS.ProcessEnv }): SpawnedSession {
   const child = spawn(bin, args, {
     detached: true,
     stdio: ["ignore", opts.jsonlFd, opts.jsonlFd],
@@ -453,11 +477,17 @@ export function spawnClaudeSession(
     try {
       process.kill(-child.pid, sig); // negative pid -> the whole detached process group
     } catch {
-      try { process.kill(child.pid, sig); } catch { /* already gone */ }
+      try {
+        process.kill(child.pid, sig);
+      } catch {
+        /* already gone */
+      }
     }
   };
   return {
-    get pid() { return child.pid; },
+    get pid() {
+      return child.pid;
+    },
     onSpawn: (cb) => child.once("spawn", cb),
     onError: (cb) => child.on("error", cb),
     onExit: (cb) => child.once("exit", cb),
@@ -592,8 +622,13 @@ export class WorkerSupervisor implements Supervisor {
     // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
-      prompt, model: this.deps.cfg.worker.model, effort: this.deps.cfg.worker.effort,
-      worktree: laneName, name: laneName, sessionId, settings: settingsJson,
+      prompt,
+      model: this.deps.cfg.worker.model,
+      effort: this.deps.cfg.worker.effort,
+      worktree: laneName,
+      name: laneName,
+      sessionId,
+      settings: settingsJson,
     });
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree.
     // SAPWOOD_GUARD_MODE in the spawn env reaches the hook subprocess (inherited from claude)
@@ -608,9 +643,18 @@ export class WorkerSupervisor implements Supervisor {
     // rejecting args) must already have its handler or its terminal sentinel is lost and the
     // conductor mis-reads the lane as DEAD (Codex PR #32 R2 P2).
     const lane: Lane = {
-      child, issue: issue.number, sessionId, jsonlFd, jsonlPath,
-      hb: undefined, handoffRequested: false, reclaiming: false,
-      startedMs: this.now().getTime(), timedOut: false, estimatedCostUsd: 0, estimateBaselineUsd: 0,
+      child,
+      issue: issue.number,
+      sessionId,
+      jsonlFd,
+      jsonlPath,
+      hb: undefined,
+      handoffRequested: false,
+      reclaiming: false,
+      startedMs: this.now().getTime(),
+      timedOut: false,
+      estimatedCostUsd: 0,
+      estimateBaselineUsd: 0,
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -621,11 +665,18 @@ export class WorkerSupervisor implements Supervisor {
     let spawnErr: unknown;
     await new Promise<void>((resolve) => {
       child.once("spawn", () => resolve());
-      child.once("error", (e) => { spawnErr = e; resolve(); });
+      child.once("error", (e) => {
+        spawnErr = e;
+        resolve();
+      });
     });
     if (spawnErr) {
       this.lanes.delete(laneName);
-      try { closeSync(jsonlFd); } catch { /* noop */ }
+      try {
+        closeSync(jsonlFd);
+      } catch {
+        /* noop */
+      }
       this.removeIfExists(jsonlPath);
       throw new Error(`worker spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
@@ -636,8 +687,11 @@ export class WorkerSupervisor implements Supervisor {
     if (this.lanes.has(laneName) && child.exitCode === null && child.signalCode === null) {
       const startedIso = new Date(lane.startedMs).toISOString();
       this.writeJsonAtomic(this.path(laneName, "running.json"), {
-        name: laneName, issue: issue.number, session_id: sessionId,
-        wrapper_pid: child.pid, started_at: startedIso,
+        name: laneName,
+        issue: issue.number,
+        session_id: sessionId,
+        wrapper_pid: child.pid,
+        started_at: startedIso,
         // #69 (fable P1): the IMMUTABLE first-dispatch time, the dirty-worktree retention
         // baseline. Distinct from started_at, which resume() resets to resume-time for the
         // wall-clock timeout — baselining retention on that would judge pre-handoff WIP (older
@@ -697,13 +751,21 @@ export class WorkerSupervisor implements Supervisor {
     // against worker.budgetUsdSoft. Without this, a lane that handed off AT the budget would
     // re-cross it on the first heartbeat tick after resume — an unresumable handoff loop.
     // The estimator-side mirror of State.recordSpend's resume cost-delta baseline.
-    const estimateBaselineUsd = parseAssistantUsageDeltas(this.readJsonl(jsonlPath))
-      .reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0);
+    const estimateBaselineUsd = parseAssistantUsageDeltas(this.readJsonl(jsonlPath)).reduce(
+      (sum, d) => sum + estimateUsd(d, this.pricing),
+      0,
+    );
     const jsonlFd = openSync(jsonlPath, "a"); // append: preserve the pre-handoff stream
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     const args = claudeArgs({
-      prompt, model: this.deps.cfg.worker.model, effort: this.deps.cfg.worker.effort,
-      worktree: name, name, sessionId, resumeSessionId: sessionId, settings: settingsJson,
+      prompt,
+      model: this.deps.cfg.worker.model,
+      effort: this.deps.cfg.worker.effort,
+      worktree: name,
+      name,
+      sessionId,
+      resumeSessionId: sessionId,
+      settings: settingsJson,
     });
     const child = spawn(this.bin, args, {
       detached: true,
@@ -711,9 +773,18 @@ export class WorkerSupervisor implements Supervisor {
       env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
     });
     const lane: Lane = {
-      child, issue: issue.number, sessionId, jsonlFd, jsonlPath,
-      hb: undefined, handoffRequested: false, reclaiming: false,
-      startedMs: this.now().getTime(), timedOut: false, estimatedCostUsd: 0, estimateBaselineUsd,
+      child,
+      issue: issue.number,
+      sessionId,
+      jsonlFd,
+      jsonlPath,
+      hb: undefined,
+      handoffRequested: false,
+      reclaiming: false,
+      startedMs: this.now().getTime(),
+      timedOut: false,
+      estimatedCostUsd: 0,
+      estimateBaselineUsd,
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
@@ -721,11 +792,18 @@ export class WorkerSupervisor implements Supervisor {
     let spawnErr: unknown;
     await new Promise<void>((resolve) => {
       child.once("spawn", () => resolve());
-      child.once("error", (e) => { spawnErr = e; resolve(); });
+      child.once("error", (e) => {
+        spawnErr = e;
+        resolve();
+      });
     });
     if (spawnErr) {
       this.lanes.delete(name);
-      try { closeSync(jsonlFd); } catch { /* noop */ }
+      try {
+        closeSync(jsonlFd);
+      } catch {
+        /* noop */
+      }
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     child.on("error", () => this.onExit(name, 1));
@@ -734,8 +812,11 @@ export class WorkerSupervisor implements Supervisor {
     this.removeIfExists(handoffPath);
     if (this.lanes.has(name) && child.exitCode === null && child.signalCode === null) {
       this.writeJsonAtomic(this.path(name, "running.json"), {
-        name, issue: issue.number, session_id: sessionId,
-        wrapper_pid: child.pid, started_at: new Date(lane.startedMs).toISOString(),
+        name,
+        issue: issue.number,
+        session_id: sessionId,
+        wrapper_pid: child.pid,
+        started_at: new Date(lane.startedMs).toISOString(),
         // Preserve the original first-dispatch baseline (not this resume's start).
         ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
       });
@@ -844,9 +925,7 @@ export class WorkerSupervisor implements Supervisor {
    *  input + cache-read + cache-creation tokens only — a drop marks an auto-compact, itself
    *  display-worthy, never smoothed into a running max). `tokenComposition` is the cumulative
    *  4-class split across every streamed assistant message so far. */
-  private liveTelemetry(
-    lane: Lane,
-  ): { estCostUsd: number; contextTokens: number; tokenComposition: CategorizedTokenUsage } {
+  private liveTelemetry(lane: Lane): { estCostUsd: number; contextTokens: number; tokenComposition: CategorizedTokenUsage } {
     const deltas = parseAssistantUsageDeltas(this.readJsonl(lane.jsonlPath));
     const wholeFileUsd = deltas.reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0);
     const estCostUsd = Math.max(0, wholeFileUsd - lane.estimateBaselineUsd);
@@ -900,7 +979,11 @@ export class WorkerSupervisor implements Supervisor {
     const lane = this.lanes.get(name);
     if (!lane) return;
     clearInterval(lane.hb);
-    try { closeSync(lane.jsonlFd); } catch { /* already closed */ }
+    try {
+      closeSync(lane.jsonlFd);
+    } catch {
+      /* already closed */
+    }
     // reclaim() owns the lane's terminal state — don't also write a sentinel.
     if (!lane.reclaiming) {
       // #60/#69: the real `claude` CLI has no SIGTERM trap — a handoff-requested process dies
@@ -914,13 +997,7 @@ export class WorkerSupervisor implements Supervisor {
       // resume() above); a handoff-requested lane is tagged .handoff regardless of how it
       // died or what state its worktree is in. timedOut is always .failed — a wall-clock
       // timeout is a distinct, non-drain-requested hard kill.
-      const tag = lane.timedOut
-        ? "failed"
-        : lane.handoffRequested
-          ? "handoff"
-          : code === 0
-            ? "done"
-            : "failed";
+      const tag = lane.timedOut ? "failed" : lane.handoffRequested ? "handoff" : code === 0 ? "done" : "failed";
       this.writeTerminalSentinel(name, lane.issue, lane.sessionId, lane.jsonlPath, tag, code, lane.estimatedCostUsd);
     }
     this.lanes.delete(name);
@@ -933,8 +1010,12 @@ export class WorkerSupervisor implements Supervisor {
    *  exact same write shape onExit's real exit callback uses, just fed its issue/sessionId
    *  from the persisted running.json instead. */
   private writeTerminalSentinel(
-    name: string, issue: number, sessionId: string, jsonlPath: string,
-    tag: "done" | "failed" | "handoff", exitCode: number | null,
+    name: string,
+    issue: number,
+    sessionId: string,
+    jsonlPath: string,
+    tag: "done" | "failed" | "handoff",
+    exitCode: number | null,
     // #33: the live token-ESTIMATE this lane accumulated (undefined for the detached-lane path
     // below, which has no in-memory Lane to have accumulated one). Purely for the divergence log
     // below — never affects what gets written to the sentinel.
@@ -964,8 +1045,12 @@ export class WorkerSupervisor implements Supervisor {
     const running = this.readJson(this.path(name, "running.json"));
     const dispatchedAt = typeof running?.dispatched_at === "string" ? running.dispatched_at : null;
     const base = {
-      name, issue, session_id: sessionId, total_cost_usd: cost,
-      model_usage: modelUsage, ended_at: this.now().toISOString(),
+      name,
+      issue,
+      session_id: sessionId,
+      total_cost_usd: cost,
+      model_usage: modelUsage,
+      ended_at: this.now().toISOString(),
       ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
     };
     this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: exitCode });
@@ -1065,7 +1150,14 @@ export class WorkerSupervisor implements Supervisor {
     // reason.
     const failureText = failed ? this.terminalFailureText(name) : undefined;
     return {
-      done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd, modelUsage,
+      done,
+      failed,
+      handoff,
+      hbAge,
+      wrapperAlive,
+      hasPr,
+      costUsd,
+      modelUsage,
       ...(prNumber != null ? { prNumber } : {}),
       ...(liveTelemetry ? { liveTelemetry } : {}),
       ...(failureText !== undefined ? { failureText } : {}),
@@ -1258,7 +1350,11 @@ export class WorkerSupervisor implements Supervisor {
   dispose(): void {
     for (const lane of this.lanes.values()) {
       clearInterval(lane.hb);
-      try { closeSync(lane.jsonlFd); } catch { /* noop */ }
+      try {
+        closeSync(lane.jsonlFd);
+      } catch {
+        /* noop */
+      }
     }
     this.lanes.clear();
   }
@@ -1281,7 +1377,11 @@ export class WorkerSupervisor implements Supervisor {
     try {
       process.kill(-pid, sig); // negative pid -> the whole process group (detached leader)
     } catch {
-      try { process.kill(pid, sig); } catch { /* already gone */ }
+      try {
+        process.kill(pid, sig);
+      } catch {
+        /* already gone */
+      }
     }
   }
 
@@ -1302,7 +1402,12 @@ export class WorkerSupervisor implements Supervisor {
   private wrapperAlive(name: string): -1 | 0 | 1 {
     const pid = this.persistedPid(name);
     if (pid == null) return -1; // unknown (no running marker)
-    try { process.kill(pid, 0); return 1; } catch { return 0; }
+    try {
+      process.kill(pid, 0);
+      return 1;
+    } catch {
+      return 0;
+    }
   }
   private persistedPid(name: string): number | null {
     const r = this.readJson(this.path(name, "running.json"));
@@ -1317,10 +1422,18 @@ export class WorkerSupervisor implements Supervisor {
   }
 
   private readJsonl(p: string): string {
-    try { return readFileSync(p, "utf8"); } catch { return ""; }
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      return "";
+    }
   }
   private readJson(p: string): Record<string, unknown> | null {
-    try { return JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>; } catch { return null; }
+    try {
+      return JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
   }
   private writeJsonAtomic(p: string, obj: unknown): void {
     const tmp = `${p}.tmp.${process.pid}`;
@@ -1328,7 +1441,11 @@ export class WorkerSupervisor implements Supervisor {
     renameSync(tmp, p);
   }
   private removeIfExists(p: string): void {
-    try { rmSync(p, { force: true }); } catch { /* noop */ }
+    try {
+      rmSync(p, { force: true });
+    } catch {
+      /* noop */
+    }
   }
 }
 
@@ -1380,9 +1497,7 @@ export function renderPromptTemplate(template: string, issue: Issue): string {
   return template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => {
     const name = raw.trim();
     if (!Object.hasOwn(PROMPT_VARS, name)) {
-      throw new Error(
-        `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(PROMPT_VARS).join(", ")}`,
-      );
+      throw new Error(`worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(PROMPT_VARS).join(", ")}`);
     }
     return PROMPT_VARS[name]!(issue);
   });
@@ -1431,7 +1546,7 @@ const CONFIG_VARS: Record<string, (cfg: SapwoodConfig) => string> = {
   // file is NOT an error, unlike `worker.promptFile` above — it degrades to doctrine.ts's
   // explicit NO_DOCTRINE placeholder (see that module's doc comment), never a silent empty
   // substitution and never a startup throw.
-  "doctrine": (cfg) => loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars),
+  doctrine: (cfg) => loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars),
 };
 
 /** Builds the `WorkerDeps.renderPrompt` closure (#74): loads the template ONCE, eagerly —
@@ -1457,11 +1572,8 @@ export function buildRenderPrompt(cfg: SapwoodConfig): (issue: Issue) => string 
   for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
     const name = raw!.trim();
     if (!Object.hasOwn(vars, name)) {
-      throw new Error(
-        `worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`,
-      );
+      throw new Error(`worker prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`);
     }
   }
-  return (issue: Issue) =>
-    template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issue));
+  return (issue: Issue) => template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issue));
 }

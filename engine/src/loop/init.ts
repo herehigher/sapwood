@@ -7,11 +7,11 @@
 // The guard PreToolUse hook is wired in M1 (guard.ts does not exist yet) — deferred here
 // with a clear note, and is human-merge-only per CLAUDE.md.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import { gh, ghText, type GhRunner } from "../forge/gh.js";
 import type { OwnerKind } from "../forge/forge.js";
+import { type GhRunner, gh, ghText } from "../forge/gh.js";
 
 export interface InitDeps {
   run: GhRunner; // generic gh runner (label/milestone/api/graphql)
@@ -89,9 +89,7 @@ export async function preflight(getAuthStatus: () => Promise<string>): Promise<v
 }
 
 async function ensureLabels(cfg: SapwoodConfig, run: GhRunner, repo: string): Promise<string[]> {
-  const existing = JSON.parse(
-    await run(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"]),
-  ) as { name: string }[];
+  const existing = JSON.parse(await run(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])) as { name: string }[];
   const have = existing.map((e) => e.name);
   const toCreate = requiredLabels(cfg).filter((l) => !have.includes(l.name));
   for (const l of toCreate) {
@@ -107,7 +105,10 @@ async function ensureMilestones(cfg: SapwoodConfig, run: GhRunner, repo: string)
   // array wrap) emits one title per line, which survives --paginate concatenating pages
   // — a wrapped `[...]` per page would break JSON.parse past 30 milestones.
   const out = await run(["api", `repos/${repo}/milestones?state=all`, "--paginate", "--jq", ".[].title"]);
-  const existing = out.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+  const existing = out
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
   const toCreate = missing(cfg.milestones, existing);
   for (const title of toCreate) {
     await run(["api", `repos/${repo}/milestones`, "-f", `title=${title}`]);
@@ -139,13 +140,18 @@ async function queryBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunne
   // string vars via -f (raw); only the Int! `num` needs -F. -F magic-types @file/numeric,
   // which could misread an owner/status value starting with '@' or looking numeric.
   const out = await run([
-    "api", "graphql", "-f", `query=${q}`,
-    "-f", `owner=${cfg.board.owner}`, "-F", `num=${cfg.board.projectNumber}`,
-    "-f", `status=${cfg.board.statusField}`,
+    "api",
+    "graphql",
+    "-f",
+    `query=${q}`,
+    "-f",
+    `owner=${cfg.board.owner}`,
+    "-F",
+    `num=${cfg.board.projectNumber}`,
+    "-f",
+    `status=${cfg.board.statusField}`,
   ]);
-  const proj = (JSON.parse(out)?.data?.[root]?.projectV2) as
-    | { id: string; field?: { id: string; options: BoardOption[] } | null }
-    | null;
+  const proj = JSON.parse(out)?.data?.[root]?.projectV2 as { id: string; field?: { id: string; options: BoardOption[] } | null } | null;
   if (!proj) return { exists: false, options: [] };
   return {
     exists: true,
@@ -170,9 +176,14 @@ async function ensureBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunn
     ];
   }
   if (!board.statusFieldId) {
-    return [`board: ProjectV2 #${cfg.board.projectNumber} has no "${cfg.board.statusField}" single-select field; add it in the UI, then re-run.`];
+    return [
+      `board: ProjectV2 #${cfg.board.projectNumber} has no "${cfg.board.statusField}" single-select field; add it in the UI, then re-run.`,
+    ];
   }
-  const need = missing(desired, board.options.map((o) => o.name));
+  const need = missing(
+    desired,
+    board.options.map((o) => o.name),
+  );
   // Exact match: every desired lane already exists. Make NO mutation call at all — even a
   // no-op-looking updateProjectV2Field(singleSelectOptions:[...]) reassigns every option's
   // ID (confirmed via `gh api graphql` schema introspection: ProjectV2SingleSelectFieldOptionInput.id
@@ -182,17 +193,12 @@ async function ensureBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunn
   // updateProjectV2Field replaces the FULL option set, so resend the existing lanes with
   // their existing `id` (preserving identity + colors/descriptions — see setStatusOptionsArgs)
   // plus the new ones (GRAY, no id — the API assigns a fresh id for those).
-  const full: BoardOption[] = [
-    ...board.options,
-    ...need.map((name) => ({ name, color: "GRAY", description: "" })),
-  ];
+  const full: BoardOption[] = [...board.options, ...need.map((name) => ({ name, color: "GRAY", description: "" }))];
   await run(setStatusOptionsArgs(board.statusFieldId, full));
   return need.map((n) => `board: added Status lane "${n}"`);
 }
 
-const VALID_OPTION_COLORS = new Set([
-  "GRAY", "BLUE", "GREEN", "YELLOW", "ORANGE", "RED", "PINK", "PURPLE",
-]);
+const VALID_OPTION_COLORS = new Set(["GRAY", "BLUE", "GREEN", "YELLOW", "ORANGE", "RED", "PINK", "PURPLE"]);
 
 /**
  * argv for setting the full single-select option list on a ProjectV2 Status field.

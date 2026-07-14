@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   classifyEnvFailure,
+  DEFAULT_FORGE_FAILURE_PATTERNS,
+  DEFAULT_LLM_FAILURE_PATTERNS,
+  escalationChannel,
+  parkDurationExceededSec,
   probeBackoffSec,
   probeDue,
-  parkDurationExceededSec,
-  escalationChannel,
-  DEFAULT_LLM_FAILURE_PATTERNS,
-  DEFAULT_FORGE_FAILURE_PATTERNS,
 } from "./env-failure.js";
 
 const patterns = { llm: [...DEFAULT_LLM_FAILURE_PATTERNS], forge: [...DEFAULT_FORGE_FAILURE_PATTERNS] };

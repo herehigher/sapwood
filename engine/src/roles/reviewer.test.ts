@@ -2,32 +2,32 @@
 // deriveReviewAction) + the pluggable Reviewer implementations' verdictFromData (pure) and
 // triggerReview (against a fake IForge — no real gh calls anywhere in this file).
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  freshThumbCount,
-  freshHeadReviewCount,
-  changesRequestedOnHead,
-  deriveReviewAction,
-  normalizeLogin,
-  CodexReviewer,
-  HumanReviewer,
-  SameModelTrustedReviewer,
-  makeReviewer,
-  buildReviewerByKind,
-  makeFallbackReviewers,
-  resolveReviewVerdict,
-  NO_FALLBACK_LOCK,
-  REVIEWER_KINDS,
-  isReviewerKind,
-  buildReviewTriggerComment,
-} from "./reviewer.js";
+import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, PRReview, PRReviewData } from "../forge/forge.js";
-import type { Reviewer, ReviewVerdict, ReviewAction, ReviewFallbackLock } from "./reviewer.js";
+import type { ReviewAction, Reviewer, ReviewFallbackLock, ReviewVerdict } from "./reviewer.js";
+import {
+  buildReviewerByKind,
+  buildReviewTriggerComment,
+  CodexReviewer,
+  changesRequestedOnHead,
+  deriveReviewAction,
+  freshHeadReviewCount,
+  freshThumbCount,
+  HumanReviewer,
+  isReviewerKind,
+  makeFallbackReviewers,
+  makeReviewer,
+  NO_FALLBACK_LOCK,
+  normalizeLogin,
+  REVIEWER_KINDS,
+  resolveReviewVerdict,
+  SameModelTrustedReviewer,
+} from "./reviewer.js";
 
 // ── pure signal helpers (0day pr_gate.sh parity) ──────────────────────────────────────────
 
@@ -92,32 +92,62 @@ test("freshHeadReviewCount: acceptStates restricts which states count (human rev
 
 test("deriveReviewAction: unresolved threads outrank a fresh approving review (findings first)", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 2, changesRequestedOnHead: false }),
+    deriveReviewAction({
+      hasEyesReaction: false,
+      freshTrustedThumbs: 0,
+      freshApprovingReviews: 1,
+      unresolvedThreads: 2,
+      changesRequestedOnHead: false,
+    }),
     "HANDLE_THREADS",
   );
 });
 
 test("deriveReviewAction: a standing change request outranks a fresh approving review (Codex PR #42 P1)", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: true }),
+    deriveReviewAction({
+      hasEyesReaction: false,
+      freshTrustedThumbs: 0,
+      freshApprovingReviews: 1,
+      unresolvedThreads: 0,
+      changesRequestedOnHead: true,
+    }),
     "HANDLE_THREADS",
   );
 });
 
 test("deriveReviewAction: a fresh approving review with no threads -> MERGE_OK", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 1, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({
+      hasEyesReaction: false,
+      freshTrustedThumbs: 0,
+      freshApprovingReviews: 1,
+      unresolvedThreads: 0,
+      changesRequestedOnHead: false,
+    }),
     "MERGE_OK",
   );
 });
 
 test("deriveReviewAction: nothing yet (no review, no eyes) -> WAIT_REVIEW, never a silent MERGE_OK", () => {
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: false, freshTrustedThumbs: 0, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({
+      hasEyesReaction: false,
+      freshTrustedThumbs: 0,
+      freshApprovingReviews: 0,
+      unresolvedThreads: 0,
+      changesRequestedOnHead: false,
+    }),
     "WAIT_REVIEW",
   );
   assert.equal(
-    deriveReviewAction({ hasEyesReaction: true, freshTrustedThumbs: 0, freshApprovingReviews: 0, unresolvedThreads: 0, changesRequestedOnHead: false }),
+    deriveReviewAction({
+      hasEyesReaction: true,
+      freshTrustedThumbs: 0,
+      freshApprovingReviews: 0,
+      unresolvedThreads: 0,
+      changesRequestedOnHead: false,
+    }),
     "WAIT_REVIEW",
   );
 });
@@ -145,10 +175,7 @@ test("changesRequestedOnHead: the SAME reviewer re-approving the same head clear
 });
 
 test("changesRequestedOnHead: a mere COMMENTED does NOT clear a standing change request (GitHub semantics)", () => {
-  const reviews = [
-    mkReview("rev", "HEAD", "CHANGES_REQUESTED"),
-    mkReview("rev", "HEAD", "COMMENTED"),
-  ];
+  const reviews = [mkReview("rev", "HEAD", "CHANGES_REQUESTED"), mkReview("rev", "HEAD", "COMMENTED")];
   assert.equal(changesRequestedOnHead(reviews, "HEAD", "author"), true);
 });
 
@@ -179,10 +206,7 @@ test("buildReviewTriggerComment: null plan -> an explicit fallback sentence, nev
 // #156: reviewer.triggerCommand — the trigger text is now a parameter (default unchanged).
 test("buildReviewTriggerComment: default triggerCommand is byte-for-byte identical to today's hardcoded `@codex review`", () => {
   const body = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
-  assert.equal(
-    body,
-    "@codex review\n\nVerify this PR against issue #46's verification plan below:\n\n## Verification\nrun the test suite",
-  );
+  assert.equal(body, "@codex review\n\nVerify this PR against issue #46's verification plan below:\n\n## Verification\nrun the test suite");
 });
 
 test("buildReviewTriggerComment: a custom triggerCommand replaces the default `@codex review` line, instruction unchanged", () => {
@@ -438,10 +462,7 @@ test("CodexReviewer: approve-then-CHANGES_REQUESTED on the same head blocks — 
 test("CodexReviewer: a change request from an UNLISTED account still blocks (filter shrinks approvals, never blockers)", () => {
   const r = new CodexReviewer();
   const data = mkData({
-    reviews: [
-      mkReview("chatgpt-codex-connector", "HEAD", "APPROVED"),
-      mkReview("random-account", "HEAD", "CHANGES_REQUESTED"),
-    ],
+    reviews: [mkReview("chatgpt-codex-connector", "HEAD", "APPROVED"), mkReview("random-account", "HEAD", "CHANGES_REQUESTED")],
   });
   assert.equal(r.verdictFromData(data).action, "HANDLE_THREADS");
 });
@@ -491,7 +512,9 @@ test("CodexReviewer: triggerReview still fires (with the fallback text) when get
   const calls: Array<[number, string]> = [];
   const forge = {
     addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
-    getIssueBody: async () => { throw new Error("rate limited"); },
+    getIssueBody: async () => {
+      throw new Error("rate limited");
+    },
   } as unknown as IForge;
   await new CodexReviewer().triggerReview(forge, 42, 46);
   assert.equal(calls.length, 1); // the trigger still posts — never silently skipped
@@ -598,7 +621,11 @@ test("HumanReviewer: only an explicit APPROVED state counts — a mere COMMENTED
 
 test("HumanReviewer: triggerReview is a no-op (nothing to ping)", async () => {
   let called = false;
-  const forge = { addPRComment: async () => { called = true; } } as unknown as IForge;
+  const forge = {
+    addPRComment: async () => {
+      called = true;
+    },
+  } as unknown as IForge;
   const r: Reviewer = new HumanReviewer();
   await r.triggerReview(forge, 1, 46);
   assert.equal(called, false);
@@ -712,8 +739,13 @@ test("isReviewerKind: accepts exactly the three Reviewer kinds, rejects anything
 test("resolveReviewVerdict: no fallback configured -> always the primary's own verdict, no lock, no transition (unchanged behavior)", () => {
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const result = resolveReviewVerdict({
-    primary, fallbacks: [], data: mkData(), triggerPin: TRIGGERED_LONG_AGO, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: NO_FALLBACK_LOCK,
+    primary,
+    fallbacks: [],
+    data: mkData(),
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: NO_FALLBACK_LOCK,
   });
   assert.deepEqual(result.verdict, { action: "WAIT_REVIEW", headOid: HEAD });
   assert.equal(result.sourceKind, "different-model-codex");
@@ -725,8 +757,13 @@ test("resolveReviewVerdict: primary decisive (MERGE_OK) -> used directly even wi
   const primary = new ScriptedReviewer("different-model-codex", "MERGE_OK");
   const fallback = new ScriptedReviewer("human", "MERGE_OK");
   const result = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data: mkData(), triggerPin: TRIGGERED_LONG_AGO, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: NO_FALLBACK_LOCK,
+    primary,
+    fallbacks: [fallback],
+    data: mkData(),
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: NO_FALLBACK_LOCK,
   });
   assert.equal(result.sourceKind, "different-model-codex");
   assert.equal(result.transition, null);
@@ -737,8 +774,13 @@ test("resolveReviewVerdict: primary WAIT_REVIEW under the threshold -> still the
   const fallback = new ScriptedReviewer("same-model-trusted", "MERGE_OK");
   const justTriggered = { head: HEAD, at: "2026-01-01T00:59:00Z" }; // 1 minute ago
   const result = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data: mkData(), triggerPin: justTriggered, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: NO_FALLBACK_LOCK,
+    primary,
+    fallbacks: [fallback],
+    data: mkData(),
+    triggerPin: justTriggered,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: NO_FALLBACK_LOCK,
   });
   assert.equal(result.verdict.action, "WAIT_REVIEW");
   assert.equal(result.sourceKind, "different-model-codex");
@@ -750,8 +792,13 @@ test("resolveReviewVerdict: threshold crossed -> the first fallback with a decis
   const fallback = new SameModelTrustedReviewer(["trusted-bot"]); // real mode semantics, not scripted
   const data = mkData({ reviews: [mkReview("trusted-bot", HEAD, "APPROVED")] });
   const result = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data, triggerPin: TRIGGERED_LONG_AGO, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: NO_FALLBACK_LOCK,
+    primary,
+    fallbacks: [fallback],
+    data,
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: NO_FALLBACK_LOCK,
   });
   assert.deepEqual(result.verdict, { action: "MERGE_OK", headOid: HEAD });
   assert.equal(result.sourceKind, "same-model-trusted");
@@ -764,8 +811,13 @@ test("resolveReviewVerdict: threshold crossed but an UNTRUSTED approver doesn't 
   const fallback = new SameModelTrustedReviewer(["trusted-bot"]);
   const data = mkData({ reviews: [mkReview("random-account", HEAD, "APPROVED")] }); // not trusted
   const result = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data, triggerPin: TRIGGERED_LONG_AGO, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: NO_FALLBACK_LOCK,
+    primary,
+    fallbacks: [fallback],
+    data,
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: NO_FALLBACK_LOCK,
   });
   assert.equal(result.verdict.action, "WAIT_REVIEW");
   assert.equal(result.sourceKind, "different-model-codex");
@@ -778,8 +830,13 @@ test("resolveReviewVerdict: ordered fallback list — the SECOND entry gates whe
   const trustedBot = new ScriptedReviewer("same-model-trusted", "WAIT_REVIEW"); // not decisive
   const human = new ScriptedReviewer("human", "MERGE_OK");
   const result = resolveReviewVerdict({
-    primary, fallbacks: [trustedBot, human], data: mkData(), triggerPin: TRIGGERED_LONG_AGO, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: NO_FALLBACK_LOCK,
+    primary,
+    fallbacks: [trustedBot, human],
+    data: mkData(),
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: NO_FALLBACK_LOCK,
   });
   assert.equal(result.sourceKind, "human");
   assert.deepEqual(result.transition, { kind: "switch", mode: "human", head: HEAD });
@@ -796,8 +853,13 @@ test("resolveReviewVerdict R2: primary decisive HANDLE_THREADS gates (blocks) ev
   // resurrect MERGE_OK over them.
   const primary = new ScriptedReviewer("different-model-codex", "HANDLE_THREADS");
   const result = resolveReviewVerdict({
-    primary, fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])], data: mkData(), triggerPin: TRIGGERED_LONG_AGO,
-    now: NOW, failoverAfterSec: FAILOVER_AFTER_SEC, lock,
+    primary,
+    fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])],
+    data: mkData(),
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock,
   });
   assert.equal(result.verdict.action, "HANDLE_THREADS"); // blocks — never MERGE_OK from the lock
   assert.equal(result.sourceKind, "different-model-codex");
@@ -809,8 +871,13 @@ test("resolveReviewVerdict R2: primary decisive MERGE_OK with a lock held -> pri
   const lock: ReviewFallbackLock = { head: HEAD, kind: "same-model-trusted" };
   const primary = new ScriptedReviewer("different-model-codex", "MERGE_OK");
   const result = resolveReviewVerdict({
-    primary, fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])], data: mkData(), triggerPin: TRIGGERED_LONG_AGO,
-    now: NOW, failoverAfterSec: FAILOVER_AFTER_SEC, lock,
+    primary,
+    fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])],
+    data: mkData(),
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock,
   });
   assert.deepEqual(result.verdict, { action: "MERGE_OK", headOid: HEAD });
   assert.equal(result.sourceKind, "different-model-codex");
@@ -825,8 +892,13 @@ test("resolveReviewVerdict R2: lock survives primary non-decisiveness — honore
   const data = mkData({ reviews: [mkReview("trusted-bot", HEAD, "APPROVED")] }); // artifact exists
   const justTriggered = { head: HEAD, at: "2026-01-01T00:59:00Z" }; // below threshold
   const result = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data, triggerPin: justTriggered, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock,
+    primary,
+    fallbacks: [fallback],
+    data,
+    triggerPin: justTriggered,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock,
   });
   assert.deepEqual(result.verdict, { action: "MERGE_OK", headOid: HEAD });
   assert.equal(result.sourceKind, "same-model-trusted");
@@ -840,14 +912,24 @@ test("resolveReviewVerdict R2: a FORGED lock (valid kind, but no matching approv
   const data = mkData(); // NO reviews at all — the claimed approval does not exist
   // Below the threshold the lock re-verify path runs; the artifact is missing -> queue.
   const below = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data, triggerPin: { head: HEAD, at: "2026-01-01T00:59:00Z" }, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: forged,
+    primary,
+    fallbacks: [fallback],
+    data,
+    triggerPin: { head: HEAD, at: "2026-01-01T00:59:00Z" },
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: forged,
   });
   assert.equal(below.verdict.action, "WAIT_REVIEW");
   // Past the threshold the chain runs; the artifact is still missing -> still queue.
   const past = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data, triggerPin: TRIGGERED_LONG_AGO, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: forged,
+    primary,
+    fallbacks: [fallback],
+    data,
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: forged,
   });
   assert.equal(past.verdict.action, "WAIT_REVIEW");
 });
@@ -857,8 +939,13 @@ test("resolveReviewVerdict R2: a lock whose kind is NOT among the currently conf
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const data = mkData({ reviews: [mkReview("alice", HEAD, "APPROVED")] }); // a human approval DOES exist
   const result = resolveReviewVerdict({
-    primary, fallbacks: [], data, triggerPin: { head: HEAD, at: "2026-01-01T00:59:00Z" }, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock, // fallback list emptied since the lock was recorded
+    primary,
+    fallbacks: [],
+    data,
+    triggerPin: { head: HEAD, at: "2026-01-01T00:59:00Z" },
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock, // fallback list emptied since the lock was recorded
   });
   assert.equal(result.verdict.action, "WAIT_REVIEW"); // fail-closed: no configured fallback, no failover
   assert.equal(result.transition, null);
@@ -878,13 +965,23 @@ test("resolveReviewVerdict R2: lock + fresh blocking signals in the data -> the 
     ],
   });
   const below = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data, triggerPin: { head: HEAD, at: "2026-01-01T00:59:00Z" }, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock,
+    primary,
+    fallbacks: [fallback],
+    data,
+    triggerPin: { head: HEAD, at: "2026-01-01T00:59:00Z" },
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock,
   });
   assert.notEqual(below.verdict.action, "MERGE_OK"); // the lock never overrides the block
   const past = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data, triggerPin: TRIGGERED_LONG_AGO, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock,
+    primary,
+    fallbacks: [fallback],
+    data,
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock,
   });
   assert.equal(past.verdict.action, "HANDLE_THREADS"); // the chain surfaces the block (gates HUMAN)
 });
@@ -893,8 +990,13 @@ test("resolveReviewVerdict: a lock recorded for a DIFFERENT (older) head is stal
   const staleLock: ReviewFallbackLock = { head: "OLD_HEAD", kind: "same-model-trusted" };
   const primary = new ScriptedReviewer("different-model-codex", "MERGE_OK"); // healthy for the NEW head
   const result = resolveReviewVerdict({
-    primary, fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])], data: mkData({ headOid: HEAD }),
-    triggerPin: TRIGGERED_LONG_AGO, now: NOW, failoverAfterSec: FAILOVER_AFTER_SEC, lock: staleLock,
+    primary,
+    fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])],
+    data: mkData({ headOid: HEAD }),
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: staleLock,
   });
   assert.equal(result.sourceKind, "different-model-codex"); // primary gates the new head directly
   assert.equal(result.transition, null); // no active episode on this head to revert from
@@ -907,8 +1009,13 @@ test("resolveReviewVerdict: no trigger pin recorded yet -> never past threshold,
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const fallback = new ScriptedReviewer("human", "MERGE_OK");
   const result = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data: mkData(), triggerPin: { head: null, at: null }, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: NO_FALLBACK_LOCK,
+    primary,
+    fallbacks: [fallback],
+    data: mkData(),
+    triggerPin: { head: null, at: null },
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: NO_FALLBACK_LOCK,
   });
   assert.equal(result.sourceKind, "different-model-codex");
   assert.equal(result.transition, null);
@@ -918,8 +1025,13 @@ test("resolveReviewVerdict: REVIEW_UNAVAILABLE (an explicit failure) is treated 
   const primary = new ScriptedReviewer("different-model-codex", "REVIEW_UNAVAILABLE");
   const fallback = new ScriptedReviewer("human", "MERGE_OK");
   const result = resolveReviewVerdict({
-    primary, fallbacks: [fallback], data: mkData(), triggerPin: TRIGGERED_LONG_AGO, now: NOW,
-    failoverAfterSec: FAILOVER_AFTER_SEC, lock: NO_FALLBACK_LOCK,
+    primary,
+    fallbacks: [fallback],
+    data: mkData(),
+    triggerPin: TRIGGERED_LONG_AGO,
+    now: NOW,
+    failoverAfterSec: FAILOVER_AFTER_SEC,
+    lock: NO_FALLBACK_LOCK,
   });
   assert.equal(result.sourceKind, "human");
   assert.deepEqual(result.transition, { kind: "switch", mode: "human", head: HEAD });

@@ -16,8 +16,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { guardDecision } from "./guard.js";
 
 const CWD = "/repo";
@@ -76,16 +76,49 @@ function makeRng(seed: number): () => number {
 }
 
 const PREFIXES = [
-  "", "", "env FOO=1 ", "env -u BAR ", "uv run ", "uv run --with rich ", "uv run --all-extras ",
-  "command ", "nohup ", "/usr/bin/", "stdbuf -oL ", "poetry run ", "npx ", "( ", "{ ",
+  "",
+  "",
+  "env FOO=1 ",
+  "env -u BAR ",
+  "uv run ",
+  "uv run --with rich ",
+  "uv run --all-extras ",
+  "command ",
+  "nohup ",
+  "/usr/bin/",
+  "stdbuf -oL ",
+  "poetry run ",
+  "npx ",
+  "( ",
+  "{ ",
 ];
 const CORE = [
-  "gh pr merge 1", "gh pr merge 1 --squash", "gh pr ready 2", "gh release create v1",
-  "gh -R o/r pr merge 3", "gh api -X PUT repos/o/r/pulls/1/merge", "gh api repos/o/r/releases -f t=v",
-  "gh api graphql -f query='mutation { mergePullRequest }'", "gh api --hostname H graphql -f query='mutation{x}'",
-  "gh pr view 1 --json state", "gh api repos/o/r/pulls/1", "gh pr list", "gh api graphql -f query='query{viewer{login}}'",
-  "bash -c 'ls'", "bash -lc 'echo hi'", "sh -c 'ls'", "python -c 'print(1)'", "node -e 'x'", "eval 'ls'",
-  "diff <(ls) <(ls -a)", "ls -la", "git status", "echo hello", "cat README.md", "grep foo bar.txt", "pytest -q",
+  "gh pr merge 1",
+  "gh pr merge 1 --squash",
+  "gh pr ready 2",
+  "gh release create v1",
+  "gh -R o/r pr merge 3",
+  "gh api -X PUT repos/o/r/pulls/1/merge",
+  "gh api repos/o/r/releases -f t=v",
+  "gh api graphql -f query='mutation { mergePullRequest }'",
+  "gh api --hostname H graphql -f query='mutation{x}'",
+  "gh pr view 1 --json state",
+  "gh api repos/o/r/pulls/1",
+  "gh pr list",
+  "gh api graphql -f query='query{viewer{login}}'",
+  "bash -c 'ls'",
+  "bash -lc 'echo hi'",
+  "sh -c 'ls'",
+  "python -c 'print(1)'",
+  "node -e 'x'",
+  "eval 'ls'",
+  "diff <(ls) <(ls -a)",
+  "ls -la",
+  "git status",
+  "echo hello",
+  "cat README.md",
+  "grep foo bar.txt",
+  "pytest -q",
 ];
 const SUFFIXES = ["", "", "", " > out.txt", " >> log", " 2>&1", " | cat", " && ls", " ; echo done"];
 
@@ -103,7 +136,7 @@ test("differential: sapwood is at least as strict as guard.py on opaque + Catego
     return;
   }
 
-  const rng = makeRng(0xC0FFEE);
+  const rng = makeRng(0xc0ffee);
   const commands = Array.from({ length: 1500 }, () => genCommand(rng));
   const pyDecisions = runGuardPy(bin, commands);
   assert.equal(pyDecisions.length, commands.length, "guard.py returned a decision per command");
@@ -115,7 +148,11 @@ test("differential: sapwood is at least as strict as guard.py on opaque + Catego
     const ts = guardDecision("Bash", { command: commands[i]! }, CWD);
     if (ts.allow) divergences.push(`guard.py BLOCKED but guard.ts ALLOWED: ${JSON.stringify(commands[i])} (py: ${py.reason})`);
   }
-  assert.deepEqual(divergences, [], `sapwood weaker than guard.py on ${divergences.length} input(s):\n${divergences.slice(0, 10).join("\n")}`);
+  assert.deepEqual(
+    divergences,
+    [],
+    `sapwood weaker than guard.py on ${divergences.length} input(s):\n${divergences.slice(0, 10).join("\n")}`,
+  );
 });
 
 test("differential: 0day's shared-surface BLOCK cases all block in guard.ts", (t) => {
@@ -126,12 +163,27 @@ test("differential: 0day's shared-surface BLOCK cases all block in guard.ts", (t
   }
   // The exact opaque + Category C commands from 0day's authoritative bypass matrix.
   const cases = [
-    'bash -c "python transfer.py"', "gh pr merge 143 --squash", "gh pr ready 143", "gh release create v1 -t x",
-    "gh api -X PUT repos/o/r/pulls/143/merge", "gh -R o/r pr merge 143 --squash", "gh --repo o/r pr ready 5",
-    "gh api repos/o/r/releases --raw-field tag_name=v1", "gh api --method=PUT repos/o/r/pulls/143/merge",
-    "gh api -XPUT repos/o/r/pulls/143/merge", "bash -lc 'x'", "bash -o pipefail -c 'ls'", "diff <(ls) <(ls -a)",
-    "python -c 'print(1)'", "eval 'ls -la'", "node -e 'x'", "/bin/bash -c 'ls'", "command bash -c 'ls'",
-    "gh api graphql -f query='mutation { mergePullRequest }'", "/usr/bin/gh pr merge 143", "command -p bash -c 'ls'",
+    'bash -c "python transfer.py"',
+    "gh pr merge 143 --squash",
+    "gh pr ready 143",
+    "gh release create v1 -t x",
+    "gh api -X PUT repos/o/r/pulls/143/merge",
+    "gh -R o/r pr merge 143 --squash",
+    "gh --repo o/r pr ready 5",
+    "gh api repos/o/r/releases --raw-field tag_name=v1",
+    "gh api --method=PUT repos/o/r/pulls/143/merge",
+    "gh api -XPUT repos/o/r/pulls/143/merge",
+    "bash -lc 'x'",
+    "bash -o pipefail -c 'ls'",
+    "diff <(ls) <(ls -a)",
+    "python -c 'print(1)'",
+    "eval 'ls -la'",
+    "node -e 'x'",
+    "/bin/bash -c 'ls'",
+    "command bash -c 'ls'",
+    "gh api graphql -f query='mutation { mergePullRequest }'",
+    "/usr/bin/gh pr merge 143",
+    "command -p bash -c 'ls'",
   ];
   const py = runGuardPy(bin, cases);
   for (let i = 0; i < cases.length; i++) {

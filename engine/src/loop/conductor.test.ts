@@ -3,42 +3,42 @@
 // the bash 0/1 sentinel/flag args, string[] for the CSV label args). If a row here
 // disagrees with the bash row it mirrors, that's a parity regression.
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { test } from "node:test";
+import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
+import { CODEX_REVIEWER_LOGINS, CodexReviewer } from "../roles/reviewer.js";
+import { State } from "../state/state.js";
 import {
-  nextRoundId,
-  classifyLane,
   budgetExceeded,
-  issuePriority,
-  labelsBlockers,
-  hasReserveLabel,
+  capHitEscalationNote,
+  classifyLane,
   codingFloor,
+  drainEscalationDue,
+  driveDecision,
+  ENGINE_SESSION_GAP_SEC,
+  engineSessionGapSec,
+  evaluateCeiling,
+  gatedReentryDecision,
+  hasReserveLabel,
   isCodingRank,
-  metaLaneAllowed,
+  issuePriority,
+  type LaneProbe,
+  labelsBlockers,
   laneOnReclaimDone,
   laneOnReclaimFailed,
-  driveDecision,
-  gatedReentryDecision,
-  capHitEscalationNote,
-  tick,
-  orderForDispatch,
-  evaluateCeiling,
-  drainEscalationDue,
-  engineSessionGapSec,
-  ENGINE_SESSION_GAP_SEC,
-  type Supervisor,
-  type LaneProbe,
   type MergeGate,
+  metaLaneAllowed,
+  nextRoundId,
+  orderForDispatch,
   type ReclaimResult,
+  type Supervisor,
+  tick,
 } from "./conductor.js";
-import { State } from "../state/state.js";
-import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
-import { MergeDriver, type DriveOutcome } from "../roles/merge-driver.js";
-import { CodexReviewer, CODEX_REVIEWER_LOGINS } from "../roles/reviewer.js";
 
 // ── tick test doubles (real State, fake forge + supervisor — no claude, no gh) ──
 const DEFAULT_PROBE: LaneProbe = { done: false, failed: false, handoff: false, hbAge: 10, wrapperAlive: 1, hasPr: false };
@@ -65,40 +65,95 @@ class FakeForge implements IForge {
    *  existing FakeMergeGate-based test is unaffected. */
   prStatus: PRStatus = { number: 0, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   prReviewData: PRReviewData = {
-    headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-    labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+    headOid: "x",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    reviews: [],
+    unresolvedThreads: 0,
   };
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return this.ready; }
-  async claimIssue(n: number): Promise<void> { this.claimed.push(n); }
-  async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> { this.boardSet.push([n, s]); }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return this.ready;
+  }
+  async claimIssue(n: number): Promise<void> {
+    this.claimed.push(n);
+  }
+  async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> {
+    this.boardSet.push([n, s]);
+  }
   async addLabel(n: number, l: string): Promise<void> {
     if (this.throwOnAddLabel) throw new Error("simulated forge failure");
     this.labelsAdded.push([n, l]);
     const cur = this.issueLabelsByIssue[n] ?? [];
     if (!cur.includes(l)) this.issueLabelsByIssue[n] = [...cur, l];
   }
-  async addPRLabel(n: number, l: string): Promise<void> { this.prLabelsAdded.push([n, l]); }
-  async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { ...this.prStatus, number: n }; }
-  async mergePR(pr: number, headOid: string): Promise<void> { this.merged.push([pr, headOid]); }
-  async addPRComment(pr: number, body: string): Promise<void> { this.prComments.push([pr, body]); }
-  async addIssueComment(n: number, body: string): Promise<void> { this.issueComments.push([n, body]); }
-  async getIssueBody(): Promise<string> { return ""; }
+  async addPRLabel(n: number, l: string): Promise<void> {
+    this.prLabelsAdded.push([n, l]);
+  }
+  async openPR(): Promise<number> {
+    return 1;
+  }
+  async getPRStatus(n: number): Promise<PRStatus> {
+    return { ...this.prStatus, number: n };
+  }
+  async mergePR(pr: number, headOid: string): Promise<void> {
+    this.merged.push([pr, headOid]);
+  }
+  async addPRComment(pr: number, body: string): Promise<void> {
+    this.prComments.push([pr, body]);
+  }
+  async addIssueComment(n: number, body: string): Promise<void> {
+    this.issueComments.push([n, body]);
+  }
+  async getIssueBody(): Promise<string> {
+    return "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
-  async getPRReviewData(): Promise<PRReviewData> { return this.prReviewData; }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
-  async getIssueLabels(n: number): Promise<string[]> { return this.issueLabelsByIssue[n] ?? []; }
-  async getIssueComments() { return []; }
-  async createIssue(): Promise<number> { return 0; }
-  async listOpenIssueNumbers(): Promise<number[]> { return []; }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
+  async getPRReviewData(): Promise<PRReviewData> {
+    return this.prReviewData;
+  }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return [];
+  }
+  async getIssueLabels(n: number): Promise<string[]> {
+    return this.issueLabelsByIssue[n] ?? [];
+  }
+  async getIssueComments() {
+    return [];
+  }
+  async createIssue(): Promise<number> {
+    return 0;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return [];
+  }
 }
 
 class FakeSupervisor implements Supervisor {
@@ -112,7 +167,9 @@ class FakeSupervisor implements Supervisor {
   inspectResults: Record<string, ReclaimResult> = {};
   inspected: string[] = [];
   private n = 0;
-  async probe(w: string): Promise<LaneProbe> { return this.probes[w] ?? DEFAULT_PROBE; }
+  async probe(w: string): Promise<LaneProbe> {
+    return this.probes[w] ?? DEFAULT_PROBE;
+  }
   async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
     this.dispatched.push(issue);
     const name = `lane-${++this.n}`;
@@ -126,7 +183,10 @@ class FakeSupervisor implements Supervisor {
     this.inspected.push(w);
     return this.inspectResults[w] ?? { worktreePath: null, worktreeRetained: false };
   }
-  requestHandoff(w: string): boolean { this.handoffRequested.push(w); return true; }
+  requestHandoff(w: string): boolean {
+    this.handoffRequested.push(w);
+    return true;
+  }
 }
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -155,7 +215,10 @@ test("orderForDispatch: the plain `blocked` escalation label is held out of disp
     { number: 2, title: "", labels: ["prio:3-feature", "blocked"] }, // held
     { number: 3, title: "", labels: ["prio:3-feature", "needs-human"] }, // held
   ];
-  assert.deepEqual(orderForDispatch(issues, cfg).map((i) => i.number), [1]);
+  assert.deepEqual(
+    orderForDispatch(issues, cfg).map((i) => i.number),
+    [1],
+  );
 });
 
 test("tick dispatch: claim happens before launch; a claim failure spawns no worker", async () => {
@@ -163,7 +226,9 @@ test("tick dispatch: claim happens before launch; a claim failure spawns no work
   const sup = new FakeSupervisor();
   const forge = new FakeForge();
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
-  forge.claimIssue = async () => { throw new Error("board claim failed"); };
+  forge.claimIssue = async () => {
+    throw new Error("board claim failed");
+  };
   await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }));
   assert.deepEqual(sup.dispatched, []); // claim threw first -> nothing launched, no untracked worker
   assert.equal(st.runningWorkers().length, 0);
@@ -175,7 +240,9 @@ test("tick dispatch: a launch failure rolls the board back to Ready", async () =
   const sup = new FakeSupervisor();
   const forge = new FakeForge();
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
-  sup.dispatch = async () => { throw new Error("spawn failed"); };
+  sup.dispatch = async () => {
+    throw new Error("spawn failed");
+  };
   await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }));
   assert.deepEqual(forge.claimed, [7]); // claimed first
   assert.ok(forge.boardSet.some(([n, s]) => n === 7 && s === "ready")); // then rolled back
@@ -192,7 +259,9 @@ test("tick dispatch: dispatch AND rollback both fail -> pending rollback persist
   const sup = new FakeSupervisor();
   const forge = new FakeForge();
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
-  sup.dispatch = async () => { throw new Error("spawn failed"); };
+  sup.dispatch = async () => {
+    throw new Error("spawn failed");
+  };
   let boardFails = true;
   forge.setBoardStatus = async (n, s) => {
     if (boardFails) throw new Error("board transiently unreachable");
@@ -228,8 +297,12 @@ test("tick dispatch: rollback keeps failing past the retry cap -> bounded escala
   const sup = new FakeSupervisor();
   const forge = new FakeForge();
   forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"] }];
-  sup.dispatch = async () => { throw new Error("spawn failed"); };
-  forge.setBoardStatus = async () => { throw new Error("board unreachable"); };
+  sup.dispatch = async () => {
+    throw new Error("spawn failed");
+  };
+  forge.setBoardStatus = async () => {
+    throw new Error("board unreachable");
+  };
   const cfg = mkCfg({ recovery: { rollbackRetryCap: 2 } });
 
   // Tick 1: dispatch fails; rollback attempt #1 fails -> persisted, attempts=1 (under cap=2).
@@ -253,7 +326,9 @@ test("tick reclaim: DEAD lane no-PR requeue failure does not throw or strand the
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-dead", 4);
   sup.probes["lane-dead"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
-  forge.setBoardStatus = async () => { throw new Error("board unreachable"); };
+  forge.setBoardStatus = async () => {
+    throw new Error("board unreachable");
+  };
 
   // Unlike the dispatch-rollback path, this one must NOT throw (there's no analogous existing
   // "tick rejects" contract here) — a throw would abort the whole tick over an unrelated dead
@@ -265,7 +340,9 @@ test("tick reclaim: DEAD lane no-PR requeue failure does not throw or strand the
   assert.deepEqual(forge.boardSet, []);
 
   // Next tick: forge recovers -> the persisted row is retried and cleared.
-  forge.setBoardStatus = async (n, s) => { forge.boardSet.push([n, s]); };
+  forge.setBoardStatus = async (n, s) => {
+    forge.boardSet.push([n, s]);
+  };
   const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(r2.rollbacks, [{ kind: "recovered", issue: 4, target: "ready", reason: "dead-lane-requeue" }]);
   assert.equal(st.pendingRollbacks().length, 0);
@@ -302,7 +379,14 @@ test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+n
   const byWorker = Object.fromEntries(r.reclaimed.map((o) => [o.worker, o]));
   assert.equal(byWorker["lane-keep"]!.kind, "kept");
   assert.deepEqual(byWorker["lane-donepr"], { kind: "done", worker: "lane-donepr", issue: 2, next: "DRIVING", costUsd: 0, modelUsage: [] });
-  assert.deepEqual(byWorker["lane-donenopr"], { kind: "done", worker: "lane-donenopr", issue: 3, next: "ESCALATE_NOPR", costUsd: 0, modelUsage: [] });
+  assert.deepEqual(byWorker["lane-donenopr"], {
+    kind: "done",
+    worker: "lane-donenopr",
+    issue: 3,
+    next: "ESCALATE_NOPR",
+    costUsd: 0,
+    modelUsage: [],
+  });
   assert.deepEqual(forge.labelsAdded, [[3, "needs-human"]]); // only the no-PR done escalates
   assert.equal(st.getWorker("lane-keep")?.state, "running");
   assert.equal(st.getWorker("lane-donepr")?.state, "driving"); // PR -> lane held for the review gate
@@ -319,7 +403,8 @@ test("tick reclaim: a KEEP lane's probe-carried liveTelemetry is persisted onto 
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-keep", 1);
   const telemetry = {
-    estCostUsd: 0.42, contextTokens: 41000,
+    estCostUsd: 0.42,
+    contextTokens: 41000,
     tokenComposition: { inputTokens: 12000, outputTokens: 3000, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
   };
   sup.probes["lane-keep"] = { ...DEFAULT_PROBE, liveTelemetry: telemetry };
@@ -333,7 +418,11 @@ test("tick reclaim: a KEEP lane's probe-carried liveTelemetry is persisted onto 
   // A later probe's numbers simply overwrite — no history, no per-probe event.
   sup.probes["lane-keep"] = {
     ...DEFAULT_PROBE,
-    liveTelemetry: { estCostUsd: 0.5, contextTokens: 500, tokenComposition: { inputTokens: 12500, outputTokens: 3100, cacheReadTokens: 90000, cacheCreationTokens: 4000 } },
+    liveTelemetry: {
+      estCostUsd: 0.5,
+      contextTokens: 500,
+      tokenComposition: { inputTokens: 12500, outputTokens: 3100, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
+    },
   };
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
   const after = st.getWorker("lane-keep");
@@ -352,7 +441,8 @@ test("tick reclaim: a KEEP lane whose probe carries NO liveTelemetry (detached p
   // detached-lane test pins that). Leaving the old numbers in place would show a frozen
   // cost/context as if live for the lane's whole remaining leg.
   st.setLiveTelemetry("lane-keep", {
-    estCostUsd: 0.42, contextTokens: 41000,
+    estCostUsd: 0.42,
+    contextTokens: 41000,
     tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
   });
   sup.probes["lane-keep"] = { ...DEFAULT_PROBE }; // no liveTelemetry field at all
@@ -371,7 +461,11 @@ test("tick reclaim: DONE+PR (-> driving) clears any previously-persisted live te
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-a", 2);
-  st.setLiveTelemetry("lane-a", { estCostUsd: 0.9, contextTokens: 999, tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 } });
+  st.setLiveTelemetry("lane-a", {
+    estCostUsd: 0.9,
+    contextTokens: 999,
+    tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
+  });
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 1.23 };
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-a");
@@ -379,7 +473,11 @@ test("tick reclaim: DONE+PR (-> driving) clears any previously-persisted live te
   assert.equal(row?.est_cost_usd, null, "live telemetry cleared on leaving `running`");
   assert.equal(row?.context_tokens, null);
   assert.equal(row?.token_composition, null);
-  assert.equal(st.spentUsdForWorker("lane-a"), 1.23, "the SETTLED real cost still lands in spend_ledger, unaffected by the telemetry clear");
+  assert.equal(
+    st.spentUsdForWorker("lane-a"),
+    1.23,
+    "the SETTLED real cost still lands in spend_ledger, unaffected by the telemetry clear",
+  );
   st.close();
 });
 
@@ -388,7 +486,11 @@ test("tick reclaim: a DEAD lane (rescued to driving, or torn down failed) clears
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-deadpr", 6);
-  st.setLiveTelemetry("lane-deadpr", { estCostUsd: 0.3, contextTokens: 500, tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 } });
+  st.setLiveTelemetry("lane-deadpr", {
+    estCostUsd: 0.3,
+    contextTokens: 500,
+    tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
+  });
   sup.probes["lane-deadpr"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true };
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-deadpr");
@@ -687,9 +789,7 @@ test("tick DRIVE: driveOne's recordFallback callback persists the reviewer-failo
 function rawEventKinds(path: string): string[] {
   const raw = new DatabaseSync(path);
   try {
-    return (raw.prepare("SELECT kind FROM events ORDER BY id").all() as unknown as Array<{ kind: string }>).map(
-      (r) => r.kind,
-    );
+    return (raw.prepare("SELECT kind FROM events ORDER BY id").all() as unknown as Array<{ kind: string }>).map((r) => r.kind);
   } finally {
     raw.close();
   }
@@ -706,7 +806,9 @@ test("tick DRIVE: reviewerTransition -> structured switch/revert events + PR com
     sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
     const gate = new FakeMergeGate();
     gate.outcomes[55] = {
-      kind: "queued", pr: 55, reason: "waiting",
+      kind: "queued",
+      pr: 55,
+      reason: "waiting",
       reviewerTransition: { kind: "switch", mode: "same-model-trusted", head: "H1" },
     };
     const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
@@ -724,7 +826,9 @@ test("tick DRIVE: reviewerTransition -> structured switch/revert events + PR com
 
     // Tick 3: a DIFFERENT transition (revert) -> announced (event + comment).
     gate.outcomes[55] = {
-      kind: "queued", pr: 55, reason: "waiting",
+      kind: "queued",
+      pr: 55,
+      reason: "waiting",
       reviewerTransition: { kind: "revert", mode: "different-model-codex", head: "H1" },
     };
     await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
@@ -755,12 +859,16 @@ test("tick DRIVE: a NEW head re-announces the same transition kind (a new episod
     sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
     const gate = new FakeMergeGate();
     gate.outcomes[55] = {
-      kind: "queued", pr: 55, reason: "waiting",
+      kind: "queued",
+      pr: 55,
+      reason: "waiting",
       reviewerTransition: { kind: "switch", mode: "human", head: "H1" },
     };
     await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
     gate.outcomes[55] = {
-      kind: "queued", pr: 55, reason: "waiting",
+      kind: "queued",
+      pr: 55,
+      reason: "waiting",
       reviewerTransition: { kind: "switch", mode: "human", head: "H2" }, // pushed -> new episode
     };
     await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
@@ -1041,7 +1149,10 @@ test("#75 tick: removing the PAUSE sentinel restores dispatch on the very next t
 
     rmSync(pausePath, { force: true }); // human resumes
     const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
-    assert.deepEqual(r2.dispatched.map((d) => d.kind), ["dispatched"]);
+    assert.deepEqual(
+      r2.dispatched.map((d) => d.kind),
+      ["dispatched"],
+    );
     assert.equal(st.runningWorkers().length, 1);
     st.close();
   } finally {
@@ -1074,7 +1185,10 @@ test("tick dispatch: fills lanes by priority up to roundDispatchCap; claims + re
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { roundDispatchCap: 2, max: 3 } }) });
   const dispatched = r.dispatched.filter((d) => d.kind === "dispatched").map((d) => d.issue);
   assert.deepEqual(dispatched, [2, 5]); // #2 (prio1) first, then #5 (prio3, lower number than #8); cap=2 stops before #8
-  assert.deepEqual(sup.dispatched.map((i) => i.number), [2, 5]);
+  assert.deepEqual(
+    sup.dispatched.map((i) => i.number),
+    [2, 5],
+  );
   assert.deepEqual(forge.claimed, [2, 5]);
   assert.equal(st.runningWorkers().length, 2);
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 8 && d.reason === "cap"));
@@ -1092,7 +1206,10 @@ test("tick dispatch: skips in-flight issue, respects max lanes, and over-budget 
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-x", 2); // #2 already in flight
-  forge.ready = [{ number: 2, title: "", labels: [] }, { number: 3, title: "", labels: [] }];
+  forge.ready = [
+    { number: 2, title: "", labels: [] },
+    { number: 3, title: "", labels: [] },
+  ];
   // over budget: roundSpend 50 > default roundBudgetUsd 30 (thunk since #124 gate② P1-2 —
   // evaluated inside tick(), post-reclaim)
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), roundSpendUsd: () => 50 });
@@ -1115,7 +1232,10 @@ test("tick dispatch anti-starvation: a meta issue yields a reserved coding lane 
     { number: 3, title: "", labels: ["prio:3-feature"] }, // coding
   ];
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 2, roundDispatchCap: 2 } }) });
-  const dispatched = r.dispatched.filter((d) => d.kind === "dispatched").map((d) => d.issue).sort((a, b) => a - b);
+  const dispatched = r.dispatched
+    .filter((d) => d.kind === "dispatched")
+    .map((d) => d.issue)
+    .sort((a, b) => a - b);
   assert.deepEqual(dispatched, [1, 3]); // one meta (#1) + the coding issue (#3); #2 meta yields the floor
   assert.ok(r.dispatched.some((d) => d.kind === "skipped" && d.issue === 2 && d.reason === "meta-floor"));
   st.close();
@@ -1231,7 +1351,10 @@ test("laneOnReclaimFailed: has PR -> DRIVING (rescue), else ESCALATE", () => {
 
 test("evaluateCeiling: no breach when under both caps", () => {
   const reasons = evaluateCeiling({
-    dailySpendUsd: 10, dailyBudgetUsd: 100, wallClockElapsedSec: 100, maxWallClockSec: 14400,
+    dailySpendUsd: 10,
+    dailyBudgetUsd: 100,
+    wallClockElapsedSec: 100,
+    maxWallClockSec: 14400,
   });
   assert.deepEqual(reasons, []);
 });
@@ -1245,7 +1368,10 @@ test("evaluateCeiling: daily budget / wall-clock each independently breach (#69:
 
 test("evaluateCeiling: multiple simultaneous breaches report in fixed order (daily, wall-clock)", () => {
   const reasons = evaluateCeiling({
-    dailySpendUsd: 200, dailyBudgetUsd: 100, wallClockElapsedSec: 99999, maxWallClockSec: 14400,
+    dailySpendUsd: 200,
+    dailyBudgetUsd: 100,
+    wallClockElapsedSec: 99999,
+    maxWallClockSec: 14400,
   });
   assert.deepEqual(reasons, ["daily-budget", "wall-clock"]);
 });
@@ -1406,7 +1532,7 @@ test("#69 P3b (fable): a .failed-sentinel lane with an open PR and a CLEAN workt
   seedRunning(st, "lane-fail-clean", 9);
   sup.probes["lane-fail-clean"] = { ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 92 };
   sup.inspectResults["lane-fail-clean"] = { worktreePath: "/wt/lane-fail-clean", worktreeRetained: false };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(sup.inspected, ["lane-fail-clean"]);
   assert.equal(st.getWorker("lane-fail-clean")?.state, "driving"); // clean -> rescued as before
   assert.equal(st.getWorker("lane-fail-clean")?.pr, 92);
@@ -1548,8 +1674,14 @@ test("#147 round-4 P2 (Codex PR #151): needs-human removed but `blocked` (anothe
   gate.outcomes[600] = { kind: "queued", pr: 600, reason: "gate-pending:WAIT_REVIEW" };
 
   st.upsertWorker({
-    name: "lane-h", issue: 50, session_id: "s-lane-h", state: "failed",
-    started_at: "t0", ended_at: "t1", pr: 600, gated_escalation_labeled: 1,
+    name: "lane-h",
+    issue: 50,
+    session_id: "s-lane-h",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 600,
+    gated_escalation_labeled: 1,
   });
   // A human removed needs-human — but `blocked` still stands on the issue. The human-hold set
   // is the WHOLE escalation.humanLabels list (dispatch's standard): the merge driver's
@@ -1583,9 +1715,15 @@ test("#147 gated-PR reentry: an escalated PR whose threads are resolved and labe
   // HANDLE_THREADS — failed, PR retained (labeled=1: the escalation's label write succeeded),
   // the ORIGINAL drive's trigger pin still on file.
   st.upsertWorker({
-    name: "lane-a", issue: 10, session_id: "s-lane-a", state: "failed",
-    started_at: "t0", ended_at: "t1", pr: 99,
-    review_triggered_head: "H1", review_triggered_at: "2026-07-01T00:00:00.000Z",
+    name: "lane-a",
+    issue: 10,
+    session_id: "s-lane-a",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 99,
+    review_triggered_head: "H1",
+    review_triggered_at: "2026-07-01T00:00:00.000Z",
     gated_escalation_labeled: 1,
   });
   forge.prStatus = { number: 99, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
@@ -1593,8 +1731,13 @@ test("#147 gated-PR reentry: an escalated PR whose threads are resolved and labe
   // reentry signal); a FRESH accepted Codex review lands after the re-entry's trigger
   // (submittedAt > the re-trigger pin — #147 P1: a pre-reentry review would NOT count).
   forge.prReviewData = {
-    headOid: "H1", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-    labels: [], state: "OPEN", reactions: [],
+    headOid: "H1",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
     reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-02T00:05:00Z" }],
     unresolvedThreads: 0,
   };
@@ -1629,9 +1772,15 @@ test("#147 P1 (Codex PR #151): a STALE review (submitted before the re-entry's t
   const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now: () => new Date("2026-07-02T00:00:00.000Z") });
 
   st.upsertWorker({
-    name: "lane-s", issue: 20, session_id: "s-lane-s", state: "failed",
-    started_at: "t0", ended_at: "t1", pr: 88,
-    review_triggered_head: "H1", review_triggered_at: "2026-06-30T00:00:00.000Z",
+    name: "lane-s",
+    issue: 20,
+    session_id: "s-lane-s",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 88,
+    review_triggered_head: "H1",
+    review_triggered_at: "2026-06-30T00:00:00.000Z",
     gated_escalation_labeled: 1,
   });
   forge.prStatus = { number: 88, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
@@ -1641,8 +1790,13 @@ test("#147 P1 (Codex PR #151): a STALE review (submitted before the re-entry's t
   // that stale review would read as a fresh accepted review and auto-merge on the tick after
   // the re-trigger — without the re-review ever responding.
   forge.prReviewData = {
-    headOid: "H1", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-    labels: [], state: "OPEN", reactions: [],
+    headOid: "H1",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
     reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-01T00:00:00Z" }],
     unresolvedThreads: 0,
   };
@@ -1683,17 +1837,30 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg });
 
   st.upsertWorker({
-    name: "lane-b", issue: 11, session_id: "s-lane-b", state: "failed",
-    started_at: "t0", ended_at: "t1", pr: 199,
-    review_triggered_head: "H1", review_triggered_at: "2026-07-01T00:00:00.000Z",
+    name: "lane-b",
+    issue: 11,
+    session_id: "s-lane-b",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 199,
+    review_triggered_head: "H1",
+    review_triggered_at: "2026-07-01T00:00:00.000Z",
     gated_escalation_labeled: 1,
   });
   forge.prStatus = { number: 199, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   // The findings are STILL standing (unresolvedThreads unchanged) — a human removed
   // needs-human believing it was fixed, but a re-review will find the same problem.
   forge.prReviewData = {
-    headOid: "H1", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-    labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 2,
+    headOid: "H1",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    reviews: [],
+    unresolvedThreads: 2,
   };
   forge.issueLabelsByIssue[11] = [];
 
@@ -1709,9 +1876,7 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   assert.equal(st.getWorker("lane-b")?.state, "failed");
   assert.equal(st.getWorker("lane-b")?.gated_reentry_attempts, 1);
   assert.equal(st.getWorker("lane-b")?.gated_reentry_capped, 0); // cap is only latched on the NEXT removal
-  assert.deepEqual(r2.driven, [
-    { kind: "needs-human", worker: "lane-b", issue: 11, pr: 199, reason: "gate:HUMAN:HANDLE_THREADS" },
-  ]);
+  assert.deepEqual(r2.driven, [{ kind: "needs-human", worker: "lane-b", issue: 11, pr: 199, reason: "gate:HUMAN:HANDLE_THREADS" }]);
   assert.deepEqual(forge.labelsAdded, [[11, "needs-human"]]);
   // A REPEAT escalation (gated_reentry_attempts > 0) carries the attempt trail — the very first
   // escalation for a lane never gets this comment.
@@ -1736,7 +1901,10 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   assert.deepEqual(r3.gatedReclaimed, [{ kind: "capped", worker: "lane-b", issue: 11, pr: 199, attempts: 1 }]);
   assert.equal(st.getWorker("lane-b")?.state, "failed"); // never reclaimed this time
   assert.equal(st.getWorker("lane-b")?.gated_reentry_capped, 1);
-  assert.deepEqual(forge.labelsAdded, [[11, "needs-human"], [11, "needs-human"]]); // re-applied
+  assert.deepEqual(forge.labelsAdded, [
+    [11, "needs-human"],
+    [11, "needs-human"],
+  ]); // re-applied
   assert.equal(forge.issueComments.length, 2); // the cap-reached notice
   assert.equal(sup.dispatched.length, 0);
 
@@ -1773,10 +1941,7 @@ test("capHitEscalationNote: a doctrine file loaded via loadConfig -> cites the R
     const docsDir = join(dir, "docs");
     mkdirSync(docsDir, { recursive: true });
     writeFileSync(join(docsDir, "REVIEW-DOCTRINE.md"), "# doctrine\nadjudication point 4: re-examine design.\n");
-    writeFileSync(
-      cfgPath,
-      "board: { owner: o, repo: r, projectNumber: 4 }\ndoctrine: { file: docs/REVIEW-DOCTRINE.md }\n",
-    );
+    writeFileSync(cfgPath, "board: { owner: o, repo: r, projectNumber: 4 }\ndoctrine: { file: docs/REVIEW-DOCTRINE.md }\n");
     const cfg = loadConfig(cfgPath);
     // Sanity: loadConfig really did resolve the path to an absolute one under dir.
     assert.equal(cfg.doctrine.file, join(docsDir, "REVIEW-DOCTRINE.md"));
@@ -1824,9 +1989,15 @@ test("#147 round-3 P2 (Codex PR #151): CAPPED latches ONLY after the needs-human
   // the label write failed, the row would leave gatedFailedWorkers() forever with no label on
   // the issue: invisible to automation AND to human triage.
   st.upsertWorker({
-    name: "lane-z", issue: 40, session_id: "s-lane-z", state: "failed",
-    started_at: "t0", ended_at: "t1", pr: 500,
-    gated_reentry_attempts: 1, gated_escalation_labeled: 1,
+    name: "lane-z",
+    issue: 40,
+    session_id: "s-lane-z",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 500,
+    gated_reentry_attempts: 1,
+    gated_escalation_labeled: 1,
   });
   forge.issueLabelsByIssue[40] = [];
 
@@ -1862,8 +2033,14 @@ test("#147 gated-PR reentry: without a mergeGate configured, an eligible failed+
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   st.upsertWorker({
-    name: "lane-c", issue: 12, session_id: "s-lane-c", state: "failed",
-    started_at: "t0", ended_at: "t1", pr: 300, gated_escalation_labeled: 1,
+    name: "lane-c",
+    issue: 12,
+    session_id: "s-lane-c",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 300,
+    gated_escalation_labeled: 1,
   });
   forge.issueLabelsByIssue[12] = []; // label already removed
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }); // no mergeGate
@@ -1929,7 +2106,9 @@ test("#168: FAILED lane with an LLM env-failure signature, no PR -> classified e
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-a", 501);
   sup.probes["lane-a"] = {
-    ...DEFAULT_PROBE, failed: true, hasPr: false,
+    ...DEFAULT_PROBE,
+    failed: true,
+    hasPr: false,
     failureText: "API Error: rate_limit_error — please retry later",
   };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
@@ -1952,7 +2131,9 @@ test("#168: FAILED lane with a forge env-failure signature, no PR -> same dispos
   seedRunning(st, "lane-b", 502);
   sup.probes["lane-b"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "ssh: Could not resolve host: github.com" };
   // The PARK-section forge probe (post-reclaim, same tick) must also see it still down.
-  forge.listOpenIssueNumbers = async () => { throw new Error("still down"); };
+  forge.listOpenIssueNumbers = async () => {
+    throw new Error("still down");
+  };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.equal(r.reclaimed[0]?.kind, "env-failure");
@@ -1974,7 +2155,10 @@ test("#168: FAILED lane with an env-failure signature + a CLEAN PR -> unchanged 
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-c", 503);
   sup.probes["lane-c"] = {
-    ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 77,
+    ...DEFAULT_PROBE,
+    failed: true,
+    hasPr: true,
+    prNumber: 77,
     failureText: "usage limit reached for this billing period",
   };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
@@ -1997,11 +2181,16 @@ test("#168 P1-4: env-failure + PR + DIRTY worktree -> env precedence: preserved 
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-dirty", 505);
   sup.probes["lane-dirty"] = {
-    ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 88,
+    ...DEFAULT_PROBE,
+    failed: true,
+    hasPr: true,
+    prNumber: 88,
     failureText: "gh: Service Unavailable (HTTP 503)",
   };
   sup.inspectResults["lane-dirty"] = { worktreePath: "/tmp/wt-505", worktreeRetained: true };
-  forge.listOpenIssueNumbers = async () => { throw new Error("down"); }; // forge outage, consistently
+  forge.listOpenIssueNumbers = async () => {
+    throw new Error("down");
+  }; // forge outage, consistently
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.deepEqual(r.reclaimed, [{ kind: "env-failure", worker: "lane-dirty", issue: 505, source: "forge", costUsd: 0, modelUsage: [] }]);
@@ -2016,6 +2205,7 @@ test("#168 P1-4: env-failure + PR + DIRTY worktree -> env precedence: preserved 
   assert.deepEqual(sup.reclaimed, []); // no teardown — worktree left on disk
   const preserved = st.eventsSince("2020-01-01T00:00:00Z", ["env-failure-preserved"]);
   assert.equal(preserved.length, 1);
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the asserted event payload to exist.
   assert.equal((preserved[0]?.payload as { worktreePath: string }).worktreePath, "/tmp/wt-505");
   assert.equal(st.isParked(), true);
   st.close();
@@ -2027,7 +2217,9 @@ test("#168 negative: a FAILED lane whose text merely DISCUSSES rate limits (no r
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-d", 504);
   sup.probes["lane-d"] = {
-    ...DEFAULT_PROBE, failed: true, hasPr: false,
+    ...DEFAULT_PROBE,
+    failed: true,
+    hasPr: false,
     failureText: "AssertionError: expected the client to add rate limiting; TODO handle usage limits gracefully",
   };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
@@ -2042,7 +2234,9 @@ test("#168 storm: all lanes failing with env signatures in one tick (mixed sourc
   const st = new State(":memory:");
   const forge = new FakeForge();
   forge.throwOnAddLabel = true; // proves needs-human is never even ATTEMPTED for these lanes
-  forge.listOpenIssueNumbers = async () => { throw new Error("outage"); };
+  forge.listOpenIssueNumbers = async () => {
+    throw new Error("outage");
+  };
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-e1", 601);
   seedRunning(st, "lane-e2", 602);
@@ -2052,12 +2246,21 @@ test("#168 storm: all lanes failing with env signatures in one tick (mixed sourc
   sup.probes["lane-e3"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "overloaded_error" };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
 
-  assert.deepEqual(r.reclaimed.map((x) => x.kind), ["env-failure", "env-failure", "env-failure"]);
+  assert.deepEqual(
+    r.reclaimed.map((x) => x.kind),
+    ["env-failure", "env-failure", "env-failure"],
+  );
   assert.deepEqual(forge.labelsAdded, []);
   assert.equal(st.gatedFailedWorkers().length, 0);
   // Mixed storm: the llm episode (e1) AND the forge episode (e2) both exist — the old
   // singleton INSERT OR IGNORE dropped the second source entirely (P1-1a).
-  assert.deepEqual(st.parkedSources().map((p) => p.source).sort(), ["forge", "llm"]);
+  assert.deepEqual(
+    st
+      .parkedSources()
+      .map((p) => p.source)
+      .sort(),
+    ["forge", "llm"],
+  );
   assert.equal(st.parkRow("llm")?.triggerIssue, 601); // first detection wins per source
   assert.equal(st.parkRow("forge")?.triggerIssue, 602);
   // e1 requeued BEFORE the forge episode opened (llm-only park at that instant); e2/e3's
@@ -2072,7 +2275,9 @@ test("#168 dispatch gate: parked -> dispatch skipped entirely (mirrors PAUSE: no
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   st.enterPark("forge", "could not resolve host", 999, "2026-07-14T00:00:00Z");
-  forge.listOpenIssueNumbers = async () => { throw new Error("down"); };
+  forge.listOpenIssueNumbers = async () => {
+    throw new Error("down");
+  };
   // A driving lane with a mergeable PR: DRIVE must still proceed while parked (same as PAUSE).
   st.upsertWorker({ name: "lane-drv", issue: 3, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 56 });
   const gate = new FakeMergeGate();
@@ -2080,7 +2285,11 @@ test("#168 dispatch gate: parked -> dispatch skipped entirely (mirrors PAUSE: no
   forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
 
   const r = await tick({
-    forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
     now: () => new Date("2026-07-14T00:10:00Z"),
   });
 
@@ -2096,7 +2305,10 @@ test("#168 probe/backoff (P1-1c): the FIRST probe waits a full base backoff (nev
   const st = new State(":memory:");
   const forge = new FakeForge();
   let forgeProbeCalls = 0;
-  forge.listOpenIssueNumbers = async () => { forgeProbeCalls++; throw new Error("still down"); };
+  forge.listOpenIssueNumbers = async () => {
+    forgeProbeCalls++;
+    throw new Error("still down");
+  };
   const sup = new FakeSupervisor();
   const t0 = new Date("2026-07-14T00:00:00Z");
   st.enterPark("forge", "could not resolve host", 1, t0.toISOString());
@@ -2139,7 +2351,10 @@ test("#168 P2-B auto-resume (forge): a successful probe clears the episode, but 
   // this tick (P2-B — the next tick's rollback-retry-before-dispatch ordering is what makes
   // suspended requeues fair; see the fairness test below for the race this closes).
   const r1 = await tick({
-    forge, state: st, supervisor: sup, cfg: mkCfg(),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
     now: () => new Date(t0.getTime() + 31_000), // past the base backoff -> probe due -> succeeds
   });
   assert.equal(st.isParked(), false); // cleared within the recovery tick
@@ -2148,10 +2363,16 @@ test("#168 P2-B auto-resume (forge): a successful probe clears the episode, but 
 
   // Next tick: fully resumed.
   const r2 = await tick({
-    forge, state: st, supervisor: sup, cfg: mkCfg(),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
     now: () => new Date(t0.getTime() + 62_000),
   });
-  assert.deepEqual(sup.dispatched.map((i) => i.number), [701]);
+  assert.deepEqual(
+    sup.dispatched.map((i) => i.number),
+    [701],
+  );
   assert.equal(r2.dispatched.filter((d) => d.kind === "dispatched").length, 1);
   st.close();
 });
@@ -2165,7 +2386,10 @@ test("#168 P2-B fairness: the outage VICTIM's suspended requeue drains before a 
   // suspended requeue's setBoardStatus actually lands.
   forge.ready = [{ number: 901, title: "", labels: ["prio:3-feature"] }];
   let forgeUp = false;
-  forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+  forge.listOpenIssueNumbers = async () => {
+    if (!forgeUp) throw new Error("down");
+    return [];
+  };
   forge.setBoardStatus = async (n, s) => {
     if (!forgeUp) throw new Error("down");
     forge.boardSet.push([n, s]);
@@ -2196,7 +2420,10 @@ test("#168 P2-B fairness: the outage VICTIM's suspended requeue drains before a 
   // sees both 900 and 901 — and priority/number order admits the VICTIM into the single lane.
   const r3 = await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 4_000) });
   assert.deepEqual(r3.rollbacks, [{ kind: "recovered", issue: 900, target: "ready", reason: "env-failure-requeue" }]);
-  assert.deepEqual(sup.dispatched.map((i) => i.number), [900]);
+  assert.deepEqual(
+    sup.dispatched.map((i) => i.number),
+    [900],
+  );
   st.close();
 });
 
@@ -2207,7 +2434,11 @@ test("#168 Amendment 2: a FAILED llm ping's detail (first stderr line) is record
   const t0 = new Date("2026-07-14T00:00:00Z");
   st.enterPark("llm", "rate_limit_error", 1, t0.toISOString());
   const r = await tick({
-    forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 31_000),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    now: () => new Date(t0.getTime() + 31_000),
     probeLlmReachable: async () => ({ ok: false, detail: "Error: Exceeded USD budget (0.01)" }),
   });
   void r;
@@ -2228,11 +2459,16 @@ test("#168 Amendment 2: a plain-boolean probe fake keeps working (no detail reco
   const t0 = new Date("2026-07-14T00:00:00Z");
   st.enterPark("llm", "rate_limit_error", 810, t0.toISOString());
   await tick({
-    forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 31_000),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    now: () => new Date(t0.getTime() + 31_000),
     probeLlmReachable: async () => ({ ok: true }),
   });
   assert.equal(st.parkRow("llm")?.canaryWorker, "lane-1"); // canary armed off the rich shape
   const probes = st.eventsSince("2020-01-01T00:00:00Z", ["park-probe"]);
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the expected probe event payload.
   assert.equal((probes[0]?.payload as { reason?: string }).reason, undefined); // success carries no reason
   st.close();
 });
@@ -2266,14 +2502,23 @@ test("#168 P1-1 canary: a green ping does NOT clear the llm episode — it launc
   st.enterPark("llm", "rate_limit_error", 800, t0.toISOString());
   let versionChecks = 0;
   const deps = {
-    forge, state: st, supervisor: sup, cfg: mkCfg(),
-    probeLlmReachable: async () => { versionChecks++; return true; },
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    probeLlmReachable: async () => {
+      versionChecks++;
+      return true;
+    },
   };
 
   // Tick 1 (past base backoff): ping ok -> ONE canary dispatched; STILL PARKED.
   const r1 = await tick({ ...deps, now: () => new Date(t0.getTime() + 31_000) });
   assert.equal(versionChecks, 1);
-  assert.deepEqual(sup.dispatched.map((i) => i.number), [800]);
+  assert.deepEqual(
+    sup.dispatched.map((i) => i.number),
+    [800],
+  );
   assert.equal(st.isParked(), true, "a green ping is NOT a recovery signal — still parked");
   assert.equal(st.parkRow("llm")?.canaryWorker, "lane-1");
   assert.equal(st.parkRow("llm")?.probeAttempts, 0); // arming a canary never grows the exponent
@@ -2292,6 +2537,7 @@ test("#168 P1-1 canary: a green ping does NOT clear the llm episode — it launc
   assert.equal(st.isParked(), false, "a real lane reaching a non-env terminal is the recovery signal");
   const resumed = st.eventsSince("2020-01-01T00:00:00Z", ["park-resumed"]);
   assert.equal(resumed.length, 1);
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the asserted event payload to exist.
   assert.equal((resumed[0]?.payload as { via: string }).via, "canary");
   st.close();
 });
@@ -2361,7 +2607,10 @@ test("#168 P1-1a mixed storm end-to-end: llm episode + forge failure -> BOTH row
   const forge = new FakeForge();
   forge.ready = [{ number: 950, title: "", labels: ["prio:3-feature"] }];
   let forgeUp = false;
-  forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+  forge.listOpenIssueNumbers = async () => {
+    if (!forgeUp) throw new Error("down");
+    return [];
+  };
   const sup = new FakeSupervisor();
   const cfg = mkCfg({ envFailure: { probeBackoffBaseSec: 10, probeBackoffMaxSec: 10 } });
   const t0 = new Date("2026-07-14T00:00:00Z");
@@ -2397,7 +2646,10 @@ test("#168 P1-2 named regression: forge outage with EVERY forge write throwing f
   const forge = new FakeForge();
   let forgeUp = false;
   forge.throwOnAddLabel = true;
-  forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+  forge.listOpenIssueNumbers = async () => {
+    if (!forgeUp) throw new Error("down");
+    return [];
+  };
   forge.setBoardStatus = async (n, s) => {
     if (!forgeUp) throw new Error("board unreachable");
     forge.boardSet.push([n, s]);
@@ -2467,7 +2719,9 @@ test("#168 P1-2 cap exemption: an env-failure requeue that keeps failing while N
 test("#168 escalation: DURATION-based, not probe-count — many rapid (backoff-capped) failed probes never trigger it early; crossing parkEscalateAfterSec does", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
-  forge.listOpenIssueNumbers = async () => { throw new Error("still down"); };
+  forge.listOpenIssueNumbers = async () => {
+    throw new Error("still down");
+  };
   const sup = new FakeSupervisor();
   const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 100, probeBackoffBaseSec: 1, probeBackoffMaxSec: 1 } });
   const t0 = new Date("2026-07-14T00:00:00Z");
@@ -2490,7 +2744,10 @@ test("#168 escalation is ADDITIVE: probing continues after escalation, and a lat
   const st = new State(":memory:");
   const forge = new FakeForge();
   let forgeUp = false;
-  forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+  forge.listOpenIssueNumbers = async () => {
+    if (!forgeUp) throw new Error("down");
+    return [];
+  };
   const sup = new FakeSupervisor();
   const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 10, probeBackoffBaseSec: 1, probeBackoffMaxSec: 1 } });
   const t0 = new Date("2026-07-14T00:00:00Z");
@@ -2513,7 +2770,10 @@ test("#168 channel ladder: forge-sourced escalation is LOCAL only — zero forge
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
     let forgeUp = false;
-    forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+    forge.listOpenIssueNumbers = async () => {
+      if (!forgeUp) throw new Error("down");
+      return [];
+    };
     const sup = new FakeSupervisor();
     const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 10, probeBackoffBaseSec: 1, probeBackoffMaxSec: 1 } });
     const t0 = new Date("2026-07-14T00:00:00Z");
@@ -2532,6 +2792,7 @@ test("#168 channel ladder: forge-sourced escalation is LOCAL only — zero forge
     const marker = JSON.parse(readFileSync(markerPath!, "utf8"));
     assert.equal(marker.source, "forge");
     const events = st.eventsSince("2020-01-01T00:00:00Z", ["park-escalated"]);
+    // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the expected escalation event payload.
     assert.equal((events[0]?.payload as { channel: string }).channel, "local");
 
     // P2-2: the forge heals -> auto-resume -> the stale marker is removed with it.
@@ -2561,6 +2822,7 @@ test("#168 channel ladder: llm-sourced escalation (forge healthy) goes via the f
   assert.equal(forge.issueComments.length, 1);
   assert.equal(forge.issueComments[0]?.[0], 55);
   const events = st.eventsSince("2020-01-01T00:00:00Z", ["park-escalated"]);
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the expected escalation event payload.
   assert.equal((events[0]?.payload as { channel: string }).channel, "forge");
   st.close();
 });
@@ -2570,7 +2832,9 @@ test("#168 channel ladder (P2-3): an llm-sourced escalation whose forge comment 
   try {
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
-    forge.addIssueComment = async () => { throw new Error("forge unreachable after all"); };
+    forge.addIssueComment = async () => {
+      throw new Error("forge unreachable after all");
+    };
     const sup = new FakeSupervisor();
     const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 10 } });
     const t0 = new Date("2026-07-14T00:00:00Z");
@@ -2582,6 +2846,7 @@ test("#168 channel ladder (P2-3): an llm-sourced escalation whose forge comment 
     const markerPath = st.escalationMarkerPath();
     assert.ok(markerPath && existsSync(markerPath));
     const events = st.eventsSince("2020-01-01T00:00:00Z", ["park-escalated"]);
+    // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the expected escalation event payload.
     assert.equal((events[0]?.payload as { channel: string }).channel, "local", "the audit trail records the ACTUAL channel");
     st.close();
   } finally {
@@ -2594,8 +2859,12 @@ test("#168 channel ladder mixed storm: an llm escalation while a FORGE episode i
   try {
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
-    forge.listOpenIssueNumbers = async () => { throw new Error("down"); };
-    forge.addIssueComment = async () => { throw new Error("must never be called"); };
+    forge.listOpenIssueNumbers = async () => {
+      throw new Error("down");
+    };
+    forge.addIssueComment = async () => {
+      throw new Error("must never be called");
+    };
     const sup = new FakeSupervisor();
     const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 10, probeBackoffBaseSec: 1000, probeBackoffMaxSec: 1000 } });
     const t0 = new Date("2026-07-14T00:00:00Z");
@@ -2632,10 +2901,15 @@ test("#168 restart-mid-park: a fresh State on the SAME db path still sees the ep
 
     const forge = new FakeForge();
     forge.ready = [{ number: 9, title: "", labels: ["prio:3-feature"] }];
-    forge.listOpenIssueNumbers = async () => { throw new Error("still down"); }; // probe still fails
+    forge.listOpenIssueNumbers = async () => {
+      throw new Error("still down");
+    }; // probe still fails
     const sup = new FakeSupervisor();
     const r = await tick({
-      forge, state: st2, supervisor: sup, cfg: mkCfg(),
+      forge,
+      state: st2,
+      supervisor: sup,
+      cfg: mkCfg(),
       now: () => new Date("2026-07-14T00:01:00Z"), // past base backoff -> probe due
     });
     assert.deepEqual(r.dispatched, []); // NOT dispatching
@@ -2667,7 +2941,10 @@ test("#168 forge-outage integration: park -> suspended requeue -> restore forge 
   const st = new State(":memory:");
   const forge = new FakeForge();
   let forgeUp = false;
-  forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+  forge.listOpenIssueNumbers = async () => {
+    if (!forgeUp) throw new Error("down");
+    return [];
+  };
   // Board-status-driven Ready (P2-B: never statically pre-seed the victim — it only becomes
   // dispatchable once its board rollback actually executes).
   forge.ready = [];
@@ -2707,7 +2984,10 @@ test("#168 forge-outage integration: park -> suspended requeue -> restore forge 
   // re-admits the SAME issue — the full round trip.
   const r4 = await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 6_000) });
   assert.deepEqual(r4.rollbacks, [{ kind: "recovered", issue: 900, target: "ready", reason: "env-failure-requeue" }]);
-  assert.deepEqual(r4.dispatched.map((d) => (d.kind === "dispatched" ? d.issue : null)), [900]);
+  assert.deepEqual(
+    r4.dispatched.map((d) => (d.kind === "dispatched" ? d.issue : null)),
+    [900],
+  );
   st.close();
 });
 
@@ -2717,7 +2997,10 @@ test("#168 P1-A: llm-parked + hard ceiling breached -> ZERO paid ping spawns (th
   const st = new State(":memory:");
   const forge = new FakeForge();
   let forgeProbes = 0;
-  forge.listOpenIssueNumbers = async () => { forgeProbes++; throw new Error("down"); };
+  forge.listOpenIssueNumbers = async () => {
+    forgeProbes++;
+    throw new Error("down");
+  };
   const sup = new FakeSupervisor();
   const t0 = new Date("2026-07-14T00:00:00Z");
   st.enterPark("llm", "rate_limit_error", 1, t0.toISOString());
@@ -2726,9 +3009,15 @@ test("#168 P1-A: llm-parked + hard ceiling breached -> ZERO paid ping spawns (th
   st.recordSpend("old-lane", 1, 200, t0.toISOString());
   let pings = 0;
   await tick({
-    forge, state: st, supervisor: sup, cfg: mkCfg(),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
     now: () => new Date(t0.getTime() + 31_000), // both probes would be due
-    probeLlmReachable: async () => { pings++; return true; },
+    probeLlmReachable: async () => {
+      pings++;
+      return true;
+    },
   });
   assert.equal(pings, 0, "a hard cost-ceiling breach must never itself keep spending on pings");
   assert.equal(forgeProbes, 1, "the FREE forge read-probe keeps running under a breach");
@@ -2740,17 +3029,26 @@ test("#168 P1-A: llm-parked + PAUSED -> zero llm pings (pause blocks the canary 
   const st = new State(":memory:");
   const forge = new FakeForge();
   let forgeProbes = 0;
-  forge.listOpenIssueNumbers = async () => { forgeProbes++; throw new Error("down"); };
+  forge.listOpenIssueNumbers = async () => {
+    forgeProbes++;
+    throw new Error("down");
+  };
   const sup = new FakeSupervisor();
   const t0 = new Date("2026-07-14T00:00:00Z");
   st.enterPark("llm", "rate_limit_error", 1, t0.toISOString());
   st.enterPark("forge", "could not resolve host", 2, t0.toISOString());
   let pings = 0;
   await tick({
-    forge, state: st, supervisor: sup, cfg: mkCfg(),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
     now: () => new Date(t0.getTime() + 31_000),
     forceDispatchPause: true, // the same `paused` flag the data/PAUSE sentinel drives
-    probeLlmReachable: async () => { pings++; return true; },
+    probeLlmReachable: async () => {
+      pings++;
+      return true;
+    },
   });
   assert.equal(pings, 0, "a green ping under pause is pure spend with no consumer");
   assert.equal(forgeProbes, 1);
@@ -2819,9 +3117,15 @@ test("#168 P1-B: a HARD drain killing the canary releases the slot (no permanent
   // Ceiling heals (fresh UTC day -> daily sum resets) -> the episode can still probe: no wedge.
   let pings = 0;
   await tick({
-    forge, state: st, supervisor: sup, cfg,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg,
     now: () => new Date("2026-07-15T00:10:00Z"),
-    probeLlmReachable: async () => { pings++; return false; },
+    probeLlmReachable: async () => {
+      pings++;
+      return false;
+    },
   });
   assert.equal(pings, 1, "the episode probes again after recovery — never permanently wedged");
   assert.equal(st.parkRow("llm")?.probeAttempts, 1);

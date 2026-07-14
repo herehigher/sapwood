@@ -1,17 +1,41 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, lstatSync, chmodSync, rmSync, utimesSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import {
-  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, probeLlmPing, extractFailureText, claudeArgs, guardSettings, shellSingleQuote,
-  WorkerSupervisor, renderPromptTemplate, defaultPromptPath, loadWorkerPromptTemplate, buildRenderPrompt,
-} from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import { classifyEnvFailure, DEFAULT_LLM_FAILURE_PATTERNS, DEFAULT_FORGE_FAILURE_PATTERNS } from "../loop/env-failure.js";
+import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
+import {
+  buildRenderPrompt,
+  claudeArgs,
+  defaultPromptPath,
+  discoverClaudeBin,
+  extractFailureText,
+  guardSettings,
+  loadWorkerPromptTemplate,
+  parseAssistantUsageDeltas,
+  parseCostUsd,
+  parseModelUsage,
+  parseResultText,
+  probeLlmPing,
+  renderPromptTemplate,
+  shellSingleQuote,
+  WorkerSupervisor,
+} from "./worker.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
@@ -60,7 +84,7 @@ test("parseResultText: multiple results -> last wins; garbage/partial lines igno
   assert.equal(parseResultText(`no json here\n{"type":"assistant"}`), "");
 });
 
-test("parseResultText: missing `result` field -> \"\"", () => {
+test('parseResultText: missing `result` field -> ""', () => {
   assert.equal(parseResultText(`{"type":"result","subtype":"success","total_cost_usd":0.1}`), "");
 });
 
@@ -74,13 +98,13 @@ test("parseResultText: a LAST result line without a string `result` RESETS earli
   assert.equal(parseResultText(`{"type":"result","result":"kept"}\ngarbage{{{`), "kept");
 });
 
-test("parseResultText: non-string `result` field -> \"\" (never throws)", () => {
+test('parseResultText: non-string `result` field -> "" (never throws)', () => {
   assert.equal(parseResultText(`{"type":"result","result":{"nested":true}}`), "");
   assert.equal(parseResultText(`{"type":"result","result":42}`), "");
   assert.equal(parseResultText(`{"type":"result","result":null}`), "");
 });
 
-test("parseResultText: empty input -> \"\"", () => {
+test('parseResultText: empty input -> ""', () => {
   assert.equal(parseResultText(""), "");
 });
 
@@ -89,7 +113,9 @@ test("parseModelUsage: full modelUsage map capture (newer CLI)", () => {
   const jsonl = [
     `{"type":"system","subtype":"init"}`,
     JSON.stringify({
-      type: "result", subtype: "success", total_cost_usd: 0.5,
+      type: "result",
+      subtype: "success",
+      total_cost_usd: 0.5,
       usage: { input_tokens: 999 }, // top-level usage ignored when modelUsage is present
       modelUsage: {
         "claude-opus-4-6": { inputTokens: 100, outputTokens: 200, cacheReadInputTokens: 30, cacheCreationInputTokens: 10 },
@@ -105,7 +131,10 @@ test("parseModelUsage: full modelUsage map capture (newer CLI)", () => {
 
 test("parseModelUsage: modelUsage absent -> falls back to top-level usage attributed to the result's model id", () => {
   const jsonl = JSON.stringify({
-    type: "result", subtype: "success", total_cost_usd: 0.1, model: "claude-sonnet-4-6",
+    type: "result",
+    subtype: "success",
+    total_cost_usd: 0.1,
+    model: "claude-sonnet-4-6",
     usage: { input_tokens: 40, output_tokens: 60, cache_creation_input_tokens: 5, cache_read_input_tokens: 15 },
   });
   assert.deepEqual(parseModelUsage(jsonl), [
@@ -115,7 +144,9 @@ test("parseModelUsage: modelUsage absent -> falls back to top-level usage attrib
 
 test("parseModelUsage: modelUsage absent + no model field -> falls back to modelName, else 'unknown'", () => {
   const withModelName = JSON.stringify({
-    type: "result", total_cost_usd: 0.1, modelName: "claude-haiku-4-6",
+    type: "result",
+    total_cost_usd: 0.1,
+    modelName: "claude-haiku-4-6",
     usage: { input_tokens: 1, output_tokens: 2 },
   });
   assert.deepEqual(parseModelUsage(withModelName), [
@@ -144,7 +175,8 @@ test("parseModelUsage: malformed/missing usage -> zeros, never a parse failure (
 
   // usage fields are negative/non-numeric — clamp to 0, not NaN or negative.
   const badFields = JSON.stringify({
-    type: "result", total_cost_usd: 0.4,
+    type: "result",
+    total_cost_usd: 0.4,
     usage: { input_tokens: -5, output_tokens: "oops", cache_read_input_tokens: null },
   });
   assert.deepEqual(parseModelUsage(badFields), [
@@ -152,7 +184,7 @@ test("parseModelUsage: malformed/missing usage -> zeros, never a parse failure (
   ]);
 
   // no result line at all / garbage-only stream -> empty, no throw.
-  assert.deepEqual(parseModelUsage("no json here\n{\"type\":\"assistant\"}"), []);
+  assert.deepEqual(parseModelUsage('no json here\n{"type":"assistant"}'), []);
   assert.deepEqual(parseModelUsage(""), []);
   assert.deepEqual(parseModelUsage("garbage{{{"), []);
 });
@@ -162,9 +194,7 @@ test("parseModelUsage: multiple result lines -> last one wins (same as parseCost
     JSON.stringify({ type: "result", total_cost_usd: 0.1, model: "m1", usage: { input_tokens: 1 } }),
     JSON.stringify({ type: "result", total_cost_usd: 0.2, model: "m2", usage: { input_tokens: 2 } }),
   ].join("\n");
-  assert.deepEqual(parseModelUsage(jsonl), [
-    { model: "m2", inputTokens: 2, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
-  ]);
+  assert.deepEqual(parseModelUsage(jsonl), [{ model: "m2", inputTokens: 2, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }]);
 });
 
 // ── #33: parseAssistantUsageDeltas — the live in-flight cost-estimation signal ──
@@ -173,12 +203,18 @@ test("parseAssistantUsageDeltas: extracts per-message usage from streamed `assis
     `{"type":"system","subtype":"init"}`,
     JSON.stringify({
       type: "assistant",
-      message: { model: "claude-opus-4-8", usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+      message: {
+        model: "claude-opus-4-8",
+        usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
     }),
     `garbage{{{`,
     JSON.stringify({
       type: "assistant",
-      message: { model: "claude-opus-4-8", usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 2000 } },
+      message: {
+        model: "claude-opus-4-8",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 2000 },
+      },
     }),
     // a terminal result line must NOT be double-counted as an assistant delta
     JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 9.99, usage: { input_tokens: 99999 } }),
@@ -194,10 +230,9 @@ test("parseAssistantUsageDeltas: no assistant lines / malformed message / missin
   assert.deepEqual(parseAssistantUsageDeltas("garbage{{{\nnot json either"), []);
   assert.deepEqual(parseAssistantUsageDeltas(`{"type":"assistant","message":"not-an-object"}`), []);
   assert.deepEqual(parseAssistantUsageDeltas(`{"type":"assistant"}`), []); // no message field at all
-  assert.deepEqual(
-    parseAssistantUsageDeltas(JSON.stringify({ type: "assistant", message: { model: "m", usage: {} } })),
-    [{ model: "m", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }],
-  );
+  assert.deepEqual(parseAssistantUsageDeltas(JSON.stringify({ type: "assistant", message: { model: "m", usage: {} } })), [
+    { model: "m", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+  ]);
 });
 
 test("discoverClaudeBin: env CLAUDE_BIN wins, else 'claude'", () => {
@@ -208,8 +243,13 @@ test("discoverClaudeBin: env CLAUDE_BIN wins, else 'claude'", () => {
 
 test("claudeArgs: headless flags, stream-json, worktree/session; no --max-budget-usd (soft budget is monitored, not a hard cut)", () => {
   const args = claudeArgs({
-    prompt: "do the thing", model: "opus", effort: "high",
-    worktree: "lane-1", name: "lane-1", sessionId: "uuid-1", addDir: "/repo/data",
+    prompt: "do the thing",
+    model: "opus",
+    effort: "high",
+    worktree: "lane-1",
+    name: "lane-1",
+    sessionId: "uuid-1",
+    addDir: "/repo/data",
   });
   assert.ok(args.includes("-p") && args.includes("do the thing"));
   assert.deepEqual(args.slice(args.indexOf("--model"), args.indexOf("--model") + 2), ["--model", "opus"]);
@@ -222,8 +262,13 @@ test("claudeArgs: headless flags, stream-json, worktree/session; no --max-budget
 
 test("claudeArgs: resumeSessionId (#46) uses --resume instead of --session-id, reusing the id", () => {
   const args = claudeArgs({
-    prompt: "p", model: "m", effort: "high", worktree: "w", name: "w",
-    sessionId: "sess-1", resumeSessionId: "sess-1",
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    worktree: "w",
+    name: "w",
+    sessionId: "sess-1",
+    resumeSessionId: "sess-1",
   });
   assert.deepEqual(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2), ["--resume", "sess-1"]);
   assert.ok(!args.includes("--session-id"));
@@ -234,8 +279,14 @@ test("claudeArgs: allowedTools/disallowedTools override the worker defaults when
   const idx = defaults.indexOf("--allowedTools");
   assert.equal(defaults[idx + 1], "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)");
   const scoped = claudeArgs({
-    prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s",
-    allowedTools: "Bash(gh issue comment*)", disallowedTools: "Bash(gh pr *)",
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+    allowedTools: "Bash(gh issue comment*)",
+    disallowedTools: "Bash(gh pr *)",
   });
   const aIdx = scoped.indexOf("--allowedTools");
   const dIdx = scoped.indexOf("--disallowedTools");
@@ -245,8 +296,19 @@ test("claudeArgs: allowedTools/disallowedTools override the worker defaults when
 
 test("claudeArgs: --settings only when given (guard hook wiring lands in #26)", () => {
   assert.ok(!claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s" }).includes("--settings"));
-  const withSettings = claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s", settings: "/tmp/guard.json" });
-  assert.deepEqual(withSettings.slice(withSettings.indexOf("--settings"), withSettings.indexOf("--settings") + 2), ["--settings", "/tmp/guard.json"]);
+  const withSettings = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+    settings: "/tmp/guard.json",
+  });
+  assert.deepEqual(withSettings.slice(withSettings.indexOf("--settings"), withSettings.indexOf("--settings") + 2), [
+    "--settings",
+    "/tmp/guard.json",
+  ]);
 });
 
 // ── Integration: stub `claude` (zero token) drives the real spawn/sentinel/probe path ──
@@ -359,10 +421,19 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
     assert.deepEqual(await probeLlmPing(bin, "my-cheap-model", 0.05, 30), { ok: true });
     const argv = readFileSync(argsFile, "utf8").split("\0").slice(0, -1);
     assert.deepEqual(argv, [
-      "-p", "--model", "my-cheap-model", "--no-session-persistence",
-      "--system-prompt", "You are a heartbeat responder. Only output the requested word.",
-      "--strict-mcp-config", "--tools", "",
-      "--max-budget-usd", "0.05", "--output-format", "text",
+      "-p",
+      "--model",
+      "my-cheap-model",
+      "--no-session-persistence",
+      "--system-prompt",
+      "You are a heartbeat responder. Only output the requested word.",
+      "--strict-mcp-config",
+      "--tools",
+      "",
+      "--max-budget-usd",
+      "0.05",
+      "--output-format",
+      "text",
       "Respond with the single word 'pong' and nothing else.",
     ]);
   } finally {
@@ -418,10 +489,16 @@ test("probe: #13 findOpenPr (when provided) supplies prNumber and derives hasPr 
   try {
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
-      cfg, stateDir: dir, claudeBin: bin,
-      hasOpenPr: async () => { throw new Error("legacy path must not be used when findOpenPr is provided"); },
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => {
+        throw new Error("legacy path must not be used when findOpenPr is provided");
+      },
       findOpenPr: async (issue) => (issue === 8 ? 42 : null),
-      renderPrompt: () => "test prompt", heartbeatMs: 50, guardHookPath: mkHook(dir),
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     const { name } = await s.dispatch({ number: 8, title: "t", labels: [] });
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
@@ -439,10 +516,16 @@ test("probe: #13 findOpenPr returning null -> hasPr false, prNumber undefined (n
   try {
     const bin = mkStub(dir, FAST_STUB);
     const s = new WorkerSupervisor({
-      cfg, stateDir: dir, claudeBin: bin,
-      hasOpenPr: async () => { throw new Error("legacy path must not be used when findOpenPr is provided"); },
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => {
+        throw new Error("legacy path must not be used when findOpenPr is provided");
+      },
       findOpenPr: async () => null,
-      renderPrompt: () => "test prompt", heartbeatMs: 50, guardHookPath: mkHook(dir),
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
@@ -666,7 +749,13 @@ test("resume: fails closed in hard mode when the guard hook is missing (no ungua
     s.requestHandoff(name);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     // A supervisor whose guard hook path doesn't exist, same as dispatch()'s hard-mode guard.
-    const s2 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, guardHookPath: join(dir, "nonexistent-hook.js") });
+    const s2 = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      guardHookPath: join(dir, "nonexistent-hook.js"),
+    });
     await assert.rejects(() => s2.resume({ number: 3, title: "t", labels: [] }, name), /guard hook not found|unguarded/i);
     s.dispose();
     s2.dispose();
@@ -699,9 +788,11 @@ test("shellSingleQuote: suppresses shell expansion of $, backticks, $()", () => 
 test("guard hook wrapper fails closed: a crashing hook exits 2 in hard mode, 0 in soft (Codex #26 P1)", async () => {
   // A hook path that makes `node` exit non-zero (module not found). In hard mode the wrapper
   // must map that to exit 2 (BLOCKING); in soft (observe-only) it allows (exit 0).
-  const cmd = (guardSettings("/nonexistent/sapwood-guard-hook.js") as {
-    hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };
-  }).hooks.PreToolUse[0]!.hooks[0]!.command;
+  const cmd = (
+    guardSettings("/nonexistent/sapwood-guard-hook.js") as {
+      hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };
+    }
+  ).hooks.PreToolUse[0]!.hooks[0]!.command;
   const run = (mode: string): Promise<number | null> =>
     new Promise((resolve) => {
       const c = spawn("sh", ["-c", cmd], { stdio: "ignore", env: { ...process.env, SAPWOOD_GUARD_MODE: mode } });
@@ -716,9 +807,20 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
   try {
     const hook = mkHook(dir);
     // stub records its argv + the guard mode env, proving the inline settings + env reach the process.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho "$SAPWOOD_GUARD_MODE" > "${join(dir, "mode.seen")}"\nexit 0\n`);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho "$SAPWOOD_GUARD_MODE" > "${join(dir, "mode.seen")}"\nexit 0\n`,
+    );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
-    const s = new WorkerSupervisor({ cfg: scfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: hook });
+    const s = new WorkerSupervisor({
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
     const { name } = await s.dispatch({ number: 7, title: "t", labels: [] });
     assert.ok(!existsSync(join(dir, `${name}.settings.json`)), "no mutable settings file written");
     // mode.seen is the stub's LAST write — waiting on it guarantees args.seen exists too
@@ -739,7 +841,14 @@ test("dispatch fails closed in hard mode when the guard hook is missing (no ungu
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     const bin = mkStub(dir, FAST_STUB);
-    const s = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", guardHookPath: join(dir, "nonexistent-hook.js") });
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      guardHookPath: join(dir, "nonexistent-hook.js"),
+    });
     await assert.rejects(() => s.dispatch({ number: 1, title: "t", labels: [] }), /guard hook not found|unguarded/i);
     s.dispose();
   } finally {
@@ -766,7 +875,15 @@ test("enforces worker timeout: a run past timeoutSec is killed and marked failed
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // ignores TERM -> needs the KILL
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
-    const s = new WorkerSupervisor({ cfg: tcfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 100, guardHookPath: mkHook(dir) });
+    const s = new WorkerSupervisor({
+      cfg: tcfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 100,
+      guardHookPath: mkHook(dir),
+    });
     const { name } = await s.dispatch({ number: 5, title: "t", labels: [] });
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
@@ -803,8 +920,13 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
       worker: { budgetUsdSoft: 0.01 },
     });
     const s = new WorkerSupervisor({
-      cfg: tcfg, stateDir: dir, claudeBin: bin,
-      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: mkHook(dir),
+      cfg: tcfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     let handoffCalls = 0;
     const original = s.requestHandoff.bind(s);
@@ -847,8 +969,13 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
       worker: { budgetUsdSoft: 2 },
     });
     const s = new WorkerSupervisor({
-      cfg: tcfg, stateDir: dir, claudeBin: bin,
-      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: mkHook(dir),
+      cfg: tcfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     const { name } = await s.dispatch({ number: 34, title: "t", labels: [] });
     // Let several heartbeat ticks pass -- long enough that a wrongly-priced estimate would
@@ -872,17 +999,15 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       worker: { pricingFile: "/nonexistent/rates.yaml" },
     });
     assert.throws(
-      () => new WorkerSupervisor({ cfg: badCfg, stateDir: dir, claudeBin: "claude", hasOpenPr: async () => false, guardHookPath: mkHook(dir) }),
+      () =>
+        new WorkerSupervisor({ cfg: badCfg, stateDir: dir, claudeBin: "claude", hasOpenPr: async () => false, guardHookPath: mkHook(dir) }),
       /\/nonexistent\/rates\.yaml/,
     );
 
     // And a VALID custom table is what the budget check prices against: rates 100x the
     // shipped defaults make a tiny usage line cross a budget the default table wouldn't.
     const ratesPath = join(dir, "expensive.yaml");
-    writeFileSync(
-      ratesPath,
-      "models: { opus: { input: 500, output: 2500, cacheWrite: 625, cacheRead: 50, contextWindow: 200000 } }\n",
-    );
+    writeFileSync(ratesPath, "models: { opus: { input: 500, output: 2500, cacheWrite: 625, cacheRead: 50, contextWindow: 200000 } }\n");
     // 1000 in + 1000 out at 100x rates = $3.00; the shipped table would price it $0.03 —
     // under this $1 budget. A handoff proves the CUSTOM table is in effect.
     const bin = mkStub(
@@ -899,8 +1024,13 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       worker: { budgetUsdSoft: 1, pricingFile: ratesPath },
     });
     const s = new WorkerSupervisor({
-      cfg: cfgCustom, stateDir: dir, claudeBin: bin,
-      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: mkHook(dir),
+      cfg: cfgCustom,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     const { name } = await s.dispatch({ number: 35, title: "t", labels: [] });
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
@@ -943,8 +1073,13 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
       worker: { budgetUsdSoft: 0.01 },
     });
     const s = new WorkerSupervisor({
-      cfg: tcfg, stateDir: dir, claudeBin: bin,
-      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 50, guardHookPath: mkHook(dir),
+      cfg: tcfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
     });
     await s.resume({ number: 33, title: "t", labels: [] }, name);
     // Must-NOT window: ~10 heartbeat ticks pass while the jsonl holds only pre-handoff usage.
@@ -995,7 +1130,10 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
     assert.equal(p.liveTelemetry!.contextTokens, 10 + 2000 + 0);
     // tokenComposition: cumulative 4-class split across BOTH streamed messages.
     assert.deepEqual(p.liveTelemetry!.tokenComposition, {
-      inputTokens: 110, outputTokens: 55, cacheCreationTokens: 0, cacheReadTokens: 2000,
+      inputTokens: 110,
+      outputTokens: 55,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 2000,
     });
     await s.reclaim(name);
     s.dispose();
@@ -1075,7 +1213,10 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
     // includes the pre-handoff line, but the baseline snapshot cancels it out.
     const p1 = await s.probe(name);
     assert.ok(p1.liveTelemetry, "resumed lane is tracked in-memory too");
-    assert.ok(Math.abs(p1.liveTelemetry!.estCostUsd) < 1e-9, `pre-handoff spend must not leak into the resumed leg's live cost (got ${p1.liveTelemetry!.estCostUsd})`);
+    assert.ok(
+      Math.abs(p1.liveTelemetry!.estCostUsd) < 1e-9,
+      `pre-handoff spend must not leak into the resumed leg's live cost (got ${p1.liveTelemetry!.estCostUsd})`,
+    );
     writeFileSync(marker, "");
     let p2 = await s.probe(name);
     for (let i = 0; i < 200 && !(p2.liveTelemetry && p2.liveTelemetry.estCostUsd > 0); i++) {
@@ -1083,12 +1224,18 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
       p2 = await s.probe(name);
     }
     const expectedNewLegCost = (200 / 1_000_000) * 5; // opus input rate
-    assert.ok(Math.abs(p2.liveTelemetry!.estCostUsd - expectedNewLegCost) < 1e-9, `new-leg estCostUsd ${p2.liveTelemetry!.estCostUsd} ~= ${expectedNewLegCost}`);
+    assert.ok(
+      Math.abs(p2.liveTelemetry!.estCostUsd - expectedNewLegCost) < 1e-9,
+      `new-leg estCostUsd ${p2.liveTelemetry!.estCostUsd} ~= ${expectedNewLegCost}`,
+    );
     // contextTokens/tokenComposition are NOT baseline-adjusted — they read the whole jsonl-so-far
     // (resume APPENDS), so they include the pre-handoff line too.
     assert.equal(p2.liveTelemetry!.contextTokens, 200); // newest message only
     assert.deepEqual(p2.liveTelemetry!.tokenComposition, {
-      inputTokens: 1200, outputTokens: 1000, cacheCreationTokens: 0, cacheReadTokens: 0,
+      inputTokens: 1200,
+      outputTokens: 1000,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
     });
     await s.reclaim(name);
     s.dispose();
@@ -1125,10 +1272,7 @@ test("#168: probe() of a FAILED lane surfaces failureText from the jsonl (stdout
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     const name = "lane-168-failed";
-    writeFileSync(
-      join(dir, `${name}.failed.json`),
-      JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0, exit_code: 1 }),
-    );
+    writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0, exit_code: 1 }));
     writeFileSync(
       join(dir, `${name}.jsonl`),
       `{"type":"system","subtype":"init"}\n` +
@@ -1229,7 +1373,8 @@ test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTA
     assert.ok(!p.failureText?.includes("rate_limit_error"), "the assistant's signature strings never reach failureText");
     assert.equal(
       classifyEnvFailure(p.failureText ?? "", {
-        llm: [...DEFAULT_LLM_FAILURE_PATTERNS], forge: [...DEFAULT_FORGE_FAILURE_PATTERNS],
+        llm: [...DEFAULT_LLM_FAILURE_PATTERNS],
+        forge: [...DEFAULT_FORGE_FAILURE_PATTERNS],
       }),
       null,
       "an ordinary task failure whose assistant text discusses the signatures classifies as a TASK failure",
@@ -1313,7 +1458,7 @@ test("#69 grep-invariant (engine-wide, fable P3): the ONLY child_process importe
     if (f === "roles/worker.ts") {
       // spawn ONLY (the claude CLI launch); every exec-style API (what #62's preserveHandoffWip
       // used) is banned — this pins the deletion.
-      assert.match(src, /import \{ spawn, type ChildProcess \} from "node:child_process"/, "worker.ts imports spawn only");
+      assert.match(src, /import \{ type ChildProcess, spawn \} from "node:child_process"/, "worker.ts imports spawn only");
       assert.doesNotMatch(src, /\b(execFileSync|execFile|execSync|spawnSync|exec)\b/, "worker.ts has no exec API");
       assert.doesNotMatch(src, /["'`]git["'`]/, "worker.ts references no `git` command");
       assert.doesNotMatch(src, /preserveHandoffWip|runGit|tryGit|noHooksDir/, "deleted helpers not stranded");
@@ -1336,8 +1481,13 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     const s = new WorkerSupervisor({
-      cfg: tcfg, stateDir: dir, claudeBin: bin,
-      hasOpenPr: async () => false, renderPrompt: () => "p", heartbeatMs: 100, guardHookPath: mkHook(dir),
+      cfg: tcfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 100,
+      guardHookPath: mkHook(dir),
     });
     const { name: laneName } = await s.dispatch({ number: 63, title: "t", labels: [] });
     await sleep(200);
@@ -1654,10 +1804,7 @@ test("#63: wrapperAlive() === -1 (unreadable pid) -> probe() does not throw, doe
     const s = sup(dir, bin);
     // A persisted lane that claims a handoff was requested but carries no readable wrapper_pid
     // (garbage/missing) -> persistedPid() is null -> wrapperAlive() is -1 (unknown), not 0.
-    writeFileSync(
-      join(dir, "lane-63-c.running.json"),
-      JSON.stringify({ issue: 1, session_id: "s", handoff_requested: true }),
-    );
+    writeFileSync(join(dir, "lane-63-c.running.json"), JSON.stringify({ issue: 1, session_id: "s", handoff_requested: true }));
     const probe = await s.probe("lane-63-c");
     assert.equal(probe.wrapperAlive, -1);
     assert.equal(probe.handoff, false, "an unknown pid is never treated as confirmed-dead");
@@ -2018,7 +2165,7 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     const templatePath = join(dir, "e2e-worker.md");
-    writeFileSync(templatePath, "Do issue #{{issue.number}} (\"{{issue.title}}\"):\n{{issue.body}}");
+    writeFileSync(templatePath, 'Do issue #{{issue.number}} ("{{issue.title}}"):\n{{issue.body}}');
     const scfg = ConfigSchema.parse({
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { promptFile: templatePath },
@@ -2028,12 +2175,23 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
     // stub records its argv so we can inspect exactly what -p carried (same trick as the
     // #26 inline-settings test above).
     const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\nexit 0\n`);
-    const s = new WorkerSupervisor({ cfg: scfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, renderPrompt, heartbeatMs: 50, guardHookPath: hook });
+    const s = new WorkerSupervisor({
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt,
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
     await s.dispatch({ number: 74, title: "File-based worker prompt", labels: [], body: "wire promptFile through renderPrompt" });
     for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     const expected = renderPromptTemplate(readFileSync(templatePath, "utf8"), {
-      number: 74, title: "File-based worker prompt", labels: [], body: "wire promptFile through renderPrompt",
+      number: 74,
+      title: "File-based worker prompt",
+      labels: [],
+      body: "wire promptFile through renderPrompt",
     });
     assert.ok(args.includes(expected), `expected the rendered template in the spawned argv, got:\n${args}`);
     s.dispose();

@@ -29,16 +29,16 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { PeripheralStub } from "./round.js";
+import type { SapwoodConfig } from "../config/config.js";
+import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
-import type { State } from "../state/state.js";
-import type { SapwoodConfig } from "../config/config.js";
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
+import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
-import { resolveRoundDirective } from "../config/directive.js";
+import type { PeripheralStub } from "./round.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
  *  ledger's persisted marker for this phase, also embedded in every comment this phase posts
@@ -126,9 +126,7 @@ function splitAlignIssueBodies(raw: string, count: number): string[] | null {
   return bodies;
 }
 
-export type AlignValidation =
-  | { ok: true; issues: Array<{ title: string; body: string }> }
-  | { ok: false; reason: string };
+export type AlignValidation = { ok: true; issues: Array<{ title: string; body: string }> } | { ok: false; reason: string };
 
 /** Parse + schema-validate a po-align session's structured output. Deliberately does NOT
  *  content-check each issue body for a verification-plan section (unlike plan-review.ts's
@@ -276,23 +274,33 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         runner: deps.runner,
         state: deps.state,
         session: {
-          roleId: "po-align", prompt: alignPrompt, model: role.model, effort: role.effort,
-          allowedTools: PO_ALLOWED_TOOLS, disallowedTools: PO_DISALLOWED_TOOLS,
+          roleId: "po-align",
+          prompt: alignPrompt,
+          model: role.model,
+          effort: role.effort,
+          allowedTools: PO_ALLOWED_TOOLS,
+          disallowedTools: PO_DISALLOWED_TOOLS,
         },
         // Align spend is round-scoped, not tied to any single issue — `issue` is a plain int
         // column with no FK, so 0 is a documented sentinel ("no single issue").
         issue: 0,
         now,
         degradeEvent: "po-degraded",
-        degradePayload: (result) => ({ round_id: roundId, outcome: result.outcome, session: result.name, reason: alignDegradeReason(result) }),
+        degradePayload: (result) => ({
+          round_id: roundId,
+          outcome: result.outcome,
+          session: result.name,
+          reason: alignDegradeReason(result),
+        }),
         degradeMessage: (result) =>
           `[sapwood:po] round ${roundId}: po-align session failed twice (${result.outcome}) — ` +
           `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result)}`,
         isValid: (result) => validateAlignOutput(result.resultText ?? "").ok,
       });
-      const alignValidated: AlignValidation = alignResult.outcome === "done"
-        ? validateAlignOutput(alignResult.resultText ?? "")
-        : { ok: false, reason: `po-align session failed twice (${alignResult.outcome})` };
+      const alignValidated: AlignValidation =
+        alignResult.outcome === "done"
+          ? validateAlignOutput(alignResult.resultText ?? "")
+          : { ok: false, reason: `po-align session failed twice (${alignResult.outcome})` };
 
       // Every created issue originates from the VALIDATED array above — the engine is the only
       // caller of forge.createIssue, and its (title, body) signature carries no label field, so
@@ -340,14 +348,21 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           runner: deps.runner,
           state: deps.state,
           session: {
-            roleId: "po-triage", prompt: triagePrompt, model: role.model, effort: role.effort,
-            allowedTools: PO_ALLOWED_TOOLS, disallowedTools: PO_DISALLOWED_TOOLS,
+            roleId: "po-triage",
+            prompt: triagePrompt,
+            model: role.model,
+            effort: role.effort,
+            allowedTools: PO_ALLOWED_TOOLS,
+            disallowedTools: PO_DISALLOWED_TOOLS,
           },
           issue: issue.number,
           now,
           degradeEvent: "triage-degraded",
           degradePayload: (result) => ({
-            round_id: roundId, issue: issue.number, outcome: result.outcome, session: result.name,
+            round_id: roundId,
+            issue: issue.number,
+            outcome: result.outcome,
+            session: result.name,
             reason: triageDegradeReason(result, issue.number),
           }),
           degradeMessage: (result) =>
@@ -356,9 +371,10 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             `${triageDegradeReason(result, issue.number)}`,
           isValid: (result) => validateTriageOutput(result.resultText ?? "", issue.number).ok,
         });
-        const validated: TriageValidation = triageResult.outcome === "done"
-          ? validateTriageOutput(triageResult.resultText ?? "", issue.number)
-          : { ok: false, reason: `po-triage session failed twice (${triageResult.outcome})` };
+        const validated: TriageValidation =
+          triageResult.outcome === "done"
+            ? validateTriageOutput(triageResult.resultText ?? "", issue.number)
+            : { ok: false, reason: `po-triage session failed twice (${triageResult.outcome})` };
 
         if (!validated.ok) {
           // Malformed-twice/failed-twice already went through runSessionWithRetry's own
@@ -385,7 +401,9 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           // be a false audit-trail entry), a durable event, the candidate re-matches next round.
           try {
             deps.state.appendEvent("triage-degraded", { round_id: roundId, issue: issue.number, outcome: "no-plan-after-draft" });
-          } catch { /* state write failed — the console line below still lands */ }
+          } catch {
+            /* state write failed — the console line below still lands */
+          }
           console.error(
             `[sapwood:po] round ${roundId}: triage left issue #${issue.number} still planless — ` +
               `no success comment posted; the candidate re-matches next round`,
@@ -402,9 +420,13 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       if (alignValidated.ok) {
         try {
           deps.state.appendEvent("align-summary", {
-            round_id: roundId, created: alignSummaryCreated, triaged: alignSummaryTriaged,
+            round_id: roundId,
+            created: alignSummaryCreated,
+            triaged: alignSummaryTriaged,
           });
-        } catch { /* telemetry only — the phase's forge writes above already landed */ }
+        } catch {
+          /* telemetry only — the phase's forge writes above already landed */
+        }
       }
 
       return { marker: mark };

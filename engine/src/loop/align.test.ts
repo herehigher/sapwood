@@ -9,23 +9,26 @@
 // direct `gh issue create/edit` side effect. The engine reads `resultText`, validates it, and
 // performs every forge write itself — exactly what createAligningStub is being tested for here.
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createAligningStub, alignMarker, loadPlanMd, defaultPoPromptPath, validateAlignOutput,
-  validateTriageOutput, type AlignDeps,
-} from "./align.js";
-import { loadRolePromptTemplate } from "../roles/plan-review.js";
-import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS } from "../roles/peripheral.js";
-import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
-import {
-  RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END,
-} from "../state/structured-output.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
-import { State } from "../state/state.js";
+import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
+import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS } from "../roles/peripheral.js";
+import { loadRolePromptTemplate } from "../roles/plan-review.js";
+import { State } from "../state/state.js";
+import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import {
+  type AlignDeps,
+  alignMarker,
+  createAligningStub,
+  defaultPoPromptPath,
+  loadPlanMd,
+  validateAlignOutput,
+  validateTriageOutput,
+} from "./align.js";
 
 class FakeForge implements IForge {
   issueLabels: Record<number, string[]> = {};
@@ -37,8 +40,12 @@ class FakeForge implements IForge {
   boardStatusCalls: Array<[number, string]> = [];
   planTriageCandidates: Issue[] = [];
 
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> {
     this.boardStatusCalls.push([n, s]);
@@ -47,14 +54,20 @@ class FakeForge implements IForge {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
   async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
-  async addIssueComment(n: number, body: string): Promise<void> { this.issueCommentsPosted.push([n, body]); }
-  async getIssueBody(issue: number): Promise<string> { return this.issueBodies[issue] ?? ""; }
+  async addIssueComment(n: number, body: string): Promise<void> {
+    this.issueCommentsPosted.push([n, body]);
+  }
+  async getIssueBody(issue: number): Promise<string> {
+    return this.issueBodies[issue] ?? "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
   async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
@@ -62,18 +75,41 @@ class FakeForge implements IForge {
   }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
-  async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
-  async getIssueComments() { return []; }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return [];
+  }
+  async getIssueLabels(issue: number): Promise<string[]> {
+    return this.issueLabels[issue] ?? [];
+  }
+  async getIssueComments() {
+    return [];
+  }
   async createIssue(title: string, body: string): Promise<number> {
     const n = this.nextIssueNumber++;
     this.createdIssues.push({ title, body });
@@ -81,8 +117,12 @@ class FakeForge implements IForge {
     this.openIssueNumbers.push(n);
     return n;
   }
-  async listOpenIssueNumbers(): Promise<number[]> { return this.openIssueNumbers; }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return this.planTriageCandidates; }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return this.openIssueNumbers;
+  }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return this.planTriageCandidates;
+  }
 }
 
 /** Scripted fake of RoleRunner.run — same shape as plan-review.test.ts's ScriptedRunner: each
@@ -117,20 +157,26 @@ const issueSegment = (body: string): string => `<<<ISSUE>>>\n${body}\n<<<END_ISS
 /** A po-align session's structured output for N created issues (title + body pairs). */
 const alignResultText = (issues: Array<{ title: string; body: string }>): string => {
   if (issues.length === 0) return sapwoodResult({ issues: [] });
-  return sapwoodResult(
-    { issues: issues.map((i) => ({ title: i.title })) },
-    issues.map((i) => issueSegment(i.body)).join("\n"),
-  );
+  return sapwoodResult({ issues: issues.map((i) => ({ title: i.title })) }, issues.map((i) => issueSegment(i.body)).join("\n"));
 };
 
 /** A po-triage session's structured output: the entire revised body for one issue. */
 const triageResultText = (issue: number, body: string): string => sapwoodResult({ issue }, body);
 
 const doneResult = (name: string, resultText = ""): RoleSessionResult => ({
-  outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name, resultText,
+  outcome: "done",
+  costUsd: 0.01,
+  modelUsage: [],
+  exitCode: 0,
+  name,
+  resultText,
 });
 const failedResult = (name: string): RoleSessionResult => ({
-  outcome: "failed", costUsd: 0.01, modelUsage: [], exitCode: 1, name,
+  outcome: "failed",
+  costUsd: 0.01,
+  modelUsage: [],
+  exitCode: 1,
+  name,
 });
 
 /** Taps state.appendEvent so a test can assert on durable degradation events (same pattern as
@@ -187,9 +233,7 @@ test("createAligningStub: dispatches the align session with the PO tool pair (PO
 test("createAligningStub: a declared issue with a plan section gets stamped origin:agent, never needs-human, never board status", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
-  const runner = new ScriptedRunner([
-    doneResult("po-align-1", alignResultText([{ title: "Do the thing", body: PLAN_BODY }])),
-  ]);
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "Do the thing", body: PLAN_BODY }]))]);
   const state = new State(":memory:");
   const deps: AlignDeps = { forge, state, cfg, runner };
   const stub = createAligningStub(deps);
@@ -250,9 +294,7 @@ test("createAligningStub #123: a DEGRADED align pass emits NO align-summary — 
 test("createAligningStub: a declared issue WITHOUT a plan section is escalated needs-human, never left silently planless", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
-  const runner = new ScriptedRunner([
-    doneResult("po-align-1", alignResultText([{ title: "Vague issue", body: NO_PLAN_BODY }])),
-  ]);
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "Vague issue", body: NO_PLAN_BODY }]))]);
   const state = new State(":memory:");
   const deps: AlignDeps = { forge, state, cfg, runner };
   const stub = createAligningStub(deps);
@@ -270,17 +312,23 @@ test("createAligningStub: multiple declared issues are each processed independen
   const forge = new FakeForge();
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
-    doneResult("po-align-1", alignResultText([
-      { title: "a", body: "## Acceptance criteria\n- x" },
-      { title: "b", body: "no plan here" },
-    ])),
+    doneResult(
+      "po-align-1",
+      alignResultText([
+        { title: "a", body: "## Acceptance criteria\n- x" },
+        { title: "b", body: "no plan here" },
+      ]),
+    ),
   ]);
   const state = new State(":memory:");
   const deps: AlignDeps = { forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 3, phase: "aligning", marker: null });
   assert.equal(forge.openIssueNumbers.length, 2);
-  assert.deepEqual(forge.createdIssues.map((i) => i.title), ["a", "b"]);
+  assert.deepEqual(
+    forge.createdIssues.map((i) => i.title),
+    ["a", "b"],
+  );
   const [a, b] = forge.openIssueNumbers as [number, number];
   assert.ok(forge.issueLabels[a]!.includes("origin:agent"));
   assert.ok(!forge.issueLabels[a]!.includes(cfg.labels.needsHuman));
@@ -291,9 +339,7 @@ test("createAligningStub: multiple declared issues are each processed independen
 
 test("createAligningStub: triage pass briefs a po-triage session per plan-less candidate, posts a traceable comment", async () => {
   const forge = new FakeForge();
-  forge.planTriageCandidates = [
-    { number: 50, title: "human-filed, no plan", labels: [], body: "just a description" },
-  ];
+  forge.planTriageCandidates = [{ number: 50, title: "human-filed, no plan", labels: [], body: "just a description" }];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     doneResult("po-align-1", alignResultText([])), // align pass: declares nothing
@@ -303,7 +349,10 @@ test("createAligningStub: triage pass briefs a po-triage session per plan-less c
   const deps: AlignDeps = { forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 6, phase: "aligning", marker: null });
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["po-align", "po-triage"]);
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-triage"],
+  );
   assert.equal(runner.calls[1]!.allowedTools, PO_ALLOWED_TOOLS);
   assert.equal(runner.calls[1]!.disallowedTools, PO_DISALLOWED_TOOLS);
   assert.ok(runner.calls[1]!.prompt.includes("#50"));
@@ -332,7 +381,10 @@ test("createAligningStub: triage processes every candidate independently", async
   const deps: AlignDeps = { forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 7, phase: "aligning", marker: null });
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["po-align", "po-triage", "po-triage"]);
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-triage", "po-triage"],
+  );
   assert.ok(forge.issueCommentsPosted.some(([n]) => n === 60));
   assert.ok(forge.issueCommentsPosted.some(([n]) => n === 61));
   state.close();
@@ -404,7 +456,11 @@ test("createAligningStub P2: two failed align sessions -> marker STILL set (next
   const stub = createAligningStub(deps);
   const { marker } = await stub.run({ roundId: 11, phase: "aligning", marker: null });
   assert.equal(marker, alignMarker(11), "the round still advances — pre-Ready, low stakes");
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["po-align", "po-align", "po-triage"], "one retry, then triage proceeds");
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-align", "po-triage"],
+    "one retry, then triage proceeds",
+  );
   assert.equal(forge.createdIssues.length, 0, "a twice-failed session creates nothing — the engine is the only creator");
   const ev = logged.find(([kind]) => kind === "po-degraded");
   assert.ok(ev, "degradation is durably visible, never a silent skip");
@@ -426,8 +482,14 @@ test("createAligningStub P2: a failed triage session is retried once; the succes
   const deps: AlignDeps = { forge, state, cfg, runner };
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 12, phase: "aligning", marker: null });
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["po-align", "po-triage", "po-triage"]);
-  assert.ok(forge.issueCommentsPosted.some(([n]) => n === 81), "success comment after the converged retry");
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-triage", "po-triage"],
+  );
+  assert.ok(
+    forge.issueCommentsPosted.some(([n]) => n === 81),
+    "success comment after the converged retry",
+  );
   assert.ok(!logged.some(([kind]) => kind === "triage-degraded"));
   state.close();
 });
@@ -471,7 +533,11 @@ test("createAligningStub P2: a 'done' triage session whose VALID output left the
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 14, phase: "aligning", marker: null });
   assert.equal(runner.calls.length, 2, "not retried — schema-valid output is a DONE attempt, even if content-checked afterward");
-  assert.deepEqual(forge.updateIssueBodyCalls, [[83, "still no plan here"]], "the (planless) draft is still written — the write is earned by validity, not by content");
+  assert.deepEqual(
+    forge.updateIssueBodyCalls,
+    [[83, "still no plan here"]],
+    "the (planless) draft is still written — the write is earned by validity, not by content",
+  );
   assert.ok(!forge.issueCommentsPosted.some(([n]) => n === 83), "the success comment is earned by the content check, not by exit code");
   assert.ok(logged.some(([kind]) => kind === "triage-degraded"));
   state.close();
@@ -546,10 +612,7 @@ test("createAligningStub #110 (Codex round 1): a duplicate-title align batch twi
     { title: "Add X", body: PLAN_BODY },
     { title: "Add X", body: PLAN_BODY },
   ]);
-  const runner = new ScriptedRunner([
-    doneResult("po-align-0", dupText),
-    doneResult("po-align-0-retry", dupText),
-  ]);
+  const runner = new ScriptedRunner([doneResult("po-align-0", dupText), doneResult("po-align-0-retry", dupText)]);
   const state = new State(":memory:");
   const logged = tapEvents(state);
   const deps: AlignDeps = { forge, state, cfg, runner };
@@ -584,9 +647,7 @@ test("createAligningStub #110: an align block with a wrong number of <<<ISSUE>>>
 test("createAligningStub P3: a customized labels.originAgent value is what gets stamped — never a hardcoded 'origin:agent'", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ labels: { originAgent: "bot:made" } });
-  const runner = new ScriptedRunner([
-    doneResult("po-align-1", alignResultText([{ title: "t", body: "## Verification\n- x" }])),
-  ]);
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "t", body: "## Verification\n- x" }]))]);
   const state = new State(":memory:");
   const deps: AlignDeps = { forge, state, cfg, runner };
   const stub = createAligningStub(deps);
@@ -769,10 +830,12 @@ test("validateAlignOutput: a smuggled 'labels' field in an issue entry is reject
 });
 
 test("validateAlignOutput (Codex round 1): duplicate titles in one batch -> fail-closed, rejected whole (would double-create the same issue)", () => {
-  const result = validateAlignOutput(alignResultText([
-    { title: "Add X", body: "Body one." },
-    { title: "Add X", body: "Body two." },
-  ]));
+  const result = validateAlignOutput(
+    alignResultText([
+      { title: "Add X", body: "Body one." },
+      { title: "Add X", body: "Body two." },
+    ]),
+  );
   assert.equal(result.ok, false);
   assert.ok(!result.ok && /duplicate issue title/.test(result.reason));
 });
@@ -796,10 +859,12 @@ test("validateAlignOutput: well-formed empty declaration -> ok, empty array", ()
 });
 
 test("validateAlignOutput: well-formed multi-issue declaration -> ok, titles and bodies paired in order", () => {
-  const result = validateAlignOutput(alignResultText([
-    { title: "first", body: "Body one." },
-    { title: "second", body: "Body two." },
-  ]));
+  const result = validateAlignOutput(
+    alignResultText([
+      { title: "first", body: "Body one." },
+      { title: "second", body: "Body two." },
+    ]),
+  );
   assert.ok(result.ok);
   if (result.ok) {
     assert.deepEqual(result.issues, [

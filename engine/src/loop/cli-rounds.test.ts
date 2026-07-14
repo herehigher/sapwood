@@ -8,14 +8,14 @@
 // (zero token) drives the real spawn/sentinel/cost-parse path — createDefaultPeripherals's
 // stubs are never faked themselves.
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runEngine, runDryRun, tickOnlyFlagError, type EngineOverrides } from "../cli.js";
+import { test } from "node:test";
+import { type EngineOverrides, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { State } from "../state/state.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
 import type { PeripheralPhase } from "./round.js";
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -45,39 +45,80 @@ class FakeForge implements IForge {
   issueLabels: Record<number, string[]> = {};
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
 
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
-  async addLabel(n: number, l: string): Promise<void> { this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l]; }
+  async addLabel(n: number, l: string): Promise<void> {
+    this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
+  }
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
   async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
   async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> { return ""; }
+  async getIssueBody(): Promise<string> {
+    return "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return this.planReviewCandidates; }
-  async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
-  async getIssueComments(issue: number) { return this.issueComments[issue] ?? []; }
-  async createIssue(): Promise<number> { return 0; }
-  async listOpenIssueNumbers(): Promise<number[]> { return []; }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return this.planReviewCandidates;
+  }
+  async getIssueLabels(issue: number): Promise<string[]> {
+    return this.issueLabels[issue] ?? [];
+  }
+  async getIssueComments(issue: number) {
+    return this.issueComments[issue] ?? [];
+  }
+  async createIssue(): Promise<number> {
+    return 0;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return [];
+  }
 }
 
 test("sapwood run (default driver): runEngine reaches runRounds via createDefaultPeripherals wired to a REAL RoleRunner — dispatches real role sessions to the stub claude binary, and a graceful stop still closes the in-flight round", async () => {
@@ -94,13 +135,21 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
 
     let stop = (): void => {};
     const overrides: EngineOverrides = {
-      cfg, forge, state,
+      cfg,
+      forge,
+      state,
       roleRunnerDeps: {
-        stateDir: dir, worktreeRoot: join(dir, "worktrees"), claudeBin: bin,
-        heartbeatMs: 50, guardHookPath: mkHook(dir),
+        stateDir: dir,
+        worktreeRoot: join(dir, "worktrees"),
+        claudeBin: bin,
+        heartbeatMs: 50,
+        guardHookPath: mkHook(dir),
       },
       sleep: async () => {},
-      registerSignals: (requestStop) => { stop = requestStop; return () => {}; },
+      registerSignals: (requestStop) => {
+        stop = requestStop;
+        return () => {};
+      },
       // Same graceful-stop-mid-round trigger as round-defaults.test.ts: fire right after the
       // FIRST phase completes — the round must still run every remaining phase (including
       // harvest) to close, proving the safety property survives the cli.ts wiring switch.
@@ -134,10 +183,15 @@ test("sapwood run (default driver): KILL_SWITCH blocks every peripheral AND disp
     const cfg = mkCfg();
 
     const overrides: EngineOverrides = {
-      cfg, forge, state,
+      cfg,
+      forge,
+      state,
       roleRunnerDeps: {
-        stateDir: join(dir, "roles"), worktreeRoot: join(dir, "worktrees"), claudeBin: bin,
-        heartbeatMs: 50, guardHookPath: mkHook(dir),
+        stateDir: join(dir, "roles"),
+        worktreeRoot: join(dir, "worktrees"),
+        claudeBin: bin,
+        heartbeatMs: 50,
+        guardHookPath: mkHook(dir),
       },
       sleep: async () => {},
       registerSignals: () => () => {},
@@ -172,10 +226,7 @@ test("tickOnlyFlagError: --once/--until-idle produce an actionable error; --dry-
   assert.match(tickOnlyFlagError(["node", "sapwood", "run", "--once"])!, /engine\.driver: tick/);
   assert.match(tickOnlyFlagError(["node", "sapwood", "run", "--once"])!, /--stop-after-issues/);
   assert.match(tickOnlyFlagError(["node", "sapwood", "run", "--until-idle"])!, /--until-idle only apply/);
-  assert.match(
-    tickOnlyFlagError(["node", "sapwood", "run", "--once", "--until-idle"])!,
-    /--once\/--until-idle only apply/,
-  );
+  assert.match(tickOnlyFlagError(["node", "sapwood", "run", "--once", "--until-idle"])!, /--once\/--until-idle only apply/);
 });
 
 /** Capture what runEngine writes to process.stderr for the duration of `fn`. */
@@ -208,9 +259,7 @@ for (const flag of ["--once", "--until-idle"] as const) {
     });
     const cfg = mkCfg(); // engine.driver defaults to "rounds"
 
-    const { code, stderr } = await captureStderr(() =>
-      runEngine(["node", "sapwood", "run", flag], { cfg, forge: trackingForge, state }),
-    );
+    const { code, stderr } = await captureStderr(() => runEngine(["node", "sapwood", "run", flag], { cfg, forge: trackingForge, state }));
 
     assert.equal(code, 1);
     assert.match(stderr, /only apply to the tick driver/);
@@ -259,10 +308,13 @@ test("sapwood run --milestone <real title>: scopes AND stops on the same milesto
   const forge = new NamedMilestoneForge();
   const cfg = mkCfg(); // engine.driver defaults to "rounds", no round.milestone/stop configured
 
-  const code = await runEngine(
-    ["node", "sapwood", "run", "--milestone", "M4 — UX surface + CLI"],
-    { cfg, forge, state, sleep: async () => {}, registerSignals: () => () => {} },
-  );
+  const code = await runEngine(["node", "sapwood", "run", "--milestone", "M4 — UX surface + CLI"], {
+    cfg,
+    forge,
+    state,
+    sleep: async () => {},
+    registerSignals: () => () => {},
+  });
 
   // Zero open issues in the milestone from tick 1 -> the round loop's dispatch batch is skipped
   // (round.milestone scoping) AND the final onMilestoneComplete condition fires immediately

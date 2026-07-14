@@ -26,37 +26,39 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import type { SapwoodConfig } from "./config.js";
 import type { ModelUsageEntry } from "../state/state.js";
+import type { SapwoodConfig } from "./config.js";
 
-const Rate = z.object({
-  /** USD per million input tokens. */
-  input: z.number().finite().positive(),
-  /** USD per million output tokens. */
-  output: z.number().finite().positive(),
-  /** 5-minute ephemeral cache write premium (~1.25x input — see pricing.yaml's header). */
-  cacheWrite: z.number().finite().positive(),
-  /** Cache READS must be priced at this rate, not `input` — pricing a cache-heavy run at the
-   *  input rate is the exact over-trigger failure mode #33 exists to prevent: a worker mostly
-   *  re-reading a large cached prefix would look artificially expensive and hand off
-   *  prematurely, even though a cache read costs roughly a tenth of a fresh input token. */
-  cacheRead: z.number().finite().positive(),
-  /** #155: the model's total context window, in tokens — the denominator for the dashboard's
-   *  context-usage % gauge (docs/frontend-design.md §8). Same hand-maintained-snapshot pattern
-   *  as the USD rates above (this file's header), and the SAME fail-closed load rule: a model
-   *  entry missing `contextWindow` fails PricingFile's `.strict()` parse exactly like one
-   *  missing a rate field — loadPricingTable throws, naming the file, never a silent fallback. */
-  contextWindow: z.number().int().finite().positive(),
-}).strict();
+const Rate = z
+  .object({
+    /** USD per million input tokens. */
+    input: z.number().finite().positive(),
+    /** USD per million output tokens. */
+    output: z.number().finite().positive(),
+    /** 5-minute ephemeral cache write premium (~1.25x input — see pricing.yaml's header). */
+    cacheWrite: z.number().finite().positive(),
+    /** Cache READS must be priced at this rate, not `input` — pricing a cache-heavy run at the
+     *  input rate is the exact over-trigger failure mode #33 exists to prevent: a worker mostly
+     *  re-reading a large cached prefix would look artificially expensive and hand off
+     *  prematurely, even though a cache read costs roughly a tenth of a fresh input token. */
+    cacheRead: z.number().finite().positive(),
+    /** #155: the model's total context window, in tokens — the denominator for the dashboard's
+     *  context-usage % gauge (docs/frontend-design.md §8). Same hand-maintained-snapshot pattern
+     *  as the USD rates above (this file's header), and the SAME fail-closed load rule: a model
+     *  entry missing `contextWindow` fails PricingFile's `.strict()` parse exactly like one
+     *  missing a rate field — loadPricingTable throws, naming the file, never a silent fallback. */
+    contextWindow: z.number().int().finite().positive(),
+  })
+  .strict();
 
 /** File shape: `models: {<alias>: {input, output, cacheWrite, cacheRead}}`. Unknown model
  *  ALIASES are allowed (users add their own); unknown FIELDS inside a rate are rejected
  *  (.strict() — a typo'd rate key must not be silently dropped, same stance as config.ts). */
-const PricingFile = z.object({
-  models: z
-    .record(z.string().min(1), Rate)
-    .refine((m) => Object.keys(m).length > 0, { message: "models must not be empty" }),
-}).strict();
+const PricingFile = z
+  .object({
+    models: z.record(z.string().min(1), Rate).refine((m) => Object.keys(m).length > 0, { message: "models must not be empty" }),
+  })
+  .strict();
 
 export type ModelRateUsdPerMTok = z.infer<typeof Rate>;
 /** Alias -> rate, as loaded from pricing.yaml. Guaranteed non-empty by the schema. */

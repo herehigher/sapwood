@@ -5,8 +5,9 @@
 //
 // SECURITY: all subprocess calls go through gh.ts (execFile with an argv array — never
 // exec/shell:true). Issue text is treated as data, never interpolated into a shell.
-import { gh } from "./gh.js";
+
 import type { SapwoodConfig } from "../config/config.js";
+import { gh } from "./gh.js";
 
 export type OwnerKind = "user" | "org";
 
@@ -229,10 +230,14 @@ export class GithubForge implements IForge {
     // ponytail: hard page ceiling (500 items) so a cursor bug can't spin forever.
     for (let page = 0; page < 50; page++) {
       const args = [
-        "api", "graphql",
-        "-f", `query=${query}`,
-        "-f", `login=${this.cfg.board.owner}`,
-        "-F", `number=${this.cfg.board.projectNumber}`,
+        "api",
+        "graphql",
+        "-f",
+        `query=${query}`,
+        "-f",
+        `login=${this.cfg.board.owner}`,
+        "-F",
+        `number=${this.cfg.board.projectNumber}`,
         // First page: -F passes the literal `null` as JSON null. Later pages: the cursor is
         // an opaque string -> -f (raw), so a number-/bool-looking cursor isn't mistyped by -F.
         ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
@@ -284,26 +289,37 @@ export class GithubForge implements IForge {
     const optionId = findOptionId(project, value);
     if (!optionId) throw new Error(`setBoardStatus: no "${value}" option in the "${this.cfg.board.statusField}" field`);
     await this.gh([
-      "api", "graphql", "-f", `query=${BOARD_MUTATION}`,
-      "-f", `projectId=${project.projectId}`,
-      "-f", `itemId=${itemId}`,
-      "-f", `fieldId=${project.statusFieldId}`,
-      "-f", `optionId=${optionId}`,
+      "api",
+      "graphql",
+      "-f",
+      `query=${BOARD_MUTATION}`,
+      "-f",
+      `projectId=${project.projectId}`,
+      "-f",
+      `itemId=${itemId}`,
+      "-f",
+      `fieldId=${project.statusFieldId}`,
+      "-f",
+      `optionId=${optionId}`,
     ]);
   }
 
   async addLabel(issue: number, label: string): Promise<void> {
-    await this.gh([
-      "issue", "edit", String(issue),
-      "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--add-label", label,
-    ]);
+    await this.gh(["issue", "edit", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--add-label", label]);
   }
 
   async openPR(branch: string, title: string, body: string): Promise<number> {
     const out = await this.gh([
-      "pr", "create", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--head", branch, "--title", title, "--body", body,
+      "pr",
+      "create",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--head",
+      branch,
+      "--title",
+      title,
+      "--body",
+      body,
     ]);
     const m = out.match(/\/pull\/(\d+)/);
     if (!m) throw new Error(`openPR: could not parse PR number from: ${out.trim()}`);
@@ -312,8 +328,13 @@ export class GithubForge implements IForge {
 
   async getPRStatus(pr: number): Promise<PRStatus> {
     const out = await this.gh([
-      "pr", "view", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--json", "number,headRefOid,state,mergeable,statusCheckRollup",
+      "pr",
+      "view",
+      String(pr),
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--json",
+      "number,headRefOid,state,mergeable,statusCheckRollup",
     ]);
     return parsePRStatus(out);
   }
@@ -326,8 +347,10 @@ export class GithubForge implements IForge {
     // Same --paginate/--slurp discipline as getIssueComments — the commits list endpoint pages
     // at 30/page by default; a round spanning >30 commits must not silently lose the rest.
     const out = await this.gh([
-      "api", `repos/${this.cfg.board.owner}/${this.repo()}/commits?since=${encodeURIComponent(sinceIso)}&per_page=100`,
-      "--paginate", "--slurp",
+      "api",
+      `repos/${this.cfg.board.owner}/${this.repo()}/commits?since=${encodeURIComponent(sinceIso)}&per_page=100`,
+      "--paginate",
+      "--slurp",
     ]);
     return parseCommitsSince(out);
   }
@@ -353,8 +376,15 @@ export class GithubForge implements IForge {
     // review and merge (0day loop_merge_driver.sh). producer != merger: only the
     // conductor calls this, never a worker.
     await this.gh([
-      "pr", "merge", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--squash", "--delete-branch", "--match-head-commit", headOid,
+      "pr",
+      "merge",
+      String(pr),
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--squash",
+      "--delete-branch",
+      "--match-head-commit",
+      headOid,
     ]);
   }
 
@@ -375,10 +405,7 @@ export class GithubForge implements IForge {
   }
 
   async getIssueBody(issue: number): Promise<string> {
-    const out = await this.gh([
-      "issue", "view", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--json", "body",
-    ]);
+    const out = await this.gh(["issue", "view", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--json", "body"]);
     const parsed = JSON.parse(out) as { body?: string };
     return parsed.body ?? "";
   }
@@ -395,7 +422,10 @@ export class GithubForge implements IForge {
    *  multiple bare mentions -> null, the lane queues rather than gating a guessed PR). */
   async findOpenPrForIssue(issue: number): Promise<number | null> {
     const out = await this.gh([
-      "pr", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
+      "pr",
+      "list",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
       // gh's default --limit is 30 (Codex PR #50, forge.ts thread): a worker's PR beyond the
       // first page would probe hasPr=false and wrongly escalate a completed lane to
       // needs-human. 200 comfortably covers any repo this loop realistically operates on
@@ -406,10 +436,18 @@ export class GithubForge implements IForge {
       // PRs could still hide the target past the page — accepted for v1 trusted repos;
       // fail direction is the conductor's existing no-PR fail-safe (escalate), never a
       // wrong-PR merge.
-      "--state", "open", "--limit", "200", "--json", "number,body",
+      "--state",
+      "open",
+      "--limit",
+      "200",
+      "--json",
+      "number,body",
     ]);
     const prs = JSON.parse(out) as { number: number; body?: string }[];
-    return findOpenPrNumber(prs.map((p) => ({ number: p.number, body: p.body ?? "" })), issue);
+    return findOpenPrNumber(
+      prs.map((p) => ({ number: p.number, body: p.body ?? "" })),
+      issue,
+    );
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
@@ -418,24 +456,43 @@ export class GithubForge implements IForge {
     // fetch could report zero findings while an unresolved thread sits on a later page).
     // Never touches merge/approve/ready — this is a read surface only.
     const viewJson = await this.gh([
-      "pr", "view", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--json", "headRefOid,author,updatedAt,isDraft,labels,state,reviews",
+      "pr",
+      "view",
+      String(pr),
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--json",
+      "headRefOid,author,updatedAt,isDraft,labels,state,reviews",
     ]);
     const reactionsJson = await this.gh([
       // --slurp: --paginate alone concatenates one JSON doc per page (unparseable as a
       // single document); --slurp wraps pages in an outer array parsePRReactions flattens.
-      "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/reactions`, "--paginate", "--slurp",
+      "api",
+      `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/reactions`,
+      "--paginate",
+      "--slurp",
     ]);
     const commentsJson = await this.gh([
       // Same pagination discipline. Conversation comments carry Codex's comment-shaped clean
       // verdict ("Didn't find any major issues") — post-#55 P2: that shape has no review
       // object and no +1 reaction, so without this fetch it wedges at WAIT_REVIEW.
-      "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/comments`, "--paginate", "--slurp",
+      "api",
+      `repos/${this.cfg.board.owner}/${this.repo()}/issues/${pr}/comments`,
+      "--paginate",
+      "--slurp",
     ]);
     const unresolvedThreads = await countUnresolvedThreads((after) =>
       this.gh([
-        "api", "graphql", "-f", `query=${REVIEW_THREADS_QUERY}`,
-        "-f", `owner=${this.cfg.board.owner}`, "-f", `repo=${this.repo()}`, "-F", `number=${pr}`,
+        "api",
+        "graphql",
+        "-f",
+        `query=${REVIEW_THREADS_QUERY}`,
+        "-f",
+        `owner=${this.cfg.board.owner}`,
+        "-f",
+        `repo=${this.repo()}`,
+        "-F",
+        `number=${pr}`,
         // Same -F null / -f cursor split as fetchProject: an opaque cursor must go raw.
         ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
       ]),
@@ -450,8 +507,18 @@ export class GithubForge implements IForge {
     // not this loop's use case); undercounting past that would only delay the stop condition,
     // never fire it early.
     const out = await this.gh([
-      "issue", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--milestone", milestone, "--state", "open", "--json", "number", "--limit", "1000",
+      "issue",
+      "list",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--milestone",
+      milestone,
+      "--state",
+      "open",
+      "--json",
+      "number",
+      "--limit",
+      "1000",
     ]);
     const issues = JSON.parse(out) as { number: number }[];
     return issues.length;
@@ -461,9 +528,7 @@ export class GithubForge implements IForge {
     // state=all: a closed milestone is a valid (instantly-complete) stop target. per_page=100 —
     // ponytail: >100 milestones in one repo is not this loop's use case; validation would only
     // false-reject, visibly, at startup.
-    const out = await this.gh([
-      "api", `repos/${this.cfg.board.owner}/${this.repo()}/milestones?state=all&per_page=100`,
-    ]);
+    const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/milestones?state=all&per_page=100`]);
     const milestones = JSON.parse(out) as { title: string }[];
     return milestones.map((m) => m.title);
   }
@@ -474,10 +539,7 @@ export class GithubForge implements IForge {
   }
 
   async getIssueLabels(issue: number): Promise<string[]> {
-    const out = await this.gh([
-      "issue", "view", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--json", "labels",
-    ]);
+    const out = await this.gh(["issue", "view", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--json", "labels"]);
     return parseIssueLabels(out);
   }
 
@@ -485,17 +547,12 @@ export class GithubForge implements IForge {
     // Same endpoint shape (and pagination discipline) as getPRReviewData's commentsJson fetch
     // — GitHub's REST API serves issue and PR conversation comments off the same
     // `issues/<n>/comments` route, so parsePRComments parses this unchanged.
-    const out = await this.gh([
-      "api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${issue}/comments`, "--paginate", "--slurp",
-    ]);
+    const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${issue}/comments`, "--paginate", "--slurp"]);
     return parsePRComments(out);
   }
 
   async createIssue(title: string, body: string): Promise<number> {
-    const out = await this.gh([
-      "issue", "create", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--title", title, "--body", body,
-    ]);
+    const out = await this.gh(["issue", "create", "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--title", title, "--body", body]);
     const m = out.match(/\/issues\/(\d+)/);
     if (!m) throw new Error(`createIssue: could not parse issue number from: ${out.trim()}`);
     return Number(m[1]);
@@ -505,8 +562,16 @@ export class GithubForge implements IForge {
     // Same --limit rationale as countOpenIssuesInMilestone: generously above any realistic
     // open-issue count for this loop's use case (ponytail).
     const out = await this.gh([
-      "issue", "list", "--repo", `${this.cfg.board.owner}/${this.repo()}`,
-      "--state", "open", "--json", "number", "--limit", "1000",
+      "issue",
+      "list",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--state",
+      "open",
+      "--json",
+      "number",
+      "--limit",
+      "1000",
     ]);
     const issues = JSON.parse(out) as { number: number }[];
     return issues.map((i) => i.number);
@@ -749,7 +814,10 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
     .filter((it) => it.status === cfg.board.status.ready)
     .filter((it) => isDispatchable(it.body, it.labels, cfg.labels))
     .map((it) => ({
-      number: it.number, title: it.title, labels: it.labels, body: it.body,
+      number: it.number,
+      title: it.title,
+      labels: it.labels,
+      body: it.body,
       // exactOptionalPropertyTypes: an optional field must be OMITTED, not set to explicit
       // undefined — only include the key when there's a real milestone title.
       ...(it.milestone != null ? { milestone: it.milestone } : {}),
@@ -784,7 +852,10 @@ export function selectPlanReviewCandidates(project: ParsedProject, cfg: ReadyCfg
     .filter((it) => it.status === cfg.board.status.ready)
     .filter((it) => needsPlanReview(it.labels, cfg.labels))
     .map((it) => ({
-      number: it.number, title: it.title, labels: it.labels, body: it.body,
+      number: it.number,
+      title: it.title,
+      labels: it.labels,
+      body: it.body,
       ...(it.milestone != null ? { milestone: it.milestone } : {}),
     }));
 }
@@ -812,7 +883,10 @@ export function selectPlanTriageCandidates(project: ParsedProject, cfg: ReadyCfg
     .filter((it) => it.state === "OPEN")
     .filter((it) => needsPlanTriage(it.body, it.labels, cfg.labels))
     .map((it) => ({
-      number: it.number, title: it.title, labels: it.labels, body: it.body,
+      number: it.number,
+      title: it.title,
+      labels: it.labels,
+      body: it.body,
       ...(it.milestone != null ? { milestone: it.milestone } : {}),
     }));
 }
@@ -834,9 +908,7 @@ export function findOptionId(project: ParsedProject, name: string): string | und
 /** Item id for an issue. Scoped by full `owner/repo` when given — board items are unique by
  *  (repo, number), and a /repo suffix would also match a foreign `other/repo` (Codex R2 P1). */
 export function findItemId(project: ParsedProject, issue: number, repoFullName?: string): string | undefined {
-  return project.items.find(
-    (it) => it.number === issue && (repoFullName === undefined || it.repo === repoFullName),
-  )?.itemId;
+  return project.items.find((it) => it.number === issue && (repoFullName === undefined || it.repo === repoFullName))?.itemId;
 }
 
 /** Items-connection page cursor. Owner-kind agnostic; absent pageInfo -> terminal. */
@@ -870,9 +942,7 @@ export function parsePRStatus(json: string): PRStatus {
   // when the merge gate is wired (M3), not a silent empty-means-green default.
   // (Codex P1/P2, PR #22.)
   const PASSING = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
-  const ciGreen =
-    checks.length > 0 &&
-    checks.every((c) => (c.conclusion != null ? PASSING.has(c.conclusion) : c.state === "SUCCESS"));
+  const ciGreen = checks.length > 0 && checks.every((c) => (c.conclusion != null ? PASSING.has(c.conclusion) : c.state === "SUCCESS"));
   return {
     number: d.number,
     headOid: d.headRefOid,
@@ -1032,7 +1102,12 @@ export function parseCommitsSince(json: string): CommitInfo[] {
   }));
 }
 
-export function assemblePRReviewData(viewJson: string, reactionsJson: string, unresolvedThreads: number, commentsJson = "[]"): PRReviewData {
+export function assemblePRReviewData(
+  viewJson: string,
+  reactionsJson: string,
+  unresolvedThreads: number,
+  commentsJson = "[]",
+): PRReviewData {
   const view = parsePRReviewView(viewJson);
   return {
     headOid: view.headOid,

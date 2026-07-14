@@ -1,25 +1,25 @@
 #!/usr/bin/env node
+import { existsSync, realpathSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
 // (/sapwood-run, /sapwood-status, /sapwood-stop) are thin wrappers that shell out to this CLI
 // — see ../../commands/.
 import { createRequire } from "node:module";
-import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
-import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config/config.js";
-import { init, InitError } from "./loop/init.js";
-import { State, SCHEMA_VERSION, type WorkerRow, type ParkRow } from "./state/state.js";
-import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
-import { WorkerSupervisor, buildRenderPrompt, discoverClaudeBin, probeLlmPing } from "./roles/worker.js";
+import { DEFAULT_CONFIG_PATHS, loadConfig, type SapwoodConfig } from "./config/config.js";
 import { loadPricingTable } from "./config/pricing.js";
-import { makeReviewer, makeFallbackReviewers } from "./roles/reviewer.js";
-import { MergeDriver } from "./roles/merge-driver.js";
-import { runDriver, type StopMode, type DriverResult, type StopConfig, type StopConditionHit } from "./loop/driver.js";
+import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
 import { orderForDispatch } from "./loop/conductor.js";
-import { runRounds, type RoundsResult, type PeripheralPhase } from "./loop/round.js";
+import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
+import { InitError, init } from "./loop/init.js";
+import { type PeripheralPhase, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
+import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
+import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
+import { buildRenderPrompt, discoverClaudeBin, probeLlmPing, WorkerSupervisor } from "./roles/worker.js";
+import { type ParkRow, SCHEMA_VERSION, State, type WorkerRow } from "./state/state.js";
 
 const require = createRequire(import.meta.url);
 // ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
@@ -404,8 +404,7 @@ export function formatStatus(s: StatusSnapshot): string {
   const lines: string[] = [
     `sapwood status — ${s.dbPath} (schema v${s.schemaVersion})`,
     "",
-    `lanes: ${s.active.length}/${s.lanesMax ?? "unknown"} active ` +
-      `(${running.length} running, ${s.driving.length} driving)`,
+    `lanes: ${s.active.length}/${s.lanesMax ?? "unknown"} active ` + `(${running.length} running, ${s.driving.length} driving)`,
   ];
   for (const w of s.active) {
     const pr = w.pr ? `  PR #${w.pr}` : "";
@@ -545,8 +544,7 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
       return {
         stdout: "",
         stderr:
-          `sapwood run: --milestone cannot combine with --stop-on-milestone ` +
-          `(--milestone already sets it — pick one)\n\n${RUN_USAGE}`,
+          `sapwood run: --milestone cannot combine with --stop-on-milestone ` + `(--milestone already sets it — pick one)\n\n${RUN_USAGE}`,
         code: 1,
       };
     }
@@ -645,16 +643,13 @@ export function applyMilestoneOverride(argv: string[], cfg: SapwoodConfig): Sapw
  *  after dispatching a full wave of workers. Called by runEngine BEFORE runDriver: unknown
  *  title = a thrown error naming the available titles, no dispatch ever happens. Pure given the
  *  forge — exported for testing with a fake. */
-export async function assertStopMilestoneExists(
-  forge: Pick<IForge, "listMilestoneTitles">,
-  stop: StopConfig,
-): Promise<void> {
+export async function assertStopMilestoneExists(forge: Pick<IForge, "listMilestoneTitles">, stop: StopConfig): Promise<void> {
   if (stop.onMilestoneComplete === undefined) return;
   const titles = await forge.listMilestoneTitles();
   if (!titles.includes(stop.onMilestoneComplete)) {
     throw new Error(
       `stop.onMilestoneComplete: no milestone titled "${stop.onMilestoneComplete}" in this repo ` +
-      `(exact match required). Available: ${titles.length > 0 ? titles.map((t) => `"${t}"`).join(", ") : "(none)"}`,
+        `(exact match required). Available: ${titles.length > 0 ? titles.map((t) => `"${t}"`).join(", ") : "(none)"}`,
     );
   }
 }
@@ -710,9 +705,7 @@ export function roundsExitCode(result: Pick<RoundsResult, "stoppedBy">): number 
  *  EngineOverrides can type `forge` as the general `IForge` interface. */
 function findOpenPrForIssue(forge: IForge, issue: number): Promise<number | null> {
   const withPr = forge as Partial<Pick<GithubForge, "findOpenPrForIssue">>;
-  return typeof withPr.findOpenPrForIssue === "function"
-    ? withPr.findOpenPrForIssue(issue)
-    : Promise.resolve(null);
+  return typeof withPr.findOpenPrForIssue === "function" ? withPr.findOpenPrForIssue(issue) : Promise.resolve(null);
 }
 
 /** The M4 tick-driver path (`driver.ts`'s `runDriver`) — unchanged behavior, kept reachable via
@@ -760,20 +753,27 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // park-probe event so a failing probe names its own cause.
   const probeLlmReachable = () =>
     probeLlmPing(
-      discoverClaudeBin(process.env), cfg.envFailure.probeModel,
-      cfg.envFailure.probeMaxBudgetUsd, cfg.envFailure.probeTimeoutSec,
+      discoverClaudeBin(process.env),
+      cfg.envFailure.probeModel,
+      cfg.envFailure.probeMaxBudgetUsd,
+      cfg.envFailure.probeTimeoutSec,
     );
   const result = await runDriver({
-    forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, stopMode, stop,
+    forge,
+    state,
+    supervisor,
+    cfg,
+    mergeGate,
+    tickIntervalSec: cfg.engine.tickIntervalSec,
+    stopMode,
+    stop,
     probeLlmReachable,
   });
   // #76: name the condition that fired BEFORE the generic stop-summary line, when one did.
   if (result.stopCondition) {
     console.log(formatStopConditionLine(result.stopCondition));
   }
-  console.log(
-    `sapwood run: stopped after ${result.ticks} tick(s), ${result.tickErrors} tick error(s) (${result.stoppedBy})`,
-  );
+  console.log(`sapwood run: stopped after ${result.ticks} tick(s), ${result.tickErrors} tick error(s) (${result.stoppedBy})`);
   return runExitCode(result, stopMode);
 }
 
@@ -810,11 +810,20 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
   const probeLlmReachable = () =>
     probeLlmPing(
-      discoverClaudeBin(process.env), cfg.envFailure.probeModel,
-      cfg.envFailure.probeMaxBudgetUsd, cfg.envFailure.probeTimeoutSec,
+      discoverClaudeBin(process.env),
+      cfg.envFailure.probeModel,
+      cfg.envFailure.probeMaxBudgetUsd,
+      cfg.envFailure.probeTimeoutSec,
     );
   const result = await runRounds({
-    forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, peripherals, stop,
+    forge,
+    state,
+    supervisor,
+    cfg,
+    mergeGate,
+    tickIntervalSec: cfg.engine.tickIntervalSec,
+    peripherals,
+    stop,
     probeLlmReachable,
     ...(overrides.sleep !== undefined ? { sleep: overrides.sleep } : {}),
     ...(overrides.registerSignals !== undefined ? { registerSignals: overrides.registerSignals } : {}),

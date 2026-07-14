@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { spawn } from "node:child_process";
-import { symlinkSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { guardDecision } from "./guard.js";
-import { hookResponse, responseFromText, resolveGuardMode, applyGuardMode } from "./guard-hook.js";
+import { applyGuardMode, hookResponse, resolveGuardMode, responseFromText } from "./guard-hook.js";
 
 test("resolveGuardMode: only the exact 'soft' selects observe-mode; everything else -> hard (fail-safe)", () => {
   assert.equal(resolveGuardMode({ SAPWOOD_GUARD_MODE: "soft" }), "soft");
@@ -35,20 +35,20 @@ const bash = (command: string, cwd = CWD) => guardDecision("Bash", { command }, 
 // trading-domain (funds/keys) cases omitted; reason must name the keyword. ──────────
 const BLOCK: [string, string, string][] = [
   // opaque shell/interpreter/process-sub wrappers (fail-closed, inner not parsed)
-  ["bash -c \"echo hi\"", CWD, "opaque"],
-  ["bash -lc \"ls -la\"", CWD, "opaque"],
-  ["bash -e -c \"ls\"", CWD, "opaque"],
-  ["sh -lc \"ls\"", CWD, "opaque"],
+  ['bash -c "echo hi"', CWD, "opaque"],
+  ['bash -lc "ls -la"', CWD, "opaque"],
+  ['bash -e -c "ls"', CWD, "opaque"],
+  ['sh -lc "ls"', CWD, "opaque"],
   ["bash -O extglob -c 'ls'", CWD, "opaque"],
   ["bash -o pipefail -c 'ls'", CWD, "opaque"],
   ["diff <(ls) <(ls -a)", CWD, "opaque"],
   ["gh pr view <(gh pr merge 143)", CWD, "opaque"],
-  ["python -c \"print(1)\"", CWD, "opaque"],
-  ["eval \"ls -la\"", CWD, "opaque"],
-  ["node -e \"console.log(1)\"", CWD, "opaque"],
+  ['python -c "print(1)"', CWD, "opaque"],
+  ['eval "ls -la"', CWD, "opaque"],
+  ['node -e "console.log(1)"', CWD, "opaque"],
   ["env FOO=1 bash -c 'ls'", CWD, "opaque"],
   ["/bin/bash -c 'ls'", CWD, "opaque"],
-  ["/usr/bin/python -c \"print(1)\"", CWD, "opaque"],
+  ['/usr/bin/python -c "print(1)"', CWD, "opaque"],
   ["command bash -c 'ls'", CWD, "opaque"],
   ["command -p bash -c 'ls'", CWD, "opaque"],
   ["command /bin/bash -c 'ls'", CWD, "opaque"],
@@ -365,7 +365,10 @@ test("guard-hook: invoked via a symlink still enforces (realpath direct-invocati
       void stderr;
     });
     assert.equal(result.code, 0, "hook process itself exits 0 (decision travels via stdout JSON, not exit code)");
-    assert.ok(result.stdout.trim().length > 0, "hook must still emit a decision when invoked via a symlink — empty output means the guard silently no-op'd (fail-open)");
+    assert.ok(
+      result.stdout.trim().length > 0,
+      "hook must still emit a decision when invoked via a symlink — empty output means the guard silently no-op'd (fail-open)",
+    );
     const parsed = JSON.parse(result.stdout.trim());
     assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
     assert.ok(parsed.hookSpecificOutput.permissionDecisionReason.toLowerCase().includes("merge"));

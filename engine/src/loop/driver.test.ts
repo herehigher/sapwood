@@ -3,12 +3,12 @@
 // gh) — mirrors conductor.test.ts's tick test-double style.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runDriver, type DriverDeps } from "./driver.js";
-import type { Supervisor, LaneProbe, MergeGate } from "./conductor.js";
-import { State } from "../state/state.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
+import { State } from "../state/state.js";
+import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
+import { type DriverDeps, runDriver } from "./driver.js";
 
 class FakeForge implements IForge {
   ready: Issue[] = [];
@@ -16,29 +16,54 @@ class FakeForge implements IForge {
    *  the count changing across calls (shift() per call; last value repeats once exhausted). */
   milestoneOpenCounts: number[] = [0];
   milestoneQueries: string[] = [];
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return this.ready; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return this.ready;
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
+  async getPRStatus(n: number): Promise<PRStatus> {
+    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
   async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> { return ""; }
+  async getIssueBody(): Promise<string> {
+    return "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
   /** Set to make countOpenIssuesInMilestone throw ONCE (then clear) — the P1 containment test. */
   milestoneErrOnce: Error | null = null;
   async countOpenIssuesInMilestone(milestone: string): Promise<number> {
@@ -51,13 +76,27 @@ class FakeForge implements IForge {
     return this.milestoneOpenCounts.length > 1 ? this.milestoneOpenCounts.shift()! : this.milestoneOpenCounts[0]!;
   }
   milestoneTitles: string[] = [];
-  async listMilestoneTitles(): Promise<string[]> { return this.milestoneTitles; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
-  async getIssueLabels(): Promise<string[]> { return []; }
-  async getIssueComments() { return []; }
-  async createIssue(): Promise<number> { return 0; }
-  async listOpenIssueNumbers(): Promise<number[]> { return []; }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
+  async listMilestoneTitles(): Promise<string[]> {
+    return this.milestoneTitles;
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return [];
+  }
+  async getIssueLabels(): Promise<string[]> {
+    return [];
+  }
+  async getIssueComments() {
+    return [];
+  }
+  async createIssue(): Promise<number> {
+    return 0;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return [];
+  }
 }
 
 class FakeSupervisor implements Supervisor {
@@ -81,7 +120,9 @@ class FakeSupervisor implements Supervisor {
   inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
     return { worktreePath: null, worktreeRetained: false };
   }
-  requestHandoff(): boolean { return true; }
+  requestHandoff(): boolean {
+    return true;
+  }
 }
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -91,7 +132,12 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
  *  wall-clock wait in the test suite). */
 function mkSleepSpy(): { sleep: (ms: number) => Promise<void>; calls: number[] } {
   const calls: number[] = [];
-  return { sleep: async (ms: number) => { calls.push(ms); }, calls };
+  return {
+    sleep: async (ms: number) => {
+      calls.push(ms);
+    },
+    calls,
+  };
 }
 
 const baseDeps = (over: Partial<DriverDeps> = {}): DriverDeps => ({
@@ -109,10 +155,16 @@ test("runDriver: ticks at least once, sleeping the configured tickIntervalSec be
   const forge = new FakeForge();
   const deps = baseDeps({ forge, sleep, tickIntervalSec: 5 });
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   // Stop after the 3rd tick by signalling once we've seen enough sleeps.
   let ticks = 0;
-  deps.onTick = () => { ticks++; if (ticks >= 3) stop(); };
+  deps.onTick = () => {
+    ticks++;
+    if (ticks >= 3) stop();
+  };
   const result = await runDriver(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 3);
@@ -168,8 +220,14 @@ test("runDriver --until-idle: keeps ticking while a dispatched lane is still act
   // that never detects idle doesn't hang the suite forever.
   let ticks = 0;
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
-  deps.onTick = () => { ticks++; if (ticks >= 3) stop(); };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  deps.onTick = () => {
+    ticks++;
+    if (ticks >= 3) stop();
+  };
   const result = await runDriver(deps);
   assert.equal(result.stoppedBy, "signal"); // never reached "idle" — the lane stayed active
   assert.equal(ticks, 3);
@@ -184,7 +242,10 @@ test("runDriver: a signal mid-sleep stops the loop before the next tick starts (
     requestStopRef?.(); // simulate SIGINT arriving while "sleeping" between ticks
   };
   const deps = baseDeps({ sleep });
-  deps.registerSignals = (requestStop) => { requestStopRef = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    requestStopRef = requestStop;
+    return () => {};
+  };
   const result = await runDriver(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 1); // exactly one (completed) tick — the signal fired during the sleep, not mid-tick
@@ -195,7 +256,13 @@ test("runDriver: a signal mid-sleep stops the loop before the next tick starts (
 test("runDriver: registerSignals teardown is invoked exactly once when the loop stops", async () => {
   const { sleep } = mkSleepSpy();
   let unregisterCalls = 0;
-  const deps = baseDeps({ sleep, stopMode: "once", registerSignals: () => () => { unregisterCalls++; } });
+  const deps = baseDeps({
+    sleep,
+    stopMode: "once",
+    registerSignals: () => () => {
+      unregisterCalls++;
+    },
+  });
   await runDriver(deps);
   assert.equal(unregisterCalls, 1);
   deps.state.close();
@@ -219,7 +286,10 @@ test("runDriver: a signal during the inter-tick sleep wakes it immediately — s
   // would hang until the suite timeout. The signal-abort race is the only way out.
   let stop = () => {};
   const deps = baseDeps({ sleep: () => new Promise<void>(() => {}) });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   deps.onTick = () => {
     // Deliver the signal asynchronously, AFTER the loop has entered the inter-tick wait —
     // modeling a real SIGTERM landing mid-sleep.
@@ -242,7 +312,10 @@ test("runDriver: a signal arriving between the post-tick check and the sleep arm
       return new Promise<void>(() => {});
     },
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runDriver(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 1);
@@ -259,12 +332,18 @@ test("runDriver: a tick() throw is contained — logged as a tick-error event, n
   let failures = 1;
   const realGetReady = forge.getReadyIssues.bind(forge);
   forge.getReadyIssues = async () => {
-    if (failures > 0) { failures--; throw new Error("HTTP 502: GitHub is having a moment"); }
+    if (failures > 0) {
+      failures--;
+      throw new Error("HTTP 502: GitHub is having a moment");
+    }
     return realGetReady();
   };
   const deps = baseDeps({ forge, sleep, tickIntervalSec: 5 });
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   // Stop after the first SUCCESSFUL tick — which must be the attempt AFTER the contained throw.
   deps.onTick = () => stop();
   const result = await runDriver(deps);
@@ -280,7 +359,9 @@ test("runDriver: a tick() throw is contained — logged as a tick-error event, n
 test("runDriver: the contained tick() throw is recorded as a structured tick-error event", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
-  forge.getReadyIssues = async () => { throw new Error("HTTP 502"); };
+  forge.getReadyIssues = async () => {
+    throw new Error("HTTP 502");
+  };
   const deps = baseDeps({ forge, sleep, stopMode: "once" });
   const logged: Array<[string, unknown]> = [];
   const realAppend = deps.state.appendEvent.bind(deps.state);
@@ -305,9 +386,14 @@ test("runDriver: a persistently-throwing tick keeps the daemon looping at normal
     if (calls.length >= 3) stop(); // bound the test: signal after 3 failed rounds
   };
   const forge = new FakeForge();
-  forge.getReadyIssues = async () => { throw new Error("still down"); };
+  forge.getReadyIssues = async () => {
+    throw new Error("still down");
+  };
   const deps = baseDeps({ forge, sleep, tickIntervalSec: 5 });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runDriver(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.ticks, 0);
@@ -336,7 +422,10 @@ class ScriptedMergeGate implements MergeGate {
  *  test instead of hanging the suite — real correct behavior always returns well before this. */
 function boundedStop(deps: DriverDeps, maxTicks: number): () => void {
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   let ticks = 0;
   const prevOnTick = deps.onTick;
   deps.onTick = (r) => {
@@ -355,7 +444,10 @@ test("runDriver stop.afterIssuesMerged: hitting it winds the run down (no kill) 
   sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
   const gate = new ScriptedMergeGate([{ kind: "merged", pr: 1, headOid: "H" }]);
   const deps = baseDeps({
-    forge, supervisor: sup, sleep, mergeGate: gate,
+    forge,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
     stop: { afterIssuesMerged: 1 },
   });
@@ -384,7 +476,10 @@ test("runDriver stop.afterPRsOpened: fires the moment a lane's PR is first disco
   // becoming known to the engine, not a successful merge (that's afterIssuesMerged's job).
   const gate = new ScriptedMergeGate([{ kind: "needs-human", pr: 1, reason: "test" }]);
   const deps = baseDeps({
-    forge, supervisor: sup, sleep, mergeGate: gate,
+    forge,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
     stop: { afterPRsOpened: 1 },
   });
@@ -461,21 +556,25 @@ test("runDriver stop conditions: OR semantics — whichever fires FIRST wins and
   // Room for a SECOND lane so a dispatch freeze failure would be observable (issue #2 could
   // otherwise slot into the free lane while #1 is still driving).
   const deps = baseDeps({
-    forge, supervisor: sup, sleep, mergeGate: gate,
+    forge,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
     cfg: mkCfg({ lanes: { max: 2, roundDispatchCap: 1 } }),
     stop: { afterPRsOpened: 1, afterIssuesMerged: 1 },
   });
   deps.onTick = (r) => {
-    for (const d of r.dispatched) if (d.kind === "dispatched") {
-      forge.ready = forge.ready.filter((i) => i.number !== d.issue);
-    }
+    for (const d of r.dispatched)
+      if (d.kind === "dispatched") {
+        forge.ready = forge.ready.filter((i) => i.number !== d.issue);
+      }
     // Once #1's PR is discovered (this run's actual afterPRsOpened trigger), a second issue
     // becomes Ready. If the wind-down freeze is broken, this is exactly what would get
     // wrongly dispatched into the still-free second lane on a later tick.
-    const prJustOpened = r.reclaimed.some((x) =>
-      (x.kind === "done" && x.next === "DRIVING") ||
-      (x.kind === "failed" && x.next === "DRIVING") ||
-      (x.kind === "dead" && x.rescued));
+    const prJustOpened = r.reclaimed.some(
+      (x) =>
+        (x.kind === "done" && x.next === "DRIVING") || (x.kind === "failed" && x.next === "DRIVING") || (x.kind === "dead" && x.rescued),
+    );
     if (prJustOpened) forge.ready.push({ number: 2, title: "t2", labels: ["prio:3-feature"] });
   };
   const stopSafety = boundedStop(deps, 15);
@@ -502,7 +601,9 @@ test("runDriver stop.afterSpendUsd: hitting the ledgered run-spend threshold win
   // regardless of merge-gate activity, so this test needs no ScriptedMergeGate at all.
   sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 25 };
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
     stop: { afterSpendUsd: 20 },
   });

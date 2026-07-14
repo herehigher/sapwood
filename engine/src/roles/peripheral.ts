@@ -13,16 +13,20 @@
 // dirty-worktree retention (a role session never writes code — allowedTools scoping AND the
 // unchanged guard hook both block it — so its worktree is always safe to delete afterward).
 import { randomUUID } from "node:crypto";
-import {
-  existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, writeFileSync,
-} from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import type { ModelUsageEntry, State } from "../state/state.js";
 import {
-  claudeArgs, guardSettings, discoverClaudeBin, parseCostUsd, parseModelUsage, parseResultText,
-  spawnClaudeSession, type SpawnedSession,
+  claudeArgs,
+  discoverClaudeBin,
+  guardSettings,
+  parseCostUsd,
+  parseModelUsage,
+  parseResultText,
+  type SpawnedSession,
+  spawnClaudeSession,
 } from "./worker.js";
 
 /** #110 PR5: issues-only role sessions (plan-reviewer, plan-drafter, PO/align+triage, harvest,
@@ -199,8 +203,13 @@ export class RoleRunner {
     // reason: a settings FILE would be an on-disk target the session could try to mutate.
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     const args = claudeArgs({
-      prompt: opts.prompt, model: opts.model, effort: opts.effort,
-      worktree: name, name, sessionId, settings: settingsJson,
+      prompt: opts.prompt,
+      model: opts.model,
+      effort: opts.effort,
+      worktree: name,
+      name,
+      sessionId,
+      settings: settingsJson,
       allowedTools: opts.allowedTools ?? ROLE_ALLOWED_TOOLS,
       disallowedTools: opts.disallowedTools ?? ROLE_DISALLOWED_TOOLS,
       // NB: no addDir — same as worker.ts's dispatch(): a role session must never see engine
@@ -208,7 +217,8 @@ export class RoleRunner {
     });
     const startedMs = this.now().getTime();
     const session = spawnClaudeSession(this.bin, args, {
-      jsonlFd, env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
+      jsonlFd,
+      env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
     });
 
     // Register the exit listener BEFORE any await — same rationale as worker.ts's dispatch():
@@ -221,18 +231,30 @@ export class RoleRunner {
     let spawnErr: unknown;
     await new Promise<void>((resolve) => {
       session.onSpawn(() => resolve());
-      session.onError((e) => { spawnErr = e; resolve(); });
+      session.onError((e) => {
+        spawnErr = e;
+        resolve();
+      });
     });
     if (spawnErr) {
-      try { closeSync(jsonlFd); } catch { /* noop */ }
+      try {
+        closeSync(jsonlFd);
+      } catch {
+        /* noop */
+      }
       this.removeIfExists(jsonlPath);
       throw new Error(`role session spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
-    session.onError(() => { /* post-spawn error: exitPromise's `exit` still resolves this */ });
+    session.onError(() => {
+      /* post-spawn error: exitPromise's `exit` still resolves this */
+    });
 
     this.writeJsonAtomic(this.path(name, "running.json"), {
-      name, role_id: opts.roleId, session_id: sessionId,
-      wrapper_pid: session.pid, started_at: new Date(startedMs).toISOString(),
+      name,
+      role_id: opts.roleId,
+      session_id: sessionId,
+      wrapper_pid: session.pid,
+      started_at: new Date(startedMs).toISOString(),
     });
 
     // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
@@ -250,7 +272,11 @@ export class RoleRunner {
 
     const exitCode = await exitPromise;
     clearInterval(hb);
-    try { closeSync(jsonlFd); } catch { /* already closed */ }
+    try {
+      closeSync(jsonlFd);
+    } catch {
+      /* already closed */
+    }
 
     const jsonl = this.readJsonl(jsonlPath);
     const costUsd = parseCostUsd(jsonl);
@@ -261,8 +287,13 @@ export class RoleRunner {
     const outcome: "done" | "failed" | "timeout" = timedOut ? "timeout" : exitCode === 0 ? "done" : "failed";
     const sentinelTag = outcome === "timeout" ? "failed" : outcome;
     this.writeJsonAtomic(this.path(name, `${sentinelTag}.json`), {
-      name, role_id: opts.roleId, session_id: sessionId, exit_code: exitCode,
-      total_cost_usd: costUsd, model_usage: modelUsage, ended_at: this.now().toISOString(),
+      name,
+      role_id: opts.roleId,
+      session_id: sessionId,
+      exit_code: exitCode,
+      total_cost_usd: costUsd,
+      model_usage: modelUsage,
+      ended_at: this.now().toISOString(),
       timed_out: timedOut,
     });
     this.removeIfExists(this.path(name, "running.json"));
@@ -289,7 +320,11 @@ export class RoleRunner {
             `outside the session worktree (${target}) — refusing to read it; scratchText stays undefined`,
         );
       } else {
-        try { scratchText = readFileSync(target, "utf8"); } catch { /* absent */ }
+        try {
+          scratchText = readFileSync(target, "utf8");
+        } catch {
+          /* absent */
+        }
       }
     }
 
@@ -298,10 +333,19 @@ export class RoleRunner {
     // dirty-vs-clean retention there is no WIP that could ever need preserving here. Retro's
     // one worktree deliverable (the scratch file) was already captured above; its actual code
     // proposal lives on its PUSHED BRANCH, never in the worktree.
-    try { rmSync(join(this.worktreeRoot, name), { recursive: true, force: true }); } catch { /* best-effort */ }
+    try {
+      rmSync(join(this.worktreeRoot, name), { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
 
     return {
-      outcome, costUsd, modelUsage, exitCode, name, resultText,
+      outcome,
+      costUsd,
+      modelUsage,
+      exitCode,
+      name,
+      resultText,
       ...(scratchText !== undefined ? { scratchText } : {}),
     };
   }
@@ -313,7 +357,11 @@ export class RoleRunner {
   }
 
   private readJsonl(p: string): string {
-    try { return readFileSync(p, "utf8"); } catch { return ""; }
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      return "";
+    }
   }
   private writeJsonAtomic(p: string, obj: unknown): void {
     const tmp = `${p}.tmp.${process.pid}`;
@@ -321,7 +369,11 @@ export class RoleRunner {
     renameSync(tmp, p);
   }
   private removeIfExists(p: string): void {
-    try { rmSync(p, { force: true }); } catch { /* noop */ }
+    try {
+      rmSync(p, { force: true });
+    } catch {
+      /* noop */
+    }
   }
 }
 
@@ -409,7 +461,9 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
     if (!isDone(result)) {
       try {
         opts.state.appendEvent(opts.degradeEvent, opts.degradePayload(result));
-      } catch { /* state write failed — the console line below still lands */ }
+      } catch {
+        /* state write failed — the console line below still lands */
+      }
       console.error(opts.degradeMessage(result));
     }
   }

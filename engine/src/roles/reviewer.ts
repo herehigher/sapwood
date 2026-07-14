@@ -12,10 +12,11 @@
 // SECURITY (producer != reviewer != merger): this module only ever *reads* review state and
 // posts a plain PR comment (the trigger). It has no merge method and never will — merging is
 // merge-driver.ts's alone, invoked only from the Conductor (conductor.ts), never a worker.
-import type { IForge, PRReview, PRReviewData } from "../forge/forge.js";
-import { extractVerificationPlan } from "../forge/forge.js";
+
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine, NO_DOCTRINE } from "../config/doctrine.js";
+import type { IForge, PRReview, PRReviewData } from "../forge/forge.js";
+import { extractVerificationPlan } from "../forge/forge.js";
 
 export type ReviewAction =
   | "MERGE_OK" // fresh, non-author, accepted-state review on the CURRENT head
@@ -57,15 +58,8 @@ export function freshThumbCount(reactions: { content: string; createdAt: string 
  * head — the exact bypass gate② exists to close). Author self-review never counts
  * (producer != reviewer, even if the author is also a configured "trusted" login).
  */
-export function freshHeadReviewCount(
-  reviews: PRReview[],
-  headOid: string,
-  prAuthor: string,
-  acceptStates: readonly string[],
-): number {
-  return reviews.filter(
-    (r) => r.commitOid === headOid && r.author !== prAuthor && acceptStates.includes(r.state),
-  ).length;
+export function freshHeadReviewCount(reviews: PRReview[], headOid: string, prAuthor: string, acceptStates: readonly string[]): number {
+  return reviews.filter((r) => r.commitOid === headOid && r.author !== prAuthor && acceptStates.includes(r.state)).length;
 }
 
 /**
@@ -214,16 +208,10 @@ export function buildReviewTriggerComment(
  * No pin, or a pin for a different head, ⇒ 0, fail-closed (no trigger recorded for this head
  * yet ⇒ no thumb can have been a response to it).
  */
-function freshTrustedThumbCount(
-  data: PRReviewData,
-  trustedLogin?: (login: string) => boolean,
-  pin?: ReviewTriggerPin,
-): number {
+function freshTrustedThumbCount(data: PRReviewData, trustedLogin?: (login: string) => boolean, pin?: ReviewTriggerPin): number {
   if (!trustedLogin || !pin?.at || pin.head !== data.headOid) return 0;
   const author = normalizeLogin(data.author);
-  const trusted = data.reactions.filter(
-    (r) => normalizeLogin(r.login) !== author && trustedLogin(normalizeLogin(r.login)),
-  );
+  const trusted = data.reactions.filter((r) => normalizeLogin(r.login) !== author && trustedLogin(normalizeLogin(r.login)));
   return freshThumbCount(trusted, pin.at);
 }
 
@@ -236,19 +224,12 @@ function freshTrustedThumbCount(
  * Identity-gating makes the text non-spoofable: only the trusted bot's own comments are read.
  */
 const CLEAN_VERDICT_RE = /didn't find any major issues/i;
-function freshTrustedCleanComments(
-  data: PRReviewData,
-  trustedLogin?: (login: string) => boolean,
-  pin?: ReviewTriggerPin,
-): number {
+function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: string) => boolean, pin?: ReviewTriggerPin): number {
   if (!trustedLogin || !pin?.at || pin.head !== data.headOid) return 0;
   const author = normalizeLogin(data.author);
   return (data.comments ?? []).filter(
     (c) =>
-      normalizeLogin(c.login) !== author &&
-      trustedLogin(normalizeLogin(c.login)) &&
-      c.createdAt > pin.at! &&
-      CLEAN_VERDICT_RE.test(c.body),
+      normalizeLogin(c.login) !== author && trustedLogin(normalizeLogin(c.login)) && c.createdAt > pin.at! && CLEAN_VERDICT_RE.test(c.body),
   ).length;
 }
 
@@ -267,8 +248,7 @@ function verdictFrom(
     // Thumbs and comment-shaped clean verdicts share one signal: both are "the trusted
     // reviewer said done-no-findings" under identical identity/pin rules.
     freshTrustedThumbs:
-      freshTrustedThumbCount(data, trustedReactionLogin, pin) +
-      freshTrustedCleanComments(data, trustedReactionLogin, pin),
+      freshTrustedThumbCount(data, trustedReactionLogin, pin) + freshTrustedCleanComments(data, trustedReactionLogin, pin),
     unresolvedThreads: data.unresolvedThreads,
     changesRequestedOnHead: changesRequestedOnHead(data.reviews, data.headOid, data.author),
   });
@@ -306,10 +286,7 @@ export class CodexReviewer implements Reviewer {
     // silently retrying forever or skipping the comment (#46 Decision #8: the trigger always
     // posts, never a swallowed no-op).
     const body = await forge.getIssueBody(issue).catch(() => "");
-    await forge.addPRComment(
-      pr,
-      buildReviewTriggerComment(issue, extractVerificationPlan(body), this.triggerCommand, this.doctrine),
-    );
+    await forge.addPRComment(pr, buildReviewTriggerComment(issue, extractVerificationPlan(body), this.triggerCommand, this.doctrine));
   }
 
   verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict {
@@ -357,8 +334,11 @@ export class SameModelTrustedReviewer implements Reviewer {
     // still see every review (verdictFrom's contract).
     // Thumbs count here too, from the same trusted list — mode symmetry with CodexReviewer.
     return verdictFrom(
-      data, SameModelTrustedReviewer.ACCEPT,
-      (r) => trusted.includes(normalizeLogin(r.author)), (l) => trusted.includes(l), pin,
+      data,
+      SameModelTrustedReviewer.ACCEPT,
+      (r) => trusted.includes(normalizeLogin(r.author)),
+      (l) => trusted.includes(l),
+      pin,
     );
   }
 }
@@ -384,6 +364,7 @@ export function buildReviewerByKind(
       return new HumanReviewer();
     case "same-model-trusted":
       return new SameModelTrustedReviewer(trustedReviewers);
+    // biome-ignore lint/complexity/noUselessSwitchCase: explicit case documents the fail-closed reviewer fallback.
     case "different-model-codex":
     default:
       // trustedReviewers EXTENDS the Codex-bot allowlist in this mode (public-repo hardening:
@@ -411,12 +392,7 @@ function loadReviewDoctrine(cfg: SapwoodConfig): string | undefined {
 /** Construct the configured PRIMARY reviewer (reviewer.mode). Default = CodexReviewer, matching
  *  the locked decision (0day-style fresh different-model review). */
 export function makeReviewer(cfg: SapwoodConfig): Reviewer {
-  return buildReviewerByKind(
-    cfg.reviewer.mode,
-    cfg.reviewer.trustedReviewers,
-    cfg.reviewer.triggerCommand,
-    loadReviewDoctrine(cfg),
-  );
+  return buildReviewerByKind(cfg.reviewer.mode, cfg.reviewer.trustedReviewers, cfg.reviewer.triggerCommand, loadReviewDoctrine(cfg));
 }
 
 /** Construct the configured FALLBACK chain (cfg.reviewer.fallback, #54) — one Reviewer per
@@ -551,8 +527,7 @@ export function resolveReviewVerdict(input: {
   // A lock only ever REFERS to a re-verifiable episode: current head + a kind that is still an
   // explicitly configured fallback. Anything else (stale head, forged/unknown kind, kind
   // removed from config) is ignored — never an error, never a verdict.
-  const lockReviewer =
-    lock.head === data.headOid && lock.kind != null ? (fallbacks.find((f) => f.kind === lock.kind) ?? null) : null;
+  const lockReviewer = lock.head === data.headOid && lock.kind != null ? (fallbacks.find((f) => f.kind === lock.kind) ?? null) : null;
 
   if (isDecisive(primaryVerdict.action)) {
     // Primary gates — including a blocking HANDLE_THREADS, lock or no lock (fable-review P1).
@@ -587,7 +562,12 @@ export function resolveReviewVerdict(input: {
     // nothing (#54 R2), and blocking signals block here too (verdictFrom evaluates them first).
     const v = lockReviewer.verdictFromData(data, triggerPin);
     if (v.action === "MERGE_OK") {
-      return { verdict: v, sourceKind: lockReviewer.kind, lock, transition: { kind: "switch", mode: lockReviewer.kind, head: data.headOid } };
+      return {
+        verdict: v,
+        sourceKind: lockReviewer.kind,
+        lock,
+        transition: { kind: "switch", mode: lockReviewer.kind, head: data.headOid },
+      };
     }
   }
   return { verdict: primaryVerdict, sourceKind: primary.kind, lock, transition: null };

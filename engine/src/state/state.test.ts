@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { State, SCHEMA_VERSION, MIGRATIONS, backfillLegacyRoundCursors, type ModelUsageEntry } from "./state.js";
+import { test } from "node:test";
+import { backfillLegacyRoundCursors, MIGRATIONS, type ModelUsageEntry, SCHEMA_VERSION, State } from "./state.js";
 
 // In-memory DB keeps tests hermetic (no disk, no cleanup). WAL pragma is a no-op on
 // :memory: but the migration/version logic is identical.
@@ -20,15 +20,23 @@ test("fresh DB migrates to current schema version", () => {
 test("worker upsert round-trips and updates state on conflict", () => {
   const s = mem();
   s.upsertWorker({
-    name: "w1", issue: 2, session_id: "uuid-1", state: "running",
-    started_at: "2026-06-27T00:00:00Z", ended_at: null,
+    name: "w1",
+    issue: 2,
+    session_id: "uuid-1",
+    state: "running",
+    started_at: "2026-06-27T00:00:00Z",
+    ended_at: null,
   });
   assert.equal(s.getWorker("w1")?.state, "running");
 
   // same name => update, not duplicate (single-writer-serial assumption)
   s.upsertWorker({
-    name: "w1", issue: 2, session_id: "uuid-1", state: "handoff",
-    started_at: "2026-06-27T00:00:00Z", ended_at: "2026-06-27T01:00:00Z",
+    name: "w1",
+    issue: 2,
+    session_id: "uuid-1",
+    state: "handoff",
+    started_at: "2026-06-27T00:00:00Z",
+    ended_at: "2026-06-27T01:00:00Z",
   });
   const row = s.getWorker("w1");
   assert.equal(row?.state, "handoff");
@@ -39,13 +47,21 @@ test("worker upsert round-trips and updates state on conflict", () => {
 test("upsert refreshes ALL fields on name reuse (resume / reassigned lane)", () => {
   const s = mem();
   s.upsertWorker({
-    name: "lane-1", issue: 2, session_id: "uuid-A", state: "done",
-    started_at: "2026-06-27T00:00:00Z", ended_at: "2026-06-27T00:30:00Z",
+    name: "lane-1",
+    issue: 2,
+    session_id: "uuid-A",
+    state: "done",
+    started_at: "2026-06-27T00:00:00Z",
+    ended_at: "2026-06-27T00:30:00Z",
   });
   // lane name reused for a different issue + fresh session
   s.upsertWorker({
-    name: "lane-1", issue: 9, session_id: "uuid-B", state: "running",
-    started_at: "2026-06-27T02:00:00Z", ended_at: null,
+    name: "lane-1",
+    issue: 9,
+    session_id: "uuid-B",
+    state: "running",
+    started_at: "2026-06-27T02:00:00Z",
+    ended_at: null,
   });
   const row = s.getWorker("lane-1");
   assert.equal(row?.issue, 9);
@@ -73,8 +89,14 @@ test("activeWorkers returns running + driving (occupied lanes), not terminal sta
   s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "driving", started_at: "t", ended_at: "t2" });
   s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "done", started_at: "t", ended_at: "t2" });
   s.upsertWorker({ name: "d", issue: 4, session_id: "s4", state: "handoff", started_at: "t", ended_at: "t2" });
-  assert.deepEqual(s.activeWorkers().map((w) => w.name), ["a", "b"]);
-  assert.deepEqual(s.runningWorkers().map((w) => w.name), ["a"]); // running only (probe set)
+  assert.deepEqual(
+    s.activeWorkers().map((w) => w.name),
+    ["a", "b"],
+  );
+  assert.deepEqual(
+    s.runningWorkers().map((w) => w.name),
+    ["a"],
+  ); // running only (probe set)
   s.close();
 });
 
@@ -84,7 +106,10 @@ test("drivingWorkers returns only state=driving rows (#13 merge-driver targets)"
   s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "driving", started_at: "t", ended_at: "t2", pr: 21 });
   s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "driving", started_at: "t", ended_at: "t2", pr: 22 });
   s.upsertWorker({ name: "d", issue: 4, session_id: "s4", state: "done", started_at: "t", ended_at: "t2" });
-  assert.deepEqual(s.drivingWorkers().map((w) => w.name), ["b", "c"]);
+  assert.deepEqual(
+    s.drivingWorkers().map((w) => w.name),
+    ["b", "c"],
+  );
   s.close();
 });
 
@@ -114,15 +139,37 @@ test("gatedFailedWorkers: only failed rows WITH a pr number AND a proven label w
   const s = mem();
   s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null }); // running, no pr
   s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "failed", started_at: "t", ended_at: "t2" }); // failed, no pr (e.g. dead lane / ESCALATE_NOPR)
-  s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "failed", started_at: "t", ended_at: "t2", pr: 30, gated_escalation_labeled: 1 }); // eligible
+  s.upsertWorker({
+    name: "c",
+    issue: 3,
+    session_id: "s3",
+    state: "failed",
+    started_at: "t",
+    ended_at: "t2",
+    pr: 30,
+    gated_escalation_labeled: 1,
+  }); // eligible
   s.upsertWorker({ name: "d", issue: 4, session_id: "s4", state: "driving", started_at: "t", ended_at: "t2", pr: 40 }); // driving, not failed
-  s.upsertWorker({ name: "e", issue: 5, session_id: "s5", state: "failed", started_at: "t", ended_at: "t2", pr: 50, gated_reentry_capped: 1, gated_escalation_labeled: 1 }); // capped, excluded
+  s.upsertWorker({
+    name: "e",
+    issue: 5,
+    session_id: "s5",
+    state: "failed",
+    started_at: "t",
+    ended_at: "t2",
+    pr: 50,
+    gated_reentry_capped: 1,
+    gated_escalation_labeled: 1,
+  }); // capped, excluded
   s.upsertWorker({ name: "f", issue: 6, session_id: "s6", state: "done", started_at: "t", ended_at: "t2" }); // terminal, not failed
   // #147 P2: failed+PR but the escalation's label write FAILED (labeled=0, the default) — the
   // label's absence proves nothing about a human act, so the row is invisible to reclaim.
   // Same shape as every pre-migration row (back-compat is deliberately fail-closed).
   s.upsertWorker({ name: "g", issue: 7, session_id: "s7", state: "failed", started_at: "t", ended_at: "t2", pr: 70 });
-  assert.deepEqual(s.gatedFailedWorkers().map((w) => w.name), ["c"]);
+  assert.deepEqual(
+    s.gatedFailedWorkers().map((w) => w.name),
+    ["c"],
+  );
   s.close();
 });
 
@@ -231,8 +278,18 @@ test("lastReviewerFallbackEvent (#54 R2): none -> null; returns the LATEST switc
 
   // A later revert for the same lane supersedes the switch; lane-b's row is untouched.
   s.appendEvent("reviewer-fallback-revert", { worker: "lane-a", issue: 2, pr: 55, mode: "different-model-codex", head: "H1" });
-  assert.deepEqual(s.lastReviewerFallbackEvent("lane-a"), { kind: "reviewer-fallback-revert", mode: "different-model-codex", pr: 55, head: "H1" });
-  assert.deepEqual(s.lastReviewerFallbackEvent("lane-b"), { kind: "reviewer-fallback-switch", mode: "same-model-trusted", pr: 56, head: "HX" });
+  assert.deepEqual(s.lastReviewerFallbackEvent("lane-a"), {
+    kind: "reviewer-fallback-revert",
+    mode: "different-model-codex",
+    pr: 55,
+    head: "H1",
+  });
+  assert.deepEqual(s.lastReviewerFallbackEvent("lane-b"), {
+    kind: "reviewer-fallback-switch",
+    mode: "same-model-trusted",
+    pr: 56,
+    head: "HX",
+  });
   s.close();
 });
 
@@ -470,6 +527,7 @@ test("kill switch: a file sentinel in the engine's own data dir flips it, human-
     const s = new State(join(dir, "sapwood.sqlite"));
     assert.equal(s.isKillSwitchActive(), false);
     const p = s.killSwitchPath();
+    // biome-ignore lint/complexity/useOptionalChain: the assertion deliberately requires a non-null sentinel path.
     assert.ok(p && p.startsWith(dir)); // lives in the engine's OWN data dir
     writeFileSync(p!, "");
     assert.equal(s.isKillSwitchActive(), true);
@@ -492,6 +550,7 @@ test("pause (#75): a file sentinel in the engine's own data dir flips it, human-
     const s = new State(join(dir, "sapwood.sqlite"));
     assert.equal(s.isPauseActive(), false);
     const p = s.pausePath();
+    // biome-ignore lint/complexity/useOptionalChain: the assertion deliberately requires a non-null sentinel path.
     assert.ok(p && p.startsWith(dir)); // lives in the engine's OWN data dir
     assert.notEqual(p, s.killSwitchPath()); // distinct sentinel from KILL_SWITCH
     writeFileSync(p!, "");
@@ -539,7 +598,10 @@ test("pendingRollbacks: returns rows oldest-first (retry order) across multiple 
   const s = mem();
   s.addPendingRollback(9, "ready", "dead-lane-requeue", "t1");
   s.addPendingRollback(2, "ready", "dispatch-rollback", "t2");
-  assert.deepEqual(s.pendingRollbacks().map((r) => r.issue), [9, 2]);
+  assert.deepEqual(
+    s.pendingRollbacks().map((r) => r.issue),
+    [9, 2],
+  );
   s.close();
 });
 
@@ -568,15 +630,26 @@ test("pending_rollbacks persists across close/reopen (an engine restart mid-reco
 /** Raw spend_ledger rows for a worker, read via a second connection (WAL allows concurrent
  *  reads) — asserts the on-disk columns directly rather than adding a State query method
  *  purely for test introspection. */
-function rawSpendRows(path: string, worker: string): Array<{
-  usd: number; model: string; input_tokens: number; output_tokens: number;
-  cache_read_tokens: number; cache_creation_tokens: number;
+function rawSpendRows(
+  path: string,
+  worker: string,
+): Array<{
+  usd: number;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
 }> {
   const raw = new DatabaseSync(path);
   try {
     return raw.prepare("SELECT * FROM spend_ledger WHERE worker = ? ORDER BY id").all(worker) as unknown as Array<{
-      usd: number; model: string; input_tokens: number; output_tokens: number;
-      cache_read_tokens: number; cache_creation_tokens: number;
+      usd: number;
+      model: string;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
     }>;
   } finally {
     raw.close();
@@ -722,10 +795,12 @@ test("setLiveTelemetry: persists the trio (JSON-encoded tokenComposition), updat
   const row = s.getWorker("a");
   assert.equal(row?.est_cost_usd, 0.12);
   assert.equal(row?.context_tokens, 41000);
-  assert.deepEqual(
-    JSON.parse(row!.token_composition!),
-    { inputTokens: 12000, outputTokens: 3000, cacheReadTokens: 90000, cacheCreationTokens: 4000 },
-  );
+  assert.deepEqual(JSON.parse(row!.token_composition!), {
+    inputTokens: 12000,
+    outputTokens: 3000,
+    cacheReadTokens: 90000,
+    cacheCreationTokens: 4000,
+  });
 
   // A second probe's numbers simply overwrite — contextTokens is deliberately allowed to DROP
   // (an auto-compact), never accumulated/maxed.
@@ -747,7 +822,8 @@ test("clearLiveTelemetry: nulls all three columns; idempotent on a row that neve
   const s = mem();
   s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
   s.setLiveTelemetry("a", {
-    estCostUsd: 0.5, contextTokens: 100,
+    estCostUsd: 0.5,
+    contextTokens: 100,
     tokenComposition: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheCreationTokens: 1 },
   });
   s.clearLiveTelemetry("a");
@@ -774,7 +850,8 @@ test("live telemetry persists across close/reopen (DB-backed, not memory) — a 
     const s1 = new State(path);
     s1.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
     s1.setLiveTelemetry("a", {
-      estCostUsd: 0.42, contextTokens: 8000,
+      estCostUsd: 0.42,
+      contextTokens: 8000,
       tokenComposition: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 900, cacheCreationTokens: 10 },
     });
     s1.close();
@@ -784,7 +861,12 @@ test("live telemetry persists across close/reopen (DB-backed, not memory) — a 
     const row = s2.getWorker("a");
     assert.equal(row?.est_cost_usd, 0.42);
     assert.equal(row?.context_tokens, 8000);
-    assert.deepEqual(JSON.parse(row!.token_composition!), { inputTokens: 100, outputTokens: 50, cacheReadTokens: 900, cacheCreationTokens: 10 });
+    assert.deepEqual(JSON.parse(row!.token_composition!), {
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 900,
+      cacheCreationTokens: 10,
+    });
     s2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -809,8 +891,10 @@ test("backfillLegacyRoundCursors (#123, Codex round-5 P2): a pre-migration in_pr
     const raw = new DatabaseSync(path);
     raw.exec("UPDATE rounds SET start_event_id = 0, start_spend_id = 0");
     backfillLegacyRoundCursors(raw);
-    const row = raw.prepare("SELECT start_event_id, start_spend_id FROM rounds WHERE round_id = ?")
-      .get(round.round_id) as { start_event_id: number; start_spend_id: number };
+    const row = raw.prepare("SELECT start_event_id, start_spend_id FROM rounds WHERE round_id = ?").get(round.round_id) as {
+      start_event_id: number;
+      start_spend_id: number;
+    };
     raw.close();
     // The pre-round event/spend row ids are the cursors again — the resumed round's artifact
     // window starts after them, never at the whole-history 0.
@@ -925,7 +1009,10 @@ test("eventsSince: filters by kind AND ts cutoff, chronological order, parsed pa
   s.appendEvent("merged", { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
   s.appendEvent("drive-needs-human", { worker: "lane-b", issue: 2, pr: 11, reason: "changes requested" });
   const rows = s.eventsSince("2020-01-01T00:00:00.000Z", ["merged", "drive-needs-human"]);
-  assert.deepEqual(rows.map((r) => r.kind), ["merged", "drive-needs-human"]); // "dispatched" excluded
+  assert.deepEqual(
+    rows.map((r) => r.kind),
+    ["merged", "drive-needs-human"],
+  ); // "dispatched" excluded
   assert.deepEqual(rows[0]!.payload, { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
   s.close();
 });
@@ -996,7 +1083,10 @@ test("park: a DIFFERENT source while parked opens its OWN episode (mixed storm) 
   const forgeInserted = s.enterPark("forge", "could not resolve host", 2, "2026-07-14T00:30:00Z");
   assert.equal(forgeInserted, true); // NOT dropped
   assert.equal(s.parkedSources().length, 2);
-  assert.deepEqual(s.parkedSources().map((p) => p.source), ["llm", "forge"]); // oldest first
+  assert.deepEqual(
+    s.parkedSources().map((p) => p.source),
+    ["llm", "forge"],
+  ); // oldest first
   // Clearing one source alone does NOT resume the engine.
   s.clearPark("forge");
   assert.equal(s.isParked(), true);
@@ -1051,10 +1141,11 @@ test("park (P2-A): registerCanaryDispatch is ATOMIC — worker row + canary assi
   // cannot be produced through this method.
   s.clearPark("llm");
   assert.throws(
-    () => s.registerCanaryDispatch(
-      { name: "lane-2", issue: 43, session_id: "sess-2", state: "running", started_at: "2026-07-14T00:02:00Z", ended_at: null },
-      "llm",
-    ),
+    () =>
+      s.registerCanaryDispatch(
+        { name: "lane-2", issue: 43, session_id: "sess-2", state: "running", started_at: "2026-07-14T00:02:00Z", ended_at: null },
+        "llm",
+      ),
     /no open llm park episode/,
   );
   assert.equal(s.getWorker("lane-2"), undefined, "the worker row rolled back with the failed canary assignment");
@@ -1104,6 +1195,7 @@ test("park: escalation marker is written to the engine's own data dir; clearing 
   try {
     const s = new State(join(dir, "sapwood.sqlite"));
     const p = s.escalationMarkerPath();
+    // biome-ignore lint/complexity/useOptionalChain: the assertion deliberately requires a non-null marker path.
     assert.ok(p && p.startsWith(dir));
     assert.notEqual(p, s.killSwitchPath());
     assert.notEqual(p, s.pausePath());
@@ -1136,15 +1228,21 @@ test("migration v11->v12: a populated v11 DB opens on the current engine with al
     for (let v = 0; v < 11; v++) MIGRATIONS[v]!(raw);
     raw.exec("PRAGMA user_version = 11");
     // Populate representative rows across the v11 tables.
-    raw.prepare(
-      "INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, gated_reentry_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run("lane-v11", 9, "sess-9", "failed", "2026-07-01T00:00:00Z", "2026-07-01T01:00:00Z", 55, 1);
-    raw.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)")
+    raw
+      .prepare(
+        "INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, gated_reentry_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("lane-v11", 9, "sess-9", "failed", "2026-07-01T00:00:00Z", "2026-07-01T01:00:00Z", 55, 1);
+    raw
+      .prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)")
       .run("2026-07-01T00:30:00Z", "dispatched", JSON.stringify({ worker: "lane-v11", issue: 9 }));
-    raw.prepare(
-      "INSERT INTO spend_ledger (ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run("2026-07-01T01:00:00Z", "lane-v11", 9, 1.25, "opus", 10, 20, 0, 0);
-    raw.prepare("INSERT INTO pending_rollbacks (issue, target, reason, attempts, created_at) VALUES (?, ?, ?, 0, ?)")
+    raw
+      .prepare(
+        "INSERT INTO spend_ledger (ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("2026-07-01T01:00:00Z", "lane-v11", 9, 1.25, "opus", 10, 20, 0, 0);
+    raw
+      .prepare("INSERT INTO pending_rollbacks (issue, target, reason, attempts, created_at) VALUES (?, ?, ?, 0, ?)")
       .run(9, "ready", "dead-lane-requeue", "2026-07-01T01:00:00Z");
     // park_state must not exist yet — that's exactly what migration 12 adds.
     assert.throws(() => raw.prepare("SELECT * FROM park_state").get());

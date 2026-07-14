@@ -14,7 +14,7 @@
 // sleep) — an in-flight tick is a single already-started async call this driver never touches
 // mid-flight, so "stop after the in-flight tick completes" falls out of the loop shape rather
 // than needing its own cancellation machinery.
-import { tick, type TickDeps, type TickResult } from "./conductor.js";
+import { type TickDeps, type TickResult, tick } from "./conductor.js";
 
 /** How the loop decides to stop ticking. Default ("forever") is the normal daemon mode — only a
  *  signal stops it. "once": run exactly one tick then stop (scripting / cron / a manual poke).
@@ -40,11 +40,7 @@ export interface StopConfig {
   afterSpendUsd?: number;
 }
 
-export type StopConditionName =
-  | "afterIssuesMerged"
-  | "afterPRsOpened"
-  | "onMilestoneComplete"
-  | "afterSpendUsd";
+export type StopConditionName = "afterIssuesMerged" | "afterPRsOpened" | "onMilestoneComplete" | "afterSpendUsd";
 
 /** Which configured stop condition fired first (OR semantics: first hit wins, never
  *  overwritten once wind-down starts). `threshold` echoes the configured value (the N, or the
@@ -256,7 +252,9 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
         // in-memory tickErrors count / returned result still carry the signal.
         try {
           deps.state.appendEvent("tick-error", { error: String(e) });
-        } catch { /* state write failed too — tickErrors still counts it */ }
+        } catch {
+          /* state write failed too — tickErrors still counts it */
+        }
       }
       if (result && !stopConditionHit) {
         issuesMerged += issuesMergedThisTick(result);
@@ -264,11 +262,15 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
         const stop = deps.stop;
         if (stop?.afterIssuesMerged !== undefined && issuesMerged >= stop.afterIssuesMerged) {
           stopConditionHit = {
-            name: "afterIssuesMerged", threshold: stop.afterIssuesMerged, detail: `merged ${issuesMerged}`,
+            name: "afterIssuesMerged",
+            threshold: stop.afterIssuesMerged,
+            detail: `merged ${issuesMerged}`,
           };
         } else if (stop?.afterPRsOpened !== undefined && prsOpened >= stop.afterPRsOpened) {
           stopConditionHit = {
-            name: "afterPRsOpened", threshold: stop.afterPRsOpened, detail: `opened ${prsOpened}`,
+            name: "afterPRsOpened",
+            threshold: stop.afterPRsOpened,
+            detail: `opened ${prsOpened}`,
           };
         } else if (
           // #154: a live query, not an accumulated counter — spend is only known at worker
@@ -282,7 +284,9 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
         ) {
           const runSpendUsd = deps.state.spentUsdAfterId(runSpendAnchorId);
           stopConditionHit = {
-            name: "afterSpendUsd", threshold: stop.afterSpendUsd, detail: `spent $${runSpendUsd.toFixed(2)}`,
+            name: "afterSpendUsd",
+            threshold: stop.afterSpendUsd,
+            detail: `spent $${runSpendUsd.toFixed(2)}`,
           };
         } else if (stop?.onMilestoneComplete && !signalled) {
           // Evaluated at tick boundaries only (never mid-tick), per #76's scope — one extra
@@ -300,14 +304,18 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
             const openLeft = await deps.forge.countOpenIssuesInMilestone(stop.onMilestoneComplete);
             if (openLeft === 0) {
               stopConditionHit = {
-                name: "onMilestoneComplete", threshold: stop.onMilestoneComplete, detail: "0 open issues left",
+                name: "onMilestoneComplete",
+                threshold: stop.onMilestoneComplete,
+                detail: "0 open issues left",
               };
             }
           } catch (e) {
             tickErrors++;
             try {
               deps.state.appendEvent("tick-error", { error: `stop-condition milestone check failed: ${String(e)}` });
-            } catch { /* state write failed too — tickErrors still counts it */ }
+            } catch {
+              /* state write failed too — tickErrors still counts it */
+            }
           }
         }
       }
