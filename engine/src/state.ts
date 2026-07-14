@@ -5,7 +5,7 @@
 //
 // Uses Node's built-in node:sqlite (unflagged since Node 22.13 — see engines floor).
 // ponytail: zero native dep; if the API bites, swap to better-sqlite3 — same call shape.
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -26,7 +26,10 @@ export function backfillLegacyRoundCursors(db: DatabaseSync): void {
   `);
 }
 
-const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
+// Exported for state.test.ts's REAL migration test (PR #180 review P3-2): the test builds a
+// populated v(N-1) DB by running MIGRATIONS[0..N-1] directly, then opens it with State to prove
+// the newest migration preserves existing data. Never call these outside State.migrate()/tests.
+export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // 0 -> 1: initial schema.
   (db) => {
     db.exec(`
@@ -276,6 +279,49 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN token_composition TEXT;
     `);
   },
+  // 11 -> 12: environment-failure park (#168). ONE ROW PER SOURCE (PK = source — PR #180 review
+  // P1-1a: a singleton row silently DROPPED a forge failure arriving mid-llm-episode; per-source
+  // rows record a mixed storm faithfully, and the engine resumes dispatch only when ZERO rows
+  // remain). The CTO architecture directive for #168 is explicit: park state lives in the STATE
+  // DB, never a new control-sentinel file. This repo's locked partition is "SQLite = runtime-
+  // state machine; sentinels = human out-of-band controls (KILL_SWITCH/PAUSE)" — park state/
+  // reason/source/entered-at is runtime state the engine itself derives (an env-failure
+  // classification), not a human control input, so it belongs here. The direct payoff: an
+  // engine restart mid-park resumes probing (never dispatching) purely from normal state
+  // loading — conductor.ts's tick() just re-reads parkedSources() like any other row, no
+  // bespoke crash-recovery path needed.
+  //
+  // Per-source columns are the FIRST detection's classification (see State.enterPark's INSERT
+  // OR IGNORE — re-detecting the SAME source while already parked must not reset `entered_at`,
+  // or a storm of failures could push the duration-based escalation threshold out
+  // indefinitely). `last_probe_at` is NOT NULL — initialized to entered_at at park entry
+  // (PR #180 review P1-1c: a NULL "never probed" made the first probe due IMMEDIATELY, which
+  // for the llm source meant a same-tick clear-park-and-redispatch oscillation; seeding it
+  // makes the first wait a full base backoff). `probe_attempts` backs the bounded exponential
+  // backoff (env-failure.ts's probeBackoffSec/probeDue) — a COUNT for backoff math only, never
+  // itself the escalation trigger (issue #168 decision 3: escalation is duration-based, since
+  // backoff makes a probe count an ambiguous measure of elapsed time). `escalated_at` is a
+  // one-way latch per episode: null until the duration-based human notification fires, never
+  // re-fires after (additive, not a state transition — probing and auto-resume continue
+  // unaffected either way). `canary_worker` (llm rows only; PR #180 review P1-1b): the ONE
+  // in-flight canary lane's name while an llm-park recovery attempt is being tested — see
+  // conductor.ts's PARK section for the canary contract (the cheap-model inference ping is a
+  // capacity filter, never a recovery signal; only a real lane reaching a non-env-classified
+  // terminal state clears the llm row).
+  (db) => {
+    db.exec(`
+      CREATE TABLE park_state (
+        source         TEXT PRIMARY KEY CHECK (source IN ('llm', 'forge')),
+        reason         TEXT NOT NULL,
+        trigger_issue  INTEGER,
+        entered_at     TEXT NOT NULL,
+        last_probe_at  TEXT NOT NULL,
+        probe_attempts INTEGER NOT NULL DEFAULT 0,
+        escalated_at   TEXT,
+        canary_worker  TEXT
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -472,6 +518,26 @@ export interface PendingRollback {
   attempts: number;
   created_at: string;
   last_attempt_at: string | null;
+}
+
+export type EnvFailureSource = "llm" | "forge";
+
+/** #168: one environment-failure park episode — ONE ROW PER SOURCE (see the schema v11->v12
+ *  migration comment for why per-source rows and why this lives in the state DB, not a file
+ *  sentinel). `triggerIssue` is the issue whose lane failure caused this episode, or null.
+ *  `canaryWorker` (llm rows only) is the in-flight canary lane's name, or null when no canary
+ *  is being tested — see conductor.ts's PARK section for the canary contract. */
+export interface ParkRow {
+  source: EnvFailureSource;
+  reason: string;
+  triggerIssue: number | null;
+  enteredAt: string;
+  /** NOT NULL — initialized to enteredAt at park entry, so the first probe/canary waits a full
+   *  base backoff instead of firing immediately (PR #180 review P1-1c). */
+  lastProbeAt: string;
+  probeAttempts: number;
+  escalatedAt: string | null;
+  canaryWorker: string | null;
 }
 
 export class State {
@@ -853,6 +919,174 @@ export class State {
   isPauseActive(): boolean {
     const p = this.pausePath();
     return p != null && existsSync(p);
+  }
+
+  // ── Environment-failure park (#168) ─────────────────────────────────────────────────────
+  // Deliberately NOT a file sentinel (unlike killSwitchPath/pausePath above) — see the schema
+  // v11->v12 migration comment: this is engine-derived runtime state, not a human out-of-band
+  // control, so it belongs in the state DB. One row per source (PR #180 review P1-1a); the
+  // engine is "parked" while ANY row exists and resumes dispatch only at zero rows. `sapwood
+  // status` and conductor.ts's tick() both read fresh (parkedSources()/isParked()) — no
+  // caching, same "always live" property the file sentinels have via existsSync.
+
+  /** Enter the parked state for `source`. INSERT OR IGNORE per source — mirrors
+   *  recordCeilingBreach: re-detecting the SAME source while its episode is open must NOT reset
+   *  `entered_at` (a storm of failing lanes, in one tick or across many, must never keep
+   *  pushing the duration-based escalation threshold out). A DIFFERENT source while parked
+   *  opens its own row (mixed storm — PR #180 review P1-1a). `last_probe_at` is seeded to `now`
+   *  so the first probe/canary waits a full base backoff (P1-1c). Returns true iff THIS call
+   *  actually inserted the row, so a caller can fire a park-entry event once per episode. */
+  enterPark(source: EnvFailureSource, reason: string, triggerIssue: number | null, now: string): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts)
+         VALUES (?, ?, ?, ?, ?, 0)`,
+      )
+      .run(source, reason, triggerIssue, now, now);
+    return res.changes > 0;
+  }
+
+  private static rowToPark(row: {
+    source: string; reason: string; trigger_issue: number | null; entered_at: string;
+    last_probe_at: string; probe_attempts: number; escalated_at: string | null;
+    canary_worker: string | null;
+  }): ParkRow {
+    return {
+      source: row.source as EnvFailureSource,
+      reason: row.reason,
+      triggerIssue: row.trigger_issue,
+      enteredAt: row.entered_at,
+      lastProbeAt: row.last_probe_at,
+      probeAttempts: row.probe_attempts,
+      escalatedAt: row.escalated_at,
+      canaryWorker: row.canary_worker,
+    };
+  }
+
+  /** Every open park episode, oldest first (at most one per source). */
+  parkedSources(): ParkRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM park_state ORDER BY entered_at, source")
+      .all() as unknown as Parameters<typeof State.rowToPark>[0][];
+    return rows.map((r) => State.rowToPark(r));
+  }
+
+  /** The open episode for one source, or null. */
+  parkRow(source: EnvFailureSource): ParkRow | null {
+    const row = this.db.prepare("SELECT * FROM park_state WHERE source = ?").get(source) as
+      | Parameters<typeof State.rowToPark>[0]
+      | undefined;
+    return row ? State.rowToPark(row) : null;
+  }
+
+  /** Parked = ANY source's episode is open. Dispatch resumes only at zero rows. */
+  isParked(): boolean {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM park_state").get() as { n: number };
+    return row.n > 0;
+  }
+
+  /** Record one FAILED probe attempt (or a failed canary — PR #180 review P1-1b): bump
+   *  probe_attempts (backoff grows) and stamp last_probe_at. env-failure.ts's
+   *  probeBackoffSec/probeDue re-derive the next-due time from these two fresh every tick —
+   *  no separately-persisted next-probe timestamp, so a restart naturally resumes correct
+   *  probing with no replay logic of its own. Never touches entered_at/escalated_at — the
+   *  episode continues. */
+  bumpParkProbe(source: EnvFailureSource, at: string): void {
+    this.db
+      .prepare("UPDATE park_state SET last_probe_at = ?, probe_attempts = probe_attempts + 1 WHERE source = ?")
+      .run(at, source);
+  }
+
+  /** Stamp last_probe_at WITHOUT bumping probe_attempts — the llm path's "ping succeeded,
+   *  canary armed" case (PR #180 review P1-1b): pacing must advance (no re-probe every tick
+   *  while the canary is pending/launching) but the backoff exponent only grows on a FAILED
+   *  outcome (probe failure or canary env-failure), never on the mere act of arming one. */
+  touchParkProbe(source: EnvFailureSource, at: string): void {
+    this.db.prepare("UPDATE park_state SET last_probe_at = ? WHERE source = ?").run(at, source);
+  }
+
+  /** Record (or clear, with null) the llm episode's in-flight canary lane name. */
+  setParkCanary(source: EnvFailureSource, worker: string | null): void {
+    this.db.prepare("UPDATE park_state SET canary_worker = ? WHERE source = ?").run(worker, source);
+  }
+
+  /** #168 (PR #180 round-3 P2-A): register a freshly-dispatched CANARY lane atomically — the
+   *  worker row, the episode's canary_worker assignment, and both dispatch events land in ONE
+   *  SQLite transaction. Separate writes had a crash window: a worker row persisted without
+   *  its canary_worker assignment left a LIVE canary the restarted engine didn't know about,
+   *  so the next backoff step launched a second one ("exactly one canary" broken). This method
+   *  makes that partial state unrepresentable: it either all lands or none of it does —
+   *  including the case where no `source` episode row exists to attach to (the UPDATE matches
+   *  zero rows -> the whole registration, worker row included, rolls back and this throws;
+   *  a canary must never exist without the episode it is testing). */
+  registerCanaryDispatch(row: WorkerRow, source: EnvFailureSource): void {
+    this.db.exec("BEGIN");
+    try {
+      this.upsertWorker(row);
+      const res = this.db
+        .prepare("UPDATE park_state SET canary_worker = ? WHERE source = ?")
+        .run(row.name, source);
+      if (res.changes === 0) {
+        throw new Error(`registerCanaryDispatch: no open ${source} park episode to attach canary ${row.name} to`);
+      }
+      this.appendEvent("dispatched", { worker: row.name, issue: row.issue });
+      this.appendEvent("park-canary", { worker: row.name, issue: row.issue });
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** One-way latch: the duration-based human notification has fired for this source's episode.
+   *  Never re-fires for the same episode (conductor.ts's escalatePark checks escalatedAt == null
+   *  before calling this) — additive, not a state transition: probing/auto-resume are unaffected
+   *  either side of this call. */
+  recordParkEscalation(source: EnvFailureSource, at: string): void {
+    this.db.prepare("UPDATE park_state SET escalated_at = ? WHERE source = ?").run(at, source);
+  }
+
+  /** Auto-resume / manual clear for one source. A LATER park of the same source is a fresh
+   *  episode with its own entered_at/backoff count, never a continuation. Clearing the LAST
+   *  open episode also removes the local escalation marker (PR #180 review P2-2: the marker
+   *  described an outage that no longer exists — wiring the clear here, at the single choke
+   *  point every resume path goes through, is what guarantees it can never be forgotten). */
+  clearPark(source: EnvFailureSource): void {
+    this.db.prepare("DELETE FROM park_state WHERE source = ?").run(source);
+    if (!this.isParked()) this.clearEscalationMarker();
+  }
+
+  /** #168: the LOCAL escalation fallback marker path — a file in the engine's OWN data dir,
+   *  alongside KILL_SWITCH/PAUSE for filesystem-layout convenience only. UNLIKE those two, this
+   *  file is written BY THE ENGINE (never a human control input) and is read-only informational
+   *  output: nothing in this codebase ever reads it back as a decision input (isParked/
+   *  parkState() consult only the park_state SQLite row above) — a human/dashboard can `cat` it
+   *  to see the last local-fallback escalation without a forge round-trip, during exactly the
+   *  window (forge itself unreachable) where a forge-side notification isn't possible. null dir
+   *  (in-memory State, tests) -> no path, same convention as killSwitchPath/pausePath. */
+  escalationMarkerPath(): string | null {
+    return this.dataDir ? join(this.dataDir, "ESCALATION") : null;
+  }
+
+  /** Write the local escalation fallback marker (#168's channel-ladder local branch,
+   *  conductor.ts's escalatePark). Best-effort content only — this is a side-channel output, not
+   *  sapwood state; the caller does not treat a write failure here as a park/probe failure. */
+  writeEscalationMarker(payload: Record<string, unknown>): void {
+    const p = this.escalationMarkerPath();
+    if (!p) return;
+    writeFileSync(p, JSON.stringify(payload, null, 2) + "\n");
+  }
+
+  /** Best-effort removal of a stale escalation marker once the episode it described has
+   *  resolved (conductor.ts clears it on auto-resume) — a missing file is not an error. */
+  clearEscalationMarker(): void {
+    const p = this.escalationMarkerPath();
+    if (!p) return;
+    try {
+      rmSync(p, { force: true });
+    } catch {
+      /* noop */
+    }
   }
 
   close(): void {

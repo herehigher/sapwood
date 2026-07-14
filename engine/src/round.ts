@@ -92,6 +92,12 @@ export interface RoundDeps {
    *  checked preemptively before opening a NEW round (never mid-round: a round already open
    *  always finishes its remaining phases, including harvest+retro, first). */
   stop?: StopConfig;
+  /** #168: threaded straight into every tick's TickDeps.probeLlmReachable (see its doc comment
+   *  for the disabled-consumer rationale and the boolean-or-{ok,detail} return shape — omitted
+   *  means an llm-sourced park never auto-probes; the duration-based human escalation still
+   *  fires regardless). cli.ts wires the real implementation (worker.ts's probeLlmPing) for a
+   *  live `sapwood run`; tests inject a fake or leave it unset. */
+  probeLlmReachable?: () => Promise<boolean | { ok: boolean; detail?: string }>;
 }
 
 export interface RoundsResult {
@@ -405,6 +411,8 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(deps.stop?.afterSpendUsd !== undefined
       ? { runSpendStopCrossed: () => deps.state.spentUsdAfterId(runSpendAnchorId) >= deps.stop!.afterSpendUsd! }
       : {}),
+    // #168: passthrough — see RoundDeps.probeLlmReachable's doc comment.
+    ...(deps.probeLlmReachable !== undefined ? { probeLlmReachable: deps.probeLlmReachable } : {}),
   });
 
   /** Run one peripheral phase's stub, persist its marker, fire the observability hook. Returns

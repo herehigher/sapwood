@@ -14,11 +14,17 @@
 
 import { existsSync } from "node:fs";
 import type { IForge, Issue } from "./forge.js";
-import type { State, BoardStatus, PendingRollback, ModelUsageEntry, WorkerRow, CategorizedTokenUsage } from "./state.js";
+import type {
+  State, BoardStatus, PendingRollback, ModelUsageEntry, WorkerRow, CategorizedTokenUsage, ParkRow,
+} from "./state.js";
 import type { SapwoodConfig } from "./config.js";
 import type { DriveOutcome } from "./merge-driver.js";
 import type { ReviewFallbackLock } from "./reviewer.js";
 import { isReviewerKind } from "./reviewer.js";
+import {
+  classifyEnvFailure, probeBackoffSec, probeDue, parkDurationExceededSec, escalationChannel,
+  type EnvFailureSource,
+} from "./env-failure.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -284,6 +290,14 @@ export interface LaneProbe {
     contextTokens: number;
     tokenComposition: CategorizedTokenUsage;
   };
+  /** #168: a FAILED lane's own captured output — worker.ts's stream-json jsonl (stdout+stderr
+   *  merged onto one fd at spawn), tail-capped. The env-failure classification input
+   *  (env-failure.ts's classifyEnvFailure): the engine already writes/reads this file for
+   *  cost/model-usage parsing (terminalCostUsd/terminalModelUsage), so this is not a new
+   *  capture mechanism, only a new read of an existing one. undefined for a non-FAILED lane, or
+   *  for probe fixtures that predate #168 — classifyEnvFailure treats undefined/"" as no match
+   *  (an ordinary task failure), never a park. */
+  failureText?: string;
 }
 
 /** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
@@ -366,7 +380,12 @@ export type ReclaimOutcome =
   | ({ kind: "done"; worker: string; issue: number; next: ReclaimDone } & TerminalSpend)
   | ({ kind: "failed"; worker: string; issue: number; next: ReclaimFailed } & TerminalSpend)
   | ({ kind: "handoff"; worker: string; issue: number } & TerminalSpend)
-  | ({ kind: "dead"; worker: string; issue: number; rescued: boolean } & TerminalSpend);
+  | ({ kind: "dead"; worker: string; issue: number; rescued: boolean } & TerminalSpend)
+  // #168: a FAILED, no-PR lane whose captured output matched an environment-failure signature.
+  // Distinct from "failed" — never applies needs-human, never touches gated-reentry state
+  // (this lane's `pr` column stays null); the issue is returned to Ready via the existing #31
+  // rollback/requeue machinery, and the engine enters/extends the parked state.
+  | ({ kind: "env-failure"; worker: string; issue: number; source: EnvFailureSource } & TerminalSpend);
 
 export type DispatchOutcome =
   | { kind: "dispatched"; issue: number; worker: string }
@@ -475,6 +494,26 @@ export interface TickDeps {
    *  (the exact same-tick window #124 gate② P1-2 closed for cost.roundBudgetUsd). Unset (no
    *  spend stop configured) → no check, no cost. */
   runSpendStopCrossed?: () => boolean;
+  /** #168: the LLM reachability probe — a deterministic check (no LLM JUDGMENT: success is
+   *  "did the process exit 0 and print pong", never a model's opinion). The real
+   *  implementation (worker.ts's probeLlmPing, wired by cli.ts) is a minimal inference ping on
+   *  the cheapest model (cfg.envFailure.probeModel, ~$0.016 measured per ping, bounded by
+   *  probeMaxBudgetUsd): it proves network + auth + some account capacity, and merely GATES
+   *  the canary — it is never itself a recovery signal (see the PARK section).
+   *
+   *  Return shape: a bare boolean, or `{ ok, detail? }` — `detail` (failure only) is the
+   *  probe's first stderr/error line, recorded in the park-probe event so an operator can
+   *  distinguish "provider still down" (a 429) from a local misconfiguration ("Exceeded USD
+   *  budget" = probeMaxBudgetUsd too low; "unknown option" = an older CLI missing the ping's
+   *  flags). Bare booleans keep every existing fake/test valid.
+   *
+   *  Consulted only while parked for `source: "llm"`. Disabled-consumer rule (doctrine):
+   *  omitted -> tick() never probes the LLM source at all (there is no consumer for the
+   *  result) — the park stays in place until either a human intervenes or the duration-based
+   *  escalation notifies one; the forge probe is UNCONDITIONAL (see conductor.ts's PARK
+   *  section) since `forge` above is a required field, never optional, so it always has a
+   *  consumer. */
+  probeLlmReachable?: () => Promise<boolean | { ok: boolean; detail?: string }>;
 }
 
 /** #167 review (Codex P2+P3 adjudication): the gated-reentry-cap-hit escalation note appended
@@ -534,6 +573,12 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
  * tick) on failure under the cap, or cleared + escalated (needs-human label attempt, never a
  * silent swallow) once attempts hit cfg.recovery.rollbackRetryCap. Never throws — the whole
  * point is that a repeated forge failure here must not propagate and must not go unrecorded.
+ *
+ * #168 EXEMPTION (PR #180 review P1-2): an env-failure requeue NEVER takes the cap branch — the
+ * issue did nothing wrong, so degrading it to needs-human (and deleting its durable requeue,
+ * silently un-queuing it) breaks the env-failure contract on both counts. Its row stays durable
+ * and is bumped-and-retried indefinitely; the park escalation channel (escalatePark's suspended-
+ * requeue count) is how a human learns it is being held.
  */
 async function attemptRollback(
   forge: IForge,
@@ -549,7 +594,7 @@ async function attemptRollback(
     return { kind: "recovered", issue: row.issue, target: row.target, reason: row.reason };
   } catch (e) {
     const attempts = row.attempts + 1;
-    if (attempts >= cfg.recovery.rollbackRetryCap) {
+    if (attempts >= cfg.recovery.rollbackRetryCap && row.reason !== ENV_FAILURE_REQUEUE_REASON) {
       state.clearPendingRollback(row.id);
       // Best-effort last-mile notification — its own failure is not re-persisted (this is
       // already the bounded-retry escalation path, not another recovery loop to harden) but
@@ -604,6 +649,12 @@ async function drainThenEscalate(
   const escalated: string[] = [];
   const stillRunning = state.runningWorkers();
   for (const w of stillRunning) {
+    // #168 P1-B: a drained lane that happens to be the llm episode's CANARY is settled
+    // INCONCLUSIVE right here, at drain-request time — see releaseCanaryInconclusive's doc
+    // comment for the two corruption modes this closes (false-clear via the later .handoff
+    // reclaim; permanent wedge via the hard kill below). Idempotent no-op for every other lane
+    // and for repeat drain ticks.
+    releaseCanaryInconclusive(state, w.name);
     if (supervisor.requestHandoff(w.name)) drainRequested.push(w.name);
   }
   const breach = state.ceilingBreach();
@@ -637,6 +688,153 @@ async function drainThenEscalate(
   return { drainRequested, escalated };
 }
 
+/** #168: a short, human-readable excerpt of a FAILED lane's captured output — stored as the
+ *  park episode's `reason` (state.ts's park_state.reason) and surfaced in `sapwood status` /
+ *  the escalation channel. Deliberately SHORT (this is a display string, not the classification
+ *  input — classifyEnvFailure already ran against the full failureText before this is called). */
+const PARK_REASON_MAX_CHARS = 200;
+function summarizeFailureText(text: string): string {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  return trimmed.length > PARK_REASON_MAX_CHARS
+    ? `${trimmed.slice(0, PARK_REASON_MAX_CHARS)}…`
+    : trimmed;
+}
+
+/** #168: the pending_rollbacks `reason` tag for an env-failure requeue — typed as a constant
+ *  because THREE sites must agree on it byte-for-byte (PR #180 review P1-2): the requeue
+ *  creation in reclaimTerminalLane, the suspension filter in tick()'s ROLLBACK RETRY phase, and
+ *  attemptRollback's never-needs-human cap exemption. */
+const ENV_FAILURE_REQUEUE_REASON = "env-failure-requeue";
+
+/** #168: the forge probe — a lightweight, ALREADY-EXISTING IForge read (no new forge method),
+ *  wrapped so any throw (network/auth/5xx — exactly the conditions env-failure.ts's forge
+ *  signatures describe) reads as "still unreachable" rather than propagating. Deterministic:
+ *  the classification is "did the call succeed", never an LLM judgment. */
+async function probeForgeReachable(forge: IForge): Promise<boolean> {
+  try {
+    await forge.listOpenIssueNumbers();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** #168 (PR #180 review P1-1b): settle an llm-park CANARY lane at its terminal transition.
+ *  The ping probe succeeding is NOT a recovery signal for the WORKER's model/tier (the ping
+ *  runs on the cheapest model — model-specific caps and primary-model-only overload can leave
+ *  it green while real dispatch still fails), so an llm episode is cleared ONLY by this
+ *  function — when the lane recorded as the episode's canary reaches a terminal state that is
+ *  NOT env-classified (done, ordinary task failure, handoff, DEAD): the one signal that a real
+ *  worker-class run actually got through to the provider. An env-classified canary
+ *  failure is the SAME episode continuing: entered_at and escalated_at are preserved untouched
+ *  (the duration-escalation clock keeps running from FIRST entry), probe_attempts is bumped so
+ *  the backoff keeps growing, and the canary slot is freed for the next backoff step. No-op
+ *  for any lane that is not the current canary. */
+function settleCanary(state: State, workerName: string, envClassified: boolean, iso: () => string): void {
+  const llm = state.parkRow("llm");
+  if (!llm || llm.canaryWorker !== workerName) return;
+  if (envClassified) {
+    state.bumpParkProbe("llm", iso());
+    state.setParkCanary("llm", null);
+    state.appendEvent("park-canary-failed", { worker: workerName, attempts: llm.probeAttempts + 1 });
+  } else {
+    state.clearPark("llm"); // also clears the local escalation marker when this was the last row
+    state.appendEvent("park-resumed", { source: "llm", enteredAt: llm.enteredAt, via: "canary" });
+  }
+}
+
+/** #168 (PR #180 round-3 P1-B): the THIRD canary disposition — INCONCLUSIVE. A drain (kill
+ *  switch or cost/wall-clock ceiling) stopping a live canary says NOTHING about the provider:
+ *  the lane was stopped for a safety reason, not because it answered or env-failed. Without
+ *  this, the two drain modes each corrupted the episode differently: a graceful drain's
+ *  .handoff sentinel landed in reclaimTerminalLane's settleCanary(..., false) and FALSELY
+ *  CLEARED the llm episode with zero recovery evidence, and a hard drain (drainThenEscalate's
+ *  kill + direct `failed` upsert) never touched the canary slot at all — leaving canary_worker
+ *  pointing at a dead lane forever, which the PARK section reads as "canary still in flight"
+ *  and never probes again: a PERMANENTLY WEDGED episode. Inconclusive = release the slot
+ *  (clear canary_worker) while preserving the episode row UNCHANGED: no probe_attempts bump
+ *  (a drain is not a probe result), entered_at/escalated_at untouched — the next backoff step
+ *  simply pings again. Called from drainThenEscalate for every lane it drains (idempotent
+ *  no-op for non-canaries), which covers BOTH modes: the slot is released at drain-REQUEST
+ *  time, so the later .handoff reclaim's settleCanary no-ops (no false clear), and a hard
+ *  kill leaves no dangling slot (no wedge). */
+function releaseCanaryInconclusive(state: State, workerName: string): void {
+  const llm = state.parkRow("llm");
+  if (!llm || llm.canaryWorker !== workerName) return;
+  state.setParkCanary("llm", null);
+  state.appendEvent("park-canary-inconclusive", { worker: workerName });
+}
+
+/** #168: park-duration escalation — the channel ladder (env-failure.ts's escalationChannel):
+ *  forge believed reachable (an llm-sourced escalation with no forge episode open) -> comment on
+ *  the triggering issue with the EXISTING addIssueComment primitive (never a NEW label/issue-
+ *  creation surface); forge believed/known unreachable (a forge-sourced escalation, OR an
+ *  llm-sourced one during a mixed storm whose forge episode is also open) -> the LOCAL fallback
+ *  ONLY — zero forge writes attempted on that branch, by construction (the channel is computed
+ *  BEFORE any forge call, never a try-then-fallback pattern that would still attempt one).
+ *  Additive: never touches park_state's active-ness, only stamps escalated_at
+ *  (state.recordParkEscalation) — probing/auto-resume continue unaffected either side.
+ *
+ *  P1-2 surfacing (PR #180 review): env-failure requeues suspended by a forge outage never
+ *  degrade to needs-human — they stay durable in pending_rollbacks and are surfaced HERE, in
+ *  the escalation message, as the human-visible record of what will drain on resume. */
+async function escalatePark(
+  forge: IForge, state: State, cfg: SapwoodConfig, park: ParkRow, forgeParked: boolean, iso: () => string,
+): Promise<void> {
+  const suspendedRequeues = state
+    .pendingRollbacks()
+    .filter((r) => r.reason === ENV_FAILURE_REQUEUE_REASON).length;
+  const message =
+    `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
+    `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
+    `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
+    `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
+    (suspendedRequeues > 0
+      ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. `
+      : "") +
+    `Informational only — no action is required unless the underlying outage is expected to ` +
+    `persist.`;
+  const intended = escalationChannel(park.source, forgeParked);
+  // P2-3 (PR #180 review): the event below records the channel ACTUALLY used — when the forge
+  // comment fails and this degrades to the local fallback, the audit trail must say "local",
+  // not the intended-but-failed "forge".
+  let actualChannel = intended;
+  if (intended === "forge" && park.triggerIssue != null) {
+    try {
+      await forge.addIssueComment(park.triggerIssue, message);
+    } catch {
+      // The channel-ladder's "forge reachable" premise proved wrong (a race, or an llm-sourced
+      // park whose forge turns out to ALSO be down) — never lose the escalation silently.
+      actualChannel = "local";
+      writeLocalEscalation(state, park, message);
+    }
+  } else {
+    actualChannel = "local";
+    writeLocalEscalation(state, park, message);
+  }
+  // ACCEPTED RESIDUAL (PR #180 review P2, documented not machined-away): a crash in the window
+  // between the successful comment above and the recordParkEscalation latch below re-escalates
+  // on the next tick after restart — one duplicate informational comment, bounded at one per
+  // crash, self-identifying as informational. Closing it would need a persist-before-post
+  // two-phase marker for a message that is explicitly advisory — machinery the #69 policy
+  // (rare edges degrade to less machinery, not more) says not to build.
+  state.recordParkEscalation(park.source, iso());
+  state.appendEvent("park-escalated", {
+    source: park.source, channel: actualChannel, triggerIssue: park.triggerIssue,
+  });
+}
+
+/** #168: the local-fallback escalation write (CTO directive: sapwood status surface + a marker
+ *  file in the engine data dir, written by the ENGINE, read-only informational, never a control
+ *  input — see State.escalationMarkerPath's doc comment — + a log line). Zero forge writes. */
+function writeLocalEscalation(state: State, park: ParkRow, message: string): void {
+  state.writeEscalationMarker({
+    source: park.source, reason: park.reason, triggerIssue: park.triggerIssue,
+    enteredAt: park.enteredAt, message, at: new Date().toISOString(),
+  });
+  process.stderr.write(`[sapwood:park] ${message}\n`);
+}
+
 /** Reclaim a lane that has reached a TERMINAL sentinel (handoff / done / failed) — record its
  *  real outcome and transition the worker row out of `running`. Returns the outcome, or `null`
  *  when the lane is NOT terminal (KEEP still-running, or DEAD with no sentinel) so the caller
@@ -665,12 +863,17 @@ async function reclaimTerminalLane(
     // Whoever wires --resume (M4) must record the delta, or verify claude's resume cost first.
     state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
     state.appendEvent("handoff", { worker: w.name, issue: w.issue });
+    // #168 P1-1b: a handed-off canary RAN (crossed its soft budget doing real work) — the
+    // strongest possible non-env terminal signal. Resume.
+    settleCanary(state, w.name, false, iso);
     return { kind: "handoff", worker: w.name, issue: w.issue, costUsd, modelUsage };
   }
   const cls = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive);
   if (cls === "DONE") {
     // #155: leaving `running` either way (driving or done/escalated) — clear LIVE telemetry.
     state.clearLiveTelemetry(w.name);
+    // #168 P1-1b: a DONE canary proves the provider is back — resume the llm episode.
+    settleCanary(state, w.name, false, iso);
     const next = laneOnReclaimDone(p.hasPr);
     if (next === "DRIVING") {
       // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
@@ -688,6 +891,87 @@ async function reclaimTerminalLane(
   if (cls === "FAILED") {
     // #155: leaving `running` either way (rescued to driving, or escalated failed).
     state.clearLiveTelemetry(w.name);
+    // #168: environment-failure classification, BEFORE the ordinary has-PR rescue/escalate
+    // logic below — deterministic, no LLM (env-failure.ts's classifyEnvFailure is a pure regex
+    // match over the lane's own structured error output — worker.ts's extractFailureText, never
+    // assistant message content, PR #180 review P1-3). Unconditional on hasPr: decision 1 is
+    // "park the engine" regardless of what the failed lane produced.
+    const envSource = classifyEnvFailure(p.failureText ?? "", {
+      llm: cfg.envFailure.llmPatterns, forge: cfg.envFailure.forgePatterns,
+    });
+    // P1-1b: if THIS lane was the llm episode's canary, settle it first — env-classified means
+    // the same episode continues (attempts bumped, entered_at untouched); anything else means
+    // the provider is provably back (a real run reached a non-env terminal) and the llm row
+    // clears here, before the lane's own disposition below runs as normal.
+    settleCanary(state, w.name, envSource != null, iso);
+    if (envSource) {
+      const reason = summarizeFailureText(p.failureText ?? "");
+      state.enterPark(envSource, reason, w.issue, iso());
+      state.appendEvent("env-failure", { worker: w.name, issue: w.issue, source: envSource, reason, hasPr: p.hasPr });
+    }
+    if (envSource && !p.hasPr) {
+      // The common/expected shape (issue #168's framing: worker `claude` invocations and
+      // worker-side `git push`/`gh pr create` calls fail generically BEFORE any PR exists).
+      // Return the issue to Ready UNTOUCHED — no needs-human, no gated-reentry spend (this
+      // row's `pr` column stays null, so it can never satisfy gatedFailedWorkers' `pr IS NOT
+      // NULL` filter). Reuses the EXISTING durable rollback/requeue machinery (#31) rather
+      // than a bespoke write.
+      //
+      // ORDERING (PR #180 review P2-1): the durable requeue intent is persisted BEFORE the
+      // terminal upsertWorker — a crash between the two used to leave the row `failed` (out of
+      // runningWorkers(), never re-probed) with NO rollback row: the issue stranded In Progress
+      // forever. Persist-first means the worst crash outcome is a duplicate requeue attempt
+      // (setBoardStatus to `ready` twice — idempotent on the board), never a stranded issue.
+      const rollbackId = state.addPendingRollback(w.issue, "ready", ENV_FAILURE_REQUEUE_REASON, iso());
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      // SUSPENSION (PR #180 review P1-2): while a FORGE park episode is open, the requeue is
+      // NOT attempted — persisting the durable row above is the whole action (zero forge
+      // writes while the forge is known-down; the frozen row drains via the ROLLBACK RETRY
+      // phase once the forge episode clears). An llm-only park leaves the forge healthy, so
+      // the attempt proceeds — the canary needs the issue back in Ready to have anything to
+      // dispatch.
+      if (state.parkRow("forge") == null) {
+        await attemptRollback(
+          forge, state, cfg,
+          { id: rollbackId, issue: w.issue, target: "ready", reason: ENV_FAILURE_REQUEUE_REASON, attempts: 0 },
+          iso,
+        );
+      }
+      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+      return { kind: "env-failure", worker: w.name, issue: w.issue, source: envSource, costUsd, modelUsage };
+    }
+    if (envSource && p.hasPr) {
+      // A PR already exists — durable work. Clean worktree -> the ordinary rescue-to-driving
+      // disposition (below) applies unchanged (it never labels or spends reentry attempts).
+      // Dirty worktree (PR #180 review P1-4): env classification takes PRECEDENCE over the #69
+      // dirty ⇒ needs-human policy — the dirt is circumstantial to an ENVIRONMENT fault, not
+      // evidence of worker error, and the contract says an env-failure never applies
+      // needs-human. Preserve everything durably instead: worktree retained on disk (no
+      // teardown happens on this path), lane parked `failed` with its PR number and
+      // gated_escalation_labeled=0 — the EXISTING #147 fail-closed preservation shape
+      // (invisible to gatedFailedWorkers, so zero reentry-cap consumption; manual drive, same
+      // as any pre-#147 escalation whose label write failed). ZERO forge writes — no label, no
+      // comment (the forge may be the very thing that's down). The park escalation channel is
+      // where a human eventually learns about it.
+      const retained = supervisor.inspectWorktree(w.name);
+      if (retained.worktreeRetained) {
+        state.upsertWorker({
+          ...w, state: "failed", ended_at: iso(),
+          pr: p.prNumber ?? w.pr ?? null, gated_escalation_labeled: 0,
+        });
+        state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+        state.appendEvent("env-failure-preserved", {
+          worker: w.name, issue: w.issue, source: envSource,
+          pr: p.prNumber ?? w.pr ?? null, worktreePath: retained.worktreePath,
+        });
+        return { kind: "env-failure", worker: w.name, issue: w.issue, source: envSource, costUsd, modelUsage };
+      }
+      // Clean + PR: rescue to driving, exactly the ordinary disposition (no label either way).
+      state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
+      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+      state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next: "DRIVING" });
+      return { kind: "failed", worker: w.name, issue: w.issue, next: "DRIVING", costUsd, modelUsage };
+    }
     let next = laneOnReclaimFailed(p.hasPr);
     // #69 (fable P3-b): a `.failed`-sentinel lane with a PR is rescued to `driving` — but the
     // worker exited NON-ZERO, so it may have left uncommitted WIP alongside its PR. Apply the
@@ -781,8 +1065,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // ── ROLLBACK RETRY (#31): retry every board mutation still pending from a prior tick's
   //   recovery-path failure, BEFORE this tick does anything else. Never throws (see
   //   attemptRollback) — a still-failing forge only bumps the retry count or escalates.
+  //   #168 SUSPENSION (PR #180 review P1-2): while a FORGE park episode is open, env-failure
+  //   requeues are not attempted at all — no forge write, no attempt-counter bump; the durable
+  //   rows simply wait (frozen) and drain here on the first tick after the forge episode
+  //   clears. Scoped to env-failure requeues only: every OTHER pending rollback keeps its
+  //   pre-#168 retry behavior unchanged (its issue's failure was real, and its bounded
+  //   retry-then-escalate contract predates parking). Gated on the FORGE row specifically —
+  //   an llm-only park leaves the forge healthy, and holding requeues then would starve the
+  //   canary of anything to dispatch.
   const rollbacks: RollbackOutcome[] = [];
+  const forgeParkedThisTick = state.parkRow("forge") != null;
   for (const pending of state.pendingRollbacks()) {
+    if (forgeParkedThisTick && pending.reason === ENV_FAILURE_REQUEUE_REASON) continue; // suspended
     rollbacks.push(await attemptRollback(forge, state, cfg, pending, iso));
   }
   const reclaimed: ReclaimOutcome[] = [];
@@ -822,6 +1116,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // LIVE telemetry trio (a crashed lane always passes through here, so this single call
     // covers the "stale telemetry from a dead lane must not survive as live" crash semantics).
     state.clearLiveTelemetry(w.name);
+    // #168 P1-1b: a DEAD canary is a terminal state that is NOT env-classified (there is no
+    // sentinel/output to classify — a provider outage produces a FAILED sentinel with error
+    // text, not a silent crash), so per the canary contract the llm episode resumes. If the
+    // provider is in fact still down, the next real dispatch re-classifies and re-parks
+    // through the normal FAILED path — bounded, never a silent wedge.
+    settleCanary(state, w.name, false, iso);
     // #69 dirty-worktree retention: reclaim() deletes the worktree ONLY when it's provably
     // clean; a possibly-dirty one survives on disk and is escalated to a human here.
     const r = await supervisor.reclaim(w.name);
@@ -1134,11 +1434,128 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     state.clearCeilingBreach();
   }
 
+  // ── PARK (#168): environment-failure self-healing, per source (PR #180 review P1-1). Read
+  //   fresh HERE — after RECLAIM/GATED RECLAIM/DRIVE above (any of which may have just entered
+  //   or settled an episode via reclaimTerminalLane) and exactly at the point the DISPATCH gate
+  //   below consults it — same-tick window rule (doctrine): never a pre-tick scalar snapshot.
+  //   Dispatch resumes only when ZERO episodes remain.
+  //
+  //   forge source: the cheap IForge read is a GENUINE recovery signal — success clears the
+  //   forge episode outright, failure bumps the backoff.
+  //   llm source (P1-1 design change, amended to a real ping): the probe is a minimal
+  //   inference ping on the cheapest model (worker.ts's probeLlmPing) — it proves network +
+  //   auth + some account capacity, but NOT that the WORKER's model/tier has quota
+  //   (model-specific caps, primary-model-only overload), so it is NEVER a recovery signal —
+  //   it only GATES a canary. When the backoff interval elapses AND the ping succeeds AND no
+  //   forge episode is open (a canary needs the forge to claim its issue) AND no canary is
+  //   already in flight, the dispatch phase below is allowed exactly ONE lane. The llm episode clears only when that canary
+  //   reaches a non-env-classified terminal state (settleCanary, reclaim phase); a canary that
+  //   env-fails CONTINUES the same episode — entered_at/escalated_at preserved, backoff grown —
+  //   so the duration escalation accrues on wall-clock since FIRST entry, and the per-cycle
+  //   cost is one canary per backoff step, never a full-width redispatch oscillation.
+  //
+  //   Escalation is per episode, duration-based (not probe count), additive — probing and
+  //   auto-resume continue unaffected either side of it.
+  let canaryBudget = 0;
+  // #168 P2-B: parked-ness is ALSO captured before the probes run — see the dispatch gate
+  // below: a recovery observed by THIS tick's probes takes effect NEXT tick, never this one.
+  const parkedBeforeProbes = state.isParked();
+  {
+    const forgeEpisode = state.parkRow("forge");
+    if (forgeEpisode) {
+      const backoffSec = probeBackoffSec(
+        forgeEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec,
+      );
+      if (probeDue(forgeEpisode.lastProbeAt, nowDate.getTime(), backoffSec)) {
+        const success = await probeForgeReachable(forge);
+        if (success) {
+          state.clearPark("forge"); // also clears the local escalation marker when last row (P2-2)
+          state.appendEvent("park-resumed", { source: "forge", enteredAt: forgeEpisode.enteredAt });
+        } else {
+          state.bumpParkProbe("forge", iso());
+        }
+        state.appendEvent("park-probe", {
+          source: "forge", success,
+          attempts: success ? forgeEpisode.probeAttempts : forgeEpisode.probeAttempts + 1,
+        });
+      }
+    }
+    const llmEpisode = state.parkRow("llm");
+    // Disabled-consumer rule (doctrine): the ping probe only runs when a caller actually
+    // wired one (deps.probeLlmReachable) — with none wired, tick() does not touch the llm
+    // episode at all (no bump, no event, no canary) rather than recording a synthetic
+    // always-failing attempt; the duration escalation still fires regardless. Also skipped
+    // while a canary is already in flight — its terminal settlement (settleCanary) is the only
+    // thing that can advance the episode then.
+    //
+    // #168 P1-A: the llm ping is PAID (~$0.016/ping, a real API call) — it is suppressed while
+    // a hard cost/wall-clock ceiling breach is active (the engine is draining for SPEND
+    // reasons; a safety boundary must not itself keep spending) and while dispatch is PAUSED
+    // (pause blocks the canary the ping exists to unlock, so a green ping would be pure spend
+    // with no consumer — the disabled-consumer rule again). The FREE forge read-probe above
+    // keeps running in both states, and the kill switch needs no gate here: an active switch
+    // returns from the top of tick() before this section ever runs. Duration escalation is
+    // unaffected either way.
+    if (llmEpisode && llmEpisode.canaryWorker == null && deps.probeLlmReachable && !ceilingBreached && !paused) {
+      const backoffSec = probeBackoffSec(
+        llmEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec,
+      );
+      if (probeDue(llmEpisode.lastProbeAt, nowDate.getTime(), backoffSec)) {
+        const raw = await deps.probeLlmReachable();
+        const pingOk = typeof raw === "boolean" ? raw : raw.ok;
+        // Amendment 2: on failure, the probe's own first error line rides along in the event —
+        // an operator reading the ledger can tell "provider still down" (429/overloaded) from
+        // a local misconfiguration ("Exceeded USD budget" -> probeMaxBudgetUsd too low;
+        // "unknown option" -> CLI too old for the ping's flags).
+        const pingDetail = typeof raw === "boolean" ? undefined : raw.detail;
+        state.appendEvent("park-probe", {
+          source: "llm", success: pingOk,
+          attempts: pingOk ? llmEpisode.probeAttempts : llmEpisode.probeAttempts + 1,
+          ...(!pingOk && pingDetail != null ? { reason: pingDetail } : {}),
+        });
+        if (!pingOk) {
+          // Ping failed (network/auth/CLI/no capacity at all) — no canary spent, backoff grows.
+          state.bumpParkProbe("llm", iso());
+        } else {
+          // Ping green: pace the next check (touch, NOT bump — the exponent only grows on a
+          // FAILED outcome) and, forge permitting, arm exactly one canary for DISPATCH below.
+          state.touchParkProbe("llm", iso());
+          if (state.parkRow("forge") == null) canaryBudget = 1;
+        }
+      }
+    }
+    // Escalation per episode (re-read post-probe: a just-resumed episode must not escalate).
+    for (const episode of state.parkedSources()) {
+      if (
+        episode.escalatedAt == null &&
+        parkDurationExceededSec(episode.enteredAt, nowDate.getTime(), cfg.envFailure.parkEscalateAfterSec)
+      ) {
+        await escalatePark(forge, state, cfg, episode, state.parkRow("forge") != null, iso);
+      }
+    }
+  }
+  // #168 P2-B (PR #180 round 3): a recovery observed by THIS tick's probes takes effect NEXT
+  // tick, not this one — `parkActive` ORs the pre-probe capture with the post-probe read, so a
+  // forge probe that just succeeded leaves this tick's dispatch gated. Rationale: env-failure
+  // requeues suspended by the forge outage drain in the ROLLBACK RETRY phase, which runs at
+  // the TOP of a tick — before this tick's probes could have cleared the episode — so a
+  // same-tick resume would fill the lanes with whatever else was Ready while the outage
+  // VICTIM's requeue only lands next tick. Deferring one tick makes the next tick's ordering
+  // (rollback retry, THEN dispatch) do the fairness work with zero new machinery. The one
+  // same-tick resume that remains legal: an llm episode cleared by its CANARY during this
+  // tick's own RECLAIM phase (before the pre-probe capture) — safe, because an llm-only park
+  // never suspends requeues (they were attempted inline, forge healthy). The canary path
+  // itself still needs `parkActive` true + `canaryBudget` to open the loop for exactly one
+  // lane.
+  const parkActive = parkedBeforeProbes || state.isParked();
+
   // ── DISPATCH: fill free lanes from the Ready queue, by priority, within caps + budget ──
-  //   #75: skipped entirely while `paused` — no new lane dispatch, not even "skipped" rows
-  //   (mirrors the kill-switch tick's dispatched: [] — see its test comment). overBudget is
-  //   still reported (cheap, dispatch-independent — just deps.roundSpendUsd vs. the cap), but
-  //   nothing below it runs: no Ready-queue read, no claim, no worker spawn.
+  //   #75/#168: skipped entirely while `paused` OR `parkActive` — no new lane dispatch, not even
+  //   "skipped" rows (mirrors the kill-switch tick's dispatched: [] — see its test comment) —
+  //   EXCEPT the llm-park canary (P1-1): `canaryBudget` opens the loop for exactly ONE lane,
+  //   which is recorded on the llm episode (setParkCanary) the moment it launches.
+  //   overBudget is still reported (cheap, dispatch-independent — just deps.roundSpendUsd vs.
+  //   the cap), but nothing below it runs: no Ready-queue read, no claim, no worker spawn.
   //   The roundSpendUsd THUNK is evaluated exactly HERE — after the reclaim phase above has
   //   banked any terminal lanes' spend, before the dispatch loop below reads overBudget — so
   //   a same-tick reclaim that crosses the round budget blocks this same tick's refill
@@ -1149,7 +1566,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // Kept SEPARATE from overBudget so TickResult.overBudget keeps meaning exactly
   // cost.roundBudgetUsd (its consumers pre-date the run-level stop family).
   const runSpendStop = deps.runSpendStopCrossed?.() ?? false;
-  if (!paused) {
+  if (!paused && (!parkActive || canaryBudget > 0)) {
     // Capacity counts running + driving lanes: a driving lane holds a PR awaiting the review
     // gate and must keep occupying a lane, else reclaiming a PR-producing worker would free a
     // slot and over-fill past cfg.lanes.max (Codex R2 P2). Re-read post-reclaim.
@@ -1182,7 +1599,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // #124: dispatchCapOverride (round.ts's remaining round-quota) replaces the plain
       // cfg.lanes.roundDispatchCap for a caller that tracks quota ACROSS ticks; unset (the
       // tick-driver, driver.ts) leaves this a flat per-tick rate limit, exactly as before.
-      if (dispatchedThisTick >= (deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap)) {
+      // #168 P1-1: while still parked, the loop is only open at all because a canary was armed
+      // — the effective cap is exactly that canary budget (1), never the normal quota.
+      const effectiveCap = parkActive
+        ? Math.min(canaryBudget, deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap)
+        : (deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap);
+      if (dispatchedThisTick >= effectiveCap) {
         dispatched.push({ kind: "skipped", issue: issue.number, reason: "cap" });
         continue;
       }
@@ -1231,18 +1653,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         throw e;
       }
       const { name, sessionId } = dispatchRes;
-      state.upsertWorker({
+      const workerRow: WorkerRow = {
         name, issue: issue.number, session_id: sessionId, state: "running",
         started_at: iso(), ended_at: null,
-      });
-      state.appendEvent("dispatched", { worker: name, issue: issue.number });
+      };
+      // #168 P1-1: a lane dispatched while still parked IS the llm episode's canary — recorded
+      // durably on the episode row the moment it launches, so its terminal reclaim
+      // (settleCanary) can recognize it and no second canary can launch while it's in flight
+      // (the PARK section skips probing while canary_worker is set), across restarts too.
+      // P2-A (round 3): worker row + canary assignment + events land in ONE transaction
+      // (state.registerCanaryDispatch) — a crash can no longer leave a live canary the
+      // restarted engine doesn't know about (which would break "exactly one canary").
+      if (parkActive) {
+        state.registerCanaryDispatch(workerRow, "llm");
+      } else {
+        state.upsertWorker(workerRow);
+        state.appendEvent("dispatched", { worker: name, issue: issue.number });
+      }
       inFlightIssues.add(issue.number);
       lanesUsed++;
       dispatchedThisTick++;
       if (!isCodingRank(rank)) metaUsed++;
       dispatched.push({ kind: "dispatched", issue: issue.number, worker: name });
     }
-  } // !paused (#75)
+  } // !paused (#75) / park canary (#168)
 
   return {
     reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated,

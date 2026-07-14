@@ -82,6 +82,91 @@ merges are frozen and running workers are being drained. Recovery:
 If a drain escalated to a hard kill (the drain window elapsed before a worker handed
 off), that lane's issue/PR will carry `needs-human` — see above.
 
+## Environment-failure park (#168)
+
+A failure whose structured error output matches an environment-failure signature — an
+LLM-provider issue (429 / usage-limit / credit-exhausted) or a forge issue (network unreachable
+/ 5xx / `gh` auth errors) — is treated as a fault in *sapwood's own environment*, not in the
+task the worker was doing. (Only the process's stderr and errored result records are matched —
+never the worker's own message content, so a worker *writing code about* rate limits can't trip
+this.) This is deliberately a **different** class from an ordinary task failure or the kill
+switch above: the engine never applies `needs-human` and never spends a gated-reentry attempt
+for it — the affected issue goes back to `Ready` untouched (during a forge outage, the requeue
+itself is held durably and drains on resume), and the engine **parks** instead: new dispatch
+stops, but in-flight lanes keep running/draining exactly as normal (the same "only DISPATCH is
+gated" behavior as `PAUSE`, not the kill switch's harder freeze-and-drain).
+
+**What a parked engine looks like:**
+
+```
+$ sapwood status
+...
+park: PARKED (forge) since 2026-07-14T09:12:03.000Z (612s) — reason: could not resolve host —
+  no new dispatch; in-flight lanes proceed normally; probing on backoff, auto-resumes on recovery
+```
+
+- `source` is `llm` or `forge` — which upstream tripped the signature match. Episodes are
+  per-source: a mixed storm (both upstreams broken) shows one `park:` line per source, and
+  dispatch resumes only when **every** episode has cleared.
+- `reason` is a short excerpt of the matched failure text.
+- The duration shown is wall-clock since the FIRST detection in this episode — further
+  env-failures (including failed recovery canaries) while already parked never reset this clock.
+
+**What sapwood does on its own (no action needed for a transient outage):** while parked, the
+engine re-checks the failed source on a bounded exponential backoff
+(`envFailure.probeBackoffBaseSec` doubling up to `probeBackoffMaxSec`):
+
+- A **forge** episode clears the moment a lightweight read-only GitHub call succeeds again —
+  dispatch resumes that same tick, and any requeues held during the outage drain right after.
+- An **llm** episode is stricter. At each backoff step sapwood first sends a **minimal
+  inference ping** (~$0.016 per ping on `envFailure.probeModel`, default `haiku`, budget-capped
+  by `envFailure.probeMaxBudgetUsd`); a failed ping means the provider is still down — and the
+  ping's own error line is recorded in the `park-probe` event, so `Exceeded USD budget` (your
+  `probeMaxBudgetUsd` is set below the ~$0.016 floor) and `unknown option` (your claude CLI is
+  too old for the ping's flags — upgrade it) are immediately distinguishable from a real
+  outage. A green ping proves basic network/auth/capacity but *not* that your worker's
+  model/tier has quota — so it only unlocks exactly **one canary lane**. If the canary
+  completes without an env-classified failure, the provider is provably back and the episode
+  clears; if the canary itself env-fails, the same episode continues with a longer backoff.
+  You may therefore see a single `canary lane <name> in flight` note in `sapwood status` while
+  parked — that is the recovery test, not a dispatch leak.
+
+Most outages (a `gh` blip, a temporary rate-limit window) resolve this way with zero human
+involvement.
+
+**When a human IS notified:** if an episode's *duration* (not probe count — backoff makes a
+count an ambiguous measure of elapsed time) exceeds `envFailure.parkEscalateAfterSec` (default
+1h), sapwood additionally notifies a human — this is **additive**, never a state change: probing
+keeps going, and an auto-resume still fires normally afterward even after an escalation fired.
+The channel depends on what's actually reachable:
+
+- **Forge reachable** (an `llm` episode, forge healthy) — a comment on the issue that triggered
+  the episode.
+- **Forge unreachable** (a `forge` episode, or any escalation during a mixed storm) — sapwood
+  does not attempt a GitHub write at all: it falls back to **local-only** signals: `sapwood
+  status` (above), a plain-text `ESCALATION` file in the engine's data dir (`data/ESCALATION`
+  by default) written by the engine — informational output only, never read back as a control
+  input, unlike `KILL_SWITCH`/`PAUSE`, and removed automatically once the outage resolves —
+  and a `[sapwood:park]` log line.
+
+The escalation also names how many issue requeues are being held for resume, so nothing is
+invisibly parked-behind-the-park.
+
+**What to do:**
+
+1. Run `sapwood status` (or `cat data/ESCALATION` if the forge itself is down) to see each
+   episode's source/reason/duration.
+2. If the underlying outage is a known, expected one (a GitHub incident, an account-level rate
+   limit reset time you already know), you can just wait — sapwood keeps probing/canarying and
+   resumes on its own.
+3. If you fix the underlying problem yourself (renew a `gh` token, restore network, wait out a
+   credit/usage window), no action is needed on sapwood's side either — the next scheduled
+   probe (or canary) picks up the recovery and auto-resumes.
+4. There is no manual "unpark" flag — recovery is always evidenced by the environment actually
+   working again (a successful forge read, or a canary lane completing). Restarting the engine
+   does not lose the park state or its duration clock — it resumes probing, not dispatching —
+   and does not, on its own, clear a still-genuinely-broken environment either.
+
 ## Tick errors (`sapwood status` / run summary)
 
 `sapwood run`'s exit line reports a tick-error count:

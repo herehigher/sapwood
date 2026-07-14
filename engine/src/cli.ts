@@ -9,9 +9,9 @@ import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { loadConfig, DEFAULT_CONFIG_PATHS, type SapwoodConfig } from "./config.js";
 import { init, InitError } from "./init.js";
-import { State, SCHEMA_VERSION, type WorkerRow } from "./state.js";
+import { State, SCHEMA_VERSION, type WorkerRow, type ParkRow } from "./state.js";
 import { GithubForge, type IForge, type Issue } from "./forge.js";
-import { WorkerSupervisor, buildRenderPrompt } from "./worker.js";
+import { WorkerSupervisor, buildRenderPrompt, discoverClaudeBin, probeLlmPing } from "./worker.js";
 import { loadPricingTable } from "./pricing.js";
 import { makeReviewer, makeFallbackReviewers } from "./reviewer.js";
 import { MergeDriver } from "./merge-driver.js";
@@ -392,6 +392,11 @@ export interface StatusSnapshot {
   /** null when no config could be loaded — reported as "unknown", never a fabricated default. */
   lanesMax: number | null;
   dailyBudgetUsd: number | null;
+  /** #168: every open environment-failure park episode (at most one per source — llm/forge),
+   *  empty when not parked. Read straight off state.ts's park_state rows
+   *  (State.parkedSources()) — same "always live, no caching" property every other
+   *  sentinel/flag on this snapshot has. */
+  parked: ParkRow[];
 }
 
 export function formatStatus(s: StatusSnapshot): string {
@@ -420,6 +425,20 @@ export function formatStatus(s: StatusSnapshot): string {
       ? `ceiling breach: ${s.ceilingBreach.reasons.join(", ")} (since ${s.ceilingBreach.at.toISOString()})`
       : "ceiling breach: none",
   );
+  if (s.parked.length > 0) {
+    for (const p of s.parked) {
+      const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(p.enteredAt)) / 1000));
+      lines.push(
+        `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +
+          `reason: ${p.reason} — no new dispatch; in-flight lanes proceed normally; ` +
+          `probing on backoff, auto-resumes on recovery` +
+          (p.canaryWorker ? ` — canary lane ${p.canaryWorker} in flight` : "") +
+          (p.escalatedAt ? ` — escalated to a human at ${p.escalatedAt}` : ""),
+      );
+    }
+  } else {
+    lines.push("park: inactive");
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -473,6 +492,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       dailySpendUsd: state.dailySpendUsd(new Date()),
       lanesMax: cfg?.lanes.max ?? null,
       dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
+      parked: state.parkedSources(),
     };
     return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
   } finally {
@@ -734,8 +754,18 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // engine-wide daily/wall-clock/kill-switch ceiling (cfg.cost.dailyBudgetUsd /
   // maxWallClockSec / KILL_SWITCH) is fully live regardless — that's the actual hard safety
   // boundary; roundBudgetUsd is a softer per-round throttle.
+  // #168 (P1-1 amendment): the real LLM-source park probe — a minimal inference ping on the
+  // cheapest model (worker.ts's probeLlmPing), resolved against the SAME claude binary
+  // WorkerSupervisor's dispatch() would use. The rich {ok, detail} result flows into the
+  // park-probe event so a failing probe names its own cause.
+  const probeLlmReachable = () =>
+    probeLlmPing(
+      discoverClaudeBin(process.env), cfg.envFailure.probeModel,
+      cfg.envFailure.probeMaxBudgetUsd, cfg.envFailure.probeTimeoutSec,
+    );
   const result = await runDriver({
     forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, stopMode, stop,
+    probeLlmReachable,
   });
   // #76: name the condition that fired BEFORE the generic stop-summary line, when one did.
   if (result.stopCondition) {
@@ -777,8 +807,15 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
   await assertStopMilestoneExists(forge, stop);
   console.log(`sapwood run: driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
+  // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
+  const probeLlmReachable = () =>
+    probeLlmPing(
+      discoverClaudeBin(process.env), cfg.envFailure.probeModel,
+      cfg.envFailure.probeMaxBudgetUsd, cfg.envFailure.probeTimeoutSec,
+    );
   const result = await runRounds({
     forge, state, supervisor, cfg, mergeGate, tickIntervalSec: cfg.engine.tickIntervalSec, peripherals, stop,
+    probeLlmReachable,
     ...(overrides.sleep !== undefined ? { sleep: overrides.sleep } : {}),
     ...(overrides.registerSignals !== undefined ? { registerSignals: overrides.registerSignals } : {}),
     ...(overrides.onRoundPhase !== undefined ? { onRoundPhase: overrides.onRoundPhase } : {}),

@@ -6,10 +6,11 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import {
-  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, claudeArgs, guardSettings, shellSingleQuote,
+  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, probeLlmPing, extractFailureText, claudeArgs, guardSettings, shellSingleQuote,
   WorkerSupervisor, renderPromptTemplate, defaultPromptPath, loadWorkerPromptTemplate, buildRenderPrompt,
 } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
+import { classifyEnvFailure, DEFAULT_LLM_FAILURE_PATTERNS, DEFAULT_FORGE_FAILURE_PATTERNS } from "./env-failure.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
@@ -251,6 +252,110 @@ const mkHook = (dir: string): string => {
   writeFileSync(p, "process.exit(0)\n");
   return p;
 };
+
+// ── #168 (P1-1 amendment, final form): probeLlmPing — the LLM-source park probe's real
+//    implementation: a minimal stripped inference ping; success = exit 0 AND trimmed stdout
+//    containing "pong" (case-insensitive). Failure carries a `detail` (first stderr/error
+//    line) so the park-probe event can name its own cause. ──────────────────────────────────
+
+test("probeLlmPing: exit 0 + 'pong' on stdout -> ok (case-insensitive, whitespace-tolerant), no detail", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "  Pong  "\nexit 0\n`);
+    assert.deepEqual(await probeLlmPing(bin, "haiku", 0.05, 30), { ok: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing: exit 0 but NON-pong stdout -> failure, detail carries the first output line", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "I'm sorry, I can't help with that."\nexit 0\n`);
+    const r = await probeLlmPing(bin, "haiku", 0.05, 30);
+    assert.equal(r.ok, false);
+    assert.ok(r.detail?.includes("I'm sorry"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing (P3): a sentence CONTAINING 'pong' is a failure — success requires the normalized output to EQUAL 'pong'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "I cannot return only pong"\nexit 0\n`);
+    const r = await probeLlmPing(bin, "haiku", 0.05, 30);
+    assert.equal(r.ok, false, "a refusal mentioning 'pong' must never read as provider health");
+    assert.ok(r.detail?.includes("I cannot return only pong"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing: non-zero exit -> failure even with 'pong' on stdout; detail prefers the STDERR error line (the 'Exceeded USD budget' / 'unknown option' operator signal)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho pong\necho "Error: Exceeded USD budget (0.01)" >&2\nexit 1\n`);
+    const r = await probeLlmPing(bin, "haiku", 0.01, 30);
+    assert.equal(r.ok, false);
+    assert.equal(r.detail, "Error: Exceeded USD budget (0.01)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing: an older CLI rejecting the ping's flags surfaces the unknown-option line as detail", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "error: unknown option '--no-session-persistence'" >&2\nexit 1\n`);
+    const r = await probeLlmPing(bin, "haiku", 0.05, 30);
+    assert.equal(r.ok, false);
+    assert.ok(r.detail?.includes("unknown option"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing: a nonexistent binary -> failure with a spawn detail, never throws", async () => {
+  const r = await probeLlmPing("/no/such/binary/sapwood-168", "haiku", 0.05, 30);
+  assert.equal(r.ok, false);
+  assert.ok(r.detail);
+});
+
+test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves failure with a timeout detail, never left dangling", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\necho pong\n`);
+    const start = Date.now();
+    const r = await probeLlmPing(bin, "haiku", 0.05, 1); // 1s timeout vs a 30s hang
+    assert.equal(r.ok, false);
+    assert.ok(r.detail?.includes("timed out"));
+    assert.ok(Date.now() - start < 10_000, "resolved via the timeout kill, not by waiting out the 30s sleep");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no-session-persistence, --system-prompt, --strict-mcp-config, --tools '', --max-budget-usd, --output-format text, prompt (and NO --max-tokens, which the CLI rejects)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  const argsFile = join(dir, "args.txt");
+  try {
+    // NUL-separated capture: one argv entry is the EMPTY string (--tools ""), which a
+    // newline-separated printf would silently swallow on split.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${argsFile}"\necho pong\nexit 0\n`);
+    assert.deepEqual(await probeLlmPing(bin, "my-cheap-model", 0.05, 30), { ok: true });
+    const argv = readFileSync(argsFile, "utf8").split("\0").slice(0, -1);
+    assert.deepEqual(argv, [
+      "-p", "--model", "my-cheap-model", "--no-session-persistence",
+      "--system-prompt", "You are a heartbeat responder. Only output the requested word.",
+      "--strict-mcp-config", "--tools", "",
+      "--max-budget-usd", "0.05", "--output-format", "text",
+      "Respond with the single word 'pong' and nothing else.",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 const sup = (dir: string, claudeBin: string, hasPr = false, worktreeRoot?: string) =>
   new WorkerSupervisor({
@@ -994,6 +1099,128 @@ test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — 
     const s = sup(dir, "claude"); // no dispatch/resume -> no in-memory Lane for this name
     const p = await s.probe(name);
     assert.equal(p.liveTelemetry, undefined, "a detached lane has no known baseline -> no live telemetry, never a guessed one");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #168: environment-failure failureText capture — probe() reads the SAME jsonl already used
+//    for terminalCostUsd/terminalModelUsage (no new capture mechanism), only for a FAILED lane.
+
+test("#168: probe() of a FAILED lane surfaces failureText from the jsonl (stdout+stderr merged)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-168-failed";
+    writeFileSync(
+      join(dir, `${name}.failed.json`),
+      JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0, exit_code: 1 }),
+    );
+    writeFileSync(
+      join(dir, `${name}.jsonl`),
+      `{"type":"system","subtype":"init"}\n` +
+        `API Error: 429 too many requests — rate_limit_error\n` + // raw stderr, non-JSON line
+        `{"type":"result","subtype":"error","is_error":true,"result":"request failed"}\n`,
+    );
+    const s = sup(dir, "claude"); // no live process — a static terminal sentinel + jsonl is enough
+    const p = await s.probe(name);
+    assert.equal(p.failed, true);
+    assert.ok(p.failureText?.includes("429 too many requests"), "raw non-JSON stderr lines are captured, not just parsed JSON fields");
+    assert.ok(p.failureText?.includes("rate_limit_error"));
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#168: probe() of a DONE (non-failed) lane never populates failureText", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-168-done";
+    writeFileSync(
+      join(dir, `${name}.done.json`),
+      JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0.01, exit_code: 0 }),
+    );
+    writeFileSync(join(dir, `${name}.jsonl`), `{"type":"result","subtype":"success","total_cost_usd":0.01}\n`);
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.equal(p.done, true);
+    assert.equal(p.failureText, undefined);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#168: failureText is tail-capped for a large jsonl — the classifiable error near the end still comes through", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-168-tail";
+    writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0 }));
+    const padding = "x".repeat(10_000);
+    writeFileSync(join(dir, `${name}.jsonl`), `${padding}\nCould not resolve host: github.com\n`);
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.ok(p.failureText && p.failureText.length <= 4000, "capped, not the whole 10k+ jsonl");
+    assert.ok(p.failureText?.includes("Could not resolve host"), "the tail (where the error actually is) survives the cap");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #168 (PR #180 review P1-3): failureText is built from STRUCTURED error records only —
+//    NEVER assistant message content. A worker legitimately WORKING ON rate-limit handling
+//    prints the exact signature strings as part of doing its job; that must never park the
+//    engine on an ordinary task failure.
+
+test("extractFailureText: assistant/user/system records and SUCCESSFUL results are excluded; stderr lines + errored results + error records are included", () => {
+  const jsonl = [
+    `{"type":"system","subtype":"init","model":"opus"}`,
+    `{"type":"assistant","message":{"content":[{"type":"text","text":"I will add handling for rate_limit_error and 429 Too Many Requests"}]}}`,
+    `{"type":"user","message":{"content":"also handle Could not resolve host"}}`,
+    `gh: Bad credentials (HTTP 401)`, // raw stderr — included
+    `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`, // API error record — included
+    `{"type":"result","subtype":"success","result":"clean run mentioning usage limit reached","total_cost_usd":0.1}`, // successful result — excluded
+    `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"request failed"}`, // errored result — included
+  ].join("\n");
+  const out = extractFailureText(jsonl);
+  assert.ok(out.includes("gh: Bad credentials"));
+  assert.ok(out.includes("overloaded_error"));
+  assert.ok(out.includes("[error_during_execution] request failed"));
+  assert.ok(!out.includes("429 Too Many Requests"), "assistant content is NEVER included");
+  assert.ok(!out.includes("Could not resolve host"), "user content is NEVER included");
+  assert.ok(!out.includes("usage limit reached"), "a successful result's text is NEVER included");
+});
+
+test("extractFailureText: an unparseable {-prefixed line (mid-write stream fragment, possibly of an assistant message) is SKIPPED, never included", () => {
+  const truncatedAssistant = `{"type":"assistant","message":{"content":[{"type":"text","text":"discussing rate_limit_error and how`;
+  assert.equal(extractFailureText(truncatedAssistant), "");
+});
+
+test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTANT text + a non-env failure -> task failure, no env classification, no park", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-168-neg";
+    writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0 }));
+    // A worker FIXING rate-limit handling: its assistant messages carry the exact signature
+    // strings verbatim; the actual failure is an ordinary failing test.
+    writeFileSync(
+      join(dir, `${name}.jsonl`),
+      `{"type":"assistant","message":{"content":[{"type":"text","text":"Testing the retry path for rate_limit_error, 429 too many requests, usage limit reached, and Could not resolve host"}]}}\n` +
+        `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"AssertionError: retry test failed — expected 3 retries, got 0"}\n`,
+    );
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.equal(p.failed, true);
+    assert.ok(!p.failureText?.includes("rate_limit_error"), "the assistant's signature strings never reach failureText");
+    assert.equal(
+      classifyEnvFailure(p.failureText ?? "", {
+        llm: [...DEFAULT_LLM_FAILURE_PATTERNS], forge: [...DEFAULT_FORGE_FAILURE_PATTERNS],
+      }),
+      null,
+      "an ordinary task failure whose assistant text discusses the signatures classifies as a TASK failure",
+    );
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

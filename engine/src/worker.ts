@@ -172,6 +172,122 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
+/** #168: the ping probe's outcome. `detail` is set on FAILURE only — the first stderr (or
+ *  stdout) error line, a timeout note, or a spawn error — so the recorded probe event lets an
+ *  operator distinguish "provider still down" (a 429/overloaded error) from a local
+ *  misconfiguration ("Error: Exceeded USD budget (0.01)" = envFailure.probeMaxBudgetUsd set
+ *  too low; see docs/configuration.md). */
+export interface LlmPingResult {
+  ok: boolean;
+  detail?: string;
+}
+
+/** The ping's fixed prompt pair — deliberately strict so the response is a single word
+ *  (minimum output tokens) and deliberately engine-internal, not config. The custom
+ *  --system-prompt REPLACES the CLI's default (much larger) system prompt. */
+const LLM_PING_SYSTEM_PROMPT = "You are a heartbeat responder. Only output the requested word.";
+const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
+
+/** #168 (PR #180 review, P1-1 amendment — final form): the LLM-source probe for conductor.ts's
+ *  park machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping, verified
+ *  working against claude CLI 2.1.209 in exactly this form (returns "pong", exit 0):
+ *
+ *      claude -p --model <probeModel> --no-session-persistence \
+ *        --system-prompt "<LLM_PING_SYSTEM_PROMPT>" --strict-mcp-config --tools "" \
+ *        --max-budget-usd <probeMaxBudgetUsd> --output-format text "<LLM_PING_PROMPT>"
+ *
+ *  Flag rationale: --no-session-persistence keeps probe runs off the disk (no session files);
+ *  --system-prompt REPLACES the CLI's default full system prompt; --strict-mcp-config +
+ *  --tools "" strip MCP servers and tool schemas from the request — the smallest prompt
+ *  surface and the fewest failure modes the CLI supports. (--max-tokens does NOT exist in the
+ *  CLI — verified unknown-option error — and must not be added.)
+ *
+ *  Success = exit code 0 AND the trimmed, lowercased stdout being EXACTLY "pong" (PR #180
+ *  round-3 P3: a contains-check passed refusals like "I cannot return only pong"; normalized
+ *  equality cannot). This replaced
+ *  the original `claude --version` check, which proves nothing about the PROVIDER — the CLI
+ *  stays installed and executable throughout a rate-limit/credit outage. The ping proves
+ *  network + auth + some account capacity on the cheapest model (cfg.envFailure.probeModel,
+ *  default "haiku"). It deliberately does NOT prove the WORKER's model/tier has quota
+ *  (model-specific caps, primary-model-only overload) — exactly why the canary +
+ *  episode-continuity layers above it remain: ping (cheap filter, paced by backoff) ->
+ *  success unlocks ONE canary lane -> only the canary reaching a non-env terminal clears the
+ *  llm episode. A false-positive ping costs one bounded canary spawn and never resets the
+ *  episode clock. The ping subsumes CLI-breakage detection too (broken CLI = ping fails).
+ *
+ *  COST (empirical, honest number): ~$0.016 measured per probe even fully stripped — the CLI
+ *  still sends ~7.4k scaffolding tokens as cache-creation plus ~240 output tokens, so the
+ *  floor is >$0.01, never "a few tokens". `--max-budget-usd` bounds it
+ *  (cfg.envFailure.probeMaxBudgetUsd, default 0.05): a cap at or below the floor (e.g. 0.01)
+ *  empirically FAILS every probe with "Error: Exceeded USD budget (0.01)" exit 1 — which is
+ *  why the failure detail is surfaced: a too-low cap keeps the engine parked, a fail-safe but
+ *  confusing state without the stderr line in the event. An OLDER CLI lacking these flags
+ *  fails every probe with "error: unknown option ..." — same surfacing, remedy is a CLI
+ *  upgrade (see docs/configuration.md).
+ *
+ *  Never throws — any spawn error, non-zero exit, non-"pong" output, or a hang past
+ *  `timeoutSec` (hard kill) resolves `{ ok: false, detail }`. */
+export function probeLlmPing(
+  claudeBin: string, probeModel: string, probeMaxBudgetUsd: number, timeoutSec: number,
+): Promise<LlmPingResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (r: LlmPingResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    const firstLine = (s: string): string => s.trim().split("\n")[0]?.trim() ?? "";
+    let child: ChildProcess;
+    try {
+      child = spawn(
+        claudeBin,
+        [
+          "-p", "--model", probeModel, "--no-session-persistence",
+          "--system-prompt", LLM_PING_SYSTEM_PROMPT, "--strict-mcp-config", "--tools", "",
+          "--max-budget-usd", String(probeMaxBudgetUsd), "--output-format", "text",
+          LLM_PING_PROMPT,
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } catch (e) {
+      finish({ ok: false, detail: `ping spawn failed: ${e instanceof Error ? e.message : String(e)}` });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      finish({ ok: false, detail: `ping timed out after ${timeoutSec}s (hard-killed)` });
+    }, timeoutSec * 1000);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      finish({ ok: false, detail: `ping spawn error: ${e.message}` });
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0 && stdout.trim().toLowerCase() === "pong") {
+        finish({ ok: true });
+        return;
+      }
+      // Failure detail: prefer the first stderr error line (where "Exceeded USD budget" and
+      // API errors land), else the first stdout line, else the bare exit code.
+      const detail = firstLine(stderr) || firstLine(stdout) || `ping exited ${code} with no output`;
+      finish({ ok: false, detail });
+    });
+  });
+}
+
 export interface ClaudeArgsOpts {
   prompt: string;
   model: string;
@@ -218,6 +334,58 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
 }
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "handoff.json", "heartbeat", "jsonl"];
+
+/** #168: tail cap for terminalFailureText's extracted text — see extractFailureText's doc. */
+const FAILURE_TEXT_TAIL_CHARS = 4000;
+
+/** #168 (PR #180 review P1-3): build the env-failure classification input from STRUCTURED
+ *  error records only — NEVER from assistant message content. The naive version (a raw tail of
+ *  the whole jsonl) let a worker legitimately WORKING ON rate-limit handling — whose assistant
+ *  messages print the exact signature strings (`rate_limit_error`, `429 Too Many Requests`) as
+ *  part of doing its job — park the entire engine on an ordinary task failure. Included, line
+ *  by line:
+ *   - NON-JSON lines: the process's own stderr (spawn merges stdout+stderr onto one fd; stdout
+ *     is exclusively JSON stream lines, so a bare-text line can only be stderr/CLI output —
+ *     where real 429/network/auth errors actually land). A `{`-prefixed line that fails to
+ *     parse is SKIPPED, not included: it is far more likely a mid-write/truncated stream
+ *     fragment (possibly of an assistant message — content leak risk) than stderr that happens
+ *     to start with `{`.
+ *   - `type:"result"` records ONLY when errored (`is_error` true, or a non-"success" subtype):
+ *     their subtype + `result` text is the CLI's own terminal error report.
+ *   - `type:"error"` records: the API's structured error line (e.g.
+ *     `{"type":"error","error":{"type":"rate_limit_error",...}}`).
+ *   - Everything else — `assistant`/`user`/`system`/successful `result` — is NEVER included. */
+export function extractFailureText(jsonl: string): string {
+  const out: string[] = [];
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (t === "") continue;
+    if (!t.startsWith("{")) {
+      out.push(t); // raw stderr / CLI error output
+      continue;
+    }
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // mid-write/truncated stream fragment — never classify on possibly-content bytes
+    }
+    if (obj.type === "result") {
+      const subtype = typeof obj.subtype === "string" ? obj.subtype : "";
+      const errored = obj.is_error === true || (subtype !== "" && subtype !== "success");
+      if (errored) {
+        const text = typeof obj.result === "string" ? obj.result : "";
+        out.push(`[${subtype || "error"}] ${text}`.trim());
+      }
+      continue;
+    }
+    if (obj.type === "error") {
+      out.push(t); // structured API error record — exactly what the signature sets describe
+    }
+    // assistant / user / system / anything else: excluded by design (see doc comment).
+  }
+  return out.join("\n");
+}
 
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
@@ -891,10 +1059,16 @@ export class WorkerSupervisor implements Supervisor {
     // baseline of 0 would misprice a resumed detached lane's current leg).
     const lane = this.lanes.get(name);
     const liveTelemetry = lane ? this.liveTelemetry(lane) : undefined;
+    // #168: only for a FAILED lane — a DONE/handoff lane's classification is irrelevant
+    // (env-failure disposition only applies to the FAILED reclaim path, conductor.ts), and
+    // computing it unconditionally would re-read the jsonl on every probe of every lane for no
+    // reason.
+    const failureText = failed ? this.terminalFailureText(name) : undefined;
     return {
       done, failed, handoff, hbAge, wrapperAlive, hasPr, costUsd, modelUsage,
       ...(prNumber != null ? { prNumber } : {}),
       ...(liveTelemetry ? { liveTelemetry } : {}),
+      ...(failureText !== undefined ? { failureText } : {}),
     };
   }
 
@@ -927,6 +1101,19 @@ export class WorkerSupervisor implements Supervisor {
       if (Array.isArray(r?.model_usage)) return r.model_usage as ModelUsageEntry[];
     }
     return parseModelUsage(this.readJsonl(this.path(name, "jsonl")));
+  }
+
+  /** #168: a FAILED lane's own captured ERROR output, for conductor.ts's env-failure
+   *  classification — no new capture mechanism, just a new READ of the jsonl this class already
+   *  writes (spawn's `stdio: ["ignore", jsonlFd, jsonlFd]` merges stdout+stderr onto the same
+   *  fd, and probe() already reads this exact file for terminalCostUsd/terminalModelUsage).
+   *  Extraction is STRUCTURED (PR #180 review P1-3 — see extractFailureText: stderr lines +
+   *  errored result/error records only, never assistant message content), then tail-capped: an
+   *  environment failure is almost always the LAST thing the process emits before dying, and
+   *  there's no reason to carry more through LaneProbe than the classifier can use. */
+  private terminalFailureText(name: string): string {
+    const text = extractFailureText(this.readJsonl(this.path(name, "jsonl")));
+    return text.length > FAILURE_TEXT_TAIL_CHARS ? text.slice(-FAILURE_TEXT_TAIL_CHARS) : text;
   }
 
   /** #69: tears the lane's process down, THEN decides its worktree's fate — see

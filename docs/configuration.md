@@ -351,6 +351,95 @@ builds the peripherals map (engine startup) — never re-logged per round or per
 |---|---|---|
 | `mode` | `hard` | `hard`: fail-closed deny — the actual producer≠merger/boundary-write enforcement. `soft`: observe-only — log what would be blocked, but allow it. `soft` is a first-run/dogfood affordance only, never the shipped default; it reaches the hook via a spawn env a worker cannot itself rewrite. |
 
+## `envFailure`
+
+Environment-failure park (#168) — detect an LLM-provider or forge outage as ONE class distinct
+from an ordinary task failure, park the engine (no new dispatch) instead of escalating the
+issue or spending a gated-reentry attempt, self-heal via a bounded backoff probe, and — only
+past a configurable park *duration* — additionally notify a human. Episodes are tracked **per
+source** (an `llm` episode and a `forge` episode can be open simultaneously — a mixed storm);
+dispatch resumes only when *every* open episode has cleared. See
+[`troubleshooting.md`](troubleshooting.md#environment-failure-park-168) for what a parked engine
+looks like and what to do about it.
+
+Pattern matching is deterministic (a case-insensitive regex match against a FAILED lane's own
+**structured error output** — the process's stderr lines plus errored stream-json result/error
+records, never assistant message content, so a worker legitimately *working on* rate-limit
+handling whose messages print the exact signature strings stays an ordinary task failure) —
+never an LLM judgment call. Every pattern is compiled at config load: a malformed regex, an
+empty pattern array, or a backoff cap below the base is a fail-fast startup error (`sapwood
+validate` catches all three).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `llmPatterns` | see `sapwood.config.yaml` | Regex patterns (case-insensitive, compiled/validated at load, non-empty) matched against a FAILED lane's structured error output to classify it as an LLM-provider environment failure — `rate_limit_error`, `usage limit reached`, `credit balance is too low`, `insufficient_quota`, `overloaded_error`, `429 too many requests`, etc. |
+| `forgePatterns` | see `sapwood.config.yaml` | Same matching, for a forge (GitHub) environment failure — `could not resolve host`, `connection refused`, `network is unreachable`, `bad gateway`/`gateway timeout`/`service unavailable`, `bad credentials`, `401 unauthorized`, `gh auth login`, etc. |
+| `parkEscalateAfterSec` | `3600` (1h) | Park **duration** per episode (not probe count — bounded exponential backoff makes a count an ambiguous measure of elapsed time) past which the engine additionally notifies a human via the channel ladder. Additive, never a state transition — probing/auto-resume continue unaffected either side of an escalation. The clock runs from the episode's FIRST detection and is never reset by further failures (including failed recovery canaries) within the same episode. |
+| `probeBackoffBaseSec` | `30` | Initial probe interval while parked (the first probe waits a full base interval — never fires on the same tick the park began). |
+| `probeBackoffMaxSec` | `1800` (30min) | Cap on the bounded exponential backoff (`base * 2^attempts`, capped here). Must be >= `probeBackoffBaseSec` (validated at load). |
+| `probeModel` | `haiku` | The model the llm-source **ping probe** runs on — deliberately the cheapest tier, independent of `worker.model`. Point it at whatever your account's cheapest alias is. |
+| `probeTimeoutSec` | `30` | Hard timeout on one ping — a hung CLI is killed and counted as a failed probe, never allowed to wedge a tick. |
+| `probeMaxBudgetUsd` | `0.05` | `--max-budget-usd` for one ping. **Don't set this below ~$0.02**: even fully stripped, a `-p` invocation still carries ~7.4k CLI scaffolding tokens, so the real floor is >$0.01 (~$0.016 measured) — a too-low cap makes **every** probe fail with `Error: Exceeded USD budget (…)` and the engine stays parked until the duration escalation notifies a human (fail-safe, but confusing). The failing probe's error line is recorded in each `park-probe` event so the symptom names itself. |
+
+**How each source recovers:**
+
+- **`forge`** — the probe is an existing lightweight read-only `IForge` call; its success is a
+  genuine recovery signal and clears the forge episode outright. While a forge episode is open,
+  env-failure issue-requeues are **suspended** (persisted durably, zero forge writes, retry
+  counter frozen) and drain automatically on resume; they are exempt from the rollback retry cap
+  and never degrade to `needs-human`. Dispatch resumes on the tick **after** the recovery
+  probe, not the recovery tick itself — that ordering lets the outage victim's held requeue
+  drain (rollback retry runs at the top of a tick, before dispatch) so other Ready issues can't
+  race it into the freed lanes.
+- **`llm`** — the probe is a **minimal inference ping** (same `CLAUDE_BIN` resolution as a real
+  dispatch):
+
+  ```
+  claude -p --model <probeModel> --no-session-persistence \
+    --system-prompt "You are a heartbeat responder. Only output the requested word." \
+    --strict-mcp-config --tools "" \
+    --max-budget-usd <probeMaxBudgetUsd> --output-format text \
+    "Respond with the single word 'pong' and nothing else."
+  ```
+
+  Success = clean exit + a reply that is exactly `pong` (case/whitespace-normalized equality —
+  a refusal *containing* the word never counts). The custom system prompt replaces the CLI's
+  default one and `--strict-mcp-config`/`--tools ""` strip MCP servers and tool schemas — the
+  smallest request the CLI supports; `--no-session-persistence` keeps probe runs off the disk.
+  **Honest cost:** ~$0.016 per ping measured (the CLI still sends ~7.4k scaffolding tokens plus
+  ~240 output tokens even fully stripped) — at `probeBackoffMaxSec` pacing that is still
+  negligible per day. Because the ping is *paid*, it is suppressed while a hard cost/wall-clock
+  ceiling breach is active (a spend-safety boundary must not itself keep spending) and while
+  dispatch is paused (`data/PAUSE` blocks the canary the ping exists to unlock) — the free
+  forge probe keeps running in both states, and duration escalation is unaffected. A canary
+  stopped by a **drain** (kill switch / ceiling) is settled *inconclusive*: the canary slot is
+  released and the episode continues unchanged — a drain says nothing about the provider, so
+  it neither clears the episode nor grows the backoff; the next backoff step simply pings
+  again. The ping proves network + auth + *some* account capacity on the cheapest model —
+  but **not** that the worker's own model/tier has quota (model-specific caps,
+  primary-model-only overload), so a green ping is only a *gate*, never a recovery signal.
+  When the backoff interval elapses and the ping succeeds (and no forge episode is open), the
+  engine dispatches exactly **one canary lane**. The llm episode clears only when that canary
+  reaches a terminal state that is *not* itself env-classified; a canary that env-fails
+  continues the *same* episode — the entry time (and therefore the escalation clock) is
+  preserved and the backoff keeps growing, so a persistent outage costs one ping + one canary
+  per backoff step, never a full-queue redispatch cycle. A broken CLI needs no separate check:
+  the ping simply fails — and an **older CLI lacking these flags** fails every probe with
+  `error: unknown option …` (the symptom is a permanently parked engine whose `park-probe`
+  events name the unknown option; the remedy is upgrading the CLI — these flags exist as of
+  2.x). Every failed ping records its first error line in the `park-probe` event, so
+  "provider still down" (a 429), "budget cap too low" (`Exceeded USD budget`), and "CLI too
+  old" (`unknown option`) are all distinguishable from the event ledger.
+
+**Escalation channel ladder:** an `llm`-sourced escalation with the forge healthy notifies via a
+comment on the issue whose lane triggered the episode; a `forge`-sourced escalation — or an
+`llm`-sourced one during a mixed storm whose forge episode is also open — never attempts a
+GitHub write at all: it falls back to `sapwood status`, a local `ESCALATION` file in the
+engine's data dir (written by the engine, read-only informational output, never a control input
+— unlike `KILL_SWITCH`/`PAUSE`; removed automatically once the outage resolves), and a log
+line. The escalation event records the channel *actually* used, including a comment attempt
+that failed and degraded to local.
+
 ## `escalation`
 
 | Key | Default | Meaning |

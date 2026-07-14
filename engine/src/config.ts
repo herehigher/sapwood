@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { DEFAULT_LLM_FAILURE_PATTERNS, DEFAULT_FORGE_FAILURE_PATTERNS } from "./env-failure.js";
 
 const Board = z.object({
   // Removes 0day's hard-coded PROJECT_NUMBER / user-vs-org / literal status names.
@@ -506,6 +507,81 @@ const Recovery = z.object({
   rollbackRetryCap: z.number().int().positive().default(5),
 }).strict();
 
+// #168: environment-failure park — detect (signature pattern sets per source), park, probe,
+// auto-resume, timed human escalation. User-tunable-in-config (same shipped-commented-YAML
+// precedent as labels.*/pricing.yaml): patterns are matched deterministically (env-failure.ts's
+// classifyEnvFailure — regex, case-insensitive) against a FAILED lane's own captured output
+// (worker.ts's stream-json jsonl, which already merges stdout+stderr onto one fd) — never an LLM
+// judgment call (issue #168 decision 2). Defaults are deliberately signature-shaped (API/CLI
+// error identifiers, full HTTP-error phrases) rather than bare words like "rate limit" — a
+// worker's own prose discussing "the rate limiter" or a test asserting "expected 429, got 500"
+// must NOT match (issue #168's required negative test case).
+const EnvFailure = z.object({
+  // Defaults live in env-failure.ts (the classifier's own module) so the shipped pattern set and
+  // the code that matches against it can never drift apart — this schema only wraps them in a
+  // user-overridable array default. Non-empty (PR #180 review P3-1): an empty pattern set would
+  // silently disable env-failure detection for that whole source — if that's genuinely wanted,
+  // it should be a deliberate, visible decision, not an accident of clearing an array.
+  llmPatterns: z.array(z.string().min(1)).min(1).default([...DEFAULT_LLM_FAILURE_PATTERNS]),
+  forgePatterns: z.array(z.string().min(1)).min(1).default([...DEFAULT_FORGE_FAILURE_PATTERNS]),
+  // Park DURATION (not probe count — bounded exponential backoff makes a probe COUNT an
+  // ambiguous measure of elapsed time, issue #168 decision 3) past which the engine additionally
+  // notifies a human via the channel ladder (conductor.ts's escalatePark). Additive, never a
+  // state transition — probing continues unchanged, auto-resume still fires the instant a probe
+  // succeeds, escalated or not. Conservative default: 1h.
+  parkEscalateAfterSec: z.number().int().positive().default(3600),
+  // Bounded exponential backoff for the probe cadence while parked (env-failure.ts's
+  // probeBackoffSec): base * 2^attempts, capped at max.
+  probeBackoffBaseSec: z.number().int().positive().default(30),
+  probeBackoffMaxSec: z.number().int().positive().default(1800),
+  // #168 P1-1 amendment: the llm-source probe is a REAL minimal inference ping (worker.ts's
+  // probeLlmPing — see its doc comment for the exact verified argv), not a --version check: it
+  // proves network + auth + some account capacity on the CHEAPEST model, while the worker's
+  // own (possibly capped) model/tier is still verified by the canary lane the ping merely
+  // unlocks. User-tunable per the config rule — an operator whose cheapest available alias
+  // differs points this at it.
+  probeModel: z.string().min(1).default("haiku"),
+  // Hard timeout on one ping (kill + treat as a failed probe). A hung CLI must never wedge a
+  // tick — the ping is called inline from tick()'s PARK section.
+  probeTimeoutSec: z.number().int().positive().default(30),
+  // --max-budget-usd for one ping. EMPIRICAL floor (see probeLlmPing's doc comment): a -p
+  // invocation still carries ~7.4k scaffolding tokens even fully stripped, so one ping costs
+  // ~$0.016 measured — a cap at or below that floor (e.g. 0.01) makes EVERY probe fail with
+  // "Error: Exceeded USD budget (...)" and the engine stays parked until the duration
+  // escalation notifies a human (fail-safe, but confusing — which is why the probe's stderr is
+  // surfaced in the park-probe event; see docs/configuration.md). 0.05 is verified passing
+  // with real headroom.
+  probeMaxBudgetUsd: z.number().finite().positive().default(0.05),
+}).strict().superRefine((v, ctx) => {
+  // PR #180 review P3-1: every pattern must COMPILE at config load — a malformed regex is a
+  // fail-fast startup error (`sapwood validate` catches it too), never a silent degradation to
+  // the classifier's literal-substring fallback (that fallback stays, as pure defense-in-depth
+  // for direct classifyEnvFailure callers, but no config-supplied pattern may rely on it).
+  for (const [key, patterns] of [["llmPatterns", v.llmPatterns], ["forgePatterns", v.forgePatterns]] as const) {
+    patterns.forEach((p, i) => {
+      try {
+        new RegExp(p, "i");
+      } catch (e) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key, i],
+          message: `not a valid regular expression: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+    });
+  }
+  if (v.probeBackoffMaxSec < v.probeBackoffBaseSec) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["probeBackoffMaxSec"],
+      message:
+        `probeBackoffMaxSec (${v.probeBackoffMaxSec}) must be >= probeBackoffBaseSec ` +
+        `(${v.probeBackoffBaseSec}) — a cap below the base would make the very first backoff ` +
+        `interval unrepresentable`,
+    });
+  }
+});
+
 // Raw (untransformed) schema — kept internal. `goal.file` and `roles.architect.planMdPath` are
 // both still `.optional()` here (see their own doc comments); `ConfigSchema` below wraps this in
 // a `.transform(resolveGoalFile)` so EVERY caller of `ConfigSchema.parse`/`.safeParse` — not just
@@ -530,6 +606,7 @@ const ConfigSchemaRaw = z.object({
   merge: Merge.default({}),
   labels: Labels.default({}),
   roles: Roles.default({}),
+  envFailure: EnvFailure.default({}),
   escalation: z
     .object({ humanLabels: z.array(z.string()).default(["needs-human", "blocked"]) })
     .strict()

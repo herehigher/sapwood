@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { State, SCHEMA_VERSION, backfillLegacyRoundCursors, type ModelUsageEntry } from "./state.js";
+import { State, SCHEMA_VERSION, MIGRATIONS, backfillLegacyRoundCursors, type ModelUsageEntry } from "./state.js";
 
 // In-memory DB keeps tests hermetic (no disk, no cleanup). WAL pragma is a no-op on
 // :memory: but the migration/version logic is identical.
@@ -954,4 +954,229 @@ test("spentUsdSince: sums spend_ledger rows at or after the cutoff, excludes ear
   assert.equal(s.spentUsdSince("2026-07-06T00:00:00.000Z"), 12);
   assert.equal(s.spentUsdSince("2999-01-01T00:00:00.000Z"), 0);
   s.close();
+});
+
+// ── #168: environment-failure park (per-source episodes — PR #180 review P1-1a) ─────────────
+
+test("park: not parked initially; enterPark persists source/reason/triggerIssue/enteredAt and seeds lastProbeAt (P1-1c: first probe waits a full backoff)", () => {
+  const s = mem();
+  assert.equal(s.isParked(), false);
+  assert.deepEqual(s.parkedSources(), []);
+  assert.equal(s.parkRow("llm"), null);
+  const inserted = s.enterPark("llm", "rate_limit_error seen", 42, "2026-07-14T00:00:00Z");
+  assert.equal(inserted, true);
+  assert.equal(s.isParked(), true);
+  const p = s.parkRow("llm");
+  assert.equal(p?.source, "llm");
+  assert.equal(p?.reason, "rate_limit_error seen");
+  assert.equal(p?.triggerIssue, 42);
+  assert.equal(p?.enteredAt, "2026-07-14T00:00:00Z");
+  assert.equal(p?.lastProbeAt, "2026-07-14T00:00:00Z"); // seeded, NOT null — first wait = base backoff
+  assert.equal(p?.probeAttempts, 0);
+  assert.equal(p?.escalatedAt, null);
+  assert.equal(p?.canaryWorker, null);
+  s.close();
+});
+
+test("park: re-entering the SAME source is a no-op (first detection wins, enteredAt never resets — storm-safe)", () => {
+  const s = mem();
+  s.enterPark("llm", "first reason", 1, "2026-07-14T00:00:00Z");
+  const insertedAgain = s.enterPark("llm", "a later llm failure", 2, "2026-07-14T01:00:00Z");
+  assert.equal(insertedAgain, false);
+  const p = s.parkRow("llm");
+  assert.equal(p?.reason, "first reason");
+  assert.equal(p?.triggerIssue, 1);
+  assert.equal(p?.enteredAt, "2026-07-14T00:00:00Z");
+  s.close();
+});
+
+test("park: a DIFFERENT source while parked opens its OWN episode (mixed storm) — resume only at zero rows (P1-1a: the old singleton silently dropped this)", () => {
+  const s = mem();
+  s.enterPark("llm", "rate_limit_error", 1, "2026-07-14T00:00:00Z");
+  const forgeInserted = s.enterPark("forge", "could not resolve host", 2, "2026-07-14T00:30:00Z");
+  assert.equal(forgeInserted, true); // NOT dropped
+  assert.equal(s.parkedSources().length, 2);
+  assert.deepEqual(s.parkedSources().map((p) => p.source), ["llm", "forge"]); // oldest first
+  // Clearing one source alone does NOT resume the engine.
+  s.clearPark("forge");
+  assert.equal(s.isParked(), true);
+  s.clearPark("llm");
+  assert.equal(s.isParked(), false);
+  s.close();
+});
+
+test("park: bumpParkProbe grows attempts + stamps lastProbeAt; touchParkProbe stamps WITHOUT growing (canary pacing, P1-1b)", () => {
+  const s = mem();
+  s.enterPark("forge", "reason", null, "2026-07-14T00:00:00Z");
+  s.bumpParkProbe("forge", "2026-07-14T00:00:30Z");
+  let p = s.parkRow("forge");
+  assert.equal(p?.probeAttempts, 1);
+  assert.equal(p?.lastProbeAt, "2026-07-14T00:00:30Z");
+  s.touchParkProbe("forge", "2026-07-14T00:01:00Z");
+  p = s.parkRow("forge");
+  assert.equal(p?.probeAttempts, 1); // unchanged — touch never grows the exponent
+  assert.equal(p?.lastProbeAt, "2026-07-14T00:01:00Z");
+  assert.equal(s.isParked(), true);
+  s.close();
+});
+
+test("park: setParkCanary round-trips the in-flight canary lane name; bump/touch never disturb it", () => {
+  const s = mem();
+  s.enterPark("llm", "reason", 7, "2026-07-14T00:00:00Z");
+  s.setParkCanary("llm", "lane-3");
+  assert.equal(s.parkRow("llm")?.canaryWorker, "lane-3");
+  s.touchParkProbe("llm", "2026-07-14T00:01:00Z");
+  s.bumpParkProbe("llm", "2026-07-14T00:02:00Z");
+  assert.equal(s.parkRow("llm")?.canaryWorker, "lane-3");
+  s.setParkCanary("llm", null);
+  assert.equal(s.parkRow("llm")?.canaryWorker, null);
+  s.close();
+});
+
+test("park (P2-A): registerCanaryDispatch is ATOMIC — worker row + canary assignment + events land together; a missing episode rolls the WHOLE registration back (partial state unrepresentable)", () => {
+  const s = mem();
+  // Happy path: one call, everything lands.
+  s.enterPark("llm", "rate_limit_error", 42, "2026-07-14T00:00:00Z");
+  s.registerCanaryDispatch(
+    { name: "lane-1", issue: 42, session_id: "sess-1", state: "running", started_at: "2026-07-14T00:01:00Z", ended_at: null },
+    "llm",
+  );
+  assert.equal(s.getWorker("lane-1")?.state, "running");
+  assert.equal(s.parkRow("llm")?.canaryWorker, "lane-1");
+  assert.equal(s.eventsSince("2020-01-01T00:00:00Z", ["dispatched"]).length, 1);
+  assert.equal(s.eventsSince("2020-01-01T00:00:00Z", ["park-canary"]).length, 1);
+
+  // Unrepresentable partial state: registering against a MISSING episode throws and leaves NO
+  // worker row and NO events — the crash-window shape (worker row present, canary_worker null)
+  // cannot be produced through this method.
+  s.clearPark("llm");
+  assert.throws(
+    () => s.registerCanaryDispatch(
+      { name: "lane-2", issue: 43, session_id: "sess-2", state: "running", started_at: "2026-07-14T00:02:00Z", ended_at: null },
+      "llm",
+    ),
+    /no open llm park episode/,
+  );
+  assert.equal(s.getWorker("lane-2"), undefined, "the worker row rolled back with the failed canary assignment");
+  assert.equal(s.eventsSince("2020-01-01T00:00:00Z", ["dispatched"]).length, 1, "no orphan events either");
+  s.close();
+});
+
+test("park: a fresh episode after clearPark starts with its own clean enteredAt/probeAttempts", () => {
+  const s = mem();
+  s.enterPark("llm", "first episode", 1, "2026-07-14T00:00:00Z");
+  s.bumpParkProbe("llm", "2026-07-14T00:00:30Z");
+  s.clearPark("llm");
+  const inserted = s.enterPark("llm", "second episode", 2, "2026-07-14T02:00:00Z");
+  assert.equal(inserted, true); // a genuinely fresh episode, not blocked by the old (cleared) row
+  const p = s.parkRow("llm");
+  assert.equal(p?.reason, "second episode");
+  assert.equal(p?.enteredAt, "2026-07-14T02:00:00Z");
+  assert.equal(p?.probeAttempts, 0);
+  s.close();
+});
+
+test("park: recordParkEscalation is a per-source one-way latch, independent of continued probing", () => {
+  const s = mem();
+  s.enterPark("forge", "reason", null, "2026-07-14T00:00:00Z");
+  s.enterPark("llm", "reason2", null, "2026-07-14T00:10:00Z");
+  assert.equal(s.parkRow("forge")?.escalatedAt, null);
+  s.recordParkEscalation("forge", "2026-07-14T01:00:00Z");
+  assert.equal(s.parkRow("forge")?.escalatedAt, "2026-07-14T01:00:00Z");
+  assert.equal(s.parkRow("llm")?.escalatedAt, null); // per-source: llm untouched
+  // Probing continues unaffected — escalation is additive, never a state transition.
+  s.bumpParkProbe("forge", "2026-07-14T01:00:30Z");
+  assert.equal(s.parkRow("forge")?.escalatedAt, "2026-07-14T01:00:00Z"); // unchanged
+  assert.equal(s.parkRow("forge")?.probeAttempts, 1);
+  s.close();
+});
+
+test("park: in-memory State has no data dir -> escalationMarkerPath is null; writeEscalationMarker is a safe no-op", () => {
+  const s = mem();
+  assert.equal(s.escalationMarkerPath(), null);
+  assert.doesNotThrow(() => s.writeEscalationMarker({ hello: "world" }));
+  assert.doesNotThrow(() => s.clearEscalationMarker());
+  s.close();
+});
+
+test("park: escalation marker is written to the engine's own data dir; clearing the LAST episode auto-removes it (P2-2 — the wired clear), an earlier clear leaves it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const s = new State(join(dir, "sapwood.sqlite"));
+    const p = s.escalationMarkerPath();
+    assert.ok(p && p.startsWith(dir));
+    assert.notEqual(p, s.killSwitchPath());
+    assert.notEqual(p, s.pausePath());
+    s.enterPark("forge", "gh outage", null, "2026-07-14T00:00:00Z");
+    s.enterPark("llm", "rate limited", null, "2026-07-14T00:01:00Z");
+    s.writeEscalationMarker({ source: "forge", reason: "gh outage" });
+    const written = JSON.parse(readFileSync(p!, "utf8"));
+    assert.equal(written.source, "forge");
+    // Clearing ONE of TWO episodes keeps the marker (the outage it describes isn't over).
+    s.clearPark("forge");
+    assert.equal(existsSync(p!), true);
+    // Clearing the LAST episode removes it — no stale ESCALATION file after full resume.
+    s.clearPark("llm");
+    assert.equal(existsSync(p!), false);
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #168 (PR #180 review P3-2): REAL v11 -> v12 migration — data survives, park_state lands ──
+
+test("migration v11->v12: a populated v11 DB opens on the current engine with all data intact, an empty park_state, user_version 12, and an idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    // Build a REAL v11 DB: run the shipped migrations 0..10 exactly as a v11 engine would have.
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 11; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 11");
+    // Populate representative rows across the v11 tables.
+    raw.prepare(
+      "INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, gated_reentry_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("lane-v11", 9, "sess-9", "failed", "2026-07-01T00:00:00Z", "2026-07-01T01:00:00Z", 55, 1);
+    raw.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)")
+      .run("2026-07-01T00:30:00Z", "dispatched", JSON.stringify({ worker: "lane-v11", issue: 9 }));
+    raw.prepare(
+      "INSERT INTO spend_ledger (ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("2026-07-01T01:00:00Z", "lane-v11", 9, 1.25, "opus", 10, 20, 0, 0);
+    raw.prepare("INSERT INTO pending_rollbacks (issue, target, reason, attempts, created_at) VALUES (?, ?, ?, 0, ?)")
+      .run(9, "ready", "dead-lane-requeue", "2026-07-01T01:00:00Z");
+    // park_state must not exist yet — that's exactly what migration 12 adds.
+    assert.throws(() => raw.prepare("SELECT * FROM park_state").get());
+    raw.close();
+
+    // Open with the CURRENT engine -> migrates 11 -> 12.
+    const s = new State(dbPath);
+    assert.equal(s.userVersion(), 12);
+    assert.equal(SCHEMA_VERSION, 12);
+    // Pre-existing data survived intact.
+    const w = s.getWorker("lane-v11");
+    assert.equal(w?.issue, 9);
+    assert.equal(w?.pr, 55);
+    assert.equal(w?.gated_reentry_attempts, 1);
+    assert.equal(s.spentUsdForWorker("lane-v11"), 1.25);
+    assert.equal(s.pendingRollbacks().length, 1);
+    assert.equal(s.eventsSince("2026-01-01T00:00:00Z", ["dispatched"]).length, 1);
+    // park_state exists and is empty; the new API works on the migrated DB.
+    assert.equal(s.isParked(), false);
+    assert.deepEqual(s.parkedSources(), []);
+    assert.equal(s.enterPark("forge", "post-migration episode", null, "2026-07-14T00:00:00Z"), true);
+    assert.equal(s.parkRow("forge")?.reason, "post-migration episode");
+    s.clearPark("forge");
+    s.close();
+
+    // Idempotent reopen: no re-migration, same version, same data.
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), 12);
+    assert.equal(s2.getWorker("lane-v11")?.issue, 9);
+    assert.equal(s2.isParked(), false);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
