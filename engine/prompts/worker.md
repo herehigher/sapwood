@@ -15,6 +15,17 @@ markdown code fences of its own — the tags, not any fence, mark where it ends.
 {{issue.body}}
 </issue-body>
 
+## Review doctrine (this repo's own review history)
+
+The engine-assembled text below is this repo's own accumulated review knowledge — technical
+invariants (recurring failure classes) and adjudication doctrine (how findings get treated) —
+distilled from past rounds so it doesn't live only in a human's memory. Read it before you
+start: it names failure classes this repo's reviewers have flagged more than once.
+
+<review-doctrine>
+{{doctrine}}
+</review-doctrine>
+
 ## Non-negotiables (do not deviate)
 
 - **producer ≠ reviewer ≠ merger.** You write and push code. You never approve a

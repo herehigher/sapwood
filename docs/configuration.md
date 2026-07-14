@@ -196,6 +196,47 @@ directly):
   than silently preferring one (an operator who set both almost certainly meant to change one
   and forgot the other was still there).
 
+## `doctrine`
+
+The loop's **repo-level review doctrine** (#167) — durable review knowledge (recurring technical
+invariants + adjudication doctrine for how findings get treated) carried forward across rounds
+instead of living only in a human/conductor's memory. Prose for LLM readers, deliberately never
+a lint/DSL. Injected into the worker dispatch brief (`{{doctrine}}`) and the architect pass
+(`{{round.doctrine}}`), and cited by name in the gated-PR-reentry-cap escalation comment when
+automatic fix attempts are exhausted.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `file` | `docs/REVIEW-DOCTRINE.md` | Path to the project's review-doctrine file. Same `#74`-style resolution as `worker.promptFile`/`goal.file`: a relative path resolves against **the config file's own directory**, not the CLI's cwd. `sapwood init` scaffolds a starter template here (technical invariants + adjudication doctrine, seeded from the loop's own distilled review history) **iff the resolved path is missing**; it never overwrites an existing file. **Unlike** `worker.promptFile`, a missing file is not an error — it's a legal, common state (a repo that hasn't adopted the convention, or has opted out): the prompts render an explicit "no review doctrine available" placeholder, behavior otherwise unchanged. |
+| `maxChars` | `20000` | Deterministic truncation cap, in characters, on the doctrine text substituted into the prompts — same marked-cut-never-silent-drop contract as `round.directiveMaxChars` / `roles.architect.lastMergedMaxChars` / `roles.retro.digestMaxChars`. |
+
+## Language customization
+
+sapwood has no language-preference config key of its own — it doesn't need one. Every spawned
+session (worker, and every peripheral role) runs as a Claude Code session inside the target
+repo's own checkout, and Claude Code loads that repo's `CLAUDE.md` automatically. A language
+preference — "always respond in Japanese," "write commit messages in French" — belongs there,
+in the target repo's own `CLAUDE.md`, exactly like any other repo-specific working convention.
+There's nothing to configure in `sapwood.config.yaml` for this.
+
+**Caveat: keep machine-parsed surfaces in English.** A language preference in `CLAUDE.md`
+naturally covers everything an agent freely composes — comments, commit messages, PR
+descriptions, conversational replies. It must NOT extend to the handful of surfaces sapwood's
+own engine code parses with an English-only pattern, since these are read by the engine, not by
+an LLM, and a translated heading/label is invisible to a fixed regex:
+
+- **Issue-body verification/acceptance headings** — `forge.ts`'s `extractVerificationPlan` looks
+  for a heading matching `/^(#{1,6})\s*(verification|acceptance)[^\n]*$/im`. A translated heading
+  (e.g. `## 検証`) is invisible to this regex — the issue reads as having no verification plan at
+  all, which blocks dispatch (Decision #8) or silently routes it down the `verify:n/a` doc-gate
+  path instead.
+- **Labels and board `Status` values** — `type:*`/`prio:*`/`needs-human`/etc. and the ProjectV2
+  `Status` field's option names are matched literally against the values `sapwood.config.yaml`
+  configures; they are identifiers, not prose, and translating them just breaks the match.
+- **Structured-output blocks** — the `<<<SAPWOOD_RESULT>>>`/`<<<BODY>>>` sentinels
+  (`structured-output.ts`) and every role's JSON metadata keys are a fixed wire format the engine
+  parses; only the free-text BODY content within them is safe to localize.
+
 ## `recovery`
 
 | Key | Default | Meaning |

@@ -23,6 +23,7 @@ import {
 } from "./architect.js";
 import { ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
+import { NO_DOCTRINE } from "./doctrine.js";
 import {
   RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END,
 } from "./structured-output.js";
@@ -405,6 +406,7 @@ test("defaultArchitectPromptPath: resolves to a real shipped file with the expec
   assert.ok(template.includes("{{candidates.summary}}"));
   assert.ok(template.includes("{{labels.blocked}}"));
   assert.ok(template.includes("{{round.directive}}"), "#126: the shipped architect.md must reference the round directive var");
+  assert.ok(template.includes("{{round.doctrine}}"), "#167: the shipped architect.md must reference the review-doctrine var");
 });
 
 // ── #126: round directive file — human steering injected at round open ─────────────────────
@@ -671,6 +673,33 @@ test("createArchitectStub (#132): an explicitly supplied lastMerged string reach
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 6, phase: "architecting", marker: null });
   assert.ok(runner.calls[0]!.prompt.includes("issue #21 merged via PR #55"));
+});
+
+// ── #167: {{round.doctrine}} — the third engine-assembled block, threaded like lastMerged ──────
+
+test("createArchitectStub (#167): the rendered prompt carries the explicit NO_DOCTRINE placeholder when deps.doctrine is not supplied", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const stub = createArchitectStub(deps);
+  await stub.run({ roundId: 6, phase: "architecting", marker: null });
+  assert.ok(runner.calls[0]!.prompt.includes(NO_DOCTRINE));
+});
+
+test("createArchitectStub (#167): an explicitly supplied doctrine string reaches the prompt verbatim", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = {
+    forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md",
+    doctrine: "the disabled-consumer rule: gate a probe on whether its consumer is enabled.",
+  };
+  const stub = createArchitectStub(deps);
+  await stub.run({ roundId: 6, phase: "architecting", marker: null });
+  assert.ok(runner.calls[0]!.prompt.includes("the disabled-consumer rule: gate a probe on whether its consumer is enabled."));
 });
 
 // ── validateArchitectOutput: schema/shape validation (unit-level, mirrors plan-review.ts) ──

@@ -60,6 +60,18 @@ a full code review.
 {{round.lastMerged}}
 </round-lastMerged>
 
+## Review doctrine (this repo's own review history)
+
+The engine-assembled text below is this repo's accumulated review knowledge — technical
+invariants (recurring failure classes past rounds have already flagged) and adjudication
+doctrine (how findings get treated). Weigh it alongside the locked architecture below when you
+judge cross-issue consistency and flag contradictions: a candidate whose approach repeats an
+invariant this doctrine already names is itself worth flagging.
+
+<review-doctrine>
+{{round.doctrine}}
+</review-doctrine>
+
 ## Locked architecture (the north-star goal file's architecture chapter)
 
 The project's north-star goal file (`goal.file` in config; `docs/PLAN.md` by default) is the

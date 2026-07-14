@@ -24,6 +24,7 @@ import { createArchitectStub, NO_PRIOR_ROUND_YET, type ArchitectDeps } from "./a
 import { createPlanReviewStub } from "./plan-review.js";
 import { createHarvestStub } from "./harvest.js";
 import { createRetroStub } from "./retro.js";
+import { loadDoctrine } from "./doctrine.js";
 
 export interface DefaultPeripheralsDeps {
   forge: IForge;
@@ -202,6 +203,12 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         architectDeps.lastMerged = renderLastMergedFromArtifact(
           deps.state, ctx.roundId, deps.cfg.roles.architect.lastMergedMaxChars,
         );
+        // #167: this repo's review-doctrine text — the third engine-assembled block (see
+        // ArchitectDeps.doctrine's own doc comment). No round-scoping of its own (the doctrine
+        // file doesn't vary per round), but loaded HERE, at architect-invocation time, same as
+        // alignedGoals/lastMerged above, so a crash-rerun that resumes directly at architecting
+        // re-assembles identically and the load logic stays in doctrine.ts, not duplicated here.
+        architectDeps.doctrine = loadDoctrine(deps.cfg.doctrine.file, deps.cfg.doctrine.maxChars);
         return architectStub.run(ctx);
       },
     };

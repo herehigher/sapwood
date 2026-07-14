@@ -275,6 +275,40 @@ function ensureGoalFile(cfg: SapwoodConfig, cwd: string): string | null {
   return target;
 }
 
+// ---- #167: repo-level review-doctrine file scaffold ------------------------------------------
+
+/** Resolves the shipped doctrine-file template — `engine/prompts/doctrine-template.md` inside
+ *  the engine package, same "next to the shipped prompts" resolution as
+ *  defaultGoalTemplatePath above (and the same rationale: reuse the existing "ship every role's
+ *  starter content as a file next to worker.md/architect.md/goal-template.md" pattern rather
+ *  than a module constant). */
+export function defaultDoctrineTemplatePath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "prompts", "doctrine-template.md");
+}
+
+/** cfg.doctrine.file is config-file-relative resolved by loadConfig (#167, same shape as
+ *  goal.file/#128) for a REAL run, but a cfg built directly via parseConfig/ConfigSchema (no
+ *  file on disk — every init.test.ts case, and any future direct caller) leaves it exactly as
+ *  configured, which may still be relative. Absolute -> used as-is; relative -> resolved against
+ *  `cwd`, the same directory ensureConfig above writes the starter config into. */
+export function resolveDoctrineFilePath(doctrineFile: string, cwd: string): string {
+  return isAbsolute(doctrineFile) ? doctrineFile : join(cwd, doctrineFile);
+}
+
+/** Scaffold the review-doctrine template IFF the resolved path is missing. Never overwrites an
+ *  existing file (it's the user's document once it exists, not sapwood's) — this IS the
+ *  idempotence: a second `sapwood init` run against a repo that already has the file (whether
+ *  sapwood wrote it or a human did) is a byte-for-byte no-op. Returns the path written, or null
+ *  when the file already existed. Same shape as ensureGoalFile above. */
+function ensureDoctrineFile(cfg: SapwoodConfig, cwd: string): string | null {
+  const target = resolveDoctrineFilePath(cfg.doctrine.file, cwd);
+  if (existsSync(target)) return null;
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, readFileSync(defaultDoctrineTemplatePath(), "utf8"));
+  return target;
+}
+
 // ---- orchestrator ---------------------------------------------------------------
 
 export interface InitResult {
@@ -310,6 +344,15 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
   const goalWritten = ensureGoalFile(cfg, cwd);
   actions.push(
     goalWritten ? `wrote starter goal file ${goalWritten}` : `goal file already present (${resolveGoalFilePath(cfg.goal.file, cwd)})`,
+  );
+
+  // #167: the repo-level review-doctrine file — scaffolded iff missing, never overwriting a
+  // user's doc. Same idempotence contract as the goal file above.
+  const doctrineWritten = ensureDoctrineFile(cfg, cwd);
+  actions.push(
+    doctrineWritten
+      ? `wrote starter doctrine file ${doctrineWritten}`
+      : `doctrine file already present (${resolveDoctrineFilePath(cfg.doctrine.file, cwd)})`,
   );
 
   actions.push("guard hook: deferred to M1 (guard.ts not built yet) — human-merge-only when wired");

@@ -46,6 +46,7 @@ import { runSessionWithRetry, type RoleRunner, type RoleSessionResult } from "./
 import { loadRolePromptTemplate } from "./plan-review.js";
 import { parseStructuredBlock } from "./structured-output.js";
 import { resolveRoundDirective } from "./directive.js";
+import { NO_DOCTRINE } from "./doctrine.js";
 
 export interface ArchitectDeps {
   forge: IForge;
@@ -78,6 +79,17 @@ export interface ArchitectDeps {
    *  below — never an empty substitution. This module itself fetches nothing to produce this
    *  string; it only renders whatever the caller hands it (or the placeholder). */
   lastMerged?: string;
+  /** #167: this repo's review-doctrine text (technical invariants + adjudication doctrine) —
+   *  the THIRD engine-assembled block, threaded the same way `lastMerged` above is: a real
+   *  caller (round-defaults.ts's createDefaultPeripherals) loads it at invocation time via
+   *  doctrine.ts's `loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars)` and assigns it before
+   *  calling this stub; a caller that omits it (every direct unit test in this file, and any
+   *  consumer that hasn't wired round-defaults.ts) gets doctrine.ts's own `NO_DOCTRINE`
+   *  placeholder below — never an empty substitution. Unlike `lastMerged`, this text has no
+   *  round-scoping of its own (the doctrine file doesn't vary per round); it's still threaded
+   *  through `ArchitectDeps` rather than loaded directly here so the load logic lives in exactly
+   *  one place (doctrine.ts), shared with worker.ts's own injection, never duplicated. */
+  doctrine?: string;
 }
 
 /** #132: the explicit placeholder used both when there IS no possible prior round (round 1) and
@@ -367,6 +379,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "round.designNoteIssue": String(anchor.number),
         "round.alignedGoals": deps.alignedGoals ?? NO_ALIGNED_GOALS_YET,
         "round.lastMerged": deps.lastMerged ?? NO_PRIOR_ROUND_YET,
+        "round.doctrine": deps.doctrine ?? NO_DOCTRINE,
         "plan.architectureChapter": architectureChapter,
         "candidates.summary": candidates.map(formatCandidate).join("\n\n---\n\n"),
         "labels.blocked": deps.cfg.labels.blocked,

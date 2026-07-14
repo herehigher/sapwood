@@ -1699,6 +1699,66 @@ test("buildRenderPrompt: the shipped default prompt builds clean (all its vars a
   assert.doesNotMatch(rendered, /\{\{/);
 });
 
+// ── #167: {{doctrine}} — repo-level review doctrine injected into the worker brief ─────────────
+
+test("buildRenderPrompt: with no doctrine.file on disk, {{doctrine}} substitutes the explicit 'none' placeholder — behavior unchanged, never an error", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "tpl.md");
+    writeFileSync(p, "DOCTRINE: {{doctrine}}");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+      doctrine: { file: join(dir, "does-not-exist-DOCTRINE.md") },
+    });
+    const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
+    assert.match(rendered, /DOCTRINE: \(No review doctrine file is configured/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: with a doctrine.file present, {{doctrine}} substitutes its content, bounded by doctrine.maxChars", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "tpl.md");
+    writeFileSync(p, "DOCTRINE: {{doctrine}}");
+    const doctrinePath = join(dir, "DOCTRINE.md");
+    writeFileSync(doctrinePath, "the disabled-consumer rule matters here");
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+      doctrine: { file: doctrinePath },
+    });
+    const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
+    assert.equal(rendered, "DOCTRINE: the disabled-consumer rule matters here");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderPrompt: an oversized doctrine.file is deterministically truncated with a marked cut when substituted into {{doctrine}}", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
+  try {
+    const p = join(dir, "tpl.md");
+    writeFileSync(p, "{{doctrine}}");
+    const doctrinePath = join(dir, "DOCTRINE.md");
+    writeFileSync(doctrinePath, "y".repeat(5000));
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { promptFile: p },
+      // #167 review (Codex P3): doctrine.maxChars now has a 200-char floor (config.ts) so the
+      // truncation marker itself always fits — 200 is the smallest legal value here.
+      doctrine: { file: doctrinePath, maxChars: 200 },
+    });
+    const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
+    assert.ok(rendered.length <= 200, `expected <= 200 chars, got ${rendered.length}`);
+    assert.match(rendered, /truncated/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("buildRenderPrompt: unknown {{var}} in the template throws at BUILD time, before any issue is claimed", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
   try {
