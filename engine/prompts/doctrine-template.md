@@ -37,8 +37,9 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   how many times a probe happened to run.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
-  auto-merge. The reviewer evaluates such a PR under the doctrine loaded from the default branch,
-  so the change cannot approve itself — but a human should still confirm rule changes.
+  auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
+  on the PR's branch — the change cannot influence the doctrine used for its own review, but it
+  can still pass under the prior rules, so a human should confirm rule changes.
 
 ## Adjudication doctrine
 
