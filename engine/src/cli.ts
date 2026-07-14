@@ -392,10 +392,11 @@ export interface StatusSnapshot {
   /** null when no config could be loaded — reported as "unknown", never a fabricated default. */
   lanesMax: number | null;
   dailyBudgetUsd: number | null;
-  /** #168: the current environment-failure park episode, or null when not parked. Read straight
-   *  off state.ts's park_state row (State.parkState()) — same "always live, no caching" property
-   *  every other sentinel/flag on this snapshot has. */
-  parked: ParkRow | null;
+  /** #168: every open environment-failure park episode (at most one per source — llm/forge),
+   *  empty when not parked. Read straight off state.ts's park_state rows
+   *  (State.parkedSources()) — same "always live, no caching" property every other
+   *  sentinel/flag on this snapshot has. */
+  parked: ParkRow[];
 }
 
 export function formatStatus(s: StatusSnapshot): string {
@@ -424,14 +425,17 @@ export function formatStatus(s: StatusSnapshot): string {
       ? `ceiling breach: ${s.ceilingBreach.reasons.join(", ")} (since ${s.ceilingBreach.at.toISOString()})`
       : "ceiling breach: none",
   );
-  if (s.parked) {
-    const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(s.parked.enteredAt)) / 1000));
-    lines.push(
-      `park: PARKED (${s.parked.source}) since ${s.parked.enteredAt} (${durationSec}s) — ` +
-        `reason: ${s.parked.reason} — no new dispatch; in-flight lanes proceed normally; ` +
-        `probing on backoff, auto-resumes on the first successful probe` +
-        (s.parked.escalatedAt ? ` — escalated to a human at ${s.parked.escalatedAt}` : ""),
-    );
+  if (s.parked.length > 0) {
+    for (const p of s.parked) {
+      const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(p.enteredAt)) / 1000));
+      lines.push(
+        `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +
+          `reason: ${p.reason} — no new dispatch; in-flight lanes proceed normally; ` +
+          `probing on backoff, auto-resumes on recovery` +
+          (p.canaryWorker ? ` — canary lane ${p.canaryWorker} in flight` : "") +
+          (p.escalatedAt ? ` — escalated to a human at ${p.escalatedAt}` : ""),
+      );
+    }
   } else {
     lines.push("park: inactive");
   }
@@ -488,7 +492,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       dailySpendUsd: state.dailySpendUsd(new Date()),
       lanesMax: cfg?.lanes.max ?? null,
       dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
-      parked: state.parkState(),
+      parked: state.parkedSources(),
     };
     return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
   } finally {

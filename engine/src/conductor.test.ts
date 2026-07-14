@@ -1917,10 +1917,11 @@ test("#147 P2: the happy-path escalation records labeled=1 (label applied), whic
   st.close();
 });
 
-// ── #168: environment-failure park — detect, park, probe, auto-resume, timed escalation ─────
-// Decision table (env-failure x source x has-PR x reentry state), park/probe/backoff/escalation
-// state machine, channel-ladder selection, and the two integration storms (LLM / forge outage)
-// from the issue's Verification section.
+// ── #168: environment-failure park — detect, park (per source), canary-probe, auto-resume,
+//    timed escalation. Decision table (env-failure × source × has-PR × reentry state), the
+//    park/probe/backoff/escalation state machine, channel-ladder selection, and the storm /
+//    oscillation / mixed-storm integrations from the issue's Verification section plus the
+//    PR #180 review's named regression tests (P1-1..P1-4, P2, P3).
 
 test("#168: FAILED lane with an LLM env-failure signature, no PR -> classified env-failure (not 'failed'), issue requeued to Ready untouched, no needs-human, engine parks (source: llm)", async () => {
   const st = new State(":memory:");
@@ -1935,37 +1936,39 @@ test("#168: FAILED lane with an LLM env-failure signature, no PR -> classified e
 
   assert.deepEqual(r.reclaimed, [{ kind: "env-failure", worker: "lane-a", issue: 501, source: "llm", costUsd: 0, modelUsage: [] }]);
   assert.deepEqual(forge.labelsAdded, []); // never needs-human
-  assert.deepEqual(forge.boardSet, [[501, "ready"]]); // returned to the queue
+  assert.deepEqual(forge.boardSet, [[501, "ready"]]); // returned to the queue (forge healthy — llm-only park)
   assert.equal(st.getWorker("lane-a")?.state, "failed"); // terminal, frees the lane
   assert.equal(st.getWorker("lane-a")?.pr, null); // never satisfies gatedFailedWorkers' pr filter
   assert.equal(st.gatedFailedWorkers().length, 0); // zero gated-reentry consumption
   assert.equal(st.isParked(), true);
-  assert.equal(st.parkState()?.source, "llm");
-  assert.equal(st.parkState()?.triggerIssue, 501);
+  assert.equal(st.parkRow("llm")?.triggerIssue, 501);
   st.close();
 });
 
-test("#168: FAILED lane with a forge env-failure signature, no PR -> same disposition, park source: forge", async () => {
+test("#168: FAILED lane with a forge env-failure signature, no PR -> same disposition, park source: forge; the requeue is SUSPENDED durably (P1-2: zero forge writes while forge-parked)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
-  // Kept genuinely down for this tick's own PARK-section probe (which runs post-reclaim, same
-  // tick) — otherwise the default FakeForge's always-succeeding listOpenIssueNumbers would
-  // auto-resume the park within this same tick, before the assertions below even run.
-  forge.listOpenIssueNumbers = async () => { throw new Error("still down"); };
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-b", 502);
   sup.probes["lane-b"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "ssh: Could not resolve host: github.com" };
+  // The PARK-section forge probe (post-reclaim, same tick) must also see it still down.
+  forge.listOpenIssueNumbers = async () => { throw new Error("still down"); };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
 
   assert.equal(r.reclaimed[0]?.kind, "env-failure");
   assert.equal((r.reclaimed[0] as { source: string }).source, "forge");
   assert.deepEqual(forge.labelsAdded, []);
-  assert.deepEqual(forge.boardSet, [[502, "ready"]]);
-  assert.equal(st.parkState()?.source, "forge");
+  // P1-2: NO board write attempted while the forge episode is open — the requeue intent is
+  // persisted durably instead, to drain on resume.
+  assert.deepEqual(forge.boardSet, []);
+  assert.equal(st.pendingRollbacks().length, 1);
+  assert.equal(st.pendingRollbacks()[0]?.reason, "env-failure-requeue");
+  assert.equal(st.pendingRollbacks()[0]?.attempts, 0); // never attempted -> counter frozen
+  assert.equal(st.parkRow("forge")?.source, "forge");
   st.close();
 });
 
-test("#168: FAILED lane with an env-failure signature BUT a PR already exists -> unaffected rescue-to-driving disposition, engine STILL parks (decision 1 is unconditional on hasPr)", async () => {
+test("#168: FAILED lane with an env-failure signature + a CLEAN PR -> unchanged rescue-to-driving disposition, engine STILL parks (decision 1 is unconditional on hasPr)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -1981,9 +1984,40 @@ test("#168: FAILED lane with an env-failure signature BUT a PR already exists ->
   assert.equal(st.getWorker("lane-c")?.state, "driving");
   assert.equal(st.getWorker("lane-c")?.pr, 77);
   assert.deepEqual(forge.labelsAdded, []);
-  // But the engine still parks — decision 1 ("park the engine") does not carve out a has-PR exception.
+  // But the engine still parks — decision 1 does not carve out a has-PR exception.
   assert.equal(st.isParked(), true);
-  assert.equal(st.parkState()?.source, "llm");
+  assert.equal(st.parkRow("llm")?.source, "llm");
+  st.close();
+});
+
+test("#168 P1-4: env-failure + PR + DIRTY worktree -> env precedence: preserved failed+PR shape, ZERO labels/forge writes, zero reentry consumption, worktree retained — never the ordinary dirty=>needs-human path", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.throwOnAddLabel = true; // any needs-human attempt would blow the tick — proves none happens
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dirty", 505);
+  sup.probes["lane-dirty"] = {
+    ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 88,
+    failureText: "gh: Service Unavailable (HTTP 503)",
+  };
+  sup.inspectResults["lane-dirty"] = { worktreePath: "/tmp/wt-505", worktreeRetained: true };
+  forge.listOpenIssueNumbers = async () => { throw new Error("down"); }; // forge outage, consistently
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(r.reclaimed, [{ kind: "env-failure", worker: "lane-dirty", issue: 505, source: "forge", costUsd: 0, modelUsage: [] }]);
+  assert.deepEqual(forge.labelsAdded, []); // no needs-human on the issue
+  assert.deepEqual(forge.prLabelsAdded, []); // none on the PR either
+  assert.deepEqual(forge.issueComments, []); // no retained-worktree comment — zero forge writes
+  const row = st.getWorker("lane-dirty");
+  assert.equal(row?.state, "failed");
+  assert.equal(row?.pr, 88); // lane/PR preserved
+  assert.equal(row?.gated_escalation_labeled, 0); // the #147 fail-closed preservation shape
+  assert.equal(st.gatedFailedWorkers().length, 0); // invisible to gated reclaim — zero reentry-cap spend
+  assert.deepEqual(sup.reclaimed, []); // no teardown — worktree left on disk
+  const preserved = st.eventsSince("2020-01-01T00:00:00Z", ["env-failure-preserved"]);
+  assert.equal(preserved.length, 1);
+  assert.equal((preserved[0]?.payload as { worktreePath: string }).worktreePath, "/tmp/wt-505");
+  assert.equal(st.isParked(), true);
   st.close();
 });
 
@@ -2004,10 +2038,11 @@ test("#168 negative: a FAILED lane whose text merely DISCUSSES rate limits (no r
   st.close();
 });
 
-test("#168 storm: all lanes failing with env signatures in one tick, including a simulated forge outage (addLabel would throw) -> zero needs-human labels, zero reentry consumption, one park episode (first detection wins)", async () => {
+test("#168 storm: all lanes failing with env signatures in one tick (mixed sources, forge label-writes throwing) -> zero needs-human, zero reentry consumption, BOTH sources parked (P1-1a), forge-suspended requeues durable", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   forge.throwOnAddLabel = true; // proves needs-human is never even ATTEMPTED for these lanes
+  forge.listOpenIssueNumbers = async () => { throw new Error("outage"); };
   const sup = new FakeSupervisor();
   seedRunning(st, "lane-e1", 601);
   seedRunning(st, "lane-e2", 602);
@@ -2015,36 +2050,39 @@ test("#168 storm: all lanes failing with env signatures in one tick, including a
   sup.probes["lane-e1"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "rate_limit_error" };
   sup.probes["lane-e2"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "gh: Bad credentials" };
   sup.probes["lane-e3"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "overloaded_error" };
-  // A forge write attempt anywhere in this tick would throw (throwOnAddLabel) and blow up the
-  // tick — the storm surviving at all is itself proof no needs-human write was attempted.
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
 
-  const kinds = r.reclaimed.map((x) => x.kind);
-  assert.deepEqual(kinds, ["env-failure", "env-failure", "env-failure"]);
+  assert.deepEqual(r.reclaimed.map((x) => x.kind), ["env-failure", "env-failure", "env-failure"]);
   assert.deepEqual(forge.labelsAdded, []);
-  assert.deepEqual(forge.boardSet.sort(), [[601, "ready"], [602, "ready"], [603, "ready"]]);
   assert.equal(st.gatedFailedWorkers().length, 0);
-  assert.equal(st.isParked(), true);
-  // First detection wins — the episode's own source/reason is lane-e1's (llm), not overwritten
-  // by lane-e2/e3's later detections in the SAME tick (storm-safe: the duration clock, once
-  // started, is never pushed out by more failures in the same storm).
-  assert.equal(st.parkState()?.source, "llm");
-  assert.equal(st.parkState()?.triggerIssue, 601);
+  // Mixed storm: the llm episode (e1) AND the forge episode (e2) both exist — the old
+  // singleton INSERT OR IGNORE dropped the second source entirely (P1-1a).
+  assert.deepEqual(st.parkedSources().map((p) => p.source).sort(), ["forge", "llm"]);
+  assert.equal(st.parkRow("llm")?.triggerIssue, 601); // first detection wins per source
+  assert.equal(st.parkRow("forge")?.triggerIssue, 602);
+  // e1 requeued BEFORE the forge episode opened (llm-only park at that instant); e2/e3's
+  // requeues arrived after and are suspended durably.
+  assert.deepEqual(forge.boardSet, [[601, "ready"]]);
+  assert.equal(st.pendingRollbacks().filter((p) => p.reason === "env-failure-requeue").length, 2);
   st.close();
 });
 
-test("#168 dispatch gate: parked -> dispatch skipped entirely (mirrors PAUSE exactly: no new lane, not even a 'skipped' row); reclaim/drive of OTHER lanes proceed normally", async () => {
+test("#168 dispatch gate: parked -> dispatch skipped entirely (mirrors PAUSE: no new lane, not even a 'skipped' row); reclaim/drive of OTHER lanes proceed normally", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  st.enterPark("llm", "rate_limit_error", 999, new Date().toISOString());
+  st.enterPark("forge", "could not resolve host", 999, "2026-07-14T00:00:00Z");
+  forge.listOpenIssueNumbers = async () => { throw new Error("down"); };
   // A driving lane with a mergeable PR: DRIVE must still proceed while parked (same as PAUSE).
   st.upsertWorker({ name: "lane-drv", issue: 3, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 56 });
   const gate = new FakeMergeGate();
   gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H" };
   forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
 
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const r = await tick({
+    forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate,
+    now: () => new Date("2026-07-14T00:10:00Z"),
+  });
 
   assert.deepEqual(r.dispatched, []);
   assert.deepEqual(forge.claimed, []);
@@ -2054,7 +2092,7 @@ test("#168 dispatch gate: parked -> dispatch skipped entirely (mirrors PAUSE exa
   st.close();
 });
 
-test("#168 probe/backoff: no probe attempted before the backoff interval elapses; the forge probe reuses an EXISTING lightweight IForge read (no forge write, ever)", async () => {
+test("#168 probe/backoff (P1-1c): the FIRST probe waits a full base backoff (never due immediately); the forge probe reuses an EXISTING lightweight IForge read, no forge write ever", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   let forgeProbeCalls = 0;
@@ -2063,73 +2101,279 @@ test("#168 probe/backoff: no probe attempted before the backoff interval elapses
   const t0 = new Date("2026-07-14T00:00:00Z");
   st.enterPark("forge", "could not resolve host", 1, t0.toISOString());
 
-  // First probe due immediately (lastProbeAt null) -> probeBackoffBaseSec default 30s elapsed check n/a.
+  // Immediately after entry: NOT due (lastProbeAt seeded to entry time; base backoff 30s).
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => t0 });
-  assert.equal(forgeProbeCalls, 1);
-  assert.equal(st.parkState()?.probeAttempts, 1);
+  assert.equal(forgeProbeCalls, 0);
+  assert.equal(st.parkRow("forge")?.probeAttempts, 0);
 
-  // Immediately after (well under the 30s base backoff) -> not due, no second probe.
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 5_000) });
+  // Past the base backoff -> first probe fires (and fails).
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 31_000) });
   assert.equal(forgeProbeCalls, 1);
-  assert.equal(st.parkState()?.probeAttempts, 1);
+  assert.equal(st.parkRow("forge")?.probeAttempts, 1);
 
-  // Past the (now-doubled, attempts=1) backoff window -> due again.
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 61_000) });
+  // 5s later: under the (now-doubled, attempts=1 -> 60s) backoff -> no second probe.
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 36_000) });
+  assert.equal(forgeProbeCalls, 1);
+
+  // Past the doubled window -> due again.
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date(t0.getTime() + 95_000) });
   assert.equal(forgeProbeCalls, 2);
-  assert.equal(st.parkState()?.probeAttempts, 2);
-  // Never a single forge WRITE while parked-for-forge (label/comment/board mutation) — only the
-  // one read-only probe call.
+  assert.equal(st.parkRow("forge")?.probeAttempts, 2);
+  // Never a single forge WRITE while parked-for-forge — only the read-only probe.
   assert.deepEqual(forge.labelsAdded, []);
   assert.deepEqual(forge.issueComments, []);
+  assert.deepEqual(forge.boardSet, []);
   st.close();
 });
 
-test("#168 auto-resume: a successful probe clears park in the SAME tick, and that tick's own dispatch re-admits the previously-parked issue (same-tick window rule)", async () => {
+test("#168 auto-resume (forge): a successful probe clears the episode in the SAME tick, and that tick's own dispatch re-admits the previously-parked issue (same-tick window rule)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   forge.ready = [{ number: 701, title: "", labels: ["prio:3-feature"] }];
   const sup = new FakeSupervisor();
-  st.enterPark("forge", "could not resolve host", 701, new Date("2026-07-14T00:00:00Z").toISOString());
-  // forge.listOpenIssueNumbers succeeds by default (FakeForge) -> the probe succeeds this tick.
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  st.enterPark("forge", "could not resolve host", 701, t0.toISOString());
+  // forge.listOpenIssueNumbers succeeds by default (FakeForge) -> the probe succeeds once due.
 
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date("2026-07-14T00:00:00Z") });
+  const r = await tick({
+    forge, state: st, supervisor: sup, cfg: mkCfg(),
+    now: () => new Date(t0.getTime() + 31_000), // past the base backoff -> probe due -> succeeds
+  });
 
   assert.equal(st.isParked(), false); // cleared within this same tick, post-reclaim
-  assert.deepEqual(r.dispatched, [{ kind: "dispatched", issue: 701, worker: sup.dispatched[0] ? "lane-1" : "" }]);
-  assert.deepEqual(sup.dispatched.map((i) => i.number), [701]); // re-dispatched THIS tick, no extra tick needed
+  assert.deepEqual(sup.dispatched.map((i) => i.number), [701]); // re-dispatched THIS tick
+  assert.equal(r.dispatched.filter((d) => d.kind === "dispatched").length, 1);
   st.close();
 });
 
-test("#168 auto-resume via the LLM probe: disabled-consumer rule — with no probeLlmReachable wired, tick() never probes the llm source at all (park stays exactly as-is, no probeAttempts bump)", async () => {
+test("#168 disabled-consumer rule: with no probeLlmReachable wired, tick() never touches the llm episode at all (no bump, no canary); duration escalation still fires regardless", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  st.enterPark("llm", "rate_limit_error", 1, new Date("2026-07-14T00:00:00Z").toISOString());
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date("2026-07-14T00:05:00Z") });
+  const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 100 } });
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  st.enterPark("llm", "rate_limit_error", 55, t0.toISOString());
+
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 60_000) });
   assert.equal(st.isParked(), true);
-  assert.equal(st.parkState()?.probeAttempts, 0); // never probed — no consumer wired
+  assert.equal(st.parkRow("llm")?.probeAttempts, 0); // never probed — no consumer wired
+  assert.equal(st.parkRow("llm")?.canaryWorker, null);
+
+  // The duration escalation is NOT gated on the probe consumer existing.
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 101_000) });
+  assert.notEqual(st.parkRow("llm")?.escalatedAt, null);
+  assert.equal(st.isParked(), true); // still parked — escalation is additive
   st.close();
 });
 
-test("#168 auto-resume via a wired LLM probe: a caller-supplied probeLlmReachable IS consulted and clears park on success", async () => {
+test("#168 P1-1 canary: --version success does NOT clear the llm episode — it launches exactly ONE canary lane; the episode clears only when the canary reaches a non-env terminal", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
+  forge.ready = [{ number: 800, title: "", labels: ["prio:3-feature"] }];
   const sup = new FakeSupervisor();
-  st.enterPark("llm", "rate_limit_error", 1, new Date("2026-07-14T00:00:00Z").toISOString());
-  let probed = 0;
-  const r = await tick({
-    forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date("2026-07-14T00:00:00Z"),
-    probeLlmReachable: async () => { probed++; return true; },
-  });
-  assert.equal(probed, 1);
-  assert.equal(st.isParked(), false);
-  const events = st.eventsSince("2020-01-01T00:00:00Z", ["park-resumed"]);
-  assert.equal(events.length, 1);
-  void r;
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  st.enterPark("llm", "rate_limit_error", 800, t0.toISOString());
+  let versionChecks = 0;
+  const deps = {
+    forge, state: st, supervisor: sup, cfg: mkCfg(),
+    probeLlmReachable: async () => { versionChecks++; return true; },
+  };
+
+  // Tick 1 (past base backoff): --version ok -> ONE canary dispatched; STILL PARKED.
+  const r1 = await tick({ ...deps, now: () => new Date(t0.getTime() + 31_000) });
+  assert.equal(versionChecks, 1);
+  assert.deepEqual(sup.dispatched.map((i) => i.number), [800]);
+  assert.equal(st.isParked(), true, "--version success is NOT a recovery signal — still parked");
+  assert.equal(st.parkRow("llm")?.canaryWorker, "lane-1");
+  assert.equal(st.parkRow("llm")?.probeAttempts, 0); // arming a canary never grows the exponent
+  assert.equal(r1.dispatched.filter((d) => d.kind === "dispatched").length, 1);
+
+  // Tick 2 (canary still running): no second canary, no re-probe while one is in flight.
+  sup.probes["lane-1"] = { ...DEFAULT_PROBE }; // KEEP
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 120_000) });
+  assert.equal(versionChecks, 1);
+  assert.equal(sup.dispatched.length, 1);
+
+  // Canary succeeds (DONE, no PR would ordinarily escalate NOPR — irrelevant here; use a PR to
+  // keep it clean): terminal NOT env-classified -> the llm episode clears.
+  sup.probes["lane-1"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 90 };
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 130_000) });
+  assert.equal(st.isParked(), false, "a real lane reaching a non-env terminal is the recovery signal");
+  const resumed = st.eventsSince("2020-01-01T00:00:00Z", ["park-resumed"]);
+  assert.equal(resumed.length, 1);
+  assert.equal((resumed[0]?.payload as { via: string }).via, "canary");
   st.close();
 });
 
-test("#168 escalation: DURATION-based, not probe-count — many rapid (backoff-bounded) failed probes never trigger it early; crossing parkEscalateAfterSec does", async () => {
+test("#168 P1-1 oscillation regression: provider stays down while --version always succeeds -> exactly ONE canary per backoff step, SAME episode throughout (entered_at stable, attempts grow), duration escalation fires on wall-clock since FIRST entry", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.ready = [{ number: 900, title: "", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ envFailure: { probeBackoffBaseSec: 10, probeBackoffMaxSec: 100, parkEscalateAfterSec: 50 } });
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  const deps = { forge, state: st, supervisor: sup, cfg, probeLlmReachable: async () => true };
+
+  // t0: the initial failure parks the engine (llm), requeues #900 (forge healthy).
+  seedRunning(st, "lane-w", 900);
+  sup.probes["lane-w"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "rate_limit_error" };
+  await tick({ ...deps, now: () => t0 });
+  assert.equal(st.parkRow("llm")?.enteredAt, t0.toISOString());
+  assert.deepEqual(sup.dispatched, []); // parked from this tick's own reclaim -> no dispatch
+
+  // t0+5: backoff (10s) not yet elapsed -> NO canary, NO full dispatch. The old design cleared
+  // park here (--version succeeds) and re-dispatched the full queue — the oscillation.
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 5_000) });
+  assert.deepEqual(sup.dispatched, []);
+  assert.equal(st.isParked(), true);
+
+  // t0+11: due -> canary #1 (exactly one lane).
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 11_000) });
+  assert.equal(sup.dispatched.length, 1);
+  assert.equal(st.parkRow("llm")?.canaryWorker, "lane-1");
+
+  // Canary #1 env-fails (provider still down): SAME episode — attempts 1, entered_at UNCHANGED.
+  sup.probes["lane-1"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "rate_limit_error" };
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 20_000) });
+  assert.equal(st.parkRow("llm")?.enteredAt, t0.toISOString(), "entered_at never resets — no new episode");
+  assert.equal(st.parkRow("llm")?.probeAttempts, 1);
+  assert.equal(st.parkRow("llm")?.canaryWorker, null);
+  assert.equal(sup.dispatched.length, 1); // no dispatch on the canary-failure tick
+
+  // t0+25: backoff now 20s from the failure at t0+20 -> not due -> no canary.
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 25_000) });
+  assert.equal(sup.dispatched.length, 1);
+
+  // t0+41: due -> canary #2 (still exactly one per backoff step).
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 41_000) });
+  assert.equal(sup.dispatched.length, 2);
+
+  // Canary #2 env-fails too: attempts 2, same episode.
+  sup.probes["lane-2"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "429 too many requests" };
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 45_000) });
+  assert.equal(st.parkRow("llm")?.probeAttempts, 2);
+  assert.equal(st.parkRow("llm")?.enteredAt, t0.toISOString());
+
+  // t0+51: park DURATION since FIRST entry crosses 50s -> escalation fires (llm source, forge
+  // healthy -> issue comment on the trigger issue) even though probes/canaries keep cycling.
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 51_000) });
+  assert.notEqual(st.parkRow("llm")?.escalatedAt, null);
+  assert.equal(forge.issueComments.length, 1);
+  assert.equal(forge.issueComments[0]?.[0], 900);
+  assert.equal(st.isParked(), true); // escalation is additive — still parked, still cycling
+  assert.equal(sup.dispatched.length, 2); // and no extra canary snuck out (t0+51 < t0+45+40)
+  st.close();
+});
+
+test("#168 P1-1a mixed storm end-to-end: llm episode + forge failure -> BOTH rows; resume requires BOTH healthy (forge probe first, then a clean canary)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.ready = [{ number: 950, title: "", labels: ["prio:3-feature"] }];
+  let forgeUp = false;
+  forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ envFailure: { probeBackoffBaseSec: 10, probeBackoffMaxSec: 10 } });
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  st.enterPark("llm", "rate_limit_error", 950, t0.toISOString());
+  st.enterPark("forge", "could not resolve host", 950, t0.toISOString());
+  const deps = { forge, state: st, supervisor: sup, cfg, probeLlmReachable: async () => true };
+
+  // While the FORGE episode is open, --version success must NOT arm a canary (it couldn't
+  // even claim an issue) — both episodes persist, zero dispatch.
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 11_000) });
+  assert.equal(st.parkedSources().length, 2);
+  assert.deepEqual(sup.dispatched, []);
+
+  // Forge recovers: its probe clears the forge episode — but the llm episode still blocks.
+  forgeUp = true;
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 25_000) });
+  assert.equal(st.parkRow("forge"), null);
+  assert.equal(st.isParked(), true, "resume only at ZERO rows — llm episode still open");
+
+  // Next due step: canary launches; it succeeds -> llm clears -> fully resumed.
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 40_000) });
+  assert.equal(sup.dispatched.length, 1);
+  const canary = st.parkRow("llm")?.canaryWorker;
+  assert.ok(canary);
+  sup.probes[canary!] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 91 };
+  await tick({ ...deps, now: () => new Date(t0.getTime() + 55_000) });
+  assert.equal(st.isParked(), false);
+  st.close();
+});
+
+test("#168 P1-2 named regression: forge outage with EVERY forge write throwing for N>cap ticks -> zero needs-human, requeue row still present (frozen), resume drains it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  let forgeUp = false;
+  forge.throwOnAddLabel = true;
+  forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+  forge.setBoardStatus = async (n, s) => {
+    if (!forgeUp) throw new Error("board unreachable");
+    forge.boardSet.push([n, s]);
+  };
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ envFailure: { probeBackoffBaseSec: 1, probeBackoffMaxSec: 1 } }); // rollbackRetryCap default 5
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  seedRunning(st, "lane-p12", 970);
+  sup.probes["lane-p12"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "gh: Bad Gateway (HTTP 502)" };
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => t0 });
+  assert.equal(st.parkRow("forge")?.source, "forge");
+
+  // N = 8 > rollbackRetryCap (5) parked ticks: the env requeue is SUSPENDED — never attempted,
+  // never bumped, never degraded to needs-human, never deleted.
+  for (let s = 1; s <= 8; s++) {
+    await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + s * 2000) });
+  }
+  assert.deepEqual(forge.labelsAdded, []); // zero needs-human across the whole outage
+  const pending = st.pendingRollbacks().filter((p) => p.reason === "env-failure-requeue");
+  assert.equal(pending.length, 1, "the requeue row survives the whole outage");
+  assert.equal(pending[0]?.attempts, 0, "frozen — never attempted while suspended");
+
+  // Forge recovers: the probe resumes the engine; the NEXT tick's ROLLBACK RETRY drains it.
+  forgeUp = true;
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 20_000) });
+  assert.equal(st.isParked(), false);
+  const r = await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 22_000) });
+  assert.deepEqual(r.rollbacks, [{ kind: "recovered", issue: 970, target: "ready", reason: "env-failure-requeue" }]);
+  assert.deepEqual(forge.boardSet, [[970, "ready"]]);
+  assert.equal(st.pendingRollbacks().length, 0);
+  st.close();
+});
+
+test("#168 P1-2 cap exemption: an env-failure requeue that keeps failing while NOT forge-parked (llm park, transient board errors) is bumped past rollbackRetryCap — never needs-human, never deleted; recovers when the board heals", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.throwOnAddLabel = true;
+  let boardUp = false;
+  forge.setBoardStatus = async (n, s) => {
+    if (!boardUp) throw new Error("board transiently failing");
+    forge.boardSet.push([n, s]);
+  };
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg(); // recovery.rollbackRetryCap default 5
+  seedRunning(st, "lane-cap", 980);
+  sup.probes["lane-cap"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "rate_limit_error" };
+  const t0 = new Date("2026-07-14T00:00:00Z");
+  await tick({ forge, state: st, supervisor: sup, cfg, now: () => t0 }); // llm park; inline requeue attempt fails
+  assert.equal(st.parkRow("llm")?.source, "llm");
+  assert.equal(st.pendingRollbacks()[0]?.attempts, 1);
+
+  // 7 more ticks (attempts run well past the cap of 5) — llm-parked, so requeues ARE attempted.
+  for (let s = 1; s <= 7; s++) {
+    await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + s * 1000) });
+  }
+  const pending = st.pendingRollbacks();
+  assert.equal(pending.length, 1, "never deleted at cap");
+  assert.ok((pending[0]?.attempts ?? 0) > 5, "bumped past the cap, still retrying");
+  assert.deepEqual(forge.labelsAdded, [], "never degraded to needs-human");
+
+  boardUp = true;
+  const r = await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 20_000) });
+  assert.deepEqual(r.rollbacks, [{ kind: "recovered", issue: 980, target: "ready", reason: "env-failure-requeue" }]);
+  st.close();
+});
+
+test("#168 escalation: DURATION-based, not probe-count — many rapid (backoff-capped) failed probes never trigger it early; crossing parkEscalateAfterSec does", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   forge.listOpenIssueNumbers = async () => { throw new Error("still down"); };
@@ -2142,12 +2386,12 @@ test("#168 escalation: DURATION-based, not probe-count — many rapid (backoff-b
   for (let s = 1; s <= 50; s++) {
     await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + s * 1000) });
   }
-  assert.ok((st.parkState()?.probeAttempts ?? 0) >= 40); // plenty of probe attempts happened
-  assert.equal(st.parkState()?.escalatedAt, null); // duration not yet exceeded -> no escalation
+  assert.ok((st.parkRow("forge")?.probeAttempts ?? 0) >= 40); // plenty of probe attempts happened
+  assert.equal(st.parkRow("forge")?.escalatedAt, null); // duration not yet exceeded -> no escalation
 
   // Cross the duration threshold.
   await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 101_000) });
-  assert.notEqual(st.parkState()?.escalatedAt, null);
+  assert.notEqual(st.parkRow("forge")?.escalatedAt, null);
   st.close();
 });
 
@@ -2162,24 +2406,23 @@ test("#168 escalation is ADDITIVE: probing continues after escalation, and a lat
   st.enterPark("forge", "could not resolve host", 1, t0.toISOString());
 
   await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 11_000) }); // escalates
-  assert.notEqual(st.parkState()?.escalatedAt, null);
-  const attemptsAtEscalation = st.parkState()?.probeAttempts ?? 0;
+  assert.notEqual(st.parkRow("forge")?.escalatedAt, null);
 
   forgeUp = true; // environment heals
   await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 13_000) });
   assert.equal(st.isParked(), false); // auto-resumes despite the earlier escalation
-  void attemptsAtEscalation;
   const resumed = st.eventsSince("2020-01-01T00:00:00Z", ["park-resumed"]);
   assert.equal(resumed.length, 1);
   st.close();
 });
 
-test("#168 channel ladder: forge-sourced park escalates via the LOCAL fallback ONLY — zero forge writes attempted, escalation marker file + status both reflect it", async () => {
+test("#168 channel ladder: forge-sourced escalation is LOCAL only — zero forge writes, marker written; auto-resume then CLEARS the marker (P2-2 wired)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-park-escalate-"));
   try {
     const st = new State(join(dir, "sapwood.sqlite"));
     const forge = new FakeForge();
-    forge.listOpenIssueNumbers = async () => { throw new Error("down"); };
+    let forgeUp = false;
+    forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
     const sup = new FakeSupervisor();
     const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 10, probeBackoffBaseSec: 1, probeBackoffMaxSec: 1 } });
     const t0 = new Date("2026-07-14T00:00:00Z");
@@ -2187,7 +2430,7 @@ test("#168 channel ladder: forge-sourced park escalates via the LOCAL fallback O
 
     await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 11_000) });
 
-    assert.notEqual(st.parkState()?.escalatedAt, null);
+    assert.notEqual(st.parkRow("forge")?.escalatedAt, null);
     // Zero forge writes on the local-fallback path — asserted directly, per the CTO directive.
     assert.deepEqual(forge.labelsAdded, []);
     assert.deepEqual(forge.issueComments, []);
@@ -2199,25 +2442,31 @@ test("#168 channel ladder: forge-sourced park escalates via the LOCAL fallback O
     assert.equal(marker.source, "forge");
     const events = st.eventsSince("2020-01-01T00:00:00Z", ["park-escalated"]);
     assert.equal((events[0]?.payload as { channel: string }).channel, "local");
+
+    // P2-2: the forge heals -> auto-resume -> the stale marker is removed with it.
+    forgeUp = true;
+    await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 13_000) });
+    assert.equal(st.isParked(), false);
+    assert.equal(existsSync(markerPath!), false, "a resolved outage never leaves a stale ESCALATION file behind");
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("#168 channel ladder: llm-sourced park escalates via the forge (issue comment) channel", async () => {
+test("#168 channel ladder: llm-sourced escalation (forge healthy) goes via the forge (issue comment) channel, event records channel 'forge'", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 10 } });
   const t0 = new Date("2026-07-14T00:00:00Z");
   st.enterPark("llm", "rate_limit_error", 55, t0.toISOString());
-  // No probeLlmReachable wired -> the park never auto-resumes across this window (disabled-
-  // consumer rule) -> escalation still fires on duration alone.
+  // No probeLlmReachable wired -> the episode never auto-probes (disabled-consumer) -> the
+  // duration escalation still fires on wall-clock alone.
 
   await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 11_000) });
 
-  assert.notEqual(st.parkState()?.escalatedAt, null);
+  assert.notEqual(st.parkRow("llm")?.escalatedAt, null);
   assert.equal(forge.issueComments.length, 1);
   assert.equal(forge.issueComments[0]?.[0], 55);
   const events = st.eventsSince("2020-01-01T00:00:00Z", ["park-escalated"]);
@@ -2225,7 +2474,7 @@ test("#168 channel ladder: llm-sourced park escalates via the forge (issue comme
   st.close();
 });
 
-test("#168 channel ladder: an llm-sourced park whose forge ALSO turns out to be down falls back to local — never loses the escalation silently", async () => {
+test("#168 channel ladder (P2-3): an llm-sourced escalation whose forge comment THROWS falls back to local — and the event records the channel ACTUALLY used ('local', not the intended 'forge')", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-park-escalate-fallback-"));
   try {
     const st = new State(join(dir, "sapwood.sqlite"));
@@ -2238,16 +2487,46 @@ test("#168 channel ladder: an llm-sourced park whose forge ALSO turns out to be 
 
     await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 11_000) });
 
-    assert.notEqual(st.parkState()?.escalatedAt, null);
+    assert.notEqual(st.parkRow("llm")?.escalatedAt, null);
     const markerPath = st.escalationMarkerPath();
     assert.ok(markerPath && existsSync(markerPath));
+    const events = st.eventsSince("2020-01-01T00:00:00Z", ["park-escalated"]);
+    assert.equal((events[0]?.payload as { channel: string }).channel, "local", "the audit trail records the ACTUAL channel");
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("#168 restart-mid-park: a fresh State reopened on the SAME db path still sees the park episode and blocks dispatch — resumes probing, never dispatching, purely from normal state loading", async () => {
+test("#168 channel ladder mixed storm: an llm escalation while a FORGE episode is ALSO open goes straight to local (never a doomed GitHub write)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-park-mixed-escalate-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    forge.listOpenIssueNumbers = async () => { throw new Error("down"); };
+    forge.addIssueComment = async () => { throw new Error("must never be called"); };
+    const sup = new FakeSupervisor();
+    const cfg = mkCfg({ envFailure: { parkEscalateAfterSec: 10, probeBackoffBaseSec: 1000, probeBackoffMaxSec: 1000 } });
+    const t0 = new Date("2026-07-14T00:00:00Z");
+    st.enterPark("llm", "rate_limit_error", 55, t0.toISOString());
+    st.enterPark("forge", "could not resolve host", 56, t0.toISOString());
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 11_000) });
+
+    // BOTH episodes escalated (duration crossed), both via local — no comment attempt at all.
+    assert.notEqual(st.parkRow("llm")?.escalatedAt, null);
+    assert.notEqual(st.parkRow("forge")?.escalatedAt, null);
+    assert.deepEqual(forge.issueComments, []);
+    const events = st.eventsSince("2020-01-01T00:00:00Z", ["park-escalated"]);
+    assert.equal(events.length, 2);
+    assert.ok(events.every((e) => (e.payload as { channel: string }).channel === "local"));
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#168 restart-mid-park: a fresh State on the SAME db path still sees the episode (canary marker included) and blocks dispatch — resumes probing, never dispatching, purely from normal state loading", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-park-restart-"));
   try {
     const dbPath = join(dir, "sapwood.sqlite");
@@ -2258,68 +2537,78 @@ test("#168 restart-mid-park: a fresh State reopened on the SAME db path still se
     // A brand-new State instance (simulating an engine restart) reads the SAME row back.
     const st2 = new State(dbPath);
     assert.equal(st2.isParked(), true);
-    assert.equal(st2.parkState()?.source, "forge");
+    assert.equal(st2.parkRow("forge")?.source, "forge");
 
     const forge = new FakeForge();
     forge.ready = [{ number: 9, title: "", labels: ["prio:3-feature"] }];
     forge.listOpenIssueNumbers = async () => { throw new Error("still down"); }; // probe still fails
     const sup = new FakeSupervisor();
-    const r = await tick({ forge, state: st2, supervisor: sup, cfg: mkCfg() });
+    const r = await tick({
+      forge, state: st2, supervisor: sup, cfg: mkCfg(),
+      now: () => new Date("2026-07-14T00:01:00Z"), // past base backoff -> probe due
+    });
     assert.deepEqual(r.dispatched, []); // NOT dispatching
     assert.equal(st2.isParked(), true); // still probing (attempted, failed -> stays parked)
-    assert.ok((st2.parkState()?.probeAttempts ?? 0) >= 1);
+    assert.equal(st2.parkRow("forge")?.probeAttempts, 1);
     st2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("#168 forge-outage integration: pre-park PENDING ROLLBACKS still drain normally while parked (only DISPATCH is gated, exactly like PAUSE)", async () => {
+test("#168: pre-park pending rollbacks of OTHER reasons still drain normally while parked (only env-failure requeues are suspended, and only by a forge episode)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
   // A rollback pending from BEFORE this park episode (e.g. a dead-lane requeue from an earlier
   // tick) — must still be retried and recovered even while parked.
-  const rollbackId = st.addPendingRollback(88, "ready", "dead-lane-requeue", "2026-07-14T00:00:00Z");
-  void rollbackId;
-  st.enterPark("forge", "could not resolve host", 1, "2026-07-14T00:00:00Z");
+  st.addPendingRollback(88, "ready", "dead-lane-requeue", "2026-07-14T00:00:00Z");
+  st.enterPark("llm", "rate_limit_error", 1, "2026-07-14T00:00:00Z");
 
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), now: () => new Date("2026-07-14T00:00:05Z") });
 
   assert.deepEqual(r.rollbacks, [{ kind: "recovered", issue: 88, target: "ready", reason: "dead-lane-requeue" }]);
   assert.equal(st.pendingRollbacks().length, 0);
   st.close();
 });
 
-test("#168 forge-outage integration: restoring the forge auto-resumes and re-dispatches the SAME issue that triggered the park", async () => {
+test("#168 forge-outage integration: park -> suspended requeue -> restore forge -> auto-resume -> the SAME issue re-dispatches and the requeue drains", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   let forgeUp = false;
   forge.listOpenIssueNumbers = async () => { if (!forgeUp) throw new Error("down"); return []; };
+  forge.setBoardStatus = async (n, s) => {
+    if (!forgeUp) throw new Error("down");
+    forge.boardSet.push([n, s]);
+  };
   const sup = new FakeSupervisor();
+  const cfg = mkCfg({ envFailure: { probeBackoffBaseSec: 1, probeBackoffMaxSec: 1 } });
+  const t0 = new Date("2026-07-14T00:00:00Z");
   seedRunning(st, "lane-f", 900);
   sup.probes["lane-f"] = { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "Could not resolve host: github.com" };
   forge.ready = [{ number: 900, title: "", labels: ["prio:3-feature"] }];
-  const cfg = mkCfg({ envFailure: { probeBackoffBaseSec: 1, probeBackoffMaxSec: 1 } });
-  const t0 = new Date("2026-07-14T00:00:00Z");
 
-  // Tick 1: the forge-outage failure parks the engine and requeues #900 to Ready.
+  // Tick 1: the forge-outage failure parks the engine; the requeue is suspended (durable).
   const r1 = await tick({ forge, state: st, supervisor: sup, cfg, now: () => t0 });
   assert.equal(r1.reclaimed[0]?.kind, "env-failure");
   assert.equal(st.isParked(), true);
-  assert.deepEqual(r1.dispatched, []); // parked this same tick -> no dispatch yet
+  assert.deepEqual(r1.dispatched, []);
+  assert.equal(st.pendingRollbacks().length, 1);
 
-  // Tick 2: forge is still down -> stays parked, no dispatch. Advance past the 1s backoff so
-  // this tick's probe actually runs (and fails again).
+  // Tick 2: still down -> stays parked, no dispatch, requeue still suspended.
   const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 2_000) });
   assert.equal(st.isParked(), true);
   assert.deepEqual(r2.dispatched, []);
+  assert.equal(st.pendingRollbacks()[0]?.attempts, 0);
 
-  // Forge recovers -> the probe succeeds -> auto-resume -> #900 (still sitting in Ready) is
+  // Forge recovers -> probe succeeds -> auto-resume -> #900 (FakeForge.ready is static) is
   // re-dispatched the SAME tick the probe succeeds.
   forgeUp = true;
   const r3 = await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 4_000) });
   assert.equal(st.isParked(), false);
   assert.deepEqual(r3.dispatched.map((d) => (d.kind === "dispatched" ? d.issue : null)), [900]);
+  // Tick 4: the un-suspended requeue drains through the normal ROLLBACK RETRY phase.
+  const r4 = await tick({ forge, state: st, supervisor: sup, cfg, now: () => new Date(t0.getTime() + 6_000) });
+  assert.deepEqual(r4.rollbacks, [{ kind: "recovered", issue: 900, target: "ready", reason: "env-failure-requeue" }]);
   st.close();
 });

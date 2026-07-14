@@ -6,10 +6,11 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import {
-  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, probeClaudeCliReachable, claudeArgs, guardSettings, shellSingleQuote,
+  parseCostUsd, parseModelUsage, parseResultText, parseAssistantUsageDeltas, discoverClaudeBin, probeClaudeCliReachable, extractFailureText, claudeArgs, guardSettings, shellSingleQuote,
   WorkerSupervisor, renderPromptTemplate, defaultPromptPath, loadWorkerPromptTemplate, buildRenderPrompt,
 } from "./worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
+import { classifyEnvFailure, DEFAULT_LLM_FAILURE_PATTERNS, DEFAULT_FORGE_FAILURE_PATTERNS } from "./env-failure.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
 
@@ -1108,6 +1109,64 @@ test("#168: failureText is tail-capped for a large jsonl — the classifiable er
     const p = await s.probe(name);
     assert.ok(p.failureText && p.failureText.length <= 4000, "capped, not the whole 10k+ jsonl");
     assert.ok(p.failureText?.includes("Could not resolve host"), "the tail (where the error actually is) survives the cap");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #168 (PR #180 review P1-3): failureText is built from STRUCTURED error records only —
+//    NEVER assistant message content. A worker legitimately WORKING ON rate-limit handling
+//    prints the exact signature strings as part of doing its job; that must never park the
+//    engine on an ordinary task failure.
+
+test("extractFailureText: assistant/user/system records and SUCCESSFUL results are excluded; stderr lines + errored results + error records are included", () => {
+  const jsonl = [
+    `{"type":"system","subtype":"init","model":"opus"}`,
+    `{"type":"assistant","message":{"content":[{"type":"text","text":"I will add handling for rate_limit_error and 429 Too Many Requests"}]}}`,
+    `{"type":"user","message":{"content":"also handle Could not resolve host"}}`,
+    `gh: Bad credentials (HTTP 401)`, // raw stderr — included
+    `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`, // API error record — included
+    `{"type":"result","subtype":"success","result":"clean run mentioning usage limit reached","total_cost_usd":0.1}`, // successful result — excluded
+    `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"request failed"}`, // errored result — included
+  ].join("\n");
+  const out = extractFailureText(jsonl);
+  assert.ok(out.includes("gh: Bad credentials"));
+  assert.ok(out.includes("overloaded_error"));
+  assert.ok(out.includes("[error_during_execution] request failed"));
+  assert.ok(!out.includes("429 Too Many Requests"), "assistant content is NEVER included");
+  assert.ok(!out.includes("Could not resolve host"), "user content is NEVER included");
+  assert.ok(!out.includes("usage limit reached"), "a successful result's text is NEVER included");
+});
+
+test("extractFailureText: an unparseable {-prefixed line (mid-write stream fragment, possibly of an assistant message) is SKIPPED, never included", () => {
+  const truncatedAssistant = `{"type":"assistant","message":{"content":[{"type":"text","text":"discussing rate_limit_error and how`;
+  assert.equal(extractFailureText(truncatedAssistant), "");
+});
+
+test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTANT text + a non-env failure -> task failure, no env classification, no park", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-168-neg";
+    writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 168, session_id: "s", total_cost_usd: 0 }));
+    // A worker FIXING rate-limit handling: its assistant messages carry the exact signature
+    // strings verbatim; the actual failure is an ordinary failing test.
+    writeFileSync(
+      join(dir, `${name}.jsonl`),
+      `{"type":"assistant","message":{"content":[{"type":"text","text":"Testing the retry path for rate_limit_error, 429 too many requests, usage limit reached, and Could not resolve host"}]}}\n` +
+        `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"AssertionError: retry test failed — expected 3 retries, got 0"}\n`,
+    );
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.equal(p.failed, true);
+    assert.ok(!p.failureText?.includes("rate_limit_error"), "the assistant's signature strings never reach failureText");
+    assert.equal(
+      classifyEnvFailure(p.failureText ?? "", {
+        llm: [...DEFAULT_LLM_FAILURE_PATTERNS], forge: [...DEFAULT_FORGE_FAILURE_PATTERNS],
+      }),
+      null,
+      "an ordinary task failure whose assistant text discusses the signatures classifies as a TASK failure",
+    );
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

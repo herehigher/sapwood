@@ -356,38 +356,52 @@ builds the peripherals map (engine startup) — never re-logged per round or per
 Environment-failure park (#168) — detect an LLM-provider or forge outage as ONE class distinct
 from an ordinary task failure, park the engine (no new dispatch) instead of escalating the
 issue or spending a gated-reentry attempt, self-heal via a bounded backoff probe, and — only
-past a configurable park *duration* — additionally notify a human. See
+past a configurable park *duration* — additionally notify a human. Episodes are tracked **per
+source** (an `llm` episode and a `forge` episode can be open simultaneously — a mixed storm);
+dispatch resumes only when *every* open episode has cleared. See
 [`troubleshooting.md`](troubleshooting.md#environment-failure-park-168) for what a parked engine
 looks like and what to do about it.
 
 Pattern matching is deterministic (a case-insensitive regex match against a FAILED lane's own
-captured output — the same stream-json jsonl the engine already reads for cost/model-usage
-parsing) — never an LLM judgment call. Defaults are signature-shaped (API/CLI error identifiers,
-full HTTP-error phrases) rather than bare words like "rate limit", specifically so a worker's own
-prose *discussing* rate limits or mocking an HTTP 429 in a test stays an ordinary task failure.
+**structured error output** — the process's stderr lines plus errored stream-json result/error
+records, never assistant message content, so a worker legitimately *working on* rate-limit
+handling whose messages print the exact signature strings stays an ordinary task failure) —
+never an LLM judgment call. Every pattern is compiled at config load: a malformed regex, an
+empty pattern array, or a backoff cap below the base is a fail-fast startup error (`sapwood
+validate` catches all three).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `llmPatterns` | see `sapwood.config.yaml` | Regex patterns (case-insensitive) matched against a FAILED lane's captured output to classify it as an LLM-provider environment failure — `rate_limit_error`, `usage limit reached`, `credit balance is too low`, `insufficient_quota`, `overloaded_error`, `429 too many requests`, etc. |
+| `llmPatterns` | see `sapwood.config.yaml` | Regex patterns (case-insensitive, compiled/validated at load, non-empty) matched against a FAILED lane's structured error output to classify it as an LLM-provider environment failure — `rate_limit_error`, `usage limit reached`, `credit balance is too low`, `insufficient_quota`, `overloaded_error`, `429 too many requests`, etc. |
 | `forgePatterns` | see `sapwood.config.yaml` | Same matching, for a forge (GitHub) environment failure — `could not resolve host`, `connection refused`, `network is unreachable`, `bad gateway`/`gateway timeout`/`service unavailable`, `bad credentials`, `401 unauthorized`, `gh auth login`, etc. |
-| `parkEscalateAfterSec` | `3600` (1h) | Park **duration** (not probe count — bounded exponential backoff makes a count an ambiguous measure of elapsed time) past which the engine additionally notifies a human via the channel ladder. Additive, never a state transition — probing/auto-resume continue unaffected either side of an escalation. |
-| `probeBackoffBaseSec` | `30` | Initial probe interval while parked. |
-| `probeBackoffMaxSec` | `1800` (30min) | Cap on the bounded exponential backoff (`base * 2^attempts`, capped here). |
+| `parkEscalateAfterSec` | `3600` (1h) | Park **duration** per episode (not probe count — bounded exponential backoff makes a count an ambiguous measure of elapsed time) past which the engine additionally notifies a human via the channel ladder. Additive, never a state transition — probing/auto-resume continue unaffected either side of an escalation. The clock runs from the episode's FIRST detection and is never reset by further failures (including failed recovery canaries) within the same episode. |
+| `probeBackoffBaseSec` | `30` | Initial probe interval while parked (the first probe waits a full base interval — never fires on the same tick the park began). |
+| `probeBackoffMaxSec` | `1800` (30min) | Cap on the bounded exponential backoff (`base * 2^attempts`, capped here). Must be >= `probeBackoffBaseSec` (validated at load). |
 
-**Escalation channel ladder:** an `llm`-sourced park (forge presumed reachable) notifies via a
-comment on the issue whose lane triggered the park; a `forge`-sourced park (forge presumed
-*un*reachable — that's the classification itself) never attempts a GitHub write at all — it
-falls back to `sapwood status`, a local `ESCALATION` file in the engine's data dir (written by
-the engine, read-only informational output, never a control input — unlike `KILL_SWITCH`/
-`PAUSE`), and a log line.
+**How each source recovers:**
 
-**LLM-source auto-resume probe:** the cheapest possible reachability check — `claude --version`
-(no API call, no token spend), invoked against the same `CLAUDE_BIN`-resolved binary
-`dispatch()` uses. This only confirms the CLI is installed/executable, not that the underlying
-rate-limit/credit/usage-window condition has actually cleared; a false-positive resume is not a
-wedge — the next real dispatch that still hits the limit re-classifies and re-parks through the
-same path. The forge-source probe reuses an existing lightweight `IForge` read (no new API
-surface, no forge write).
+- **`forge`** — the probe is an existing lightweight read-only `IForge` call; its success is a
+  genuine recovery signal and clears the forge episode outright. While a forge episode is open,
+  env-failure issue-requeues are **suspended** (persisted durably, zero forge writes, retry
+  counter frozen) and drain automatically on resume; they are exempt from the rollback retry cap
+  and never degrade to `needs-human`.
+- **`llm`** — `claude --version` (no API call, zero token spend, same `CLAUDE_BIN` resolution as
+  a real dispatch) is only a *liveness gate*, **not** a recovery signal: it keeps succeeding
+  throughout a rate-limit/credit outage. When the backoff interval elapses and `--version`
+  succeeds (and no forge episode is open), the engine dispatches exactly **one canary lane**.
+  The llm episode clears only when that canary reaches a terminal state that is *not* itself
+  env-classified; a canary that env-fails continues the *same* episode — the entry time (and
+  therefore the escalation clock) is preserved and the backoff keeps growing, so a persistent
+  outage costs one canary per backoff step, never a full-queue redispatch cycle.
+
+**Escalation channel ladder:** an `llm`-sourced escalation with the forge healthy notifies via a
+comment on the issue whose lane triggered the episode; a `forge`-sourced escalation — or an
+`llm`-sourced one during a mixed storm whose forge episode is also open — never attempts a
+GitHub write at all: it falls back to `sapwood status`, a local `ESCALATION` file in the
+engine's data dir (written by the engine, read-only informational output, never a control input
+— unlike `KILL_SWITCH`/`PAUSE`; removed automatically once the outage resolves), and a log
+line. The escalation event records the channel *actually* used, including a comment attempt
+that failed and degraded to local.
 
 ## `escalation`
 

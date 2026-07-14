@@ -764,7 +764,7 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
-    parked: null,
+    parked: [],
   };
   const out = formatStatus(snapshot);
   assert.match(out, /kill switch: ACTIVE/);
@@ -785,7 +785,7 @@ test("formatStatus: PAUSE active renders distinctly from kill switch, both can b
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
-    parked: null,
+    parked: [],
   };
   const out = formatStatus(snapshot);
   assert.match(out, /kill switch: inactive/);
@@ -799,10 +799,11 @@ test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", 
     dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
     killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
     lanesMax: 3, dailyBudgetUsd: 100,
-    parked: {
+    parked: [{
       source: "llm", reason: "rate_limit_error", triggerIssue: 42,
-      enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: null, probeAttempts: 0, escalatedAt: null,
-    },
+      enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: "2026-07-14T00:00:00.000Z",
+      probeAttempts: 0, escalatedAt: null, canaryWorker: null,
+    }],
   };
   const out = formatStatus(snapshot);
   assert.match(out, /park: PARKED \(llm\) since 2026-07-14T00:00:00\.000Z/);
@@ -815,11 +816,11 @@ test("formatStatus: parked + escalated renders the escalation timestamp", () => 
     dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
     killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
     lanesMax: 3, dailyBudgetUsd: 100,
-    parked: {
+    parked: [{
       source: "forge", reason: "could not resolve host", triggerIssue: 7,
       enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: "2026-07-14T00:05:00.000Z",
-      probeAttempts: 4, escalatedAt: "2026-07-14T01:00:00.000Z",
-    },
+      probeAttempts: 4, escalatedAt: "2026-07-14T01:00:00.000Z", canaryWorker: null,
+    }],
   };
   const out = formatStatus(snapshot);
   assert.match(out, /park: PARKED \(forge\)/);
@@ -830,9 +831,33 @@ test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => 
   const snapshot: StatusSnapshot = {
     dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
     killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
-    lanesMax: 3, dailyBudgetUsd: 100, parked: null,
+    lanesMax: 3, dailyBudgetUsd: 100, parked: [],
   };
   assert.match(formatStatus(snapshot), /park: inactive/);
+});
+
+test("formatStatus: a mixed storm renders BOTH episodes (one line per source), canary lane shown when in flight (#168 P1-1a)", () => {
+  const snapshot: StatusSnapshot = {
+    dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
+    killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
+    lanesMax: 3, dailyBudgetUsd: 100,
+    parked: [
+      {
+        source: "llm", reason: "rate_limit_error", triggerIssue: 42,
+        enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: "2026-07-14T00:05:00.000Z",
+        probeAttempts: 2, escalatedAt: null, canaryWorker: "lane-3",
+      },
+      {
+        source: "forge", reason: "could not resolve host", triggerIssue: 7,
+        enteredAt: "2026-07-14T00:10:00.000Z", lastProbeAt: "2026-07-14T00:10:00.000Z",
+        probeAttempts: 0, escalatedAt: null, canaryWorker: null,
+      },
+    ],
+  };
+  const out = formatStatus(snapshot);
+  assert.match(out, /park: PARKED \(llm\)/);
+  assert.match(out, /park: PARKED \(forge\)/);
+  assert.match(out, /canary lane lane-3 in flight/);
 });
 
 test("runStatus: reports a live parked state read straight off the DB, and clears once resumed (#168)", () => {
@@ -849,7 +874,7 @@ test("runStatus: reports a live parked state read straight off the DB, and clear
 
     // Resume (a probe would normally do this) — status must reflect it on the very next read.
     const s2 = new State(dbPath);
-    s2.clearPark();
+    s2.clearPark("forge");
     s2.close();
     const r2 = runStatus(["node", "sapwood", "status", dbPath]);
     assert.match(r2.stdout, /park: inactive/);

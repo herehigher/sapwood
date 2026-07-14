@@ -119,8 +119,14 @@ test("parkDurationExceededSec: independent of probe count — many rapid (backof
 
 test("escalationChannel: forge-sourced park -> local fallback (forge presumed unreachable)", () => {
   assert.equal(escalationChannel("forge"), "local");
+  assert.equal(escalationChannel("forge", true), "local");
 });
 
 test("escalationChannel: llm-sourced park -> forge channel (forge presumed fine)", () => {
   assert.equal(escalationChannel("llm"), "forge");
+  assert.equal(escalationChannel("llm", false), "forge");
+});
+
+test("escalationChannel: llm-sourced park during a mixed storm (forge episode also open) -> local (never a doomed GitHub write)", () => {
+  assert.equal(escalationChannel("llm", true), "local");
 });

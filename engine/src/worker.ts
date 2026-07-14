@@ -265,8 +265,57 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "handoff.json", "heartbeat", "jsonl"];
 
-/** #168: tail cap for terminalFailureText's jsonl read — see its doc comment. */
+/** #168: tail cap for terminalFailureText's extracted text — see extractFailureText's doc. */
 const FAILURE_TEXT_TAIL_CHARS = 4000;
+
+/** #168 (PR #180 review P1-3): build the env-failure classification input from STRUCTURED
+ *  error records only — NEVER from assistant message content. The naive version (a raw tail of
+ *  the whole jsonl) let a worker legitimately WORKING ON rate-limit handling — whose assistant
+ *  messages print the exact signature strings (`rate_limit_error`, `429 Too Many Requests`) as
+ *  part of doing its job — park the entire engine on an ordinary task failure. Included, line
+ *  by line:
+ *   - NON-JSON lines: the process's own stderr (spawn merges stdout+stderr onto one fd; stdout
+ *     is exclusively JSON stream lines, so a bare-text line can only be stderr/CLI output —
+ *     where real 429/network/auth errors actually land). A `{`-prefixed line that fails to
+ *     parse is SKIPPED, not included: it is far more likely a mid-write/truncated stream
+ *     fragment (possibly of an assistant message — content leak risk) than stderr that happens
+ *     to start with `{`.
+ *   - `type:"result"` records ONLY when errored (`is_error` true, or a non-"success" subtype):
+ *     their subtype + `result` text is the CLI's own terminal error report.
+ *   - `type:"error"` records: the API's structured error line (e.g.
+ *     `{"type":"error","error":{"type":"rate_limit_error",...}}`).
+ *   - Everything else — `assistant`/`user`/`system`/successful `result` — is NEVER included. */
+export function extractFailureText(jsonl: string): string {
+  const out: string[] = [];
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (t === "") continue;
+    if (!t.startsWith("{")) {
+      out.push(t); // raw stderr / CLI error output
+      continue;
+    }
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // mid-write/truncated stream fragment — never classify on possibly-content bytes
+    }
+    if (obj.type === "result") {
+      const subtype = typeof obj.subtype === "string" ? obj.subtype : "";
+      const errored = obj.is_error === true || (subtype !== "" && subtype !== "success");
+      if (errored) {
+        const text = typeof obj.result === "string" ? obj.result : "";
+        out.push(`[${subtype || "error"}] ${text}`.trim());
+      }
+      continue;
+    }
+    if (obj.type === "error") {
+      out.push(t); // structured API error record — exactly what the signature sets describe
+    }
+    // assistant / user / system / anything else: excluded by design (see doc comment).
+  }
+  return out.join("\n");
+}
 
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
@@ -984,18 +1033,17 @@ export class WorkerSupervisor implements Supervisor {
     return parseModelUsage(this.readJsonl(this.path(name, "jsonl")));
   }
 
-  /** #168: a FAILED lane's own captured output, for conductor.ts's env-failure classification —
-   *  no new capture mechanism, just a new READ of the jsonl this class already writes (spawn's
-   *  `stdio: ["ignore", jsonlFd, jsonlFd]` merges stdout+stderr onto the same fd, and probe()
-   *  already reads this exact file for terminalCostUsd/terminalModelUsage above) and already
-   *  reads for cost/model-usage parsing. Tail-capped: an environment failure (429/network/auth)
-   *  is almost always the LAST thing the process emits before dying, and a long session's full
-   *  jsonl can be large — no reason to carry the whole thing through LaneProbe just to regex the
-   *  end of it. Not gated on the `failed` flag here (the caller in probe() only invokes this for
-   *  a failed lane) — this method itself is unconditional so it's independently testable. */
+  /** #168: a FAILED lane's own captured ERROR output, for conductor.ts's env-failure
+   *  classification — no new capture mechanism, just a new READ of the jsonl this class already
+   *  writes (spawn's `stdio: ["ignore", jsonlFd, jsonlFd]` merges stdout+stderr onto the same
+   *  fd, and probe() already reads this exact file for terminalCostUsd/terminalModelUsage).
+   *  Extraction is STRUCTURED (PR #180 review P1-3 — see extractFailureText: stderr lines +
+   *  errored result/error records only, never assistant message content), then tail-capped: an
+   *  environment failure is almost always the LAST thing the process emits before dying, and
+   *  there's no reason to carry more through LaneProbe than the classifier can use. */
   private terminalFailureText(name: string): string {
-    const jsonl = this.readJsonl(this.path(name, "jsonl"));
-    return jsonl.length > FAILURE_TEXT_TAIL_CHARS ? jsonl.slice(-FAILURE_TEXT_TAIL_CHARS) : jsonl;
+    const text = extractFailureText(this.readJsonl(this.path(name, "jsonl")));
+    return text.length > FAILURE_TEXT_TAIL_CHARS ? text.slice(-FAILURE_TEXT_TAIL_CHARS) : text;
   }
 
   /** #69: tears the lane's process down, THEN decides its worktree's fate — see

@@ -114,13 +114,16 @@ export type EscalationChannel = "forge" | "local";
 
 /**
  * The escalation channel ladder (issue #168 decision 4), as a pure function of the classified
- * SOURCE rather than a live re-probe at escalation time: if the forge itself is the failed
- * source, it is — by construction — still unreachable at escalation time (escalation only fires
- * while still parked; parked-for-forge only clears once a forge probe SUCCEEDS, which would have
- * already resumed the engine before escalation could fire). Deterministic, zero-cost, and avoids
- * a second forge round-trip at exactly the moment the forge is suspected down. `llm`-sourced
- * parks use the forge channel — an LLM outage says nothing about forge reachability.
+ * SOURCE plus whether a forge park episode is currently open — rather than a live re-probe at
+ * escalation time: if the forge itself is a failed source, it is — by construction — still
+ * unreachable at escalation time (escalation only fires while its episode is still open;
+ * parked-for-forge only clears once a forge probe SUCCEEDS, which resumes before escalation
+ * could fire). Deterministic, zero-cost, and avoids a second forge round-trip at exactly the
+ * moment the forge is suspected down. An `llm`-sourced escalation uses the forge channel — an
+ * LLM outage says nothing about forge reachability — UNLESS a forge episode is ALSO open (a
+ * mixed storm, PR #180 review): then the forge is known-broken and the llm escalation degrades
+ * to the local channel too, never attempting a doomed GitHub write.
  */
-export function escalationChannel(source: EnvFailureSource): EscalationChannel {
-  return source === "forge" ? "local" : "forge";
+export function escalationChannel(source: EnvFailureSource, forgeParked = false): EscalationChannel {
+  return source === "forge" || forgeParked ? "local" : "forge";
 }

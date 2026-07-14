@@ -1450,10 +1450,11 @@ test("runRounds standby: a truly exhausted round.milestone (0 open issues) contr
 
 // ── #168: RoundDeps.probeLlmReachable passthrough — reaches every tick's TickDeps unchanged ──
 
-test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-parked (llm) state gets probed during the round's executing phase", async () => {
+test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-parked (llm) episode's --version check runs during the round's executing phase (park itself persists: --version is not a recovery signal)", async () => {
   const { sleep } = mkSleepSpy();
   const state = new State(":memory:");
-  state.enterPark("llm", "rate_limit_error", 1, "2026-07-14T00:00:00.000Z");
+  // Entered far in the past so the base backoff has long elapsed by the time the round ticks.
+  state.enterPark("llm", "rate_limit_error", 1, "2026-07-01T00:00:00.000Z");
   let probeCalls = 0;
   const deps = baseDeps({
     state, sleep,
@@ -1463,19 +1464,21 @@ test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-pa
   await runRounds(deps);
   stopSafety();
   assert.ok(probeCalls >= 1, "the round loop's own tick() calls reached RoundDeps.probeLlmReachable");
-  assert.equal(state.isParked(), false, "the wired probe succeeded -> auto-resumed");
+  // P1-1: --version success alone never clears the episode — with no Ready issues there is no
+  // canary to launch, so the park (correctly) persists until a real lane proves recovery.
+  assert.equal(state.isParked(), true);
   state.close();
 });
 
-test("#168: RoundDeps.probeLlmReachable omitted -> a pre-parked (llm) state is never probed (disabled-consumer rule holds through the round loop too)", async () => {
+test("#168: RoundDeps.probeLlmReachable omitted -> a pre-parked (llm) episode is never probed (disabled-consumer rule holds through the round loop too)", async () => {
   const { sleep } = mkSleepSpy();
   const state = new State(":memory:");
-  state.enterPark("llm", "rate_limit_error", 1, "2026-07-14T00:00:00.000Z");
+  state.enterPark("llm", "rate_limit_error", 1, "2026-07-01T00:00:00.000Z");
   const deps = baseDeps({ state, sleep }); // no probeLlmReachable
   const stopSafety = boundedStopOnPhase(deps, 5);
   await runRounds(deps);
   stopSafety();
   assert.equal(state.isParked(), true, "never probed -> never auto-resumed");
-  assert.equal(state.parkState()?.probeAttempts, 0);
+  assert.equal(state.parkRow("llm")?.probeAttempts, 0);
   state.close();
 });

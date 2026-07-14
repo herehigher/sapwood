@@ -519,9 +519,11 @@ const Recovery = z.object({
 const EnvFailure = z.object({
   // Defaults live in env-failure.ts (the classifier's own module) so the shipped pattern set and
   // the code that matches against it can never drift apart — this schema only wraps them in a
-  // user-overridable array default.
-  llmPatterns: z.array(z.string()).default([...DEFAULT_LLM_FAILURE_PATTERNS]),
-  forgePatterns: z.array(z.string()).default([...DEFAULT_FORGE_FAILURE_PATTERNS]),
+  // user-overridable array default. Non-empty (PR #180 review P3-1): an empty pattern set would
+  // silently disable env-failure detection for that whole source — if that's genuinely wanted,
+  // it should be a deliberate, visible decision, not an accident of clearing an array.
+  llmPatterns: z.array(z.string().min(1)).min(1).default([...DEFAULT_LLM_FAILURE_PATTERNS]),
+  forgePatterns: z.array(z.string().min(1)).min(1).default([...DEFAULT_FORGE_FAILURE_PATTERNS]),
   // Park DURATION (not probe count — bounded exponential backoff makes a probe COUNT an
   // ambiguous measure of elapsed time, issue #168 decision 3) past which the engine additionally
   // notifies a human via the channel ladder (conductor.ts's escalatePark). Additive, never a
@@ -532,7 +534,35 @@ const EnvFailure = z.object({
   // probeBackoffSec): base * 2^attempts, capped at max.
   probeBackoffBaseSec: z.number().int().positive().default(30),
   probeBackoffMaxSec: z.number().int().positive().default(1800),
-}).strict();
+}).strict().superRefine((v, ctx) => {
+  // PR #180 review P3-1: every pattern must COMPILE at config load — a malformed regex is a
+  // fail-fast startup error (`sapwood validate` catches it too), never a silent degradation to
+  // the classifier's literal-substring fallback (that fallback stays, as pure defense-in-depth
+  // for direct classifyEnvFailure callers, but no config-supplied pattern may rely on it).
+  for (const [key, patterns] of [["llmPatterns", v.llmPatterns], ["forgePatterns", v.forgePatterns]] as const) {
+    patterns.forEach((p, i) => {
+      try {
+        new RegExp(p, "i");
+      } catch (e) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key, i],
+          message: `not a valid regular expression: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+    });
+  }
+  if (v.probeBackoffMaxSec < v.probeBackoffBaseSec) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["probeBackoffMaxSec"],
+      message:
+        `probeBackoffMaxSec (${v.probeBackoffMaxSec}) must be >= probeBackoffBaseSec ` +
+        `(${v.probeBackoffBaseSec}) — a cap below the base would make the very first backoff ` +
+        `interval unrepresentable`,
+    });
+  }
+});
 
 // Raw (untransformed) schema — kept internal. `goal.file` and `roles.architect.planMdPath` are
 // both still `.optional()` here (see their own doc comments); `ConfigSchema` below wraps this in

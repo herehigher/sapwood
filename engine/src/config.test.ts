@@ -961,3 +961,49 @@ test("roles.*.enabled: a non-boolean value is rejected", () => {
     /enabled/,
   );
 });
+
+// ── #168 (PR #180 review P3-1): envFailure config validation — fail-fast at load ────────────
+
+test("envFailure: defaults apply (patterns non-empty, escalate 1h, backoff 30s..30min)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.ok(cfg.envFailure.llmPatterns.length > 0);
+  assert.ok(cfg.envFailure.forgePatterns.length > 0);
+  assert.equal(cfg.envFailure.parkEscalateAfterSec, 3600);
+  assert.equal(cfg.envFailure.probeBackoffBaseSec, 30);
+  assert.equal(cfg.envFailure.probeBackoffMaxSec, 1800);
+});
+
+test("envFailure: a custom valid override parses; a MALFORMED regex pattern is a fail-fast load error naming the entry (never a silent literal-substring degradation)", () => {
+  const ok = parseConfig(
+    'board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { llmPatterns: ["my_custom_error", "quota (exceeded|reached)"] }',
+  );
+  assert.deepEqual(ok.envFailure.llmPatterns, ["my_custom_error", "quota (exceeded|reached)"]);
+  assert.throws(
+    () => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { llmPatterns: ["([unterminated"] }'),
+    /not a valid regular expression/,
+  );
+  assert.throws(
+    () => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { forgePatterns: ["ok", "*bad*"] }'),
+    /not a valid regular expression/,
+  );
+});
+
+test("envFailure: an EMPTY pattern array is rejected at load — silently disabling a source's detection must be impossible by accident", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { llmPatterns: [] }"),
+  );
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { forgePatterns: [] }"),
+  );
+});
+
+test("envFailure: probeBackoffMaxSec below probeBackoffBaseSec is rejected at load; equal is legal (a flat backoff)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { probeBackoffBaseSec: 60, probeBackoffMaxSec: 30 }"),
+    /probeBackoffMaxSec/,
+  );
+  const flat = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { probeBackoffBaseSec: 60, probeBackoffMaxSec: 60 }",
+  );
+  assert.equal(flat.envFailure.probeBackoffMaxSec, 60);
+});
