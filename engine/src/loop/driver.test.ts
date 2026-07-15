@@ -14,6 +14,9 @@ class FakeForge implements IForge {
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
+  async readStartupReconcileData() {
+    return { placements: [], openPrs: [] };
+  }
   ready: Issue[] = [];
   /** #76: countOpenIssuesInMilestone's canned answer — a mutable array so a test can simulate
    *  the count changing across calls (shift() per call; last value repeats once exhausted). */

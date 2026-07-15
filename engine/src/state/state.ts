@@ -699,6 +699,14 @@ export class State {
     return this.db.prepare("SELECT * FROM workers WHERE state IN ('running', 'driving') ORDER BY name").all() as unknown as WorkerRow[];
   }
 
+  /** Rows that still own an issue for startup reconciliation. Handoff is terminal to the live
+   *  scheduler but resumable, so it deliberately prevents a board issue being called orphaned. */
+  reconcileWorkers(): WorkerRow[] {
+    return this.db
+      .prepare("SELECT * FROM workers WHERE state IN ('running', 'driving', 'handoff') ORDER BY name")
+      .all() as unknown as WorkerRow[];
+  }
+
   /** Lanes holding a PR awaiting the review gate (#13's merge driver). No live worker process —
    *  just a lane occupying capacity until gate①/gate② resolve it to merged/needs-human/queued. */
   drivingWorkers(): WorkerRow[] {
@@ -1191,6 +1199,13 @@ export class State {
       .prepare(`SELECT kind, payload FROM events WHERE ts >= ? AND kind IN (${placeholders}) ORDER BY id`)
       .all(sinceIso, ...kinds) as { kind: string; payload: string }[];
     return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
+  }
+
+  latestEvent(kind: string): { kind: string; payload: unknown } | undefined {
+    const row = this.db.prepare("SELECT kind, payload FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1").get(kind) as
+      | { kind: string; payload: string }
+      | undefined;
+    return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
   }
 
   /** Cumulative spend_ledger sum at or after `sinceIso` — harvest's "spend vs round budget"

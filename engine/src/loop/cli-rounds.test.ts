@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { type EngineOverrides, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
 import { State } from "../state/state.js";
 import type { PeripheralPhase } from "./round.js";
 
@@ -46,6 +46,9 @@ class FakeForge implements IForge {
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   unplaced = { issues: [] as number[], skipped: 0 };
   boardCalls: string[] = [];
+  reconcileData: StartupReconcileData = { placements: [], openPrs: [] };
+  reconcileReads = 0;
+  reconcileError: Error | null = null;
 
   async detectOwnerKind(): Promise<"user"> {
     return "user";
@@ -53,6 +56,11 @@ class FakeForge implements IForge {
   async listUnplacedIssues() {
     this.boardCalls.push("list-unplaced");
     return this.unplaced;
+  }
+  async readStartupReconcileData() {
+    this.reconcileReads++;
+    if (this.reconcileError) throw this.reconcileError;
+    return this.reconcileData;
   }
   async getReadyIssues(): Promise<Issue[]> {
     return [];
@@ -129,6 +137,62 @@ class FakeForge implements IForge {
   }
 }
 
+test("sapwood run startup reconcile emits board/PR orphans without forge writes, and runs once", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  forge.reconcileData = {
+    placements: [{ number: 171, repo: "o/r", status: "In Progress" }],
+    openPrs: [{ number: 200, body: "Fixes #171" }],
+  };
+  try {
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" } }),
+      forge,
+      state,
+    });
+    assert.equal(code, 0);
+    assert.equal(forge.reconcileReads, 1);
+    assert.deepEqual(forge.boardCalls, ["list-unplaced"]);
+    assert.equal(state.eventsSince("1970-01-01T00:00:00.000Z", ["orphan-detected"]).length, 2);
+  } finally {
+    state.close();
+  }
+});
+
+test("sapwood run startup reconcile is quiet when rows match and forge-down is non-fatal", async () => {
+  const cfg = mkCfg({ engine: { driver: "tick" } });
+  const healthyState = new State(":memory:");
+  healthyState.upsertWorker({
+    name: "lane-171",
+    issue: 171,
+    session_id: "s",
+    state: "handoff",
+    started_at: "2026-07-15T00:00:00.000Z",
+    ended_at: null,
+    pr: 200,
+  });
+  const healthyForge = new FakeForge();
+  healthyForge.reconcileData = {
+    placements: [{ number: 171, repo: "o/r", status: "In Progress" }],
+    openPrs: [{ number: 200, body: "Fixes #171" }],
+  };
+  try {
+    assert.equal(await runEngine(["node", "sapwood", "run", "--once"], { cfg, forge: healthyForge, state: healthyState }), 0);
+    assert.equal(healthyState.eventsSince("1970-01-01T00:00:00.000Z", ["orphan-detected"]).length, 0);
+  } finally {
+    healthyState.close();
+  }
+
+  const failedState = new State(":memory:");
+  const failedForge = new FakeForge();
+  failedForge.reconcileError = new Error("forge unreachable");
+  try {
+    assert.equal(await runEngine(["node", "sapwood", "run", "--once"], { cfg, forge: failedForge, state: failedState }), 0);
+  } finally {
+    failedState.close();
+  }
+});
+
 test("sapwood run (default driver): runEngine reaches runRounds via createDefaultPeripherals wired to a REAL RoleRunner — dispatches real role sessions to the stub claude binary, and a graceful stop still closes the in-flight round", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-"));
   try {
@@ -171,6 +235,7 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
 
     assert.equal(code, 0);
     assert.deepEqual(forge.boardCalls.slice(0, 2), ["list-unplaced", "set-173-backlog"], "normalization runs before the round loop");
+    assert.equal(forge.reconcileReads, 1, "round driver reconciles exactly once per engine start");
     assert.deepEqual(state.eventsSince("2020-01-01T00:00:00Z", ["board-normalized"]), [
       { kind: "board-normalized", payload: { issue: 173, status: "backlog" } },
     ]);

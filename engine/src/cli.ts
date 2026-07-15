@@ -13,6 +13,7 @@ import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
 import { orderForDispatch } from "./loop/conductor.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
 import { InitError, init } from "./loop/init.js";
+import { parseReconcileCompleted, reconcileStartup, type StartupOrphan, sweepStaleRoleSessions } from "./loop/reconcile.js";
 import { type PeripheralPhase, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { MergeDriver } from "./roles/merge-driver.js";
@@ -397,6 +398,8 @@ export interface StatusSnapshot {
    *  (State.parkedSources()) — same "always live, no caching" property every other
    *  sentinel/flag on this snapshot has. */
   parked: ParkRow[];
+  /** Latest successful startup reconcile only. Absent/healthy runs render no section. */
+  orphanReport?: { orphans: StartupOrphan[]; overflow: number } | null;
 }
 
 export function formatStatus(s: StatusSnapshot): string {
@@ -437,6 +440,15 @@ export function formatStatus(s: StatusSnapshot): string {
     }
   } else {
     lines.push("park: inactive");
+  }
+  if (s.orphanReport && (s.orphanReport.orphans.length > 0 || s.orphanReport.overflow > 0)) {
+    lines.push("", `orphans: ${s.orphanReport.orphans.length + s.orphanReport.overflow}`);
+    for (const orphan of s.orphanReport.orphans) {
+      lines.push(
+        orphan.kind === "pr" ? `  open engine PR #${orphan.pr} (issue #${orphan.issue})` : `  ${orphan.reason} issue #${orphan.issue}`,
+      );
+    }
+    if (s.orphanReport.overflow > 0) lines.push(`  … and ${s.orphanReport.overflow} more`);
   }
   return lines.join("\n") + "\n";
 }
@@ -480,6 +492,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
         code: 1,
       };
     }
+    const reconcile = parseReconcileCompleted(state.latestEvent("reconcile-completed")?.payload);
     const snapshot: StatusSnapshot = {
       dbPath,
       schemaVersion: dbVersion,
@@ -492,6 +505,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       lanesMax: cfg?.lanes.max ?? null,
       dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
       parked: state.parkedSources(),
+      orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
     };
     return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
   } finally {
@@ -770,6 +784,12 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // startup with zero dispatch, not silently stop the run after the first wave of workers.
   await assertStopMilestoneExists(forge, stop);
   await normalizeUnplacedBoardItems(forge, state);
+  await reconcileStartup(forge, state, cfg);
+  sweepStaleRoleSessions(state, {
+    log: console.error,
+    ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
+    ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
+  });
   console.log(`sapwood run: driver=tick tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
   // NOTE: roundSpendUsd (the per-round hard budget gate, cfg.cost.roundBudgetUsd) is left at
   // its TickDeps default (0, i.e. never over-budget) — computing a live "this round's spend"
@@ -838,6 +858,12 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
   await assertStopMilestoneExists(forge, stop);
   await normalizeUnplacedBoardItems(forge, state);
+  await reconcileStartup(forge, state, cfg);
+  sweepStaleRoleSessions(state, {
+    log: console.error,
+    ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
+    ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
+  });
   console.log(`sapwood run: driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
   // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
   const probeLlmReachable = () =>

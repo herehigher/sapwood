@@ -18,6 +18,16 @@ The loader probes, in order: `sapwood.config.yaml`, `sapwood.config.yml`,
 `sapwood.config.json`. Only `board.owner`, `board.repo`, and `board.projectNumber` are
 required; every other key has a default.
 
+## Data directory is stateful
+
+Treat `data/` as durable runtime state: back it up, and never delete it while sapwood is
+running. SQLite worker rows are the recovery truth; the GitHub board is only a management
+view and sapwood deliberately never rebuilds local state from it. `KILL_SWITCH`, `PAUSE`, and
+`ESCALATION` also live in this directory and disappear with it. Losing the database resets the
+daily `spend_ledger`, so the same UTC day's budget may be spent again; this is a known accepted
+residual risk. On the next start sapwood reports detectable board/PR orphans, but does not
+requeue, relabel, drive, or otherwise reconstruct them.
+
 ## `board`
 
 Identifies the repo and ProjectV2 board the loop drives.

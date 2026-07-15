@@ -593,6 +593,9 @@ class MinimalForge implements IForge {
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
+  async readStartupReconcileData() {
+    return { placements: [], openPrs: [] };
+  }
   async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
