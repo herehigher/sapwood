@@ -7,9 +7,9 @@
 // exec/shell:true). Issue text is treated as data, never interpolated into a shell.
 
 import type { SapwoodConfig } from "../config/config.js";
-import { labelsInclude } from "../labels.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { gh } from "./gh.js";
+import { labelsInclude } from "./labels.js";
 
 export type OwnerKind = "user" | "org";
 

@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
-import { labelsInclude, normalizeLabel, SAPWOOD_TAXONOMY_LABELS } from "../labels.js";
+import { labelsInclude, normalizeLabel, SAPWOOD_TAXONOMY_LABELS } from "../forge/labels.js";
 
 export interface InitDeps {
   run: GhRunner; // generic gh runner (label/milestone/api/graphql)

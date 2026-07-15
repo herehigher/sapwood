@@ -15,7 +15,7 @@
 import { existsSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../labels.js";
+import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";

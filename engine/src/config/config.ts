@@ -21,7 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { DEFAULT_WORKFLOW_LABELS, labelsInclude } from "../labels.js";
+import { DEFAULT_WORKFLOW_LABELS, labelsInclude } from "../forge/labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 
 const Board = z

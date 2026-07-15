@@ -20,7 +20,7 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
-import { LEGACY_WORKFLOW_LABELS, labelsInclude, labelsIncludeAnySubstring } from "../labels.js";
+import { LEGACY_WORKFLOW_LABELS, labelsInclude, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { ReviewAction, Reviewer, ReviewFailoverTransition, ReviewFallbackLock, ReviewTriggerPin } from "./reviewer.js";
 import { changesRequestedOnHead, NO_FALLBACK_LOCK, resolveReviewVerdict } from "./reviewer.js";
 
