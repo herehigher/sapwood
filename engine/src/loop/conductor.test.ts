@@ -1310,7 +1310,8 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
   const dir = mkdtempSync(join(tmpdir(), "sapwood-adopt-detached-"));
   const dbPath = join(dir, "sapwood.sqlite");
   const bin = join(dir, "claude-stub");
-  writeFileSync(bin, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`, { mode: 0o755 });
+  const termMarker = join(dir, "term-received");
+  writeFileSync(bin, `#!/usr/bin/env bash\ntrap 'touch "${termMarker}" ; exit 0' TERM\nsleep 30\n`, { mode: 0o755 });
   const cfg = mkCfg({ guard: { mode: "soft" }, worker: { heartbeatStaleSecs: 1, timeoutSec: 30 } });
   const forge = new FakeForge();
   const st = new State(dbPath);
@@ -1353,6 +1354,7 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
       }
     }
     assert.throws(() => process.kill(running.wrapper_pid, 0), "cooperative wrapper exited from the graceful SIGTERM");
+    assert.ok(existsSync(termMarker), "TERM trap wrote its marker; SIGKILL cannot satisfy this assertion");
 
     const settled = await tick({ forge, state: st, supervisor: s2, cfg });
     assert.equal(settled.reclaimed[0]?.kind, "handoff");

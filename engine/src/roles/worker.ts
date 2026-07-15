@@ -932,15 +932,20 @@ export class WorkerSupervisor implements Supervisor {
     // instead confirms death (and writes .handoff) from INSIDE probe(), the next time it's
     // called for this lane; see finalizeDetachedHandoffIfConfirmedDead.
     if (this.detachedHandoffRequested.has(name) || this.detachedReclaiming.has(name)) return false;
-    // #169: the in-memory set above dedups ticks only within one engine process. A second
-    // restart must honor the write-before-signal flag left by the first adopter: do not send
-    // another SIGTERM and do not cause the conductor to emit another lane-adopted event.
     const runningPath = this.path(name, "running.json");
     const running = this.readJson(runningPath);
-    if (running?.handoff_requested === true) return false;
     const pid = this.persistedPid(name);
     if (pid == null || this.wrapperAlive(name) !== 1) return false;
     this.detachedHandoffRequested.add(name);
+    if (running?.handoff_requested === true) {
+      // #169: re-signal once per restarted engine to close the write-before-signal crash
+      // window (the flag was persisted, but SIGTERM may never have been sent). Return false
+      // because the flag dedups only the lane-adopted event. Accepted blind spot: a crash after
+      // SIGTERM but before appendEvent permanently loses that honesty event; fixing that tiny
+      // window needs new conductor-side event-log dedup machinery.
+      this.signalGroup(pid, "SIGTERM");
+      return false;
+    }
     // #63: persist the request onto running.json itself (not just this process's in-memory
     // set) so a SECOND engine restart — before probe() ever confirms the pid is dead — doesn't
     // forget the request. The in-memory set alone only survives one restart (it's how THIS

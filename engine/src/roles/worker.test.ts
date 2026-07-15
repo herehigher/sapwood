@@ -1988,7 +1988,7 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
     assert.equal(
       s2.requestHandoff(laneName),
       false,
-      "second restart reads handoff_requested and neither re-signals nor re-announces adoption",
+      "second restart reads handoff_requested, re-signals once, and does not re-announce adoption",
     );
 
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
@@ -2001,6 +2001,52 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
 
     s2.dispose();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#169: persisted handoff_requested closes the write-before-signal crash window by re-sending SIGTERM without re-announcing adoption", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s1: WorkerSupervisor | undefined;
+  let s2: WorkerSupervisor | undefined;
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    s1 = sup(dir, bin);
+    const { name } = await s1.dispatch({ number: 169, title: "t", labels: [] });
+    await sleep(600); // let bash install its TERM trap before simulating the crash window
+    const runningPath = join(dir, `${name}.running.json`);
+    const running = JSON.parse(readFileSync(runningPath, "utf8")) as Record<string, unknown> & { wrapper_pid: number };
+    const pid = running.wrapper_pid;
+    assert.equal(alive(pid), true);
+
+    // Simulate: running.json flag persisted, then the engine died before sending SIGTERM.
+    writeFileSync(runningPath, `${JSON.stringify({ ...running, handoff_requested: true })}\n`);
+    s1.dispose();
+    s1 = undefined;
+
+    s2 = sup(dir, bin);
+    const proto = WorkerSupervisor.prototype as unknown as {
+      signalGroup: (pid: number, sig: NodeJS.Signals) => void;
+    };
+    const s2Hooks = s2 as unknown as {
+      signalGroup: (pid: number, sig: NodeJS.Signals) => void;
+    };
+    let signalCount = 0;
+    s2Hooks.signalGroup = (targetPid, sig) => {
+      signalCount++;
+      proto.signalGroup.call(s2, targetPid, sig);
+    };
+
+    assert.equal(s2.requestHandoff(name), false, "persisted flag suppresses only the duplicate adoption event");
+    assert.equal(signalCount, 1, "fresh supervisor re-sends SIGTERM once");
+    for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
+    assert.equal(alive(pid), false, "SIGTERM reached the wrapper despite the pre-existing persisted flag");
+
+    assert.doesNotThrow(() => assert.equal(s2?.requestHandoff(name), false));
+    assert.equal(signalCount, 1, "in-memory set prevents a second signal from the same supervisor");
+  } finally {
+    s1?.dispose();
+    s2?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
