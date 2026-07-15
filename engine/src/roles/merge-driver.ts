@@ -20,7 +20,7 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
-import { LEGACY_WORKFLOW_LABELS, labelsInclude, labelsIncludeAnySubstring } from "../forge/labels.js";
+import { labelsInclude, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { ReviewAction, Reviewer, ReviewFailoverTransition, ReviewFallbackLock, ReviewTriggerPin } from "./reviewer.js";
 import { changesRequestedOnHead, NO_FALLBACK_LOCK, resolveReviewVerdict } from "./reviewer.js";
 
@@ -71,7 +71,7 @@ export function deriveGate(input: {
 // (sapwood dropped 0day's risk/fund trading-domain labels — CLAUDE.md: port the logic, not the
 // domain); this default exists only so mergeDecision reproduces 0day's parity-suite rows
 // unchanged when called with no 5th argument.
-const BASH_DEFAULT_HUMAN_LABELS = ["risk", "fund", LEGACY_WORKFLOW_LABELS.needsHuman, LEGACY_WORKFLOW_LABELS.blocked] as const;
+const BASH_DEFAULT_HUMAN_LABELS = ["risk", "fund", "needs-human", "blocked"] as const;
 
 /**
  * Port of 0day's loop_merge_driver.sh `merge_decision` — the FINAL fail-safe check evaluated

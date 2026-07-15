@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
-import { labelsInclude, normalizeLabel, SAPWOOD_TAXONOMY_LABELS } from "../forge/labels.js";
+import { labelsInclude, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
 
 export interface InitDeps {
   run: GhRunner; // generic gh runner (label/milestone/api/graphql)
@@ -52,7 +52,7 @@ export interface LabelSpec {
 export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
   const l = cfg.labels;
   return [
-    ...SAPWOOD_TAXONOMY_LABELS,
+    ...taxonomyLabels(l.prefix),
     { name: l.inProgress, color: "0e8a16", description: "Claimed by a worker (in flight)" },
     { name: l.needsHuman, color: "5319e7", description: "Escalated — stop autonomy, ask a human" },
     { name: l.blocked, color: "5319e7", description: "Blocked — held out of the main lane" },

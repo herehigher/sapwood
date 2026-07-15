@@ -15,12 +15,47 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.worker.maxResumes, 2);
   assert.equal(cfg.reviewer.mode, "different-model-codex");
+  assert.equal(cfg.labels.prefix, "sapwood:");
   assert.equal(cfg.labels.verifyNa, "sapwood:verify:n/a");
   assert.equal(cfg.labels.planApproved, "sapwood:plan:approved"); // #88 gate⓪
+  assert.deepEqual(cfg.escalation.humanLabels, ["sapwood:needs-human", "sapwood:blocked"]);
   // #14 engine cost ceiling + kill switch: conservative defaults.
   assert.equal(cfg.cost.dailyBudgetUsd, 100);
   assert.equal(cfg.cost.maxWallClockSec, 14400);
   assert.equal(cfg.cost.drainWindowSec, 300);
+});
+
+test("labels.prefix derives omitted workflow and escalation defaults, including the empty-prefix escape hatch", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  const custom = parseConfig(`${base}labels: { prefix: "TEAM:" }`);
+  assert.equal(custom.labels.prefix, "team:");
+  assert.equal(custom.labels.inProgress, "team:in-progress");
+  assert.equal(custom.labels.planApproved, "team:plan:approved");
+  assert.deepEqual(custom.escalation.humanLabels, ["team:needs-human", "team:blocked"]);
+
+  const bare = parseConfig(`${base}labels: { prefix: "" }`);
+  assert.equal(bare.labels.prefix, "");
+  assert.equal(bare.labels.needsHuman, "needs-human");
+  assert.deepEqual(bare.escalation.humanLabels, ["needs-human", "blocked"]);
+});
+
+test("labels.prefix affects defaults only; explicit label and escalation values remain verbatim", () => {
+  const cfg = parseConfig(`
+board: { owner: a, repo: r, projectNumber: 1 }
+labels: { prefix: "TEAM:", inProgress: Existing-Case, needsHuman: Human-Review }
+escalation: { humanLabels: [human-review, Another-Hold] }
+`);
+  assert.equal(cfg.labels.prefix, "team:");
+  assert.equal(cfg.labels.inProgress, "Existing-Case");
+  assert.equal(cfg.labels.needsHuman, "Human-Review");
+  assert.deepEqual(cfg.escalation.humanLabels, ["human-review", "Another-Hold"]);
+});
+
+test("labels.prefix rejects whitespace", () => {
+  assert.throws(
+    () => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { prefix: "team labels:" }'),
+    /labels\.prefix.*whitespace|whitespace.*labels\.prefix/i,
+  );
 });
 
 test("worker.maxResumes (#172): non-negative integer, default 2, 0 disables resume", () => {

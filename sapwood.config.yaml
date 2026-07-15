@@ -114,14 +114,7 @@ reviewer:
   # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
   escalateAfterSec: 86400
 
-labels: # explicit unprefixed pins preserve this repo's established pre-#199 taxonomy
-  inProgress: in-progress
-  needsHuman: needs-human
-  blocked: blocked
-  reserve: reserve
-  verifyNa: verify:n/a # Decision #8: issues with this label skip the verification-plan gate
-  planApproved: plan:approved # gate⓪: applied by the plan-reviewer; required with a real plan
-  originAgent: origin:agent # provenance stamp for issues created by an agent
+# labels omitted: this repo adopts the shipped sapwood:* namespace defaults.
 
 # #87/#104: peripheral role sessions — the round orchestrator's aligning (PO)/architecting/
 # plan_review (gate⓪)/harvesting/retro phases, each a role-scoped session wired into runRounds's
@@ -283,8 +276,7 @@ labels: # explicit unprefixed pins preserve this repo's established pre-#199 tax
 #                              # setting this at/below the floor fails EVERY probe with
 #                              # "Exceeded USD budget" and keeps the engine parked.
 
-escalation:
-  humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human
+# escalation omitted: humanLabels derives from the default labels.prefix.
 
 coverage:
   minPercent: 0 # test-coverage gate (0 = off for M0)

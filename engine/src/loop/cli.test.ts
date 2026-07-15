@@ -588,7 +588,7 @@ test("computeDryRunPreview: uses the REAL dispatch eligibility filter — reserv
     { number: 1, title: "held for human", labels: [baseCfg.labels.needsHuman] },
     { number: 2, title: "blocked", labels: [baseCfg.labels.blocked] },
     { number: 3, title: "reserve", labels: [baseCfg.labels.reserve] },
-    { number: 4, title: "waiting on 9", labels: ["blocked-by:9"] },
+    { number: 4, title: "waiting on 9", labels: ["sapwood:blocked-by:9"] },
     { number: 5, title: "actually dispatchable", labels: [] },
   ];
   const preview = computeDryRunPreview(ready, baseCfg);
@@ -604,13 +604,13 @@ test("computeDryRunPreview: uses the REAL dispatch eligibility filter — reserv
 test("computeDryRunPreview: candidates follow orderForDispatch's priority ordering, not board order", () => {
   const ready: Issue[] = [
     { number: 10, title: "default prio", labels: [] }, // prio 3 (no label)
-    { number: 11, title: "urgent", labels: ["prio:0"] },
+    { number: 11, title: "urgent", labels: ["sapwood:prio:0"] },
   ];
   const preview = computeDryRunPreview(ready, baseCfg); // roundDispatchCap default = 6 (#124), both ready issues under it
   assert.deepEqual(
     preview.candidates.map((i) => i.number),
     [11, 10],
-  ); // prio:0 first
+  ); // configured-prefix prio:0 first
 });
 
 test("computeDryRunPreview: fewer ready issues than the cap -> candidates = all of them", () => {

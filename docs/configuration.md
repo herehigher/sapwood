@@ -316,11 +316,18 @@ The label taxonomy the loop reads and writes. GitHub label names are case-insens
 unique but case-preserving, so sapwood normalizes every label comparison by trimming and
 lowercasing both sides. `sapwood init` detects existing labels case-insensitively and sends
 lowercase names when creating missing labels; re-runs still preserve existing label casing,
-colors, and descriptions. It provisions all workflow labels below plus the fixed
-`sapwood:type:*`/`sapwood:prio:*` labels, which aren't individually configurable.
+colors, and descriptions. It provisions all workflow labels below plus the fixed taxonomy,
+formed by prepending `labels.prefix` to `type:*` and `prio:*`.
+
+`labels.prefix` namespaces all omitted workflow-label defaults and the fixed taxonomy. Set it
+to `""` to use bare names. The prefix is normalized to lowercase and may not contain
+whitespace. It affects defaults only: any explicitly configured workflow label is used
+verbatim, without prepending the prefix. An explicit `escalation.humanLabels` array is likewise
+used verbatim.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `prefix` | `sapwood:` | Namespace for omitted workflow-label defaults and the fixed `type:*`/`prio:*` taxonomy. Empty string selects bare names. |
 | `inProgress` | `sapwood:in-progress` | Applied to a claimed issue. |
 | `needsHuman` | `sapwood:needs-human` | Escalation — stop autonomy on this issue/PR, ask a human. Its value must be listed case-insensitively in `escalation.humanLabels` so the written label is recognized by both PR and issue holds. |
 | `blocked` | `sapwood:blocked` | Held out of the main dispatch lane. |
@@ -475,7 +482,7 @@ that failed and degraded to local.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `humanLabels` | `[sapwood:needs-human, sapwood:blocked]` | Any matching label on an issue means "stop autonomy, ask a human" for that issue. It must list `labels.needsHuman` case-insensitively so PR and issue holds recognize the same escalation label. |
+| `humanLabels` | `[sapwood:needs-human, sapwood:blocked]` | When omitted, derives from `labels.prefix`. Any matching label on an issue means "stop autonomy, ask a human" for that issue. An explicit array is used verbatim and must list `labels.needsHuman` case-insensitively so PR and issue holds recognize the same escalation label. |
 
 ## `coverage`
 

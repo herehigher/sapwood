@@ -204,7 +204,7 @@ The scheduler + worker + live guard. TS port of 0day's `loop_conductor.sh` +
 domain (no reserve/SLA/eval-report/HTML machinery).
 
 - **`conductor.ts`** — pure scheduling core mirrors `test_loop_conductor.sh` row-for-row
-  (`classifyLane` 4-signal lane state, `issuePriority` [matches bare `prio:N` *and* suffixed],
+  (`classifyLane` 4-signal lane state, `issuePriority` [matches configured-prefix `prio:N`, bare when the prefix is empty, and suffixed],
   `labelsBlockers`, `budgetExceeded`, `codingFloor`/`isCodingRank`/`metaLaneAllowed`
   anti-starvation, `laneOnReclaim*`, `driveDecision`). **Structured discriminated-union tick
   result** replaces 0day's stringly-typed `DISPATCHED/RECLAIMED` text protocol. `tick()` =

@@ -212,6 +212,7 @@ class FakeSupervisor implements Supervisor {
 
 const LEGACY_LABEL_CONFIG = {
   labels: {
+    prefix: "",
     inProgress: "in-progress",
     needsHuman: "needs-human",
     blocked: "blocked",
@@ -1635,38 +1636,32 @@ test("budgetExceeded: total > cap (float); equal is not over", () => {
   assert.equal(budgetExceeded(0, 0), false);
 });
 
-test("issuePriority: min prio:N-* across labels, default 3", () => {
-  assert.equal(issuePriority(["prio:0-gov", "type:ops"]), 0);
-  assert.equal(issuePriority(["type:feature", "prio:1-decision"]), 1);
-  assert.equal(issuePriority(["prio:2-blocking-ux"]), 2);
-  assert.equal(issuePriority(["prio:3-feature"]), 3);
-  assert.equal(issuePriority(["prio:4-fe-polish"]), 4);
-  assert.equal(issuePriority(["type:feature"]), 3); // no prio label -> default 3
-  assert.equal(issuePriority([]), 3); // empty -> 3
-  assert.equal(issuePriority(["prio:3-feature", "prio:0-gov"]), 0); // multiple -> highest priority (min rank)
+test("issuePriority: min configured-prefix prio:N-* across labels, default 3", () => {
+  assert.equal(issuePriority(["sapwood:prio:0-gov", "sapwood:type:ops"], "sapwood:"), 0);
+  assert.equal(issuePriority(["sapwood:type:feature", "sapwood:prio:1-decision"], "sapwood:"), 1);
+  assert.equal(issuePriority(["sapwood:prio:2-blocking-ux"], "sapwood:"), 2);
+  assert.equal(issuePriority(["sapwood:prio:3-feature"], "sapwood:"), 3);
+  assert.equal(issuePriority(["sapwood:prio:4-fe-polish"], "sapwood:"), 4);
+  assert.equal(issuePriority(["sapwood:type:feature"], "sapwood:"), 3); // no prio label -> default 3
+  assert.equal(issuePriority([], "sapwood:"), 3); // empty -> 3
+  assert.equal(issuePriority(["sapwood:prio:3-feature", "sapwood:prio:0-gov"], "sapwood:"), 0);
 });
 
-test("issuePriority: bare init-created labels (prio:N, no suffix) are recognized (Codex R4)", () => {
-  // sapwood init.ts creates bare prio:0..3; the real repo also uses suffixed prio:1-high.
-  // Both must rank (diverges from the bash twin, which only matched the hyphenated form).
-  assert.equal(issuePriority(["prio:0"]), 0);
-  assert.equal(issuePriority(["prio:1"]), 1);
-  assert.equal(issuePriority(["prio:3"]), 3);
-  assert.equal(issuePriority(["prio:2", "prio:0"]), 0); // min across bare labels
-  assert.equal(issuePriority(["prio:00"]), 3); // malformed -> no match -> default
-  assert.equal(issuePriority(["PRIO:2-high"]), 2); // legacy case variant
-  assert.equal(issuePriority(["Sapwood:Prio:1"]), 1); // prefixed case variant
-  assert.equal(issuePriority(["sapwood:prio:4-polish"]), 4); // prefixed suffixed form
+test("issuePriority: bare forms require labels.prefix to be empty", () => {
+  assert.equal(issuePriority(["prio:0"], "sapwood:"), 3);
+  assert.equal(issuePriority(["PRIO:2-high"], "sapwood:"), 3);
+  assert.equal(issuePriority(["prio:0"], ""), 0);
+  assert.equal(issuePriority(["PRIO:2-high"], ""), 2);
+  assert.equal(issuePriority(["prio:00"], ""), 3); // malformed -> no match -> default
+  assert.equal(issuePriority(["Sapwood:Prio:1"], "sapwood:"), 1); // normalized case variant
 });
 
-test("labelsBlockers: parse blocked-by:[#]N, ascending", () => {
-  assert.deepEqual(labelsBlockers(["blocked-by:42", "type:feature"]), [42]);
-  assert.deepEqual(labelsBlockers(["blocked-by:42", "blocked-by:7"]), [7, 42]);
-  assert.deepEqual(labelsBlockers(["type:feature", "prio:3-feature"]), []);
-  assert.deepEqual(labelsBlockers([]), []);
-  assert.deepEqual(labelsBlockers(["blocked-by:#42", "type:feature"]), [42]); // doc format with # tolerated
-  assert.deepEqual(labelsBlockers(["blocked-by:#42", "blocked-by:7"]), [7, 42]); // mixed #/no-#
-  assert.deepEqual(labelsBlockers(["BLOCKED-BY:#5", "Sapwood:Blocked-By:12"]), [5, 12]);
+test("labelsBlockers: parse only the configured-prefix blocked-by:[#]N forms", () => {
+  assert.deepEqual(labelsBlockers(["sapwood:blocked-by:42", "sapwood:type:feature"], "sapwood:"), [42]);
+  assert.deepEqual(labelsBlockers(["sapwood:blocked-by:42", "sapwood:blocked-by:7"], "sapwood:"), [7, 42]);
+  assert.deepEqual(labelsBlockers(["blocked-by:#42"], "sapwood:"), []);
+  assert.deepEqual(labelsBlockers(["BLOCKED-BY:#5", "blocked-by:12"], ""), [5, 12]);
+  assert.deepEqual(labelsBlockers([], "sapwood:"), []);
 });
 
 test("hasReserveLabel: any of the reserve-ish labels present", () => {

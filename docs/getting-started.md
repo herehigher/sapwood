@@ -50,11 +50,12 @@ sapwood init
    `gh auth refresh -s project`) if you're not logged in or missing the `project`
    scope, before touching anything.
 2. **Detects user vs. org** for the configured `board.owner`.
-3. **Ensures the label taxonomy exists** (`sapwood:type:*`, `sapwood:prio:0`–`3`,
+3. **Ensures the label taxonomy exists** (with the default `labels.prefix`: `sapwood:type:*`, `sapwood:prio:0`–`3`,
    `sapwood:in-progress`, `sapwood:needs-human`, `sapwood:blocked`, `sapwood:reserve`,
    `sapwood:verify:n/a`, `sapwood:plan:approved`, `sapwood:origin:agent`) — detection is
    case-insensitive and missing labels are created lowercase, so it never clobbers labels
-   you've already customized.
+   you've already customized. Set `labels.prefix: ""` for bare defaults; explicitly configured
+   workflow-label values are used verbatim.
 4. **Ensures any configured milestones exist** (`config.milestones`; empty by default —
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**

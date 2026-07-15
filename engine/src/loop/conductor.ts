@@ -127,16 +127,13 @@ export function drainEscalationDue(breachAtIso: string, nowMs: number, drainWind
 }
 
 /**
- * Lowest prio:N rank across labels (0..4, low = higher priority). No prio label -> 3.
- * Matches bare and `sapwood:`-prefixed forms, with or without a suffix
- * (`prio:N-foo`, e.g. prio:1-high), case-insensitively. This intentionally diverges from
- * 0day's bash twin, which only matched the hyphenated form. Bare support remains required for
- * repositories using sapwood's pre-#199 taxonomy.
+ * Lowest configured-prefix prio:N rank across labels (0..4, low = higher priority).
+ * No matching prio label -> 3. Supports bare names only when labels.prefix is explicitly "".
  */
-export function issuePriority(labels: string[]): number {
+export function issuePriority(labels: string[], prefix: string): number {
   let min = 5; // sentinel: no prio label found
   for (const tok of labels) {
-    const d = matchPriorityLabel(tok);
+    const d = matchPriorityLabel(tok, prefix);
     if (d != null) {
       if (d < min) min = d;
     }
@@ -144,11 +141,11 @@ export function issuePriority(labels: string[]): number {
   return min === 5 ? 3 : min;
 }
 
-/** Bare or `sapwood:`-prefixed blocked-by:[#]N blocker issue numbers, ascending. */
-export function labelsBlockers(labels: string[]): number[] {
+/** Configured-prefix blocked-by:[#]N blocker issue numbers, ascending. */
+export function labelsBlockers(labels: string[], prefix: string): number[] {
   const out: number[] = [];
   for (const tok of labels) {
-    const issue = matchBlockedByLabel(tok);
+    const issue = matchBlockedByLabel(tok, prefix);
     if (issue != null) out.push(issue);
   }
   return out.sort((a, b) => a - b);
@@ -586,8 +583,8 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
   const reserveish = [cfg.labels.reserve, ...cfg.escalation.humanLabels];
   return ready
     .filter((i) => !hasReserveLabel(i.labels, reserveish))
-    .filter((i) => labelsBlockers(i.labels).length === 0)
-    .map((i) => ({ i, rank: issuePriority(i.labels) }))
+    .filter((i) => labelsBlockers(i.labels, cfg.labels.prefix).length === 0)
+    .map((i) => ({ i, rank: issuePriority(i.labels, cfg.labels.prefix) }))
     .sort((a, b) => a.rank - b.rank || a.i.number - b.i.number)
     .map((x) => x.i);
 }
@@ -1883,9 +1880,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       // Anti-starvation: a meta-rank issue must yield a reserved coding lane while coding
       // work is still waiting (codingFloor of cfg.lanes.max lanes are reserved for coding).
-      const rank = issuePriority(issue.labels);
+      const rank = issuePriority(issue.labels, cfg.labels.prefix);
       if (!isCodingRank(rank)) {
-        const codingWaiting = order.filter((o) => isCodingRank(issuePriority(o.labels)) && !inFlightIssues.has(o.number)).length;
+        const codingWaiting = order.filter(
+          (o) => isCodingRank(issuePriority(o.labels, cfg.labels.prefix)) && !inFlightIssues.has(o.number),
+        ).length;
         if (!metaLaneAllowed(cfg.lanes.max, metaUsed, codingWaiting)) {
           dispatched.push({ kind: "skipped", issue: issue.number, reason: "meta-floor" });
           continue;

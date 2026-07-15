@@ -60,9 +60,24 @@ test("requiredLabels includes the sapwood-prefixed taxonomy and workflow default
 
 test("requiredLabels provisions every configured label", () => {
   const names = new Set(requiredLabels(cfg).map((l) => l.name));
-  for (const label of Object.values(cfg.labels)) {
+  for (const [key, label] of Object.entries(cfg.labels)) {
+    if (key === "prefix") continue;
     assert.ok(names.has(label), `missing configured label: ${label}`);
   }
+});
+
+test("requiredLabels derives fixed taxonomy names from labels.prefix", () => {
+  const custom = parseConfig('board: { owner: acme, repo: widgets, projectNumber: 7 }\nlabels: { prefix: "TEAM:" }');
+  const customNames = requiredLabels(custom).map((label) => label.name);
+  assert.ok(customNames.includes("team:type:feature"));
+  assert.ok(customNames.includes("team:prio:0"));
+  assert.ok(customNames.includes("team:needs-human"));
+
+  const bare = parseConfig('board: { owner: acme, repo: widgets, projectNumber: 7 }\nlabels: { prefix: "" }');
+  const bareNames = requiredLabels(bare).map((label) => label.name);
+  assert.ok(bareNames.includes("type:feature"));
+  assert.ok(bareNames.includes("prio:0"));
+  assert.ok(bareNames.includes("needs-human"));
 });
 
 test("preflight throws actionably when not logged in", async () => {

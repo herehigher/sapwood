@@ -21,7 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { DEFAULT_WORKFLOW_LABELS, labelsInclude } from "../forge/labels.js";
+import { labelsInclude, normalizeLabel, SAPWOOD_LABEL_PREFIX, workflowLabelDefaults } from "../forge/labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 
 const Board = z
@@ -209,21 +209,25 @@ const Merge = z
 
 const Labels = z
   .object({
-    inProgress: z.string().default(DEFAULT_WORKFLOW_LABELS.inProgress),
-    needsHuman: z.string().default(DEFAULT_WORKFLOW_LABELS.needsHuman),
-    blocked: z.string().default(DEFAULT_WORKFLOW_LABELS.blocked),
-    reserve: z.string().default(DEFAULT_WORKFLOW_LABELS.reserve),
-    verifyNa: z.string().default(DEFAULT_WORKFLOW_LABELS.verifyNa), // Decision #8: skips the verification-plan gate
+    prefix: z
+      .string()
+      .refine((value) => !/\s/.test(value), "labels.prefix must not contain whitespace")
+      .default(SAPWOOD_LABEL_PREFIX),
+    inProgress: z.string().optional(),
+    needsHuman: z.string().optional(),
+    blocked: z.string().optional(),
+    reserve: z.string().optional(),
+    verifyNa: z.string().optional(), // Decision #8: skips the verification-plan gate
     // #88 gate⓪ (amends Decision #8 per #77's 2026-07-09 comment): a verification plan must
     // also pass the plan-reviewer peripheral's quality review before getReadyIssues dispatches
     // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
     // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
-    planApproved: z.string().default(DEFAULT_WORKFLOW_LABELS.planApproved),
+    planApproved: z.string().optional(),
     // #89: provenance stamp for agent-created issues (docs/security.md's convention, now
     // load-bearing): align.ts's PO orchestrator applies it to every issue the alignment
     // session creates. Config-driven like every sibling label here — never a hardcoded
     // string at the call site (fable PR #101 P3).
-    originAgent: z.string().default(DEFAULT_WORKFLOW_LABELS.originAgent),
+    originAgent: z.string().optional(),
   })
   .strict();
 
@@ -657,9 +661,9 @@ const EnvFailure = z
     }
   });
 
-// Raw (untransformed) schema — kept internal. `goal.file` and `roles.architect.planMdPath` are
-// both still `.optional()` here (see their own doc comments); `ConfigSchema` below wraps this in
-// a `.transform(resolveGoalFile)` so EVERY caller of `ConfigSchema.parse`/`.safeParse` — not just
+// Raw (untransformed) schema — kept internal. `goal.file`, `roles.architect.planMdPath`, the
+// workflow-label values, and escalation.humanLabels are still optional here; `ConfigSchema`
+// below resolves them in one transform so EVERY caller of `ConfigSchema.parse`/`.safeParse` — not just
 // this module's own `parseConfig` — gets the single resolved `cfg.goal.file`, including the many
 // test files across this codebase that build a `SapwoodConfig` via `ConfigSchema.parse({...})`
 // directly rather than through `parseConfig`/`loadConfig`. Doing the resolution as a schema-level
@@ -685,7 +689,7 @@ const ConfigSchemaRaw = z
     roles: Roles.default({}),
     envFailure: EnvFailure.default({}),
     escalation: z
-      .object({ humanLabels: z.array(z.string()).default([DEFAULT_WORKFLOW_LABELS.needsHuman, DEFAULT_WORKFLOW_LABELS.blocked]) })
+      .object({ humanLabels: z.array(z.string()).optional() })
       .strict()
       .default({}),
     coverage: z
@@ -700,21 +704,7 @@ const ConfigSchemaRaw = z
     // labels + board lanes, not milestones — those are the user's organizational choice).
     milestones: z.array(z.string()).default([]),
   })
-  .strict()
-  .superRefine((cfg, ctx) => {
-    // #170 review-silence escalation writes labels.needsHuman, while the existing PR gate
-    // and the issue-side gated-reentry hold both recognize escalation.humanLabels. Reject drift
-    // between them so the label latch cannot suppress visibility without holding both paths.
-    if (!labelsInclude(cfg.escalation.humanLabels, cfg.labels.needsHuman)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["labels", "needsHuman"],
-        message:
-          `labels.needsHuman ("${cfg.labels.needsHuman}") must be listed case-insensitively in ` +
-          `escalation.humanLabels so the escalation label is recognized by both PR and issue holds`,
-      });
-    }
-  });
+  .strict();
 
 // #128: `goal.file` is ALWAYS a string once ConfigSchema.parse has run (resolveGoalFile below
 // either takes the explicit value, falls back to the deprecated `roles.architect.planMdPath`, or
@@ -732,9 +722,11 @@ const ConfigSchemaRaw = z
 // path (only loadConfig's relative-to-config-file resolution mutates it), so a reader falls
 // back to `cfg.doctrine.file` itself and still never sees a resolved absolute path it didn't
 // ask for.
-export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine"> & {
+export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine" | "labels" | "escalation"> & {
   goal: { file: string };
   doctrine: { file: string; maxChars: number; fileRaw?: string };
+  labels: ReturnType<typeof workflowLabelDefaults> & { prefix: string };
+  escalation: { humanLabels: string[] };
 };
 
 export const DEFAULT_GOAL_FILE = "docs/PLAN.md";
@@ -785,10 +777,41 @@ export function resolveGoalFile(cfg: z.infer<typeof ConfigSchemaRaw>): SapwoodCo
   return cfg as SapwoodConfig;
 }
 
-/** The schema every real caller uses: `ConfigSchemaRaw` plus the `goal.file`/deprecated-key
- *  resolution transform (see resolveGoalFile's doc comment for why the transform lives here,
- *  not only inside `parseConfig`). */
-export const ConfigSchema = ConfigSchemaRaw.transform(resolveGoalFile);
+/** Resolve the configured namespace before deriving omitted workflow and escalation labels.
+ * Explicit per-label values and an explicit humanLabels array pass through verbatim. */
+export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): SapwoodConfig {
+  const prefix = normalizeLabel(cfg.labels.prefix);
+  const defaults = workflowLabelDefaults(prefix);
+  cfg.labels = {
+    prefix,
+    inProgress: cfg.labels.inProgress ?? defaults.inProgress,
+    needsHuman: cfg.labels.needsHuman ?? defaults.needsHuman,
+    blocked: cfg.labels.blocked ?? defaults.blocked,
+    reserve: cfg.labels.reserve ?? defaults.reserve,
+    verifyNa: cfg.labels.verifyNa ?? defaults.verifyNa,
+    planApproved: cfg.labels.planApproved ?? defaults.planApproved,
+    originAgent: cfg.labels.originAgent ?? defaults.originAgent,
+  };
+  cfg.escalation.humanLabels ??= [defaults.needsHuman, defaults.blocked];
+  return resolveGoalFile(cfg);
+}
+
+/** The schema every real caller uses: raw validation followed by label-prefix/default and
+ * goal-file resolution, then cross-field validation on the fully resolved values. */
+export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).superRefine((cfg, ctx) => {
+  // #170 review-silence escalation writes labels.needsHuman, while the existing PR gate
+  // and the issue-side gated-reentry hold both recognize escalation.humanLabels. Reject drift
+  // between them so the label latch cannot suppress visibility without holding both paths.
+  if (!labelsInclude(cfg.escalation.humanLabels, cfg.labels.needsHuman)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["labels", "needsHuman"],
+      message:
+        `labels.needsHuman ("${cfg.labels.needsHuman}") must be listed case-insensitively in ` +
+        `escalation.humanLabels so the escalation label is recognized by both PR and issue holds`,
+    });
+  }
+});
 
 /** Parse + validate raw YAML/JSON text. Exported for testing without disk I/O. */
 export function parseConfig(text: string): SapwoodConfig {
