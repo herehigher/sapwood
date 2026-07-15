@@ -338,14 +338,17 @@ Choose one migration strategy:
    (by default `sapwood:`), on both issues and PRs. This includes `in-progress`, `needs-human`,
    `blocked`, `reserve`, `verify:n/a`, `plan:approved`, `origin:agent`, `type:*`, `prio:*`, and
    `blocked-by:N`. Remove or update any explicit workflow-label pins so they name the migrated
-   labels.
+   labels. Also remove an explicit `escalation.humanLabels` array so it derives from the resolved
+   workflow labels, or update its entries to the migrated names; it must contain the migrated
+   `labels.needsHuman` value.
 
 This is safety-critical, not cosmetic. A PR carrying only the old bare `needs-human` label no
 longer holds the merge gate under the prefixed defaults. Bare `needs-human`/`blocked` issue labels
 no longer hold dispatch, and a gated lane can appear human-released and re-enter automatically.
 Bare `reserve`, `blocked-by:N`, and `prio:N` labels are also ignored. Pre-#199 generated configs
-pin the workflow-label values but do not contain `labels.prefix`, so they still require
-`labels.prefix: ""` or a complete taxonomy/dependency-label migration before restart.
+pin the workflow-label values and `escalation.humanLabels`, but do not contain `labels.prefix`,
+so they still require `labels.prefix: ""` or a complete migration—including removing or updating
+both sets of explicit pins—before restart.
 
 | Key | Default | Meaning |
 |---|---|---|
