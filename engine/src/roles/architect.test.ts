@@ -637,6 +637,11 @@ test("extractArchitectureChapter: no matching heading -> null (caller supplies t
   assert.equal(extractArchitectureChapter("# Title\n\n## Something Else\ntext\n"), null);
 });
 
+test("extractArchitectureChapter: a zero-space matching heading starts a section but does not terminate the preceding one", () => {
+  const doc = "## Architecture\nA\n##Architecture second\nB\n## Next\nN";
+  assert.equal(extractArchitectureChapter(doc), "## Architecture\nA\n##Architecture second\nB");
+});
+
 test("loadArchitectureChapter: a real docs/PLAN.md resolves to a non-empty chapter mentioning locked decisions", () => {
   // The repo's own docs/PLAN.md — engine/src/roles/architect.test.ts -> engine/../docs/PLAN.md.
   const here = dirname(fileURLToPath(import.meta.url));

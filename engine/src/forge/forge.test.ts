@@ -279,6 +279,25 @@ test("extractVerificationPlan: an unclosed fence at EOF keeps its pseudo-heading
   assert.equal(plan.match(/## Acceptance/g)?.length, 1, "unclosed fence does not create a phantom section");
 });
 
+test("extractVerificationPlan: a shorter backtick run does not close a longer backtick fence", () => {
+  const body = "````md\n```\n## Verification\npseudo-plan\n````";
+  assert.equal(extractVerificationPlan(body), null);
+});
+
+test("extractVerificationPlan: a tilde fence is closed only by a sufficient tilde run", () => {
+  const body = "~~~md\n```\n## Verification\npseudo-plan\n~~~\n## Verification plan\nreal-plan";
+  assert.equal(extractVerificationPlan(body), "## Verification plan\nreal-plan");
+});
+
+test("extractVerificationPlan: fence openers and closers may be indented by up to three spaces", () => {
+  const body = "   ```md\n## Verification\npseudo-plan\n   ```\n## Verification plan\nreal-plan";
+  assert.equal(extractVerificationPlan(body), "## Verification plan\nreal-plan");
+});
+
+test("extractVerificationPlan: a three-space-indented pseudo-heading inside a fence is ignored", () => {
+  assert.equal(extractVerificationPlan("```md\n   ## Verification\npseudo-plan\n```"), null);
+});
+
 test("hasVerificationPlan and extractVerificationPlan agree on every case (shared parser, not duplicated)", () => {
   const cases = ["## Verification\nrun tests", "### Acceptance criteria", "no plan here", ""];
   for (const body of cases) {
