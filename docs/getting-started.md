@@ -55,7 +55,8 @@ sapwood init
    `sapwood:verify:n/a`, `sapwood:plan:approved`, `sapwood:origin:agent`) — detection is
    case-insensitive and missing labels are created lowercase, so it never clobbers labels
    you've already customized. Set `labels.prefix: ""` for bare defaults; explicitly configured
-   workflow-label values are used verbatim.
+   workflow-label values are used verbatim. Existing pre-#199 repositories must complete the
+   [label migration before restarting sapwood](configuration.md#upgrading-from-pre-199).
 4. **Ensures any configured milestones exist** (`config.milestones`; empty by default —
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**

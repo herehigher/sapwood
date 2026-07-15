@@ -207,11 +207,12 @@ test("renderAlignedGoalsFromSummary (#123): renders the align-summary event's pe
   assert.equal(renderAlignedGoalsFromSummary(state, round.round_id), null, "no summary event yet -> null");
   state.appendEvent("align-summary", {
     round_id: round.round_id,
-    created: [{ issue: 12, title: "Split the parser", hasPlan: true }],
+    created: [{ issue: 12, title: "Split the parser", hasPlan: false }],
     triaged: [{ issue: 9, drafted: false }],
   });
   const text = renderAlignedGoalsFromSummary(state, round.round_id)!;
   assert.ok(text.includes("created #12 — Split the parser"));
+  assert.ok(text.includes("labelled for human attention"));
   assert.ok(text.includes("triaged #9: still planless"));
   // A second (crash-rerun) summary MERGES — an empty one never erases the first's content
   // (Codex round-6 P2 on PR #152), and a fresher triage outcome for the same issue wins.

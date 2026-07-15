@@ -648,7 +648,7 @@ async function attemptRollback(
 
 /** #69 dirty-worktree retention: tell a human where the preserved worktree lives. Best-effort
  *  and never throws (this runs on recovery paths that must not gain new failure modes) — the
- *  structured event always lands even if both forge calls fail. The needs-human LABEL is the
+ *  structured event always lands even if both forge calls fail. The human-attention label is the
  *  caller's job (every retention call site already applies it on its own escalation branch). */
 async function reportRetainedWorktree(
   forge: IForge,
@@ -656,6 +656,7 @@ async function reportRetainedWorktree(
   worker: string,
   issue: number,
   worktreePath: string | null,
+  needsHumanLabel: string,
 ): Promise<void> {
   state.appendEvent("worktree-retained", { worker, issue, worktreePath });
   await forge
@@ -664,7 +665,7 @@ async function reportRetainedWorktree(
       `sapwood: lane \`${worker}\` was torn down with possibly-uncommitted changes in its ` +
         `worktree. Automation never deletes work it can't prove is clean (#69) — the worktree ` +
         `was left on disk at:\n\n\`${worktreePath}\`\n\nSalvage or discard it by hand, then ` +
-        `remove the \`needs-human\` label.`,
+        `remove the \`${needsHumanLabel}\` label.`,
     )
     .catch(() => {});
 }
@@ -756,7 +757,7 @@ async function drainThenEscalate(
       if (r.worktreeRetained && p.hasPr && p.prNumber != null) {
         await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman).catch(() => {});
       }
-      if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
+      if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
       state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons });
       // #155: leaving `running` via the ceiling drain — clear the LIVE telemetry trio.
       state.clearLiveTelemetry(w.name);
@@ -1091,7 +1092,7 @@ async function reclaimTerminalLane(
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       if (retained?.worktreeRetained) {
         if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
-        await reportRetainedWorktree(forge, state, w.name, w.issue, retained.worktreePath);
+        await reportRetainedWorktree(forge, state, w.name, w.issue, retained.worktreePath, cfg.labels.needsHuman);
       }
       state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
     }
@@ -1273,7 +1274,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     if (r.worktreeRetained) {
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
-      await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
+      await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
       state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
       // No requeue to Ready: an open PR must not be raced by a fresh worker, and a no-PR dirty
       // lane is a human-salvage case (needs-human already blocks re-dispatch), not a clean

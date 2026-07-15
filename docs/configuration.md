@@ -325,6 +325,28 @@ whitespace. It affects defaults only: any explicitly configured workflow label i
 verbatim, without prepending the prefix. An explicit `escalation.humanLabels` array is likewise
 used verbatim.
 
+### Upgrading from pre-#199
+
+> [!WARNING]
+> Stop sapwood and complete this label migration **before restarting the engine**. There is no
+> automatic bare-label fallback: with the new default prefix, existing bare labels are ignored.
+
+Choose one migration strategy:
+
+1. Set `labels.prefix: ""` to keep the pre-#199 bare namespace; or
+2. Rename every existing workflow, taxonomy, and dependency label into the configured namespace
+   (by default `sapwood:`), on both issues and PRs. This includes `in-progress`, `needs-human`,
+   `blocked`, `reserve`, `verify:n/a`, `plan:approved`, `origin:agent`, `type:*`, `prio:*`, and
+   `blocked-by:N`. Remove or update any explicit workflow-label pins so they name the migrated
+   labels.
+
+This is safety-critical, not cosmetic. A PR carrying only the old bare `needs-human` label no
+longer holds the merge gate under the prefixed defaults. Bare `needs-human`/`blocked` issue labels
+no longer hold dispatch, and a gated lane can appear human-released and re-enter automatically.
+Bare `reserve`, `blocked-by:N`, and `prio:N` labels are also ignored. Pre-#199 generated configs
+pin the workflow-label values but do not contain `labels.prefix`, so they still require
+`labels.prefix: ""` or a complete taxonomy/dependency-label migration before restart.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `prefix` | `sapwood:` | Namespace for omitted workflow-label defaults and the fixed `type:*`/`prio:*` taxonomy. Empty string selects bare names. |

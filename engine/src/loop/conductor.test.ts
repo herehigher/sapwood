@@ -575,14 +575,16 @@ test("tick reclaim: DEAD lane whose dirty worktree was RETAINED -> needs-human l
   seedRunning(st, "lane-dirty", 7);
   sup.probes["lane-dirty"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
   sup.reclaimResults["lane-dirty"] = { worktreePath: "/abs/worktrees/lane-dirty", worktreeRetained: true };
-  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const cfg = mkCfg({ labels: { needsHuman: "Human-Hold" }, escalation: { humanLabels: ["human-hold", "sapwood:blocked"] } });
+  const r = await tick({ forge, state: st, supervisor: sup, cfg });
   assert.deepEqual(sup.reclaimed, ["lane-dirty"]);
   assert.deepEqual(r.reclaimed[0], { kind: "dead", worker: "lane-dirty", issue: 7, rescued: false, costUsd: 0, modelUsage: [] });
-  assert.deepEqual(forge.labelsAdded, [[7, "needs-human"]]); // human salvages or discards
+  assert.deepEqual(forge.labelsAdded, [[7, "Human-Hold"]]); // human salvages or discards
   assert.equal(forge.issueComments.length, 1);
   assert.equal(forge.issueComments[0]![0], 7);
   assert.match(forge.issueComments[0]![1], /\/abs\/worktrees\/lane-dirty/); // the absolute path
   assert.match(forge.issueComments[0]![1], /lane-dirty/); // the lane name
+  assert.match(forge.issueComments[0]![1], /remove the `Human-Hold` label/); // resolved configured label, not a literal default
   st.close();
 });
 
