@@ -167,7 +167,7 @@ async function queryBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunne
  */
 async function ensureBoard(cfg: SapwoodConfig, ownerKind: OwnerKind, run: GhRunner): Promise<string[]> {
   const board = await queryBoard(cfg, ownerKind, run);
-  const desired = [cfg.board.status.ready, cfg.board.status.inProgress, cfg.board.status.done];
+  const desired = [cfg.board.status.backlog, cfg.board.status.ready, cfg.board.status.inProgress, cfg.board.status.done];
   if (!board.exists) {
     return [
       `board: no ProjectV2 #${cfg.board.projectNumber} found for ${cfg.board.owner}. ` +

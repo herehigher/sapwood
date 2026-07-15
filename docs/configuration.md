@@ -29,6 +29,7 @@ Identifies the repo and ProjectV2 board the loop drives.
 | `ownerKind` | auto-detected | `user` \| `org`. Detected at `init` if omitted. |
 | `projectNumber` | *(required)* | The ProjectV2 board number. |
 | `statusField` | `Status` | The board's single-select field used as the work queue. |
+| `status.backlog` | `Todo` | Human-managed intake lane. Whoever adds an item places it here; at startup the engine moves any No-Status issue items here without making them dispatchable. Engine-mediated issue creation must set this Status as its own board-add write. |
 | `status.ready` | `Ready` | Lane name for dispatchable issues. |
 | `status.inProgress` | `In Progress` | Lane name for claimed issues. |
 | `status.done` | `Done` | Lane name for finished issues. |

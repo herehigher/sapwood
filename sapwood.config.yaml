@@ -12,6 +12,7 @@ board:
   projectNumber: 4 # the ProjectV2 board number
   statusField: Status # the board's single-select field used as the work queue
   status: # lane names on that field (no literals baked into code)
+    backlog: Todo # intake; startup normalizes No-Status issue items here (not dispatchable)
     ready: Ready
     inProgress: In Progress
     done: Done

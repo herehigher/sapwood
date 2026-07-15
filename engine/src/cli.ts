@@ -654,6 +654,36 @@ export async function assertStopMilestoneExists(forge: Pick<IForge, "listMilesto
   }
 }
 
+/** Adopt GitHub's implicit No-Status board entries into the configured backlog once per
+ *  engine start. This is deliberately separate from every dispatch read: Ready remains the
+ *  only execution queue. Individual moves are best-effort so one malformed/stale item cannot
+ *  prevent the engine from starting; the next startup naturally sees and retries any item
+ *  whose move failed. */
+export async function normalizeUnplacedBoardItems(
+  forge: Pick<IForge, "listUnplacedIssues" | "setBoardStatus">,
+  state: Pick<State, "appendEvent">,
+  log: (message: string) => void = console.error,
+): Promise<void> {
+  let unplaced: Awaited<ReturnType<IForge["listUnplacedIssues"]>>;
+  try {
+    unplaced = await forge.listUnplacedIssues();
+  } catch (error) {
+    log(`sapwood run: could not list No-Status board items; startup normalization skipped: ${String(error)}`);
+    return;
+  }
+  if (unplaced.skipped > 0) {
+    log(`sapwood run: skipped ${unplaced.skipped} No-Status draft/foreign-repo board item(s) outside this repo's write jurisdiction`);
+  }
+  for (const issue of unplaced.issues) {
+    try {
+      await forge.setBoardStatus(issue, "backlog");
+      state.appendEvent("board-normalized", { issue, status: "backlog" });
+    } catch (error) {
+      log(`sapwood run: failed to move No-Status issue #${issue} to backlog; continuing: ${String(error)}`);
+    }
+  }
+}
+
 /** #76: the exit log line naming whichever stop condition fired — e.g. "sapwood run: stop
  *  condition hit — afterIssuesMerged=3 (merged 3)". Pure + exported for testing; only called
  *  when result.stopCondition is set (stoppedBy "stop-condition", or "once" when the single
@@ -739,6 +769,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
   // startup with zero dispatch, not silently stop the run after the first wave of workers.
   await assertStopMilestoneExists(forge, stop);
+  await normalizeUnplacedBoardItems(forge, state);
   console.log(`sapwood run: driver=tick tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
   // NOTE: roundSpendUsd (the per-round hard budget gate, cfg.cost.roundBudgetUsd) is left at
   // its TickDeps default (0, i.e. never over-budget) — computing a live "this round's spend"
@@ -806,6 +837,7 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // #76: same fail-fast stance as the tick driver — a typo'd milestone goal must abort startup
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
   await assertStopMilestoneExists(forge, stop);
+  await normalizeUnplacedBoardItems(forge, state);
   console.log(`sapwood run: driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
   // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
   const probeLlmReachable = () =>

@@ -132,6 +132,10 @@ export class RoundScopedForge implements IForge {
     return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
   }
 
+  listUnplacedIssues() {
+    return this.inner.listUnplacedIssues();
+  }
+
   detectOwnerKind(owner: string) {
     return this.inner.detectOwnerKind(owner);
   }

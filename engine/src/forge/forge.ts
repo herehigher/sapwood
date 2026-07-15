@@ -101,9 +101,12 @@ export interface PRReviewData {
 /** The only surface the conductor uses to touch the code host. */
 export interface IForge {
   detectOwnerKind(owner: string): Promise<OwnerKind>;
+  /** Issue-number-addressable board items with no Status, plus draft/non-issue items that
+   *  cannot be moved through setBoardStatus. Used once at engine startup, never for dispatch. */
+  listUnplacedIssues(): Promise<UnplacedIssues>;
   getReadyIssues(): Promise<Issue[]>;
   claimIssue(issue: number): Promise<void>;
-  setBoardStatus(issue: number, status: "ready" | "inProgress" | "done"): Promise<void>;
+  setBoardStatus(issue: number, status: "backlog" | "ready" | "inProgress" | "done"): Promise<void>;
   addLabel(issue: number, label: string): Promise<void>;
   /** Add a label to a PULL REQUEST. #69 P1: the merge gate reads a PR's OWN labels
    *  (getPRReviewData → deriveGate's humanLabels check), not the source issue's, so escalating
@@ -245,7 +248,10 @@ export class GithubForge implements IForge {
       const out = await this.gh(args);
       const parsed = parseProject(out, statusField);
       if (!merged) merged = parsed;
-      else merged.items.push(...parsed.items);
+      else {
+        merged.items.push(...parsed.items);
+        merged.placements.push(...parsed.placements);
+      }
       const pi = parsePageInfo(out);
       if (!pi.hasNextPage || !pi.endCursor) return merged;
       after = pi.endCursor;
@@ -264,6 +270,11 @@ export class GithubForge implements IForge {
     return selectReadyIssues(project, this.cfg);
   }
 
+  async listUnplacedIssues(): Promise<UnplacedIssues> {
+    const project = await this.fetchProject();
+    return selectUnplacedIssues(project.placements, `${this.cfg.board.owner}/${this.cfg.board.repo}`);
+  }
+
   async claimIssue(issue: number): Promise<void> {
     // Atomic-ish claim: board -> In Progress, then the in-progress label. If the label step
     // fails, roll the board back to Ready so a partial claim can't strand the issue out of
@@ -278,7 +289,7 @@ export class GithubForge implements IForge {
     }
   }
 
-  async setBoardStatus(issue: number, status: "ready" | "inProgress" | "done"): Promise<void> {
+  async setBoardStatus(issue: number, status: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     // ProjectV2 single-select mutation. The status *value* comes from config
     // (cfg.board.status[status]), never a literal. Resolve ids, then mutate. Fail closed
     // if the issue isn't on the board or the lane name doesn't exist (no silent no-op).
@@ -609,6 +620,29 @@ export interface ParsedProject {
   statusFieldId: string;
   options: { name: string; id: string }[];
   items: ProjectItem[];
+  placements: BoardPlacement[];
+}
+
+export interface BoardPlacement {
+  number: number | null;
+  repo: string | null;
+  status: string | null;
+}
+
+export interface UnplacedIssues {
+  issues: number[];
+  skipped: number;
+}
+
+/** Select only this repo's No-Status issue items for startup normalization. Any named Status
+ *  is untouched; draft/non-issue and foreign-repo items are outside this forge's write
+ *  jurisdiction and counted for one caller-level log line. */
+export function selectUnplacedIssues(items: readonly BoardPlacement[], repoFullName: string): UnplacedIssues {
+  const unplaced = items.filter((item) => item.status === null);
+  return {
+    issues: unplaced.flatMap((item) => (item.number !== null && item.repo === repoFullName ? [item.number] : [])),
+    skipped: unplaced.filter((item) => item.number === null || item.repo !== repoFullName).length,
+  };
 }
 
 /** The project query. `root` is "user" or "organization" (owner-kind agnostic downstream). */
@@ -692,6 +726,11 @@ export function parseProject(json: string, statusField: string): ParsedProject {
     statusFieldId: proj.field?.id ?? "",
     options: proj.field?.options ?? [],
     items,
+    placements: (proj.items?.nodes ?? []).map((n) => ({
+      number: n.content?.number ?? null,
+      repo: n.content?.repository?.nameWithOwner ?? null,
+      status: statusValue(n, statusField),
+    })),
   };
 }
 

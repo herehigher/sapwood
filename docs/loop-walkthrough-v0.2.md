@@ -181,7 +181,7 @@ stateDiagram-v2
     state "Done" as Done
 
     [*] --> NS: issue added to board
-    NS --> Todo: human — on entry (auto-normalized at startup once issue 173 lands)
+    NS --> Todo: placer on entry / engine startup normalization
     Todo --> Ready: HUMAN ONLY — acceptance authorization (locked decision 5)
     Ready --> IP: engine claimIssue — DISPATCH, before spawn
     IP --> Ready: engine recovery — dispatch rollback / dead-lane requeue (persisted, retried, cap 5 → needs-human)
@@ -194,10 +194,11 @@ stateDiagram-v2
 
 | Transition | Owner | When | Failure semantics |
 |---|---|---|---|
-| → Ready | **Human, exclusively** (no role ever sets Ready — locked decision 5) | acceptance authorization | — the one human→engine handover edge |
+| No Status → backlog | human on entry; engine normalization at startup | immediately when an item is added; startup repairs omissions | move failure is logged and startup continues; the next startup tries again naturally |
+| backlog → Ready | **Human, exclusively** (no role ever sets Ready — locked decision 5) | acceptance authorization | — the single human→engine handover edge |
 | Ready → In Progress | engine `claimIssue` | DISPATCH, **before** spawn (claim-before-launch: no unowned worker) | spawn failure → rollback to Ready, durably persisted, retried per tick, cap → `needs-human` |
 | In Progress → Ready | engine, recovery paths only | dispatch rollback; no-PR dead-lane requeue | persist-then-attempt (#31); never silently stranded |
-| In Progress → Done | engine DRIVE | after the merge is a durable fact | announcement failures never regress the transition |
+| In Progress → Done | engine DRIVE | after the merge is a durable fact | terminal; announcement failures never regress the transition |
 
 Two overlays that are **not** Status moves:
 
@@ -211,9 +212,12 @@ Two overlays that are **not** Status moves:
   items with no live lane behind them.
 
 No item may sit in No Status (decided 2026-07-14): the default `Todo` lane is
-the configured backlog (`board.status.backlog`, #173) — on-entry placement by
-whoever adds the item, startup normalization by the engine (the move
-authorizes nothing; the only authorization edge is → Ready).
+the configured backlog (`board.status.backlog`). Humans own the
+No Status → backlog → Ready jurisdiction; whoever adds an item places it in
+backlog immediately, and startup normalization repairs omissions. The
+normalization move authorizes nothing: backlog → Ready is the single human
+authorization edge. The engine owns Ready → In Progress → {Ready rollback,
+Done}; `Done` is terminal.
 
 ## 8. Frontend responsibilities and boundaries
 

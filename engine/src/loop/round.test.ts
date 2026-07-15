@@ -24,6 +24,9 @@ import {
 import { RoundArtifactSchema } from "./round-artifact.js";
 
 class FakeForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   ready: Issue[] = [];
   milestoneOpenCounts: number[] = [0];
   milestoneQueries: string[] = [];

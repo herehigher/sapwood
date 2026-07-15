@@ -453,8 +453,8 @@ export interface WorkerRow {
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
- *  import just for a 3-string union). Must stay in lockstep with IForge.setBoardStatus. */
-export type BoardStatus = "ready" | "inProgress" | "done";
+ *  import just for a 4-string union). Must stay in lockstep with IForge.setBoardStatus. */
+export type BoardStatus = "backlog" | "ready" | "inProgress" | "done";
 
 /** Categorized token counts from a stream-json result's `usage` block (#47). Always present
  *  and non-negative — a missing/malformed source field is normalized to 0, never omitted. */

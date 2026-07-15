@@ -9,6 +9,7 @@ test("applies defaults when only required board fields given", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
   assert.equal(cfg.board.owner, "acme");
   assert.equal(cfg.board.repo, "widgets");
+  assert.equal(cfg.board.status.backlog, "Todo"); // #173: existing configs adopt the default backlog
   assert.equal(cfg.board.status.ready, "Ready"); // default
   assert.equal(cfg.lanes.roundDispatchCap, 6); // #124: per-round quota, 2x lanes.max default
   assert.equal(cfg.worker.budgetUsdSoft, 10);
@@ -19,6 +20,15 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.cost.dailyBudgetUsd, 100);
   assert.equal(cfg.cost.maxWallClockSec, 14400);
   assert.equal(cfg.cost.drainWindowSec, 300);
+});
+
+test("board.status.backlog is overridable and the status object remains strict", () => {
+  const cfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7, status: { backlog: Triage } }");
+  assert.equal(cfg.board.status.backlog, "Triage");
+  assert.throws(
+    () => parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7, status: { backolg: Todo } }"),
+    /backolg|[Uu]nrecognized/,
+  );
 });
 
 test("engine.tickIntervalSec (#46 loop driver): defaults to 60s, positive-int-guarded, overridable", () => {
