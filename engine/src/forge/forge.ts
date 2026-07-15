@@ -9,6 +9,7 @@
 import type { SapwoodConfig } from "../config/config.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { gh } from "./gh.js";
+import { labelsInclude } from "./labels.js";
 
 export type OwnerKind = "user" | "org";
 
@@ -787,7 +788,7 @@ export function extractVerificationPlan(body: string): string | null {
 /** True if the issue carries a verification plan (Decision #8): verify:n/a label OR a
  *  Verification/Acceptance section in the body. Fail-closed: no signal -> false. */
 export function hasVerificationPlan(body: string, labels: string[], verifyNaLabel: string): boolean {
-  if (labels.includes(verifyNaLabel)) return true;
+  if (labelsInclude(labels, verifyNaLabel)) return true;
   return extractVerificationPlan(body) != null;
 }
 
@@ -858,15 +859,15 @@ type ReadyCfg = {
  * standalone "does a plan exist in some form" helper for any other caller.
  */
 function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
-  if (labels.includes(l.needsHuman) || labels.includes(l.blocked)) return false;
+  if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
   // #94 Codex retro-review P2: BOTH dispatch-path labels on one issue is a state the
   // plan-reviewer prompt forbids ("never apply both") — it can only arise from a stale or
   // manual label mutation. Fail closed BEFORE the verifyNa early-true below: a mixed-label
   // issue must not slip through the doc-gate path (which skips the red/green cycle); it waits
   // for a human to remove one of the two labels.
-  if (labels.includes(l.verifyNa) && labels.includes(l.planApproved)) return false;
-  if (labels.includes(l.verifyNa)) return true;
-  return extractVerificationPlan(body) != null && labels.includes(l.planApproved);
+  if (labelsInclude(labels, l.verifyNa) && labelsInclude(labels, l.planApproved)) return false;
+  if (labelsInclude(labels, l.verifyNa)) return true;
+  return extractVerificationPlan(body) != null && labelsInclude(labels, l.planApproved);
 }
 
 /** Ready-lane + OPEN + this repo + gate⓪-dispatchable (#88). The dispatch work-queue. */
@@ -900,9 +901,9 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
  *  labels). The verifyNa check below covers it explicitly by construction. Otherwise: needs
  *  review unless already `planApproved`. */
 function needsPlanReview(labels: string[], l: ReadyCfg["labels"]): boolean {
-  if (labels.includes(l.needsHuman) || labels.includes(l.blocked)) return false;
-  if (labels.includes(l.verifyNa)) return false; // doc-gate path OR the mixed state — neither is reviewable
-  return !labels.includes(l.planApproved);
+  if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
+  if (labelsInclude(labels, l.verifyNa)) return false; // doc-gate path OR the mixed state — neither is reviewable
+  return !labelsInclude(labels, l.planApproved);
 }
 
 /** Ready-lane + OPEN + this repo + still awaiting gate⓪ plan review (#87). The plan_review
@@ -933,8 +934,8 @@ export function selectPlanReviewCandidates(project: ParsedProject, cfg: ReadyCfg
  *  already has SOME plan section is excluded too — triage's whole job is to fill the gap, not
  *  to re-draft an existing plan (that quality judgment belongs to gate⓪'s plan-reviewer). */
 function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
-  if (labels.includes(l.needsHuman) || labels.includes(l.blocked)) return false;
-  if (labels.includes(l.verifyNa)) return false;
+  if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
+  if (labelsInclude(labels, l.verifyNa)) return false;
   return extractVerificationPlan(body) == null;
 }
 

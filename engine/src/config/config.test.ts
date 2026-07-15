@@ -15,12 +15,58 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.worker.maxResumes, 2);
   assert.equal(cfg.reviewer.mode, "different-model-codex");
-  assert.equal(cfg.labels.verifyNa, "verify:n/a");
-  assert.equal(cfg.labels.planApproved, "plan:approved"); // #88 gate⓪
+  assert.equal(cfg.labels.prefix, "sapwood:");
+  assert.equal(cfg.labels.verifyNa, "sapwood:verify:n/a");
+  assert.equal(cfg.labels.planApproved, "sapwood:plan:approved"); // #88 gate⓪
+  assert.deepEqual(cfg.escalation.humanLabels, ["sapwood:needs-human", "sapwood:blocked"]);
   // #14 engine cost ceiling + kill switch: conservative defaults.
   assert.equal(cfg.cost.dailyBudgetUsd, 100);
   assert.equal(cfg.cost.maxWallClockSec, 14400);
   assert.equal(cfg.cost.drainWindowSec, 300);
+});
+
+test("labels.prefix derives omitted workflow and escalation defaults, including the empty-prefix escape hatch", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  const custom = parseConfig(`${base}labels: { prefix: "TEAM:" }`);
+  assert.equal(custom.labels.prefix, "team:");
+  assert.equal(custom.labels.inProgress, "team:in-progress");
+  assert.equal(custom.labels.planApproved, "team:plan:approved");
+  assert.deepEqual(custom.escalation.humanLabels, ["team:needs-human", "team:blocked"]);
+
+  const bare = parseConfig(`${base}labels: { prefix: "" }`);
+  assert.equal(bare.labels.prefix, "");
+  assert.equal(bare.labels.needsHuman, "needs-human");
+  assert.deepEqual(bare.escalation.humanLabels, ["needs-human", "blocked"]);
+});
+
+test("labels.prefix affects defaults only; explicit label and escalation values remain verbatim", () => {
+  const cfg = parseConfig(`
+board: { owner: a, repo: r, projectNumber: 1 }
+labels: { prefix: "TEAM:", inProgress: Existing-Case, needsHuman: Human-Review }
+escalation: { humanLabels: [human-review, Another-Hold] }
+`);
+  assert.equal(cfg.labels.prefix, "team:");
+  assert.equal(cfg.labels.inProgress, "Existing-Case");
+  assert.equal(cfg.labels.needsHuman, "Human-Review");
+  assert.deepEqual(cfg.escalation.humanLabels, ["human-review", "Another-Hold"]);
+});
+
+test("omitted escalation derives from resolved custom labels, while an explicit array must include needsHuman", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { needsHuman: custom-hold }\n";
+  const cfg = parseConfig(base);
+  assert.deepEqual(cfg.escalation.humanLabels, ["custom-hold", "sapwood:blocked"]);
+
+  assert.throws(
+    () => parseConfig(`${base}escalation: { humanLabels: [sapwood:blocked] }`),
+    /labels\.needsHuman.*must be listed case-insensitively/s,
+  );
+});
+
+test("labels.prefix rejects whitespace", () => {
+  assert.throws(
+    () => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { prefix: "team labels:" }'),
+    /labels\.prefix.*whitespace|whitespace.*labels\.prefix/i,
+  );
 });
 
 test("worker.maxResumes (#172): non-negative integer, default 2, 0 disables resume", () => {
@@ -184,17 +230,15 @@ test("#170: removed reviewer poll keys are rejected clearly by the strict schema
 test("#170: the needs-human write label must be recognized by the human-label hold", () => {
   const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
   assert.doesNotThrow(() => parseConfig(base)); // shipped defaults agree
-  assert.throws(
-    () => parseConfig(`${base}labels: { needsHuman: human-review }`),
-    /labels\.needsHuman.*must be listed exactly in escalation\.humanLabels/i,
-  );
+  assert.deepEqual(parseConfig(`${base}labels: { needsHuman: human-review }`).escalation.humanLabels, ["human-review", "sapwood:blocked"]);
   assert.equal(
     parseConfig(`${base}labels: { needsHuman: human-review }\nescalation: { humanLabels: [human-review] }`).labels.needsHuman,
     "human-review",
   );
+  assert.doesNotThrow(() => parseConfig(`${base}labels: { needsHuman: Needs-Human }\nescalation: { humanLabels: [needs-human] }`));
   assert.throws(
     () => parseConfig(`${base}labels: { needsHuman: needs-human-now }\nescalation: { humanLabels: [needs-human] }`),
-    /labels\.needsHuman.*must be listed exactly in escalation\.humanLabels/i,
+    /labels\.needsHuman.*must be listed case-insensitively in escalation\.humanLabels/i,
   );
 });
 
@@ -334,16 +378,16 @@ test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's dir
 // runner issue; here the config surface is validated + path-resolved, same "accepted, not
 // yet wired" shape as lanes.reserveCap/prFixCap/frictionMin.
 
-test("labels.planApproved: defaults to plan:approved, overridable", () => {
+test("labels.planApproved: defaults to sapwood:plan:approved, overridable", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.labels.planApproved, "plan:approved");
+  assert.equal(cfg.labels.planApproved, "sapwood:plan:approved");
   const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { planApproved: custom:approved }");
   assert.equal(over.labels.planApproved, "custom:approved");
 });
 
-test("labels.originAgent: defaults to origin:agent, overridable (#89 — the PO provenance stamp, config-driven like every sibling label)", () => {
+test("labels.originAgent: defaults to sapwood:origin:agent, overridable (#89 — the PO provenance stamp, config-driven like every sibling label)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.labels.originAgent, "origin:agent");
+  assert.equal(cfg.labels.originAgent, "sapwood:origin:agent");
   const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { originAgent: bot:made }");
   assert.equal(over.labels.originAgent, "bot:made");
 });

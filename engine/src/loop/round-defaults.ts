@@ -61,7 +61,9 @@ export function renderAlignedGoalsFromSummary(state: State, roundId: number): st
     }
     return [
       `This round's PO/goal-alignment pass (round ${roundId}) recorded:`,
-      ...created.map((c) => `- created #${c.issue} — ${c.title}${c.hasPlan ? "" : " (no verification plan yet; labelled needs-human)"}`),
+      ...created.map(
+        (c) => `- created #${c.issue} — ${c.title}${c.hasPlan ? "" : " (no verification plan yet; labelled for human attention)"}`,
+      ),
       ...triaged.map(
         (t) => `- triaged #${t.issue}${t.drafted ? ": plan drafted into the body" : ": still planless (re-matches next round)"}`,
       ),

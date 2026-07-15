@@ -204,7 +204,7 @@ The scheduler + worker + live guard. TS port of 0day's `loop_conductor.sh` +
 domain (no reserve/SLA/eval-report/HTML machinery).
 
 - **`conductor.ts`** — pure scheduling core mirrors `test_loop_conductor.sh` row-for-row
-  (`classifyLane` 4-signal lane state, `issuePriority` [matches bare `prio:N` *and* suffixed],
+  (`classifyLane` 4-signal lane state, `issuePriority` [matches configured-prefix `prio:N`, bare when the prefix is empty, and suffixed],
   `labelsBlockers`, `budgetExceeded`, `codingFloor`/`isCodingRank`/`metaLaneAllowed`
   anti-starvation, `laneOnReclaim*`, `driveDecision`). **Structured discriminated-union tick
   result** replaces 0day's stringly-typed `DISPATCHED/RECLAIMED` text protocol. `tick()` =
@@ -336,7 +336,7 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
   live-run report) is no longer a dead end requiring a manual fix→re-review→merge
   drive — the conductor's **GATED RECLAIM** phase treats a human clearing the
-  issue of *every* `escalation.humanLabels` entry (`needs-human` and `blocked` by
+  issue of *every* `escalation.humanLabels` entry (`sapwood:needs-human` and `sapwood:blocked` by
   default — dispatch's exact hold set, not `needs-human` alone) as the explicit
   re-entry signal (autonomy principle: humans decide *why/what*, here "is this
   actually fixed") and reclaims the SAME
@@ -588,7 +588,7 @@ marker idempotency, output schema, escalation path) see
   (it could never fire). Empty `fallback` (the default) is byte-for-byte the
   pre-#54 behavior: an unavailable primary queues the PR forever, no silent
   degradation. **Review-silence visibility (#170):** a current-head review that stays
-  non-decisive past `reviewer.escalateAfterSec` (24h default) gets a `needs-human` PR
+  non-decisive past `reviewer.escalateAfterSec` (24h default) gets the configured `labels.needsHuman` PR
   label plus a structured event. The label is the latch and routes through the existing
   human hold/re-entry behavior; the lane remains driving, polling continues, and gate②
   is never softened. Configured failover receives its full evaluation window first.

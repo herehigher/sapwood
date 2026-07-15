@@ -197,8 +197,21 @@ const tapEvents = (state: State): Array<[string, unknown]> => {
   return logged;
 };
 
+const LEGACY_LABEL_CONFIG = {
+  labels: {
+    inProgress: "in-progress",
+    needsHuman: "needs-human",
+    blocked: "blocked",
+    reserve: "reserve",
+    verifyNa: "verify:n/a",
+    planApproved: "plan:approved",
+    originAgent: "origin:agent",
+  },
+  escalation: { humanLabels: ["needs-human", "blocked"] },
+};
+
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
+  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...LEGACY_LABEL_CONFIG, ...over });
 
 // A body that satisfies extractVerificationPlan (the content check createAligningStub applies
 // per created/drafted issue — a business-logic outcome, never a session-validity gate).
@@ -652,7 +665,7 @@ test("createAligningStub #110: an align block with a wrong number of <<<ISSUE>>>
 
 test("createAligningStub P3: a customized labels.originAgent value is what gets stamped — never a hardcoded 'origin:agent'", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ labels: { originAgent: "bot:made" } });
+  const cfg = mkCfg({ labels: { ...LEGACY_LABEL_CONFIG.labels, originAgent: "bot:made" } });
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "t", body: "## Verification\n- x" }]))]);
   const state = new State(":memory:");
   const deps: AlignDeps = { forge, state, cfg, runner };

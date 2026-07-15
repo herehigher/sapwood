@@ -31,17 +31,22 @@ title exactly, including any em-dash/suffix.
 
 ## `needs-human` label
 
-This label means: **automation has stopped working this issue/PR and is waiting on
-you.** sapwood deliberately degrades rare edge cases to `needs-human` rather than
-building more automation to handle them — see the issue comment or PR thread for the
-specific reason (a structured event and/or comment is posted alongside the label
-explaining what happened).
+> [!WARNING]
+> Upgrading a pre-#199 repository? Complete the
+> [label migration before restarting sapwood](configuration.md#upgrading-from-pre-199). Old bare
+> hold labels are not recognized by the new prefixed defaults.
 
-To clear it: investigate and resolve whatever's described, then remove the label by
-hand. Removing `needs-human` does not automatically re-dispatch anything — if the issue
-should re-enter the loop, move it back to `Ready` on the board yourself.
+`labels.needsHuman` (default `sapwood:needs-human`) means: **automation has stopped working
+this issue/PR and is waiting on you.** sapwood deliberately degrades rare edge cases to human
+attention rather than building more automation to handle them — see the issue comment or PR
+thread for the specific reason (a structured event and/or comment is posted alongside the
+label explaining what happened).
 
-Both `escalation.humanLabels` (default `[needs-human, blocked]`) hold an issue out of
+To clear it: investigate and resolve whatever's described, then remove the configured
+`labels.needsHuman` label by hand. Removing it does not automatically re-dispatch anything —
+if the issue should re-enter the loop, move it back to `Ready` on the board yourself.
+
+Both `escalation.humanLabels` (default `[sapwood:needs-human, sapwood:blocked]`) hold an issue out of
 the main dispatch lane — any issue carrying either label is skipped by dispatch
 regardless of its board status.
 
@@ -53,19 +58,19 @@ deletes it** — it can't prove the worktree is clean, and deleting possibly-unc
 work is worse than leaving it on disk. Instead:
 
 - The worktree is retained at its original path.
-- A `needs-human` label is applied to the issue **and**, if a PR already exists for that
-  lane, to the PR itself (the merge gate reads a PR's own labels, not the source
-  issue's — a crash-with-WIP must not let its incomplete PR auto-merge while the WIP
+- The configured `labels.needsHuman` label is applied to the issue **and**, if a PR already
+  exists for that lane, to the PR itself (the merge gate reads a PR's own labels, not the
+  source issue's — a crash-with-WIP must not let its incomplete PR auto-merge while the WIP
   awaits salvage).
 - An issue comment is posted naming the exact worktree path:
   > "sapwood: lane `<name>` was torn down with possibly-uncommitted changes in its
   > worktree. Automation never deletes work it can't prove is clean (#69) — the
   > worktree was left on disk at: `<path>`. Salvage or discard it by hand, then remove
-  > the `needs-human` label."
+  > the `<configured labels.needsHuman value>` label."
 
 To resolve: go to the path named in the comment, decide whether the uncommitted changes
 are worth keeping (commit/push them yourself, or discard the worktree by hand), then
-remove the `needs-human` label. The lane will not be reused until you do.
+remove the configured `labels.needsHuman` label. The lane will not be reused until you do.
 
 ## Kill switch recovery
 

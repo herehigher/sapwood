@@ -50,9 +50,13 @@ sapwood init
    `gh auth refresh -s project`) if you're not logged in or missing the `project`
    scope, before touching anything.
 2. **Detects user vs. org** for the configured `board.owner`.
-3. **Ensures the label taxonomy exists** (`type:*`, `prio:0`–`3`, `in-progress`,
-   `needs-human`, `blocked`, `reserve`, `verify:n/a`, `plan:approved`, `origin:agent`) —
-   detect-before-create, so it never clobbers labels you've already customized.
+3. **Ensures the label taxonomy exists** (with the default `labels.prefix`: `sapwood:type:*`, `sapwood:prio:0`–`3`,
+   `sapwood:in-progress`, `sapwood:needs-human`, `sapwood:blocked`, `sapwood:reserve`,
+   `sapwood:verify:n/a`, `sapwood:plan:approved`, `sapwood:origin:agent`) — detection is
+   case-insensitive and missing labels are created lowercase, so it never clobbers labels
+   you've already customized. Set `labels.prefix: ""` for bare defaults; explicitly configured
+   workflow-label values are used verbatim. Existing pre-#199 repositories must complete the
+   [label migration before restarting sapwood](configuration.md#upgrading-from-pre-199).
 4. **Ensures any configured milestones exist** (`config.milestones`; empty by default —
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**
@@ -176,23 +180,26 @@ Without a verification plan, `getReadyIssues` refuses to dispatch the issue at a
 there's no partial-credit path.
 
 **Docs/chore work that can't be verified by tests** (a documentation change, a
-config-only tweak) is inherently unverifiable in the test sense. Label it
-`verify:n/a` instead of writing a verification plan: this routes the issue through the
+config-only tweak) is inherently unverifiable in the test sense. Label it with the configured
+`labels.verifyNa` value (`sapwood:verify:n/a` by default) instead of writing a verification
+plan: this routes the issue through the
 doc-gate path (the reviewer checks that the described durable-knowledge change actually
-landed) rather than a red/green test cycle. `sapwood init` provisions the `verify:n/a`
+landed) rather than a red/green test cycle. `sapwood init` provisions the `sapwood:verify:n/a`
 label for you.
 
-As of gate⓪ (#88), a plan being present isn't enough on its own either: a `plan:approved`
-label is also required before `getReadyIssues` will dispatch a non-`verify:n/a` issue — it
+As of gate⓪ (#88), a plan being present isn't enough on its own either: the configured
+`labels.planApproved` label (`sapwood:plan:approved` by default) is also required before
+`getReadyIssues` will dispatch an issue without `labels.verifyNa` — it
 means the plan-reviewer peripheral judged the acceptance criteria and verification plan
 actually executable, not just present. See
 [`security.md`](security.md#plan-approved) for the full gate. The default rounds driver
-runs the plan-reviewer peripheral each round and applies `plan:approved` automatically
-when it approves a plan; `sapwood init` provisions the label like `verify:n/a` and
-`origin:agent` above.
+runs the plan-reviewer peripheral each round and applies it automatically when it approves
+a plan; `sapwood init` provisions the label like `sapwood:verify:n/a` and
+`sapwood:origin:agent` above.
 
 Any issue a human didn't personally author — including one an agent role opens on your
-behalf — should carry the `origin:agent` label; see
+behalf — should carry the configured `labels.originAgent` label (`sapwood:origin:agent` by
+default); see
 [`security.md`](security.md#origin-agent) for why.
 
 ## Next steps

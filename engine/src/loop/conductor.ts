@@ -15,6 +15,7 @@
 import { existsSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
+import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
@@ -126,37 +127,33 @@ export function drainEscalationDue(breachAtIso: string, nowMs: number, drainWind
 }
 
 /**
- * Lowest prio:N rank across labels (0..4, low = higher priority). No prio label -> 3.
- * Matches both the bare `prio:N` form that `sapwood init` creates AND the suffixed
- * `prio:N-foo` form used in practice (e.g. prio:1-high). This intentionally diverges from
- * 0day's bash twin, which only matched the hyphenated form — sapwood's own taxonomy
- * (init.ts) is bare, so a bare-only-or-suffixed match is required for the taxonomy to work.
+ * Lowest configured-prefix prio:N rank across labels (0..4, low = higher priority).
+ * No matching prio label -> 3. Supports bare names only when labels.prefix is explicitly "".
  */
-export function issuePriority(labels: string[]): number {
+export function issuePriority(labels: string[], prefix: string): number {
   let min = 5; // sentinel: no prio label found
   for (const tok of labels) {
-    const m = /^prio:([0-4])(?:-|$)/.exec(tok);
-    if (m) {
-      const d = Number(m[1]);
+    const d = matchPriorityLabel(tok, prefix);
+    if (d != null) {
       if (d < min) min = d;
     }
   }
   return min === 5 ? 3 : min;
 }
 
-/** blocked-by:[#]N blocker issue numbers, ascending. */
-export function labelsBlockers(labels: string[]): number[] {
+/** Configured-prefix blocked-by:[#]N blocker issue numbers, ascending. */
+export function labelsBlockers(labels: string[], prefix: string): number[] {
   const out: number[] = [];
   for (const tok of labels) {
-    const m = /^blocked-by:#?([0-9]+)$/.exec(tok);
-    if (m) out.push(Number(m[1]));
+    const issue = matchBlockedByLabel(tok, prefix);
+    if (issue != null) out.push(issue);
   }
   return out.sort((a, b) => a - b);
 }
 
 /** True if any reserve-ish label (reserve / needs-human — config-driven) is present. */
 export function hasReserveLabel(labels: string[], reserveLabels: string[]): boolean {
-  return labels.some((l) => reserveLabels.includes(l));
+  return reserveLabels.some((reserveLabel) => labelsInclude(labels, reserveLabel));
 }
 
 /** Reserved coding-lane floor = ceil(L/2) (anti-starvation). */
@@ -586,8 +583,8 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
   const reserveish = [cfg.labels.reserve, ...cfg.escalation.humanLabels];
   return ready
     .filter((i) => !hasReserveLabel(i.labels, reserveish))
-    .filter((i) => labelsBlockers(i.labels).length === 0)
-    .map((i) => ({ i, rank: issuePriority(i.labels) }))
+    .filter((i) => labelsBlockers(i.labels, cfg.labels.prefix).length === 0)
+    .map((i) => ({ i, rank: issuePriority(i.labels, cfg.labels.prefix) }))
     .sort((a, b) => a.rank - b.rank || a.i.number - b.i.number)
     .map((x) => x.i);
 }
@@ -651,7 +648,7 @@ async function attemptRollback(
 
 /** #69 dirty-worktree retention: tell a human where the preserved worktree lives. Best-effort
  *  and never throws (this runs on recovery paths that must not gain new failure modes) — the
- *  structured event always lands even if both forge calls fail. The needs-human LABEL is the
+ *  structured event always lands even if both forge calls fail. The human-attention label is the
  *  caller's job (every retention call site already applies it on its own escalation branch). */
 async function reportRetainedWorktree(
   forge: IForge,
@@ -659,6 +656,7 @@ async function reportRetainedWorktree(
   worker: string,
   issue: number,
   worktreePath: string | null,
+  needsHumanLabel: string,
 ): Promise<void> {
   state.appendEvent("worktree-retained", { worker, issue, worktreePath });
   await forge
@@ -667,7 +665,7 @@ async function reportRetainedWorktree(
       `sapwood: lane \`${worker}\` was torn down with possibly-uncommitted changes in its ` +
         `worktree. Automation never deletes work it can't prove is clean (#69) — the worktree ` +
         `was left on disk at:\n\n\`${worktreePath}\`\n\nSalvage or discard it by hand, then ` +
-        `remove the \`needs-human\` label.`,
+        `remove the \`${needsHumanLabel}\` label.`,
     )
     .catch(() => {});
 }
@@ -759,7 +757,7 @@ async function drainThenEscalate(
       if (r.worktreeRetained && p.hasPr && p.prNumber != null) {
         await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman).catch(() => {});
       }
-      if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
+      if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
       state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons });
       // #155: leaving `running` via the ceiling drain — clear the LIVE telemetry trio.
       state.clearLiveTelemetry(w.name);
@@ -1094,7 +1092,7 @@ async function reclaimTerminalLane(
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       if (retained?.worktreeRetained) {
         if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
-        await reportRetainedWorktree(forge, state, w.name, w.issue, retained.worktreePath);
+        await reportRetainedWorktree(forge, state, w.name, w.issue, retained.worktreePath, cfg.labels.needsHuman);
       }
       state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
     }
@@ -1276,7 +1274,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     if (r.worktreeRetained) {
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
-      await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath);
+      await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
       state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
       // No requeue to Ready: an open PR must not be raced by a fresh worker, and a no-PR dirty
       // lane is a human-salvage case (needs-human already blocks re-dispatch), not a clean
@@ -1883,9 +1881,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       // Anti-starvation: a meta-rank issue must yield a reserved coding lane while coding
       // work is still waiting (codingFloor of cfg.lanes.max lanes are reserved for coding).
-      const rank = issuePriority(issue.labels);
+      const rank = issuePriority(issue.labels, cfg.labels.prefix);
       if (!isCodingRank(rank)) {
-        const codingWaiting = order.filter((o) => isCodingRank(issuePriority(o.labels)) && !inFlightIssues.has(o.number)).length;
+        const codingWaiting = order.filter(
+          (o) => isCodingRank(issuePriority(o.labels, cfg.labels.prefix)) && !inFlightIssues.has(o.number),
+        ).length;
         if (!metaLaneAllowed(cfg.lanes.max, metaUsed, codingWaiting)) {
           dispatched.push({ kind: "skipped", issue: issue.number, reason: "meta-floor" });
           continue;

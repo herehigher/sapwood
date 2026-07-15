@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
+import { labelsInclude, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
 
 export interface InitDeps {
   run: GhRunner; // generic gh runner (label/milestone/api/graphql)
@@ -51,14 +52,7 @@ export interface LabelSpec {
 export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
   const l = cfg.labels;
   return [
-    { name: "type:feature", color: "1d76db", description: "Feature work (1 issue = 1 PR)" },
-    { name: "type:bug", color: "d73a4a", description: "Defect" },
-    { name: "type:infra", color: "6e7781", description: "Infra / CI / tooling" },
-    { name: "type:docs", color: "0075ca", description: "Documentation" },
-    { name: "prio:0", color: "b60205", description: "Priority 0 — governance/blocking (highest)" },
-    { name: "prio:1", color: "d93f0b", description: "Priority 1 — high" },
-    { name: "prio:2", color: "fbca04", description: "Priority 2 — medium" },
-    { name: "prio:3", color: "0e8a16", description: "Priority 3 — feature (default)" },
+    ...taxonomyLabels(l.prefix),
     { name: l.inProgress, color: "0e8a16", description: "Claimed by a worker (in flight)" },
     { name: l.needsHuman, color: "5319e7", description: "Escalated — stop autonomy, ask a human" },
     { name: l.blocked, color: "5319e7", description: "Blocked — held out of the main lane" },
@@ -90,13 +84,14 @@ export async function preflight(getAuthStatus: () => Promise<string>): Promise<v
 async function ensureLabels(cfg: SapwoodConfig, run: GhRunner, repo: string): Promise<string[]> {
   const existing = JSON.parse(await run(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])) as { name: string }[];
   const have = existing.map((e) => e.name);
-  const toCreate = requiredLabels(cfg).filter((l) => !have.includes(l.name));
+  const toCreate = requiredLabels(cfg).filter((l) => !labelsInclude(have, l.name));
   const created: string[] = [];
   for (const l of toCreate) {
     // No --force: detect-before-create preserves any color/description the user customized.
     try {
-      await run(["label", "create", l.name, "--repo", repo, "--color", l.color, "--description", l.description]);
-      created.push(l.name);
+      const name = normalizeLabel(l.name);
+      await run(["label", "create", name, "--repo", repo, "--color", l.color, "--description", l.description]);
+      created.push(name);
     } catch (error) {
       // Listing caps at 200; create is the authoritative existence check and also closes the list→create race.
       const text = (error as { stderr?: string }).stderr ?? String(error);

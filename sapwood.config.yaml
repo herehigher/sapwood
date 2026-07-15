@@ -114,16 +114,7 @@ reviewer:
   # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
   escalateAfterSec: 86400
 
-labels: # taxonomy used by the loop
-  inProgress: in-progress
-  needsHuman: needs-human
-  blocked: blocked
-  reserve: reserve
-  verifyNa: verify:n/a # Decision #8: issues with this label skip the verification-plan gate
-  # planApproved: plan:approved
-  #                   #88 gate⓪: applied by the plan-reviewer peripheral itself, never by a
-  #                   human or the loop directly — required (alongside a real plan section)
-  #                   for a non-verify:n/a issue to become dispatchable.
+# labels omitted: this repo adopts the shipped sapwood:* namespace defaults.
 
 # #87/#104: peripheral role sessions — the round orchestrator's aligning (PO)/architecting/
 # plan_review (gate⓪)/harvesting/retro phases, each a role-scoped session wired into runRounds's
@@ -285,8 +276,7 @@ labels: # taxonomy used by the loop
 #                              # setting this at/below the floor fails EVERY probe with
 #                              # "Exceeded USD budget" and keeps the engine parked.
 
-escalation:
-  humanLabels: [needs-human, blocked] # any of these => stop autonomy, ask a human
+# escalation omitted: humanLabels derives from the default labels.prefix.
 
 coverage:
   minPercent: 0 # test-coverage gate (0 = off for M0)
