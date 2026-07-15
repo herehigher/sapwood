@@ -261,6 +261,7 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
             prompt: rendered,
             model: role.model,
             effort: role.effort,
+            fallbackModel: role.fallbackModel,
             disallowedTools: HARVEST_DISALLOWED_TOOLS,
           },
           // Round-level spend, no single associated issue — 0 is the sentinel (spend_ledger's

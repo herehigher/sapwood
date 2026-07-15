@@ -69,6 +69,7 @@ const Worker = z
   .object({
     model: z.string().default("opus"),
     effort: z.enum(["low", "medium", "high"]).default("high"),
+    fallbackModel: z.string().default("sonnet"),
     timeoutSec: z.number().int().positive().default(3600),
     // SOFT per-worker budget -> graceful handoff (never a mid-work kill). Auto-enforced (#33) via
     // LIVE TOKEN ESTIMATION: stream-json carries no in-progress total_cost_usd (only the terminal
@@ -233,6 +234,7 @@ const RoleSession = z
   .object({
     model: z.string().default("sonnet"),
     effort: z.enum(["low", "medium", "high"]).default("medium"),
+    fallbackModel: z.string().default("sonnet"),
   })
   .strict();
 

@@ -64,7 +64,7 @@ test("run: stub claude exits 0 -> outcome done, cost/model usage parsed, running
   try {
     const bin = mkStub(dir, FAST_STUB);
     const runner = mkRunner(dir, bin);
-    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
     assert.equal(result.costUsd, 0.0005);
     assert.deepEqual(result.modelUsage, [
@@ -84,7 +84,7 @@ test("run: non-zero exit -> outcome failed, .failed sentinel", async () => {
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 3\n`);
     const runner = mkRunner(dir, bin);
-    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "failed");
     assert.equal(result.exitCode, 3);
     assert.ok(existsSync(join(dir, `${result.name}.failed.json`)));
@@ -109,7 +109,7 @@ test("run: wall-clock timeout kills the tree -> outcome timeout, tagged as a .fa
       heartbeatMs: 100,
       guardHookPath: mkHook(dir),
     });
-    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "timeout");
     assert.ok(existsSync(join(dir, `${result.name}.failed.json`)));
     const sentinel = JSON.parse(readFileSync(join(dir, `${result.name}.failed.json`), "utf8"));
@@ -124,8 +124,8 @@ test("run: two sequential sessions for the same role never collide (random per-r
   try {
     const bin = mkStub(dir, FAST_STUB);
     const runner = mkRunner(dir, bin);
-    const a = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
-    const b = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const a = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const b = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.notEqual(a.name, b.name);
     assert.ok(existsSync(join(dir, `${a.name}.done.json`)));
     assert.ok(existsSync(join(dir, `${b.name}.done.json`)));
@@ -143,7 +143,7 @@ test("run: #110 PR1 — resultText carries the stub's final structured-output te
       `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.001,"result":"${resultText}"}'\nexit 0\n`,
     );
     const runner = mkRunner(dir, bin);
-    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.resultText, '<<<SAPWOOD_RESULT>>>\n{"decision":"approve","issue":1}\n<<<END_SAPWOOD_RESULT>>>');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -155,7 +155,7 @@ test('run: #110 PR1 — no result line at all (e.g. a crashed session) -> result
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\nexit 1\n`);
     const runner = mkRunner(dir, bin);
-    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "failed");
     assert.equal(result.resultText, "");
   } finally {
@@ -175,7 +175,7 @@ test("run: guard hook missing in hard mode -> throws, refuses to spawn an unguar
       guardHookPath: join(dir, "nonexistent-hook.js"),
     });
     await assert.rejects(
-      () => runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" }),
+      () => runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" }),
       /guard hook not found/,
     );
   } finally {
@@ -195,7 +195,7 @@ test("run: soft guard mode tolerates a missing hook (no fail-closed refusal)", a
       claudeBin: bin,
       guardHookPath: join(dir, "nonexistent-hook.js"),
     });
-    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -210,12 +210,13 @@ test("run: argv scopes the session to NO Bash grant at all (#110 PR5) — pure c
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const runner = mkRunner(dir, bin);
-    await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
     assert.equal(at("--allowedTools"), ROLE_ALLOWED_TOOLS);
     assert.equal(at("--allowedTools"), "", "#110 PR5: no Bash grant of any kind reaches the argv");
     assert.equal(at("--disallowedTools"), ROLE_DISALLOWED_TOOLS);
+    assert.equal(at("--fallback-model"), "sonnet");
     assert.ok(!seen.includes("--add-dir"), "never mounts the engine's data dir");
     // No merge/review/PR capability anywhere in the tool-scoping strings (the acceptance
     // criterion: "generated settings for a peripheral session contain no merge/review
@@ -232,6 +233,22 @@ test("run: argv scopes the session to NO Bash grant at all (#110 PR5) — pure c
     // peripheral.ts's doc) — a future PR re-widening the allow-list lands back inside these.
     assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh issue comment *--body-file*)"));
     assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--body-file*)"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: fallbackModel none omits Claude's fallback flag for a role session", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "none" });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.ok(!seen.includes("--fallback-model"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -260,6 +277,7 @@ test("run: a per-role disallowedTools override reaches the argv (the drafter's s
       prompt: "p",
       model: "sonnet",
       effort: "medium",
+      fallbackModel: "sonnet",
       disallowedTools: PLAN_DRAFTER_DISALLOWED_TOOLS,
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
@@ -363,6 +381,7 @@ test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the
       prompt: "p",
       model: "sonnet",
       effort: "medium",
+      fallbackModel: "sonnet",
       allowedTools: PO_ALLOWED_TOOLS,
       disallowedTools: PO_DISALLOWED_TOOLS,
     });
@@ -389,6 +408,7 @@ test("run: a per-role allowedTools override reaches the argv (#91 — retro's wi
       prompt: "p",
       model: "sonnet",
       effort: "medium",
+      fallbackModel: "sonnet",
       allowedTools: widerScope,
       disallowedTools: "Bash(gh pr merge*)",
     });
@@ -428,7 +448,7 @@ exit 0
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
     });
-    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.ok(!existsSync(join(worktreeRoot, result.name)), "worktree removed unconditionally after run()");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -472,6 +492,7 @@ exit 0
       prompt: "p",
       model: "sonnet",
       effort: "medium",
+      fallbackModel: "sonnet",
       scratchFile: ".sapwood-retro-pr",
     });
     assert.equal(result.scratchText, "branch: retro/x\ntitle: t\n\nbody line\n");
@@ -491,6 +512,7 @@ test("run: scratchFile requested but the session never wrote it — scratchText 
       prompt: "p",
       model: "sonnet",
       effort: "medium",
+      fallbackModel: "sonnet",
       scratchFile: ".sapwood-retro-pr",
     });
     assert.equal(result.outcome, "done");
@@ -526,6 +548,7 @@ test("run: a ../-escaping scratchFile is refused — the outside file is NOT rea
       prompt: "p",
       model: "sonnet",
       effort: "medium",
+      fallbackModel: "sonnet",
       scratchFile: "../../secret",
     });
     assert.equal(result.outcome, "done");
@@ -547,6 +570,7 @@ test("run: an absolute scratchFile is refused — scratchText stays undefined ev
       prompt: "p",
       model: "sonnet",
       effort: "medium",
+      fallbackModel: "sonnet",
       scratchFile: outside,
     });
     assert.equal(result.outcome, "done");
@@ -561,7 +585,7 @@ test("run: spend baseline — costUsd is 0 when the stub emits no result line", 
   try {
     const bin = mkStub(dir, `#!/usr/bin/env bash\necho 'no json here'\nexit 0\n`);
     const runner = mkRunner(dir, bin);
-    const result = await runner.run({ roleId: "plan-drafter", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-drafter", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.costUsd, 0);
     assert.deepEqual(result.modelUsage, []);
   } finally {
@@ -610,7 +634,7 @@ class FakeState {
 const mkOpts = (runner: FakeRunner, state: FakeState, isValid: RetriedSession["isValid"]): RetriedSession => ({
   runner,
   state,
-  session: { roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium" },
+  session: { roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" },
   issue: 0,
   now: () => new Date("2026-07-11T00:00:00Z"),
   degradeEvent: "test-degraded",
@@ -740,7 +764,7 @@ test("#110 PR5 final integration: a role session spawns with empty Bash grants, 
 
     // 1. SPAWN: a real plan-reviewer role session under the DEFAULT (no override) allow/deny
     // pair — the #110 PR5 acceptance criterion itself: no Bash(...) grant reaches the argv.
-    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium" });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     const allowedArgv = seen[seen.indexOf("--allowedTools") + 1];

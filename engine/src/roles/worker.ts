@@ -308,6 +308,7 @@ export interface ClaudeArgsOpts {
   prompt: string;
   model: string;
   effort: string;
+  fallbackModel: string;
   worktree: string;
   name: string;
   sessionId: string;
@@ -338,8 +339,7 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     o.model,
     "--effort",
     o.effort,
-    "--fallback-model",
-    "sonnet",
+    ...(o.fallbackModel === "none" ? [] : ["--fallback-model", o.fallbackModel]),
     "--worktree",
     o.worktree,
     "--name",
@@ -625,6 +625,7 @@ export class WorkerSupervisor implements Supervisor {
       prompt,
       model: this.deps.cfg.worker.model,
       effort: this.deps.cfg.worker.effort,
+      fallbackModel: this.deps.cfg.worker.fallbackModel,
       worktree: laneName,
       name: laneName,
       sessionId,
@@ -761,6 +762,7 @@ export class WorkerSupervisor implements Supervisor {
       prompt,
       model: this.deps.cfg.worker.model,
       effort: this.deps.cfg.worker.effort,
+      fallbackModel: this.deps.cfg.worker.fallbackModel,
       worktree: name,
       name,
       sessionId,

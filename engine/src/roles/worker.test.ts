@@ -246,6 +246,7 @@ test("claudeArgs: headless flags, stream-json, worktree/session; no --max-budget
     prompt: "do the thing",
     model: "opus",
     effort: "high",
+    fallbackModel: "sonnet",
     worktree: "lane-1",
     name: "lane-1",
     sessionId: "uuid-1",
@@ -253,6 +254,7 @@ test("claudeArgs: headless flags, stream-json, worktree/session; no --max-budget
   });
   assert.ok(args.includes("-p") && args.includes("do the thing"));
   assert.deepEqual(args.slice(args.indexOf("--model"), args.indexOf("--model") + 2), ["--model", "opus"]);
+  assert.deepEqual(args.slice(args.indexOf("--fallback-model"), args.indexOf("--fallback-model") + 2), ["--fallback-model", "sonnet"]);
   assert.ok(args.includes("--worktree") && args.includes("lane-1"));
   assert.ok(args.includes("--session-id") && args.includes("uuid-1"));
   assert.ok(args.includes("--output-format") && args.includes("stream-json"));
@@ -265,6 +267,7 @@ test("claudeArgs: resumeSessionId (#46) uses --resume instead of --session-id, r
     prompt: "p",
     model: "m",
     effort: "high",
+    fallbackModel: "sonnet",
     worktree: "w",
     name: "w",
     sessionId: "sess-1",
@@ -274,14 +277,59 @@ test("claudeArgs: resumeSessionId (#46) uses --resume instead of --session-id, r
   assert.ok(!args.includes("--session-id"));
 });
 
+test("claudeArgs: fallbackModel defaults, overrides, and supports explicit opt-out", () => {
+  const defaults = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+  });
+  assert.deepEqual(defaults.slice(defaults.indexOf("--fallback-model"), defaults.indexOf("--fallback-model") + 2), [
+    "--fallback-model",
+    "sonnet",
+  ]);
+  const custom = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "haiku",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+  });
+  assert.deepEqual(custom.slice(custom.indexOf("--fallback-model"), custom.indexOf("--fallback-model") + 2), ["--fallback-model", "haiku"]);
+  const none = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "none",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+  });
+  assert.ok(!none.includes("--fallback-model"));
+});
+
 test("claudeArgs: allowedTools/disallowedTools override the worker defaults when given (#87 role-runner reuse)", () => {
-  const defaults = claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s" });
+  const defaults = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+  });
   const idx = defaults.indexOf("--allowedTools");
   assert.equal(defaults[idx + 1], "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)");
   const scoped = claudeArgs({
     prompt: "p",
     model: "m",
     effort: "high",
+    fallbackModel: "sonnet",
     worktree: "w",
     name: "w",
     sessionId: "s",
@@ -295,11 +343,16 @@ test("claudeArgs: allowedTools/disallowedTools override the worker defaults when
 });
 
 test("claudeArgs: --settings only when given (guard hook wiring lands in #26)", () => {
-  assert.ok(!claudeArgs({ prompt: "p", model: "m", effort: "high", worktree: "w", name: "w", sessionId: "s" }).includes("--settings"));
+  assert.ok(
+    !claudeArgs({ prompt: "p", model: "m", effort: "high", fallbackModel: "sonnet", worktree: "w", name: "w", sessionId: "s" }).includes(
+      "--settings",
+    ),
+  );
   const withSettings = claudeArgs({
     prompt: "p",
     model: "m",
     effort: "high",
+    fallbackModel: "sonnet",
     worktree: "w",
     name: "w",
     sessionId: "s",

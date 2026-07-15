@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { parseModelUsage } from "../roles/worker.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
 import { defaultPricingPath, estimateUsd, loadPricingTable, type PricingTable, resolveRate } from "./pricing.js";
 
@@ -193,6 +194,27 @@ test("estimateUsd: cache reads are priced far below the input rate — pricing t
   const wrongIfPricedAsInput = (1_000_000 / 1_000_000) * rate.input;
   assert.ok(estimateUsd(cacheHeavy, table) < wrongIfPricedAsInput);
   assert.ok(Math.abs(estimateUsd(cacheHeavy, table) - rate.cacheRead) < 1e-9);
+});
+
+test("estimateUsd: fallback-switched stream usage is priced by each reported model id", () => {
+  const fallbackSwitchedStream = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({
+      type: "result",
+      subtype: "success",
+      modelUsage: {
+        "claude-opus-4-8": { inputTokens: 1_000_000 },
+        "claude-sonnet-4-6": { inputTokens: 1_000_000 },
+      },
+    }),
+  ].join("\n");
+  const entries = parseModelUsage(fallbackSwitchedStream);
+  const estimated = entries.reduce((total, entry) => total + estimateUsd(entry, table), 0);
+  assert.deepEqual(
+    entries.map((entry) => entry.model),
+    ["claude-opus-4-8", "claude-sonnet-4-6"],
+  );
+  assert.ok(Math.abs(estimated - (resolveRate("opus", table).input + resolveRate("sonnet", table).input)) < 1e-9);
 });
 
 test("estimateUsd: zero usage -> zero cost; unrecognized model still prices (most-expensive fallback), never throws", () => {

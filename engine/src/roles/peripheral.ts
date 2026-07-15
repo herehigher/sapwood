@@ -82,6 +82,7 @@ export interface RoleSessionOpts {
   prompt: string;
   model: string;
   effort: string;
+  fallbackModel: string;
   /** #89/#91/#110: per-role ALLOW-list override — the symmetric widening counterpart to
    *  disallowedTools below, for a role whose job legitimately needs MORE than the base
    *  issues-only ROLE_ALLOWED_TOOLS (now empty, #110 PR5). retro.ts's RETRO_ALLOWED_TOOLS (git +
@@ -206,6 +207,7 @@ export class RoleRunner {
       prompt: opts.prompt,
       model: opts.model,
       effort: opts.effort,
+      fallbackModel: opts.fallbackModel,
       worktree: name,
       name,
       sessionId,

@@ -405,7 +405,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       const result = await runSessionWithRetry({
         runner: deps.runner,
         state: deps.state,
-        session: { roleId: "architect", prompt, model: role.model, effort: role.effort },
+        session: { roleId: "architect", prompt, model: role.model, effort: role.effort, fallbackModel: role.fallbackModel },
         issue: 0, // round-scoped, not tied to any single issue (spend_ledger's documented sentinel)
         now: deps.now ?? (() => new Date()),
         degradeEvent: "architect-degraded",
