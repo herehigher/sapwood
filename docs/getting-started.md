@@ -51,8 +51,8 @@ sapwood init
    scope, before touching anything.
 2. **Detects user vs. org** for the configured `board.owner`.
 3. **Ensures the label taxonomy exists** (`type:*`, `prio:0`–`3`, `in-progress`,
-   `needs-human`, `blocked`, `reserve`, `verify:n/a`, `origin:agent`) — detect-before-create,
-   so it never clobbers labels you've already customized.
+   `needs-human`, `blocked`, `reserve`, `verify:n/a`, `plan:approved`, `origin:agent`) —
+   detect-before-create, so it never clobbers labels you've already customized.
 4. **Ensures any configured milestones exist** (`config.milestones`; empty by default —
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**
@@ -186,9 +186,10 @@ As of gate⓪ (#88), a plan being present isn't enough on its own either: a `pla
 label is also required before `getReadyIssues` will dispatch a non-`verify:n/a` issue — it
 means the plan-reviewer peripheral judged the acceptance criteria and verification plan
 actually executable, not just present. See
-[`security.md`](security.md#plan-approved) for the full gate. That peripheral session
-isn't wired yet, so today `plan:approved` must be applied by hand; unlike `verify:n/a`
-and `origin:agent` above, `sapwood init` does not yet provision this label.
+[`security.md`](security.md#plan-approved) for the full gate. The default rounds driver
+runs the plan-reviewer peripheral each round and applies `plan:approved` automatically
+when it approves a plan; `sapwood init` provisions the label like `verify:n/a` and
+`origin:agent` above.
 
 Any issue a human didn't personally author — including one an agent role opens on your
 behalf — should carry the `origin:agent` label; see
