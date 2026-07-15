@@ -219,9 +219,10 @@ recent heartbeat is older than `worker.heartbeatStaleSecs` (default 180s) depend
 whether the worker process itself is still alive (#169):
 
 - **Worker process still alive**, and its first dispatch is within `worker.timeoutSec`:
-  the lane is **adopted**, not killed. The engine requests a graceful handoff (SIGTERM;
-  the worker commits+pushes WIP and exits), holds the lane while it drains, and resumes
-  the work through the ordinary handoff/resume path — an engine restart never
+  the lane is **adopted**, not killed. The engine requests a graceful handoff (SIGTERM),
+  holds the lane while the worker drains and exits — the worktree is left exactly as the
+  worker left it — then writes the `.handoff` sentinel and resumes the same session in
+  that same worktree through the ordinary handoff/resume path. An engine restart never
   hard-kills a healthy worker mid-work. Adoption is recorded as a `lane-adopted` event,
   which also notes that spend during the engine's downtime was unobserved (nothing was
   supervising the worker while the engine was down — a deliberate, bounded blind spot).
