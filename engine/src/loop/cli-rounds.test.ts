@@ -44,15 +44,23 @@ class FakeForge implements IForge {
   planReviewCandidates: Issue[] = [];
   issueLabels: Record<number, string[]> = {};
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
+  unplaced = { issues: [] as number[], skipped: 0 };
+  boardCalls: string[] = [];
 
   async detectOwnerKind(): Promise<"user"> {
     return "user";
+  }
+  async listUnplacedIssues() {
+    this.boardCalls.push("list-unplaced");
+    return this.unplaced;
   }
   async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
   async claimIssue(): Promise<void> {}
-  async setBoardStatus(): Promise<void> {}
+  async setBoardStatus(issue: number, status: Parameters<IForge["setBoardStatus"]>[1]): Promise<void> {
+    this.boardCalls.push(`set-${issue}-${status}`);
+  }
   async addLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
@@ -127,6 +135,7 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     const bin = mkStub(dir, FAST_STUB);
     const state = new State(":memory:");
     const forge = new FakeForge();
+    forge.unplaced = { issues: [173], skipped: 0 };
     // #125: FakeForge is an intentionally empty board (this test is about the CLI's wiring to a
     // REAL RoleRunner, not the standby probe) — opt out explicitly so round 1 still opens
     // immediately, same as before #125.
@@ -161,6 +170,10 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     const code = await runEngine(["node", "sapwood", "run"], overrides);
 
     assert.equal(code, 0);
+    assert.deepEqual(forge.boardCalls.slice(0, 2), ["list-unplaced", "set-173-backlog"], "normalization runs before the round loop");
+    assert.deepEqual(state.eventsSince("2020-01-01T00:00:00Z", ["board-normalized"]), [
+      { kind: "board-normalized", payload: { issue: 173, status: "backlog" } },
+    ]);
     const round = state.getRound(1)!;
     assert.equal(round.phase, "closed", "graceful stop still let the in-flight round finish (harvest included)");
 

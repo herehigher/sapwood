@@ -44,6 +44,9 @@ import {
 const DEFAULT_PROBE: LaneProbe = { done: false, failed: false, handoff: false, hbAge: 10, wrapperAlive: 1, hasPr: false };
 
 class FakeForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   ready: Issue[] = [];
   labelsAdded: Array<[number, string]> = [];
   prLabelsAdded: Array<[number, string]> = [];
@@ -84,7 +87,7 @@ class FakeForge implements IForge {
   async claimIssue(n: number): Promise<void> {
     this.claimed.push(n);
   }
-  async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> {
+  async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     this.boardSet.push([n, s]);
   }
   async addLabel(n: number, l: string): Promise<void> {

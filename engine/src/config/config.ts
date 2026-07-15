@@ -33,6 +33,7 @@ const Board = z
     statusField: z.string().default("Status"),
     status: z
       .object({
+        backlog: z.string().default("Todo"),
         ready: z.string().default("Ready"),
         inProgress: z.string().default("In Progress"),
         done: z.string().default("Done"),

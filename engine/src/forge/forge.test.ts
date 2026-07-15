@@ -22,6 +22,7 @@ import {
   selectPlanReviewCandidates,
   selectPlanTriageCandidates,
   selectReadyIssues,
+  selectUnplacedIssues,
 } from "./forge.js";
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —
@@ -290,6 +291,19 @@ test("parseProject: #86 milestone title threads onto ProjectItem, null when the 
   const p = parseProject(PROJECT_JSON, "Status");
   assert.equal(p.items.find((it) => it.number === 10)?.milestone, "M4");
   assert.equal(p.items.find((it) => it.number === 11)?.milestone, null);
+});
+
+test("selectUnplacedIssues: selects only null Status, leaves every named Status untouched, and skips drafts", () => {
+  assert.deepEqual(
+    selectUnplacedIssues([
+      { number: 10, status: null },
+      { number: 11, status: "Todo" },
+      { number: 12, status: "Ready" },
+      { number: null, status: null },
+      { number: null, status: "Todo" },
+    ]),
+    { issues: [10], skipped: 1 },
+  );
 });
 
 test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (Decision #8, tightened by #88 gate⓪)", () => {
@@ -971,6 +985,7 @@ test("selectPlanTriageCandidates: unlike selectPlanReviewCandidates, a NON-Ready
         milestone: null,
       },
     ],
+    placements: [],
   };
   const candidates = selectPlanTriageCandidates(project, cfg);
   assert.deepEqual(

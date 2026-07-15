@@ -311,6 +311,9 @@ checklist each addition must update.
 - **Retro issue-proposal channel:** hybrid — small mechanical changes keep
   the PR path; larger insights become `origin:agent` issues a human moves to
   Ready (the urgency of this dropped after #119 unified retro's trust model).
+  The #138 engine-mediated proposal-write design must place each created issue
+  on the board with `board.status.backlog` in the engine's own forge write;
+  engine-created issues may never enter the board with No Status.
 - **Role-prompt self-evolution (A/B) and a cross-round trend role** — both
   need round history that doesn't exist yet.
 - **Event-driven wake** (webhook) to replace standby polling.

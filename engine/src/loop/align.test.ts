@@ -31,6 +31,9 @@ import {
 } from "./align.js";
 
 class FakeForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   issueLabels: Record<number, string[]> = {};
   issueBodies: Record<number, string> = {};
   issueCommentsPosted: Array<[number, string]> = [];
@@ -47,7 +50,7 @@ class FakeForge implements IForge {
     return [];
   }
   async claimIssue(): Promise<void> {}
-  async setBoardStatus(n: number, s: "ready" | "inProgress" | "done"): Promise<void> {
+  async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     this.boardStatusCalls.push([n, s]);
   }
   async addLabel(n: number, l: string): Promise<void> {

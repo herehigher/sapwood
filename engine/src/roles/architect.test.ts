@@ -36,6 +36,9 @@ import { ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type R
 import { loadRolePromptTemplate } from "./plan-review.js";
 
 class FakeForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   planReviewCandidates: Issue[] = [];
   issueLabels: Record<number, string[]> = {};
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};

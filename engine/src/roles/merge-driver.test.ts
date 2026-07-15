@@ -118,6 +118,9 @@ test("deriveGate: a configured human-triage label always wins, even with MERGE_O
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 class FakeForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   merged: Array<[number, string]> = [];
   labelsAdded: Array<[number, string]> = [];
   comments: Array<[number, string]> = [];

@@ -11,6 +11,7 @@ import {
   formatDryRunPreview,
   formatStatus,
   formatStopConditionLine,
+  normalizeUnplacedBoardItems,
   parseMilestoneFlag,
   parseRunStopMode,
   parseStatusArgs,
@@ -273,6 +274,48 @@ test("assertStopMilestoneExists: unknown/partial title fails CLOSED at startup, 
     },
     {},
   );
+});
+
+test("normalizeUnplacedBoardItems: moves every issue to backlog and records one event per move", async () => {
+  const moves: Array<[number, string]> = [];
+  const events: Array<[string, unknown]> = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [17, 18], skipped: 0 }),
+      setBoardStatus: async (issue, status) => moves.push([issue, status]),
+    },
+    { appendEvent: (kind, payload) => events.push([kind, payload]) },
+    () => {},
+  );
+  assert.deepEqual(moves, [
+    [17, "backlog"],
+    [18, "backlog"],
+  ]);
+  assert.deepEqual(events, [
+    ["board-normalized", { issue: 17, status: "backlog" }],
+    ["board-normalized", { issue: 18, status: "backlog" }],
+  ]);
+});
+
+test("normalizeUnplacedBoardItems: a failed move is logged and does not block later moves", async () => {
+  const moves: number[] = [];
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [21, 22], skipped: 1 }),
+      setBoardStatus: async (issue) => {
+        moves.push(issue);
+        if (issue === 21) throw new Error("boom");
+      },
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(moves, [21, 22]);
+  assert.deepEqual(events, [{ issue: 22, status: "backlog" }]);
+  assert.equal(logs.filter((line) => /draft\/non-issue/.test(line)).length, 1);
+  assert.ok(logs.some((line) => /#21/.test(line) && /continuing/.test(line)));
 });
 
 // ── #129: `--milestone NAME` shortcut — scope + stop in one flag ───────────────────────────────

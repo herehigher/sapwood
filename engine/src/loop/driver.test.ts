@@ -11,6 +11,9 @@ import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import { type DriverDeps, runDriver } from "./driver.js";
 
 class FakeForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   ready: Issue[] = [];
   /** #76: countOpenIssuesInMilestone's canned answer — a mutable array so a test can simulate
    *  the count changing across calls (shift() per call; last value repeats once exhausted). */

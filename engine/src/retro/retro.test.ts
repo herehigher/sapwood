@@ -590,6 +590,9 @@ test("prompts/retro.md never instructs a direct merge/approve — the PR-only pa
 // ── Integration: wired as round.ts's real `retro` peripheral ────────────────────────────────
 
 class MinimalForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   async detectOwnerKind(): Promise<"user"> {
     return "user";
   }

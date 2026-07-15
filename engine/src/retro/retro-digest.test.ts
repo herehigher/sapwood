@@ -14,6 +14,9 @@ import { buildRetroDigest, capDigest, gatherDigestIssues, gatherTouchedPRs, PR_T
 // ── A programmable fake IForge — call-recording, per-item response tables ──────────────────
 
 class FakeForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   diffCalls: number[] = [];
   reviewCalls: number[] = [];
   labelCalls: number[] = [];

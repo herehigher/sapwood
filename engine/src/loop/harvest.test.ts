@@ -58,6 +58,9 @@ class ScriptedRunner {
  *  a validated harvest decision reaches GitHub through (the session itself has no gh grant it
  *  acts on), so this capture is what every "the engine posted X" assertion below reads. */
 class MinimalForge implements IForge {
+  async listUnplacedIssues() {
+    return { issues: [], skipped: 0 };
+  }
   comments: Array<[number, string]> = [];
   async detectOwnerKind(): Promise<"user"> {
     return "user";

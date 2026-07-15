@@ -120,7 +120,7 @@ const tmpCwd = () => mkdtempSync(join(tmpdir(), "sapwood-init-"));
 
 test("init is idempotent: a fully-provisioned repo creates nothing", async () => {
   const allLabels = requiredLabels(cfg).map((l) => l.name);
-  const { run, calls } = fakeRun({ labels: allLabels, boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run, calls } = fakeRun({ labels: allLabels, boardExists: true, boardOptions: ["Todo", "Ready", "In Progress", "Done"] });
   const dir = tmpCwd();
   try {
     const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
@@ -167,15 +167,16 @@ test("init creates missing labels and provisions a missing board lane", async ()
   }
 });
 
-test("board mutation preserves existing option ids (guards against issue #37's status wipe)", async () => {
-  // "In Progress" and "Done" already exist on the board with real ids from a prior run.
-  // Adding the missing "Ready" lane must resend those two WITH their existing ids — the only
+test("board missing only Todo gets one mutation that preserves every existing option id (#37)", async () => {
+  // The three engine lanes already exist on the board with real ids from a prior run.
+  // Adding the missing backlog lane must resend all three WITH their existing ids — the only
   // thing (per ProjectV2SingleSelectFieldOptionInput.id) that stops updateProjectV2Field from
   // minting fresh ids and reverting every item currently on those lanes to "No Status".
   const { run, calls } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: [
+      { name: "Ready", id: "OPT_READY" },
       { name: "In Progress", id: "OPT_IN_PROGRESS" },
       { name: "Done", id: "OPT_DONE" },
     ],
@@ -185,13 +186,15 @@ test("board mutation preserves existing option ids (guards against issue #37's s
     await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
     const mutationCall = calls.find((c) => c.join(" ").includes("mutation"));
     assert.ok(mutationCall, "board mutation issued");
+    assert.equal(calls.filter((c) => c.join(" ").includes("mutation")).length, 1);
     const query = mutationCall!.find((a) => a.startsWith("query=")) ?? "";
+    assert.ok(query.includes('id:"OPT_READY"'), "Ready kept its existing id");
     assert.ok(query.includes('id:"OPT_IN_PROGRESS"'), "In Progress kept its existing id");
     assert.ok(query.includes('id:"OPT_DONE"'), "Done kept its existing id");
-    // The new "Ready" option has no prior id — the API mints one, so it must NOT appear
+    // The new "Todo" option has no prior id — the API mints one, so it must NOT appear
     // with a fabricated id (no item references it yet, so there is nothing to preserve).
-    const readyOption = query.slice(query.indexOf('name:"Ready"') - 40, query.indexOf('name:"Ready"'));
-    assert.ok(!readyOption.includes("id:"), "new option sent without an id");
+    const backlogOption = query.slice(query.indexOf('name:"Todo"') - 40, query.indexOf('name:"Todo"'));
+    assert.ok(!backlogOption.includes("id:"), "new option sent without an id");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
