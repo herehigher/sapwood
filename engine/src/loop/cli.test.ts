@@ -585,9 +585,9 @@ test("computeDryRunPreview: caps by min(roundDispatchCap, lanes.max) — max:1 +
 
 test("computeDryRunPreview: uses the REAL dispatch eligibility filter — reserve/needs-human/blocked/blocked-by issues never appear as candidates or spend (Codex PR #70 P2)", () => {
   const ready: Issue[] = [
-    { number: 1, title: "held for human", labels: ["needs-human"] },
-    { number: 2, title: "blocked", labels: ["blocked"] },
-    { number: 3, title: "reserve", labels: ["reserve"] },
+    { number: 1, title: "held for human", labels: [baseCfg.labels.needsHuman] },
+    { number: 2, title: "blocked", labels: [baseCfg.labels.blocked] },
+    { number: 3, title: "reserve", labels: [baseCfg.labels.reserve] },
     { number: 4, title: "waiting on 9", labels: ["blocked-by:9"] },
     { number: 5, title: "actually dispatchable", labels: [] },
   ];

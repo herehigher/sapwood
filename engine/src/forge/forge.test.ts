@@ -139,6 +139,7 @@ test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section
   assert.equal(hasVerificationPlan("## Verification\nrun tests", [], "verify:n/a"), true);
   assert.equal(hasVerificationPlan("### Acceptance criteria", [], "verify:n/a"), true);
   assert.equal(hasVerificationPlan("no plan here", ["verify:n/a"], "verify:n/a"), true); // doc-gate path
+  assert.equal(hasVerificationPlan("no plan here", ["Verify:N/A"], "verify:n/a"), true); // GitHub case variant
   assert.equal(hasVerificationPlan("no plan here", ["type:feature"], "verify:n/a"), false); // fail-closed
   assert.equal(hasVerificationPlan("", [], "verify:n/a"), false);
 });

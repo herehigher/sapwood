@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { DEFAULT_WORKFLOW_LABELS, labelsInclude } from "../labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 
 const Board = z
@@ -208,21 +209,21 @@ const Merge = z
 
 const Labels = z
   .object({
-    inProgress: z.string().default("in-progress"),
-    needsHuman: z.string().default("needs-human"),
-    blocked: z.string().default("blocked"),
-    reserve: z.string().default("reserve"),
-    verifyNa: z.string().default("verify:n/a"), // Decision #8: skips the verification-plan gate
+    inProgress: z.string().default(DEFAULT_WORKFLOW_LABELS.inProgress),
+    needsHuman: z.string().default(DEFAULT_WORKFLOW_LABELS.needsHuman),
+    blocked: z.string().default(DEFAULT_WORKFLOW_LABELS.blocked),
+    reserve: z.string().default(DEFAULT_WORKFLOW_LABELS.reserve),
+    verifyNa: z.string().default(DEFAULT_WORKFLOW_LABELS.verifyNa), // Decision #8: skips the verification-plan gate
     // #88 gate⓪ (amends Decision #8 per #77's 2026-07-09 comment): a verification plan must
     // also pass the plan-reviewer peripheral's quality review before getReadyIssues dispatches
     // it — plan presence alone is no longer enough. Applied by that peripheral only (never by
     // the loop on a verify:n/a issue — the two dispatch paths are mutually exclusive).
-    planApproved: z.string().default("plan:approved"),
+    planApproved: z.string().default(DEFAULT_WORKFLOW_LABELS.planApproved),
     // #89: provenance stamp for agent-created issues (docs/security.md's convention, now
     // load-bearing): align.ts's PO orchestrator applies it to every issue the alignment
     // session creates. Config-driven like every sibling label here — never a hardcoded
     // string at the call site (fable PR #101 P3).
-    originAgent: z.string().default("origin:agent"),
+    originAgent: z.string().default(DEFAULT_WORKFLOW_LABELS.originAgent),
   })
   .strict();
 
@@ -684,7 +685,7 @@ const ConfigSchemaRaw = z
     roles: Roles.default({}),
     envFailure: EnvFailure.default({}),
     escalation: z
-      .object({ humanLabels: z.array(z.string()).default(["needs-human", "blocked"]) })
+      .object({ humanLabels: z.array(z.string()).default([DEFAULT_WORKFLOW_LABELS.needsHuman, DEFAULT_WORKFLOW_LABELS.blocked]) })
       .strict()
       .default({}),
     coverage: z
@@ -704,12 +705,12 @@ const ConfigSchemaRaw = z
     // #170 review-silence escalation writes labels.needsHuman, while the existing PR gate
     // and the issue-side gated-reentry hold both recognize escalation.humanLabels. Reject drift
     // between them so the label latch cannot suppress visibility without holding both paths.
-    if (!cfg.escalation.humanLabels.includes(cfg.labels.needsHuman)) {
+    if (!labelsInclude(cfg.escalation.humanLabels, cfg.labels.needsHuman)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["labels", "needsHuman"],
         message:
-          `labels.needsHuman ("${cfg.labels.needsHuman}") must be listed exactly in ` +
+          `labels.needsHuman ("${cfg.labels.needsHuman}") must be listed case-insensitively in ` +
           `escalation.humanLabels so the escalation label is recognized by both PR and issue holds`,
       });
     }

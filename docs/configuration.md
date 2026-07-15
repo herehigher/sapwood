@@ -76,7 +76,7 @@ Concurrency and dispatch shape.
 | `reserveCap` | `1` | **Accepted, not yet wired** — parsed and validated, but no engine code reads it yet. |
 | `prFixCap` | `2` | **Accepted, not yet wired** — the PR-fix iteration loop it will bound doesn't exist yet (review findings currently escalate to `needs-human`). |
 | `frictionMin` | `0` | **Accepted, not yet wired** — no dispatch rate-limit is enforced from it yet. |
-| `gatedReentryCap` | `2` | (#147) Bounds the **GATED RECLAIM** phase: a gate②-escalated PR whose issue a human clears of **every** `escalation.humanLabels` entry (default `needs-human` *and* `blocked` — the same hold set dispatch honors) is reclaimed back to `driving` and re-driven through the existing gate①/gate② + merge path — no new worker, same PR/branch. Each reclaim counts as one attempt; once this many have re-escalated, a further label removal is rejected (re-applies `needs-human` + a "cap reached" comment) and the lane is never retried again — merge it by hand. `0` disables automatic reentry outright. |
+| `gatedReentryCap` | `2` | (#147) Bounds the **GATED RECLAIM** phase: a gate②-escalated PR whose issue a human clears of **every** `escalation.humanLabels` entry (default `sapwood:needs-human` *and* `sapwood:blocked` — the same hold set dispatch honors) is reclaimed back to `driving` and re-driven through the existing gate①/gate② + merge path — no new worker, same PR/branch. Each reclaim counts as one attempt; once this many have re-escalated, a further label removal is rejected (re-applies `labels.needsHuman` + a "cap reached" comment) and the lane is never retried again — merge it by hand. `0` disables automatic reentry outright. |
 
 ## `worker`
 
@@ -312,18 +312,22 @@ by gate②. Custom verdict formats are out of scope here; see v1.x reviewer adap
 
 ## `labels`
 
-The label taxonomy the loop reads and writes. `sapwood init` provisions all of these
-(plus the fixed `type:*`/`prio:*` labels, which aren't individually configurable).
+The label taxonomy the loop reads and writes. GitHub label names are case-insensitively
+unique but case-preserving, so sapwood normalizes every label comparison by trimming and
+lowercasing both sides. `sapwood init` detects existing labels case-insensitively and sends
+lowercase names when creating missing labels; re-runs still preserve existing label casing,
+colors, and descriptions. It provisions all workflow labels below plus the fixed
+`sapwood:type:*`/`sapwood:prio:*` labels, which aren't individually configurable.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `inProgress` | `in-progress` | Applied to a claimed issue. |
-| `needsHuman` | `needs-human` | Escalation — stop autonomy on this issue/PR, ask a human. Its value must be listed in `escalation.humanLabels` so the written label is recognized by both PR and issue holds. |
-| `blocked` | `blocked` | Held out of the main dispatch lane. |
-| `reserve` | `reserve` | Not part of the main dispatch lane. |
-| `verifyNa` | `verify:n/a` | Marks an issue as inherently unverifiable by tests — skips the verification-plan gate and routes through the doc-gate path instead. |
-| `planApproved` | `plan:approved` | gate⓪ (#88): required, together with a genuine verification-plan section, for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. See [`security.md`](security.md#plan-approved). |
-| `originAgent` | `origin:agent` | Provenance stamp applied by the PO/align orchestrator to agent-created issues. See [`security.md`](security.md#origin-agent). |
+| `inProgress` | `sapwood:in-progress` | Applied to a claimed issue. |
+| `needsHuman` | `sapwood:needs-human` | Escalation — stop autonomy on this issue/PR, ask a human. Its value must be listed case-insensitively in `escalation.humanLabels` so the written label is recognized by both PR and issue holds. |
+| `blocked` | `sapwood:blocked` | Held out of the main dispatch lane. |
+| `reserve` | `sapwood:reserve` | Not part of the main dispatch lane. |
+| `verifyNa` | `sapwood:verify:n/a` | Marks an issue as inherently unverifiable by tests — skips the verification-plan gate and routes through the doc-gate path instead. |
+| `planApproved` | `sapwood:plan:approved` | gate⓪ (#88): required, together with a genuine verification-plan section, for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. See [`security.md`](security.md#plan-approved). |
+| `originAgent` | `sapwood:origin:agent` | Provenance stamp applied by the PO/align orchestrator to agent-created issues. See [`security.md`](security.md#origin-agent). |
 
 ## `roles`
 
@@ -365,7 +369,7 @@ local git (branch/checkout/add/commit/push/diff/status/log, for its own worktree
 | `retro.digestMaxChars` | `60000` | Hard cap, in characters, on the engine-built round-scoped read digest (#111 PR-A) substituted into retro's prompt as `{{round.digest}}` — PR diffs + review signals for every PR the round touched, comments/labels for every escalated issue, and the round's commit history. Oversize digests are truncated **deterministically** (same prefix every time for the same content+cap) and the cut is marked in the digest text itself, never silently dropped. |
 | `po.enabled` | `true` | #127: switch the `aligning` phase (PO goal-alignment + triage) off for this deployment. `false` → `round-defaults.ts`'s `createDefaultPeripherals` OMITS the aligning stub from the peripherals map; `round.ts`'s existing default for an unset phase (`noopPeripheralStub`) takes over, so the phase no-ops — marker set, round never wedges — with no `round.ts` change. **Warning:** with the PO off, plan-less issues are never triaged into the gate⓪ pipeline (no plan drafting, no decomposition) — they must arrive with a verification plan already in the body, or a human/external process must draft one, before gate⓪ can ever approve them. |
 | `architect.enabled` | `true` | #127: switch the `architecting` phase off, same mechanism as `po.enabled` above. |
-| `planReviewer.enabled` | `true` | #127: switch the WHOLE gate⓪ unit off — the plan-reviewer AND its plan-drafter, which rides along (the drafter has no toggle of its own; it only ever runs from inside the `plan_review` phase). Same omit-the-stub mechanism as `po.enabled` above. **Warning — this can starve dispatch entirely:** the dispatchability gate (deliberately, PLAN Decision #8) still requires every non-`verify:n/a` issue to carry `labels.planApproved`, and the plan-reviewer is the only thing in the engine that applies it. With gate⓪ off, a human or external process MUST apply `plan:approved` (or `verify:n/a`) to each issue — otherwise nothing is ever dispatched. The engine repeats this warning in the startup log when the role is disabled. |
+| `planReviewer.enabled` | `true` | #127: switch the WHOLE gate⓪ unit off — the plan-reviewer AND its plan-drafter, which rides along (the drafter has no toggle of its own; it only ever runs from inside the `plan_review` phase). Same omit-the-stub mechanism as `po.enabled` above. **Warning — this can starve dispatch entirely:** the dispatchability gate (deliberately, PLAN Decision #8) still requires every issue without `labels.verifyNa` to carry `labels.planApproved`, and the plan-reviewer is the only thing in the engine that applies it. With gate⓪ off, a human or external process MUST apply `labels.planApproved` (or `labels.verifyNa`) to each issue — otherwise nothing is ever dispatched. The engine repeats this warning in the startup log when the role is disabled. |
 | `harvest.enabled` | `true` | #127: switch the `harvesting` phase off, same mechanism as `po.enabled` above. |
 | `retro.enabled` | `true` | #127: switch the `retro` phase off, same mechanism as `po.enabled` above. |
 
@@ -471,7 +475,7 @@ that failed and degraded to local.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `humanLabels` | `[needs-human, blocked]` | Any of these labels on an issue means "stop autonomy, ask a human" for that issue. It must list `labels.needsHuman` exactly so PR and issue holds recognize the same escalation label. |
+| `humanLabels` | `[sapwood:needs-human, sapwood:blocked]` | Any matching label on an issue means "stop autonomy, ask a human" for that issue. It must list `labels.needsHuman` case-insensitively so PR and issue holds recognize the same escalation label. |
 
 ## `coverage`
 

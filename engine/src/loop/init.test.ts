@@ -48,14 +48,14 @@ test("missing returns set difference", () => {
   assert.deepEqual(missing(["a"], ["a"]), []);
 });
 
-test("requiredLabels includes the config taxonomy and verify:n/a", () => {
+test("requiredLabels includes the sapwood-prefixed taxonomy and workflow defaults", () => {
   const names = requiredLabels(cfg).map((l) => l.name);
-  assert.ok(names.includes("type:feature"));
-  assert.ok(names.includes("prio:0"));
-  assert.ok(names.includes("in-progress"));
-  assert.ok(names.includes("verify:n/a"));
-  assert.ok(names.includes("plan:approved"));
-  assert.ok(names.includes("origin:agent")); // #16: provenance convention (see docs/security.md)
+  assert.ok(names.includes("sapwood:type:feature"));
+  assert.ok(names.includes("sapwood:prio:0"));
+  assert.ok(names.includes("sapwood:in-progress"));
+  assert.ok(names.includes("sapwood:verify:n/a"));
+  assert.ok(names.includes("sapwood:plan:approved"));
+  assert.ok(names.includes("sapwood:origin:agent")); // #16: provenance convention (see docs/security.md)
 });
 
 test("requiredLabels provisions every configured label", () => {
@@ -149,6 +149,36 @@ test("init is idempotent: a fully-provisioned repo creates nothing", async () =>
   }
 });
 
+test("init detects an existing case-variant label before create", async () => {
+  const allLabels = requiredLabels(cfg).map((l) => (l.name === cfg.labels.needsHuman ? "SAPWOOD:Needs-Human" : l.name));
+  const { run, calls } = fakeRun({ labels: allLabels, boardExists: true, boardOptions: ["Todo", "Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    assert.ok(!calls.some((c) => c[0] === "label" && c[1] === "create"), "case variant was detected, not silently skipped after create");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init lowercases configured label names passed to gh label create", async () => {
+  const customCfg = parseConfig(`
+board: { owner: acme, repo: widgets, projectNumber: 7 }
+labels: { originAgent: Origin:Agent }
+`);
+  const existing = requiredLabels(customCfg)
+    .map((l) => l.name)
+    .filter((name) => name !== customCfg.labels.originAgent);
+  const { run, calls } = fakeRun({ labels: existing, boardExists: true, boardOptions: ["Todo", "Ready", "In Progress", "Done"] });
+  const dir = tmpCwd();
+  try {
+    await init(customCfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    assert.ok(calls.some((c) => c[0] === "label" && c[1] === "create" && c[2] === "origin:agent"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("init accepts loadConfig's non-schema doctrine.fileRaw enrichment", async () => {
   const loadedCfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");
   loadedCfg.doctrine.fileRaw = loadedCfg.doctrine.file;
@@ -185,21 +215,23 @@ test("init creates missing labels and provisions a missing board lane", async ()
 });
 
 test("init tolerates an already-existing label missed by the capped list and continues creating others", async () => {
+  const planApproved = cfg.labels.planApproved;
+  const originAgent = cfg.labels.originAgent;
   const labels = requiredLabels(cfg)
     .map((l) => l.name)
-    .filter((name) => name !== "plan:approved" && name !== "origin:agent");
+    .filter((name) => name !== planApproved && name !== originAgent);
   const { run, calls } = fakeRun({
     labels,
-    labelCreateErrors: { "plan:approved": "label already exists" },
+    labelCreateErrors: { [planApproved]: "label already exists" },
     boardExists: true,
     boardOptions: ["Ready", "In Progress", "Done"],
   });
   const dir = tmpCwd();
   try {
     const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
-    assert.ok(calls.some((c) => c[0] === "label" && c[1] === "create" && c[2] === "plan:approved"));
-    assert.ok(calls.some((c) => c[0] === "label" && c[1] === "create" && c[2] === "origin:agent"));
-    assert.ok(actions.some((a) => a === "created 1 label(s): origin:agent"));
+    assert.ok(calls.some((c) => c[0] === "label" && c[1] === "create" && c[2] === planApproved));
+    assert.ok(calls.some((c) => c[0] === "label" && c[1] === "create" && c[2] === originAgent));
+    assert.ok(actions.some((a) => a === `created 1 label(s): ${originAgent}`));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -336,7 +336,7 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
   live-run report) is no longer a dead end requiring a manual fix→re-review→merge
   drive — the conductor's **GATED RECLAIM** phase treats a human clearing the
-  issue of *every* `escalation.humanLabels` entry (`needs-human` and `blocked` by
+  issue of *every* `escalation.humanLabels` entry (`sapwood:needs-human` and `sapwood:blocked` by
   default — dispatch's exact hold set, not `needs-human` alone) as the explicit
   re-entry signal (autonomy principle: humans decide *why/what*, here "is this
   actually fixed") and reclaims the SAME
@@ -588,7 +588,7 @@ marker idempotency, output schema, escalation path) see
   (it could never fire). Empty `fallback` (the default) is byte-for-byte the
   pre-#54 behavior: an unavailable primary queues the PR forever, no silent
   degradation. **Review-silence visibility (#170):** a current-head review that stays
-  non-decisive past `reviewer.escalateAfterSec` (24h default) gets a `needs-human` PR
+  non-decisive past `reviewer.escalateAfterSec` (24h default) gets the configured `labels.needsHuman` PR
   label plus a structured event. The label is the latch and routes through the existing
   human hold/re-entry behavior; the lane remains driving, polling continues, and gate②
   is never softened. Configured failover receives its full evaluation window first.

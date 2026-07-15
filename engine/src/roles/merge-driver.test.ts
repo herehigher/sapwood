@@ -111,6 +111,8 @@ test("deriveGate: a non-OPEN PR is always HUMAN, even with MERGE_OK + CI green",
 test("deriveGate: a configured human-triage label always wins, even with MERGE_OK + CI green", () => {
   assert.equal(deriveGate(gateInput({ labels: ["needs-human"] })), "HUMAN");
   assert.equal(deriveGate(gateInput({ labels: ["blocked", "type:feature"] })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ labels: ["Needs-Human"] })), "HUMAN");
+  assert.equal(mergeDecision("MERGE_OK", "Needs-Human", "OPEN", false, HUMAN_LABELS), "ESCALATE");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -230,8 +232,21 @@ class FakeReviewer implements Reviewer {
   }
 }
 
+const LEGACY_LABEL_CONFIG = {
+  labels: {
+    inProgress: "in-progress",
+    needsHuman: "needs-human",
+    blocked: "blocked",
+    reserve: "reserve",
+    verifyNa: "verify:n/a",
+    planApproved: "plan:approved",
+    originAgent: "origin:agent",
+  },
+  escalation: { humanLabels: ["needs-human", "blocked"] },
+};
+
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, ...over });
+  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 }, ...LEGACY_LABEL_CONFIG, ...over });
 
 // #55 P1-B: driveOne now takes (pr, issue, triggerPin, recordTrigger). Most of the tests below
 // are about the GATE/MERGE machinery downstream of the trigger check, not the trigger check
@@ -287,7 +302,11 @@ test("#170 MergeDriver: an aged silent current-head review signals once; a fresh
   const driver = new MergeDriver({
     forge,
     reviewer,
-    cfg: mkCfg({ reviewer: { escalateAfterSec: 60 } }),
+    cfg: mkCfg({
+      reviewer: { escalateAfterSec: 60 },
+      labels: { needsHuman: "needs-human" },
+      escalation: { humanLabels: HUMAN_LABELS },
+    }),
     now: () => new Date("2026-07-15T00:02:00.000Z"),
   });
   const pin = { head: "HEAD", at: "2026-07-15T00:00:00.000Z" };
@@ -298,8 +317,10 @@ test("#170 MergeDriver: an aged silent current-head review signals once; a fresh
     reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 },
   });
 
-  forge.reviewData = { ...forge.reviewData, labels: ["needs-human"] };
-  assert.equal((await driver.driveOne(7, 46, pin, noopRecord)).reviewSilenceEscalation, undefined);
+  forge.reviewData = { ...forge.reviewData, labels: ["Needs-Human"] };
+  const latched = await driver.driveOne(7, 46, pin, noopRecord);
+  assert.equal(latched.kind, "needs-human");
+  assert.equal(latched.reviewSilenceEscalation, undefined);
 
   forge.reviewData = { ...forge.reviewData, headOid: "FRESH", labels: [] };
   forge.status = { ...forge.status, headOid: "FRESH" };

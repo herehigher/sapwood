@@ -172,8 +172,21 @@ const failedResult = (name: string): RoleSessionResult => ({
   name,
 });
 
+const LEGACY_LABEL_CONFIG = {
+  labels: {
+    inProgress: "in-progress",
+    needsHuman: "needs-human",
+    blocked: "blocked",
+    reserve: "reserve",
+    verifyNa: "verify:n/a",
+    planApproved: "plan:approved",
+    originAgent: "origin:agent",
+  },
+  escalation: { humanLabels: ["needs-human", "blocked"] },
+};
+
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
+  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...LEGACY_LABEL_CONFIG, ...over });
 
 /** The MOST RECENT comment posted on an issue — a cycle that bounces (posts a brief) before
  *  eventually escalating (posts a SECOND, distinct comment) has more than one, and the

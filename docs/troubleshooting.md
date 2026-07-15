@@ -41,7 +41,7 @@ To clear it: investigate and resolve whatever's described, then remove the label
 hand. Removing `needs-human` does not automatically re-dispatch anything — if the issue
 should re-enter the loop, move it back to `Ready` on the board yourself.
 
-Both `escalation.humanLabels` (default `[needs-human, blocked]`) hold an issue out of
+Both `escalation.humanLabels` (default `[sapwood:needs-human, sapwood:blocked]`) hold an issue out of
 the main dispatch lane — any issue carrying either label is skipped by dispatch
 regardless of its board status.
 

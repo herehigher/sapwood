@@ -15,6 +15,7 @@
 import { existsSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
+import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../labels.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
@@ -127,36 +128,35 @@ export function drainEscalationDue(breachAtIso: string, nowMs: number, drainWind
 
 /**
  * Lowest prio:N rank across labels (0..4, low = higher priority). No prio label -> 3.
- * Matches both the bare `prio:N` form that `sapwood init` creates AND the suffixed
- * `prio:N-foo` form used in practice (e.g. prio:1-high). This intentionally diverges from
- * 0day's bash twin, which only matched the hyphenated form — sapwood's own taxonomy
- * (init.ts) is bare, so a bare-only-or-suffixed match is required for the taxonomy to work.
+ * Matches bare and `sapwood:`-prefixed forms, with or without a suffix
+ * (`prio:N-foo`, e.g. prio:1-high), case-insensitively. This intentionally diverges from
+ * 0day's bash twin, which only matched the hyphenated form. Bare support remains required for
+ * repositories using sapwood's pre-#199 taxonomy.
  */
 export function issuePriority(labels: string[]): number {
   let min = 5; // sentinel: no prio label found
   for (const tok of labels) {
-    const m = /^prio:([0-4])(?:-|$)/.exec(tok);
-    if (m) {
-      const d = Number(m[1]);
+    const d = matchPriorityLabel(tok);
+    if (d != null) {
       if (d < min) min = d;
     }
   }
   return min === 5 ? 3 : min;
 }
 
-/** blocked-by:[#]N blocker issue numbers, ascending. */
+/** Bare or `sapwood:`-prefixed blocked-by:[#]N blocker issue numbers, ascending. */
 export function labelsBlockers(labels: string[]): number[] {
   const out: number[] = [];
   for (const tok of labels) {
-    const m = /^blocked-by:#?([0-9]+)$/.exec(tok);
-    if (m) out.push(Number(m[1]));
+    const issue = matchBlockedByLabel(tok);
+    if (issue != null) out.push(issue);
   }
   return out.sort((a, b) => a - b);
 }
 
 /** True if any reserve-ish label (reserve / needs-human — config-driven) is present. */
 export function hasReserveLabel(labels: string[], reserveLabels: string[]): boolean {
-  return labels.some((l) => reserveLabels.includes(l));
+  return reserveLabels.some((reserveLabel) => labelsInclude(labels, reserveLabel));
 }
 
 /** Reserved coding-lane floor = ceil(L/2) (anti-starvation). */

@@ -2282,7 +2282,7 @@ test("buildRenderPrompt: config vars substitute at build time — customized lab
 test("buildRenderPrompt: the shipped default prompt builds clean (all its vars are known)", () => {
   const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
   const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: ["verify:n/a"], body: "b" });
-  assert.match(rendered, /labelled `verify:n\/a`/);
+  assert.match(rendered, /labelled `sapwood:verify:n\/a`/);
   assert.doesNotMatch(rendered, /\{\{/);
 });
 

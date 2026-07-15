@@ -20,6 +20,7 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
+import { LEGACY_WORKFLOW_LABELS, labelsInclude, labelsIncludeAnySubstring } from "../labels.js";
 import type { ReviewAction, Reviewer, ReviewFailoverTransition, ReviewFallbackLock, ReviewTriggerPin } from "./reviewer.js";
 import { changesRequestedOnHead, NO_FALLBACK_LOCK, resolveReviewVerdict } from "./reviewer.js";
 
@@ -47,7 +48,7 @@ export function deriveGate(input: {
 }): Gate {
   if (input.prState !== "OPEN") return "HUMAN"; // already merged/closed -> never touch
   if (input.isDraft) return "HUMAN"; // draft is human territory
-  if (input.labels.some((l) => input.humanLabels.some((want) => l.includes(want)))) return "HUMAN";
+  if (labelsIncludeAnySubstring(input.labels, input.humanLabels)) return "HUMAN";
   switch (input.reviewAction) {
     case "REVIEW_UNAVAILABLE":
       // Rate-limit/timeout/malformed review query: QUEUE (WAIT), never skip gate② by treating
@@ -70,7 +71,7 @@ export function deriveGate(input: {
 // (sapwood dropped 0day's risk/fund trading-domain labels — CLAUDE.md: port the logic, not the
 // domain); this default exists only so mergeDecision reproduces 0day's parity-suite rows
 // unchanged when called with no 5th argument.
-const BASH_DEFAULT_HUMAN_LABELS = ["risk", "fund", "needs-human", "blocked"] as const;
+const BASH_DEFAULT_HUMAN_LABELS = ["risk", "fund", LEGACY_WORKFLOW_LABELS.needsHuman, LEGACY_WORKFLOW_LABELS.blocked] as const;
 
 /**
  * Port of 0day's loop_merge_driver.sh `merge_decision` — the FINAL fail-safe check evaluated
@@ -109,9 +110,7 @@ export function mergeDecision(
   }
   if (state !== "OPEN") return "ESCALATE"; // already merged/closed -> never touch
   const labels = labelsCsv === "" ? [] : labelsCsv.split(",");
-  for (const l of labels) {
-    if (humanLabels.some((want) => l.includes(want))) return "ESCALATE";
-  }
+  if (labelsIncludeAnySubstring(labels, humanLabels)) return "ESCALATE";
   return "MERGE";
 }
 
@@ -360,7 +359,7 @@ export class MergeDriver {
         triggerPin,
         now: gateNow,
         escalateAfterSec: cfg.reviewer.escalateAfterSec,
-        needsHumanLabelPresent: data.labels.includes(cfg.labels.needsHuman),
+        needsHumanLabelPresent: labelsInclude(data.labels, cfg.labels.needsHuman),
         fallbackConfigured: (this.deps.fallbackReviewers?.length ?? 0) > 0,
         failoverAfterSec: cfg.reviewer.failoverAfterSec,
       });

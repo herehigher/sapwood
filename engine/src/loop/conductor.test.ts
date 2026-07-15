@@ -210,8 +210,21 @@ class FakeSupervisor implements Supervisor {
   }
 }
 
+const LEGACY_LABEL_CONFIG = {
+  labels: {
+    inProgress: "in-progress",
+    needsHuman: "needs-human",
+    blocked: "blocked",
+    reserve: "reserve",
+    verifyNa: "verify:n/a",
+    planApproved: "plan:approved",
+    originAgent: "origin:agent",
+  },
+  escalation: { humanLabels: ["needs-human", "blocked"] },
+};
+
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" }, ...over });
+  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" }, ...LEGACY_LABEL_CONFIG, ...over });
 
 const seedRunning = (st: State, name: string, issue: number) =>
   st.upsertWorker({ name, issue, session_id: `s-${name}`, state: "running", started_at: "t", ended_at: null });
@@ -1641,6 +1654,9 @@ test("issuePriority: bare init-created labels (prio:N, no suffix) are recognized
   assert.equal(issuePriority(["prio:3"]), 3);
   assert.equal(issuePriority(["prio:2", "prio:0"]), 0); // min across bare labels
   assert.equal(issuePriority(["prio:00"]), 3); // malformed -> no match -> default
+  assert.equal(issuePriority(["PRIO:2-high"]), 2); // legacy case variant
+  assert.equal(issuePriority(["Sapwood:Prio:1"]), 1); // prefixed case variant
+  assert.equal(issuePriority(["sapwood:prio:4-polish"]), 4); // prefixed suffixed form
 });
 
 test("labelsBlockers: parse blocked-by:[#]N, ascending", () => {
@@ -1650,12 +1666,14 @@ test("labelsBlockers: parse blocked-by:[#]N, ascending", () => {
   assert.deepEqual(labelsBlockers([]), []);
   assert.deepEqual(labelsBlockers(["blocked-by:#42", "type:feature"]), [42]); // doc format with # tolerated
   assert.deepEqual(labelsBlockers(["blocked-by:#42", "blocked-by:7"]), [7, 42]); // mixed #/no-#
+  assert.deepEqual(labelsBlockers(["BLOCKED-BY:#5", "Sapwood:Blocked-By:12"]), [5, 12]);
 });
 
 test("hasReserveLabel: any of the reserve-ish labels present", () => {
   const reserveish = ["reserve", "needs-human"];
   assert.equal(hasReserveLabel(["reserve", "type:decision"], reserveish), true);
   assert.equal(hasReserveLabel(["needs-human"], reserveish), true);
+  assert.equal(hasReserveLabel(["Needs-Human"], reserveish), true);
   assert.equal(hasReserveLabel(["type:feature", "prio:3-feature"], reserveish), false);
   assert.equal(hasReserveLabel([], reserveish), false);
 });

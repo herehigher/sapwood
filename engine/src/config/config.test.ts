@@ -15,8 +15,8 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.worker.budgetUsdSoft, 10);
   assert.equal(cfg.worker.maxResumes, 2);
   assert.equal(cfg.reviewer.mode, "different-model-codex");
-  assert.equal(cfg.labels.verifyNa, "verify:n/a");
-  assert.equal(cfg.labels.planApproved, "plan:approved"); // #88 gate⓪
+  assert.equal(cfg.labels.verifyNa, "sapwood:verify:n/a");
+  assert.equal(cfg.labels.planApproved, "sapwood:plan:approved"); // #88 gate⓪
   // #14 engine cost ceiling + kill switch: conservative defaults.
   assert.equal(cfg.cost.dailyBudgetUsd, 100);
   assert.equal(cfg.cost.maxWallClockSec, 14400);
@@ -186,15 +186,16 @@ test("#170: the needs-human write label must be recognized by the human-label ho
   assert.doesNotThrow(() => parseConfig(base)); // shipped defaults agree
   assert.throws(
     () => parseConfig(`${base}labels: { needsHuman: human-review }`),
-    /labels\.needsHuman.*must be listed exactly in escalation\.humanLabels/i,
+    /labels\.needsHuman.*must be listed case-insensitively in escalation\.humanLabels/i,
   );
   assert.equal(
     parseConfig(`${base}labels: { needsHuman: human-review }\nescalation: { humanLabels: [human-review] }`).labels.needsHuman,
     "human-review",
   );
+  assert.doesNotThrow(() => parseConfig(`${base}labels: { needsHuman: Needs-Human }\nescalation: { humanLabels: [needs-human] }`));
   assert.throws(
     () => parseConfig(`${base}labels: { needsHuman: needs-human-now }\nescalation: { humanLabels: [needs-human] }`),
-    /labels\.needsHuman.*must be listed exactly in escalation\.humanLabels/i,
+    /labels\.needsHuman.*must be listed case-insensitively in escalation\.humanLabels/i,
   );
 });
 
@@ -334,16 +335,16 @@ test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's dir
 // runner issue; here the config surface is validated + path-resolved, same "accepted, not
 // yet wired" shape as lanes.reserveCap/prFixCap/frictionMin.
 
-test("labels.planApproved: defaults to plan:approved, overridable", () => {
+test("labels.planApproved: defaults to sapwood:plan:approved, overridable", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.labels.planApproved, "plan:approved");
+  assert.equal(cfg.labels.planApproved, "sapwood:plan:approved");
   const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { planApproved: custom:approved }");
   assert.equal(over.labels.planApproved, "custom:approved");
 });
 
-test("labels.originAgent: defaults to origin:agent, overridable (#89 — the PO provenance stamp, config-driven like every sibling label)", () => {
+test("labels.originAgent: defaults to sapwood:origin:agent, overridable (#89 — the PO provenance stamp, config-driven like every sibling label)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.labels.originAgent, "origin:agent");
+  assert.equal(cfg.labels.originAgent, "sapwood:origin:agent");
   const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { originAgent: bot:made }");
   assert.equal(over.labels.originAgent, "bot:made");
 });
