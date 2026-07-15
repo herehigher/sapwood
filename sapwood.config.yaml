@@ -108,6 +108,9 @@ reviewer:
   # How long (seconds, since the last review trigger) the primary may stay unavailable before
   # gate② hands off to the first fallback entry that itself reaches a decisive verdict.
   failoverAfterSec: 1200
+  # How long a current-head review may stay non-decisive before sapwood labels the PR
+  # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
+  escalateAfterSec: 86400
 
 labels: # taxonomy used by the loop
   inProgress: in-progress

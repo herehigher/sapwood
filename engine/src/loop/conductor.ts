@@ -1364,6 +1364,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           await forge.addPRComment(pr, note).catch(() => {});
         }
       }
+      // #170: visibility-only escalation. MergeDriver has already proved this is the current
+      // head, non-decisive, past both the silence threshold and any active failover window.
+      // The PR label is the latch: once it lands, the next live gate read sees it and follows
+      // the existing HUMAN -> gated-reentry path. This tick remains queued/driving.
+      if (outcome.reviewSilenceEscalation) {
+        const s = outcome.reviewSilenceEscalation;
+        let labeled = false;
+        try {
+          await forge.addPRLabel(pr, cfg.labels.needsHuman);
+          labeled = true;
+        } catch {
+          // No label means no latch: retry next tick. Never let a visibility-write outage stop
+          // review polling or turn a queued gate into a terminal lane transition.
+        }
+        if (labeled) {
+          state.appendEvent("review-silence-escalated", {
+            worker: w.name,
+            issue: w.issue,
+            pr,
+            head: s.head,
+            silenceSec: s.silenceSec,
+          });
+        }
+      }
       switch (outcome.kind) {
         case "merged":
           state.upsertWorker({ ...w, state: "done", ended_at: iso() });

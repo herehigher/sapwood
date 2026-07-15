@@ -586,7 +586,12 @@ marker idempotency, output schema, escalation path) see
   [same-model-trusted]` with an empty `trustedReviewers` is rejected at parse
   (it could never fire). Empty `fallback` (the default) is byte-for-byte the
   pre-#54 behavior: an unavailable primary queues the PR forever, no silent
-  degradation. **Commands + status CLI + first-run trust ramp delivered
+  degradation. **Review-silence visibility (#170):** a current-head review that stays
+  non-decisive past `reviewer.escalateAfterSec` (24h default) gets a `needs-human` PR
+  label plus a structured event. The label is the latch and routes through the existing
+  human hold/re-entry behavior; the lane remains driving, polling continues, and gate②
+  is never softened. Configured failover receives its full evaluation window first.
+  **Commands + status CLI + first-run trust ramp delivered
   (#15, PR TBD):** `sapwood status [db-path]` reads the SQLite state DB directly (no
   live engine session) and reports active lanes, PRs awaiting the review gate, spend
   vs. the daily ceiling, and kill-switch state; `sapwood run --dry-run` resolves config
