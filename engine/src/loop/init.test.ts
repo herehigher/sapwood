@@ -132,6 +132,22 @@ test("init is idempotent: a fully-provisioned repo creates nothing", async () =>
   }
 });
 
+test("init accepts loadConfig's non-schema doctrine.fileRaw enrichment", async () => {
+  const loadedCfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");
+  loadedCfg.doctrine.fileRaw = loadedCfg.doctrine.file;
+  const { run } = fakeRun({
+    labels: requiredLabels(loadedCfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    await init(loadedCfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("init creates missing labels and provisions a missing board lane", async () => {
   const { run, calls } = fakeRun({ labels: ["type:feature"], boardExists: true, boardOptions: ["In Progress", "Done"] });
   const dir = tmpCwd();

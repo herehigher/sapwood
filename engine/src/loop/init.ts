@@ -324,7 +324,9 @@ export interface InitResult {
 /** Run the full init flow. Idempotent: a second run reports zero create actions. */
 export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Promise<InitResult> {
   const { run, getAuthStatus, cwd } = { ...defaultDeps(), ...deps };
-  ConfigSchema.parse(cfg); // defend the boundary
+  // #187: fileRaw is a loadConfig-only, non-schema annotation; validate a schema-owned copy.
+  const { fileRaw: _fileRaw, ...doctrineSchemaFields } = cfg.doctrine;
+  ConfigSchema.parse({ ...cfg, doctrine: doctrineSchemaFields });
   const repo = `${cfg.board.owner}/${cfg.board.repo}`;
   const actions: string[] = [];
 
