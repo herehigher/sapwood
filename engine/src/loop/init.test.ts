@@ -54,7 +54,15 @@ test("requiredLabels includes the config taxonomy and verify:n/a", () => {
   assert.ok(names.includes("prio:0"));
   assert.ok(names.includes("in-progress"));
   assert.ok(names.includes("verify:n/a"));
+  assert.ok(names.includes("plan:approved"));
   assert.ok(names.includes("origin:agent")); // #16: provenance convention (see docs/security.md)
+});
+
+test("requiredLabels provisions every configured label", () => {
+  const names = new Set(requiredLabels(cfg).map((l) => l.name));
+  for (const label of Object.values(cfg.labels)) {
+    assert.ok(names.has(label), `missing configured label: ${label}`);
+  }
 });
 
 test("preflight throws actionably when not logged in", async () => {
@@ -92,6 +100,7 @@ function fakeRun(opts: {
   boardExists?: boolean;
   boardOptions?: (string | { name: string; id: string })[];
   ownerType?: string;
+  labelCreateErrors?: Record<string, string | { message: string; stderr: string }>;
 }) {
   const calls: string[][] = [];
   const run: GhRunner = async (args) => {
@@ -99,7 +108,12 @@ function fakeRun(opts: {
     if (args[0] === "label" && args[1] === "list") {
       return JSON.stringify((opts.labels ?? []).map((name) => ({ name })));
     }
-    if (args[0] === "label" && args[1] === "create") return "";
+    if (args[0] === "label" && args[1] === "create") {
+      const error = opts.labelCreateErrors?.[args[2] ?? ""];
+      if (typeof error === "string") throw new Error(error);
+      if (error) throw Object.assign(new Error(error.message), { stderr: error.stderr });
+      return "";
+    }
     if (args[0] === "api" && args[1]?.includes("/milestones") && args.includes("--jq")) {
       return (opts.milestones ?? []).join("\n"); // --jq '.[].title' => one title per line
     }
@@ -165,6 +179,55 @@ test("init creates missing labels and provisions a missing board lane", async ()
     );
     // wrote starter config into the empty temp dir
     assert.ok(readdirSync(dir).includes("sapwood.config.yaml"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init tolerates an already-existing label missed by the capped list and continues creating others", async () => {
+  const labels = requiredLabels(cfg)
+    .map((l) => l.name)
+    .filter((name) => name !== "plan:approved" && name !== "origin:agent");
+  const { run, calls } = fakeRun({
+    labels,
+    labelCreateErrors: { "plan:approved": "label already exists" },
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    assert.ok(calls.some((c) => c[0] === "label" && c[1] === "create" && c[2] === "plan:approved"));
+    assert.ok(calls.some((c) => c[0] === "label" && c[1] === "create" && c[2] === "origin:agent"));
+    assert.ok(actions.some((a) => a === "created 1 label(s): origin:agent"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init propagates label-create errors other than already exists", async () => {
+  const customCfg = parseConfig(`
+board: { owner: acme, repo: widgets, projectNumber: 7 }
+labels: { planApproved: verification already exists }
+`);
+  const labels = requiredLabels(customCfg)
+    .map((l) => l.name)
+    .filter((name) => name !== customCfg.labels.planApproved);
+  const { run } = fakeRun({
+    labels,
+    labelCreateErrors: {
+      [customCfg.labels.planApproved]: {
+        message: `Command failed: gh label create ${customCfg.labels.planApproved}`,
+        stderr: "permission denied",
+      },
+    },
+  });
+  const dir = tmpCwd();
+  try {
+    await assert.rejects(
+      () => init(customCfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir }),
+      (error: Error & { stderr?: string }) => error.stderr === "permission denied",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

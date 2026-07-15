@@ -313,8 +313,7 @@ by gate②. Custom verdict formats are out of scope here; see v1.x reviewer adap
 ## `labels`
 
 The label taxonomy the loop reads and writes. `sapwood init` provisions all of these
-(plus the fixed `type:*`/`prio:*` labels and `origin:agent`, which aren't
-individually configurable).
+(plus the fixed `type:*`/`prio:*` labels, which aren't individually configurable).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -324,6 +323,7 @@ individually configurable).
 | `reserve` | `reserve` | Not part of the main dispatch lane. |
 | `verifyNa` | `verify:n/a` | Marks an issue as inherently unverifiable by tests — skips the verification-plan gate and routes through the doc-gate path instead. |
 | `planApproved` | `plan:approved` | gate⓪ (#88): required, together with a genuine verification-plan section, for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. See [`security.md`](security.md#plan-approved). |
+| `originAgent` | `origin:agent` | Provenance stamp applied by the PO/align orchestrator to agent-created issues. See [`security.md`](security.md#origin-agent). |
 
 ## `roles`
 
