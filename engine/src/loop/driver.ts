@@ -134,16 +134,17 @@ function defaultRegisterSignals(requestStop: () => void): () => void {
   };
 }
 
-/** "Nothing left to do" for --until-idle: no running/driving lane occupies a slot AND this
- *  tick's dispatch phase launched nothing new (an empty or fully-blocked Ready queue). Either
- *  condition failing means there's more work the next tick could still make progress on.
+/** "Nothing left to do" for --until-idle: no running/driving lane occupies a slot, this tick's
+ *  dispatch phase launched nothing new, AND RECLAIM did not just create a handoff that becomes
+ *  eligible for RESUME on the next tick (#172). Any failure means another tick can progress.
  *  #76: also the exit gate for the stop-condition wind-down — once forceDispatchPause is set,
  *  `dispatchedAny` is trivially false (the DISPATCH phase never runs), so this reduces to "no
  *  in-flight lanes left", i.e. every lane has finished rather than been killed. */
 function isIdle(deps: DriverDeps, result: TickResult): boolean {
   const activeLanes = deps.state.activeWorkers().length; // running + driving
   const dispatchedAny = result.dispatched.some((d) => d.kind === "dispatched");
-  return activeLanes === 0 && !dispatchedAny;
+  const handoffNeedsNextTick = result.reclaimed.some((r) => r.kind === "handoff");
+  return activeLanes === 0 && !dispatchedAny && !handoffNeedsNextTick;
 }
 
 /**

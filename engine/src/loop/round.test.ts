@@ -139,6 +139,12 @@ class FakeSupervisor implements Supervisor {
     const name = `lane-${issue.number}-${++this.n}`;
     return { name, sessionId: `sess-${name}` };
   }
+  async resume(_issue: Issue, worker: string): Promise<{ name: string; sessionId: string }> {
+    return { name: worker, sessionId: `sess-${worker}` };
+  }
+  resumeIntentState(): "none" {
+    return "none";
+  }
   async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
     return { worktreePath: null, worktreeRetained: false };
   }
@@ -544,6 +550,53 @@ test("runRounds #95: a resumed-into-executing drain evaluates cost.roundBudgetUs
       "the resumed drain detected the already-banked spend against the currently-active lane",
     );
     assert.equal(result.rounds, 1);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #172: a resumed handoff is charged to roundSpendUsd and trips the round budget", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    state.upsertWorker({
+      name: "lane-handoff",
+      issue: 172,
+      session_id: "s172",
+      state: "handoff",
+      started_at: "2026-07-09T00:00:30.000Z",
+      ended_at: "2026-07-09T00:01:00.000Z",
+    });
+    const sup = new FakeSupervisor();
+    sup.probes["lane-handoff"] = {
+      done: true,
+      failed: false,
+      handoff: false,
+      hbAge: 1,
+      wrapperAlive: 1,
+      hasPr: false,
+      costUsd: 7,
+    };
+    const hits: RoundStopHit[] = [];
+    const deps = baseDeps({
+      forge: new FakeForge(),
+      supervisor: sup,
+      state,
+      sleep,
+      cfg: mkCfg({ worker: { maxResumes: 1 }, cost: { roundBudgetUsd: 5 } }),
+      onRoundStop: (_id, hit) => hits.push(hit),
+    });
+    const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
+    const result = await runRounds(deps);
+    stopSafety();
+
+    assert.equal(result.rounds, 1);
+    assert.equal(state.spentUsdForWorker("lane-handoff"), 7);
+    assert.ok(hits.some((hit) => hit.name === "roundBudgetUsd" && hit.detail === "spent $7.00"));
     state.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

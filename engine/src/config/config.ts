@@ -81,6 +81,9 @@ const Worker = z
     // enforced) — see worker.ts's writeTerminalSentinel. Backstopped by worker.timeoutSec
     // (enforced) + the engine HARD ceiling (M3, the actual runaway safety boundary).
     budgetUsdSoft: z.number().finite().positive().default(10),
+    // #172: each graceful handoff may re-enter as a fresh worker leg, but never forever.
+    // 0 disables automatic resume; the initial leg is not counted here.
+    maxResumes: z.number().int().min(0).default(2),
     heartbeatStaleSecs: z.number().int().positive().default(180),
     // #74: file-based worker prompt. A relative path is resolved against the CONFIG FILE's
     // directory (see loadConfig), so the same config works no matter what cwd the CLI runs

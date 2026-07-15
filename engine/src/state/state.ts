@@ -322,6 +322,17 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       );
     `);
   },
+  // 12 -> 13: graceful-handoff resume (#172). Mirrors gated-PR reentry's worker-row column
+  // pattern: `resume_attempts` counts successful handoff -> running reentries for this lane;
+  // `resume_capped` is the one-way latch set after the cap's needs-human label provably lands.
+  // Handoff rows predating this migration start eligible with zero attempts. No table/process/
+  // side channel: handoff remains the terminal-but-resumable runtime state it already was.
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN resume_attempts INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE workers ADD COLUMN resume_capped INTEGER NOT NULL DEFAULT 0;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -434,6 +445,12 @@ export interface WorkerRow {
    *  schema v8->v9 migration comment, incl. the deliberate pre-migration back-compat).
    *  Optional; DB default 0. */
   gated_escalation_labeled?: number;
+  /** #172: successful handoff -> running reentries for this lane. The initial dispatch is leg
+   *  zero and is not counted; bounded by cfg.worker.maxResumes. Optional; DB default 0. */
+  resume_attempts?: number;
+  /** #172: one-way cap latch. Set only after needs-human provably lands, then permanently
+   *  excludes this handoff row from State.handoffWorkers(). Optional; DB default 0. */
+  resume_capped?: number;
   /** #155: LIVE priced-cost snapshot (worker.ts's #33 pricing pipeline, baseline-adjusted the
    *  same way the soft-budget check is) for a still-`running` lane — refreshed on every
    *  RECLAIM-phase probe via State.setLiveTelemetry. NULL while not running, or once the lane
@@ -606,8 +623,9 @@ export class State {
         `INSERT INTO workers
            (name, issue, session_id, state, started_at, ended_at, pr, review_triggered,
             review_triggered_head, review_triggered_at, review_fallback_head, review_fallback_kind,
-            gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled,
+            resume_attempts, resume_capped)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -619,7 +637,9 @@ export class State {
            review_fallback_kind = excluded.review_fallback_kind,
            gated_reentry_attempts = excluded.gated_reentry_attempts,
            gated_reentry_capped = excluded.gated_reentry_capped,
-           gated_escalation_labeled = excluded.gated_escalation_labeled`,
+           gated_escalation_labeled = excluded.gated_escalation_labeled,
+           resume_attempts = excluded.resume_attempts,
+           resume_capped = excluded.resume_capped`,
       )
       .run(
         row.name,
@@ -637,6 +657,8 @@ export class State {
         row.gated_reentry_attempts ?? 0,
         row.gated_reentry_capped ?? 0,
         row.gated_escalation_labeled ?? 0,
+        row.resume_attempts ?? 0,
+        row.resume_capped ?? 0,
       );
   }
 
@@ -713,6 +735,14 @@ export class State {
     return this.db.prepare("SELECT * FROM workers WHERE state = 'driving' ORDER BY name").all() as unknown as WorkerRow[];
   }
 
+  /** #172 graceful-handoff resume candidates. `resume_capped = 0` is a permanent one-way
+   *  exclusion after maxResumes is exhausted and the needs-human escalation lands. */
+  handoffWorkers(): WorkerRow[] {
+    return this.db
+      .prepare("SELECT * FROM workers WHERE state = 'handoff' AND resume_capped = 0 ORDER BY name")
+      .all() as unknown as WorkerRow[];
+  }
+
   /** #147 gated-PR reentry candidates: `failed` lanes still carrying a PR number. `pr` is
    *  written ONLY at the running->driving transition, so a `failed` row with a non-null `pr`
    *  can only be a DRIVE-loop gate②/mergeDecision escalation (needs-human) — every other failed
@@ -776,21 +806,10 @@ export class State {
    *  'unknown' row with 0 tokens, matching every pre-#47 row's shape. */
   recordSpend(worker: string, issue: number, usd: number, at: string, models: ModelUsageEntry[] = []): void {
     const safeUsd = Number.isFinite(usd) && usd > 0 ? usd : 0;
-    // #46 resume cost-delta (gate② PR #41 P3 TRAP): a resumed lane reuses the SAME worker
-    // name across multiple terminal transitions (handoff -> --resume -> done/failed/handoff
-    // again). Claude Code's `--resume` continues the SAME session, so its terminal
-    // total_cost_usd is the whole session's cumulative cost, not just the new leg — recording
-    // it again in full here would double-count the pre-handoff portion already ledgered under
-    // this worker name. Recording only the amount ABOVE what this worker name has already
-    // banked makes every recordSpend call safe regardless of how many times it fires for the
-    // same name: the first call (nothing banked yet) records the full total unchanged; a
-    // resume's call records only the incremental delta. Floored at 0 (never negative) so a
-    // lower/equal report — a short/corrupt read, or a CLI whose resume semantics turn out to
-    // be non-cumulative after all (unverified here; see #46 scope 3's live run) — just adds
-    // nothing further rather than eroding the ledger. DB-backed (not in-memory), so this is
-    // correct across an engine restart between the handoff and the resume, too.
-    const priorUsd = this.spentUsdForWorker(worker);
-    const deltaUsd = Math.max(0, safeUsd - priorUsd);
+    // #172 empirical verification (2026-07-14): Claude Code's resumed result reports PER-LEG
+    // total_cost_usd, not a cumulative session total. Record each terminal leg directly; a
+    // handoff + any resumed legs therefore sum to the real issue spend with no subtraction or
+    // double count. The clamp above remains the safety invariant for corrupt values.
     const rows =
       models.length > 0 ? models : [{ model: "unknown", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }];
     const safeInt = (n: number): number => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
@@ -799,18 +818,14 @@ export class State {
          (ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    // ponytail: token counts are NOT delta-adjusted here (only usd, the flagged double-count
-    // risk) — a resumed lane's token counts will over-count on re-terminal, same residual #47
-    // already accepts for the model-usage breakdown (see its migration comment). Tracked as a
-    // known follow-up, not silently swept: the daily USD cap (the actual safety boundary) is
-    // exact; token telemetry for a resumed lane is approximate until that's worth the added
-    // per-model bookkeeping.
+    // The terminal result's model-usage payload follows the same last-result/per-leg read path
+    // as total_cost_usd, so token rows are recorded directly for this leg too.
     rows.forEach((m, i) => {
       stmt.run(
         at,
         worker,
         issue,
-        i === 0 ? deltaUsd : 0,
+        i === 0 ? safeUsd : 0,
         m.model || "unknown",
         safeInt(m.inputTokens),
         safeInt(m.outputTokens),
@@ -820,9 +835,7 @@ export class State {
     });
   }
 
-  /** Cumulative usd already ledgered under this worker NAME (across every prior terminal
-   *  transition for it — normally one, but a resumed lane can have more). The resume
-   *  cost-delta baseline (#46): see recordSpend's comment. */
+  /** Cumulative usd ledgered under this worker NAME across all of its terminal legs. */
   spentUsdForWorker(worker: string): number {
     const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE worker = ?").get(worker) as {
       total: number;

@@ -67,7 +67,7 @@ peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped ar
 same dispatch-and-drain tick engine, one round at a time, until a signal or a \`stop.*\`
 final condition winds the run down (the in-flight round always finishes, including
 harvest, before the process exits). Set \`engine.driver: tick\` in config to run the bare
-M4 loop driver instead: tick (reclaim -> drive -> dispatch) on
+M4 loop driver instead: tick (reclaim -> drive -> resume -> dispatch) on
 cfg.engine.tickIntervalSec's cadence, no peripherals — the pre-#106 behavior, kept
 reachable as an explicit escape hatch.
 
@@ -747,7 +747,8 @@ function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger:
 function formatTickSummary(result: TickResult): string {
   return (
     `[sapwood:tick] reclaimed=${result.reclaimed.length} dispatched=${result.dispatched.length} ` +
-    `driven=${result.driven.length} rollbacks=${result.rollbacks.length} gatedReclaimed=${result.gatedReclaimed.length} ` +
+    `driven=${result.driven.length} resumed=${result.resumed.length} rollbacks=${result.rollbacks.length} ` +
+    `gatedReclaimed=${result.gatedReclaimed.length} ` +
     `drainRequested=${result.drainRequested.length} escalated=${result.escalated.length} ceilingBreached=${result.ceilingBreached}`
   );
 }

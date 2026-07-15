@@ -591,19 +591,30 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // overBudget is computed — spentSoFar reads live durable state (spentUsdForWorker), so
     // spend banked by THIS tick's reclaim is visible to THIS tick's dispatch gate, and a lane
     // freed by a budget-blowing reclaim is never refilled in the same tick.
+    // #172: a resumed `executing` phase may start with no running/driving lane but a durable
+    // handoff waiting for RESUME. Give it one recovery tick before judging the round drained.
+    // Thereafter only a handoff RECLAIMED by the immediately-previous successful tick arms the
+    // next beat; a held/paused handoff that was skipped does not keep a round open forever.
+    let recoveryBeatPending = !freshBatch && deps.state.handoffWorkers().length > 0;
     if (freshBatch) {
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
       const batchResult = await runTick(
         toTickDeps({
           forge,
-          forceDispatchPause: !attempt,
+          // A crash-resumed drain forbids NEW dispatch waves, but its handoff lanes still need
+          // RESUME. A zero dispatch cap expresses that distinction without PAUSE-blocking resume.
+          forceDispatchPause: freshBatch && !attempt,
           roundSpendUsd: () => spentSoFar(),
-          ...(attempt ? { dispatchCapOverride: remaining } : {}),
+          dispatchCapOverride: attempt ? remaining : 0,
         }),
       );
       if (batchResult) {
         for (const d of batchResult.dispatched) if (d.kind === "dispatched") dispatchedNames.push(d.worker);
+        for (const r of batchResult.resumed) {
+          if (r.kind === "resumed" && !dispatchedNames.includes(r.worker)) dispatchedNames.push(r.worker);
+        }
+        recoveryBeatPending = batchResult.reclaimed.some((r) => r.kind === "handoff");
       }
     }
 
@@ -615,28 +626,32 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // abandoned early by a signal: an already-open round always finishes draining (never kills
     // in-flight work) — only opening a NEW round afterward is withheld.
     for (;;) {
-      if (deps.state.activeWorkers().length === 0) break;
+      if (deps.state.activeWorkers().length === 0 && !recoveryBeatPending) break;
       await interTickWait(deps.tickIntervalSec * 1000);
       const attempt = await tryDispatchWave();
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
       const tickResult = await runTick(
         toTickDeps({
           forge,
-          forceDispatchPause: !attempt,
+          forceDispatchPause: freshBatch && !attempt,
           // Same thunk as wave 1 (gate② P1-2): evaluated inside tick(), post-reclaim, so a
           // same-tick reclaim that crosses cost.roundBudgetUsd blocks the same tick's refill.
           roundSpendUsd: () => spentSoFar(),
-          ...(attempt ? { dispatchCapOverride: remaining } : {}),
+          dispatchCapOverride: attempt ? remaining : 0,
         }),
       );
       if (tickResult) {
         for (const d of tickResult.dispatched) if (d.kind === "dispatched") dispatchedNames.push(d.worker);
+        for (const r of tickResult.resumed) {
+          if (r.kind === "resumed" && !dispatchedNames.includes(r.worker)) dispatchedNames.push(r.worker);
+        }
+        recoveryBeatPending = tickResult.reclaimed.some((r) => r.kind === "handoff");
       }
       if (!stopHit && dispatchedNames.length > 0 && spentSoFar() >= cfg.cost.roundBudgetUsd) {
         stopHit = { name: "roundBudgetUsd", detail: `spent $${spentSoFar().toFixed(2)}` };
         emitRoundStop(round, stopHit);
       }
-      if (deps.state.activeWorkers().length === 0) break;
+      if (deps.state.activeWorkers().length === 0 && !recoveryBeatPending) break;
     }
     // stopHit has already been externalized (emitRoundStop) — the caller only needs the
     // in-flight count for the idle throttle.

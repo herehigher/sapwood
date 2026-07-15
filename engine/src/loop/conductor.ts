@@ -1,4 +1,4 @@
-// The conductor: the scheduler. One tick = reclaim -> drive -> dispatch.
+// The conductor: the scheduler. One tick = reclaim -> drive -> resume -> dispatch.
 //
 // This file is a TS port of 0day's ops/loop/loop_conductor.sh — but ONLY the generic
 // scheduling core, never the trading domain (no reserve/SLA/eval-report/HTML machinery).
@@ -18,6 +18,7 @@ import type { IForge, Issue } from "../forge/forge.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
+import { UnresumableLaneError } from "../roles/worker.js";
 import type { BoardStatus, CategorizedTokenUsage, ModelUsageEntry, ParkRow, PendingRollback, State, WorkerRow } from "../state/state.js";
 import {
   classifyEnvFailure,
@@ -211,6 +212,33 @@ export function gatedReentryDecision(humanHoldPresent: boolean, attempts: number
   return attempts < cap ? "RECLAIM" : "CAPPED";
 }
 
+export type ResumeIntentState = "none" | "confirmed" | "unconfirmed";
+export type ResumeDecision = "ADOPT" | "RESUME" | "CAPPED" | "UNDECIDABLE" | "SKIP";
+/** #172 graceful-handoff reentry decision. A confirmed intent is reality reconciliation, not
+ *  fresh work: its child already exists, so ADOPT comes first — human holds must not prevent
+ *  supervision, capacity may transiently exceed lanes.max, and the resume cap cannot undo a
+ *  spawn that happened. Although ADOPT also outranks `killSwitchActive` in this pure table, the
+ *  conductor's kill-switch path returns before RESUME; that explicit human-control path never
+ *  calls this function. Visibility work (undecidable/cap escalation) may latch while paused or
+ *  full. Otherwise kill switch/human holds suppress automation, and ambiguity outranks cap. */
+export function resumeDecision(
+  paused: boolean,
+  killSwitchActive: boolean,
+  humanHoldPresent: boolean,
+  confirmed: boolean,
+  undecidable: boolean,
+  attempts: number,
+  cap: number,
+  lanesUsed: number,
+  lanesMax: number,
+): ResumeDecision {
+  if (confirmed) return "ADOPT";
+  if (killSwitchActive || humanHoldPresent) return "SKIP";
+  if (undecidable) return "UNDECIDABLE";
+  if (attempts >= cap) return "CAPPED";
+  return !paused && lanesUsed < lanesMax ? "RESUME" : "SKIP";
+}
+
 export type DriveAction = "MERGE" | "WAIT" | "FIXUP" | "ESCALATE";
 /**
  * Derive a scheduling action from the PR gate + fixup-round count.
@@ -238,7 +266,7 @@ export function driveDecision(gate: string, fixRounds: number, cap: number, over
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tick orchestration: reclaim -> drive -> dispatch. Side-effecting collaborators are
+// Tick orchestration: reclaim -> drive -> resume -> dispatch. Side-effecting collaborators are
 // injected (IForge, Supervisor, State, MergeGate) so the whole tick is unit-testable without
 // ever spawning a real `claude` or calling `gh`. producer != merger: the tick itself never
 // calls forge.mergePR — that lives one level down, in MergeGate.driveOne (merge-driver.ts),
@@ -301,6 +329,10 @@ export interface ReclaimResult {
 export interface Supervisor {
   probe(worker: string): Promise<LaneProbe>;
   dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
+  /** Re-enter a terminal handoff as a fresh leg in the same session/worktree (#172). */
+  resume(issue: Issue, worker: string): Promise<{ name: string; sessionId: string }>;
+  /** Cheap, read-only classification of resume()'s durable spawn-intent marker (#172). */
+  resumeIntentState(worker: string, issue: number): ResumeIntentState;
   /** Tear down a dead/stale lane (process-tree kill + worktree retention/cleanup, #69). */
   reclaim(worker: string): Promise<ReclaimResult>;
   /** #69 (fable P3-b): report a lane's worktree dirtiness WITHOUT any teardown — no kill, no
@@ -400,6 +432,11 @@ export type GatedReclaimOutcome =
   | { kind: "reclaimed"; worker: string; issue: number; pr: number; attempt: number }
   | { kind: "capped"; worker: string; issue: number; pr: number; attempts: number };
 
+/** #172: one handoff-lane decision that changed durable state this tick. */
+export type ResumeOutcome =
+  | { kind: "resumed"; worker: string; issue: number; attempt: number }
+  | { kind: "capped"; worker: string; issue: number; attempts: number };
+
 export interface TickResult {
   reclaimed: ReclaimOutcome[];
   dispatched: DispatchOutcome[];
@@ -429,6 +466,8 @@ export interface TickResult {
    *  without a gate to drive through would just strand the lane). Empty when there were no
    *  eligible failed+PR lanes, or every one's needs-human label was still present. */
   gatedReclaimed: GatedReclaimOutcome[];
+  /** #172 handoff lanes re-admitted to `running`, or escalated+latch-capped. */
+  resumed: ResumeOutcome[];
 }
 
 export interface TickDeps {
@@ -631,6 +670,44 @@ async function reportRetainedWorktree(
         `remove the \`needs-human\` label.`,
     )
     .catch(() => {});
+}
+
+/** Label-first/latch-second handling for a resume spawn whose outcome is unknowable after a
+ *  crash. Shared by proactive marker inspection and resume()'s typed-error backstop. */
+async function escalateUndecidableResume(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  worker: WorkerRow,
+  attempts: number,
+  iso: () => string,
+): Promise<ResumeOutcome | null> {
+  try {
+    await forge.addLabel(worker.issue, cfg.labels.needsHuman);
+  } catch (labelError) {
+    state.appendEvent("resume-undecidable-label-failed", {
+      worker: worker.name,
+      issue: worker.issue,
+      error: String(labelError),
+    });
+    return null;
+  }
+  await forge
+    .addIssueComment(
+      worker.issue,
+      `sapwood: resume for lane/worktree \`${worker.name}\` entered an ambiguous crash state: ` +
+        `the durable spawn intent was never confirmed. Automatic resume is latched to avoid ` +
+        `a duplicate process in the preserved worktree. Inspect session \`${worker.session_id}\` ` +
+        `and the lane's preserved worktree before removing \`${cfg.labels.needsHuman}\`.`,
+    )
+    .catch(() => {});
+  state.upsertWorker({ ...worker, ended_at: iso(), resume_capped: 1 });
+  state.appendEvent("resume-undecidable", {
+    worker: worker.name,
+    issue: worker.issue,
+    sessionId: worker.session_id,
+  });
+  return { kind: "capped", worker: worker.name, issue: worker.issue, attempts };
 }
 
 /** The bounded drain (PLAN.md Security model: drain before kill, always). Shared by the #69
@@ -873,11 +950,9 @@ async function reclaimTerminalLane(
     // spend_ledger, recordSpend below, unchanged).
     state.clearLiveTelemetry(w.name);
     state.upsertWorker({ ...w, state: "handoff", ended_at: iso() });
-    // M4 --resume TRAP (gate② PR #41 P3): this records the handed-off run's total_cost_usd. If
-    // this lane is later resumed and claude reports CUMULATIVE total_cost_usd for the resumed
-    // session, recording the resumed run's total again at its terminal transition double-counts
-    // the pre-handoff portion — fail-SAFE for the cap (over-counts) but corrupts accounting.
-    // Whoever wires --resume (M4) must record the delta, or verify claude's resume cost first.
+    // #172 verified live 2026-07-14: resumed Claude Code legs report PER-LEG total_cost_usd,
+    // not a cumulative session total. Each terminal transition records that leg directly;
+    // spend across the initial handoff + resumed legs therefore sums exactly once.
     state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
     state.appendEvent("handoff", { worker: w.name, issue: w.issue });
     // #168 P1-1b: a handed-off canary RAN (crossed its soft budget doing real work) — the
@@ -1049,7 +1124,37 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   Blocked: rollback retry, DRIVE/merge, DISPATCH, and the kill+requeue of DEAD lanes (all
   //   "new work"). Accepted trade-off (#69 policy: rare edges degrade to less machinery): a
   //   switch flipped MID-tick, after this check passed, takes effect at the next tick's gate.
-  if (state.isKillSwitchActive()) {
+  const killSwitchActive = state.isKillSwitchActive();
+  if (killSwitchActive) {
+    // A confirmed resume intent means its child already exists despite the DB still saying
+    // `handoff`. Reconcile these rows BEFORE the drain snapshot so the hard safety boundary
+    // supervises and drains reality in this same tick; this is adoption, never a spawn.
+    const resumed: ResumeOutcome[] = [];
+    for (const w of state.handoffWorkers()) {
+      if (supervisor.resumeIntentState(w.name, w.issue) !== "confirmed") continue;
+      const issue: Issue = { number: w.issue, title: "", labels: [] };
+      let result: { name: string; sessionId: string };
+      try {
+        result = await supervisor.resume(issue, w.name);
+      } catch (e) {
+        state.appendEvent("resume-failed", { worker: w.name, issue: w.issue, error: String(e) });
+        throw e;
+      }
+      if (result.name !== w.name) {
+        throw new Error(`resume returned worker ${result.name}; expected existing lane ${w.name}`);
+      }
+      const attempt = (w.resume_attempts ?? 0) + 1;
+      state.upsertWorker({
+        ...w,
+        session_id: result.sessionId,
+        state: "running",
+        started_at: iso(),
+        ended_at: null,
+        resume_attempts: attempt,
+      });
+      state.appendEvent("resumed", { worker: w.name, issue: w.issue, attempt });
+      resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
+    }
     const reclaimed: ReclaimOutcome[] = [];
     for (const w of state.runningWorkers()) {
       const p = await supervisor.probe(w.name);
@@ -1074,6 +1179,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       driven: [],
       rollbacks: [],
       gatedReclaimed: [],
+      resumed,
     };
   }
 
@@ -1092,6 +1198,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   present -> KILL_SWITCH already returned above, so this line is never reached — the
   //   stricter gate wins, unconditionally.
   const paused = state.isPauseActive() || (deps.forceDispatchPause ?? false);
+  // Snapshot before RECLAIM: a lane that writes .handoff during this tick gets one settled
+  // terminal beat and becomes resumable on the NEXT tick, never immediately in the same tick.
+  const handoffsAtTickStart = state.handoffWorkers();
 
   // ── ROLLBACK RETRY (#31): retry every board mutation still pending from a prior tick's
   //   recovery-path failure, BEFORE this tick does anything else. Never throws (see
@@ -1609,6 +1718,108 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // lane.
   const parkActive = parkedBeforeProbes || state.isParked();
 
+  // Shared fresh-spend gates for RESUME + DISPATCH. Both launch a Claude worker leg, so both
+  // observe pause/park/ceiling and post-reclaim round/run spend at this exact point.
+  const dispatched: DispatchOutcome[] = [];
+  const overBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
+  const runSpendStop = deps.runSpendStopCrossed?.() ?? false;
+
+  // ── RESUME (#172): recover terminal handoff lanes before admitting fresh Ready work ──
+  // Same issue/worker/session/worktree, board remains In Progress. A successful resume becomes
+  // an ordinary `running` lane, so the next tick's RECLAIM supervision reattaches automatically.
+  // Attempts are successful reentries (not spawn failures), bounded by worker.maxResumes.
+  const resumed: ResumeOutcome[] = [];
+  let resumeLanesUsed = state.activeWorkers().length;
+  const resumeSpendPaused = paused || ceilingBreached || parkActive || overBudget || runSpendStop;
+  for (const w of handoffsAtTickStart) {
+    const attempts = w.resume_attempts ?? 0;
+    const intentState = supervisor.resumeIntentState(w.name, w.issue);
+    // Confirmed adoption ignores human holds and needs no forge context: the child already
+    // exists, and DB supervision must catch up even while forge access/spend is gated.
+    const labels = intentState === "confirmed" ? [] : await forge.getIssueLabels(w.issue);
+    const decision = resumeDecision(
+      resumeSpendPaused,
+      killSwitchActive,
+      hasReserveLabel(labels, cfg.escalation.humanLabels),
+      intentState === "confirmed",
+      intentState === "unconfirmed",
+      attempts,
+      cfg.worker.maxResumes,
+      resumeLanesUsed,
+      cfg.lanes.max,
+    );
+    if (decision === "SKIP") continue;
+    if (decision === "UNDECIDABLE") {
+      const outcome = await escalateUndecidableResume(forge, state, cfg, w, attempts, iso);
+      if (outcome) resumed.push(outcome);
+      continue;
+    }
+    if (decision === "CAPPED") {
+      // Gated-reentry's label-first/latch-second pattern: a transient label failure leaves the
+      // row eligible so the next tick retries; never permanently hide an unlabeled handoff.
+      try {
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      } catch (e) {
+        state.appendEvent("resume-capped-label-failed", {
+          worker: w.name,
+          issue: w.issue,
+          attempts,
+          error: String(e),
+        });
+        continue;
+      }
+      await forge
+        .addIssueComment(
+          w.issue,
+          `sapwood: worker resume cap (${cfg.worker.maxResumes}) reached after ${attempts} ` +
+            `resumed leg(s) — re-applying \`${cfg.labels.needsHuman}\`. The preserved worktree ` +
+            `and session require a human decision before continuing.`,
+        )
+        .catch(() => {});
+      state.upsertWorker({ ...w, ended_at: iso(), resume_capped: 1 });
+      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts });
+      resumed.push({ kind: "capped", worker: w.name, issue: w.issue, attempts });
+      continue;
+    }
+    const issue: Issue = {
+      number: w.issue,
+      // The resumed Claude session already owns the original issue context. Refresh the fields
+      // available through IForge so configurable prompts still receive live body/labels.
+      title: "",
+      labels,
+      // Adoption returns before worker.ts renders a prompt, so avoid a forge read that can
+      // strand an already-running child during forge park. Fresh RESUME still refreshes it.
+      ...(decision === "ADOPT" ? {} : { body: await forge.getIssueBody(w.issue) }),
+    };
+    let result: { name: string; sessionId: string };
+    try {
+      result = await supervisor.resume(issue, w.name);
+    } catch (e) {
+      if (e instanceof UnresumableLaneError) {
+        const outcome = await escalateUndecidableResume(forge, state, cfg, w, attempts, iso);
+        if (outcome) resumed.push(outcome);
+        continue;
+      }
+      state.appendEvent("resume-failed", { worker: w.name, issue: w.issue, error: String(e) });
+      throw e;
+    }
+    if (result.name !== w.name) {
+      throw new Error(`resume returned worker ${result.name}; expected existing lane ${w.name}`);
+    }
+    const attempt = attempts + 1;
+    state.upsertWorker({
+      ...w,
+      session_id: result.sessionId,
+      state: "running",
+      started_at: iso(),
+      ended_at: null,
+      resume_attempts: attempt,
+    });
+    state.appendEvent("resumed", { worker: w.name, issue: w.issue, attempt });
+    resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
+    resumeLanesUsed++;
+  }
+
   // ── DISPATCH: fill free lanes from the Ready queue, by priority, within caps + budget ──
   //   #75/#168: skipped entirely while `paused` OR `parkActive` — no new lane dispatch, not even
   //   "skipped" rows (mirrors the kill-switch tick's dispatched: [] — see its test comment) —
@@ -1620,13 +1831,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   banked any terminal lanes' spend, before the dispatch loop below reads overBudget — so
   //   a same-tick reclaim that crosses the round budget blocks this same tick's refill
   //   (#124 gate② P1-2; see the TickDeps.roundSpendUsd doc comment).
-  const dispatched: DispatchOutcome[] = [];
-  const overBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
-  // #154: same post-reclaim evaluation point, same rationale — see TickDeps.runSpendStopCrossed.
-  // Kept SEPARATE from overBudget so TickResult.overBudget keeps meaning exactly
-  // cost.roundBudgetUsd (its consumers pre-date the run-level stop family).
-  const runSpendStop = deps.runSpendStopCrossed?.() ?? false;
-  if (!paused && (!parkActive || canaryBudget > 0)) {
+  // #154: runSpendStop is kept separate from overBudget so TickResult.overBudget retains its
+  // original cost.roundBudgetUsd meaning.
+  // #172: an explicit zero override is a recovery-only beat. Keep it as quiet as PAUSE: no
+  // Ready fetch (and therefore no transient forge failure), no synthetic cap-skipped rows.
+  const effectiveDispatchCap = parkActive
+    ? Math.min(canaryBudget, deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap)
+    : (deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap);
+  if (!paused && (!parkActive || canaryBudget > 0) && effectiveDispatchCap > 0) {
     // Capacity counts running + driving lanes: a driving lane holds a PR awaiting the review
     // gate and must keep occupying a lane, else reclaiming a PR-producing worker would free a
     // slot and over-fill past cfg.lanes.max (Codex R2 P2). Re-read post-reclaim.
@@ -1661,10 +1873,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // tick-driver, driver.ts) leaves this a flat per-tick rate limit, exactly as before.
       // #168 P1-1: while still parked, the loop is only open at all because a canary was armed
       // — the effective cap is exactly that canary budget (1), never the normal quota.
-      const effectiveCap = parkActive
-        ? Math.min(canaryBudget, deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap)
-        : (deps.dispatchCapOverride ?? cfg.lanes.roundDispatchCap);
-      if (dispatchedThisTick >= effectiveCap) {
+      if (dispatchedThisTick >= effectiveDispatchCap) {
         dispatched.push({ kind: "skipped", issue: issue.number, reason: "cap" });
         continue;
       }
@@ -1753,5 +1962,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     driven,
     rollbacks,
     gatedReclaimed,
+    resumed,
   };
 }

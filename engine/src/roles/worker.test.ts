@@ -18,7 +18,9 @@ import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import { estimateUsd, loadPricingTable } from "../config/pricing.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
+import { State } from "../state/state.js";
 import {
   buildRenderPrompt,
   claudeArgs,
@@ -731,7 +733,108 @@ test("requestHandoff, worker dies by signal (no clean wrap-up), and no worktree 
   }
 });
 
+test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its baseline-adjusted estimate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const firstLine = JSON.stringify({
+    type: "assistant",
+    message: { model: "claude-opus-4-6", usage: { input_tokens: 1_000, output_tokens: 200 } },
+  });
+  const resumedLine = JSON.stringify({
+    type: "assistant",
+    message: { model: "claude-sonnet-4-6", usage: { input_tokens: 500, output_tokens: 300 } },
+  });
+  const firstResult = JSON.stringify({
+    type: "result",
+    subtype: "success",
+    total_cost_usd: 1,
+    model: "claude-opus-4-6",
+    usage: { input_tokens: 1_000, output_tokens: 200 },
+  });
+  const logs: string[] = [];
+  const state = new State(":memory:");
+  try {
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  echo '${resumedLine}'`,
+        "else",
+        `  echo '${firstLine}'`,
+        `  echo '${firstResult}'`,
+        "fi",
+        "sleep 30",
+        "",
+      ].join("\n"),
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      log: (line) => logs.push(line),
+    });
+    const pricing = loadPricingTable(cfg);
+    const resumedExpected = parseAssistantUsageDeltas(resumedLine).reduce((sum, d) => sum + estimateUsd(d, pricing), 0);
+    const { name } = await s.dispatch({ number: 172, title: "t", labels: [] });
+    const jsonlPath = join(dir, `${name}.jsonl`);
+    for (let i = 0; i < 400 && !readFileSync(jsonlPath, "utf8").includes(firstResult); i++) await sleep(20);
+    assert.ok(readFileSync(jsonlPath, "utf8").includes(firstResult), "leg 1 result flushed before SIGTERM");
+    assert.equal(s.requestHandoff(name), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    const firstProbe = await s.probe(name);
+    assert.equal(firstProbe.costUsd, 1);
+    state.recordSpend(name, 172, firstProbe.costUsd, new Date().toISOString());
+
+    await s.resume({ number: 172, title: "t", labels: [] }, name);
+    for (let i = 0; i < 400 && !readFileSync(jsonlPath, "utf8").includes(resumedLine); i++) await sleep(20);
+    assert.ok(readFileSync(jsonlPath, "utf8").includes(resumedLine), "leg 2 usage flushed before SIGTERM");
+    assert.equal(s.requestHandoff(name), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    const resumedProbe = await s.probe(name);
+    assert.ok(
+      Math.abs(resumedProbe.costUsd - resumedExpected) < 1e-12,
+      `resumed no-result leg cost ${resumedProbe.costUsd} should equal baseline-adjusted estimate ${resumedExpected}`,
+    );
+    state.recordSpend(name, 172, resumedProbe.costUsd, new Date().toISOString());
+    assert.ok(Math.abs(state.spentUsdForWorker(name) - (1 + resumedExpected)) < 1e-12);
+    assert.equal(logs.filter((line) => line.includes("source=assistant-usage-estimate")).length, 1);
+    s.dispose();
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #46: resume() — --resume after a .handoff ────────────────────────────────────────────────
+
+test("resumeIntentState: reads only matching resume-authored confirmed/unconfirmed markers", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const s = sup(dir, mkStub(dir, FAST_STUB));
+    const marker = join(dir, "lane-intent.running.json");
+    assert.equal(s.resumeIntentState("lane-intent", 172), "none");
+    writeFileSync(
+      marker,
+      JSON.stringify({ name: "lane-intent", issue: 172, session_id: "s", resume_pending_db: true, spawn_confirmed: false }),
+    );
+    assert.equal(s.resumeIntentState("lane-intent", 172), "unconfirmed");
+    assert.equal(s.resumeIntentState("lane-intent", 999), "none");
+    writeFileSync(
+      marker,
+      JSON.stringify({ name: "lane-intent", issue: 172, session_id: "s", resume_pending_db: true, spawn_confirmed: true }),
+    );
+    assert.equal(s.resumeIntentState("lane-intent", 172), "confirmed");
+    writeFileSync(marker, JSON.stringify({ name: "lane-intent", issue: 172, spawn_confirmed: false }));
+    assert.equal(s.resumeIntentState("lane-intent", 172), "none", "dispatch markers are not resume intents");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("resume: fails closed when the lane has no .handoff sentinel (nothing to resume)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
@@ -742,6 +845,50 @@ test("resume: fails closed when the lane has no .handoff sentinel (nothing to re
       () => s.resume({ number: 1, title: "t", labels: [] }, "lane-never-handed-off"),
       /no \.handoff sentinel|nothing to resume/i,
     );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: a dead matching running sentinel is durable interrupted-resume proof and is adopted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const s = sup(dir, mkStub(dir, FAST_STUB));
+    writeFileSync(
+      join(dir, "lane-dead.running.json"),
+      JSON.stringify({
+        name: "lane-dead",
+        issue: 1,
+        session_id: "survivor",
+        wrapper_pid: 999_999_999,
+        resume_pending_db: true,
+        spawn_confirmed: true,
+      }),
+    );
+    assert.deepEqual(await s.resume({ number: 1, title: "t", labels: [] }, "lane-dead"), {
+      name: "lane-dead",
+      sessionId: "survivor",
+    });
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: spawn error removes the unconfirmed intent and leaves handoff retryable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const s = sup(dir, join(dir, "missing-claude"));
+    writeFileSync(
+      join(dir, "lane-spawn-error.handoff.json"),
+      JSON.stringify({ name: "lane-spawn-error", issue: 2, session_id: "retry-session" }),
+    );
+    writeFileSync(join(dir, "lane-spawn-error.jsonl"), "");
+
+    await assert.rejects(() => s.resume({ number: 2, title: "t", labels: [] }, "lane-spawn-error"), /resume-spawn failed/i);
+    assert.equal(existsSync(join(dir, "lane-spawn-error.running.json")), false);
+    assert.equal(existsSync(join(dir, "lane-spawn-error.handoff.json")), true);
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -783,8 +930,8 @@ test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the 
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "resumed run reached a fresh terminal sentinel");
     const probe = await s.probe(name);
     assert.equal(probe.done, true);
-    // probe() surfaces the resumed run's raw reported cost as-is (0.05) — the double-count
-    // PROTECTION lives one level up, in State.recordSpend (see state.test.ts), not here.
+    // probe() surfaces the resumed leg's raw per-leg reported cost as-is (0.05); #172 records
+    // that value directly in State.recordSpend.
     assert.equal(probe.costUsd, 0.05);
     s.dispose();
   } finally {
