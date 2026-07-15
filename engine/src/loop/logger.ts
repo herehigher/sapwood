@@ -47,8 +47,9 @@ export class FileEngineLogger implements EngineLogger {
 
   log(message: string): void {
     const timestamp = this.timestamp();
-    const embeddedLines = this.boundMessage(message).split(/\r?\n/);
-    if (embeddedLines.at(-1) === "") embeddedLines.pop();
+    const boundedMessage = this.boundMessage(message);
+    const embeddedLines = boundedMessage.split(/\r?\n/);
+    if (/\r?\n$/.test(boundedMessage) && embeddedLines.at(-1) === "") embeddedLines.pop();
     for (const embeddedLine of embeddedLines) {
       const line = `[${timestamp}] ${embeddedLine}\n`;
       if (this.options.teeToStderr) this.writeStderr(line);

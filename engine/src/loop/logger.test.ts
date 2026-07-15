@@ -116,6 +116,18 @@ test("FileEngineLogger omits a trailing-newline phantom record but preserves int
   }
 });
 
+test("FileEngineLogger emits one empty timestamped record for an empty message", () => {
+  const dir = tempDir();
+  try {
+    const path = join(dir, "run.log");
+    const logger = new FileEngineLogger({ path, teeToStderr: false, maxBytes: 1024, now: () => NOW });
+    logger.log("");
+    assert.equal(readFileSync(path, "utf8"), `[${NOW.toISOString()}] \n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("FileEngineLogger loops until a sequence of short writes completes the record", () => {
   const dir = tempDir();
   let writes = 0;
