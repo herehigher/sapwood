@@ -295,15 +295,38 @@ test("parseProject: #86 milestone title threads onto ProjectItem, null when the 
 
 test("selectUnplacedIssues: selects only null Status, leaves every named Status untouched, and skips drafts", () => {
   assert.deepEqual(
-    selectUnplacedIssues([
-      { number: 10, status: null },
-      { number: 11, status: "Todo" },
-      { number: 12, status: "Ready" },
-      { number: null, status: null },
-      { number: null, status: "Todo" },
-    ]),
+    selectUnplacedIssues(
+      [
+        { number: 10, repo: "herehigher/sapwood", status: null },
+        { number: 11, repo: "herehigher/sapwood", status: "Todo" },
+        { number: 12, repo: "herehigher/sapwood", status: "Ready" },
+        { number: null, repo: null, status: null },
+        { number: null, repo: null, status: "Todo" },
+      ],
+      "herehigher/sapwood",
+    ),
     { issues: [10], skipped: 1 },
   );
+});
+
+test("selectUnplacedIssues: same-number foreign No-Status item cannot demote the configured repo's Ready item", () => {
+  assert.deepEqual(
+    selectUnplacedIssues(
+      [
+        { number: 50, repo: "herehigher/sapwood", status: "Ready" },
+        { number: 50, repo: "other/widgets", status: null },
+      ],
+      "herehigher/sapwood",
+    ),
+    { issues: [], skipped: 1 },
+  );
+});
+
+test("selectUnplacedIssues: a foreign-repo No-Status item is skipped, never selected", () => {
+  assert.deepEqual(selectUnplacedIssues([{ number: 77, repo: "other/widgets", status: null }], "herehigher/sapwood"), {
+    issues: [],
+    skipped: 1,
+  });
 });
 
 test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (Decision #8, tightened by #88 gate⓪)", () => {

@@ -314,7 +314,7 @@ test("normalizeUnplacedBoardItems: a failed move is logged and does not block la
   );
   assert.deepEqual(moves, [21, 22]);
   assert.deepEqual(events, [{ issue: 22, status: "backlog" }]);
-  assert.equal(logs.filter((line) => /draft\/non-issue/.test(line)).length, 1);
+  assert.equal(logs.filter((line) => /draft\/foreign-repo/.test(line)).length, 1);
   assert.ok(logs.some((line) => /#21/.test(line) && /continuing/.test(line)));
 });
 

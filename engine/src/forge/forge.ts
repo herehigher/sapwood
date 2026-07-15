@@ -272,7 +272,7 @@ export class GithubForge implements IForge {
 
   async listUnplacedIssues(): Promise<UnplacedIssues> {
     const project = await this.fetchProject();
-    return selectUnplacedIssues(project.placements);
+    return selectUnplacedIssues(project.placements, `${this.cfg.board.owner}/${this.cfg.board.repo}`);
   }
 
   async claimIssue(issue: number): Promise<void> {
@@ -625,6 +625,7 @@ export interface ParsedProject {
 
 export interface BoardPlacement {
   number: number | null;
+  repo: string | null;
   status: string | null;
 }
 
@@ -633,14 +634,14 @@ export interface UnplacedIssues {
   skipped: number;
 }
 
-/** Select only No-Status issue items for startup normalization. Any named Status is
- *  untouched; draft/non-issue project items have no issue number and are counted for one
- *  caller-level log line rather than being passed to the issue-number-keyed write API. */
-export function selectUnplacedIssues(items: readonly BoardPlacement[]): UnplacedIssues {
+/** Select only this repo's No-Status issue items for startup normalization. Any named Status
+ *  is untouched; draft/non-issue and foreign-repo items are outside this forge's write
+ *  jurisdiction and counted for one caller-level log line. */
+export function selectUnplacedIssues(items: readonly BoardPlacement[], repoFullName: string): UnplacedIssues {
   const unplaced = items.filter((item) => item.status === null);
   return {
-    issues: unplaced.flatMap((item) => (item.number === null ? [] : [item.number])),
-    skipped: unplaced.filter((item) => item.number === null).length,
+    issues: unplaced.flatMap((item) => (item.number !== null && item.repo === repoFullName ? [item.number] : [])),
+    skipped: unplaced.filter((item) => item.number === null || item.repo !== repoFullName).length,
   };
 }
 
@@ -727,6 +728,7 @@ export function parseProject(json: string, statusField: string): ParsedProject {
     items,
     placements: (proj.items?.nodes ?? []).map((n) => ({
       number: n.content?.number ?? null,
+      repo: n.content?.repository?.nameWithOwner ?? null,
       status: statusValue(n, statusField),
     })),
   };

@@ -672,7 +672,7 @@ export async function normalizeUnplacedBoardItems(
     return;
   }
   if (unplaced.skipped > 0) {
-    log(`sapwood run: skipped ${unplaced.skipped} No-Status draft/non-issue board item(s) with no issue number`);
+    log(`sapwood run: skipped ${unplaced.skipped} No-Status draft/foreign-repo board item(s) outside this repo's write jurisdiction`);
   }
   for (const issue of unplaced.issues) {
     try {
