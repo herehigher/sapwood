@@ -51,6 +51,20 @@ Identifies the repo and ProjectV2 board the loop drives.
 | `tickIntervalSec` | `60` | How often the engine calls `tick()`. Also feeds the wall-clock cost ceiling's session-gap scaling, so a real (non-default) cadence keeps that ceiling accurate. |
 | `driver` | `rounds` | Which engine `sapwood run` drives (#106). `rounds` — the round orchestrator: peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the same tick engine, one round at a time (see [`PLAN.md`'s round-orchestrator section](../docs/PLAN.md#v02-north-star-the-round-orchestrator)). `tick` — the bare M4 loop driver, no peripherals; `--once`/`--until-idle` only apply in this mode (under `rounds` they are a startup **error** — exit 1 before any dispatch — never silently ignored). Every safety behavior (KILL_SWITCH, cost ceilings, drain-before-kill, graceful stop still running harvest) holds under both. |
 
+## `logging`
+
+Run-scoped, disposable narrative output for humans and LLMs. It complements rather than
+duplicates the structured events ledger and raw lane/role output. Opening the configured file
+is a fail-fast startup check before dispatch; a later write failure is reported once and file
+logging is disabled while stderr teeing continues. Rotation keeps only the current file and
+one `<path>.1` generation.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `path` | `data/logs/sapwood.log` | Destination for the run narrative. A relative path—including the default—resolves against the config file's own directory, not the CLI's cwd. |
+| `teeToStderr` | `true` | Write each timestamped file record to stderr as well. |
+| `maxBytes` | `10485760` (10 MiB) | Before an append would cross this positive byte limit, replace `<path>.1` with the current file and start a fresh current file. |
+
 ## `lanes`
 
 Concurrency and dispatch shape.

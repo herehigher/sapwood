@@ -140,6 +140,7 @@ export interface RoleSessionResult {
 
 export interface RoleRunnerDeps {
   cfg: SapwoodConfig;
+  log?: (message: string) => void;
   /** Directory for sentinels/jsonl. Default <cwd>/data/sessions/roles (distinct from
    *  worker.ts's data/sessions/state — role sessions and worker lanes never share a
    *  namespace, so a name collision between the two is structurally impossible). */
@@ -317,7 +318,7 @@ export class RoleRunner {
       const root = resolve(this.worktreeRoot, name);
       const target = resolve(root, opts.scratchFile);
       if (!target.startsWith(root + sep)) {
-        console.error(
+        (this.deps.log ?? console.error)(
           `[sapwood:role] session ${name}: scratchFile ${JSON.stringify(opts.scratchFile)} resolves ` +
             `outside the session worktree (${target}) — refusing to read it; scratchText stays undefined`,
         );
@@ -419,6 +420,7 @@ export interface RetriedSession {
   /** Same rationale: the stderr line's wording is role-specific ("advisory phase, round not
    *  wedged" vs. "pre-Ready, low stakes", ...), so the caller supplies it verbatim. */
   degradeMessage: (result: RoleSessionResult) => string;
+  log?: (message: string) => void;
   /** #110 PR0: OPTIONAL extra pass/fail check beyond `outcome` itself. A "done" outcome that
    *  fails this predicate is treated as a NON-"done" outcome for retry/degrade purposes — e.g.
    *  a session that exited cleanly but whose structured final-message output failed schema
@@ -466,7 +468,7 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
       } catch {
         /* state write failed — the console line below still lands */
       }
-      console.error(opts.degradeMessage(result));
+      (opts.log ?? console.error)(opts.degradeMessage(result));
     }
   }
   return result;

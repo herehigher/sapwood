@@ -169,6 +169,20 @@ invisibly parked-behind-the-park.
    does not lose the park state or its duration clock — it resumes probing, not dispatching —
    and does not, on its own, clear a still-genuinely-broken environment either.
 
+## Where to look after an unattended run
+
+The run log (`logging.path`, default `data/logs/sapwood.log`) is the disposable human/LLM
+narrative: startup, tick and round lifecycle summaries, degradations, and park notices. Start
+here to understand the shape of a run; the previous rotation, when present, is `<path>.1`.
+
+The SQLite events ledger is the structured source of truth for transitions needed by
+correctness, audit, replay, and dashboards. Query it when you need durable facts; event payloads
+are deliberately not mirrored into the narrative log.
+
+Lane and role JSONL files contain raw subprocess output. Inspect them for a worker or peripheral
+session's model/tool transcript details; that raw stream is deliberately not copied into either
+the narrative log or the events ledger.
+
 ## Tick errors (`sapwood status` / run summary)
 
 `sapwood run`'s exit line reports a tick-error count:

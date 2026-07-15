@@ -78,6 +78,7 @@ export {
   preflight,
   requiredLabels,
 } from "./loop/init.js";
+export { type EngineLogger, FileEngineLogger, type FileEngineLoggerOptions } from "./loop/logger.js";
 export {
   noopPeripheralStub,
   type PeripheralPhase,

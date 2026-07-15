@@ -75,6 +75,7 @@ export interface RoundDeps {
   sleep?: (ms: number) => Promise<void>;
   registerSignals?: (requestStop: () => void) => () => void;
   onTick?: (result: TickResult) => void;
+  log?: (message: string) => void;
   /** Observability/test hook: fired once a peripheral phase's stub has run and its marker has
    *  been persisted (i.e. right before advancing past that phase). */
   onRoundPhase?: (roundId: number, phase: PeripheralPhase) => void;
@@ -454,6 +455,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // explicit `undefined` is not the same as an omitted key under this tsconfig setting.
     ...(deps.mergeGate !== undefined ? { mergeGate: deps.mergeGate } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
+    ...(deps.log !== undefined ? { log: deps.log } : {}),
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
     ...(over.roundSpendUsd !== undefined ? { roundSpendUsd: over.roundSpendUsd } : {}),
     ...(over.dispatchCapOverride !== undefined ? { dispatchCapOverride: over.dispatchCapOverride } : {}),

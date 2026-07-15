@@ -66,6 +66,7 @@ export interface HarvestDeps {
    *  plan-review.ts's own tests use). */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
+  log?: (message: string) => void;
 }
 
 /** The round-scoped idempotency marker this phase persists via round.ts's ledger (#77
@@ -269,6 +270,7 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
           // to one issue).
           issue: 0,
           now: deps.now ?? (() => new Date()),
+          ...(deps.log !== undefined ? { log: deps.log } : {}),
           degradeEvent: "harvest-degraded",
           // Payload shape preserved EXACTLY (pre-#110): {round_id, outcome, session, attempts}.
           // `outcome` is the SESSION's own outcome (RoleSessionResult.outcome) — a "done" session

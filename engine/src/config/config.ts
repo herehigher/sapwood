@@ -418,6 +418,19 @@ const Engine = z
   })
   .strict();
 
+const Logging = z
+  .object({
+    path: z.string().min(1).default("data/logs/sapwood.log"),
+    teeToStderr: z.boolean().default(true),
+    maxBytes: z
+      .number()
+      .finite()
+      .int()
+      .positive()
+      .default(10 * 1024 * 1024),
+  })
+  .strict();
+
 // #76: goal-based stop conditions — the loop driver's FINAL break conditions ("when is this run
 // complete"). All optional; absent = today's behavior exactly (the driver only stops on a signal,
 // --once, or --until-idle idleness). CLI --stop-after-issues/--stop-after-prs/--stop-on-milestone
@@ -656,6 +669,7 @@ const ConfigSchemaRaw = z
   .object({
     board: Board,
     engine: Engine.default({}),
+    logging: Logging.default({}),
     lanes: Lanes.default({}),
     worker: Worker.default({}),
     guard: Guard.default({}),
@@ -785,6 +799,11 @@ export function loadConfig(path?: string): SapwoodConfig {
     throw new Error(`no config found; looked for ${DEFAULT_CONFIG_PATHS.join(", ")}`);
   }
   const cfg = parseConfig(readFileSync(file, "utf8"));
+  // Run logs are repo/config scoped just like prompt files. Unlike promptFile, logging.path is
+  // defaulted, so the default is resolved too whenever a config file is loaded.
+  if (!isAbsolute(cfg.logging.path)) {
+    cfg.logging.path = resolve(dirname(file), cfg.logging.path);
+  }
   // A relative worker.promptFile means "relative to the config file" (#74), not to whatever
   // cwd the CLI happens to run from — `sapwood validate repo/sapwood.config.yaml` must judge
   // the same config the engine would run inside `repo/`.

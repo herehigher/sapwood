@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { type EngineOverrides, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
@@ -20,6 +20,7 @@ import type { PeripheralPhase } from "./round.js";
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
+const silentLogger = { log(_message: string): void {} };
 
 const mkStub = (dir: string, body: string): string => {
   const p = join(dir, "claude-stub");
@@ -149,6 +150,7 @@ test("sapwood run startup reconcile emits board/PR orphans without forge writes,
       cfg: mkCfg({ engine: { driver: "tick" } }),
       forge,
       state,
+      logger: silentLogger,
     });
     assert.equal(code, 0);
     assert.equal(forge.reconcileReads, 1);
@@ -177,7 +179,10 @@ test("sapwood run startup reconcile is quiet when rows match and forge-down is n
     openPrs: [{ number: 200, body: "Fixes #171" }],
   };
   try {
-    assert.equal(await runEngine(["node", "sapwood", "run", "--once"], { cfg, forge: healthyForge, state: healthyState }), 0);
+    assert.equal(
+      await runEngine(["node", "sapwood", "run", "--once"], { cfg, forge: healthyForge, state: healthyState, logger: silentLogger }),
+      0,
+    );
     assert.equal(healthyState.eventsSince("1970-01-01T00:00:00.000Z", ["orphan-detected"]).length, 0);
   } finally {
     healthyState.close();
@@ -187,7 +192,17 @@ test("sapwood run startup reconcile is quiet when rows match and forge-down is n
   const failedForge = new FakeForge();
   failedForge.reconcileError = new Error("forge unreachable");
   try {
-    assert.equal(await runEngine(["node", "sapwood", "run", "--once"], { cfg, forge: failedForge, state: failedState }), 0);
+    const logged: string[] = [];
+    assert.equal(
+      await runEngine(["node", "sapwood", "run", "--once"], {
+        cfg,
+        forge: failedForge,
+        state: failedState,
+        logger: { log: (line) => logged.push(line) },
+      }),
+      0,
+    );
+    assert.ok(logged.some((line) => line.startsWith("[sapwood:reconcile]")));
   } finally {
     failedState.close();
   }
@@ -203,14 +218,20 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     // #125: FakeForge is an intentionally empty board (this test is about the CLI's wiring to a
     // REAL RoleRunner, not the standby probe) — opt out explicitly so round 1 still opens
     // immediately, same as before #125.
-    const cfg = mkCfg({ round: { standby: { enabled: false } } }); // engine.driver unset -> defaults to "rounds"
+    const cfg = mkCfg({
+      logging: { path: "logs/engine.log" },
+      roles: { retro: { enabled: false } },
+      round: { standby: { enabled: false } },
+    }); // engine.driver unset -> defaults to "rounds"
     assert.equal(cfg.engine.driver, "rounds");
 
     let stop = (): void => {};
+    const logged: string[] = [];
     const overrides: EngineOverrides = {
       cfg,
       forge,
       state,
+      logger: { log: (line) => logged.push(line) },
       roleRunnerDeps: {
         stateDir: dir,
         worktreeRoot: join(dir, "worktrees"),
@@ -246,6 +267,24 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
     // actually ran, leaving real sentinel files behind for at least one role session.
     const sentinels = readdirSync(dir).filter((f) => f.endsWith(".done.json"));
     assert.ok(sentinels.length > 0, "expected at least one real role session to have run to completion");
+    assert.ok(logged.includes(`[sapwood:run] startup logPath=${resolve("logs/engine.log")}`));
+    assert.ok(
+      logged.some((line) => line.startsWith("[sapwood:tick] ")),
+      "the existing onTick seam records a tick summary",
+    );
+    assert.ok(
+      logged.some((line) => line.startsWith("[sapwood:round] peripheral role(s) disabled by config")),
+      "degradation is logged",
+    );
+    assert.ok(logged.some((line) => line.startsWith("[sapwood:round] round 1: phase aligning completed")));
+    assert.ok(
+      logged.some((line) => line.startsWith("[sapwood:run] stopped after 1 round(s)")),
+      "the stop summary is logged",
+    );
+    assert.ok(
+      logged.every((line) => /^\[sapwood:[^\]]+\]/.test(line)),
+      "every run-path message carries a subsystem tag",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -264,6 +303,7 @@ test("sapwood run (default driver): KILL_SWITCH blocks every peripheral AND disp
       cfg,
       forge,
       state,
+      logger: silentLogger,
       roleRunnerDeps: {
         stateDir: join(dir, "roles"),
         worktreeRoot: join(dir, "worktrees"),
@@ -366,7 +406,7 @@ test("sapwood run --milestone <unknown title>: fails fast — rejects naming the
   const cfg = mkCfg(); // engine.driver defaults to "rounds"
 
   await assert.rejects(
-    () => runEngine(["node", "sapwood", "run", "--milestone", "M4"], { cfg, forge, state }),
+    () => runEngine(["node", "sapwood", "run", "--milestone", "M4"], { cfg, forge, state, logger: silentLogger }),
     /no milestone titled "M4".*M4 — UX surface \+ CLI/s,
   );
   assert.equal(state.getRound(1), undefined, "no round was ever opened — the throw happens before runRounds starts");
@@ -390,6 +430,7 @@ test("sapwood run --milestone <real title>: scopes AND stops on the same milesto
     cfg,
     forge,
     state,
+    logger: silentLogger,
     sleep: async () => {},
     registerSignals: () => () => {},
   });
@@ -426,11 +467,24 @@ test("sapwood run: engine.driver: tick still reaches the M4 tick-driver escape h
   const cfg = mkCfg({ engine: { driver: "tick" } });
   assert.equal(cfg.engine.driver, "tick");
 
-  const overrides: EngineOverrides = { cfg, forge, state };
+  const logged: string[] = [];
+  let observedTicks = 0;
+  const overrides: EngineOverrides = {
+    cfg,
+    forge,
+    state,
+    logger: { log: (line) => logged.push(line) },
+    onTick: () => observedTicks++,
+  };
   // --once bounds the tick driver to a single tick so this test terminates quickly; the round
   // orchestrator has no such flag (see cli.ts's RUN_USAGE) — proof the tick path, not the round
   // path, is the one actually running here.
   const code = await runEngine(["node", "sapwood", "run", "--once"], overrides);
   assert.equal(code, 0);
   assert.equal(state.getRound(1), undefined, "the tick driver never opens a round — that's round.ts's own concept");
+  assert.ok(logged.some((line) => line.startsWith("[sapwood:run] startup logPath=")));
+  assert.ok(logged.some((line) => line.startsWith("[sapwood:tick] ")));
+  assert.ok(logged.some((line) => line.startsWith("[sapwood:run] stopped after 1 tick(s)")));
+  assert.ok(logged.every((line) => /^\[sapwood:[^\]]+\]/.test(line)));
+  assert.equal(observedTicks, 1, "logger tick summaries compose with the caller's existing onTick hook");
 });

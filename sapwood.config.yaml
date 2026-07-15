@@ -26,6 +26,12 @@ board:
 #                        # bare M4 loop driver (no peripherals; --once/--until-idle
 #                        # apply), kept as an explicit escape hatch.
 
+# logging:
+#   path: data/logs/sapwood.log # disposable run narrative; relative paths resolve against
+#                                # this config file's directory
+#   teeToStderr: true           # also emit each log record to stderr
+#   maxBytes: 10485760          # rotate to <path>.1 before the next append crosses this size
+
 lanes:
   max: 3 # max CONCURRENT workers (the lane ceiling; never a per-round quota)
   roundDispatchCap: 6 # #124: total dispatch QUOTA for one round, refilled in waves as lanes

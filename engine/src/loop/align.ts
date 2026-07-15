@@ -223,6 +223,7 @@ export interface AlignDeps {
    *  runner directly, same split as plan-review.ts's PlanReviewDeps). */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
+  log?: (message: string) => void;
   /** Override for loadPlanMd's path — tests inject a fixed string via a temp file. A real
    *  caller omits this and gets `cfg.goal.file` (#128, promoted out of the #104-era
    *  `roles.architect.planMdPath`): align.ts and architect.ts both read the project's
@@ -252,7 +253,10 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // crash-rerun of this exact phase call (marker still null) replays the SAME recorded
       // content rather than re-reading a possibly-edited file, and a stale directive can never
       // silently re-apply to a later round once archived.
-      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId, { consume: true });
+      const directive = resolveRoundDirective(deps.state, deps.cfg, roundId, {
+        consume: true,
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
+      });
 
       // ── Alignment/decomposition pass: ONE session, dispatched even with an unscoped round
       // (round.milestone unset) — decomposition still has docs/PLAN.md to work from alone.
@@ -286,6 +290,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         // column with no FK, so 0 is a documented sentinel ("no single issue").
         issue: 0,
         now,
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
         degradeEvent: "po-degraded",
         degradePayload: (result) => ({
           round_id: roundId,
@@ -359,6 +364,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           },
           issue: issue.number,
           now,
+          ...(deps.log !== undefined ? { log: deps.log } : {}),
           degradeEvent: "triage-degraded",
           degradePayload: (result) => ({
             round_id: roundId,
@@ -406,7 +412,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           } catch {
             /* state write failed — the console line below still lands */
           }
-          console.error(
+          (deps.log ?? console.error)(
             `[sapwood:po] round ${roundId}: triage left issue #${issue.number} still planless — ` +
               `no success comment posted; the candidate re-matches next round`,
           );

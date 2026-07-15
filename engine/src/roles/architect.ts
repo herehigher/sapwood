@@ -57,6 +57,7 @@ export interface ArchitectDeps {
    *  CLI" split plan-review.ts/conductor.test.ts use). */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
+  log?: (message: string) => void;
   /** Path to the repo's north-star goal file — the architecture-chapter source. Override for
    *  tests; a real caller omits this and gets `cfg.goal.file` (#128, promoted out of the
    *  #104-era `roles.architect.planMdPath` — was a hardcoded `<cwd>/docs/PLAN.md`, which broke
@@ -344,6 +345,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // at all does THIS call become the round's designated first consumer.
       const directive = resolveRoundDirective(deps.state, deps.cfg, roundId, {
         consume: !deps.cfg.roles.po.enabled,
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
       });
       // The candidate pool for this phase is the same "still awaiting gate⓪" set plan_review
       // consumes next in the sequence (aligning -> architecting -> plan_review -> executing):
@@ -403,6 +405,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         session: { roleId: "architect", prompt, model: role.model, effort: role.effort, fallbackModel: role.fallbackModel },
         issue: 0, // round-scoped, not tied to any single issue (spend_ledger's documented sentinel)
         now: deps.now ?? (() => new Date()),
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
         degradeEvent: "architect-degraded",
         degradePayload: (r) => ({
           round_id: roundId,
