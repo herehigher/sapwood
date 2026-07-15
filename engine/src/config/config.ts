@@ -792,7 +792,7 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
     planApproved: cfg.labels.planApproved ?? defaults.planApproved,
     originAgent: cfg.labels.originAgent ?? defaults.originAgent,
   };
-  cfg.escalation.humanLabels ??= [defaults.needsHuman, defaults.blocked];
+  cfg.escalation.humanLabels ??= [cfg.labels.needsHuman, cfg.labels.blocked];
   return resolveGoalFile(cfg);
 }
 

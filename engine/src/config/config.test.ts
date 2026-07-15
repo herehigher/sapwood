@@ -51,6 +51,17 @@ escalation: { humanLabels: [human-review, Another-Hold] }
   assert.deepEqual(cfg.escalation.humanLabels, ["human-review", "Another-Hold"]);
 });
 
+test("omitted escalation derives from resolved custom labels, while an explicit array must include needsHuman", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { needsHuman: custom-hold }\n";
+  const cfg = parseConfig(base);
+  assert.deepEqual(cfg.escalation.humanLabels, ["custom-hold", "sapwood:blocked"]);
+
+  assert.throws(
+    () => parseConfig(`${base}escalation: { humanLabels: [sapwood:blocked] }`),
+    /labels\.needsHuman.*must be listed case-insensitively/s,
+  );
+});
+
 test("labels.prefix rejects whitespace", () => {
   assert.throws(
     () => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { prefix: "team labels:" }'),
@@ -219,10 +230,7 @@ test("#170: removed reviewer poll keys are rejected clearly by the strict schema
 test("#170: the needs-human write label must be recognized by the human-label hold", () => {
   const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
   assert.doesNotThrow(() => parseConfig(base)); // shipped defaults agree
-  assert.throws(
-    () => parseConfig(`${base}labels: { needsHuman: human-review }`),
-    /labels\.needsHuman.*must be listed case-insensitively in escalation\.humanLabels/i,
-  );
+  assert.deepEqual(parseConfig(`${base}labels: { needsHuman: human-review }`).escalation.humanLabels, ["human-review", "sapwood:blocked"]);
   assert.equal(
     parseConfig(`${base}labels: { needsHuman: human-review }\nescalation: { humanLabels: [human-review] }`).labels.needsHuman,
     "human-review",
