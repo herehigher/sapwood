@@ -333,8 +333,13 @@ function ensureIssueTemplates(cwd: string): Array<{ path: string; written: boole
     const target = join(targetDir, name);
     if (existsSync(target)) return { path: target, written: false };
     mkdirSync(targetDir, { recursive: true });
-    writeFileSync(target, readFileSync(defaultIssueTemplatePath(name), "utf8"));
-    return { path: target, written: true };
+    try {
+      writeFileSync(target, readFileSync(defaultIssueTemplatePath(name), "utf8"), { flag: "wx" });
+      return { path: target, written: true };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return { path: target, written: false };
+      throw error;
+    }
   });
 }
 

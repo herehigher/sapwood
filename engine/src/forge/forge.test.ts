@@ -248,6 +248,37 @@ Out of scope: reviewer trigger-comment changes.
   assert.match(plan, /npm run typecheck && npm run lint && npm test/);
 });
 
+test("extractVerificationPlan: a fenced pseudo-heading alone is not a verification plan", () => {
+  assert.equal(extractVerificationPlan("```markdown\n## Verification\nrun nothing\n```"), null);
+});
+
+test("extractVerificationPlan: fenced pseudo-headings neither terminate a real section nor create phantom sections", () => {
+  const body = `## Acceptance criteria
+- [ ] real criterion
+
+\`\`\`markdown
+## Notes
+fenced text stays in the plan
+## Verification
+fenced pseudo-plan
+\`\`\`
+
+## Real notes
+outside the plan`;
+  const plan = extractVerificationPlan(body)!;
+  assert.match(plan, /fenced text stays in the plan/);
+  assert.match(plan, /fenced pseudo-plan/);
+  assert.equal(plan.match(/## Verification/g)?.length, 1, "fenced pseudo-heading is not emitted as a second section");
+  assert.ok(!plan.includes("outside the plan"));
+});
+
+test("extractVerificationPlan: an unclosed fence at EOF keeps its pseudo-headings inside the open real section", () => {
+  const body = "## Verification plan\nrun the real test\n~~~text\n## Acceptance pseudo-heading\nfenced through EOF";
+  const plan = extractVerificationPlan(body)!;
+  assert.equal(plan, body);
+  assert.equal(plan.match(/## Acceptance/g)?.length, 1, "unclosed fence does not create a phantom section");
+});
+
 test("hasVerificationPlan and extractVerificationPlan agree on every case (shared parser, not duplicated)", () => {
   const cases = ["## Verification\nrun tests", "### Acceptance criteria", "no plan here", ""];
   for (const body of cases) {
