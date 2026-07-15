@@ -111,13 +111,15 @@ export function sweepStaleRoleSessions(state: Pick<State, "appendEvent">, option
     const name = filename.slice(0, -".running.json".length);
     const removed: string[] = [];
     try {
-      rmSync(sentinel);
-      removed.push("sentinel");
       const worktree = join(worktreeRoot, name);
+      // Worktree first preserves the sentinel as a retry anchor if its removal fails; if only
+      // sentinel removal fails, the next startup harmlessly retries with the worktree absent.
       if (existsSync(worktree)) {
         rmSync(worktree, { recursive: true, force: true });
         removed.push("worktree");
       }
+      rmSync(sentinel);
+      removed.push("sentinel");
     } catch (error) {
       options.log?.(`sapwood run: failed to sweep stale role session ${name}; continuing: ${String(error)}`);
     }

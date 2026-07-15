@@ -176,7 +176,7 @@ test("role debris sweep removes confirmed-dead role debris only", () => {
     assert.equal(existsSync(join(roles, "role-bad-dddd.running.json")), true);
     assert.equal(existsSync(join(workerState, "lane-171.running.json")), true);
     assert.equal(existsSync(join(worktrees, "lane-171")), true);
-    assert.deepEqual(events, [{ session: "role-dead-aaaa", removed: ["sentinel", "worktree"] }]);
+    assert.deepEqual(events, [{ session: "role-dead-aaaa", removed: ["worktree", "sentinel"] }]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

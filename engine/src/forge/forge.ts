@@ -105,7 +105,9 @@ export interface IForge {
    *  cannot be moved through setBoardStatus. Used once at engine startup, never for dispatch. */
   listUnplacedIssues(): Promise<UnplacedIssues>;
   /** One startup-only, read-only view used to surface management-side orphans after local
-   *  state loss. It is observability input only: callers must never rebuild workers from it. */
+   *  state loss. It is observability input only: callers must never rebuild workers from it.
+   *  PR orphan detection shares findOpenPrForIssue's 200-open-PR bound (#50 residual), so PRs
+   *  beyond it are not reported. */
   readStartupReconcileData(): Promise<StartupReconcileData>;
   getReadyIssues(): Promise<Issue[]>;
   claimIssue(issue: number): Promise<void>;
