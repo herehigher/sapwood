@@ -539,10 +539,6 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
   const state = new State(":memory:");
   const forge = new FakeForge();
   const logged: string[] = [];
-  const realLog = console.log;
-  console.log = (...args: unknown[]) => {
-    logged.push(args.map(String).join(" "));
-  };
   try {
     // #127 gate② R3: CUSTOM label names — the warning must render cfg.labels.planApproved/
     // verifyNa, so a hardcoded "plan:approved"/"verify:n/a" string in round-defaults.ts would
@@ -551,8 +547,9 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
       roles: { planReviewer: { enabled: false }, retro: { enabled: false } },
       labels: { planApproved: "ok-to-build", verifyNa: "no-verify" },
     });
-    createDefaultPeripherals({ forge, state, cfg, runner: new ScriptedRunner(forge, cfg) });
+    createDefaultPeripherals({ forge, state, cfg, runner: new ScriptedRunner(forge, cfg), log: (line) => logged.push(line) });
     assert.equal(logged.length, 1, "exactly one startup log line for two disabled roles");
+    assert.match(logged[0]!, /^\[sapwood:round\]/);
     assert.match(logged[0]!, /plan_review/);
     assert.match(logged[0]!, /retro/);
     assert.match(
@@ -563,12 +560,11 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
     assert.match(logged[0]!, /no-verify/, "the configured verifyNa label too");
     assert.doesNotMatch(logged[0]!, /plan:approved/, "never the hardcoded default label name");
     const allOn = mkCfg();
-    createDefaultPeripherals({ forge, state, cfg: allOn, runner: new ScriptedRunner(forge, allOn) });
+    createDefaultPeripherals({ forge, state, cfg: allOn, runner: new ScriptedRunner(forge, allOn), log: (line) => logged.push(line) });
     assert.equal(logged.length, 1, "an all-enabled factory logs nothing");
   } finally {
-    console.log = realLog;
+    state.close();
   }
-  state.close();
 });
 
 test("runRounds integration (#127): a disabled role spawns no session for its phase, and the round still closes — the phase no-ops via round.ts's existing noopPeripheralStub default, no round.ts change", async () => {

@@ -44,6 +44,7 @@ export interface PlanReviewDeps {
    *  uses for Supervisor). */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
+  log?: (message: string) => void;
 }
 
 /** The round-scoped idempotency marker this phase persists via round.ts's ledger (#77
@@ -329,6 +330,7 @@ async function reviewOneIssue(
       },
       issue: issue.number,
       now,
+      ...(deps.log !== undefined ? { log: deps.log } : {}),
       degradeEvent: "plan-review-escalated",
       degradePayload: (result) => ({
         round_id: roundId,
@@ -405,6 +407,7 @@ async function reviewOneIssue(
       },
       issue: issue.number,
       now,
+      ...(deps.log !== undefined ? { log: deps.log } : {}),
       degradeEvent: "plan-review-escalated",
       degradePayload: (result) => ({
         round_id: roundId,

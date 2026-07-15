@@ -497,6 +497,7 @@ export function spawnClaudeSession(bin: string, args: string[], opts: { jsonlFd:
 
 export interface WorkerDeps {
   cfg: SapwoodConfig;
+  log?: (message: string) => void;
   /** Directory for sentinels/jsonl/heartbeat. Default <cwd>/data/sessions/state. */
   stateDir?: string;
   /** Parent directory holding each lane's git worktree, keyed by lane name
@@ -588,6 +589,9 @@ export class WorkerSupervisor implements Supervisor {
   }
   private now(): Date {
     return this.deps.now ? this.deps.now() : new Date();
+  }
+  private log(message: string): void {
+    (this.deps.log ?? console.error)(message);
   }
 
   async dispatch(issue: Issue, name?: string): Promise<{ name: string; sessionId: string }> {
@@ -880,7 +884,7 @@ export class WorkerSupervisor implements Supervisor {
       const running = this.readJson(this.path(name, "running.json"));
       if (running) this.writeJsonAtomic(this.path(name, "running.json"), { ...running, handoff_requested: true });
     } catch (e) {
-      console.error(`[sapwood:worker] lane ${name}: failed to persist handoff_requested (non-fatal — SIGTERM still sent): ${String(e)}`);
+      this.log(`[sapwood:worker] lane ${name}: failed to persist handoff_requested (non-fatal — SIGTERM still sent): ${String(e)}`);
     }
     this.signalGroup(pid, "SIGTERM");
     return true;
@@ -969,7 +973,7 @@ export class WorkerSupervisor implements Supervisor {
     // liveTelemetry's comment for the PER-RUN (baseline-subtracted) rationale.
     lane.estimatedCostUsd = this.liveTelemetry(lane).estCostUsd;
     if (lane.estimatedCostUsd >= this.deps.cfg.worker.budgetUsdSoft) {
-      console.error(
+      this.log(
         `[sapwood:worker] lane ${name}: estimated spend $${lane.estimatedCostUsd.toFixed(4)} this run ` +
           `crossed the soft budget $${this.deps.cfg.worker.budgetUsdSoft} — requesting graceful handoff`,
       );
@@ -1035,7 +1039,7 @@ export class WorkerSupervisor implements Supervisor {
     // that's a known semantic mismatch of the log line, not rate-table drift.
     if (estimatedCostUsd !== undefined && cost > 0) {
       const divergence = estimatedCostUsd - cost;
-      console.error(
+      this.log(
         `[sapwood:worker] lane ${name}: cost estimate $${estimatedCostUsd.toFixed(4)} vs real ` +
           `total_cost_usd $${cost.toFixed(4)} (estimate ${divergence >= 0 ? "+" : ""}${divergence.toFixed(4)})`,
       );

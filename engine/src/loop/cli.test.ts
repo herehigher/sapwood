@@ -434,11 +434,11 @@ test("applyMilestoneOverride + resolveStopConfig: --milestone sets BOTH scope an
 test("formatStopConditionLine: names the condition, its threshold, and the count/state detail", () => {
   assert.equal(
     formatStopConditionLine({ name: "afterIssuesMerged", threshold: 3, detail: "merged 3" }),
-    "sapwood run: stop condition hit — afterIssuesMerged=3 (merged 3)",
+    "[sapwood:run] stop condition hit — afterIssuesMerged=3 (merged 3)",
   );
   assert.equal(
     formatStopConditionLine({ name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" }),
-    "sapwood run: stop condition hit — onMilestoneComplete=M4 (0 open issues left)",
+    "[sapwood:run] stop condition hit — onMilestoneComplete=M4 (0 open issues left)",
   );
 });
 

@@ -436,6 +436,7 @@ export interface TickDeps {
   state: State;
   supervisor: Supervisor;
   cfg: SapwoodConfig;
+  log?: (message: string) => void;
   /** Cumulative round spend (USD) for the hard round-budget gate — a THUNK, not a snapshot
    *  (#124 gate② P1-2 on PR #157). tick() evaluates it exactly where `overBudget` is computed:
    *  AFTER the reclaim phase, BEFORE the dispatch loop. This matters because reclaim runs
@@ -787,6 +788,7 @@ async function escalatePark(
   park: ParkRow,
   forgeParked: boolean,
   iso: () => string,
+  log?: (message: string) => void,
 ): Promise<void> {
   const suspendedRequeues = state.pendingRollbacks().filter((r) => r.reason === ENV_FAILURE_REQUEUE_REASON).length;
   const message =
@@ -809,11 +811,11 @@ async function escalatePark(
       // The channel-ladder's "forge reachable" premise proved wrong (a race, or an llm-sourced
       // park whose forge turns out to ALSO be down) — never lose the escalation silently.
       actualChannel = "local";
-      writeLocalEscalation(state, park, message);
+      writeLocalEscalation(state, park, message, log);
     }
   } else {
     actualChannel = "local";
-    writeLocalEscalation(state, park, message);
+    writeLocalEscalation(state, park, message, log);
   }
   // ACCEPTED RESIDUAL (PR #180 review P2, documented not machined-away): a crash in the window
   // between the successful comment above and the recordParkEscalation latch below re-escalates
@@ -832,7 +834,7 @@ async function escalatePark(
 /** #168: the local-fallback escalation write (CTO directive: sapwood status surface + a marker
  *  file in the engine data dir, written by the ENGINE, read-only informational, never a control
  *  input — see State.escalationMarkerPath's doc comment — + a log line). Zero forge writes. */
-function writeLocalEscalation(state: State, park: ParkRow, message: string): void {
+function writeLocalEscalation(state: State, park: ParkRow, message: string, log?: (message: string) => void): void {
   state.writeEscalationMarker({
     source: park.source,
     reason: park.reason,
@@ -841,7 +843,7 @@ function writeLocalEscalation(state: State, park: ParkRow, message: string): voi
     message,
     at: new Date().toISOString(),
   });
-  process.stderr.write(`[sapwood:park] ${message}\n`);
+  (log ?? ((line) => process.stderr.write(`${line}\n`)))(`[sapwood:park] ${message}`);
 }
 
 /** Reclaim a lane that has reached a TERMINAL sentinel (handoff / done / failed) — record its
@@ -1564,7 +1566,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         episode.escalatedAt == null &&
         parkDurationExceededSec(episode.enteredAt, nowDate.getTime(), cfg.envFailure.parkEscalateAfterSec)
       ) {
-        await escalatePark(forge, state, cfg, episode, state.parkRow("forge") != null, iso);
+        await escalatePark(forge, state, cfg, episode, state.parkRow("forge") != null, iso, deps.log);
       }
     }
   }

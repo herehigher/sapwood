@@ -59,7 +59,7 @@ export async function reconcileStartup(
       inProgressStatus: cfg.board.status.inProgress,
     });
   } catch (error) {
-    log(`sapwood run: startup reconcile failed; continuing: ${String(error)}`);
+    log(`[sapwood:reconcile] startup failed; continuing: ${String(error)}`);
     state.appendEvent("reconcile-completed", { ok: false, count: 0, orphans: [], overflow: 0 } satisfies ReconcileCompletedPayload);
     return [];
   }
@@ -121,7 +121,7 @@ export function sweepStaleRoleSessions(state: Pick<State, "appendEvent">, option
       rmSync(sentinel);
       removed.push("sentinel");
     } catch (error) {
-      options.log?.(`sapwood run: failed to sweep stale role session ${name}; continuing: ${String(error)}`);
+      options.log?.(`[sapwood:reconcile] role session ${name}: stale-session sweep failed; continuing: ${String(error)}`);
     }
     if (removed.length > 0) {
       state.appendEvent("role-debris-swept", { session: name, removed });

@@ -167,6 +167,7 @@ export interface RetroDeps {
    *  the CLI" split as plan-review.ts's/harvest.ts's own tests). */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
+  log?: (message: string) => void;
 }
 
 export function retroMarker(roundId: number): string {
@@ -298,6 +299,7 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
         },
         issue: 0, // round-level spend, no single associated issue — same 0 sentinel as harvest.ts
         now: deps.now ?? (() => new Date()),
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
         degradeEvent: "retro-degraded",
         degradePayload: (result) => ({
           round_id: roundId,
@@ -306,7 +308,7 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
           attempts: 2,
         }),
         degradeMessage: (result) =>
-          `sapwood: ${retroDegradeReason(result)} for round ${roundId} — ` +
+          `[sapwood:retro] round ${roundId}: ${retroDegradeReason(result)} — ` +
           `closing the retro phase WITHOUT a proposal pass (degraded, see the retro-degraded ` +
           `event); the run is not blocked`,
         isValid: (result) => parseRetroScratch(result.scratchText).kind !== "invalid",
@@ -361,7 +363,7 @@ async function openProposalPR(deps: RetroDeps, roundId: number, p: { branch: str
     } catch {
       /* state write failed — the stderr line below still lands */
     }
-    console.error(`sapwood: retro round ${roundId}: ${reason} — no PR opened; the retro phase still closes`);
+    (deps.log ?? console.error)(`[sapwood:retro] round ${roundId}: ${reason} — no PR opened; the retro phase still closes`);
   };
   let pushed: boolean;
   try {

@@ -5,16 +5,18 @@ import { existsSync, realpathSync } from "node:fs";
 // (/sapwood-run, /sapwood-status, /sapwood-stop) are thin wrappers that shell out to this CLI
 // — see ../../commands/.
 import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { DEFAULT_CONFIG_PATHS, loadConfig, type SapwoodConfig } from "./config/config.js";
 import { loadPricingTable } from "./config/pricing.js";
 import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
-import { orderForDispatch } from "./loop/conductor.js";
+import { orderForDispatch, type TickResult } from "./loop/conductor.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
 import { InitError, init } from "./loop/init.js";
+import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
 import { parseReconcileCompleted, reconcileStartup, type StartupOrphan, sweepStaleRoleSessions } from "./loop/reconcile.js";
-import { type PeripheralPhase, type RoundsResult, runRounds } from "./loop/round.js";
+import { type PeripheralPhase, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
@@ -682,18 +684,18 @@ export async function normalizeUnplacedBoardItems(
   try {
     unplaced = await forge.listUnplacedIssues();
   } catch (error) {
-    log(`sapwood run: could not list No-Status board items; startup normalization skipped: ${String(error)}`);
+    log(`[sapwood:startup] could not list No-Status board items; normalization skipped: ${String(error)}`);
     return;
   }
   if (unplaced.skipped > 0) {
-    log(`sapwood run: skipped ${unplaced.skipped} No-Status draft/foreign-repo board item(s) outside this repo's write jurisdiction`);
+    log(`[sapwood:startup] skipped ${unplaced.skipped} No-Status draft/foreign-repo board item(s) outside this repo's write jurisdiction`);
   }
   for (const issue of unplaced.issues) {
     try {
       await forge.setBoardStatus(issue, "backlog");
       state.appendEvent("board-normalized", { issue, status: "backlog" });
     } catch (error) {
-      log(`sapwood run: failed to move No-Status issue #${issue} to backlog; continuing: ${String(error)}`);
+      log(`[sapwood:startup] issue #${issue}: failed to move No-Status item to backlog; continuing: ${String(error)}`);
     }
   }
 }
@@ -703,7 +705,7 @@ export async function normalizeUnplacedBoardItems(
  *  when result.stopCondition is set (stoppedBy "stop-condition", or "once" when the single
  *  tick satisfied a goal). */
 export function formatStopConditionLine(hit: StopConditionHit): string {
-  return `sapwood run: stop condition hit — ${hit.name}=${hit.threshold} (${hit.detail})`;
+  return `[sapwood:run] stop condition hit — ${hit.name}=${hit.threshold} (${hit.detail})`;
 }
 
 /** #106: injectable collaborators for `sapwood run`'s engine wiring (both drivers) — production
@@ -719,6 +721,8 @@ export interface EngineOverrides {
   forge?: IForge;
   state?: State;
   roleRunnerDeps?: Partial<RoleRunnerDeps>;
+  logger?: EngineLogger;
+  onTick?: (result: TickResult) => void;
   /** RoundDeps passthrough, rounds driver only — lets a test control the signal/sleep sources
    *  the same way round-defaults.test.ts's own integration tests do, without real wall-clock
    *  waits or real process signal handlers. */
@@ -729,6 +733,23 @@ export interface EngineOverrides {
    *  round already open finishes every remaining phase, harvest included, before the loop
    *  actually stops. */
   onRoundPhase?: (roundId: number, phase: PeripheralPhase) => void;
+  onRoundStop?: (roundId: number, hit: RoundStopHit) => void;
+}
+
+function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
+  const path = resolve(cfg.logging.path);
+  return {
+    path,
+    logger: override ?? new FileEngineLogger({ path, teeToStderr: cfg.logging.teeToStderr, maxBytes: cfg.logging.maxBytes }),
+  };
+}
+
+function formatTickSummary(result: TickResult): string {
+  return (
+    `[sapwood:tick] reclaimed=${result.reclaimed.length} dispatched=${result.dispatched.length} ` +
+    `driven=${result.driven.length} rollbacks=${result.rollbacks.length} gatedReclaimed=${result.gatedReclaimed.length} ` +
+    `drainRequested=${result.drainRequested.length} escalated=${result.escalated.length} ceilingBreached=${result.ceilingBreached}`
+  );
 }
 
 /** #106: exit code for a finished `sapwood run` under the round orchestrator. Rounds have no
@@ -756,6 +777,9 @@ function findOpenPrForIssue(forge: IForge, issue: number): Promise<number | null
  *  `engine.driver: tick` (#106's explicit escape hatch) now that the round orchestrator
  *  (runRoundsEngine below) is the default. */
 async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: EngineOverrides): Promise<number> {
+  const { logger, path: logPath } = createRunLogger(cfg, overrides.logger);
+  const log = logger.log.bind(logger);
+  log(`[sapwood:run] startup logPath=${logPath}`);
   // #74: build the worker-prompt renderer NOW, before anything else — loadWorkerPromptTemplate
   // (inside buildRenderPrompt) reads the template file EAGERLY, so a configured
   // `worker.promptFile` that's missing/unreadable throws here and aborts startup. Never a lazy
@@ -771,6 +795,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
   const supervisor = new WorkerSupervisor({
     cfg,
+    log,
     // #46: a first-pass live findOpenPr wiring (GithubForge.findOpenPrForIssue) — see its
     // doc comment for the heuristic and its known limits; hardening it is part of the live
     // merge-gate run (#46 scope 3), not this PR.
@@ -783,14 +808,14 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // #76: same fail-fast stance as buildRenderPrompt above — a typo'd milestone goal must abort
   // startup with zero dispatch, not silently stop the run after the first wave of workers.
   await assertStopMilestoneExists(forge, stop);
-  await normalizeUnplacedBoardItems(forge, state);
-  await reconcileStartup(forge, state, cfg);
+  await normalizeUnplacedBoardItems(forge, state, log);
+  await reconcileStartup(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
-    log: console.error,
+    log,
     ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
     ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
   });
-  console.log(`sapwood run: driver=tick tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
+  log(`[sapwood:run] driver=tick tickIntervalSec=${cfg.engine.tickIntervalSec} stopMode=${stopMode}`);
   // NOTE: roundSpendUsd (the per-round hard budget gate, cfg.cost.roundBudgetUsd) is left at
   // its TickDeps default (0, i.e. never over-budget) — computing a live "this round's spend"
   // figure needs a round-tracking concept (nextRoundId exists as a pure helper but nothing
@@ -819,12 +844,17 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
     stopMode,
     stop,
     probeLlmReachable,
+    log,
+    onTick: (result) => {
+      log(formatTickSummary(result));
+      overrides.onTick?.(result);
+    },
   });
   // #76: name the condition that fired BEFORE the generic stop-summary line, when one did.
   if (result.stopCondition) {
-    console.log(formatStopConditionLine(result.stopCondition));
+    log(formatStopConditionLine(result.stopCondition));
   }
-  console.log(`sapwood run: stopped after ${result.ticks} tick(s), ${result.tickErrors} tick error(s) (${result.stoppedBy})`);
+  log(`[sapwood:run] stopped after ${result.ticks} tick(s), ${result.tickErrors} tick error(s) (${result.stoppedBy})`);
   return runExitCode(result, stopMode);
 }
 
@@ -836,6 +866,9 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
  *  graceful-stop-still-runs-harvest) lives in round.ts/state.ts unchanged — this function only
  *  wires the real collaborators runRounds needs, it adds no safety logic of its own. */
 async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: EngineOverrides): Promise<number> {
+  const { logger, path: logPath } = createRunLogger(cfg, overrides.logger);
+  const log = logger.log.bind(logger);
+  log(`[sapwood:run] startup logPath=${logPath}`);
   // Same fail-fast stance as the tick driver above: a broken worker.promptFile must abort
   // startup before any dispatch — the round loop's `executing` phase still dispatches workers
   // via WorkerSupervisor exactly like the tick driver does.
@@ -847,24 +880,25 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
   const supervisor = new WorkerSupervisor({
     cfg,
+    log,
     hasOpenPr: async (issue) => (await findOpenPrForIssue(forge, issue)) != null,
     findOpenPr: (issue) => findOpenPrForIssue(forge, issue),
     renderPrompt,
   });
-  const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps });
-  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log });
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, log });
   const stop = resolveStopConfig(argv, cfg);
   // #76: same fail-fast stance as the tick driver — a typo'd milestone goal must abort startup
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
   await assertStopMilestoneExists(forge, stop);
-  await normalizeUnplacedBoardItems(forge, state);
-  await reconcileStartup(forge, state, cfg);
+  await normalizeUnplacedBoardItems(forge, state, log);
+  await reconcileStartup(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
-    log: console.error,
+    log,
     ...(overrides.roleRunnerDeps?.stateDir !== undefined ? { stateDir: overrides.roleRunnerDeps.stateDir } : {}),
     ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
   });
-  console.log(`sapwood run: driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
+  log(`[sapwood:run] driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
   // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
   const probeLlmReachable = () =>
     probeLlmPing(
@@ -883,15 +917,27 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     peripherals,
     stop,
     probeLlmReachable,
+    log,
+    onTick: (tickResult) => {
+      log(formatTickSummary(tickResult));
+      overrides.onTick?.(tickResult);
+    },
     ...(overrides.sleep !== undefined ? { sleep: overrides.sleep } : {}),
     ...(overrides.registerSignals !== undefined ? { registerSignals: overrides.registerSignals } : {}),
-    ...(overrides.onRoundPhase !== undefined ? { onRoundPhase: overrides.onRoundPhase } : {}),
+    onRoundPhase: (roundId, phase) => {
+      log(`[sapwood:round] round ${roundId}: phase ${phase} completed`);
+      overrides.onRoundPhase?.(roundId, phase);
+    },
+    onRoundStop: (roundId, hit) => {
+      log(`[sapwood:round] round ${roundId}: stop ${hit.name} (${hit.detail})`);
+      overrides.onRoundStop?.(roundId, hit);
+    },
   });
   if (result.stopCondition) {
-    console.log(formatStopConditionLine(result.stopCondition));
+    log(formatStopConditionLine(result.stopCondition));
   }
-  console.log(
-    `sapwood run: stopped after ${result.rounds} round(s), ${result.ticks} tick(s), ` +
+  log(
+    `[sapwood:run] stopped after ${result.rounds} round(s), ${result.ticks} tick(s), ` +
       `${result.tickErrors} tick error(s) (${result.stoppedBy})`,
   );
   return roundsExitCode(result);

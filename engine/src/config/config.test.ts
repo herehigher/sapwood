@@ -47,6 +47,31 @@ test('engine.driver (#106): defaults to "rounds", overridable to "tick", rejects
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { driver: bogus }"), /driver/i);
 });
 
+test("logging: defaults, overrides, and strict unknown-key rejection", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.deepEqual(cfg.logging, { path: "data/logs/sapwood.log", teeToStderr: true, maxBytes: 10 * 1024 * 1024 });
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { path: logs/run.log, teeToStderr: false, maxBytes: 2048 }",
+  );
+  assert.deepEqual(over.logging, { path: "logs/run.log", teeToStderr: false, maxBytes: 2048 });
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { maxByte: 10 }"), /maxByte|[Uu]nrecognized/);
+});
+
+test("logging.path: loadConfig resolves both default and explicit relative paths against the config directory", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-config-logging-"));
+  try {
+    const defaultPath = join(dir, "default.yaml");
+    writeFileSync(defaultPath, "board: { owner: a, repo: r, projectNumber: 1 }\n");
+    assert.equal(loadConfig(defaultPath).logging.path, join(dir, "data", "logs", "sapwood.log"));
+
+    const customPath = join(dir, "custom.yaml");
+    writeFileSync(customPath, "board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { path: logs/custom.log }\n");
+    assert.equal(loadConfig(customPath).logging.path, join(dir, "logs", "custom.log"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("cost: #14 ceiling fields are finite-guarded and overridable", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\ncost: { dailyBudgetUsd: 5, maxWallClockSec: 60, drainWindowSec: 10 }",

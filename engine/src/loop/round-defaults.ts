@@ -35,6 +35,7 @@ export interface DefaultPeripheralsDeps {
    *  CLI" split every other role module's Deps uses. A real caller passes a real RoleRunner. */
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
+  log?: (message: string) => void;
 }
 
 /** #123 (supersedes the #104 pointer note): render the architect's `round.alignedGoals` context
@@ -150,6 +151,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     cfg: deps.cfg,
     runner: deps.runner,
     ...(deps.now !== undefined ? { now: deps.now } : {}),
+    ...(deps.log !== undefined ? { log: deps.log } : {}),
   };
 
   // A mutable box the architect stub reads at EVERY invocation (createArchitectStub captures
@@ -229,7 +231,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     .filter(([role]) => !deps.cfg.roles[role].enabled)
     .map(([, phase]) => phase);
   if (disabledPhases.length > 0) {
-    let line = `sapwood: peripheral role(s) disabled by config — these phases will no-op every round: ${disabledPhases.join(", ")}`;
+    let line = `[sapwood:round] peripheral role(s) disabled by config — these phases will no-op every round: ${disabledPhases.join(", ")}`;
     // #127 gate② F1: disabling gate⓪'s roles silently starves ALL dispatch — forge.ts's
     // dispatchability gate still (correctly, PLAN Decision #8) requires the planApproved label
     // (or verifyNa), and only the plan-reviewer applies planApproved; the PO is what triages
@@ -246,7 +248,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
       gateWarnings.push("with aligning off plan-less issues are never triaged into the gate⓪ pipeline");
     }
     if (gateWarnings.length > 0) line += `. WARNING: ${gateWarnings.join("; ")}.`;
-    console.log(line);
+    (deps.log ?? console.log)(line);
   }
 
   return peripherals;

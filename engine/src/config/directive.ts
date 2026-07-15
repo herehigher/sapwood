@@ -101,7 +101,12 @@ export function directiveArchivePath(directiveFile: string, roundId: number): st
  *  housekeeping). A state write failure while recording a REAL directive's FIRST application
  *  does throw: the event is the source of truth for it, so silently proceeding without recording
  *  one would let the same file re-apply, unrecorded, on a later round. */
-export function resolveRoundDirective(state: State, cfg: SapwoodConfig, roundId: number, opts: { consume: boolean }): string {
+export function resolveRoundDirective(
+  state: State,
+  cfg: SapwoodConfig,
+  roundId: number,
+  opts: { consume: boolean; log?: (message: string) => void },
+): string {
   const round = state.getRound(roundId);
   const startEventId = round?.start_event_id ?? 0;
   const priorApplications = state
@@ -148,7 +153,7 @@ export function resolveRoundDirective(state: State, cfg: SapwoodConfig, roundId:
       }
     }
   } catch (e) {
-    console.error(
+    (opts.log ?? console.error)(
       `[sapwood:directive] round ${roundId}: failed to archive ${directivePath} — ${String(e)} ` +
         `— the directive-applied event is still the durable source of truth, but the source ` +
         `file was left in place and MUST be moved/removed by a human before the next round, or ` +
