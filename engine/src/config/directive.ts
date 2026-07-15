@@ -50,12 +50,13 @@
 // Deliberately NOT threaded through round-defaults.ts (unlike #123's alignedGoals handoff) —
 // each phase already reads its own `deps.state`/`deps.cfg` directly, and the prior-event
 // read-back makes architect's second, independent call harmless in the common PO-enabled path.
-import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+
 import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { capDigest } from "../retro/retro-digest.js";
 import type { State } from "../state/state.js";
 import type { SapwoodConfig } from "./config.js";
-import { capDigest } from "../retro/retro-digest.js";
 
 /** Injected verbatim as `{{round.directive}}` when no directive file exists and this round has
  *  no prior `directive-applied` event either — an explicit statement, never a silent empty
@@ -71,7 +72,8 @@ export interface DirectiveAppliedPayload {
 
 function isDirectiveAppliedPayload(p: unknown): p is DirectiveAppliedPayload {
   return (
-    typeof p === "object" && p !== null &&
+    typeof p === "object" &&
+    p !== null &&
     typeof (p as Record<string, unknown>).round_id === "number" &&
     typeof (p as Record<string, unknown>).content === "string" &&
     typeof (p as Record<string, unknown>).path === "string" &&
@@ -99,12 +101,7 @@ export function directiveArchivePath(directiveFile: string, roundId: number): st
  *  housekeeping). A state write failure while recording a REAL directive's FIRST application
  *  does throw: the event is the source of truth for it, so silently proceeding without recording
  *  one would let the same file re-apply, unrecorded, on a later round. */
-export function resolveRoundDirective(
-  state: State,
-  cfg: SapwoodConfig,
-  roundId: number,
-  opts: { consume: boolean },
-): string {
+export function resolveRoundDirective(state: State, cfg: SapwoodConfig, roundId: number, opts: { consume: boolean }): string {
   const round = state.getRound(roundId);
   const startEventId = round?.start_event_id ?? 0;
   const priorApplications = state

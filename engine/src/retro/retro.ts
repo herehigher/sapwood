@@ -33,13 +33,13 @@
 // issues-only pair.
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { PeripheralStub } from "../loop/round.js";
-import type { IForge } from "../forge/forge.js";
-import type { State, RoundRow } from "../state/state.js";
 import type { SapwoodConfig } from "../config/config.js";
-import { runSessionWithRetry, type RoleRunner } from "../roles/peripheral.js";
-import { loadRolePromptTemplate } from "../roles/plan-review.js";
+import type { IForge } from "../forge/forge.js";
 import { renderFactsTemplate } from "../loop/harvest.js";
+import type { PeripheralStub } from "../loop/round.js";
+import { type RoleRunner, runSessionWithRetry } from "../roles/peripheral.js";
+import { loadRolePromptTemplate } from "../roles/plan-review.js";
+import type { RoundRow, State } from "../state/state.js";
 import { buildRetroDigest } from "./retro-digest.js";
 
 /** #91: retro's write scope — the FIRST role in this codebase whose job requires more than
@@ -287,15 +287,22 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
         runner: deps.runner,
         state: deps.state,
         session: {
-          roleId: "retro", prompt: rendered, model: role.model, effort: role.effort,
-          allowedTools: RETRO_ALLOWED_TOOLS, disallowedTools: RETRO_DISALLOWED_TOOLS,
+          roleId: "retro",
+          prompt: rendered,
+          model: role.model,
+          effort: role.effort,
+          allowedTools: RETRO_ALLOWED_TOOLS,
+          disallowedTools: RETRO_DISALLOWED_TOOLS,
           scratchFile: RETRO_SCRATCH_FILE,
         },
         issue: 0, // round-level spend, no single associated issue — same 0 sentinel as harvest.ts
         now: deps.now ?? (() => new Date()),
         degradeEvent: "retro-degraded",
         degradePayload: (result) => ({
-          round_id: roundId, outcome: result.outcome, session: result.name, attempts: 2,
+          round_id: roundId,
+          outcome: result.outcome,
+          session: result.name,
+          attempts: 2,
         }),
         degradeMessage: (result) =>
           `sapwood: ${retroDegradeReason(result)} for round ${roundId} — ` +
@@ -321,9 +328,7 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
 function retroDegradeReason(result: { outcome: string; scratchText?: string }): string {
   if (result.outcome !== "done") return `retro session failed twice (${result.outcome})`;
   const s = parseRetroScratch(result.scratchText);
-  return s.kind === "invalid"
-    ? `retro session produced an invalid PR scratch file twice (${s.reason})`
-    : "retro session ok"; // unreachable on the degrade path; keeps the reason total
+  return s.kind === "invalid" ? `retro session produced an invalid PR scratch file twice (${s.reason})` : "retro session ok"; // unreachable on the degrade path; keeps the reason total
 }
 
 /** #111 PR-B: verify-then-open, entirely engine-side. Every failure mode degrades VISIBLY and
@@ -348,15 +353,13 @@ function retroDegradeReason(result: { outcome: string; scratchText?: string }): 
  *  crash between openPR and marker persistence re-runs the whole phase; the rerun's own openPR
  *  for the same head branch fails at the forge ("a PR already exists") and lands in case 2's
  *  visible degrade — a noisy duplicate-attempt signal, never a duplicate PR. */
-async function openProposalPR(
-  deps: RetroDeps,
-  roundId: number,
-  p: { branch: string; title: string; body: string },
-): Promise<void> {
+async function openProposalPR(deps: RetroDeps, roundId: number, p: { branch: string; title: string; body: string }): Promise<void> {
   const degrade = (reason: string): void => {
     try {
       deps.state.appendEvent("retro-pr-degraded", { round_id: roundId, branch: p.branch, title: p.title, reason });
-    } catch { /* state write failed — the stderr line below still lands */ }
+    } catch {
+      /* state write failed — the stderr line below still lands */
+    }
     console.error(`sapwood: retro round ${roundId}: ${reason} — no PR opened; the retro phase still closes`);
   };
   let pushed: boolean;
@@ -377,7 +380,9 @@ async function openProposalPR(
     const pr = await deps.forge.openPR(p.branch, p.title, p.body);
     try {
       deps.state.appendEvent("retro-pr-opened", { round_id: roundId, pr, branch: p.branch });
-    } catch { /* the PR itself is the externalized artifact — a state hiccup never fails the phase */ }
+    } catch {
+      /* the PR itself is the externalized artifact — a state hiccup never fails the phase */
+    }
   } catch (e) {
     degrade(
       `openPR failed for verified-pushed branch "${p.branch}" (${String(e)}) — the pushed branch ` +

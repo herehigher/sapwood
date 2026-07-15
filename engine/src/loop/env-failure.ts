@@ -89,7 +89,7 @@ export function classifyEnvFailure(output: string, patterns: EnvFailurePatterns)
  *  CONSECUTIVE failed probes so far (0 for "never probed yet" -> base). Never negative/NaN for
  *  a sane base/max/attempts input. */
 export function probeBackoffSec(attempts: number, baseSec: number, maxSec: number): number {
-  const raw = baseSec * Math.pow(2, Math.max(0, attempts));
+  const raw = baseSec * 2 ** Math.max(0, attempts);
   return Math.min(raw, maxSec);
 }
 

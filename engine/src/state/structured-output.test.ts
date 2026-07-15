@@ -4,9 +4,7 @@
 // no body) is covered here so callers can trust "block found" actually means well-formed.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  parseStructuredBlock, RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END,
-} from "./structured-output.js";
+import { BODY_BLOCK_END, BODY_BLOCK_START, parseStructuredBlock, RESULT_BLOCK_END, RESULT_BLOCK_START } from "./structured-output.js";
 
 test("parseStructuredBlock: metadata only, no BODY block — body is undefined", () => {
   const text = `Some reasoning preamble.\n\n${RESULT_BLOCK_START}\n{"decision":"approve","issue":1}\n${RESULT_BLOCK_END}\n`;
@@ -111,9 +109,7 @@ test("containment P1: trailing prose after a metadata-ONLY block -> null (END_SA
 test("containment P1: trailing whitespace/newlines after the final sentinel still parse fine", () => {
   const metadataOnly = `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n\n  \n`;
   assert.ok(parseStructuredBlock(metadataOnly));
-  const withBody =
-    `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n` +
-    `${BODY_BLOCK_START}\nthe body\n${BODY_BLOCK_END}\n\n\t\n`;
+  const withBody = `${RESULT_BLOCK_START}\n{"issue":1}\n${RESULT_BLOCK_END}\n` + `${BODY_BLOCK_START}\nthe body\n${BODY_BLOCK_END}\n\n\t\n`;
   const block = parseStructuredBlock(withBody);
   assert.ok(block);
   assert.equal(block!.body, "the body");

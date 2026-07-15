@@ -172,9 +172,7 @@ function interpreterEvalFlags(name: string): Set<string> | undefined {
 // uv run value-consuming flags (skip flag + value). NOTE: --all-extras is a *boolean* and
 // must NOT be here, else the command after it is mistaken for its value. The allowlist is
 // best-effort; the gh/write scans are position-independent so an unknown flag can't bypass.
-const UV_FLAGS_WITH_VALUE = new Set([
-  "--directory", "--project", "--python", "--extra", "--package", "-p",
-]);
+const UV_FLAGS_WITH_VALUE = new Set(["--directory", "--project", "--python", "--extra", "--package", "-p"]);
 
 function skipWrapperFlags(tokens: string[]): string[] {
   let i = 0;
@@ -202,7 +200,7 @@ const ENV_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir"]);
 
 function stripExecPrefix(tokensIn: string[], depth = 0): string[] {
   if (depth > 8) return tokensIn; // recursion bound (nested wrappers)
-  let tokens = stripLeadingAssignments(tokensIn);
+  const tokens = stripLeadingAssignments(tokensIn);
   if (tokens.length === 0) return tokens;
   const first = tokens[0]!.toLowerCase();
 
@@ -282,8 +280,17 @@ const FIELD_FLAGS = new Set(["-f", "--field", "-F", "--raw-field"]);
 // gh api flags that consume the NEXT token as their value — must be skipped so the value
 // isn't mistaken for the endpoint (e.g. `gh api --hostname HOST graphql ...`).
 const GH_API_VALUE_FLAGS = new Set([
-  "--hostname", "-H", "--header", "--input", "--cache", "--jq", "-q", "--template", "-t",
-  "-p", "--preview",
+  "--hostname",
+  "-H",
+  "--header",
+  "--input",
+  "--cache",
+  "--jq",
+  "-q",
+  "--template",
+  "-t",
+  "-p",
+  "--preview",
 ]);
 
 function ghSkipGlobalFlags(tokens: string[]): string[] {
@@ -292,8 +299,14 @@ function ghSkipGlobalFlags(tokens: string[]): string[] {
   while (i < tokens.length) {
     const tok = tokens[i]!;
     if (!tok.startsWith("-")) break;
-    if (tok.includes("=")) { i += 1; continue; }
-    if (withValue.has(tok)) { i += 2; continue; }
+    if (tok.includes("=")) {
+      i += 1;
+      continue;
+    }
+    if (withValue.has(tok)) {
+      i += 2;
+      continue;
+    }
     i += 1;
   }
   return tokens.slice(i);
@@ -307,10 +320,26 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
   let i = 2;
   while (i < tokens.length) {
     const tok = tokens[i]!;
-    if ((tok === "-X" || tok === "--method") && i + 1 < tokens.length) { method = tokens[i + 1]!.toUpperCase(); i += 2; continue; }
-    if (tok.startsWith("--method=") || tok.startsWith("-X=")) { method = tok.split("=", 2)[1]!.toUpperCase(); i += 1; continue; }
-    if (tok.startsWith("-X") && tok.length > 2 && tok[2] !== "=") { method = tok.slice(2).toUpperCase(); i += 1; continue; }
-    if (tok === "--input" || tok.startsWith("--input=")) { hasInput = true; i += tok === "--input" ? 2 : 1; continue; }
+    if ((tok === "-X" || tok === "--method") && i + 1 < tokens.length) {
+      method = tokens[i + 1]!.toUpperCase();
+      i += 2;
+      continue;
+    }
+    if (tok.startsWith("--method=") || tok.startsWith("-X=")) {
+      method = tok.split("=", 2)[1]!.toUpperCase();
+      i += 1;
+      continue;
+    }
+    if (tok.startsWith("-X") && tok.length > 2 && tok[2] !== "=") {
+      method = tok.slice(2).toUpperCase();
+      i += 1;
+      continue;
+    }
+    if (tok === "--input" || tok.startsWith("--input=")) {
+      hasInput = true;
+      i += tok === "--input" ? 2 : 1;
+      continue;
+    }
     if (FIELD_FLAGS.has(tok)) {
       hasField = true;
       i += 1;
@@ -318,10 +347,16 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
       continue;
     }
     for (const ff of FIELD_FLAGS) {
-      if (tok.startsWith(ff + "=") || (ff.length === 2 && tok.startsWith(ff) && tok.length > ff.length)) { hasField = true; break; }
+      if (tok.startsWith(ff + "=") || (ff.length === 2 && tok.startsWith(ff) && tok.length > ff.length)) {
+        hasField = true;
+        break;
+      }
     }
     // value-taking flag (e.g. --hostname HOST): skip flag + value so HOST isn't the endpoint
-    if (GH_API_VALUE_FLAGS.has(tok)) { i += 2; continue; }
+    if (GH_API_VALUE_FLAGS.has(tok)) {
+      i += 2;
+      continue;
+    }
     if (!tok.startsWith("-") && pathToken === null) pathToken = tok;
     i++;
   }
@@ -333,12 +368,21 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
     while (j < tokens.length) {
       const t = tokens[j]!;
       if (FIELD_FLAGS.has(t)) {
-        if (j + 1 < tokens.length) { fieldValues.push(tokens[j + 1]!); j += 2; } else j += 1;
+        if (j + 1 < tokens.length) {
+          fieldValues.push(tokens[j + 1]!);
+          j += 2;
+        } else j += 1;
         continue;
       }
       for (const ff of FIELD_FLAGS) {
-        if (t.startsWith(ff + "=")) { fieldValues.push(t.split("=", 2)[1]!); break; }
-        if (ff.length === 2 && t.startsWith(ff) && t.length > ff.length) { fieldValues.push(t.slice(ff.length)); break; }
+        if (t.startsWith(ff + "=")) {
+          fieldValues.push(t.split("=", 2)[1]!);
+          break;
+        }
+        if (ff.length === 2 && t.startsWith(ff) && t.length > ff.length) {
+          fieldValues.push(t.slice(ff.length));
+          break;
+        }
       }
       j++;
     }
@@ -355,7 +399,9 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
   if (!method || !MUTATING_METHODS.has(method)) return null;
   if (method === "DELETE" && pathToken && ALLOWED_DELETE_PATH_RE.test(pathToken)) return null;
   if (pathToken && SENSITIVE_PATH_RE.test(pathToken)) {
-    return pathToken.toLowerCase().includes("/releases") ? `BLOCK [gh] api mutates releases: ${pathToken}` : `BLOCK [gh] api mutates PR merge: ${pathToken}`;
+    return pathToken.toLowerCase().includes("/releases")
+      ? `BLOCK [gh] api mutates releases: ${pathToken}`
+      : `BLOCK [gh] api mutates PR merge: ${pathToken}`;
   }
   for (const m of fragment.matchAll(new RegExp(SENSITIVE_PATH_RE, "gi"))) {
     return m[0]!.toLowerCase().includes("/releases") ? "BLOCK [gh] api mutates releases" : "BLOCK [gh] api mutates PR merge";
@@ -559,12 +605,19 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
   const hitFor = (t: string): string | null => protectedPathLabel(normalizePath(t, cwd));
   const nonFlag = args.filter((a) => !a.startsWith("-"));
   const blockAny = (verb: string): string | null => {
-    for (const a of nonFlag) { const h = hitFor(a); if (h) return `BLOCK [write-path] ${verb} ${h} is human-merge-only`; }
+    for (const a of nonFlag) {
+      const h = hitFor(a);
+      if (h) return `BLOCK [write-path] ${verb} ${h} is human-merge-only`;
+    }
     return null;
   };
 
   if (cmd === "dd") {
-    for (const a of args) if (a.startsWith("of=")) { const h = hitFor(a.slice(3)); if (h) return `BLOCK [write-path] dd writes ${h} is human-merge-only`; }
+    for (const a of args)
+      if (a.startsWith("of=")) {
+        const h = hitFor(a.slice(3));
+        if (h) return `BLOCK [write-path] dd writes ${h} is human-merge-only`;
+      }
     return null;
   }
   if (cmd === "sed" || cmd === "perl") {
@@ -582,7 +635,10 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
   if (cmd === "git") {
     const sub = nonFlag[0]?.toLowerCase();
     if (sub === "rm" || sub === "mv" || sub === "restore" || sub === "checkout") {
-      for (const a of nonFlag.slice(1)) { const h = hitFor(a); if (h) return `BLOCK [write-path] git ${sub} ${h} is human-merge-only`; }
+      for (const a of nonFlag.slice(1)) {
+        const h = hitFor(a);
+        if (h) return `BLOCK [write-path] git ${sub} ${h} is human-merge-only`;
+      }
     }
     return null;
   }
@@ -596,7 +652,10 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
       else if (a.startsWith("-t") && a.length > 2) dest = a.slice(2);
     }
     if (dest === undefined) dest = nonFlag[nonFlag.length - 1];
-    if (dest) { const h = hitFor(dest); if (h) return `BLOCK [write-path] ${cmd} writes ${h} is human-merge-only`; }
+    if (dest) {
+      const h = hitFor(dest);
+      if (h) return `BLOCK [write-path] ${cmd} writes ${h} is human-merge-only`;
+    }
     return null;
   }
   // tee: every non-flag arg is a write target
@@ -640,10 +699,17 @@ function checkBashWritePath(tokens: string[], cwd: string): string | null {
     const tok = tokens[i]!;
     if (REDIR_OP_RE.test(tok)) {
       const target = tokens[i + 1];
-      if (target) { const h = hitFor(target); if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`; }
+      if (target) {
+        const h = hitFor(target);
+        if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`;
+      }
     } else if (tok.includes(">")) {
       const m = REDIR_GLUED_RE.exec(tok);
-      if (m && m[1]) { const h = hitFor(m[1]); if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`; }
+      // biome-ignore lint/complexity/useOptionalChain: explicit regex match guard preserves the narrowed capture.
+      if (m && m[1]) {
+        const h = hitFor(m[1]);
+        if (h) return `BLOCK [write-path] shell redirect to ${h} is human-merge-only`;
+      }
     }
   }
 

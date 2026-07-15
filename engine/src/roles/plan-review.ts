@@ -26,15 +26,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { PeripheralStub } from "../loop/round.js";
+import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
+import type { PeripheralStub } from "../loop/round.js";
 import type { State } from "../state/state.js";
-import type { SapwoodConfig } from "../config/config.js";
-import {
-  RoleRunner, PLAN_DRAFTER_DISALLOWED_TOOLS, runSessionWithRetry, type RoleSessionResult,
-} from "./peripheral.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
+import { PLAN_DRAFTER_DISALLOWED_TOOLS, type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
 
 export interface PlanReviewDeps {
   forge: IForge;
@@ -107,12 +105,7 @@ function configVars(cfg: SapwoodConfig): Record<string, string> {
  *  Wider var set than worker.ts's renderPromptTemplate (issue + config + role-specific `extra`
  *  vars, e.g. the plan-drafter's `{{reviewer.brief}}`), so implemented locally rather than
  *  reusing that function's fixed issue-only var map. */
-export function renderRolePrompt(
-  template: string,
-  issue: Issue,
-  cfg: SapwoodConfig,
-  extra: Record<string, string> = {},
-): string {
+export function renderRolePrompt(template: string, issue: Issue, cfg: SapwoodConfig, extra: Record<string, string> = {}): string {
   const cvars = configVars(cfg);
   return template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => {
     const name = raw.trim();
@@ -135,14 +128,18 @@ export function renderRolePrompt(
 // check is treated exactly like a schema-invalid one: an invalid attempt for runSessionWithRetry
 // purposes (retry once, then degrade), never silently honored and never silently dropped.
 
-const PlanReviewerMetadataSchema = z.object({
-  decision: z.enum(["approve", "draft_request", "verify_na"]),
-  issue: z.number().int().positive(),
-}).strict();
+const PlanReviewerMetadataSchema = z
+  .object({
+    decision: z.enum(["approve", "draft_request", "verify_na"]),
+    issue: z.number().int().positive(),
+  })
+  .strict();
 
-const PlanDrafterMetadataSchema = z.object({
-  issue: z.number().int().positive(),
-}).strict();
+const PlanDrafterMetadataSchema = z
+  .object({
+    issue: z.number().int().positive(),
+  })
+  .strict();
 
 export interface ReviewerDecision {
   decision: "approve" | "draft_request" | "verify_na";
@@ -161,11 +158,7 @@ export type ReviewerValidation = { ok: true; decision: ReviewerDecision } | { ok
  *  own prompt) — the content-invariant check for an "approve" with no body revision runs
  *  against it, since in that case the reviewer's approval is a claim about the body AS IT
  *  ALREADY STANDS. */
-export function validateReviewerOutput(
-  text: string,
-  expectedIssue: number,
-  currentBody: string,
-): ReviewerValidation {
+export function validateReviewerOutput(text: string, expectedIssue: number, currentBody: string): ReviewerValidation {
   const block = parseStructuredBlock(text);
   if (!block) return { ok: false, reason: "no structured output block found (missing or truncated sentinel)" };
   let metadata: unknown;
@@ -311,7 +304,9 @@ async function reviewOneIssue(
     // other appendEvent call site in this codebase.
     try {
       deps.state.appendEvent("plan-review-escalated", { round_id: roundId, issue: issue.number, reason });
-    } catch { /* state write failed — the forge label/comment above already externalized it */ }
+    } catch {
+      /* state write failed — the forge label/comment above already externalized it */
+    }
   };
 
   for (let cycle = 0; cycle <= maxCycles; cycle++) {
@@ -330,7 +325,8 @@ async function reviewOneIssue(
       now,
       degradeEvent: "plan-review-escalated",
       degradePayload: (result) => ({
-        round_id: roundId, issue: issue.number,
+        round_id: roundId,
+        issue: issue.number,
         reason: reviewerDegradeReason(result, issue.number, currentBody),
       }),
       degradeMessage: (result) =>
@@ -339,9 +335,10 @@ async function reviewOneIssue(
       isValid: (result) => validateReviewerOutput(result.resultText ?? "", issue.number, currentBody).ok,
     });
 
-    const validated: ReviewerValidation = reviewResult.outcome === "done"
-      ? validateReviewerOutput(reviewResult.resultText ?? "", issue.number, currentBody)
-      : { ok: false, reason: `reviewer session failed twice (${reviewResult.outcome})` };
+    const validated: ReviewerValidation =
+      reviewResult.outcome === "done"
+        ? validateReviewerOutput(reviewResult.resultText ?? "", issue.number, currentBody)
+        : { ok: false, reason: `reviewer session failed twice (${reviewResult.outcome})` };
 
     if (!validated.ok) {
       trail.push(`cycle ${cycle}: plan-reviewer session ${reviewResult.name} -> ${validated.reason}`);
@@ -390,7 +387,10 @@ async function reviewOneIssue(
       runner: deps.runner,
       state: deps.state,
       session: {
-        roleId: "plan-drafter", prompt: drafterPrompt, model: drafterRole.model, effort: drafterRole.effort,
+        roleId: "plan-drafter",
+        prompt: drafterPrompt,
+        model: drafterRole.model,
+        effort: drafterRole.effort,
         // Best-effort pattern layer only (peripheral.ts doc) — the authoritative enforcement of
         // "the drafter never applies a label" is now structural (see the function doc above),
         // not this deny-list. Left in place: PR1 changes the write mechanism, not the grants.
@@ -400,18 +400,19 @@ async function reviewOneIssue(
       now,
       degradeEvent: "plan-review-escalated",
       degradePayload: (result) => ({
-        round_id: roundId, issue: issue.number,
+        round_id: roundId,
+        issue: issue.number,
         reason: drafterDegradeReason(result, issue.number),
       }),
       degradeMessage: (result) =>
-        `[sapwood:plan-review] round ${roundId} issue #${issue.number} cycle ${cycle}: ` +
-        `${drafterDegradeReason(result, issue.number)}`,
+        `[sapwood:plan-review] round ${roundId} issue #${issue.number} cycle ${cycle}: ` + `${drafterDegradeReason(result, issue.number)}`,
       isValid: (result) => validateDrafterOutput(result.resultText ?? "", issue.number).ok,
     });
 
-    const draftValidated: DrafterValidation = drafterResult.outcome === "done"
-      ? validateDrafterOutput(drafterResult.resultText ?? "", issue.number)
-      : { ok: false, reason: `plan-drafter session failed twice (${drafterResult.outcome})` };
+    const draftValidated: DrafterValidation =
+      drafterResult.outcome === "done"
+        ? validateDrafterOutput(drafterResult.resultText ?? "", issue.number)
+        : { ok: false, reason: `plan-drafter session failed twice (${drafterResult.outcome})` };
 
     if (!draftValidated.ok) {
       trail.push(`cycle ${cycle}: plan-drafter session ${drafterResult.name} -> ${draftValidated.reason}`);
@@ -435,14 +436,8 @@ export function createPlanReviewStub(deps: PlanReviewDeps): PeripheralStub {
       if (marker != null) return { marker }; // already externalized this round — no duplicate work
       const candidates = await deps.forge.getIssuesNeedingPlanReview();
       if (candidates.length > 0) {
-        const reviewerTemplate = loadRolePromptTemplate(
-          deps.cfg.roles.planReviewer.promptFile,
-          defaultPlanReviewerPromptPath(),
-        );
-        const drafterTemplate = loadRolePromptTemplate(
-          deps.cfg.roles.planDrafter.promptFile,
-          defaultPlanDrafterPromptPath(),
-        );
+        const reviewerTemplate = loadRolePromptTemplate(deps.cfg.roles.planReviewer.promptFile, defaultPlanReviewerPromptPath());
+        const drafterTemplate = loadRolePromptTemplate(deps.cfg.roles.planDrafter.promptFile, defaultPlanDrafterPromptPath());
         for (const issue of candidates) {
           await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId);
         }

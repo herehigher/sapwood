@@ -12,24 +12,28 @@
 // to simulate a direct `gh issue comment/edit` side effect. The engine reads `resultText`,
 // validates it (including the candidate-set check), and performs every forge write itself.
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import { NO_DOCTRINE } from "../config/doctrine.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { State } from "../state/state.js";
+import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import {
-  createArchitectStub, architectMarker, defaultArchitectPromptPath, extractArchitectureChapter,
-  loadArchitectureChapter, renderArchitectPrompt, validateArchitectOutput, type ArchitectDeps,
+  type ArchitectDeps,
+  architectMarker,
+  createArchitectStub,
+  defaultArchitectPromptPath,
+  extractArchitectureChapter,
+  loadArchitectureChapter,
+  renderArchitectPrompt,
+  validateArchitectOutput,
 } from "./architect.js";
 import { ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
-import { NO_DOCTRINE } from "../config/doctrine.js";
-import {
-  RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END,
-} from "../state/structured-output.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
-import { State } from "../state/state.js";
-import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 
 class FakeForge implements IForge {
   planReviewCandidates: Issue[] = [];
@@ -38,8 +42,12 @@ class FakeForge implements IForge {
   labelsAdded: Array<[number, string]> = [];
   issueCommentsPosted: Array<[number, string]> = [];
 
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(n: number, l: string): Promise<void> {
@@ -47,28 +55,61 @@ class FakeForge implements IForge {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
+  async getPRStatus(n: number): Promise<PRStatus> {
+    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
-  async addIssueComment(n: number, body: string): Promise<void> { this.issueCommentsPosted.push([n, body]); }
-  async getIssueBody(): Promise<string> { return ""; }
+  async addIssueComment(n: number, body: string): Promise<void> {
+    this.issueCommentsPosted.push([n, body]);
+  }
+  async getIssueBody(): Promise<string> {
+    return "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return this.planReviewCandidates; }
-  async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
-  async getIssueComments(issue: number) { return this.issueComments[issue] ?? []; }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return this.planReviewCandidates;
+  }
+  async getIssueLabels(issue: number): Promise<string[]> {
+    return this.issueLabels[issue] ?? [];
+  }
+  async getIssueComments(issue: number) {
+    return this.issueComments[issue] ?? [];
+  }
 }
 
 /** A scripted fake of RoleRunner.run — each call consumes the next scripted result (or the last
@@ -96,19 +137,27 @@ const architectResult = (
   contradictions: Array<{ issue: number; severe: boolean; explanation: string }> = [],
 ): string => {
   const metadata = { contradictions: contradictions.map(({ issue, severe }) => ({ issue, severe })) };
-  const bodyParts = [
-    designNote,
-    ...contradictions.map((c) => `<<<CONTRADICTION #${c.issue}>>>\n${c.explanation}`),
-  ];
-  return `${RESULT_BLOCK_START}\n${JSON.stringify(metadata)}\n${RESULT_BLOCK_END}\n` +
-    `${BODY_BLOCK_START}\n${bodyParts.join("\n")}\n${BODY_BLOCK_END}`;
+  const bodyParts = [designNote, ...contradictions.map((c) => `<<<CONTRADICTION #${c.issue}>>>\n${c.explanation}`)];
+  return (
+    `${RESULT_BLOCK_START}\n${JSON.stringify(metadata)}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\n${bodyParts.join("\n")}\n${BODY_BLOCK_END}`
+  );
 };
 
 const doneResult = (name: string, resultText = ""): RoleSessionResult => ({
-  outcome: "done", costUsd: 0.02, modelUsage: [], exitCode: 0, name, resultText,
+  outcome: "done",
+  costUsd: 0.02,
+  modelUsage: [],
+  exitCode: 0,
+  name,
+  resultText,
 });
 const failedResult = (name: string): RoleSessionResult => ({
-  outcome: "failed", costUsd: 0.02, modelUsage: [], exitCode: 1, name,
+  outcome: "failed",
+  costUsd: 0.02,
+  modelUsage: [],
+  exitCode: 1,
+  name,
 });
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -195,10 +244,7 @@ test("createArchitectStub P2: a failed session is retried once; a successful ret
 test("createArchitectStub P2: two failed sessions -> marker STILL set (advisory phase never wedges the round), exactly two sessions, degradation durably visible via appendEvent", async () => {
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 61, title: "t", labels: [] }];
-  const runner = new ScriptedRunner([
-    { result: failedResult("architect-0") },
-    { result: failedResult("architect-0-retry") },
-  ]);
+  const runner = new ScriptedRunner([{ result: failedResult("architect-0") }, { result: failedResult("architect-0-retry") }]);
   const state = new State(":memory:");
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
@@ -237,7 +283,10 @@ test("createArchitectStub #110: no structured output block at all, TWICE -> degr
   const state = new State(":memory:");
   const logged: Array<[string, unknown]> = [];
   const realAppend = state.appendEvent.bind(state);
-  state.appendEvent = (kind: string, payload: unknown) => { logged.push([kind, payload]); realAppend(kind, payload); };
+  state.appendEvent = (kind: string, payload: unknown) => {
+    logged.push([kind, payload]);
+    realAppend(kind, payload);
+  };
   const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   const { marker } = await stub.run({ roundId: 11, phase: "architecting", marker: null });
@@ -255,12 +304,10 @@ test("createArchitectStub #110: no structured output block at all, TWICE -> degr
 test("createArchitectStub #110: metadata declares a contradiction with no matching BODY section, TWICE -> invalid, never applied", async () => {
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 71, title: "t", labels: [] }];
-  const badText = `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":71,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
+  const badText =
+    `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":71,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nJust a design note, no contradiction marker at all.\n${BODY_BLOCK_END}`;
-  const runner = new ScriptedRunner([
-    { result: doneResult("architect-0", badText) },
-    { result: doneResult("architect-0-retry", badText) },
-  ]);
+  const runner = new ScriptedRunner([{ result: doneResult("architect-0", badText) }, { result: doneResult("architect-0-retry", badText) }]);
   const state = new State(":memory:");
   const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
@@ -273,12 +320,10 @@ test("createArchitectStub #110: metadata declares a contradiction with no matchi
 test("createArchitectStub #110: an empty design note (BODY is only contradiction markers), TWICE -> invalid, never applied", async () => {
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 72, title: "t", labels: [] }];
-  const badText = `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":72,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
+  const badText =
+    `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":72,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\n<<<CONTRADICTION #72>>>\nexplanation text\n${BODY_BLOCK_END}`;
-  const runner = new ScriptedRunner([
-    { result: doneResult("architect-0", badText) },
-    { result: doneResult("architect-0-retry", badText) },
-  ]);
+  const runner = new ScriptedRunner([{ result: doneResult("architect-0", badText) }, { result: doneResult("architect-0-retry", badText) }]);
   const state = new State(":memory:");
   const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
@@ -520,7 +565,10 @@ test("createArchitectStub: cfg.roles.architect.promptFile override is actually l
   const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-"));
   try {
     const customPath = join(dir, "custom-architect.md");
-    writeFileSync(customPath, "CUSTOM PROMPT round={{round.id}} anchor={{round.designNoteIssue}} note={{round.marker}} goals={{round.alignedGoals}} chapter={{plan.architectureChapter}} candidates={{candidates.summary}} blocked={{labels.blocked}}");
+    writeFileSync(
+      customPath,
+      "CUSTOM PROMPT round={{round.id}} anchor={{round.designNoteIssue}} note={{round.marker}} goals={{round.alignedGoals}} chapter={{plan.architectureChapter}} candidates={{candidates.summary}} blocked={{labels.blocked}}",
+    );
     const forge = new FakeForge();
     forge.planReviewCandidates = [{ number: 7, title: "t", labels: [] }];
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
@@ -642,7 +690,11 @@ test("createArchitectStub: an explicitly supplied alignedGoals string reaches th
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
   const deps: ArchitectDeps = {
-    forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md",
+    forge,
+    state,
+    cfg: mkCfg(),
+    runner,
+    planMdPath: "/nonexistent/PLAN.md",
     alignedGoals: "Focus this round on the dashboard API contract.",
   };
   const stub = createArchitectStub(deps);
@@ -667,7 +719,11 @@ test("createArchitectStub (#132): an explicitly supplied lastMerged string reach
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
   const deps: ArchitectDeps = {
-    forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md",
+    forge,
+    state,
+    cfg: mkCfg(),
+    runner,
+    planMdPath: "/nonexistent/PLAN.md",
     lastMerged: "Merged outcomes from round 5: issue #21 merged via PR #55 (worker: lane-21).",
   };
   const stub = createArchitectStub(deps);
@@ -694,7 +750,11 @@ test("createArchitectStub (#167): an explicitly supplied doctrine string reaches
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
   const deps: ArchitectDeps = {
-    forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md",
+    forge,
+    state,
+    cfg: mkCfg(),
+    runner,
+    planMdPath: "/nonexistent/PLAN.md",
     doctrine: "the disabled-consumer rule: gate a probe on whether its consumer is enabled.",
   };
   const stub = createArchitectStub(deps);
@@ -716,7 +776,8 @@ test("validateArchitectOutput: metadata is not valid JSON -> invalid", () => {
 });
 
 test("validateArchitectOutput: a smuggled extra field is rejected outright (.strict() schema)", () => {
-  const text = `${RESULT_BLOCK_START}\n{"contradictions":[],"decision":"approve"}\n${RESULT_BLOCK_END}\n` +
+  const text =
+    `${RESULT_BLOCK_START}\n{"contradictions":[],"decision":"approve"}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nnote\n${BODY_BLOCK_END}`;
   const result = validateArchitectOutput(text, new Set([1]));
   assert.equal(result.ok, false);
@@ -739,9 +800,7 @@ test("validateArchitectOutput: a valid no-contradictions output parses cleanly",
 });
 
 test("validateArchitectOutput: a valid contradiction output round-trips issue/severe/explanation", () => {
-  const text = architectResult("Design note.", [
-    { issue: 5, severe: true, explanation: "Breaks producer!=merger." },
-  ]);
+  const text = architectResult("Design note.", [{ issue: 5, severe: true, explanation: "Breaks producer!=merger." }]);
   const result = validateArchitectOutput(text, new Set([5, 6]));
   assert.equal(result.ok, true);
   if (result.ok) {
@@ -750,7 +809,8 @@ test("validateArchitectOutput: a valid contradiction output round-trips issue/se
 });
 
 test("validateArchitectOutput: duplicate CONTRADICTION markers for the same issue -> invalid (ambiguous)", () => {
-  const text = `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":5,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
+  const text =
+    `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":5,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nnote\n<<<CONTRADICTION #5>>>\nfirst\n<<<CONTRADICTION #5>>>\nsecond\n${BODY_BLOCK_END}`;
   const result = validateArchitectOutput(text, new Set([5]));
   assert.equal(result.ok, false);
@@ -763,7 +823,8 @@ test("validateArchitectOutput Codex P1: duplicate metadata entries for the same 
   // check this would fail OPEN: schema-valid, set-match-valid, candidate-set-valid — and the
   // write loop would then post #21's comment twice and apply `blocked` off whichever entry's
   // `severe` it hit. The duplication itself must be rejected.
-  const text = `${RESULT_BLOCK_START}\n` +
+  const text =
+    `${RESULT_BLOCK_START}\n` +
     `{"contradictions":[{"issue":21,"severe":false},{"issue":21,"severe":true}]}\n` +
     `${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nnote\n<<<CONTRADICTION #21>>>\nexplanation\n${BODY_BLOCK_END}`;
@@ -777,7 +838,8 @@ test("validateArchitectOutput Codex P2: an explanation embedding an own-line CON
   // it as a real marker, so #5's explanation is silently truncated there and its tail would be
   // mis-associated with #6. With #6's REAL section also present, the embedded marker surfaces
   // as a duplicate #6 marker — fail closed, the whole output is invalid.
-  const text = `${RESULT_BLOCK_START}\n` +
+  const text =
+    `${RESULT_BLOCK_START}\n` +
     `{"contradictions":[{"issue":5,"severe":false},{"issue":6,"severe":false}]}\n` +
     `${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nnote\n` +

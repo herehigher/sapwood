@@ -17,10 +17,11 @@
 // no reference to a MergeDriver, no `--add-dir` into the engine's data, and its `claude -p` is
 // launched with `gh pr merge`/`gh pr ready` in --disallowedTools (worker.ts claudeArgs) as
 // defense-in-depth on top of the guard hook's fail-closed Category-C block (guard.ts).
-import type { IForge, PRStatus, PRReviewData } from "../forge/forge.js";
+
 import type { SapwoodConfig } from "../config/config.js";
-import type { Reviewer, ReviewAction, ReviewTriggerPin, ReviewFallbackLock, ReviewFailoverTransition } from "./reviewer.js";
-import { resolveReviewVerdict, changesRequestedOnHead, NO_FALLBACK_LOCK } from "./reviewer.js";
+import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
+import type { ReviewAction, Reviewer, ReviewFailoverTransition, ReviewFallbackLock, ReviewTriggerPin } from "./reviewer.js";
+import { changesRequestedOnHead, NO_FALLBACK_LOCK, resolveReviewVerdict } from "./reviewer.js";
 
 export type Gate = "MERGE" | "WAIT" | "HUMAN";
 

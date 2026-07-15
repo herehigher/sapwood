@@ -11,23 +11,27 @@
 // direct `gh issue comment/edit` side effect. The engine reads `resultText`, validates it, and
 // performs every forge write itself — exactly what reviewOneIssue is being tested for here.
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createPlanReviewStub, planReviewMarker, renderRolePrompt, loadRolePromptTemplate,
-  defaultPlanReviewerPromptPath, defaultPlanDrafterPromptPath, validateReviewerOutput,
-  validateDrafterOutput, type PlanReviewDeps,
-} from "./plan-review.js";
-import { PLAN_DRAFTER_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
-import {
-  RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END,
-} from "../state/structured-output.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
+import { test } from "node:test";
+import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 import { State } from "../state/state.js";
-import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import { PLAN_DRAFTER_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
+import {
+  createPlanReviewStub,
+  defaultPlanDrafterPromptPath,
+  defaultPlanReviewerPromptPath,
+  loadRolePromptTemplate,
+  type PlanReviewDeps,
+  planReviewMarker,
+  renderRolePrompt,
+  validateDrafterOutput,
+  validateReviewerOutput,
+} from "./plan-review.js";
 
 class FakeForge implements IForge {
   planReviewCandidates: Issue[] = [];
@@ -40,8 +44,12 @@ class FakeForge implements IForge {
   issueCommentsPosted: Array<[number, string]> = [];
   getIssueCommentsCallCount = 0;
 
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(n: number, l: string): Promise<void> {
@@ -49,12 +57,20 @@ class FakeForge implements IForge {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
+  async getPRStatus(n: number): Promise<PRStatus> {
+    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
-  async addIssueComment(n: number, body: string): Promise<void> { this.issueCommentsPosted.push([n, body]); }
-  async getIssueBody(issue: number): Promise<string> { return this.issueBodies[issue] ?? ""; }
+  async addIssueComment(n: number, body: string): Promise<void> {
+    this.issueCommentsPosted.push([n, body]);
+  }
+  async getIssueBody(issue: number): Promise<string> {
+    return this.issueBodies[issue] ?? "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
   async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
@@ -62,21 +78,51 @@ class FakeForge implements IForge {
   }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return this.planReviewCandidates; }
-  async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
-  async getIssueComments(issue: number) { this.getIssueCommentsCallCount++; return this.issueComments[issue] ?? []; }
-  async createIssue(): Promise<number> { return 0; }
-  async listOpenIssueNumbers(): Promise<number[]> { return []; }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return this.planReviewCandidates;
+  }
+  async getIssueLabels(issue: number): Promise<string[]> {
+    return this.issueLabels[issue] ?? [];
+  }
+  async getIssueComments(issue: number) {
+    this.getIssueCommentsCallCount++;
+    return this.issueComments[issue] ?? [];
+  }
+  async createIssue(): Promise<number> {
+    return 0;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return [];
+  }
 }
 
 /** A scripted fake of RoleRunner.run — each call consumes the next scripted result (or the
@@ -86,9 +132,7 @@ class FakeForge implements IForge {
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
   private n = 0;
-  constructor(
-    private readonly script: Array<{ result: RoleSessionResult; effect?: (opts: RoleSessionOpts) => void }>,
-  ) {}
+  constructor(private readonly script: Array<{ result: RoleSessionResult; effect?: (opts: RoleSessionOpts) => void }>) {}
   async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
     this.calls.push(opts);
     const step = this.script[Math.min(this.n, this.script.length - 1)]!;
@@ -107,10 +151,19 @@ const sapwoodResult = (metadata: Record<string, unknown>, body?: string): string
 };
 
 const doneResult = (name: string, resultText = ""): RoleSessionResult => ({
-  outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name, resultText,
+  outcome: "done",
+  costUsd: 0.01,
+  modelUsage: [],
+  exitCode: 0,
+  name,
+  resultText,
 });
 const failedResult = (name: string): RoleSessionResult => ({
-  outcome: "failed", costUsd: 0.01, modelUsage: [], exitCode: 1, name,
+  outcome: "failed",
+  costUsd: 0.01,
+  modelUsage: [],
+  exitCode: 1,
+  name,
 });
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -159,9 +212,7 @@ test("createPlanReviewStub: outcome 1 (approve, no body revision) — engine app
   forge.planReviewCandidates = [{ number: 10, title: "t", labels: [] }];
   forge.issueBodies[10] = PLAN_BODY; // the CURRENT body already carries a plan
   const cfg = mkCfg();
-  const runner = new ScriptedRunner([
-    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 10 })) },
-  ]);
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 10 })) }]);
   const state = new State(":memory:");
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
@@ -180,9 +231,7 @@ test("createPlanReviewStub: outcome 1 (approve WITH a body revision) — the rev
   forge.planReviewCandidates = [{ number: 50, title: "t", labels: [] }];
   forge.issueBodies[50] = NO_PLAN_BODY; // current body has no plan — the REVISION supplies one
   const cfg = mkCfg();
-  const runner = new ScriptedRunner([
-    { result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 50 }, PLAN_BODY)) },
-  ]);
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 50 }, PLAN_BODY)) }]);
   const state = new State(":memory:");
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
@@ -198,7 +247,12 @@ test("createPlanReviewStub: outcome 3 (propose verify:n/a) — engine applies ve
   forge.planReviewCandidates = [{ number: 11, title: "t", labels: [] }];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
-    { result: doneResult("reviewer-1", sapwoodResult({ decision: "verify_na", issue: 11 }, "Pure docs work, no verification plan applies.")) },
+    {
+      result: doneResult(
+        "reviewer-1",
+        sapwoodResult({ decision: "verify_na", issue: 11 }, "Pure docs work, no verification plan applies."),
+      ),
+    },
   ]);
   const state = new State(":memory:");
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
@@ -237,7 +291,10 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   assert.equal(runner.calls.length, 3);
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-drafter", "plan-reviewer"]);
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer", "plan-drafter", "plan-reviewer"],
+  );
   // The drafter's prompt was briefed with the reviewer's BODY block verbatim.
   assert.ok(runner.calls[1]!.prompt.includes("missing acceptance criteria"));
   assert.equal(runner.calls[1]!.disallowedTools, PLAN_DRAFTER_DISALLOWED_TOOLS);
@@ -278,15 +335,16 @@ test("createPlanReviewStub P2: a reviewer SESSION failure is retried once; a sec
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 31, title: "t", labels: [] }];
   const cfg = mkCfg();
-  const runner = new ScriptedRunner([
-    { result: failedResult("reviewer-0") },
-    { result: failedResult("reviewer-0-retry") },
-  ]);
+  const runner = new ScriptedRunner([{ result: failedResult("reviewer-0") }, { result: failedResult("reviewer-0-retry") }]);
   const state = new State(":memory:");
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 2, phase: "plan_review", marker: null });
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-reviewer"], "one retry, no drafter");
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer", "plan-reviewer"],
+    "one retry, no drafter",
+  );
   assert.ok((forge.issueLabels[31] ?? []).includes(cfg.labels.needsHuman));
   const comment = lastComment(forge, 31);
   assert.ok(/failed/.test(comment), "the escalation comment names the session failure");
@@ -327,7 +385,11 @@ test("createPlanReviewStub #110: reviewer output with no structured block at all
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 3, phase: "plan_review", marker: null });
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-reviewer"], "no drafter ever ran");
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer", "plan-reviewer"],
+    "no drafter ever ran",
+  );
   assert.ok((forge.issueLabels[33] ?? []).includes(cfg.labels.needsHuman));
   const comment = lastComment(forge, 33);
   assert.ok(/structured output/.test(comment), "the escalation comment names the malformed-output reason");
@@ -352,7 +414,10 @@ test("createPlanReviewStub #110: reviewer 'draft_request' with NO BODY block, TW
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 3, phase: "plan_review", marker: null });
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-reviewer"]);
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer", "plan-reviewer"],
+  );
   assert.ok((forge.issueLabels[34] ?? []).includes(cfg.labels.needsHuman));
   const comment = lastComment(forge, 34);
   assert.ok(/BODY block/.test(comment));
@@ -393,7 +458,10 @@ test("createPlanReviewStub #110: a plan-drafter session that produces invalid ou
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 4, phase: "plan_review", marker: null });
-  assert.deepEqual(runner.calls.map((c) => c.roleId), ["plan-reviewer", "plan-drafter", "plan-drafter"]);
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer", "plan-drafter", "plan-drafter"],
+  );
   assert.equal(forge.updateIssueBodyCalls.length, 0, "an invalid draft is never applied");
   assert.ok((forge.issueLabels[36] ?? []).includes(cfg.labels.needsHuman));
   const comment = lastComment(forge, 36);
@@ -470,10 +538,7 @@ test("createPlanReviewStub #104: escalate() from a reviewer-session-failed-twice
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 31, title: "t", labels: [] }];
   const cfg = mkCfg();
-  const runner = new ScriptedRunner([
-    { result: failedResult("reviewer-0") },
-    { result: failedResult("reviewer-0-retry") },
-  ]);
+  const runner = new ScriptedRunner([{ result: failedResult("reviewer-0") }, { result: failedResult("reviewer-0-retry") }]);
   const state = new State(":memory:");
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
@@ -492,7 +557,9 @@ test("createPlanReviewStub #104: a state-write failure on escalate() is containe
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: failedResult("reviewer-0") }, { result: failedResult("reviewer-0-retry") }]);
   const state = new State(":memory:");
-  state.appendEvent = () => { throw new Error("simulated disk failure"); };
+  state.appendEvent = () => {
+    throw new Error("simulated disk failure");
+  };
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await assert.doesNotReject(() => stub.run({ roundId: 3, phase: "plan_review", marker: null }));
@@ -555,7 +622,10 @@ test("loadRolePromptTemplate: configured-but-missing file throws, naming the pat
   const dir = mkdtempSync(join(tmpdir(), "sapwood-plan-review-"));
   try {
     const missing = join(dir, "nonexistent.md");
-    assert.throws(() => loadRolePromptTemplate(missing, defaultPlanReviewerPromptPath()), new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.throws(
+      () => loadRolePromptTemplate(missing, defaultPlanReviewerPromptPath()),
+      new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

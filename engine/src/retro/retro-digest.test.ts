@@ -7,11 +7,9 @@
 // instead — same file-per-module split as harvest.ts/harvest.test.ts.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  gatherTouchedPRs, gatherDigestIssues, capDigest, buildRetroDigest, PR_TOUCHED_EVENT_KINDS,
-} from "./retro-digest.js";
+import type { CommitInfo, IForge, Issue, PRComment, PRReviewData, PRStatus } from "../forge/forge.js";
 import { State } from "../state/state.js";
-import type { IForge, Issue, PRStatus, PRReviewData, PRComment, CommitInfo } from "../forge/forge.js";
+import { buildRetroDigest, capDigest, gatherDigestIssues, gatherTouchedPRs, PR_TOUCHED_EVENT_KINDS } from "./retro-digest.js";
 
 // ── A programmable fake IForge — call-recording, per-item response tables ──────────────────
 
@@ -29,38 +27,66 @@ class FakeForge implements IForge {
   prBodies = new Map<number, string>();
   bodyCalls: number[] = [];
 
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
   async getPRStatus(n: number): Promise<PRStatus> {
     return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
   async addIssueComment(): Promise<void> {}
-  async getIssueBody(n: number): Promise<string> { this.bodyCalls.push(n); return this.prBodies.get(n) ?? ""; }
+  async getIssueBody(n: number): Promise<string> {
+    this.bodyCalls.push(n);
+    return this.prBodies.get(n) ?? "";
+  }
   async updateIssueBody(): Promise<void> {}
   async getPRReviewData(pr: number): Promise<PRReviewData> {
     this.reviewCalls.push(pr);
-    return this.reviews.get(pr) ?? {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
-    };
+    return (
+      this.reviews.get(pr) ?? {
+        headOid: "x",
+        author: "producer",
+        updatedAt: "2026-01-01T00:00:00Z",
+        isDraft: false,
+        labels: [],
+        state: "OPEN",
+        reactions: [],
+        reviews: [],
+        unresolvedThreads: 0,
+      }
+    );
   }
   async getPRDiff(pr: number): Promise<string> {
     this.diffCalls.push(pr);
     if (this.diffErrors.has(pr)) throw new Error(`simulated fetch failure for PR #${pr}`);
     return this.diffs.get(pr) ?? "";
   }
-  async getCommitsSince(): Promise<CommitInfo[]> { return this.commits; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return this.commits;
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return [];
+  }
   async getIssueLabels(issue: number): Promise<string[]> {
     this.labelCalls.push(issue);
     return this.labels.get(issue) ?? [];
@@ -69,9 +95,15 @@ class FakeForge implements IForge {
     this.commentCalls.push(issue);
     return this.issueComments.get(issue) ?? [];
   }
-  async createIssue(): Promise<number> { return 1; }
-  async listOpenIssueNumbers(): Promise<number[]> { return []; }
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return []; }
+  async createIssue(): Promise<number> {
+    return 1;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return [];
+  }
 }
 
 // ── gatherTouchedPRs ─────────────────────────────────────────────────────────────────────────
@@ -188,8 +220,14 @@ test("buildRetroDigest: a touched PR pulls its description + diff + review data 
   forge.prBodies.set(11, "## What / why\nFixes the widget rendering bug.");
   forge.diffs.set(11, "diff --git a/foo b/foo\n+added a line");
   forge.reviews.set(11, {
-    headOid: "abc123", author: "producer", updatedAt: "2026-07-11T00:00:00Z", isDraft: false,
-    labels: [], state: "OPEN", reactions: [], unresolvedThreads: 2,
+    headOid: "abc123",
+    author: "producer",
+    updatedAt: "2026-07-11T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 2,
     reviews: [{ author: "codex", commitOid: "abc123def", state: "CHANGES_REQUESTED" }],
     comments: [{ login: "codex", createdAt: "2026-07-11T00:01:00Z", body: "please fix the widget" }],
   });
@@ -201,7 +239,10 @@ test("buildRetroDigest: a touched PR pulls its description + diff + review data 
   assert.deepEqual(forge.diffCalls, [11]);
   assert.deepEqual(forge.reviewCalls, [11]);
   assert.ok(digest.includes("PR #11"));
-  assert.ok(digest.includes("Fixes the widget rendering bug."), "the PR's own description (gh pr view's what/why) must appear — #111 dry-run finding");
+  assert.ok(
+    digest.includes("Fixes the widget rendering bug."),
+    "the PR's own description (gh pr view's what/why) must appear — #111 dry-run finding",
+  );
   assert.ok(digest.includes("added a line"));
   assert.ok(digest.includes("CHANGES_REQUESTED"));
   assert.ok(digest.includes("please fix the widget"));
@@ -257,9 +298,7 @@ test("buildRetroDigest: a per-PR fetch failure is contained to that PR's section
 
 test("buildRetroDigest: commit history is sourced from forge.getCommitsSince, formatted with short sha/date/author/subject", async () => {
   const forge = new FakeForge();
-  forge.commits = [
-    { sha: "abc1234def5678", message: "fix: something\n\nlonger body text", author: "alice", date: "2026-07-11T00:00:00Z" },
-  ];
+  forge.commits = [{ sha: "abc1234def5678", message: "fix: something\n\nlonger body text", author: "alice", date: "2026-07-11T00:00:00Z" }];
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());
   const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);
@@ -272,7 +311,9 @@ test("buildRetroDigest: commit history is sourced from forge.getCommitsSince, fo
 
 test("buildRetroDigest: a commit-history fetch failure degrades to a note, never a thrown error", async () => {
   const forge = new FakeForge();
-  forge.getCommitsSince = async () => { throw new Error("simulated API failure"); };
+  forge.getCommitsSince = async () => {
+    throw new Error("simulated API failure");
+  };
   const state = new State(":memory:");
   const round = state.startRound(new Date().toISOString());
   const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS);

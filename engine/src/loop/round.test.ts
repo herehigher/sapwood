@@ -3,66 +3,106 @@
 // and crash-rerun idempotence. Mirrors driver.test.ts's fake-forge/fake-supervisor/`:memory:`-
 // state style (no claude, no gh).
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  runRounds, noopPeripheralStub, RoundScopedForge,
-  type RoundDeps, type PeripheralStub, type PeripheralPhase, type RoundStopHit,
-} from "./round.js";
-import type { Supervisor, LaneProbe, MergeGate } from "./conductor.js";
-import { State } from "../state/state.js";
-import { RoundArtifactSchema } from "./round-artifact.js";
+import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
+import { State } from "../state/state.js";
+import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
+import {
+  noopPeripheralStub,
+  type PeripheralPhase,
+  type PeripheralStub,
+  type RoundDeps,
+  RoundScopedForge,
+  type RoundStopHit,
+  runRounds,
+} from "./round.js";
+import { RoundArtifactSchema } from "./round-artifact.js";
 
 class FakeForge implements IForge {
   ready: Issue[] = [];
   milestoneOpenCounts: number[] = [0];
   milestoneQueries: string[] = [];
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return this.ready; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return this.ready;
+  }
   // #124: mirrors real GitHub behavior — a claimed issue leaves the Ready column, so it must
   // not still be `ready` for a LATER tick's dispatch phase to see (once its lane is reclaimed,
   // tick()'s in-flight dedup no longer protects it). Multi-wave rounds now call the dispatch
   // phase more than once per round, so this needs to actually mutate state — a no-op claim was
   // harmless under the old one-batch-per-round model but would let a second wave re-dispatch
   // the exact same issue number here.
-  async claimIssue(issue: number): Promise<void> { this.ready = this.ready.filter((i) => i.number !== issue); }
+  async claimIssue(issue: number): Promise<void> {
+    this.ready = this.ready.filter((i) => i.number !== issue);
+  }
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
+  async getPRStatus(n: number): Promise<PRStatus> {
+    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
   async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> { return ""; }
+  async getIssueBody(): Promise<string> {
+    return "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
   async countOpenIssuesInMilestone(milestone: string): Promise<number> {
     this.milestoneQueries.push(milestone);
     return this.milestoneOpenCounts.length > 1 ? this.milestoneOpenCounts.shift()! : this.milestoneOpenCounts[0]!;
   }
   milestoneTitles: string[] = [];
-  async listMilestoneTitles(): Promise<string[]> { return this.milestoneTitles; }
+  async listMilestoneTitles(): Promise<string[]> {
+    return this.milestoneTitles;
+  }
   planReviewCandidates: Issue[] = [];
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return this.planReviewCandidates; }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return this.planReviewCandidates;
+  }
   issueLabels: Record<number, string[]> = {};
-  async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
+  async getIssueLabels(issue: number): Promise<string[]> {
+    return this.issueLabels[issue] ?? [];
+  }
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
-  async getIssueComments(issue: number) { return this.issueComments[issue] ?? []; }
+  async getIssueComments(issue: number) {
+    return this.issueComments[issue] ?? [];
+  }
   createdIssues: Array<{ title: string; body: string }> = [];
   nextIssueNumber = 100;
   openIssueNumbers: number[] = [];
@@ -72,9 +112,13 @@ class FakeForge implements IForge {
     this.openIssueNumbers.push(n);
     return n;
   }
-  async listOpenIssueNumbers(): Promise<number[]> { return this.openIssueNumbers; }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return this.openIssueNumbers;
+  }
   planTriageCandidates: Issue[] = [];
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return this.planTriageCandidates; }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return this.planTriageCandidates;
+  }
 }
 
 class FakeSupervisor implements Supervisor {
@@ -95,7 +139,9 @@ class FakeSupervisor implements Supervisor {
   inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
     return { worktreePath: null, worktreeRetained: false };
   }
-  requestHandoff(): boolean { return true; }
+  requestHandoff(): boolean {
+    return true;
+  }
 }
 
 /** A supervisor whose lanes complete IMMEDIATELY (done, no PR) unless a test explicitly
@@ -133,7 +179,12 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
 
 function mkSleepSpy(): { sleep: (ms: number) => Promise<void>; calls: number[] } {
   const calls: number[] = [];
-  return { sleep: async (ms: number) => { calls.push(ms); }, calls };
+  return {
+    sleep: async (ms: number) => {
+      calls.push(ms);
+    },
+    calls,
+  };
 }
 
 /** A PeripheralStub that logs every invocation (roundId, phase, marker seen) and returns a
@@ -169,7 +220,10 @@ const baseDeps = (over: Partial<RoundDeps> = {}): RoundDeps => ({
  *  round.ts bug (never closing, never stopping) fails the test instead of hanging the suite. */
 function boundedStopOnPhase(deps: RoundDeps, maxPhaseCalls: number): () => void {
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   let calls = 0;
   const prev = deps.onRoundPhase;
   deps.onRoundPhase = (roundId, phase) => {
@@ -189,7 +243,10 @@ test("runRounds: a round with nothing to dispatch visits every phase in order ex
   const stopSafety = boundedStopOnPhase(deps, 5); // aligning, architecting, plan_review, harvesting, retro
   const result = await runRounds(deps);
   stopSafety();
-  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.deepEqual(
+    log.map((l) => l.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+  );
   assert.equal(result.rounds, 1);
   deps.state.close();
 });
@@ -235,7 +292,9 @@ test("runRounds roundDispatchCap: only the cap's worth dispatch this round; the 
   const sup = new AutoCompleteSupervisor();
   const hits: RoundStopHit[] = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 2 } }),
     onRoundStop: (_id, hit) => hits.push(hit),
   });
@@ -261,7 +320,9 @@ test("runRounds round.milestone: filters dispatch candidates to the configured m
   forge.milestoneOpenCounts = [1]; // the milestone still has open issues — dispatch proceeds
   const sup = new AutoCompleteSupervisor();
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 3 }, round: { milestone: "M4" } }),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
@@ -275,7 +336,9 @@ test("runRounds round.milestone: filters dispatch candidates to the configured m
 
 test("runRounds idle throttle: an idle round (nothing dispatched) waits tickIntervalSec before the next round opens — peripherals never spin back-to-back on an empty backlog", async () => {
   const events: string[] = [];
-  const sleep = async (ms: number): Promise<void> => { events.push(`sleep:${ms}`); };
+  const sleep = async (ms: number): Promise<void> => {
+    events.push(`sleep:${ms}`);
+  };
   const deps = baseDeps({ sleep, tickIntervalSec: 7 });
   deps.onRoundPhase = (roundId, phase) => events.push(`r${roundId}:${phase}`);
   const stopSafety = boundedStopOnPhase(deps, 10); // two idle rounds' worth of phases
@@ -306,7 +369,10 @@ test("runRounds idle throttle: a signal during the idle wait exits promptly — 
   // the rounds===1 assertion below instead of hanging the suite.
   const stopSafety = boundedStopOnPhase(deps, 12);
   const inner = deps.registerSignals!;
-  deps.registerSignals = (requestStop) => { stop = requestStop; return inner(requestStop); };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return inner(requestStop);
+  };
   const result = await runRounds(deps);
   stopSafety();
   assert.equal(result.stoppedBy, "signal");
@@ -318,7 +384,9 @@ test("runRounds idle throttle: a signal during the idle wait exits promptly — 
 
 test("runRounds idle throttle: a round that dispatched work is NOT additionally throttled — its drain loop already paced it on the tick cadence", async () => {
   const events: string[] = [];
-  const sleep = async (ms: number): Promise<void> => { events.push(`sleep:${ms}`); };
+  const sleep = async (ms: number): Promise<void> => {
+    events.push(`sleep:${ms}`);
+  };
   const forge = new FakeForge();
   forge.ready = [{ number: 1, title: "a", labels: ["prio:3-feature"] }];
   const sup = new AutoCompleteSupervisor();
@@ -331,7 +399,10 @@ test("runRounds idle throttle: a round that dispatched work is NOT additionally 
   const r2aligning = events.indexOf("r2:aligning");
   assert.ok(r1retro >= 0 && r2aligning > r1retro, `expected both rounds' phases in ${JSON.stringify(events)}`);
   // The dispatched lane's cadence waits happened INSIDE executing (before r1:harvesting)…
-  assert.ok(events.slice(0, r1retro).some((e) => e.startsWith("sleep:")), "drain loop did pace the dispatched lane");
+  assert.ok(
+    events.slice(0, r1retro).some((e) => e.startsWith("sleep:")),
+    "drain loop did pace the dispatched lane",
+  );
   // …and NO extra wait separates round 1's close from round 2 opening.
   assert.deepEqual(events.slice(r1retro + 1, r2aligning), []);
   deps.state.close();
@@ -345,7 +416,9 @@ test("runRounds round.milestone: 0 open issues left skips the batch dispatch ent
   const sup = new FakeSupervisor();
   const hits: RoundStopHit[] = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ round: { milestone: "M4" } }),
     onRoundStop: (_id, hit) => hits.push(hit),
   });
@@ -369,7 +442,9 @@ test("runRounds cost.roundBudgetUsd: recorded once this round's cumulative worke
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const hits: RoundStopHit[] = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     // roundDispatchCap set well above 1 dispatch so it never fires first and masks the budget
     // hit this test is actually isolating.
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 }, cost: { roundBudgetUsd: 5 } }),
@@ -382,7 +457,10 @@ test("runRounds cost.roundBudgetUsd: recorded once this round's cumulative worke
   assert.ok(hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $999.00"));
   // Harvest + retro still ran (never skipped by a round-level cost condition — only KILL_SWITCH
   // skips peripherals).
-  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.deepEqual(
+    log.map((l) => l.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+  );
   assert.equal(result.rounds, 1);
   deps.state.close();
 });
@@ -396,7 +474,9 @@ test("runRounds #95: every round-stop hit is persisted via appendEvent, not just
   const sup = new FakeSupervisor();
   sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 999 };
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 }, cost: { roundBudgetUsd: 5 } }),
   });
   const logged: Array<[string, unknown]> = [];
@@ -426,8 +506,12 @@ test("runRounds #95: a resumed-into-executing drain evaluates cost.roundBudgetUs
     const round = state.startRound("2026-07-09T00:00:00.000Z");
     state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
     state.upsertWorker({
-      name: "lane-99", issue: 99, session_id: "s99", state: "running",
-      started_at: "2026-07-09T00:00:30.000Z", ended_at: null,
+      name: "lane-99",
+      issue: 99,
+      session_id: "s99",
+      state: "running",
+      started_at: "2026-07-09T00:00:30.000Z",
+      ended_at: null,
     });
     state.recordSpend("lane-99", 99, 50, "2026-07-09T00:00:45.000Z");
 
@@ -439,7 +523,10 @@ test("runRounds #95: a resumed-into-executing drain evaluates cost.roundBudgetUs
     sup.probes["lane-99"] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
     const hits: RoundStopHit[] = [];
     const deps = baseDeps({
-      forge, supervisor: sup, state, sleep,
+      forge,
+      supervisor: sup,
+      state,
+      sleep,
       cfg: mkCfg({ cost: { roundBudgetUsd: 5 } }), // already-banked $50 >> $5 budget
       onRoundStop: (_id, hit) => hits.push(hit),
     });
@@ -468,7 +555,10 @@ test("runRounds stop.afterIssuesMerged: a round already open finishes harvest+re
   const gate = new ScriptedMergeGate([{ kind: "merged", pr: 1, headOid: "H" }]);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep, mergeGate: gate,
+    forge,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
     stop: { afterIssuesMerged: 1 },
     peripherals: allPeripherals(log),
@@ -493,7 +583,9 @@ test("runRounds stop.afterSpendUsd: a round already open finishes harvest+retro 
   sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: false, costUsd: 25 };
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }),
     stop: { afterSpendUsd: 20 },
     peripherals: allPeripherals(log),
@@ -563,9 +655,12 @@ test("runRounds stop.afterSpendUsd: fired MID-round (worker spend crosses during
   const sup = new AutoCompleteSupervisor();
   // lanes.max 1, quota 3: wave 1 = issue 1 alone; its reclaim banks $25 ≥ the $20 threshold, so
   // the run-level condition fires mid-round with quota AND lanes still free for waves 2-3.
-  for (const n of [1, 2, 3]) sup.probes[`lane-${n}-${n}`] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false, costUsd: 25 };
+  for (const n of [1, 2, 3])
+    sup.probes[`lane-${n}-${n}`] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false, costUsd: 25 };
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 3 } }),
     stop: { afterSpendUsd: 20 },
   });
@@ -625,13 +720,21 @@ test("runRounds: a graceful signal (not KILL_SWITCH) still lets the in-flight ro
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const deps = baseDeps({ forge, sleep, peripherals: allPeripherals(log) });
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   // Signal arrives mid-round (right after 'aligning' runs) — the round must still finish
   // architecting/plan_review/harvesting/retro before the loop actually stops.
-  deps.onRoundPhase = (_id, phase) => { if (phase === "aligning") stop(); };
+  deps.onRoundPhase = (_id, phase) => {
+    if (phase === "aligning") stop();
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
-  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.deepEqual(
+    log.map((l) => l.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+  );
   assert.equal(result.rounds, 1); // the round closed cleanly; only the NEXT round was withheld
   deps.state.close();
 });
@@ -660,7 +763,10 @@ test("runRounds crash-rerun: an in_progress round resumes AT its persisted phase
     const result = await runRounds(deps);
     stopSafety();
     // aligning/architecting are NOT re-run — resumed straight at plan_review.
-    assert.deepEqual(log.map((l) => l.phase), ["plan_review", "harvesting", "retro"]);
+    assert.deepEqual(
+      log.map((l) => l.phase),
+      ["plan_review", "harvesting", "retro"],
+    );
     // plan_review's stub saw the marker from the crashed attempt, not null — proof it wasn't
     // treated as a fresh first attempt.
     assert.equal(log[0]?.marker, "m1");
@@ -693,7 +799,10 @@ test("runRounds crash-rerun: resuming directly at 'executing' does NOT re-dispat
     const result = await runRounds(deps);
     stopSafety();
     assert.deepEqual(sup.dispatchedIssues, []); // never dispatched by the resumed pass
-    assert.deepEqual(log.map((l) => l.phase), ["harvesting", "retro"]);
+    assert.deepEqual(
+      log.map((l) => l.phase),
+      ["harvesting", "retro"],
+    );
     assert.equal(result.rounds, 1);
     state2.close();
   } finally {
@@ -715,19 +824,26 @@ test("runRounds #124: 6 Ready issues, cap 6, lanes.max 3 -> one round, TWO dispa
   // reclaim-only/drain tick) — the observable proof of "two waves", not just "six total".
   const dispatchedPerTick: number[][] = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 6 } }),
     onRoundStop: (_id, hit) => hits.push(hit),
-    onTick: (r) => dispatchedPerTick.push(
-      r.dispatched.filter((d) => d.kind === "dispatched").map((d) => (d as { issue: number }).issue),
-    ),
+    onTick: (r) => dispatchedPerTick.push(r.dispatched.filter((d) => d.kind === "dispatched").map((d) => (d as { issue: number }).issue)),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
   const result = await runRounds(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1, 2, 3, 4, 5, 6]); // all six, in priority/number order
   const waves = dispatchedPerTick.filter((d) => d.length > 0);
-  assert.deepEqual(waves, [[1, 2, 3], [4, 5, 6]], `expected exactly two 3-issue waves, got ${JSON.stringify(dispatchedPerTick)}`);
+  assert.deepEqual(
+    waves,
+    [
+      [1, 2, 3],
+      [4, 5, 6],
+    ],
+    `expected exactly two 3-issue waves, got ${JSON.stringify(dispatchedPerTick)}`,
+  );
   // #124 quota-exhaustion mid-drain: once the 6th dispatch lands (inside wave 2's own tick —
   // "mid-drain" from the outer loop's perspective, since wave 2's lanes are still in flight),
   // the round-quota stop hit fires and every later tick is dispatch-frozen.
@@ -746,11 +862,14 @@ test("runRounds #124: cost.roundBudgetUsd hit mid-wave-2 behaves exactly like a 
   const sup = new AutoCompleteSupervisor();
   // $1/lane; wave 1's three lanes bank $3 (< the $3.5 budget below) — the budget can only cross
   // once wave 2's three lanes are ALSO reclaimed, i.e. mid-wave-2.
-  for (const n of [1, 2, 3, 4, 5, 6]) sup.probes[`lane-${n}-${n}`] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false, costUsd: 1 };
+  for (const n of [1, 2, 3, 4, 5, 6])
+    sup.probes[`lane-${n}-${n}`] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false, costUsd: 1 };
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const hits: RoundStopHit[] = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 8 }, cost: { roundBudgetUsd: 3.5 } }),
     peripherals: allPeripherals(log),
     onRoundStop: (_id, hit) => hits.push(hit),
@@ -763,7 +882,10 @@ test("runRounds #124: cost.roundBudgetUsd hit mid-wave-2 behaves exactly like a 
   assert.ok(!hits.some((h) => h.name === "roundDispatchCap"), "the quota (8) never bound — budget is the sole stop reason");
   // Harvest + retro still ran (never skipped by a round-level cost condition — only KILL_SWITCH
   // skips peripherals), exactly like the pre-#124 mid-drain budget test above.
-  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.deepEqual(
+    log.map((l) => l.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+  );
   assert.equal(result.rounds, 1);
   deps.state.close();
 });
@@ -776,16 +898,16 @@ test("runRounds #124 gate② P1-1: an UNEVEN final wave dispatches exactly the r
   const hits: RoundStopHit[] = [];
   const dispatchedPerTick: number[][] = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     // Quota (4) does NOT divide evenly by lanes.max (3): wave 2 has only 1 quota left but 3
     // free lanes — without dispatchCapOverride actually reaching tick(), its per-tick cap
     // falls back to cfg.lanes.roundDispatchCap (4) and wave 2 overshoots to 3 lanes (6 > 4
     // total). The even 6/6/3 case can never catch this; this uneven split is the regression.
     cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 4 } }),
     onRoundStop: (_id, hit) => hits.push(hit),
-    onTick: (r) => dispatchedPerTick.push(
-      r.dispatched.filter((d) => d.kind === "dispatched").map((d) => (d as { issue: number }).issue),
-    ),
+    onTick: (r) => dispatchedPerTick.push(r.dispatched.filter((d) => d.kind === "dispatched").map((d) => (d as { issue: number }).issue)),
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
   const result = await runRounds(deps);
@@ -825,7 +947,9 @@ test("runRounds #124 gate② P1-2: spend banked by a tick's OWN reclaim blocks t
   const overBudgetSkips: number[] = [];
   const dispatchedPerTick: number[][] = [];
   const deps = baseDeps({
-    forge, supervisor: sup, sleep,
+    forge,
+    supervisor: sup,
+    sleep,
     cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 6 }, cost: { roundBudgetUsd: 5 } }),
     onRoundStop: (_id, hit) => hits.push(hit),
     onTick: (r) => {
@@ -839,7 +963,10 @@ test("runRounds #124 gate② P1-2: spend banked by a tick's OWN reclaim blocks t
   // Issue 2 was never dispatched — not in the reclaim tick (whose own banked spend must gate
   // it) nor by any later wave (the round-level stop hit freezes further dispatch).
   assert.deepEqual(sup.dispatchedIssues, [1], "the budget-blowing reclaim's tick must not refill the freed lane");
-  assert.deepEqual(dispatchedPerTick.filter((d) => d.length > 0), [[1]]);
+  assert.deepEqual(
+    dispatchedPerTick.filter((d) => d.length > 0),
+    [[1]],
+  );
   assert.ok(overBudgetSkips.includes(2), "issue 2 was skipped over-budget IN the reclaim tick itself, not merely never reached");
   assert.ok(hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $50.00"));
   assert.equal(result.rounds, 1);
@@ -858,8 +985,12 @@ test("runRounds #124 crash-rerun: a resumed drain (freshBatch=false) never dispa
     // well under roundDispatchCap=6. Both the quota AND lane-concurrency checks would allow a
     // fresh wave if freshBatch were (wrongly) true here.
     state.upsertWorker({
-      name: "lane-99", issue: 99, session_id: "s99", state: "running",
-      started_at: "2026-07-09T00:00:30.000Z", ended_at: null,
+      name: "lane-99",
+      issue: 99,
+      session_id: "s99",
+      state: "running",
+      started_at: "2026-07-09T00:00:30.000Z",
+      ended_at: null,
     });
     state.close();
 
@@ -871,7 +1002,10 @@ test("runRounds #124 crash-rerun: a resumed drain (freshBatch=false) never dispa
     const sup = new FakeSupervisor();
     sup.probes["lane-99"] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
     const deps = baseDeps({
-      forge, supervisor: sup, state: state2, sleep,
+      forge,
+      supervisor: sup,
+      state: state2,
+      sleep,
       cfg: mkCfg({ lanes: { max: 3, roundDispatchCap: 6 } }),
     });
     const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
@@ -894,9 +1028,15 @@ test("RoundScopedForge: filters getReadyIssues() by milestone; passthrough when 
     { number: 2, title: "b", labels: [] },
   ];
   const scoped = new RoundScopedForge(forge, "M4");
-  assert.deepEqual((await scoped.getReadyIssues()).map((i) => i.number), [1]);
+  assert.deepEqual(
+    (await scoped.getReadyIssues()).map((i) => i.number),
+    [1],
+  );
   const unscoped = new RoundScopedForge(forge, undefined);
-  assert.deepEqual((await unscoped.getReadyIssues()).map((i) => i.number), [1, 2]);
+  assert.deepEqual(
+    (await unscoped.getReadyIssues()).map((i) => i.number),
+    [1, 2],
+  );
 });
 
 test("RoundScopedForge: updateIssueBody passes through unchanged (#110 PR0 — explicit passthrough, no milestone scoping)", async () => {
@@ -949,16 +1089,25 @@ test("runRounds standby: fresh empty board — the FIRST round always opens (the
     if (sleepCalls.length >= 5) stop();
   };
   const deps = baseDeps({
-    forge, state, sleep, tickIntervalSec: 5,
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 5,
     cfg: mkCfg({ round: { standby: { enabled: true } } }),
     peripherals: allPeripherals(log),
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
   // Round 1 ran ALL five peripherals (the PO got its shot) — and nothing after it: standby.
   assert.equal(result.rounds, 1);
-  assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+  assert.deepEqual(
+    log.map((l) => l.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+  );
   // First sleep = round 1's #109 idle-throttle wait; the rest = standby. Backoff waits are
   // sliced into tickIntervalSec chunks (kill-switch acknowledgment, Codex round 3), so every
   // sleep call is exactly one 5s slice — the DOUBLING shows up in the standby-wait events'
@@ -967,7 +1116,9 @@ test("runRounds standby: fresh empty board — the FIRST round always opens (the
   assert.deepEqual(sleepCalls, [5000, 5000, 5000, 5000, 5000]);
   const waits = events.filter(([kind]) => kind === "standby-wait").map(([, payload]) => payload);
   assert.deepEqual(waits, [
-    { attempt: 0, waitSec: 5 }, { attempt: 1, waitSec: 10 }, { attempt: 2, waitSec: 20 },
+    { attempt: 0, waitSec: 5 },
+    { attempt: 1, waitSec: 10 },
+    { attempt: 2, waitSec: 20 },
   ]);
   assert.equal(state.getRound(2), undefined, "no second round ever opened while in standby");
   state.close();
@@ -989,10 +1140,16 @@ test("runRounds standby: SIGINT during a standby wait exits promptly — the wai
   };
   const forge = new FakeForge(); // empty board — standby engages after the idle first round
   const deps = baseDeps({
-    forge, state, sleep, tickIntervalSec: 5,
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 5,
     cfg: mkCfg({ round: { standby: { enabled: true } } }),
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1); // the idle first round — nothing after it
@@ -1013,19 +1170,30 @@ test("runRounds standby: the backoff wait is capped at round.standby.backoffCapS
     if (sleepCalls.length >= 6) stop();
   };
   const deps = baseDeps({
-    forge, state, sleep, tickIntervalSec: 10,
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 10,
     cfg: mkCfg({ round: { standby: { enabled: true, backoffCapSec: 25 } } }),
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
   // The cap shows in the standby-wait events' waitSec (uncapped, attempt 2 would be 40): the
   // sleeps themselves are tickIntervalSec slices (kill-switch acknowledgment), never longer.
   const waits = events.filter(([kind]) => kind === "standby-wait").map(([, payload]) => payload);
   assert.deepEqual(waits, [
-    { attempt: 0, waitSec: 10 }, { attempt: 1, waitSec: 20 }, { attempt: 2, waitSec: 25 },
+    { attempt: 0, waitSec: 10 },
+    { attempt: 1, waitSec: 20 },
+    { attempt: 2, waitSec: 25 },
   ]);
-  assert.ok(sleepCalls.every((ms) => ms <= 10000), "no single sleep ever exceeds one tick slice");
+  assert.ok(
+    sleepCalls.every((ms) => ms <= 10000),
+    "no single sleep ever exceeds one tick slice",
+  );
   state.close();
 });
 
@@ -1044,7 +1212,10 @@ test("runRounds standby: a KILL_SWITCH created MID-backoff-wait is acknowledged 
       if (sleepCalls.length === 3) writeFileSync(join(dir, "KILL_SWITCH"), "");
     };
     const deps = baseDeps({
-      forge, state, sleep, tickIntervalSec: 5,
+      forge,
+      state,
+      sleep,
+      tickIntervalSec: 5,
       cfg: mkCfg({ round: { standby: { enabled: true } } }),
       peripherals: allPeripherals(log),
     });
@@ -1053,8 +1224,11 @@ test("runRounds standby: a KILL_SWITCH created MID-backoff-wait is acknowledged 
     // Acknowledged after ONE 5s slice of the 10s backoff wait — pre-slicing this third call
     // would have been a single 10000ms sleep with the sentinel unread until it elapsed.
     assert.deepEqual(sleepCalls, [5000, 5000, 5000]);
-    assert.deepEqual(log.map((l) => l.phase), ["aligning", "architecting", "plan_review", "harvesting", "retro"],
-      "round 1 ran normally; round 2 froze BEFORE its aligning stub");
+    assert.deepEqual(
+      log.map((l) => l.phase),
+      ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+      "round 1 ran normally; round 2 froze BEFORE its aligning stub",
+    );
     assert.equal(result.rounds, 1); // round 2 opened to acknowledge the freeze but never closed
     assert.ok(state.getRound(2), "round 2 was opened (the freeze-acknowledgment round)");
     state.close();
@@ -1072,7 +1246,10 @@ test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count a
   // disabled the probe must never even issue the API call (an && guard, not a discarded read).
   let planReviewProbeCalls = 0;
   const realGetNeedingReview = forge.getIssuesNeedingPlanReview.bind(forge);
-  forge.getIssuesNeedingPlanReview = async () => { planReviewProbeCalls++; return realGetNeedingReview(); };
+  forge.getIssuesNeedingPlanReview = async () => {
+    planReviewProbeCalls++;
+    return realGetNeedingReview();
+  };
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   let stop = (): void => {};
@@ -1082,16 +1259,29 @@ test("runRounds standby (#127 gate② F2): plan-review candidates do NOT count a
     if (sleepCalls.length >= 4) stop(); // bounded safety net, same as the standby tests above
   };
   const deps = baseDeps({
-    forge, state, sleep, tickIntervalSec: 5,
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 5,
     cfg: mkCfg({ roles: { planReviewer: { enabled: false } }, round: { standby: { enabled: true } } }),
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
-  assert.ok(events.some(([kind]) => kind === "standby-wait"), "standby actually engaged");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged",
+  );
   assert.equal(state.getRound(2), undefined, "no further round burned peripherals on the unconsumable candidate");
-  assert.equal(planReviewProbeCalls, 0, "getIssuesNeedingPlanReview was never called — the disabled role short-circuits the probe's API read itself");
+  assert.equal(
+    planReviewProbeCalls,
+    0,
+    "getIssuesNeedingPlanReview was never called — the disabled role short-circuits the probe's API read itself",
+  );
   state.close();
 });
 
@@ -1101,7 +1291,10 @@ test("runRounds standby (#127 gate② F2): plan-TRIAGE candidates do NOT count a
   // #127 gate② R2: same short-circuit proof as the plan-review test above.
   let triageProbeCalls = 0;
   const realGetNeedingTriage = forge.getIssuesNeedingPlanTriage.bind(forge);
-  forge.getIssuesNeedingPlanTriage = async () => { triageProbeCalls++; return realGetNeedingTriage(); };
+  forge.getIssuesNeedingPlanTriage = async () => {
+    triageProbeCalls++;
+    return realGetNeedingTriage();
+  };
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   let stop = (): void => {};
@@ -1111,16 +1304,29 @@ test("runRounds standby (#127 gate② F2): plan-TRIAGE candidates do NOT count a
     if (sleepCalls.length >= 4) stop();
   };
   const deps = baseDeps({
-    forge, state, sleep, tickIntervalSec: 5,
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 5,
     cfg: mkCfg({ roles: { po: { enabled: false } }, round: { standby: { enabled: true } } }),
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
-  assert.ok(events.some(([kind]) => kind === "standby-wait"), "standby actually engaged");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged",
+  );
   assert.equal(state.getRound(2), undefined);
-  assert.equal(triageProbeCalls, 0, "getIssuesNeedingPlanTriage was never called — the disabled role short-circuits the probe's API read itself");
+  assert.equal(
+    triageProbeCalls,
+    0,
+    "getIssuesNeedingPlanTriage was never called — the disabled role short-circuits the probe's API read itself",
+  );
   state.close();
 });
 
@@ -1139,17 +1345,26 @@ test("runRounds standby (#127 gate② R1): with BOTH gate⓪ roles disabled, ope
     if (sleepCalls.length >= 4) stop();
   };
   const deps = baseDeps({
-    forge, state, sleep, tickIntervalSec: 5,
+    forge,
+    state,
+    sleep,
+    tickIntervalSec: 5,
     cfg: mkCfg({
       roles: { po: { enabled: false }, planReviewer: { enabled: false } },
       round: { milestone: "M-X", standby: { enabled: true } },
     }),
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
-  assert.ok(events.some(([kind]) => kind === "standby-wait"), "standby actually engaged");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged",
+  );
   assert.equal(state.getRound(2), undefined, "no further round burned peripherals on issues nothing enabled can consume");
   state.close();
 });
@@ -1171,7 +1386,11 @@ test("runRounds standby: a Ready issue appearing mid-backoff is caught by the NE
     }
   };
   const deps = baseDeps({
-    forge, supervisor: sup, state, sleep, tickIntervalSec: 5,
+    forge,
+    supervisor: sup,
+    state,
+    sleep,
+    tickIntervalSec: 5,
     cfg: mkCfg({ round: { standby: { enabled: true } } }),
     peripherals: allPeripherals(log),
   });
@@ -1184,10 +1403,21 @@ test("runRounds standby: a Ready issue appearing mid-backoff is caught by the NE
   assert.ok(exit, "a standby-exit event was recorded");
   assert.deepEqual(exit![1], { attempts: 1 });
   assert.deepEqual(sup.dispatchedIssues, [1], "the newly-Ready issue got dispatched once standby exited");
-  assert.deepEqual(log.map((l) => l.phase), [
-    "aligning", "architecting", "plan_review", "harvesting", "retro", // idle round 1
-    "aligning", "architecting", "plan_review", "harvesting", "retro", // round 2, out of standby
-  ]);
+  assert.deepEqual(
+    log.map((l) => l.phase),
+    [
+      "aligning",
+      "architecting",
+      "plan_review",
+      "harvesting",
+      "retro", // idle round 1
+      "aligning",
+      "architecting",
+      "plan_review",
+      "harvesting",
+      "retro", // round 2, out of standby
+    ],
+  );
   assert.equal(result.rounds, 2);
   state.close();
 });
@@ -1201,7 +1431,9 @@ test("runRounds standby: KILL_SWITCH bypasses the probe entirely — a round sti
     const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
     const { sleep } = mkSleepSpy();
     const deps = baseDeps({
-      forge, state, sleep,
+      forge,
+      state,
+      sleep,
       cfg: mkCfg({ round: { standby: { enabled: true } } }),
       peripherals: allPeripherals(log),
     });
@@ -1225,7 +1457,9 @@ test("runRounds standby: round.milestone open issues count as work even with Rea
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({
-    forge, state, sleep,
+    forge,
+    state,
+    sleep,
     cfg: mkCfg({ round: { milestone: "M4", standby: { enabled: true } } }),
     peripherals: allPeripherals(log),
   });
@@ -1251,7 +1485,9 @@ test("runRounds standby: an open PLAN-TRIAGE candidate (plan-less, not Ready, no
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({
-    forge, state, sleep,
+    forge,
+    state,
+    sleep,
     cfg: mkCfg({ round: { standby: { enabled: true } } }), // milestone UNSET — the triage signal must carry alone
     peripherals: allPeripherals(log),
   });
@@ -1281,7 +1517,9 @@ test("runRounds standby: an outstanding pending-rollback row counts as work — 
     if (sleepCalls.length === 1) state.addPendingRollback(7, "Ready", "dispatch-rollback", new Date(0).toISOString());
   };
   const deps = baseDeps({
-    forge, state, sleep,
+    forge,
+    state,
+    sleep,
     cfg: mkCfg({ round: { standby: { enabled: true } } }),
     peripherals: allPeripherals(log),
   });
@@ -1310,11 +1548,15 @@ test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-stan
     if (sleepCalls.length >= 4) stop();
   };
   const deps = baseDeps({
-    forge, sleep,
+    forge,
+    sleep,
     cfg: mkCfg({ round: { standby: { enabled: true } } }),
     stop: { onMilestoneComplete: "M4" },
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
@@ -1341,7 +1583,9 @@ test("runRounds standby: a round resumed PAST executing (restart mid-harvest) ne
     const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
     const { sleep } = mkSleepSpy();
     const deps = baseDeps({
-      forge, state: state2, sleep,
+      forge,
+      state: state2,
+      sleep,
       cfg: mkCfg({ round: { standby: { enabled: true } } }),
       peripherals: allPeripherals(log),
     });
@@ -1349,13 +1593,24 @@ test("runRounds standby: a round resumed PAST executing (restart mid-harvest) ne
     const stopSafety = boundedStopOnPhase(deps, 7);
     const result = await runRounds(deps);
     stopSafety();
-    assert.deepEqual(log.map((l) => l.phase), [
-      "harvesting", "retro", // the resumed round — no executing in THIS process
-      "aligning", "architecting", "plan_review", "harvesting", "retro", // round 2: the PO's restart shot
-    ]);
+    assert.deepEqual(
+      log.map((l) => l.phase),
+      [
+        "harvesting",
+        "retro", // the resumed round — no executing in THIS process
+        "aligning",
+        "architecting",
+        "plan_review",
+        "harvesting",
+        "retro", // round 2: the PO's restart shot
+      ],
+    );
     assert.equal(result.rounds, 2);
-    assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0,
-      "the resumed round is not idle-evidence — standby never engaged before the PO's fresh round");
+    assert.equal(
+      events.filter(([kind]) => kind === "standby-wait").length,
+      0,
+      "the resumed round is not idle-evidence — standby never engaged before the PO's fresh round",
+    );
     state2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1381,7 +1636,11 @@ test("runRounds standby: a failing standby-wait/-exit event write is telemetry-o
     if (sleepCalls.length === 2) forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
   };
   const deps = baseDeps({
-    forge, supervisor: sup, state, sleep, tickIntervalSec: 5,
+    forge,
+    supervisor: sup,
+    state,
+    sleep,
+    tickIntervalSec: 5,
     cfg: mkCfg({ round: { standby: { enabled: true } } }),
     peripherals: allPeripherals(log),
   });
@@ -1401,12 +1660,16 @@ test("runRounds standby: a throwing probe fails OPEN — tick-error appended, th
   // indefinite wait. (Round 1's own dispatch tick also hits this throw — contained separately
   // by runTick as an ordinary tick-error, leaving the round idle, which is exactly what arms
   // the standby probe for the round-2 boundary this test targets.)
-  forge.getReadyIssues = async () => { throw new Error("rate limited"); };
+  forge.getReadyIssues = async () => {
+    throw new Error("rate limited");
+  };
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
   const deps = baseDeps({
-    forge, state, sleep: async () => {},
+    forge,
+    state,
+    sleep: async () => {},
     cfg: mkCfg({ round: { standby: { enabled: true } } }),
     peripherals: allPeripherals(log),
   });
@@ -1415,10 +1678,15 @@ test("runRounds standby: a throwing probe fails OPEN — tick-error appended, th
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened despite the probe failure — fail-open");
   assert.deepEqual(log.map((l) => l.phase).slice(5), ["aligning", "architecting", "plan_review", "harvesting", "retro"]);
-  const err = events.find(([kind, payload]) =>
-    kind === "tick-error" && String((payload as { error: string }).error).includes("standby probe failed"));
+  const err = events.find(
+    ([kind, payload]) => kind === "tick-error" && String((payload as { error: string }).error).includes("standby probe failed"),
+  );
   assert.ok(err, "a tick-error event naming the standby probe was durably appended");
-  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "the failed probe never read as 'nothing to do' — zero backoff waits");
+  assert.equal(
+    events.filter(([kind]) => kind === "standby-wait").length,
+    0,
+    "the failed probe never read as 'nothing to do' — zero backoff waits",
+  );
   state.close();
 });
 
@@ -1435,10 +1703,15 @@ test("runRounds standby: a truly exhausted round.milestone (0 open issues) contr
     if (sleepCalls.length >= 2) stop();
   };
   const deps = baseDeps({
-    forge, state, sleep,
+    forge,
+    state,
+    sleep,
     cfg: mkCfg({ round: { milestone: "M4", standby: { enabled: true } } }),
   });
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1, "only the idle first round — standby withheld round 2, the milestone had nothing left");
@@ -1457,8 +1730,12 @@ test("#168: RoundDeps.probeLlmReachable is threaded into every tick — a pre-pa
   state.enterPark("llm", "rate_limit_error", 1, "2026-07-01T00:00:00.000Z");
   let probeCalls = 0;
   const deps = baseDeps({
-    state, sleep,
-    probeLlmReachable: async () => { probeCalls++; return true; },
+    state,
+    sleep,
+    probeLlmReachable: async () => {
+      probeCalls++;
+      return true;
+    },
   });
   const stopSafety = boundedStopOnPhase(deps, 5);
   await runRounds(deps);

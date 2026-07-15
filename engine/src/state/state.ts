@@ -7,8 +7,8 @@
 // ponytail: zero native dep; if the API bites, swap to better-sqlite3 — same call shape.
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
 // never edit a shipped migration, add a new one. user_version (a SQLite builtin) is the
@@ -479,14 +479,7 @@ export interface ModelUsageEntry extends CategorizedTokenUsage {
  *  `architecting`, `plan_review` (pre-executing) and `harvesting`, `retro` (post-executing);
  *  `executing` is the real tick-engine dispatch-batch-then-drain phase (no stub — tick()
  *  itself, unmodified); `closed` is terminal. */
-export type RoundPhase =
-  | "aligning"
-  | "architecting"
-  | "plan_review"
-  | "executing"
-  | "harvesting"
-  | "retro"
-  | "closed";
+export type RoundPhase = "aligning" | "architecting" | "plan_review" | "executing" | "harvesting" | "retro" | "closed";
 
 export type RoundStatus = "in_progress" | "done";
 
@@ -587,9 +580,7 @@ export class State {
   private migrate(): void {
     const current = this.userVersion();
     if (current > MIGRATIONS.length) {
-      throw new Error(
-        `DB schema v${current} is newer than this engine (v${MIGRATIONS.length}); upgrade sapwood`,
-      );
+      throw new Error(`DB schema v${current} is newer than this engine (v${MIGRATIONS.length}); upgrade sapwood`);
     }
     for (let v = current; v < MIGRATIONS.length; v++) {
       this.db.exec("BEGIN");
@@ -631,11 +622,20 @@ export class State {
            gated_escalation_labeled = excluded.gated_escalation_labeled`,
       )
       .run(
-        row.name, row.issue, row.session_id, row.state, row.started_at, row.ended_at,
-        row.pr ?? null, row.review_triggered ?? 0,
-        row.review_triggered_head ?? null, row.review_triggered_at ?? null,
-        row.review_fallback_head ?? null, row.review_fallback_kind ?? null,
-        row.gated_reentry_attempts ?? 0, row.gated_reentry_capped ?? 0,
+        row.name,
+        row.issue,
+        row.session_id,
+        row.state,
+        row.started_at,
+        row.ended_at,
+        row.pr ?? null,
+        row.review_triggered ?? 0,
+        row.review_triggered_head ?? null,
+        row.review_triggered_at ?? null,
+        row.review_fallback_head ?? null,
+        row.review_fallback_kind ?? null,
+        row.gated_reentry_attempts ?? 0,
+        row.gated_reentry_capped ?? 0,
         row.gated_escalation_labeled ?? 0,
       );
   }
@@ -646,9 +646,7 @@ export class State {
    *  has no path to this method (no reference to State) and posting extra comments themselves
    *  cannot move this pin — it is written exclusively by the engine's own gate loop. */
   recordReviewTrigger(name: string, head: string, at: string): void {
-    this.db
-      .prepare("UPDATE workers SET review_triggered_head = ?, review_triggered_at = ? WHERE name = ?")
-      .run(head, at, name);
+    this.db.prepare("UPDATE workers SET review_triggered_head = ?, review_triggered_at = ? WHERE name = ?").run(head, at, name);
   }
 
   /** Persist `name`'s lane's reviewer-failover episode marker (#54) — called from
@@ -659,9 +657,7 @@ export class State {
    *  data at every use (see the v6->v7 migration comment). A worker/producer has no reference
    *  to State and cannot reach this method — same structural guarantee as recordReviewTrigger. */
   recordReviewFallback(name: string, head: string | null, kind: string | null): void {
-    this.db
-      .prepare("UPDATE workers SET review_fallback_head = ?, review_fallback_kind = ? WHERE name = ?")
-      .run(head, kind, name);
+    this.db.prepare("UPDATE workers SET review_fallback_head = ?, review_fallback_kind = ? WHERE name = ?").run(head, kind, name);
   }
 
   /** #155: refresh a still-`running` lane's LIVE per-probe telemetry trio (update-in-place —
@@ -672,10 +668,7 @@ export class State {
    *  same head just overwrites with the same numbers — no counters, no history, no per-probe
    *  event. `tokenComposition` is JSON-encoded (see WorkerRow.token_composition doc). Called
    *  ONLY from conductor.tick()'s RECLAIM-phase KEEP branch, once per probe. */
-  setLiveTelemetry(
-    name: string,
-    t: { estCostUsd: number; contextTokens: number; tokenComposition: CategorizedTokenUsage },
-  ): void {
+  setLiveTelemetry(name: string, t: { estCostUsd: number; contextTokens: number; tokenComposition: CategorizedTokenUsage }): void {
     this.db
       .prepare("UPDATE workers SET est_cost_usd = ?, context_tokens = ?, token_composition = ? WHERE name = ?")
       .run(t.estCostUsd, t.contextTokens, JSON.stringify(t.tokenComposition), name);
@@ -688,38 +681,28 @@ export class State {
    *  lane always passes through reclaim, so clearing here is the one place that needs to run).
    *  Safe/idempotent on a row that never had telemetry (NULL -> NULL). */
   clearLiveTelemetry(name: string): void {
-    this.db
-      .prepare("UPDATE workers SET est_cost_usd = NULL, context_tokens = NULL, token_composition = NULL WHERE name = ?")
-      .run(name);
+    this.db.prepare("UPDATE workers SET est_cost_usd = NULL, context_tokens = NULL, token_composition = NULL WHERE name = ?").run(name);
   }
 
   getWorker(name: string): WorkerRow | undefined {
-    return this.db.prepare("SELECT * FROM workers WHERE name = ?").get(name) as
-      | WorkerRow
-      | undefined;
+    return this.db.prepare("SELECT * FROM workers WHERE name = ?").get(name) as WorkerRow | undefined;
   }
 
   /** In-flight lanes: workers still in the `running` state (the conductor reclaim/probe set). */
   runningWorkers(): WorkerRow[] {
-    return this.db
-      .prepare("SELECT * FROM workers WHERE state = 'running' ORDER BY name")
-      .all() as unknown as WorkerRow[];
+    return this.db.prepare("SELECT * FROM workers WHERE state = 'running' ORDER BY name").all() as unknown as WorkerRow[];
   }
 
   /** Occupied lanes: running + driving (a driving lane holds a PR awaiting the review gate
    *  and still counts against cfg.lanes.max). The dispatch capacity + in-flight set. */
   activeWorkers(): WorkerRow[] {
-    return this.db
-      .prepare("SELECT * FROM workers WHERE state IN ('running', 'driving') ORDER BY name")
-      .all() as unknown as WorkerRow[];
+    return this.db.prepare("SELECT * FROM workers WHERE state IN ('running', 'driving') ORDER BY name").all() as unknown as WorkerRow[];
   }
 
   /** Lanes holding a PR awaiting the review gate (#13's merge driver). No live worker process —
    *  just a lane occupying capacity until gate①/gate② resolve it to merged/needs-human/queued. */
   drivingWorkers(): WorkerRow[] {
-    return this.db
-      .prepare("SELECT * FROM workers WHERE state = 'driving' ORDER BY name")
-      .all() as unknown as WorkerRow[];
+    return this.db.prepare("SELECT * FROM workers WHERE state = 'driving' ORDER BY name").all() as unknown as WorkerRow[];
   }
 
   /** #147 gated-PR reentry candidates: `failed` lanes still carrying a PR number. `pr` is
@@ -743,9 +726,7 @@ export class State {
   }
 
   appendEvent(kind: string, payload: unknown): void {
-    this.db
-      .prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)")
-      .run(new Date().toISOString(), kind, JSON.stringify(payload));
+    this.db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run(new Date().toISOString(), kind, JSON.stringify(payload));
   }
 
   /** The most recent reviewer-failover announcement for `worker`'s lane (#54 R2) — tick()'s
@@ -802,7 +783,8 @@ export class State {
     // correct across an engine restart between the handoff and the resume, too.
     const priorUsd = this.spentUsdForWorker(worker);
     const deltaUsd = Math.max(0, safeUsd - priorUsd);
-    const rows = models.length > 0 ? models : [{ model: "unknown", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }];
+    const rows =
+      models.length > 0 ? models : [{ model: "unknown", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }];
     const safeInt = (n: number): number => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
     const stmt = this.db.prepare(
       `INSERT INTO spend_ledger
@@ -817,9 +799,15 @@ export class State {
     // per-model bookkeeping.
     rows.forEach((m, i) => {
       stmt.run(
-        at, worker, issue, i === 0 ? deltaUsd : 0,
-        m.model || "unknown", safeInt(m.inputTokens), safeInt(m.outputTokens),
-        safeInt(m.cacheReadTokens), safeInt(m.cacheCreationTokens),
+        at,
+        worker,
+        issue,
+        i === 0 ? deltaUsd : 0,
+        m.model || "unknown",
+        safeInt(m.inputTokens),
+        safeInt(m.outputTokens),
+        safeInt(m.cacheReadTokens),
+        safeInt(m.cacheCreationTokens),
       );
     });
   }
@@ -828,18 +816,18 @@ export class State {
    *  transition for it — normally one, but a resumed lane can have more). The resume
    *  cost-delta baseline (#46): see recordSpend's comment. */
   spentUsdForWorker(worker: string): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE worker = ?")
-      .get(worker) as { total: number };
+    const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE worker = ?").get(worker) as {
+      total: number;
+    };
     return row.total;
   }
 
   /** Cumulative spend for `now`'s UTC calendar day (spend_ledger sum, ts-prefix match). */
   dailySpendUsd(now: Date): number {
     const dayPrefix = now.toISOString().slice(0, 10); // YYYY-MM-DD
-    const row = this.db
-      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts LIKE ?")
-      .get(`${dayPrefix}%`) as { total: number };
+    const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts LIKE ?").get(`${dayPrefix}%`) as {
+      total: number;
+    };
     return row.total;
   }
 
@@ -852,9 +840,9 @@ export class State {
    *  deliberate operator action (pause longer than the gap, or raise cost.maxWallClockSec).
    *  (Codex PR #41 R2 P1.) */
   engineSessionStart(now: Date, staleGapSec: number): Date {
-    const row = this.db
-      .prepare("SELECT started_at, last_tick_at FROM engine_session WHERE id = 1")
-      .get() as { started_at: string; last_tick_at: string } | undefined;
+    const row = this.db.prepare("SELECT started_at, last_tick_at FROM engine_session WHERE id = 1").get() as
+      | { started_at: string; last_tick_at: string }
+      | undefined;
     const nowIso = now.toISOString();
     if (!row || (now.getTime() - Date.parse(row.last_tick_at)) / 1000 > staleGapSec) {
       this.db
@@ -879,9 +867,7 @@ export class State {
   }
 
   ceilingBreach(): { reasons: string[]; at: Date } | null {
-    const row = this.db.prepare("SELECT reason, at FROM ceiling_breach WHERE id = 1").get() as
-      | { reason: string; at: string }
-      | undefined;
+    const row = this.db.prepare("SELECT reason, at FROM ceiling_breach WHERE id = 1").get() as { reason: string; at: string } | undefined;
     if (!row) return null;
     return { reasons: JSON.parse(row.reason) as string[], at: new Date(row.at) };
   }
@@ -947,8 +933,13 @@ export class State {
   }
 
   private static rowToPark(row: {
-    source: string; reason: string; trigger_issue: number | null; entered_at: string;
-    last_probe_at: string; probe_attempts: number; escalated_at: string | null;
+    source: string;
+    reason: string;
+    trigger_issue: number | null;
+    entered_at: string;
+    last_probe_at: string;
+    probe_attempts: number;
+    escalated_at: string | null;
     canary_worker: string | null;
   }): ParkRow {
     return {
@@ -965,9 +956,9 @@ export class State {
 
   /** Every open park episode, oldest first (at most one per source). */
   parkedSources(): ParkRow[] {
-    const rows = this.db
-      .prepare("SELECT * FROM park_state ORDER BY entered_at, source")
-      .all() as unknown as Parameters<typeof State.rowToPark>[0][];
+    const rows = this.db.prepare("SELECT * FROM park_state ORDER BY entered_at, source").all() as unknown as Parameters<
+      typeof State.rowToPark
+    >[0][];
     return rows.map((r) => State.rowToPark(r));
   }
 
@@ -992,9 +983,7 @@ export class State {
    *  probing with no replay logic of its own. Never touches entered_at/escalated_at — the
    *  episode continues. */
   bumpParkProbe(source: EnvFailureSource, at: string): void {
-    this.db
-      .prepare("UPDATE park_state SET last_probe_at = ?, probe_attempts = probe_attempts + 1 WHERE source = ?")
-      .run(at, source);
+    this.db.prepare("UPDATE park_state SET last_probe_at = ?, probe_attempts = probe_attempts + 1 WHERE source = ?").run(at, source);
   }
 
   /** Stamp last_probe_at WITHOUT bumping probe_attempts — the llm path's "ping succeeded,
@@ -1023,9 +1012,7 @@ export class State {
     this.db.exec("BEGIN");
     try {
       this.upsertWorker(row);
-      const res = this.db
-        .prepare("UPDATE park_state SET canary_worker = ? WHERE source = ?")
-        .run(row.name, source);
+      const res = this.db.prepare("UPDATE park_state SET canary_worker = ? WHERE source = ?").run(row.name, source);
       if (res.changes === 0) {
         throw new Error(`registerCanaryDispatch: no open ${source} park episode to attach canary ${row.name} to`);
       }
@@ -1102,26 +1089,20 @@ export class State {
    *  second insert). */
   addPendingRollback(issue: number, target: BoardStatus, reason: string, at: string): number {
     const res = this.db
-      .prepare(
-        "INSERT INTO pending_rollbacks (issue, target, reason, attempts, created_at) VALUES (?, ?, ?, 0, ?)",
-      )
+      .prepare("INSERT INTO pending_rollbacks (issue, target, reason, attempts, created_at) VALUES (?, ?, ?, 0, ?)")
       .run(issue, target, reason, at);
     return Number(res.lastInsertRowid);
   }
 
   /** All rollbacks still awaiting success or escalation, oldest first (retry order). */
   pendingRollbacks(): PendingRollback[] {
-    return this.db
-      .prepare("SELECT * FROM pending_rollbacks ORDER BY id")
-      .all() as unknown as PendingRollback[];
+    return this.db.prepare("SELECT * FROM pending_rollbacks ORDER BY id").all() as unknown as PendingRollback[];
   }
 
   /** Record one more failed attempt (attempts++, last_attempt_at refreshed) — the row stays,
    *  to be retried again next tick. */
   bumpPendingRollback(id: number, at: string): void {
-    this.db
-      .prepare("UPDATE pending_rollbacks SET attempts = attempts + 1, last_attempt_at = ? WHERE id = ?")
-      .run(at, id);
+    this.db.prepare("UPDATE pending_rollbacks SET attempts = attempts + 1, last_attempt_at = ? WHERE id = ?").run(at, id);
   }
 
   /** Resolved — either the mutation succeeded, or attempts hit the bounded retry cap and the
@@ -1162,9 +1143,9 @@ export class State {
    *  (#77 decision 4). At most one is expected to exist at a time (round.ts's own invariant);
    *  `ORDER BY round_id DESC LIMIT 1` is a defensive tiebreak, not evidence multiple are normal. */
   openRound(): RoundRow | undefined {
-    return this.db
-      .prepare("SELECT * FROM rounds WHERE status = 'in_progress' ORDER BY round_id DESC LIMIT 1")
-      .get() as RoundRow | undefined;
+    return this.db.prepare("SELECT * FROM rounds WHERE status = 'in_progress' ORDER BY round_id DESC LIMIT 1").get() as
+      | RoundRow
+      | undefined;
   }
 
   getRound(id: number): RoundRow | undefined {
@@ -1175,9 +1156,7 @@ export class State {
    *  marker of its own yet (the previous phase's marker is irrelevant once it's done; see the
    *  schema v7->v8 migration comment). */
   advanceRoundPhase(id: number, phase: RoundPhase, now: string): void {
-    this.db
-      .prepare("UPDATE rounds SET phase = ?, artifact_ref = NULL, updated_at = ? WHERE round_id = ?")
-      .run(phase, now, id);
+    this.db.prepare("UPDATE rounds SET phase = ?, artifact_ref = NULL, updated_at = ? WHERE round_id = ?").run(phase, now, id);
   }
 
   /** Persist a phase stub's externalized idempotency token WITHOUT changing phase — the
@@ -1218,9 +1197,7 @@ export class State {
    *  fact. Same table/column as dailySpendUsd; a `>=` cutoff rather than a calendar-day prefix
    *  match, since a round doesn't align to a day boundary. */
   spentUsdSince(sinceIso: string): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts >= ?")
-      .get(sinceIso) as { total: number };
+    const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE ts >= ?").get(sinceIso) as { total: number };
     return row.total;
   }
 
@@ -1238,9 +1215,7 @@ export class State {
 
   /** #123: id-cursor variant of spentUsdSince (same rationale as eventsAfterId). */
   spentUsdAfterId(afterId: number): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE id > ?")
-      .get(afterId) as { total: number };
+    const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE id > ?").get(afterId) as { total: number };
     return row.total;
   }
 
@@ -1276,9 +1251,9 @@ export class State {
    *  predates #123). `json` is returned RAW (the caller parses/validates against the version
    *  it understands via `schemaVersion`) — reader for tests and the #17 dashboard. */
   getRoundArtifact(roundId: number): { schemaVersion: number; json: string } | undefined {
-    const row = this.db
-      .prepare("SELECT schema_version, json FROM round_artifacts WHERE round_id = ?")
-      .get(roundId) as { schema_version: number; json: string } | undefined;
+    const row = this.db.prepare("SELECT schema_version, json FROM round_artifacts WHERE round_id = ?").get(roundId) as
+      | { schema_version: number; json: string }
+      | undefined;
     return row ? { schemaVersion: row.schema_version, json: row.json } : undefined;
   }
 

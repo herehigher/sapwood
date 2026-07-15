@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultPricingPath, loadPricingTable, resolveRate, estimateUsd, type PricingTable } from "./pricing.js";
+import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
+import { defaultPricingPath, estimateUsd, loadPricingTable, type PricingTable, resolveRate } from "./pricing.js";
 
 const baseCfg = (pricingFile?: string): SapwoodConfig =>
   ConfigSchema.parse({
@@ -93,10 +93,22 @@ test("loadPricingTable: malformed YAML / wrong shape / bad rates all fail loudly
       ["not-yaml.yaml", "models: {opus: {input: [unclosed", /not-yaml\.yaml/],
       ["no-models.yaml", "rates: {opus: {input: 1}}", /no-models\.yaml/],
       ["empty-models.yaml", "models: {}", /empty-models\.yaml/],
-      ["negative.yaml", "models: {opus: {input: -5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000}}", /negative\.yaml/],
-      ["non-numeric.yaml", "models: {opus: {input: cheap, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000}}", /non-numeric\.yaml/],
+      [
+        "negative.yaml",
+        "models: {opus: {input: -5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000}}",
+        /negative\.yaml/,
+      ],
+      [
+        "non-numeric.yaml",
+        "models: {opus: {input: cheap, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000}}",
+        /non-numeric\.yaml/,
+      ],
       ["missing-field.yaml", "models: {opus: {input: 5, output: 25, cacheWrite: 6.25, contextWindow: 200000}}", /missing-field\.yaml/],
-      ["extra-field.yaml", "models: {opus: {input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000, vibes: 1}}", /extra-field\.yaml/],
+      [
+        "extra-field.yaml",
+        "models: {opus: {input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200000, vibes: 1}}",
+        /extra-field\.yaml/,
+      ],
       ["scalar.yaml", "just a string", /scalar\.yaml/],
     ];
     for (const [name, body, re] of cases) {

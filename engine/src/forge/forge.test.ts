@@ -2,26 +2,26 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
 import {
-  GithubForge,
-  parsePRStatus,
-  parseProject,
-  selectReadyIssues,
-  findOptionId,
-  findItemId,
-  hasVerificationPlan,
+  assemblePRReviewData,
+  countUnresolvedThreads,
   extractVerificationPlan,
+  findItemId,
   findOpenPrNumber,
+  findOptionId,
+  GithubForge,
+  hasVerificationPlan,
+  parseIssueLabels,
   parsePageInfo,
-  projectQuery,
-  parsePRReviewView,
   parsePRComments,
   parsePRReactions,
+  parsePRReviewView,
+  parsePRStatus,
+  parseProject,
   parseReviewThreadsPage,
-  countUnresolvedThreads,
-  assemblePRReviewData,
+  projectQuery,
   selectPlanReviewCandidates,
   selectPlanTriageCandidates,
-  parseIssueLabels,
+  selectReadyIssues,
 } from "./forge.js";
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —
@@ -124,7 +124,12 @@ const PROJECT_JSON = JSON.stringify({
 });
 
 const cfg = {
-  board: { owner: "herehigher", repo: "sapwood", statusField: "Status", status: { ready: "Ready", inProgress: "In Progress", done: "Done" } },
+  board: {
+    owner: "herehigher",
+    repo: "sapwood",
+    statusField: "Status",
+    status: { ready: "Ready", inProgress: "In Progress", done: "Done" },
+  },
   // #88 gate⓪: selectReadyIssues now also reads planApproved/needsHuman/blocked.
   labels: { verifyNa: "verify:n/a", planApproved: "plan:approved", needsHuman: "needs-human", blocked: "blocked" },
 } as Parameters<typeof selectReadyIssues>[1];
@@ -179,7 +184,10 @@ test("hasVerificationPlan and extractVerificationPlan agree on every case (share
 //   this selects gate②'s MERGE target, so ambiguity is fail-closed, never guessed) ──────────
 
 test("findOpenPrNumber: a single bare #<issue> mention is still found (the unambiguous fallback)", () => {
-  const prs = [{ number: 10, body: "unrelated" }, { number: 11, body: "Part of #46" }];
+  const prs = [
+    { number: 10, body: "unrelated" },
+    { number: 11, body: "Part of #46" },
+  ];
   assert.equal(findOpenPrNumber(prs, 46), 11);
 });
 
@@ -208,7 +216,16 @@ test("findOpenPrNumber: all GitHub closing-keyword inflections count, case-insen
     assert.equal(findOpenPrNumber([{ number: 9, body: `${kw} #46` }], 46), 9, kw);
   }
   // Word-bounded: "unfixes"/"prefixes" are not closing keywords.
-  assert.equal(findOpenPrNumber([{ number: 9, body: "unfixes #46" }, { number: 8, body: "also #46" }], 46), null);
+  assert.equal(
+    findOpenPrNumber(
+      [
+        { number: 9, body: "unfixes #46" },
+        { number: 8, body: "also #46" },
+      ],
+      46,
+    ),
+    null,
+  );
 });
 
 test("findOpenPrNumber: several closing-keyword matches -> the OLDEST wins (the lane's original PR, not a newer duplicate)", () => {
@@ -222,7 +239,10 @@ test("findOpenPrNumber: several closing-keyword matches -> the OLDEST wins (the 
 });
 
 test("findOpenPrNumber: multiple bare-mention-only candidates are ambiguous -> null (queued, never a guessed merge target)", () => {
-  const prs = [{ number: 20, body: "Part of #46" }, { number: 21, body: "Part of #46" }];
+  const prs = [
+    { number: 20, body: "Part of #46" },
+    { number: 21, body: "Part of #46" },
+  ];
   assert.equal(findOpenPrNumber(prs, 46), null);
 });
 
@@ -279,7 +299,10 @@ test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (
   // a legitimate tightening (presence alone used to be enough; it no longer is). #12
   // (verify:n/a, no needs-human) still passes via the doc-gate path. #11 no plan, #13 not
   // Ready, #14 other repo, #15 closed -> all out, unchanged.
-  assert.deepEqual(ready.map((i) => i.number).sort((a, b) => a - b), [12]);
+  assert.deepEqual(
+    ready.map((i) => i.number).sort((a, b) => a - b),
+    [12],
+  );
   assert.deepEqual(ready.find((i) => i.number === 12)?.labels, ["type:docs", "verify:n/a"]);
   // #74: body carries through to the public Issue (worker.ts's {{issue.body}} substitution).
   assert.equal(ready.find((i) => i.number === 12)?.body, "no plan needed");
@@ -298,74 +321,84 @@ const GATE0_PROJECT_JSON = JSON.stringify({
       projectV2: {
         id: "PVT_gate0",
         field: { id: "PVTF_status", options: [{ id: "opt_ready", name: "Ready" }] },
-        items: { nodes: [
-          // #40: plan present + plan:approved -> dispatchable. Also carries a milestone —
-          // the #86 threads-through-when-present coverage rides this item (PROJECT_JSON's
-          // only milestoned item, #10, is no longer returned under gate⓪).
-          {
-            number: 40, title: "plan approved",
-            labels: ["plan:approved"],
-            body: "## Verification\n- run npm test",
-            milestone: "M4",
-          },
-          // #41: plan present, no plan:approved -> excluded (presence alone is not enough).
-          {
-            number: 41, title: "plan not yet approved",
-            labels: [],
-            body: "## Verification\n- run npm test",
-          },
-          // #42: no plan, no verify:n/a -> excluded (Decision #8's original floor, unchanged).
-          {
-            number: 42, title: "no plan at all",
-            labels: [],
-            body: "just vibes",
-          },
-          // #43: verify:n/a + needs-human -> excluded (human hasn't adjudicated yet).
-          {
-            number: 43, title: "proposed verify:n/a, pending human",
-            labels: ["verify:n/a", "needs-human"],
-            body: "no plan needed",
-          },
-          // #44: verify:n/a alone (needs-human removed by a human) -> dispatchable, doc-gate path.
-          {
-            number: 44, title: "verify:n/a accepted",
-            labels: ["verify:n/a"],
-            body: "no plan needed",
-          },
-          // #45: plan + plan:approved + needs-human -> excluded (needs-human always blocks).
-          {
-            number: 45, title: "approved plan but escalated",
-            labels: ["plan:approved", "needs-human"],
-            body: "## Verification\n- run npm test",
-          },
-          // #46: plan + plan:approved + blocked -> excluded (blocked always blocks).
-          {
-            number: 46, title: "approved plan but blocked",
-            labels: ["plan:approved", "blocked"],
-            body: "## Verification\n- run npm test",
-          },
-          // #47: BOTH verify:n/a and plan:approved — a state the plan-reviewer prompt forbids
-          // ("never both dispatch paths on one issue"). Fail closed: excluded from dispatch
-          // AND from plan-review (it needs a human cleanup, not another session) — #94
-          // Codex retro-review P2.
-          {
-            number: 47, title: "mixed dispatch labels (forbidden state)",
-            labels: ["verify:n/a", "plan:approved"],
-            body: "## Verification\n- run npm test",
-          },
-        ].map((it: { number: number; title: string; labels: string[]; body: string; milestone?: string }) => ({
-          id: `ITEM_${it.number}`,
-          content: {
-            number: it.number,
-            title: it.title,
-            state: "OPEN",
-            body: it.body,
-            repository: { nameWithOwner: "herehigher/sapwood" },
-            labels: { nodes: it.labels.map((name) => ({ name })) },
-            ...(it.milestone !== undefined ? { milestone: { title: it.milestone } } : {}),
-          },
-          fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
-        })) },
+        items: {
+          nodes: [
+            // #40: plan present + plan:approved -> dispatchable. Also carries a milestone —
+            // the #86 threads-through-when-present coverage rides this item (PROJECT_JSON's
+            // only milestoned item, #10, is no longer returned under gate⓪).
+            {
+              number: 40,
+              title: "plan approved",
+              labels: ["plan:approved"],
+              body: "## Verification\n- run npm test",
+              milestone: "M4",
+            },
+            // #41: plan present, no plan:approved -> excluded (presence alone is not enough).
+            {
+              number: 41,
+              title: "plan not yet approved",
+              labels: [],
+              body: "## Verification\n- run npm test",
+            },
+            // #42: no plan, no verify:n/a -> excluded (Decision #8's original floor, unchanged).
+            {
+              number: 42,
+              title: "no plan at all",
+              labels: [],
+              body: "just vibes",
+            },
+            // #43: verify:n/a + needs-human -> excluded (human hasn't adjudicated yet).
+            {
+              number: 43,
+              title: "proposed verify:n/a, pending human",
+              labels: ["verify:n/a", "needs-human"],
+              body: "no plan needed",
+            },
+            // #44: verify:n/a alone (needs-human removed by a human) -> dispatchable, doc-gate path.
+            {
+              number: 44,
+              title: "verify:n/a accepted",
+              labels: ["verify:n/a"],
+              body: "no plan needed",
+            },
+            // #45: plan + plan:approved + needs-human -> excluded (needs-human always blocks).
+            {
+              number: 45,
+              title: "approved plan but escalated",
+              labels: ["plan:approved", "needs-human"],
+              body: "## Verification\n- run npm test",
+            },
+            // #46: plan + plan:approved + blocked -> excluded (blocked always blocks).
+            {
+              number: 46,
+              title: "approved plan but blocked",
+              labels: ["plan:approved", "blocked"],
+              body: "## Verification\n- run npm test",
+            },
+            // #47: BOTH verify:n/a and plan:approved — a state the plan-reviewer prompt forbids
+            // ("never both dispatch paths on one issue"). Fail closed: excluded from dispatch
+            // AND from plan-review (it needs a human cleanup, not another session) — #94
+            // Codex retro-review P2.
+            {
+              number: 47,
+              title: "mixed dispatch labels (forbidden state)",
+              labels: ["verify:n/a", "plan:approved"],
+              body: "## Verification\n- run npm test",
+            },
+          ].map((it: { number: number; title: string; labels: string[]; body: string; milestone?: string }) => ({
+            id: `ITEM_${it.number}`,
+            content: {
+              number: it.number,
+              title: it.title,
+              state: "OPEN",
+              body: it.body,
+              repository: { nameWithOwner: "herehigher/sapwood" },
+              labels: { nodes: it.labels.map((name) => ({ name })) },
+              ...(it.milestone !== undefined ? { milestone: { title: it.milestone } } : {}),
+            },
+            fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+          })),
+        },
       },
     },
   },
@@ -376,7 +409,10 @@ test("selectReadyIssues: #88 gate⓪ full matrix — needs-human/blocked always 
   const ready = selectReadyIssues(p, cfg);
   // #47 (verify:n/a + plan:approved together) is the forbidden mixed state — fail-closed
   // excluded (#94 Codex retro-review P2), never dispatched via the verify:n/a early path.
-  assert.deepEqual(ready.map((i) => i.number).sort((a, b) => a - b), [40, 44]);
+  assert.deepEqual(
+    ready.map((i) => i.number).sort((a, b) => a - b),
+    [40, 44],
+  );
   // #86: milestone threads through selectReadyIssues when present.
   assert.equal(ready.find((i) => i.number === 40)?.milestone, "M4");
 });
@@ -413,8 +449,30 @@ test("findItemId: repo-scoped so a multi-repo board can't hit the wrong #N (Code
             field: { id: "F", options: [] },
             items: {
               nodes: [
-                { id: "ITEM_A", content: { number: 50, title: "ours", state: "OPEN", body: "", repository: { nameWithOwner: "herehigher/sapwood" }, labels: { nodes: [] } }, fieldValues: { nodes: [] } },
-                { id: "ITEM_B", content: { number: 50, title: "theirs", state: "OPEN", body: "", repository: { nameWithOwner: "herehigher/0day" }, labels: { nodes: [] } }, fieldValues: { nodes: [] } },
+                {
+                  id: "ITEM_A",
+                  content: {
+                    number: 50,
+                    title: "ours",
+                    state: "OPEN",
+                    body: "",
+                    repository: { nameWithOwner: "herehigher/sapwood" },
+                    labels: { nodes: [] },
+                  },
+                  fieldValues: { nodes: [] },
+                },
+                {
+                  id: "ITEM_B",
+                  content: {
+                    number: 50,
+                    title: "theirs",
+                    state: "OPEN",
+                    body: "",
+                    repository: { nameWithOwner: "herehigher/0day" },
+                    labels: { nodes: [] },
+                  },
+                  fieldValues: { nodes: [] },
+                },
               ],
             },
           },
@@ -439,7 +497,18 @@ test("findItemId/selectReadyIssues: full owner/repo, not a /repo suffix (Codex R
             field: { id: "F", options: [{ id: "opt_ready", name: "Ready" }] },
             items: {
               nodes: [
-                { id: "FOREIGN", content: { number: 60, title: "foreign", state: "OPEN", body: "## Verification", repository: { nameWithOwner: "other/sapwood" }, labels: { nodes: [] } }, fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] } },
+                {
+                  id: "FOREIGN",
+                  content: {
+                    number: 60,
+                    title: "foreign",
+                    state: "OPEN",
+                    body: "## Verification",
+                    repository: { nameWithOwner: "other/sapwood" },
+                    labels: { nodes: [] },
+                  },
+                  fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+                },
               ],
             },
           },
@@ -475,9 +544,7 @@ test("parsePRStatus: clean mergeable PR with passing checks", () => {
 });
 
 test("parsePRStatus: an empty rollup fails closed (checks may not be created yet)", () => {
-  const s = parsePRStatus(
-    JSON.stringify({ number: 1, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] }),
-  );
+  const s = parsePRStatus(JSON.stringify({ number: 1, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] }));
   assert.equal(s.ciGreen, false); // genuinely CI-less repos opt in via ci.requireChecks (M3)
 });
 
@@ -548,9 +615,7 @@ test("parsePRStatus: a failing check is not green", () => {
 });
 
 test("parsePRStatus: unrecognized mergeable value normalizes to UNKNOWN (queue, not escalate)", () => {
-  const s = parsePRStatus(
-    JSON.stringify({ number: 3, headRefOid: "abc", state: "OPEN", mergeable: "UNKNOWN", statusCheckRollup: [] }),
-  );
+  const s = parsePRStatus(JSON.stringify({ number: 3, headRefOid: "abc", state: "OPEN", mergeable: "UNKNOWN", statusCheckRollup: [] }));
   assert.equal(s.mergeable, "UNKNOWN");
 });
 
@@ -581,9 +646,7 @@ test("parsePRReviewView: parses headRefOid/author/updatedAt/isDraft/labels/state
 });
 
 test("parsePRReviewView: absent labels/reviews arrays default to empty (no crash)", () => {
-  const v = parsePRReviewView(
-    JSON.stringify({ headRefOid: "H", updatedAt: "t", isDraft: true, state: "OPEN" }),
-  );
+  const v = parsePRReviewView(JSON.stringify({ headRefOid: "H", updatedAt: "t", isDraft: true, state: "OPEN" }));
   assert.deepEqual(v.labels, []);
   assert.deepEqual(v.reviews, []);
   assert.equal(v.author, "");
@@ -596,8 +659,14 @@ test("parsePRReviewView: absent labels/reviews arrays default to empty (no crash
 test("parsePRReviewView: no commit-date fields are parsed at all (#55 P1-B — deleted, not just unused)", () => {
   const v = parsePRReviewView(
     JSON.stringify({
-      headRefOid: "H2", updatedAt: "t", isDraft: false, state: "OPEN",
-      commits: [{ oid: "H1", committedDate: "2026-07-07T07:00:00Z" }, { oid: "H2", committedDate: "2026-07-07T07:40:00Z" }],
+      headRefOid: "H2",
+      updatedAt: "t",
+      isDraft: false,
+      state: "OPEN",
+      commits: [
+        { oid: "H1", committedDate: "2026-07-07T07:00:00Z" },
+        { oid: "H2", committedDate: "2026-07-07T07:40:00Z" },
+      ],
     }),
   );
   assert.ok(!("headCommittedAt" in v));
@@ -635,10 +704,20 @@ test("parsePRReactions: --slurp multi-page output (array of page arrays) flatten
   const r = parsePRReactions(
     JSON.stringify([
       [{ content: "+1", created_at: "t1", user: { login: "a" } }],
-      [{ content: "eyes", created_at: "t2", user: { login: "b" } }, { content: "+1", created_at: "t3", user: {} }],
+      [
+        { content: "eyes", created_at: "t2", user: { login: "b" } },
+        { content: "+1", created_at: "t3", user: {} },
+      ],
     ]),
   );
-  assert.deepEqual(r.map((x) => [x.content, x.login]), [["+1", "a"], ["eyes", "b"], ["+1", ""]]);
+  assert.deepEqual(
+    r.map((x) => [x.content, x.login]),
+    [
+      ["+1", "a"],
+      ["eyes", "b"],
+      ["+1", ""],
+    ],
+  );
 });
 
 test("parsePRReactions: empty slurp output parses to []", () => {
@@ -646,10 +725,7 @@ test("parsePRReactions: empty slurp output parses to []", () => {
   assert.deepEqual(parsePRReactions("[[]]"), []);
 });
 
-const threadsPage = (
-  resolved: boolean[],
-  pageInfo?: { hasNextPage: boolean; endCursor: string | null },
-): string =>
+const threadsPage = (resolved: boolean[], pageInfo?: { hasNextPage: boolean; endCursor: string | null }): string =>
   JSON.stringify({
     data: {
       repository: {
@@ -695,8 +771,13 @@ test("countUnresolvedThreads: single page (no pageInfo) -> one fetch, its count"
 
 test("assemblePRReviewData: combines the raw gh responses + the paged thread total", () => {
   const view = JSON.stringify({
-    headRefOid: "H", author: { login: "producer" }, updatedAt: "t", isDraft: false,
-    labels: [], state: "OPEN", reviews: [],
+    headRefOid: "H",
+    author: { login: "producer" },
+    updatedAt: "t",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reviews: [],
   });
   const reactions = JSON.stringify([{ content: "eyes", created_at: "t", user: { login: "codex" } }]);
   const data = assemblePRReviewData(view, reactions, 1);
@@ -850,7 +931,10 @@ test("selectPlanReviewCandidates: #88 gate⓪ matrix — only issues still AWAIT
   // #45/#46 plan:approved + needs-human/blocked -> settled, not re-reviewed.
   // #47 verify:n/a + plan:approved (forbidden mixed state, #94 Codex retro P2) -> needs a
   //     human CLEANUP, not another review session — never a candidate.
-  assert.deepEqual(candidates.map((i) => i.number).sort((a, b) => a - b), [41, 42]);
+  assert.deepEqual(
+    candidates.map((i) => i.number).sort((a, b) => a - b),
+    [41, 42],
+  );
 });
 
 // ── #89: selectPlanTriageCandidates — the PO/triage peripheral's candidate query. Unlike
@@ -863,24 +947,41 @@ test("selectPlanTriageCandidates: only OPEN issues that are genuinely plan-less 
   // #40/#41/#45/#46/#47 all carry a real plan section -> not a triage target regardless of labels.
   // #42 has no plan at all and no settled label -> the one genuine candidate.
   // #43/#44 carry verify:n/a (doc-gate path, no plan expected) -> excluded.
-  assert.deepEqual(candidates.map((i) => i.number), [42]);
+  assert.deepEqual(
+    candidates.map((i) => i.number),
+    [42],
+  );
 });
 
 test("selectPlanTriageCandidates: unlike selectPlanReviewCandidates, a NON-Ready-lane plan-less issue is still a candidate (triage runs before Ready, not after)", () => {
   const project = {
-    projectId: "P", statusFieldId: "F", options: [],
+    projectId: "P",
+    statusFieldId: "F",
+    options: [],
     items: [
       {
-        itemId: "I1", number: 99, title: "backlog, no plan yet", state: "OPEN",
-        body: "just a raw idea", repo: "herehigher/sapwood", labels: [], status: "Todo",
+        itemId: "I1",
+        number: 99,
+        title: "backlog, no plan yet",
+        state: "OPEN",
+        body: "just a raw idea",
+        repo: "herehigher/sapwood",
+        labels: [],
+        status: "Todo",
         milestone: null,
       },
     ],
   };
   const candidates = selectPlanTriageCandidates(project, cfg);
-  assert.deepEqual(candidates.map((i) => i.number), [99]);
+  assert.deepEqual(
+    candidates.map((i) => i.number),
+    [99],
+  );
   // The same item is NOT a plan_review candidate — it isn't even in the Ready lane yet.
-  assert.deepEqual(selectPlanReviewCandidates(project, cfg).map((i) => i.number), []);
+  assert.deepEqual(
+    selectPlanReviewCandidates(project, cfg).map((i) => i.number),
+    [],
+  );
 });
 
 test("parseIssueLabels: extracts label names; missing/empty fields degrade to []; malformed JSON throws (fail-closed — a failed gh read must never look like 'no labels')", () => {

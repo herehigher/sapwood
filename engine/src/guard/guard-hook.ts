@@ -7,7 +7,7 @@
 // safety hook. The pure mapping (`hookResponse`) is offline-testable; only `main()` does IO.
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { guardDecision, type GuardInput } from "./guard.js";
+import { type GuardInput, guardDecision } from "./guard.js";
 
 // Tools the guard actually inspects — a malformed tool_input for these fails closed.
 const GUARDED_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit"]);
@@ -34,7 +34,9 @@ export function hookResponse(payload: unknown): DenyOutput | null {
   }
   try {
     const p = payload as Record<string, unknown>;
+    // biome-ignore lint/complexity/useLiteralKeys: external hook payload keys intentionally use bracket access.
     const tool = typeof p["tool_name"] === "string" ? p["tool_name"] : "";
+    // biome-ignore lint/complexity/useLiteralKeys: external hook payload keys intentionally use bracket access.
     const rawInput = p["tool_input"];
     const inputIsObject = typeof rawInput === "object" && rawInput !== null;
     // For a guarded tool, a missing/non-object tool_input means we can't inspect what it
@@ -43,6 +45,7 @@ export function hookResponse(payload: unknown): DenyOutput | null {
       return deny(`BLOCK [fail-closed] ${tool} with malformed tool_input`);
     }
     const toolInput = (inputIsObject ? rawInput : {}) as GuardInput;
+    // biome-ignore lint/complexity/useLiteralKeys: external hook payload keys intentionally use bracket access.
     const cwd = typeof p["cwd"] === "string" ? p["cwd"] : "";
     const decision = guardDecision(tool, toolInput, cwd);
     return decision.allow ? null : deny(decision.reason);
@@ -60,6 +63,7 @@ export type GuardMode = "hard" | "soft";
  * — so a worker can't flip its own guard from hard to soft (the self-dogfooding risk).
  */
 export function resolveGuardMode(env: Record<string, string | undefined>): GuardMode {
+  // biome-ignore lint/complexity/useLiteralKeys: environment key is intentionally bracket-addressed.
   return env["SAPWOOD_GUARD_MODE"] === "soft" ? "soft" : "hard";
 }
 
@@ -68,10 +72,7 @@ export function resolveGuardMode(env: Record<string, string | undefined>): Guard
  * return allow (null), but surface what WOULD have been blocked via `logged` so observe-mode
  * has a record. An allow decision is unaffected in both modes.
  */
-export function applyGuardMode(
-  decision: DenyOutput | null,
-  mode: GuardMode,
-): { output: DenyOutput | null; logged: DenyOutput | null } {
+export function applyGuardMode(decision: DenyOutput | null, mode: GuardMode): { output: DenyOutput | null; logged: DenyOutput | null } {
   if (decision === null) return { output: null, logged: null };
   if (mode === "soft") return { output: null, logged: decision };
   return { output: decision, logged: null };

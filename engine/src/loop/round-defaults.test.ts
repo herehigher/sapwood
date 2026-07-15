@@ -6,19 +6,19 @@
 // invocation wired with this factory's output actually dispatches all five real role sessions
 // (no noop remains in the shipped default map, #104's acceptance criterion).
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMergedFromArtifact } from "./round-defaults.js";
-import { runRounds, noopPeripheralStub, type RoundDeps } from "./round.js";
-import { State } from "../state/state.js";
+import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import type { Supervisor, LaneProbe } from "./conductor.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
-import { RESULT_BLOCK_START, RESULT_BLOCK_END, BODY_BLOCK_START, BODY_BLOCK_END } from "../state/structured-output.js";
+import { State } from "../state/state.js";
+import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import type { LaneProbe, Supervisor } from "./conductor.js";
+import { noopPeripheralStub, type RoundDeps, runRounds } from "./round.js";
 import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
+import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMergedFromArtifact } from "./round-defaults.js";
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
@@ -30,46 +30,101 @@ class FakeForge implements IForge {
   issueCommentsPosted: Array<[number, string]> = [];
   openIssueNumbers: number[] = [];
 
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
-  async addLabel(n: number, l: string): Promise<void> { this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l]; }
+  async addLabel(n: number, l: string): Promise<void> {
+    this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
+  }
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
+  async getPRStatus(n: number): Promise<PRStatus> {
+    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
-  async addIssueComment(n: number, body: string): Promise<void> { this.issueCommentsPosted.push([n, body]); }
-  async getIssueBody(): Promise<string> { return ""; }
+  async addIssueComment(n: number, body: string): Promise<void> {
+    this.issueCommentsPosted.push([n, body]);
+  }
+  async getIssueBody(): Promise<string> {
+    return "";
+  }
   updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
   async getPRReviewData(): Promise<PRReviewData> {
     return {
-      headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false,
-      labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0,
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
     };
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return this.planReviewCandidates; }
-  async getIssueLabels(issue: number): Promise<string[]> { return this.issueLabels[issue] ?? []; }
-  async getIssueComments(issue: number) { return this.issueComments[issue] ?? []; }
-  async createIssue(): Promise<number> { return 0; }
-  async listOpenIssueNumbers(): Promise<number[]> { return this.openIssueNumbers; }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return this.planReviewCandidates;
+  }
+  async getIssueLabels(issue: number): Promise<string[]> {
+    return this.issueLabels[issue] ?? [];
+  }
+  async getIssueComments(issue: number) {
+    return this.issueComments[issue] ?? [];
+  }
+  async createIssue(): Promise<number> {
+    return 0;
+  }
+  async listOpenIssueNumbers(): Promise<number[]> {
+    return this.openIssueNumbers;
+  }
   planTriageCandidates: Issue[] = [];
-  async getIssuesNeedingPlanTriage(): Promise<Issue[]> { return this.planTriageCandidates; }
+  async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return this.planTriageCandidates;
+  }
 }
 
 class MinimalSupervisor implements Supervisor {
-  async probe(): Promise<LaneProbe> { return { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false }; }
-  async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> { return { name: `lane-${issue.number}`, sessionId: "s" }; }
-  async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> { return { worktreePath: null, worktreeRetained: false }; }
-  inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } { return { worktreePath: null, worktreeRetained: false }; }
-  requestHandoff(): boolean { return true; }
+  async probe(): Promise<LaneProbe> {
+    return { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+  }
+  async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
+    return { name: `lane-${issue.number}`, sessionId: "s" };
+  }
+  async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
+    return { worktreePath: null, worktreeRetained: false };
+  }
+  inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
+    return { worktreePath: null, worktreeRetained: false };
+  }
+  requestHandoff(): boolean {
+    return true;
+  }
 }
 
 /** One shared scripted fake for every role session dispatched across the whole round — real
@@ -88,7 +143,12 @@ class MinimalSupervisor implements Supervisor {
  *  (no issues to create) — this file's scoping/wiring properties don't exercise creation. */
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
-  constructor(private readonly forge: FakeForge, private readonly cfg: SapwoodConfig) {}
+  constructor(
+    // biome-ignore lint/correctness/noUnusedPrivateClassMembers: constructor shape mirrors the production runner seam.
+    private readonly forge: FakeForge,
+    // biome-ignore lint/correctness/noUnusedPrivateClassMembers: constructor shape mirrors the production runner seam.
+    private readonly cfg: SapwoodConfig,
+  ) {}
   async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
     this.calls.push(opts);
     if (opts.roleId === "plan-reviewer") {
@@ -169,8 +229,10 @@ test("architecting stub (#123, Codex round-7 P2): resuming directly at architect
   await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
   const architectCall = runner.calls.find((c) => c.roleId === "architect");
   assert.ok(architectCall, "the architect session was dispatched");
-  assert.ok(architectCall!.prompt.includes("created #12 — Split the parser"),
-    "the architect prompt carries the pre-crash summary detail, not the fallback note");
+  assert.ok(
+    architectCall!.prompt.includes("created #12 — Split the parser"),
+    "the architect prompt carries the pre-crash summary detail, not the fallback note",
+  );
   state.close();
 });
 
@@ -361,8 +423,13 @@ test("runRounds integration: wired with createDefaultPeripherals's output, a def
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
 
   const deps: RoundDeps = {
-    forge, state, supervisor: new MinimalSupervisor(), cfg, tickIntervalSec: 1,
-    sleep: async () => {}, peripherals,
+    forge,
+    state,
+    supervisor: new MinimalSupervisor(),
+    cfg,
+    tickIntervalSec: 1,
+    sleep: async () => {},
+    peripherals,
   };
   // Graceful stop mid-round (round.test.ts's own pattern, reused by align/architect/harvest/
   // retro's integration tests): the in-flight round still finishes every phase before the loop
@@ -371,7 +438,10 @@ test("runRounds integration: wired with createDefaultPeripherals's output, a def
   // summary event and dispatches no session — still a real stub, but this proves the session
   // dispatch path too).
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   deps.onRoundPhase = (_roundId, phase) => {
     if (phase === "aligning") {
       state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 7, pr: 1, reason: "x" });
@@ -446,10 +516,16 @@ test("architecting stub (#127 gate② F3): with roles.po.enabled=false the archi
   await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
   const architectCall = runner.calls.find((c) => c.roleId === "architect");
   assert.ok(architectCall, "the architect session was dispatched");
-  assert.match(architectCall!.prompt, /PO\/goal-alignment peripheral switched off/,
-    "the architect context names the switched-off deployment state");
-  assert.doesNotMatch(architectCall!.prompt, /no structured summary was recorded/,
-    "never the fallback wording that implies the aligning pass ran");
+  assert.match(
+    architectCall!.prompt,
+    /PO\/goal-alignment peripheral switched off/,
+    "the architect context names the switched-off deployment state",
+  );
+  assert.doesNotMatch(
+    architectCall!.prompt,
+    /no structured summary was recorded/,
+    "never the fallback wording that implies the aligning pass ran",
+  );
   state.close();
 });
 
@@ -458,7 +534,9 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
   const forge = new FakeForge();
   const logged: string[] = [];
   const realLog = console.log;
-  console.log = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  console.log = (...args: unknown[]) => {
+    logged.push(args.map(String).join(" "));
+  };
   try {
     // #127 gate② R3: CUSTOM label names — the warning must render cfg.labels.planApproved/
     // verifyNa, so a hardcoded "plan:approved"/"verify:n/a" string in round-defaults.ts would
@@ -471,8 +549,11 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
     assert.equal(logged.length, 1, "exactly one startup log line for two disabled roles");
     assert.match(logged[0]!, /plan_review/);
     assert.match(logged[0]!, /retro/);
-    assert.match(logged[0]!, /ok-to-build/,
-      "the planReviewer warning names the CONFIGURED planApproved label a human/external process must now apply");
+    assert.match(
+      logged[0]!,
+      /ok-to-build/,
+      "the planReviewer warning names the CONFIGURED planApproved label a human/external process must now apply",
+    );
     assert.match(logged[0]!, /no-verify/, "the configured verifyNa label too");
     assert.doesNotMatch(logged[0]!, /plan:approved/, "never the hardcoded default label name");
     const allOn = mkCfg();
@@ -493,11 +574,19 @@ test("runRounds integration (#127): a disabled role spawns no session for its ph
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
 
   const deps: RoundDeps = {
-    forge, state, supervisor: new MinimalSupervisor(), cfg, tickIntervalSec: 1,
-    sleep: async () => {}, peripherals,
+    forge,
+    state,
+    supervisor: new MinimalSupervisor(),
+    cfg,
+    tickIntervalSec: 1,
+    sleep: async () => {},
+    peripherals,
   };
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   deps.onRoundPhase = (_roundId, phase) => {
     // Seed a needs-human escalation right after 'aligning' so harvest actually has something
     // to brief (otherwise it appends only its summary event and dispatches no session — same
@@ -536,8 +625,13 @@ test("runRounds integration: KILL_SWITCH blocks every real peripheral — none o
     const runner = new ScriptedRunner(forge, cfg);
     const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
     const deps: RoundDeps = {
-      forge, state, supervisor: new MinimalSupervisor(), cfg, tickIntervalSec: 1,
-      sleep: async () => {}, peripherals,
+      forge,
+      state,
+      supervisor: new MinimalSupervisor(),
+      cfg,
+      tickIntervalSec: 1,
+      sleep: async () => {},
+      peripherals,
     };
     const result = await runRounds(deps);
     assert.equal(result.stoppedBy, "kill-switch");

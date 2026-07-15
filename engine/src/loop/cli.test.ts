@@ -1,29 +1,29 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
-  runCli,
-  parseRunStopMode,
-  parseStopFlags,
-  parseMilestoneFlag,
-  resolveStopConfig,
   applyMilestoneOverride,
-  formatStopConditionLine,
   assertStopMilestoneExists,
-  runExitCode,
   computeDryRunPreview,
   formatDryRunPreview,
-  parseStatusArgs,
   formatStatus,
+  formatStopConditionLine,
+  parseMilestoneFlag,
+  parseRunStopMode,
+  parseStatusArgs,
+  parseStopFlags,
+  resolveStopConfig,
+  runCli,
+  runExitCode,
   runStatus,
   type StatusSnapshot,
 } from "../cli.js";
-import { parseConfig, ConfigSchema } from "../config/config.js";
-import { State, SCHEMA_VERSION } from "../state/state.js";
+import { ConfigSchema, parseConfig } from "../config/config.js";
 import type { Issue } from "../forge/forge.js";
+import { SCHEMA_VERSION, State } from "../state/state.js";
 
 test("--version prints package version and exits 0", () => {
   const r = runCli(["node", "sapwood", "--version"]);
@@ -138,8 +138,16 @@ test("run: --stop-* flags appear in --help usage", () => {
 
 test("parseStopFlags: parses all four flags, leaving non-stop tokens in `rest`", () => {
   const { rest, stop, error } = parseStopFlags([
-    "run", "--once", "--stop-after-issues", "3", "--stop-after-prs", "5", "--stop-on-milestone", "M4",
-    "--stop-after-spend", "25",
+    "run",
+    "--once",
+    "--stop-after-issues",
+    "3",
+    "--stop-after-prs",
+    "5",
+    "--stop-on-milestone",
+    "M4",
+    "--stop-after-spend",
+    "25",
   ]);
   assert.equal(error, undefined);
   assert.deepEqual(stop, { afterIssuesMerged: 3, afterPRsOpened: 5, onMilestoneComplete: "M4", afterSpendUsd: 25 });
@@ -155,11 +163,7 @@ test("parseStopFlags: --stop-after-spend accepts a decimal dollar amount (unlike
 
 test("parseStopFlags: zero, negative-looking, and non-numeric values for --stop-after-spend are rejected", () => {
   for (const bad of ["0", "nope"]) {
-    assert.match(
-      parseStopFlags(["--stop-after-spend", bad]).error ?? "",
-      /--stop-after-spend requires a positive number/,
-      bad,
-    );
+    assert.match(parseStopFlags(["--stop-after-spend", bad]).error ?? "", /--stop-after-spend requires a positive number/, bad);
   }
   // A literal "-1" is caught by the same "looks like another flag" missing-value guard as the
   // other three flags (same convention as --config elsewhere).
@@ -200,16 +204,8 @@ test("parseStopFlags: a missing value, or a value that looks like another flag, 
 
 test("parseStopFlags: zero and non-integer values for the two count flags are rejected", () => {
   for (const bad of ["0", "1.5", "nope"]) {
-    assert.match(
-      parseStopFlags(["--stop-after-issues", bad]).error ?? "",
-      /--stop-after-issues requires a positive integer/,
-      bad,
-    );
-    assert.match(
-      parseStopFlags(["--stop-after-prs", bad]).error ?? "",
-      /--stop-after-prs requires a positive integer/,
-      bad,
-    );
+    assert.match(parseStopFlags(["--stop-after-issues", bad]).error ?? "", /--stop-after-issues requires a positive integer/, bad);
+    assert.match(parseStopFlags(["--stop-after-prs", bad]).error ?? "", /--stop-after-prs requires a positive integer/, bad);
   }
 });
 
@@ -269,7 +265,14 @@ test("assertStopMilestoneExists: unknown/partial title fails CLOSED at startup, 
     /no milestone titled "M4".*M4 — UX surface \+ CLI/s,
   );
   // No milestone goal configured -> no forge call needed, resolves silently.
-  await assertStopMilestoneExists({ listMilestoneTitles: async () => { throw new Error("must not be called"); } }, {});
+  await assertStopMilestoneExists(
+    {
+      listMilestoneTitles: async () => {
+        throw new Error("must not be called");
+      },
+    },
+    {},
+  );
 });
 
 // ── #129: `--milestone NAME` shortcut — scope + stop in one flag ───────────────────────────────
@@ -465,10 +468,7 @@ test("validate: relative worker.promptFile resolves against the CONFIG's directo
 test("validate: invalid config (wrong type) prints Zod issues one per line, exits 1", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
   const path = join(dir, "sapwood.config.yaml");
-  writeFileSync(
-    path,
-    "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nlanes:\n  max: three\n",
-  );
+  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nlanes:\n  max: three\n");
   try {
     const r = runCli(["node", "sapwood", "validate", path]);
     assert.equal(r.code, 1);
@@ -512,7 +512,10 @@ test("computeDryRunPreview: candidates capped at lanes.roundDispatchCap, cost = 
   assert.equal(preview.readyCount, 3);
   assert.equal(preview.dispatchableCount, 3);
   assert.equal(preview.candidates.length, 2); // capped at roundDispatchCap
-  assert.deepEqual(preview.candidates.map((i) => i.number), [1, 2]);
+  assert.deepEqual(
+    preview.candidates.map((i) => i.number),
+    [1, 2],
+  );
   assert.equal(preview.perWorkerUsd, 5);
   assert.equal(preview.previewUsd, 10); // 2 x $5
   assert.equal(preview.dailyBudgetUsd, 40);
@@ -520,8 +523,7 @@ test("computeDryRunPreview: candidates capped at lanes.roundDispatchCap, cost = 
 
 test("computeDryRunPreview: caps by min(roundDispatchCap, lanes.max) — max:1 + cap:2 + 2 ready => 1 candidate, cost for 1 (Codex PR #70 round-5 P2)", () => {
   const cfg = parseConfig(
-    "board: { owner: acme, repo: widgets, projectNumber: 7 }\n" +
-      "lanes: { max: 1, roundDispatchCap: 2 }\nworker: { budgetUsdSoft: 8 }\n",
+    "board: { owner: acme, repo: widgets, projectNumber: 7 }\n" + "lanes: { max: 1, roundDispatchCap: 2 }\nworker: { budgetUsdSoft: 8 }\n",
   );
   const ready: Issue[] = [
     { number: 1, title: "one", labels: [] },
@@ -531,7 +533,10 @@ test("computeDryRunPreview: caps by min(roundDispatchCap, lanes.max) — max:1 +
   assert.equal(preview.dispatchableCount, 2);
   assert.equal(preview.effectiveLaneLimit, 1); // min(2, 1) — lanes.max is the binding limit
   assert.equal(preview.candidates.length, 1); // real loop stops at lanesUsed >= lanes.max
-  assert.deepEqual(preview.candidates.map((i) => i.number), [1]);
+  assert.deepEqual(
+    preview.candidates.map((i) => i.number),
+    [1],
+  );
   assert.equal(preview.previewUsd, 8); // 1 x $8, NOT 2 x $8
 });
 
@@ -546,7 +551,10 @@ test("computeDryRunPreview: uses the REAL dispatch eligibility filter — reserv
   const preview = computeDryRunPreview(ready, baseCfg);
   assert.equal(preview.readyCount, 5);
   assert.equal(preview.dispatchableCount, 1);
-  assert.deepEqual(preview.candidates.map((i) => i.number), [5]);
+  assert.deepEqual(
+    preview.candidates.map((i) => i.number),
+    [5],
+  );
   assert.equal(preview.previewUsd, baseCfg.worker.budgetUsdSoft); // 1 candidate, not 5
 });
 
@@ -556,7 +564,10 @@ test("computeDryRunPreview: candidates follow orderForDispatch's priority orderi
     { number: 11, title: "urgent", labels: ["prio:0"] },
   ];
   const preview = computeDryRunPreview(ready, baseCfg); // roundDispatchCap default = 6 (#124), both ready issues under it
-  assert.deepEqual(preview.candidates.map((i) => i.number), [11, 10]); // prio:0 first
+  assert.deepEqual(
+    preview.candidates.map((i) => i.number),
+    [11, 10],
+  ); // prio:0 first
 });
 
 test("computeDryRunPreview: fewer ready issues than the cap -> candidates = all of them", () => {
@@ -699,18 +710,24 @@ test("status: seeded DB with a running worker, a driving/gated PR, spend, and ki
   const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
   const dbPath = join(dir, "sapwood.sqlite");
   const configPath = join(dir, "sapwood.config.yaml");
-  writeFileSync(
-    configPath,
-    "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: 3 }\ncost: { dailyBudgetUsd: 50 }\n",
-  );
+  writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: 3 }\ncost: { dailyBudgetUsd: 50 }\n");
   const seed = new State(dbPath);
   seed.upsertWorker({
-    name: "lane-12-abcd", issue: 12, session_id: "s1", state: "running",
-    started_at: "2026-07-06T10:00:00.000Z", ended_at: null,
+    name: "lane-12-abcd",
+    issue: 12,
+    session_id: "s1",
+    state: "running",
+    started_at: "2026-07-06T10:00:00.000Z",
+    ended_at: null,
   });
   seed.upsertWorker({
-    name: "lane-9-efgh", issue: 9, session_id: "s2", state: "driving",
-    started_at: "2026-07-05T09:00:00.000Z", ended_at: null, pr: 101,
+    name: "lane-9-efgh",
+    issue: 9,
+    session_id: "s2",
+    state: "driving",
+    started_at: "2026-07-05T09:00:00.000Z",
+    ended_at: null,
+    pr: 101,
   });
   // Spend ts must be TODAY (runStatus queries dailySpendUsd(new Date())) — a hard-coded date
   // would silently rot this test the day after it was written (Codex PR #70 P2).
@@ -796,14 +813,28 @@ test("formatStatus: PAUSE active renders distinctly from kill switch, both can b
 
 test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
-    killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
-    lanesMax: 3, dailyBudgetUsd: 100,
-    parked: [{
-      source: "llm", reason: "rate_limit_error", triggerIssue: 42,
-      enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: "2026-07-14T00:00:00.000Z",
-      probeAttempts: 0, escalatedAt: null, canaryWorker: null,
-    }],
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: SCHEMA_VERSION,
+    active: [],
+    driving: [],
+    killSwitchActive: false,
+    pauseActive: false,
+    ceilingBreach: null,
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
+    parked: [
+      {
+        source: "llm",
+        reason: "rate_limit_error",
+        triggerIssue: 42,
+        enteredAt: "2026-07-14T00:00:00.000Z",
+        lastProbeAt: "2026-07-14T00:00:00.000Z",
+        probeAttempts: 0,
+        escalatedAt: null,
+        canaryWorker: null,
+      },
+    ],
   };
   const out = formatStatus(snapshot);
   assert.match(out, /park: PARKED \(llm\) since 2026-07-14T00:00:00\.000Z/);
@@ -813,14 +844,28 @@ test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", 
 
 test("formatStatus: parked + escalated renders the escalation timestamp", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
-    killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
-    lanesMax: 3, dailyBudgetUsd: 100,
-    parked: [{
-      source: "forge", reason: "could not resolve host", triggerIssue: 7,
-      enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: "2026-07-14T00:05:00.000Z",
-      probeAttempts: 4, escalatedAt: "2026-07-14T01:00:00.000Z", canaryWorker: null,
-    }],
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: SCHEMA_VERSION,
+    active: [],
+    driving: [],
+    killSwitchActive: false,
+    pauseActive: false,
+    ceilingBreach: null,
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
+    parked: [
+      {
+        source: "forge",
+        reason: "could not resolve host",
+        triggerIssue: 7,
+        enteredAt: "2026-07-14T00:00:00.000Z",
+        lastProbeAt: "2026-07-14T00:05:00.000Z",
+        probeAttempts: 4,
+        escalatedAt: "2026-07-14T01:00:00.000Z",
+        canaryWorker: null,
+      },
+    ],
   };
   const out = formatStatus(snapshot);
   assert.match(out, /park: PARKED \(forge\)/);
@@ -829,28 +874,53 @@ test("formatStatus: parked + escalated renders the escalation timestamp", () => 
 
 test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
-    killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
-    lanesMax: 3, dailyBudgetUsd: 100, parked: [],
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: SCHEMA_VERSION,
+    active: [],
+    driving: [],
+    killSwitchActive: false,
+    pauseActive: false,
+    ceilingBreach: null,
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
+    parked: [],
   };
   assert.match(formatStatus(snapshot), /park: inactive/);
 });
 
 test("formatStatus: a mixed storm renders BOTH episodes (one line per source), canary lane shown when in flight (#168 P1-1a)", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite", schemaVersion: SCHEMA_VERSION, active: [], driving: [],
-    killSwitchActive: false, pauseActive: false, ceilingBreach: null, dailySpendUsd: 0,
-    lanesMax: 3, dailyBudgetUsd: 100,
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: SCHEMA_VERSION,
+    active: [],
+    driving: [],
+    killSwitchActive: false,
+    pauseActive: false,
+    ceilingBreach: null,
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
     parked: [
       {
-        source: "llm", reason: "rate_limit_error", triggerIssue: 42,
-        enteredAt: "2026-07-14T00:00:00.000Z", lastProbeAt: "2026-07-14T00:05:00.000Z",
-        probeAttempts: 2, escalatedAt: null, canaryWorker: "lane-3",
+        source: "llm",
+        reason: "rate_limit_error",
+        triggerIssue: 42,
+        enteredAt: "2026-07-14T00:00:00.000Z",
+        lastProbeAt: "2026-07-14T00:05:00.000Z",
+        probeAttempts: 2,
+        escalatedAt: null,
+        canaryWorker: "lane-3",
       },
       {
-        source: "forge", reason: "could not resolve host", triggerIssue: 7,
-        enteredAt: "2026-07-14T00:10:00.000Z", lastProbeAt: "2026-07-14T00:10:00.000Z",
-        probeAttempts: 0, escalatedAt: null, canaryWorker: null,
+        source: "forge",
+        reason: "could not resolve host",
+        triggerIssue: 7,
+        enteredAt: "2026-07-14T00:10:00.000Z",
+        lastProbeAt: "2026-07-14T00:10:00.000Z",
+        probeAttempts: 0,
+        escalatedAt: null,
+        canaryWorker: null,
       },
     ],
   };
@@ -894,8 +964,12 @@ test("status: truly read-only — DB file bytes, user_version, and journal_mode 
   const dbPath = join(dir, "sapwood.sqlite");
   const seed = new State(dbPath);
   seed.upsertWorker({
-    name: "lane-1-ro", issue: 1, session_id: "s1", state: "running",
-    started_at: "2026-07-07T09:00:00.000Z", ended_at: null,
+    name: "lane-1-ro",
+    issue: 1,
+    session_id: "s1",
+    state: "running",
+    started_at: "2026-07-07T09:00:00.000Z",
+    ended_at: null,
   });
   seed.close();
   try {
@@ -907,10 +981,7 @@ test("status: truly read-only — DB file bytes, user_version, and journal_mode 
     assert.ok(before.equals(after), "status must not modify a single byte of the DB file");
     // Belt-and-braces on the two specific mutations the normal State constructor performs:
     const check = new DatabaseSync(dbPath, { readOnly: true });
-    assert.equal(
-      (check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-      SCHEMA_VERSION,
-    );
+    assert.equal((check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, SCHEMA_VERSION);
     assert.equal(
       (check.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode,
       "wal", // what the engine set at seed time — status didn't switch it (or anything else)
@@ -926,8 +997,12 @@ test("status: against a stopped/checkpointed WAL DB works and mutates no sapwood
   const dbPath = join(dir, "sapwood.sqlite");
   const seed = new State(dbPath); // WAL mode
   seed.upsertWorker({
-    name: "lane-1-wal", issue: 1, session_id: "s1", state: "running",
-    started_at: "2026-07-07T09:00:00.000Z", ended_at: null,
+    name: "lane-1-wal",
+    issue: 1,
+    session_id: "s1",
+    state: "running",
+    started_at: "2026-07-07T09:00:00.000Z",
+    ended_at: null,
   });
   seed.close(); // checkpoints + drops sidecars: a cleanly stopped engine
   for (const suffix of ["-wal", "-shm"]) {
@@ -961,8 +1036,12 @@ test("status: against a LIVE engine (rows committed only in the -wal) reads them
   // to the main file — exactly the live-engine state where an immutable open would see v0.
   const engine = new State(dbPath);
   engine.upsertWorker({
-    name: "lane-42-live", issue: 42, session_id: "s-live", state: "running",
-    started_at: "2026-07-08T09:00:00.000Z", ended_at: null,
+    name: "lane-42-live",
+    issue: 42,
+    session_id: "s-live",
+    state: "running",
+    started_at: "2026-07-08T09:00:00.000Z",
+    ended_at: null,
   });
   assert.ok(existsSync(dbPath + "-wal"), "precondition: rows are in the live -wal, not the main file");
   try {
@@ -1007,10 +1086,7 @@ test("status: DB schema OLDER than this engine -> clear 'run the engine to migra
     assert.match(r.stderr, /DB schema v1.*older.*status never migrates/);
     // status must have left the old version exactly as it found it.
     const check = new DatabaseSync(dbPath, { readOnly: true });
-    assert.equal(
-      (check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-      1,
-    );
+    assert.equal((check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 1);
     check.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

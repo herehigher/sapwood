@@ -26,59 +26,76 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
-import type { State, RoundRow } from "../state/state.js";
 import { capDigest } from "../retro/retro-digest.js";
+import type { RoundRow, State } from "../state/state.js";
 
 export const ROUND_ARTIFACT_SCHEMA_VERSION = 1;
 
 const IssueWorker = z.object({ issue: z.number().int(), worker: z.string() }).strict();
 const IssueWorkerPr = z.object({ issue: z.number().int(), worker: z.string(), pr: z.number().int() }).strict();
 
-export const RoundArtifactSchema = z.object({
-  schemaVersion: z.literal(ROUND_ARTIFACT_SCHEMA_VERSION),
-  roundId: z.number().int().positive(),
-  startedAt: z.string(),
-  /** null when assembled BEFORE the round actually closed (harvest's mid-round read) — the
-   *  persisted, final artifact (round.ts's close-time build) always sets this. */
-  endedAt: z.string().nullable(),
-  dispatches: z.array(IssueWorker),
-  merges: z.array(IssueWorkerPr),
-  prsOpened: z.number().int().nonnegative(),
-  prsMerged: z.number().int().nonnegative(),
-  issuesClosed: z.number().int().nonnegative(),
-  spendUsd: z.number().nonnegative(),
-  roundBudgetUsd: z.number().nonnegative(),
-  retries: z.object({
-    gatedReentries: z.number().int().nonnegative(),
-    gatedReentryCapped: z.number().int().nonnegative(),
-    rollbacksRecovered: z.number().int().nonnegative(),
-    rollbacksEscalated: z.number().int().nonnegative(),
-  }).strict(),
-  reviewRounds: z.object({
-    reviewerFallbackSwitches: z.number().int().nonnegative(),
-    reviewerFallbackReverts: z.number().int().nonnegative(),
-  }).strict(),
-  escalations: z.object({
-    needsHuman: z.array(z.number().int()),
-    ceiling: z.number().int().nonnegative(),
-    driveNoPr: z.number().int().nonnegative(),
-  }).strict(),
-  handoffs: z.number().int().nonnegative(),
-  degradedPhases: z.array(z.object({
-    phase: z.string(),
-    outcome: z.string(),
-    session: z.string(),
-  }).strict()),
-  roundStops: z.array(z.object({ name: z.string(), detail: z.string() }).strict()),
-  retro: z.object({
-    opened: z.object({ pr: z.number().int(), branch: z.string() }).strict().nullable(),
-    degraded: z.object({ branch: z.string(), title: z.string(), reason: z.string() }).strict().nullable(),
-  }).strict(),
-  align: z.object({
-    created: z.array(z.object({ issue: z.number().int(), title: z.string(), hasPlan: z.boolean() }).strict()),
-    triaged: z.array(z.object({ issue: z.number().int(), drafted: z.boolean() }).strict()),
-  }).strict().nullable(),
-}).strict();
+export const RoundArtifactSchema = z
+  .object({
+    schemaVersion: z.literal(ROUND_ARTIFACT_SCHEMA_VERSION),
+    roundId: z.number().int().positive(),
+    startedAt: z.string(),
+    /** null when assembled BEFORE the round actually closed (harvest's mid-round read) — the
+     *  persisted, final artifact (round.ts's close-time build) always sets this. */
+    endedAt: z.string().nullable(),
+    dispatches: z.array(IssueWorker),
+    merges: z.array(IssueWorkerPr),
+    prsOpened: z.number().int().nonnegative(),
+    prsMerged: z.number().int().nonnegative(),
+    issuesClosed: z.number().int().nonnegative(),
+    spendUsd: z.number().nonnegative(),
+    roundBudgetUsd: z.number().nonnegative(),
+    retries: z
+      .object({
+        gatedReentries: z.number().int().nonnegative(),
+        gatedReentryCapped: z.number().int().nonnegative(),
+        rollbacksRecovered: z.number().int().nonnegative(),
+        rollbacksEscalated: z.number().int().nonnegative(),
+      })
+      .strict(),
+    reviewRounds: z
+      .object({
+        reviewerFallbackSwitches: z.number().int().nonnegative(),
+        reviewerFallbackReverts: z.number().int().nonnegative(),
+      })
+      .strict(),
+    escalations: z
+      .object({
+        needsHuman: z.array(z.number().int()),
+        ceiling: z.number().int().nonnegative(),
+        driveNoPr: z.number().int().nonnegative(),
+      })
+      .strict(),
+    handoffs: z.number().int().nonnegative(),
+    degradedPhases: z.array(
+      z
+        .object({
+          phase: z.string(),
+          outcome: z.string(),
+          session: z.string(),
+        })
+        .strict(),
+    ),
+    roundStops: z.array(z.object({ name: z.string(), detail: z.string() }).strict()),
+    retro: z
+      .object({
+        opened: z.object({ pr: z.number().int(), branch: z.string() }).strict().nullable(),
+        degraded: z.object({ branch: z.string(), title: z.string(), reason: z.string() }).strict().nullable(),
+      })
+      .strict(),
+    align: z
+      .object({
+        created: z.array(z.object({ issue: z.number().int(), title: z.string(), hasPlan: z.boolean() }).strict()),
+        triaged: z.array(z.object({ issue: z.number().int(), drafted: z.boolean() }).strict()),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
 
 export type RoundArtifact = z.infer<typeof RoundArtifactSchema>;
 
@@ -86,17 +103,32 @@ export type RoundArtifact = z.infer<typeof RoundArtifactSchema>;
  *  never appended while a round is open) and anything else that isn't part of a round's own
  *  mechanical record (module doc, design guidance #6). */
 export const ROUND_ARTIFACT_EVENT_KINDS = [
-  "dispatched", "merged",
-  "reclaim-done", "reclaim-failed", "reclaim-dead",
-  "drive-needs-human", "drive-queued", "drive-stopped", "drive-no-pr",
+  "dispatched",
+  "merged",
+  "reclaim-done",
+  "reclaim-failed",
+  "reclaim-dead",
+  "drive-needs-human",
+  "drive-queued",
+  "drive-stopped",
+  "drive-no-pr",
   "plan-review-escalated",
-  "handoff", "ceiling-escalated",
-  "gated-reentry", "gated-reentry-capped",
-  "rollback-recovered", "rollback-escalated",
-  "reviewer-fallback-switch", "reviewer-fallback-revert",
+  "handoff",
+  "ceiling-escalated",
+  "gated-reentry",
+  "gated-reentry-capped",
+  "rollback-recovered",
+  "rollback-escalated",
+  "reviewer-fallback-switch",
+  "reviewer-fallback-revert",
   "round-stop",
-  "po-degraded", "triage-degraded", "architect-degraded", "harvest-degraded", "retro-degraded",
-  "retro-pr-opened", "retro-pr-degraded",
+  "po-degraded",
+  "triage-degraded",
+  "architect-degraded",
+  "harvest-degraded",
+  "retro-degraded",
+  "retro-pr-opened",
+  "retro-pr-degraded",
   "align-summary",
 ];
 
@@ -148,12 +180,7 @@ interface RoundMeta {
  *  test constructs `events` literally. `events` is expected to already be scoped to this round's
  *  window (state.eventsSince(round.started_at, ROUND_ARTIFACT_EVENT_KINDS), or an equivalent
  *  fixture array) — this function does no further time-filtering of its own. */
-export function assembleRoundArtifact(
-  events: LedgerEvent[],
-  meta: RoundMeta,
-  spendUsd: number,
-  roundBudgetUsd: number,
-): RoundArtifact {
+export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, spendUsd: number, roundBudgetUsd: number): RoundArtifact {
   const dispatches: Array<{ issue: number; worker: string }> = [];
   const merges: Array<{ issue: number; worker: string; pr: number }> = [];
   let gatedReentries = 0;
@@ -171,7 +198,10 @@ export function assembleRoundArtifact(
   const roundStops: Array<{ name: string; detail: string }> = [];
   let retroOpened: { pr: number; branch: string } | null = null;
   let retroDegraded: { branch: string; title: string; reason: string } | null = null;
-  let align: { created: Array<{ issue: number; title: string; hasPlan: boolean }>; triaged: Array<{ issue: number; drafted: boolean }> } | null = null;
+  let align: {
+    created: Array<{ issue: number; title: string; hasPlan: boolean }>;
+    triaged: Array<{ issue: number; drafted: boolean }>;
+  } | null = null;
 
   const addNeedsHuman = (issue: unknown): void => {
     if (typeof issue === "number" && !needsHumanSet.has(issue)) {
@@ -313,12 +343,7 @@ export function assembleRoundArtifact(
  *  which is still null in the DB at the moment a MID-round caller like harvest.ts builds this) —
  *  callers pass null for an unpersisted, in-progress read and the real close timestamp when
  *  building the FINAL artifact at round.ts's actual close. */
-export function buildRoundArtifact(
-  state: State,
-  round: RoundRow,
-  roundBudgetUsd: number,
-  endedAt: string | null,
-): RoundArtifact {
+export function buildRoundArtifact(state: State, round: RoundRow, roundBudgetUsd: number, endedAt: string | null): RoundArtifact {
   // Id-cursor window, not a timestamp window (Codex P2, PR #152): events/spend timestamps are
   // ms-granular, so a previous round's tail write in the same ms as this round's started_at
   // would bleed into this artifact under ts >= started_at. The cursors captured at startRound
@@ -326,12 +351,7 @@ export function buildRoundArtifact(
   // degrades to the old whole-ledger lower bound, never throws.
   const events = state.eventsAfterId(round.start_event_id ?? 0, ROUND_ARTIFACT_EVENT_KINDS);
   const spendUsd = state.spentUsdAfterId(round.start_spend_id ?? 0);
-  return assembleRoundArtifact(
-    events,
-    { roundId: round.round_id, startedAt: round.started_at, endedAt },
-    spendUsd,
-    roundBudgetUsd,
-  );
+  return assembleRoundArtifact(events, { roundId: round.round_id, startedAt: round.started_at, endedAt }, spendUsd, roundBudgetUsd);
 }
 
 function section(title: string, lines: string[]): string {
@@ -346,8 +366,14 @@ export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
   const parts: string[] = [
     `# Round #${artifact.roundId} summary`,
     `Started: ${artifact.startedAt} | Ended: ${artifact.endedAt ?? "(round still in progress)"}`,
-    section("Dispatches", artifact.dispatches.map((d) => `- #${d.issue} -> ${d.worker}`)),
-    section("Merges", artifact.merges.map((m) => `- #${m.issue} (PR #${m.pr}) via ${m.worker}`)),
+    section(
+      "Dispatches",
+      artifact.dispatches.map((d) => `- #${d.issue} -> ${d.worker}`),
+    ),
+    section(
+      "Merges",
+      artifact.merges.map((m) => `- #${m.issue} (PR #${m.pr}) via ${m.worker}`),
+    ),
     section("Throughput", [
       `PRs opened: ${artifact.prsOpened}`,
       `PRs merged: ${artifact.prsMerged}`,
@@ -368,19 +394,31 @@ export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
       `Drive-no-PR: ${artifact.escalations.driveNoPr}`,
     ]),
     section("Handoffs", [`Soft-budget handoffs: ${artifact.handoffs}`]),
-    section("Degraded phases", artifact.degradedPhases.map((d) => `- ${d.phase}: ${d.outcome} (session ${d.session})`)),
-    section("Round-stop hits", artifact.roundStops.map((h) => `- ${h.name}: ${h.detail}`)),
-    section("Retro proposal", artifact.retro.opened
-      ? [`PR #${artifact.retro.opened.pr} (branch ${artifact.retro.opened.branch})`]
-      : artifact.retro.degraded
-        ? [`Degraded: ${artifact.retro.degraded.reason} (branch ${artifact.retro.degraded.branch})`]
-        : ["(no proposal this round)"]),
-    section("PO / goal-alignment", artifact.align
-      ? [
-        ...artifact.align.created.map((c) => `- created #${c.issue} — ${c.title}${c.hasPlan ? "" : " (no plan yet)"}`),
-        ...artifact.align.triaged.map((t) => `- triaged #${t.issue}${t.drafted ? " (plan drafted)" : " (still planless)"}`),
-      ]
-      : ["(no aligning-phase summary recorded)"]),
+    section(
+      "Degraded phases",
+      artifact.degradedPhases.map((d) => `- ${d.phase}: ${d.outcome} (session ${d.session})`),
+    ),
+    section(
+      "Round-stop hits",
+      artifact.roundStops.map((h) => `- ${h.name}: ${h.detail}`),
+    ),
+    section(
+      "Retro proposal",
+      artifact.retro.opened
+        ? [`PR #${artifact.retro.opened.pr} (branch ${artifact.retro.opened.branch})`]
+        : artifact.retro.degraded
+          ? [`Degraded: ${artifact.retro.degraded.reason} (branch ${artifact.retro.degraded.branch})`]
+          : ["(no proposal this round)"],
+    ),
+    section(
+      "PO / goal-alignment",
+      artifact.align
+        ? [
+            ...artifact.align.created.map((c) => `- created #${c.issue} — ${c.title}${c.hasPlan ? "" : " (no plan yet)"}`),
+            ...artifact.align.triaged.map((t) => `- triaged #${t.issue}${t.drafted ? " (plan drafted)" : " (still planless)"}`),
+          ]
+        : ["(no aligning-phase summary recorded)"],
+    ),
   ];
   return parts.join("\n\n");
 }

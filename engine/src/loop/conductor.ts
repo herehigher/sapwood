@@ -13,17 +13,19 @@
 //    (conductor identity), never a worker. The worker is only ever the injected dispatch fn.
 
 import { existsSync } from "node:fs";
-import type { IForge, Issue } from "../forge/forge.js";
-import type {
-  State, BoardStatus, PendingRollback, ModelUsageEntry, WorkerRow, CategorizedTokenUsage, ParkRow,
-} from "../state/state.js";
 import type { SapwoodConfig } from "../config/config.js";
+import type { IForge, Issue } from "../forge/forge.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
+import type { BoardStatus, CategorizedTokenUsage, ModelUsageEntry, ParkRow, PendingRollback, State, WorkerRow } from "../state/state.js";
 import {
-  classifyEnvFailure, probeBackoffSec, probeDue, parkDurationExceededSec, escalationChannel,
+  classifyEnvFailure,
   type EnvFailureSource,
+  escalationChannel,
+  parkDurationExceededSec,
+  probeBackoffSec,
+  probeDue,
 } from "./env-failure.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,13 +46,7 @@ export type LaneClass = "KEEP" | "DONE" | "FAILED" | "DEAD";
  * wrapperAlive: 1 alive | 0 dead (kill -0 failed) | -1 unknown (no readable pid).
  * hbAge < 0 means "no heartbeat file yet" (just spawned) — not a timeout.
  */
-export function classifyLane(
-  done: boolean,
-  failed: boolean,
-  hbAge: number,
-  threshold: number,
-  wrapperAlive: -1 | 0 | 1,
-): LaneClass {
+export function classifyLane(done: boolean, failed: boolean, hbAge: number, threshold: number, wrapperAlive: -1 | 0 | 1): LaneClass {
   if (failed) return "FAILED";
   if (done) return "DONE";
   if (wrapperAlive === 0) return "DEAD"; // confirmed dead, no sentinel -> crashed without trace
@@ -210,11 +206,7 @@ export type GatedReentryDecision = "RECLAIM" | "CAPPED" | "SKIP";
  *    reclaim that re-escalated; fail closed rather than retry forever — re-escalate + latch
  *    permanently).
  */
-export function gatedReentryDecision(
-  humanHoldPresent: boolean,
-  attempts: number,
-  cap: number,
-): GatedReentryDecision {
+export function gatedReentryDecision(humanHoldPresent: boolean, attempts: number, cap: number): GatedReentryDecision {
   if (humanHoldPresent) return "SKIP";
   return attempts < cap ? "RECLAIM" : "CAPPED";
 }
@@ -230,12 +222,7 @@ export type DriveAction = "MERGE" | "WAIT" | "FIXUP" | "ESCALATE";
  * NOTE: this is the conductor's drive_decision only. The PR-gate ACTION->action map
  * (0day merge_decision / pr_gate) belongs to M3's reviewer.ts + merge-driver.ts.
  */
-export function driveDecision(
-  gate: string,
-  fixRounds: number,
-  cap: number,
-  overBudget: boolean,
-): DriveAction {
+export function driveDecision(gate: string, fixRounds: number, cap: number, overBudget: boolean): DriveAction {
   switch (gate) {
     case "MERGE":
       return "MERGE";
@@ -602,13 +589,21 @@ async function attemptRollback(
       // escalation itself is never silently swallowed even if the label call is.
       await forge.addLabel(row.issue, cfg.labels.needsHuman).catch(() => {});
       state.appendEvent("rollback-escalated", {
-        issue: row.issue, target: row.target, reason: row.reason, attempts, error: String(e),
+        issue: row.issue,
+        target: row.target,
+        reason: row.reason,
+        attempts,
+        error: String(e),
       });
       return { kind: "escalated", issue: row.issue, attempts, reason: row.reason };
     }
     state.bumpPendingRollback(row.id, iso());
     state.appendEvent("rollback-retry-failed", {
-      issue: row.issue, target: row.target, reason: row.reason, attempts, error: String(e),
+      issue: row.issue,
+      target: row.target,
+      reason: row.reason,
+      attempts,
+      error: String(e),
     });
     return { kind: "retrying", issue: row.issue, attempts, reason: row.reason };
   }
@@ -619,7 +614,11 @@ async function attemptRollback(
  *  structured event always lands even if both forge calls fail. The needs-human LABEL is the
  *  caller's job (every retention call site already applies it on its own escalation branch). */
 async function reportRetainedWorktree(
-  forge: IForge, state: State, worker: string, issue: number, worktreePath: string | null,
+  forge: IForge,
+  state: State,
+  worker: string,
+  issue: number,
+  worktreePath: string | null,
 ): Promise<void> {
   state.appendEvent("worktree-retained", { worker, issue, worktreePath });
   await forge
@@ -641,8 +640,13 @@ async function reportRetainedWorktree(
  *  process-tree kill + needs-human. No PR-aware rescue on escalation — this is a safety
  *  boundary, not a liveness classification, so fail-safe to human triage. */
 async function drainThenEscalate(
-  forge: IForge, state: State, supervisor: Supervisor, cfg: SapwoodConfig,
-  reasons: CeilingReason[], nowDate: Date, iso: () => string,
+  forge: IForge,
+  state: State,
+  supervisor: Supervisor,
+  cfg: SapwoodConfig,
+  reasons: CeilingReason[],
+  nowDate: Date,
+  iso: () => string,
 ): Promise<{ drainRequested: string[]; escalated: string[] }> {
   state.recordCeilingBreach(reasons, nowDate);
   const drainRequested: string[] = [];
@@ -695,9 +699,7 @@ async function drainThenEscalate(
 const PARK_REASON_MAX_CHARS = 200;
 function summarizeFailureText(text: string): string {
   const trimmed = text.trim().replace(/\s+/g, " ");
-  return trimmed.length > PARK_REASON_MAX_CHARS
-    ? `${trimmed.slice(0, PARK_REASON_MAX_CHARS)}…`
-    : trimmed;
+  return trimmed.length > PARK_REASON_MAX_CHARS ? `${trimmed.slice(0, PARK_REASON_MAX_CHARS)}…` : trimmed;
 }
 
 /** #168: the pending_rollbacks `reason` tag for an env-failure requeue — typed as a constant
@@ -779,19 +781,20 @@ function releaseCanaryInconclusive(state: State, workerName: string): void {
  *  degrade to needs-human — they stay durable in pending_rollbacks and are surfaced HERE, in
  *  the escalation message, as the human-visible record of what will drain on resume. */
 async function escalatePark(
-  forge: IForge, state: State, cfg: SapwoodConfig, park: ParkRow, forgeParked: boolean, iso: () => string,
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  park: ParkRow,
+  forgeParked: boolean,
+  iso: () => string,
 ): Promise<void> {
-  const suspendedRequeues = state
-    .pendingRollbacks()
-    .filter((r) => r.reason === ENV_FAILURE_REQUEUE_REASON).length;
+  const suspendedRequeues = state.pendingRollbacks().filter((r) => r.reason === ENV_FAILURE_REQUEUE_REASON).length;
   const message =
     `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
     `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
     `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
     `auto-resume dispatch on the first successful probe; this notification does not stop that. ` +
-    (suspendedRequeues > 0
-      ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. `
-      : "") +
+    (suspendedRequeues > 0 ? `${suspendedRequeues} issue requeue(s) are held durably and will drain on resume. ` : "") +
     `Informational only — no action is required unless the underlying outage is expected to ` +
     `persist.`;
   const intended = escalationChannel(park.source, forgeParked);
@@ -820,7 +823,9 @@ async function escalatePark(
   // (rare edges degrade to less machinery, not more) says not to build.
   state.recordParkEscalation(park.source, iso());
   state.appendEvent("park-escalated", {
-    source: park.source, channel: actualChannel, triggerIssue: park.triggerIssue,
+    source: park.source,
+    channel: actualChannel,
+    triggerIssue: park.triggerIssue,
   });
 }
 
@@ -829,8 +834,12 @@ async function escalatePark(
  *  input — see State.escalationMarkerPath's doc comment — + a log line). Zero forge writes. */
 function writeLocalEscalation(state: State, park: ParkRow, message: string): void {
   state.writeEscalationMarker({
-    source: park.source, reason: park.reason, triggerIssue: park.triggerIssue,
-    enteredAt: park.enteredAt, message, at: new Date().toISOString(),
+    source: park.source,
+    reason: park.reason,
+    triggerIssue: park.triggerIssue,
+    enteredAt: park.enteredAt,
+    message,
+    at: new Date().toISOString(),
   });
   process.stderr.write(`[sapwood:park] ${message}\n`);
 }
@@ -844,8 +853,14 @@ function writeLocalEscalation(state: State, park: ParkRow, message: string): voi
  *  must be recorded as such, never rotted as `running` until drainThenEscalate mislabels it
  *  failed. Touches no process/worktree (terminal lanes have sentinels — nothing to kill). */
 async function reclaimTerminalLane(
-  forge: IForge, state: State, supervisor: Supervisor, cfg: SapwoodConfig,
-  w: WorkerRow, p: LaneProbe, threshold: number, iso: () => string,
+  forge: IForge,
+  state: State,
+  supervisor: Supervisor,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  p: LaneProbe,
+  threshold: number,
+  iso: () => string,
 ): Promise<ReclaimOutcome | null> {
   const costUsd = p.costUsd ?? 0;
   const modelUsage = p.modelUsage ?? [];
@@ -897,7 +912,8 @@ async function reclaimTerminalLane(
     // assistant message content, PR #180 review P1-3). Unconditional on hasPr: decision 1 is
     // "park the engine" regardless of what the failed lane produced.
     const envSource = classifyEnvFailure(p.failureText ?? "", {
-      llm: cfg.envFailure.llmPatterns, forge: cfg.envFailure.forgePatterns,
+      llm: cfg.envFailure.llmPatterns,
+      forge: cfg.envFailure.forgePatterns,
     });
     // P1-1b: if THIS lane was the llm episode's canary, settle it first — env-classified means
     // the same episode continues (attempts bumped, entered_at untouched); anything else means
@@ -932,7 +948,9 @@ async function reclaimTerminalLane(
       // dispatch.
       if (state.parkRow("forge") == null) {
         await attemptRollback(
-          forge, state, cfg,
+          forge,
+          state,
+          cfg,
           { id: rollbackId, issue: w.issue, target: "ready", reason: ENV_FAILURE_REQUEUE_REASON, attempts: 0 },
           iso,
         );
@@ -956,13 +974,19 @@ async function reclaimTerminalLane(
       const retained = supervisor.inspectWorktree(w.name);
       if (retained.worktreeRetained) {
         state.upsertWorker({
-          ...w, state: "failed", ended_at: iso(),
-          pr: p.prNumber ?? w.pr ?? null, gated_escalation_labeled: 0,
+          ...w,
+          state: "failed",
+          ended_at: iso(),
+          pr: p.prNumber ?? w.pr ?? null,
+          gated_escalation_labeled: 0,
         });
         state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
         state.appendEvent("env-failure-preserved", {
-          worker: w.name, issue: w.issue, source: envSource,
-          pr: p.prNumber ?? w.pr ?? null, worktreePath: retained.worktreePath,
+          worker: w.name,
+          issue: w.issue,
+          source: envSource,
+          pr: p.prNumber ?? w.pr ?? null,
+          worktreePath: retained.worktreePath,
         });
         return { kind: "env-failure", worker: w.name, issue: w.issue, source: envSource, costUsd, modelUsage };
       }
@@ -1036,13 +1060,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     }
     // drainThenEscalate re-reads runningWorkers() AFTER the terminal reclaim above transitioned
     // those lanes out of `running`, so a just-recorded handoff/done lane is never re-touched.
-    const { drainRequested, escalated } = await drainThenEscalate(
-      forge, state, supervisor, cfg, ["kill-switch"], now(), iso,
-    );
+    const { drainRequested, escalated } = await drainThenEscalate(forge, state, supervisor, cfg, ["kill-switch"], now(), iso);
     return {
-      reclaimed, dispatched: [], overBudget: false,
-      ceilingBreached: true, ceilingReasons: ["kill-switch"],
-      drainRequested, escalated, driven: [], rollbacks: [], gatedReclaimed: [],
+      reclaimed,
+      dispatched: [],
+      overBudget: false,
+      ceilingBreached: true,
+      ceilingReasons: ["kill-switch"],
+      drainRequested,
+      escalated,
+      driven: [],
+      rollbacks: [],
+      gatedReclaimed: [],
     };
   }
 
@@ -1155,7 +1184,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       const rollbackId = state.addPendingRollback(w.issue, "ready", "dead-lane-requeue", iso());
       rollbacks.push(
         await attemptRollback(
-          forge, state, cfg,
+          forge,
+          state,
+          cfg,
           { id: rollbackId, issue: w.issue, target: "ready", reason: "dead-lane-requeue", attempts: 0 },
           iso,
         ),
@@ -1200,9 +1231,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // orderForDispatch. needsHuman alone would let an issue still carrying `blocked` reclaim
       // and drive to merge (the merge driver's human-label veto reads the PR's labels, not the
       // issue's) the moment needs-human was removed.
-      const decision = gatedReentryDecision(
-        hasReserveLabel(labels, cfg.escalation.humanLabels), attempts, cfg.lanes.gatedReentryCap,
-      );
+      const decision = gatedReentryDecision(hasReserveLabel(labels, cfg.escalation.humanLabels), attempts, cfg.lanes.gatedReentryCap);
       if (decision === "SKIP") continue; // a human hold still stands — no complete human act yet
       if (decision === "CAPPED") {
         // The cap was already spent on a prior reclaim that re-escalated, and a human removed
@@ -1224,7 +1253,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           await forge.addLabel(w.issue, cfg.labels.needsHuman);
         } catch (e) {
           state.appendEvent("gated-reentry-capped-label-failed", {
-            worker: w.name, issue: w.issue, pr, attempts, error: String(e),
+            worker: w.name,
+            issue: w.issue,
+            pr,
+            attempts,
+            error: String(e),
           });
           continue;
         }
@@ -1246,8 +1279,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // RECLAIM: back to `driving`, same worker/PR — the DRIVE loop below picks it up this tick.
       const attempt = attempts + 1;
       state.upsertWorker({
-        ...w, state: "driving", ended_at: iso(),
-        review_triggered_head: null, review_triggered_at: null,
+        ...w,
+        state: "driving",
+        ended_at: iso(),
+        review_triggered_head: null,
+        review_triggered_at: null,
         gated_reentry_attempts: attempt,
       });
       state.appendEvent("gated-reentry", { worker: w.name, issue: w.issue, pr, attempt });
@@ -1311,8 +1347,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         const t = outcome.reviewerTransition;
         const evKind = `reviewer-fallback-${t.kind}`;
         const last = state.lastReviewerFallbackEvent(w.name);
-        const alreadyAnnounced =
-          last != null && last.kind === evKind && last.mode === t.mode && last.pr === pr && last.head === t.head;
+        const alreadyAnnounced = last != null && last.kind === evKind && last.mode === t.mode && last.pr === pr && last.head === t.head;
         if (!alreadyAnnounced) {
           state.appendEvent(evKind, { worker: w.name, issue: w.issue, pr, mode: t.mode, head: t.head });
           const note =
@@ -1357,7 +1392,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           }
           state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
           state.appendEvent("drive-needs-human", {
-            worker: w.name, issue: w.issue, pr, reason: outcome.reason, labeled,
+            worker: w.name,
+            issue: w.issue,
+            pr,
+            reason: outcome.reason,
+            labeled,
             ...(labelError != null ? { labelError } : {}),
           });
           // #147: gated_reentry_attempts > 0 means this lane was reclaimed by GATED RECLAIM at
@@ -1417,17 +1456,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     dailySpendUsd: state.dailySpendUsd(nowDate),
     dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
     wallClockElapsedSec:
-      (nowDate.getTime() -
-        state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec ?? 0)).getTime()) / 1000,
+      (nowDate.getTime() - state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec ?? 0)).getTime()) / 1000,
     maxWallClockSec: cfg.cost.maxWallClockSec,
   });
   const ceilingBreached = ceilingReasons.length > 0;
   let drainRequested: string[] = [];
   let escalated: string[] = [];
   if (ceilingBreached) {
-    ({ drainRequested, escalated } = await drainThenEscalate(
-      forge, state, supervisor, cfg, ceilingReasons, nowDate, iso,
-    ));
+    ({ drainRequested, escalated } = await drainThenEscalate(forge, state, supervisor, cfg, ceilingReasons, nowDate, iso));
   } else {
     // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / kill switch
     // lifted before this tick) -> clear so a future re-breach starts a fresh drain window.
@@ -1463,9 +1499,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   {
     const forgeEpisode = state.parkRow("forge");
     if (forgeEpisode) {
-      const backoffSec = probeBackoffSec(
-        forgeEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec,
-      );
+      const backoffSec = probeBackoffSec(forgeEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec);
       if (probeDue(forgeEpisode.lastProbeAt, nowDate.getTime(), backoffSec)) {
         const success = await probeForgeReachable(forge);
         if (success) {
@@ -1475,7 +1509,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.bumpParkProbe("forge", iso());
         }
         state.appendEvent("park-probe", {
-          source: "forge", success,
+          source: "forge",
+          success,
           attempts: success ? forgeEpisode.probeAttempts : forgeEpisode.probeAttempts + 1,
         });
       }
@@ -1497,9 +1532,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // returns from the top of tick() before this section ever runs. Duration escalation is
     // unaffected either way.
     if (llmEpisode && llmEpisode.canaryWorker == null && deps.probeLlmReachable && !ceilingBreached && !paused) {
-      const backoffSec = probeBackoffSec(
-        llmEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec,
-      );
+      const backoffSec = probeBackoffSec(llmEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec);
       if (probeDue(llmEpisode.lastProbeAt, nowDate.getTime(), backoffSec)) {
         const raw = await deps.probeLlmReachable();
         const pingOk = typeof raw === "boolean" ? raw : raw.ok;
@@ -1509,7 +1542,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // "unknown option" -> CLI too old for the ping's flags).
         const pingDetail = typeof raw === "boolean" ? undefined : raw.detail;
         state.appendEvent("park-probe", {
-          source: "llm", success: pingOk,
+          source: "llm",
+          success: pingOk,
           attempts: pingOk ? llmEpisode.probeAttempts : llmEpisode.probeAttempts + 1,
           ...(!pingOk && pingDetail != null ? { reason: pingDetail } : {}),
         });
@@ -1616,9 +1650,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // work is still waiting (codingFloor of cfg.lanes.max lanes are reserved for coding).
       const rank = issuePriority(issue.labels);
       if (!isCodingRank(rank)) {
-        const codingWaiting = order.filter(
-          (o) => isCodingRank(issuePriority(o.labels)) && !inFlightIssues.has(o.number),
-        ).length;
+        const codingWaiting = order.filter((o) => isCodingRank(issuePriority(o.labels)) && !inFlightIssues.has(o.number)).length;
         if (!metaLaneAllowed(cfg.lanes.max, metaUsed, codingWaiting)) {
           dispatched.push({ kind: "skipped", issue: issue.number, reason: "meta-floor" });
           continue;
@@ -1646,7 +1678,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // with no worker row and no trace of the failed recovery attempt.
         const rollbackId = state.addPendingRollback(issue.number, "ready", "dispatch-rollback", iso());
         await attemptRollback(
-          forge, state, cfg,
+          forge,
+          state,
+          cfg,
           { id: rollbackId, issue: issue.number, target: "ready", reason: "dispatch-rollback", attempts: 0 },
           iso,
         );
@@ -1654,8 +1688,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       }
       const { name, sessionId } = dispatchRes;
       const workerRow: WorkerRow = {
-        name, issue: issue.number, session_id: sessionId, state: "running",
-        started_at: iso(), ended_at: null,
+        name,
+        issue: issue.number,
+        session_id: sessionId,
+        state: "running",
+        started_at: iso(),
+        ended_at: null,
       };
       // #168 P1-1: a lane dispatched while still parked IS the llm episode's canary — recorded
       // durably on the episode row the moment it launches, so its terminal reclaim
@@ -1679,7 +1717,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   } // !paused (#75) / park canary (#168)
 
   return {
-    reclaimed, dispatched, overBudget, ceilingBreached, ceilingReasons, drainRequested, escalated,
-    driven, rollbacks, gatedReclaimed,
+    reclaimed,
+    dispatched,
+    overBudget,
+    ceilingBreached,
+    ceilingReasons,
+    drainRequested,
+    escalated,
+    driven,
+    rollbacks,
+    gatedReclaimed,
   };
 }

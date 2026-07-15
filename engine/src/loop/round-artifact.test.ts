@@ -4,16 +4,22 @@
 // state-reading/writing wrappers get their own smaller, focused tests; the round.ts integration
 // ("artifact exists after closeRound") lives in round.test.ts, next to the loop that calls it.
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  assembleRoundArtifact, buildRoundArtifact, persistRoundArtifact, renderRoundArtifactMarkdown,
-  capRoundArtifactMarkdown, RoundArtifactSchema, ROUND_ARTIFACT_SCHEMA_VERSION,
-  ROUND_ARTIFACT_EVENT_KINDS, type RoundArtifact,
-} from "./round-artifact.js";
+import { test } from "node:test";
 import { State } from "../state/state.js";
+import {
+  assembleRoundArtifact,
+  buildRoundArtifact,
+  capRoundArtifactMarkdown,
+  persistRoundArtifact,
+  ROUND_ARTIFACT_EVENT_KINDS,
+  ROUND_ARTIFACT_SCHEMA_VERSION,
+  type RoundArtifact,
+  RoundArtifactSchema,
+  renderRoundArtifactMarkdown,
+} from "./round-artifact.js";
 
 const meta = { roundId: 1, startedAt: "2026-07-10T00:00:00.000Z", endedAt: "2026-07-10T01:00:00.000Z" };
 
@@ -41,7 +47,10 @@ test("assembleRoundArtifact: dispatches + merges are collected verbatim, in ledg
     { kind: "merged", payload: { worker: "lane-1", issue: 1, pr: 10, headOid: "h1" } },
   ];
   const artifact = assembleRoundArtifact(events, meta, 4, 30);
-  assert.deepEqual(artifact.dispatches, [{ issue: 1, worker: "lane-1" }, { issue: 2, worker: "lane-2" }]);
+  assert.deepEqual(artifact.dispatches, [
+    { issue: 1, worker: "lane-1" },
+    { issue: 2, worker: "lane-2" },
+  ]);
   assert.deepEqual(artifact.merges, [{ issue: 1, worker: "lane-1", pr: 10 }]);
   assert.equal(artifact.prsMerged, 1);
   assert.equal(artifact.issuesClosed, 1);
@@ -85,7 +94,10 @@ test("assembleRoundArtifact: retries, review-fallback episodes, ceiling/drive-no
   ];
   const artifact = assembleRoundArtifact(events, meta, 0, 30);
   assert.deepEqual(artifact.retries, {
-    gatedReentries: 2, gatedReentryCapped: 1, rollbacksRecovered: 1, rollbacksEscalated: 1,
+    gatedReentries: 2,
+    gatedReentryCapped: 1,
+    rollbacksRecovered: 1,
+    rollbacksEscalated: 1,
   });
   assert.deepEqual(artifact.reviewRounds, { reviewerFallbackSwitches: 1, reviewerFallbackReverts: 1 });
   assert.equal(artifact.escalations.ceiling, 1);
@@ -116,14 +128,14 @@ test("assembleRoundArtifact: round-stop hits and *-degraded events map to named 
 });
 
 test("assembleRoundArtifact: retro-pr-opened/-degraded populate the retro section, last event wins", () => {
-  const opened = assembleRoundArtifact(
-    [{ kind: "retro-pr-opened", payload: { round_id: 1, pr: 5, branch: "retro/x" } }], meta, 0, 30,
-  );
+  const opened = assembleRoundArtifact([{ kind: "retro-pr-opened", payload: { round_id: 1, pr: 5, branch: "retro/x" } }], meta, 0, 30);
   assert.deepEqual(opened.retro, { opened: { pr: 5, branch: "retro/x" }, degraded: null });
 
   const degraded = assembleRoundArtifact(
     [{ kind: "retro-pr-degraded", payload: { round_id: 1, branch: "retro/y", title: "t", reason: "push not verified" } }],
-    meta, 0, 30,
+    meta,
+    0,
+    30,
   );
   assert.deepEqual(degraded.retro, { opened: null, degraded: { branch: "retro/y", title: "t", reason: "push not verified" } });
 
@@ -134,29 +146,39 @@ test("assembleRoundArtifact: retro-pr-opened/-degraded populate the retro sectio
     [
       { kind: "retro-pr-opened", payload: { round_id: 1, pr: 5, branch: "retro/x" } },
       { kind: "retro-pr-degraded", payload: { round_id: 1, branch: "retro/x", title: "t", reason: "branch exists" } },
-    ], meta, 0, 30,
+    ],
+    meta,
+    0,
+    30,
   );
   assert.deepEqual(openedThenDegraded.retro, { opened: null, degraded: { branch: "retro/x", title: "t", reason: "branch exists" } });
   const degradedThenOpened = assembleRoundArtifact(
     [
       { kind: "retro-pr-degraded", payload: { round_id: 1, branch: "retro/x", title: "t", reason: "transient" } },
       { kind: "retro-pr-opened", payload: { round_id: 1, pr: 6, branch: "retro/x" } },
-    ], meta, 0, 30,
+    ],
+    meta,
+    0,
+    30,
   );
   assert.deepEqual(degradedThenOpened.retro, { opened: { pr: 6, branch: "retro/x" }, degraded: null });
 });
 
 test("assembleRoundArtifact: align-summary populates the align section verbatim; absent -> null", () => {
   const withAlign = assembleRoundArtifact(
-    [{
-      kind: "align-summary",
-      payload: {
-        round_id: 1,
-        created: [{ issue: 20, title: "new idea", hasPlan: true }],
-        triaged: [{ issue: 21, drafted: false }],
+    [
+      {
+        kind: "align-summary",
+        payload: {
+          round_id: 1,
+          created: [{ issue: 20, title: "new idea", hasPlan: true }],
+          triaged: [{ issue: 21, drafted: false }],
+        },
       },
-    }],
-    meta, 0, 30,
+    ],
+    meta,
+    0,
+    30,
   );
   assert.deepEqual(withAlign.align, {
     created: [{ issue: 20, title: "new idea", hasPlan: true }],
@@ -169,13 +191,24 @@ test("assembleRoundArtifact: align-summary populates the align section verbatim;
 test("assembleRoundArtifact: two align-summary events (crash-rerun) MERGE — created unions by issue, triage outcome last-wins (Codex round-6 P2, PR #152)", () => {
   const artifact = assembleRoundArtifact(
     [
-      { kind: "align-summary", payload: { round_id: 1, created: [{ issue: 10, title: "a", hasPlan: true }], triaged: [{ issue: 9, drafted: false }] } },
-      { kind: "align-summary", payload: { round_id: 1, created: [{ issue: 11, title: "b", hasPlan: false }], triaged: [{ issue: 9, drafted: true }] } },
+      {
+        kind: "align-summary",
+        payload: { round_id: 1, created: [{ issue: 10, title: "a", hasPlan: true }], triaged: [{ issue: 9, drafted: false }] },
+      },
+      {
+        kind: "align-summary",
+        payload: { round_id: 1, created: [{ issue: 11, title: "b", hasPlan: false }], triaged: [{ issue: 9, drafted: true }] },
+      },
     ],
-    meta, 0, 30,
+    meta,
+    0,
+    30,
   );
   assert.deepEqual(artifact.align, {
-    created: [{ issue: 10, title: "a", hasPlan: true }, { issue: 11, title: "b", hasPlan: false }],
+    created: [
+      { issue: 10, title: "a", hasPlan: true },
+      { issue: 11, title: "b", hasPlan: false },
+    ],
     triaged: [{ issue: 9, drafted: true }],
   });
 });
@@ -200,7 +233,9 @@ test("renderRoundArtifactMarkdown: same artifact -> byte-identical markdown ever
       { kind: "merged", payload: { worker: "lane-1", issue: 1, pr: 10 } },
       { kind: "drive-needs-human", payload: { worker: "lane-2", issue: 2, pr: 11, reason: "x" } },
     ],
-    meta, 4.2, 30,
+    meta,
+    4.2,
+    30,
   );
   const a = renderRoundArtifactMarkdown(artifact);
   const b = renderRoundArtifactMarkdown(artifact);

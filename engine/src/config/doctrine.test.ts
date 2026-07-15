@@ -60,12 +60,15 @@ test("loadDoctrine: a PRESENT-but-unreadable path (a directory, not a file) thro
   try {
     const path = join(dir, "REVIEW-DOCTRINE.md");
     mkdirSync(path); // exists at the configured path, but readFileSync on a directory throws EISDIR
-    assert.throws(() => loadDoctrine(path, 1000), (err: unknown) => {
-      assert.ok(err instanceof Error);
-      assert.match(err.message, /present but unreadable/i);
-      assert.ok(err.message.includes(path), `expected error to name the path ${path}, got: ${err.message}`);
-      return true;
-    });
+    assert.throws(
+      () => loadDoctrine(path, 1000),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /present but unreadable/i);
+        assert.ok(err.message.includes(path), `expected error to name the path ${path}, got: ${err.message}`);
+        return true;
+      },
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

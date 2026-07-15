@@ -11,26 +11,35 @@
 // grants, cadence, prompt-template rendering) with the digest as one more thing that wiring now
 // produces and substitutes in.
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createRetroStub, gatherRetroFacts, retroMarker, defaultRetroPromptPath, parseRetroScratch,
-  RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS, RETRO_SCRATCH_FILE, type RetroDeps,
-} from "./retro.js";
+import { test } from "node:test";
+import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import type { LaneProbe, Supervisor } from "../loop/conductor.js";
+import { type PeripheralPhase, type PeripheralStub, type RoundDeps, runRounds } from "../loop/round.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { State } from "../state/state.js";
-import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import { runRounds, type RoundDeps, type PeripheralPhase, type PeripheralStub } from "../loop/round.js";
-import type { Supervisor, LaneProbe } from "../loop/conductor.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
+import {
+  createRetroStub,
+  defaultRetroPromptPath,
+  gatherRetroFacts,
+  parseRetroScratch,
+  RETRO_ALLOWED_TOOLS,
+  RETRO_DISALLOWED_TOOLS,
+  RETRO_SCRATCH_FILE,
+  type RetroDeps,
+  retroMarker,
+} from "./retro.js";
 
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
   private n = 0;
   private readonly script: RoleSessionResult[];
-  constructor(...script: RoleSessionResult[]) { this.script = script; }
+  constructor(...script: RoleSessionResult[]) {
+    this.script = script;
+  }
   async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
     this.calls.push(opts);
     const result = this.script[Math.min(this.n, this.script.length - 1)]!;
@@ -45,10 +54,19 @@ class ScriptedRunner {
 // NO scratchText at all is built as a literal where needed (a default parameter can't be
 // bypassed by passing undefined explicitly).
 const doneResult = (name: string, scratchText = "none"): RoleSessionResult => ({
-  outcome: "done", costUsd: 0.03, modelUsage: [], exitCode: 0, name, scratchText,
+  outcome: "done",
+  costUsd: 0.03,
+  modelUsage: [],
+  exitCode: 0,
+  name,
+  scratchText,
 });
 const timeoutResult = (name: string): RoleSessionResult => ({
-  outcome: "timeout", costUsd: 0.03, modelUsage: [], exitCode: null, name,
+  outcome: "timeout",
+  costUsd: 0.03,
+  modelUsage: [],
+  exitCode: null,
+  name,
 });
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -57,7 +75,10 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
 // ── Write-scope: "proposals appear as branches/PRs only" ────────────────────────────────────
 
 test("RETRO_ALLOWED_TOOLS: grants local git (proposal authorship) — never a merge/review/issue-mutation capability", () => {
-  assert.ok(RETRO_ALLOWED_TOOLS.includes("Bash(git commit*)") && RETRO_ALLOWED_TOOLS.includes("Bash(git push*)"), "can commit + push a branch");
+  assert.ok(
+    RETRO_ALLOWED_TOOLS.includes("Bash(git commit*)") && RETRO_ALLOWED_TOOLS.includes("Bash(git push*)"),
+    "can commit + push a branch",
+  );
   for (const forbidden of ["gh pr merge", "gh pr review", "gh pr ready", "gh issue edit", "gh issue comment", "gh api"]) {
     assert.ok(!RETRO_ALLOWED_TOOLS.includes(forbidden), `allowed tools must not grant ${forbidden}`);
   }
@@ -67,7 +88,11 @@ test("RETRO_ALLOWED_TOOLS: grants local git (proposal authorship) — never a me
 
 test("RETRO_ALLOWED_TOOLS: no gh entries AT ALL (#111 acceptance criterion) — reads come from the digest, PR creation is engine-side", () => {
   for (const removed of [
-    "Bash(gh pr view*)", "Bash(gh pr list*)", "Bash(gh pr diff*)", "Bash(gh issue view*)", "Bash(gh issue list*)",
+    "Bash(gh pr view*)",
+    "Bash(gh pr list*)",
+    "Bash(gh pr diff*)",
+    "Bash(gh issue view*)",
+    "Bash(gh issue list*)",
     "Bash(gh pr create*)",
   ]) {
     assert.ok(!RETRO_ALLOWED_TOOLS.includes(removed), `allowed tools must no longer grant ${removed}`);
@@ -78,8 +103,14 @@ test("RETRO_ALLOWED_TOOLS: no gh entries AT ALL (#111 acceptance criterion) — 
 
 test("RETRO_ALLOWED_TOOLS: local git introspection (branch/checkout/add/commit/push/diff/status/log) is unchanged — never GitHub browsing", () => {
   for (const kept of [
-    "Bash(git branch*)", "Bash(git checkout*)", "Bash(git add*)", "Bash(git commit*)", "Bash(git push*)",
-    "Bash(git diff*)", "Bash(git status*)", "Bash(git log*)",
+    "Bash(git branch*)",
+    "Bash(git checkout*)",
+    "Bash(git add*)",
+    "Bash(git commit*)",
+    "Bash(git push*)",
+    "Bash(git diff*)",
+    "Bash(git status*)",
+    "Bash(git log*)",
   ]) {
     assert.ok(RETRO_ALLOWED_TOOLS.includes(kept), `allowed tools must still grant ${kept}`);
   }
@@ -151,7 +182,10 @@ test("createRetroStub: renders the round facts into the prompt and dispatches ex
   state.appendEvent("drive-needs-human", { worker: "lane-b", issue: 2, pr: 5, reason: "flaky" });
   const runner = new ScriptedRunner(doneResult("role-retro-2"));
   const deps: RetroDeps = {
-    state, cfg: mkCfg(), runner, forge: new MinimalForge(),
+    state,
+    cfg: mkCfg(),
+    runner,
+    forge: new MinimalForge(),
     now: () => new Date("2026-07-10T02:00:00.000Z"),
   };
   const stub = createRetroStub(deps);
@@ -184,7 +218,10 @@ test("createRetroStub: uses deps.forge to build the digest (PR diff + review dat
   const runner = new ScriptedRunner(doneResult("s1"));
   const forge = new MinimalForge();
   let diffCalledWith: number | undefined;
-  forge.getPRDiff = async (pr: number) => { diffCalledWith = pr; return "diff --git a/x b/x\n+hello"; };
+  forge.getPRDiff = async (pr: number) => {
+    diffCalledWith = pr;
+    return "diff --git a/x b/x\n+hello";
+  };
   let commitsCalledWith: string | undefined;
   forge.getCommitsSince = async (sinceIso: string) => {
     commitsCalledWith = sinceIso;
@@ -236,8 +273,7 @@ test("createRetroStub: roles.retro.digestMaxChars is honored — a tiny cap trun
 
 // ── #111 PR-B: the scratch-file contract (parseRetroScratch, fail-closed) ───────────────────
 
-const PROPOSAL_SCRATCH =
-  "branch: retro/round-1-proposal\ntitle: docs: tighten worker prompt\n\n## Why\n\nRecurring gate② finding.\n";
+const PROPOSAL_SCRATCH = "branch: retro/round-1-proposal\ntitle: docs: tighten worker prompt\n\n## Why\n\nRecurring gate② finding.\n";
 
 test("parseRetroScratch: a well-formed proposal parses to exact branch/title/body (body raw markdown, trimmed)", () => {
   const p = parseRetroScratch(PROPOSAL_SCRATCH);
@@ -291,9 +327,7 @@ test("createRetroStub: happy path — session writes a proposal scratch; engine 
 
   assert.equal(marker, retroMarker(round.round_id));
   assert.deepEqual(forge.branchExistsCalls, ["retro/round-1-proposal"], "push verified engine-side, by name");
-  assert.deepEqual(forge.openPRCalls, [[
-    "retro/round-1-proposal", "docs: tighten worker prompt", "## Why\n\nRecurring gate② finding.",
-  ]]);
+  assert.deepEqual(forge.openPRCalls, [["retro/round-1-proposal", "docs: tighten worker prompt", "## Why\n\nRecurring gate② finding."]]);
   const opened = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-opened"]);
   assert.equal(opened.length, 1);
   assert.deepEqual(opened[0]!.payload, { round_id: round.round_id, pr: 77, branch: "retro/round-1-proposal" });
@@ -366,7 +400,11 @@ test("createRetroStub: missing scratch file is an INVALID attempt — retried on
   // Literals, not doneResult(name, undefined): an explicit `undefined` argument would trigger
   // the helper's default ("none") — these results must genuinely carry NO scratchText field.
   const noScratch = (name: string): RoleSessionResult => ({
-    outcome: "done", costUsd: 0.03, modelUsage: [], exitCode: 0, name,
+    outcome: "done",
+    costUsd: 0.03,
+    modelUsage: [],
+    exitCode: 0,
+    name,
   });
   const runner = new ScriptedRunner(noScratch("s1"), noScratch("s2"));
   const forge = new MinimalForge();
@@ -522,7 +560,13 @@ test("defaultRetroPromptPath: resolves to the shipped prompts/retro.md, which ex
   assert.ok(/not a fix queue|point.fix/i.test(body), "must reject a point-fix-queue response to recurring findings");
   assert.ok(/inputs to judge|evidence to weigh/i.test(body), "must treat findings as evidence to judge");
   assert.ok(/accepted/i.test(body) && /rejected/i.test(body), "must require an accepted/rejected classification with reasons");
-  for (const v of ["{{round.id}}", "{{round.handoffs}}", "{{round.needsHumanEscalations}}", "{{round.ceilingEscalations}}", "{{round.digest}}"]) {
+  for (const v of [
+    "{{round.id}}",
+    "{{round.handoffs}}",
+    "{{round.needsHumanEscalations}}",
+    "{{round.ceilingEscalations}}",
+    "{{round.digest}}",
+  ]) {
     assert.ok(body.includes(v), `retro.md should reference ${v}`);
   }
 });
@@ -546,8 +590,12 @@ test("prompts/retro.md never instructs a direct merge/approve — the PR-only pa
 // ── Integration: wired as round.ts's real `retro` peripheral ────────────────────────────────
 
 class MinimalForge implements IForge {
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
@@ -566,31 +614,71 @@ class MinimalForge implements IForge {
     this.branchExistsCalls.push(branch);
     return this.branchExistsResult;
   }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
+  async getPRStatus(n: number): Promise<PRStatus> {
+    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
   async addIssueComment(): Promise<void> {}
-  async getIssueBody(): Promise<string> { return ""; }
-  updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
-  async getPRReviewData(): Promise<PRReviewData> {
-    return { headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false, labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0 };
+  async getIssueBody(): Promise<string> {
+    return "";
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
-  async getIssueLabels(): Promise<string[]> { return []; }
-  async getIssueComments() { return []; }
+  updateIssueBodyCalls: Array<[number, string]> = [];
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
+  async getPRReviewData(): Promise<PRReviewData> {
+    return {
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
+    };
+  }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return [];
+  }
+  async getIssueLabels(): Promise<string[]> {
+    return [];
+  }
+  async getIssueComments() {
+    return [];
+  }
 }
 
 class MinimalSupervisor implements Supervisor {
-  async probe(): Promise<LaneProbe> { return { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false }; }
-  async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> { return { name: `lane-${issue.number}`, sessionId: "s" }; }
-  async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> { return { worktreePath: null, worktreeRetained: false }; }
-  inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } { return { worktreePath: null, worktreeRetained: false }; }
-  requestHandoff(): boolean { return true; }
+  async probe(): Promise<LaneProbe> {
+    return { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+  }
+  async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
+    return { name: `lane-${issue.number}`, sessionId: "s" };
+  }
+  async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
+    return { worktreePath: null, worktreeRetained: false };
+  }
+  inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
+    return { worktreePath: null, worktreeRetained: false };
+  }
+  requestHandoff(): boolean {
+    return true;
+  }
 }
 
 const baseIntegrationDeps = (state: State, peripherals: Partial<Record<PeripheralPhase, PeripheralStub>>): RoundDeps => ({
@@ -614,8 +702,13 @@ test("runRounds integration: the real retro stub runs during a normal round clos
   // Graceful stop mid-round (round.test.ts's pattern): the in-flight round still finishes
   // every phase — retro included — and only the NEXT round is withheld.
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
-  deps.onRoundPhase = (_roundId, phase) => { if (phase === "aligning") stop(); };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  deps.onRoundPhase = (_roundId, phase) => {
+    if (phase === "aligning") stop();
+  };
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1);

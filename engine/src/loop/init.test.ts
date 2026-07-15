@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseConfig } from "../config/config.js";
+import type { GhRunner } from "../forge/gh.js";
 import {
   defaultDoctrineTemplatePath,
   defaultGoalTemplatePath,
+  InitError,
   init,
   missing,
   parseAuthScopes,
@@ -15,9 +17,7 @@ import {
   resolveDoctrineFilePath,
   resolveGoalFilePath,
   setStatusOptionsArgs,
-  InitError,
 } from "./init.js";
-import type { GhRunner } from "../forge/gh.js";
 
 const cfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");
 const OK_AUTH = "github.com\n  ✓ Logged in to github.com account x\n  - Token scopes: 'repo', 'read:org', 'project'\n";
@@ -140,7 +140,10 @@ test("init creates missing labels and provisions a missing board lane", async ()
     const creates = calls.filter((c) => c[0] === "label" && c[1] === "create");
     assert.ok(creates.length > 0, "created missing labels");
     assert.ok(actions.some((a) => /added Status lane "Ready"/.test(a)));
-    assert.ok(calls.some((c) => c.join(" ").includes("mutation")), "board mutation issued");
+    assert.ok(
+      calls.some((c) => c.join(" ").includes("mutation")),
+      "board mutation issued",
+    );
     // wrote starter config into the empty temp dir
     assert.ok(readdirSync(dir).includes("sapwood.config.yaml"));
   } finally {
@@ -180,7 +183,12 @@ test("board mutation preserves existing option ids (guards against issue #37's s
 
 test("milestones: only missing ones are created (idempotent, line-parsed)", async () => {
   const cfgMs = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\nmilestones: [M0, M1, v1.0]");
-  const { run, calls } = fakeRun({ labels: requiredLabels(cfgMs).map((l) => l.name), milestones: ["M0", "v1.0"], boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(cfgMs).map((l) => l.name),
+    milestones: ["M0", "v1.0"],
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     const { actions } = await init(cfgMs, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
@@ -229,7 +237,11 @@ test("defaultGoalTemplatePath resolves to a real, readable shipped file with the
 });
 
 test("init scaffolds the goal-file template when the resolved path is missing", async () => {
-  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
@@ -248,7 +260,11 @@ test("init scaffolds the goal-file template when the resolved path is missing", 
 });
 
 test("init never overwrites an existing goal file — byte-for-byte untouched, even with different content (idempotent, crash-rerun safe)", async () => {
-  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     const goalPath = join(dir, "docs", "PLAN.md");
@@ -266,7 +282,11 @@ test("init never overwrites an existing goal file — byte-for-byte untouched, e
 });
 
 test("init: a second run against a repo where init itself scaffolded the goal file is also a no-op (re-running init twice never overwrites)", async () => {
-  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
@@ -284,7 +304,11 @@ test("init: a second run against a repo where init itself scaffolded the goal fi
 
 test("init scaffolds the goal file at a custom goal.file location, creating intermediate directories", async () => {
   const customCfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\ngoal: { file: notes/nested/GOAL.md }");
-  const { run } = fakeRun({ labels: requiredLabels(customCfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run } = fakeRun({
+    labels: requiredLabels(customCfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     const { actions } = await init(customCfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
@@ -320,7 +344,11 @@ test("defaultDoctrineTemplatePath resolves to a real, readable shipped file with
 });
 
 test("init scaffolds the doctrine-file template when the resolved path is missing", async () => {
-  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
@@ -335,7 +363,11 @@ test("init scaffolds the doctrine-file template when the resolved path is missin
 });
 
 test("init never overwrites an existing doctrine file — byte-for-byte untouched, even with different content (idempotent, crash-rerun safe)", async () => {
-  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     const doctrinePath = join(dir, "docs", "REVIEW-DOCTRINE.md");
@@ -353,7 +385,11 @@ test("init never overwrites an existing doctrine file — byte-for-byte untouche
 });
 
 test("init: a second run against a repo where init itself scaffolded the doctrine file is also a no-op (re-running init twice never overwrites)", async () => {
-  const { run } = fakeRun({ labels: requiredLabels(cfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
@@ -371,7 +407,11 @@ test("init: a second run against a repo where init itself scaffolded the doctrin
 
 test("init scaffolds the doctrine file at a custom doctrine.file location, creating intermediate directories", async () => {
   const customCfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\ndoctrine: { file: notes/nested/DOCTRINE.md }");
-  const { run } = fakeRun({ labels: requiredLabels(customCfg).map((l) => l.name), boardExists: true, boardOptions: ["Ready", "In Progress", "Done"] });
+  const { run } = fakeRun({
+    labels: requiredLabels(customCfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
   const dir = tmpCwd();
   try {
     const { actions } = await init(customCfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });

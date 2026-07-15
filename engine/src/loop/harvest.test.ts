@@ -12,22 +12,28 @@
 // against the round's pre-computed needsHumanIssues set, and performs every addIssueComment
 // call itself — exactly what these tests assert on via the fake forge's `comments` capture.
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createHarvestStub, harvestMarker, renderFactsTemplate, factVars,
-  defaultHarvestPromptPath, HARVEST_DISALLOWED_TOOLS, validateHarvestOutput, type HarvestDeps,
-} from "./harvest.js";
-import { ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "../roles/peripheral.js";
-import { buildRoundArtifact } from "./round-artifact.js";
-import { RESULT_BLOCK_START, RESULT_BLOCK_END } from "../state/structured-output.js";
-import { State } from "../state/state.js";
+import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import { runRounds, type RoundDeps, type PeripheralPhase, type PeripheralStub } from "./round.js";
-import type { Supervisor, LaneProbe } from "./conductor.js";
-import type { IForge, Issue, PRStatus, PRReviewData, CommitInfo } from "../forge/forge.js";
+import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "../roles/peripheral.js";
+import { State } from "../state/state.js";
+import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import type { LaneProbe, Supervisor } from "./conductor.js";
+import {
+  createHarvestStub,
+  defaultHarvestPromptPath,
+  factVars,
+  HARVEST_DISALLOWED_TOOLS,
+  type HarvestDeps,
+  harvestMarker,
+  renderFactsTemplate,
+  validateHarvestOutput,
+} from "./harvest.js";
+import { type PeripheralPhase, type PeripheralStub, type RoundDeps, runRounds } from "./round.js";
+import { buildRoundArtifact } from "./round-artifact.js";
 
 /** Scripted fake of RoleRunner.run — captures every call's opts for assertion, returns the
  *  next scripted result (or the last one, repeated) — same pattern as plan-review.test.ts's
@@ -36,7 +42,9 @@ class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
   private n = 0;
   private readonly script: RoleSessionResult[];
-  constructor(...script: RoleSessionResult[]) { this.script = script; }
+  constructor(...script: RoleSessionResult[]) {
+    this.script = script;
+  }
   async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
     this.calls.push(opts);
     const result = this.script[Math.min(this.n, this.script.length - 1)]!;
@@ -51,31 +59,71 @@ class ScriptedRunner {
  *  acts on), so this capture is what every "the engine posted X" assertion below reads. */
 class MinimalForge implements IForge {
   comments: Array<[number, string]> = [];
-  async detectOwnerKind(): Promise<"user"> { return "user"; }
-  async getReadyIssues(): Promise<Issue[]> { return []; }
+  async detectOwnerKind(): Promise<"user"> {
+    return "user";
+  }
+  async getReadyIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}
-  async openPR(): Promise<number> { return 1; }
-  async getPRStatus(n: number): Promise<PRStatus> { return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true }; }
+  async openPR(): Promise<number> {
+    return 1;
+  }
+  async getPRStatus(n: number): Promise<PRStatus> {
+    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
-  async addIssueComment(issue: number, body: string): Promise<void> { this.comments.push([issue, body]); }
-  async getIssueBody(): Promise<string> { return ""; }
-  updateIssueBodyCalls: Array<[number, string]> = [];
-  async updateIssueBody(issue: number, body: string): Promise<void> { this.updateIssueBodyCalls.push([issue, body]); }
-  async getPRReviewData(): Promise<PRReviewData> {
-    return { headOid: "x", author: "producer", updatedAt: "2026-01-01T00:00:00Z", isDraft: false, labels: [], state: "OPEN", reactions: [], reviews: [], unresolvedThreads: 0 };
+  async addIssueComment(issue: number, body: string): Promise<void> {
+    this.comments.push([issue, body]);
   }
-  async getPRDiff(): Promise<string> { return ""; }
-  async getCommitsSince(): Promise<CommitInfo[]> { return []; }
-  async branchExists(): Promise<boolean> { return false; }
-  async countOpenIssuesInMilestone(): Promise<number> { return 0; }
-  async listMilestoneTitles(): Promise<string[]> { return []; }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> { return []; }
-  async getIssueLabels(): Promise<string[]> { return []; }
-  async getIssueComments() { return []; }
+  async getIssueBody(): Promise<string> {
+    return "";
+  }
+  updateIssueBodyCalls: Array<[number, string]> = [];
+  async updateIssueBody(issue: number, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push([issue, body]);
+  }
+  async getPRReviewData(): Promise<PRReviewData> {
+    return {
+      headOid: "x",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: [],
+      state: "OPEN",
+      reactions: [],
+      reviews: [],
+      unresolvedThreads: 0,
+    };
+  }
+  async getPRDiff(): Promise<string> {
+    return "";
+  }
+  async getCommitsSince(): Promise<CommitInfo[]> {
+    return [];
+  }
+  async branchExists(): Promise<boolean> {
+    return false;
+  }
+  async countOpenIssuesInMilestone(): Promise<number> {
+    return 0;
+  }
+  async listMilestoneTitles(): Promise<string[]> {
+    return [];
+  }
+  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return [];
+  }
+  async getIssueLabels(): Promise<string[]> {
+    return [];
+  }
+  async getIssueComments() {
+    return [];
+  }
 }
 
 /** Builds a session's structured final-message text (structured-output.ts's sentinel format,
@@ -85,10 +133,19 @@ const sapwoodResult = (metadata: Record<string, unknown>): string =>
   `${RESULT_BLOCK_START}\n${JSON.stringify(metadata)}\n${RESULT_BLOCK_END}`;
 
 const doneResult = (name: string, resultText = ""): RoleSessionResult => ({
-  outcome: "done", costUsd: 0.02, modelUsage: [], exitCode: 0, name, resultText,
+  outcome: "done",
+  costUsd: 0.02,
+  modelUsage: [],
+  exitCode: 0,
+  name,
+  resultText,
 });
 const failedResult = (name: string): RoleSessionResult => ({
-  outcome: "failed", costUsd: 0.02, modelUsage: [], exitCode: 1, name,
+  outcome: "failed",
+  costUsd: 0.02,
+  modelUsage: [],
+  exitCode: 1,
+  name,
 });
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -106,12 +163,18 @@ test("defaultHarvestPromptPath: resolves to the shipped prompts/harvest.md, whic
   }
   // #110 PR3: the session has no gh grant it acts on — every comment travels through the
   // sentinel-delimited structured block, never a direct tool call.
-  assert.ok(body.includes(RESULT_BLOCK_START) && body.includes(RESULT_BLOCK_END), "harvest.md must instruct the structured-output sentinel format");
+  assert.ok(
+    body.includes(RESULT_BLOCK_START) && body.includes(RESULT_BLOCK_END),
+    "harvest.md must instruct the structured-output sentinel format",
+  );
   assert.ok(/no GitHub write access/i.test(body), "harvest.md must state the session has no gh access");
 });
 
 test("renderFactsTemplate: substitutes known vars, throws on an unknown placeholder (#74 fail-closed pattern)", () => {
-  assert.equal(renderFactsTemplate("round {{round.id}} spent {{round.spentUsd}}", { "round.id": "5", "round.spentUsd": "1.00" }), "round 5 spent 1.00");
+  assert.equal(
+    renderFactsTemplate("round {{round.id}} spent {{round.spentUsd}}", { "round.id": "5", "round.spentUsd": "1.00" }),
+    "round 5 spent 1.00",
+  );
   assert.throws(() => renderFactsTemplate("{{bogus}}", {}), /unknown variable \{\{bogus\}\}/);
 });
 
@@ -172,6 +235,7 @@ test("factVars (#123): {{round.artifact}} carries the rendered md verbatim; the 
   assert.equal(vars["round.prsMerged"], "1");
   assert.equal(vars["round.needsHumanList"], "#6");
   // Both a pre-#123 custom template and the shipped one render without an unknown-var throw.
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: this is the literal template syntax under test.
   renderFactsTemplate("r{{round.id}}: {{round.prsOpened}}/{{round.prsMerged}} ${{round.spentUsd}}", vars);
   renderFactsTemplate("{{round.artifact}} targets: {{round.needsHumanList}}", vars);
   state.close();
@@ -223,9 +287,7 @@ test("createHarvestStub: a needs-human issue this round -> dispatches ONE harves
   // #110 PR3: the engine posts the comment, from the session's VALIDATED structured output —
   // never the session itself (no gh grant it acts on) — appending the round marker itself
   // (structural, not a prompt instruction the session might get wrong).
-  assert.deepEqual(forge.comments, [
-    [42, `Round context: 1 PR merged this round.\n\n${harvestMarker(round.round_id)}`],
-  ]);
+  assert.deepEqual(forge.comments, [[42, `Round context: 1 PR merged this round.\n\n${harvestMarker(round.round_id)}`]]);
 
   // Round-level spend recorded against the session name, issue=0 sentinel (no single issue).
   assert.equal(state.spentUsdSince("2026-07-10T00:00:00.000Z") >= 0.02, true);
@@ -323,7 +385,10 @@ test("validateHarvestOutput: a smuggled extra metadata field is rejected outrigh
 
 test("validateHarvestOutput: an issue number outside the pre-computed needs-human set -> fail-closed, WHOLE batch rejected (not just the bad entry)", () => {
   const text = sapwoodResult({
-    comments: [{ issue: 42, body: "in-set, fine on its own" }, { issue: 99, body: "not in this round's set" }],
+    comments: [
+      { issue: 42, body: "in-set, fine on its own" },
+      { issue: 99, body: "not in this round's set" },
+    ],
   });
   const result = validateHarvestOutput(text, [42]);
   assert.equal(result.ok, false);
@@ -332,7 +397,10 @@ test("validateHarvestOutput: an issue number outside the pre-computed needs-huma
 
 test("validateHarvestOutput: duplicate issue numbers in the batch -> fail-closed, WHOLE batch rejected (Codex round 1 P1: one comment per needs-human issue, never two)", () => {
   const text = sapwoodResult({
-    comments: [{ issue: 42, body: "first" }, { issue: 42, body: "second, same target" }],
+    comments: [
+      { issue: 42, body: "first" },
+      { issue: 42, body: "second, same target" },
+    ],
   });
   const result = validateHarvestOutput(text, [42]);
   assert.equal(result.ok, false);
@@ -351,9 +419,20 @@ test("validateHarvestOutput: empty comments array is valid, including when the n
 });
 
 test("validateHarvestOutput: well-formed comments, all within the pre-computed set -> ok", () => {
-  const text = sapwoodResult({ comments: [{ issue: 1, body: "a" }, { issue: 2, body: "b" }] });
+  const text = sapwoodResult({
+    comments: [
+      { issue: 1, body: "a" },
+      { issue: 2, body: "b" },
+    ],
+  });
   const result = validateHarvestOutput(text, [1, 2, 3]);
-  assert.deepEqual(result, { ok: true, comments: [{ issue: 1, body: "a" }, { issue: 2, body: "b" }] });
+  assert.deepEqual(result, {
+    ok: true,
+    comments: [
+      { issue: 1, body: "a" },
+      { issue: 2, body: "b" },
+    ],
+  });
 });
 
 test("createHarvestStub #110: malformed structured output TWICE -> degrades exactly like a session failure — harvest-degraded event, no comment posted, round still closes", async () => {
@@ -384,7 +463,10 @@ test("createHarvestStub #110: an out-of-set issue number TWICE -> degrades fail-
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 42, pr: 7, reason: "x" });
   const poisoned = sapwoodResult({
-    comments: [{ issue: 42, body: "legit" }, { issue: 999, body: "not this round's issue" }],
+    comments: [
+      { issue: 42, body: "legit" },
+      { issue: 999, body: "not this round's issue" },
+    ],
   });
   const runner = new ScriptedRunner(doneResult("s1", poisoned), doneResult("s1-retry", poisoned));
   const forge = new MinimalForge();
@@ -404,7 +486,10 @@ test("createHarvestStub #110: duplicate issue numbers TWICE -> degrades fail-clo
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 42, pr: 7, reason: "x" });
   const duplicated = sapwoodResult({
-    comments: [{ issue: 42, body: "first" }, { issue: 42, body: "second, same target" }],
+    comments: [
+      { issue: 42, body: "first" },
+      { issue: 42, body: "second, same target" },
+    ],
   });
   const runner = new ScriptedRunner(doneResult("s1", duplicated), doneResult("s1-retry", duplicated));
   const forge = new MinimalForge();
@@ -422,11 +507,21 @@ test("createHarvestStub #110: duplicate issue numbers TWICE -> degrades fail-clo
 // ── Integration: wired as round.ts's real `harvesting` peripheral ──────────────────────────
 
 class MinimalSupervisor implements Supervisor {
-  async probe(): Promise<LaneProbe> { return { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false }; }
-  async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> { return { name: `lane-${issue.number}`, sessionId: "s" }; }
-  async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> { return { worktreePath: null, worktreeRetained: false }; }
-  inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } { return { worktreePath: null, worktreeRetained: false }; }
-  requestHandoff(): boolean { return true; }
+  async probe(): Promise<LaneProbe> {
+    return { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+  }
+  async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
+    return { name: `lane-${issue.number}`, sessionId: "s" };
+  }
+  async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
+    return { worktreePath: null, worktreeRetained: false };
+  }
+  inspectWorktree(): { worktreePath: string | null; worktreeRetained: boolean } {
+    return { worktreePath: null, worktreeRetained: false };
+  }
+  requestHandoff(): boolean {
+    return true;
+  }
 }
 
 const baseIntegrationDeps = (state: State, peripherals: Partial<Record<PeripheralPhase, PeripheralStub>>): RoundDeps => ({
@@ -455,7 +550,10 @@ test("runRounds integration: the real harvest stub runs during a normal round cl
   // Signal a graceful stop mid-round (round.test.ts's pattern): the in-flight round still
   // finishes every phase — harvesting included — and only the NEXT round is withheld.
   let stop = () => {};
-  deps.registerSignals = (requestStop) => { stop = requestStop; return () => {}; };
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
   deps.onRoundPhase = (_roundId, phase) => {
     // Appended AFTER startRound (the round already exists once 'aligning' completes), so its
     // ts is guaranteed >= round.started_at — exactly what gatherRoundFacts' window requires.

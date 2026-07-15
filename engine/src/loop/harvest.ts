@@ -32,18 +32,14 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { PeripheralStub } from "./round.js";
-import type { IForge } from "../forge/forge.js";
-import type { State, RoundRow } from "../state/state.js";
 import type { SapwoodConfig } from "../config/config.js";
-import {
-  ROLE_DISALLOWED_TOOLS, runSessionWithRetry, type RoleRunner, type RoleSessionResult,
-} from "../roles/peripheral.js";
+import type { IForge } from "../forge/forge.js";
+import { ROLE_DISALLOWED_TOOLS, type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
+import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
-import {
-  buildRoundArtifact, renderRoundArtifactMarkdown, capRoundArtifactMarkdown, type RoundArtifact,
-} from "./round-artifact.js";
+import type { PeripheralStub } from "./round.js";
+import { buildRoundArtifact, capRoundArtifactMarkdown, type RoundArtifact, renderRoundArtifactMarkdown } from "./round-artifact.js";
 
 /** Harvest's deny-list: the base denies PLUS all of `gh issue edit` — harvest writes issue
  *  COMMENTS only (see prompts/harvest.md), never a body edit and never a label, so unlike the
@@ -105,9 +101,7 @@ export function factVars(artifact: RoundArtifact, artifactMd: string): Record<st
     "round.spentUsd": artifact.spendUsd.toFixed(2),
     "round.roundBudgetUsd": artifact.roundBudgetUsd.toFixed(2),
     "round.needsHumanCount": String(needsHuman.length),
-    "round.needsHumanList": needsHuman.length > 0
-      ? needsHuman.map((n) => `#${n}`).join(", ")
-      : "(none)",
+    "round.needsHumanList": needsHuman.length > 0 ? needsHuman.map((n) => `#${n}`).join(", ") : "(none)",
   };
 }
 
@@ -118,9 +112,7 @@ export function renderFactsTemplate(template: string, vars: Record<string, strin
   return template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => {
     const name = raw.trim();
     if (Object.hasOwn(vars, name)) return vars[name]!;
-    throw new Error(
-      `role prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`,
-    );
+    throw new Error(`role prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`);
   });
 }
 
@@ -134,14 +126,18 @@ export function renderFactsTemplate(template: string, vars: Record<string, strin
 // lines, not a report" (round-context prose, never a revised issue body), so none of the
 // nested-code-fence/JSON-escaping hazard the BODY segment exists to avoid for plan-review's
 // long bodies applies here.
-const HarvestMetadataSchema = z.object({
-  comments: z.array(
-    z.object({
-      issue: z.number().int().positive(),
-      body: z.string(),
-    }).strict(),
-  ),
-}).strict();
+const HarvestMetadataSchema = z
+  .object({
+    comments: z.array(
+      z
+        .object({
+          issue: z.number().int().positive(),
+          body: z.string(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
 
 export interface HarvestComment {
   issue: number;
@@ -185,7 +181,8 @@ export function validateHarvestOutput(text: string, needsHumanIssues: number[]):
     if (!allowed.has(c.issue)) {
       return {
         ok: false,
-        reason: `comment targets issue #${c.issue}, outside this round's needs-human set ` +
+        reason:
+          `comment targets issue #${c.issue}, outside this round's needs-human set ` +
           `(${needsHumanIssues.length > 0 ? needsHumanIssues.map((n) => `#${n}`).join(", ") : "empty"})`,
       };
     }
@@ -242,9 +239,7 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
       const needsHumanIssues = artifact.escalations.needsHuman;
       if (needsHumanIssues.length > 0) {
         const template = loadRolePromptTemplate(deps.cfg.roles.harvest.promptFile, defaultHarvestPromptPath());
-        const artifactMd = capRoundArtifactMarkdown(
-          renderRoundArtifactMarkdown(artifact), deps.cfg.roles.harvest.artifactMaxChars,
-        );
+        const artifactMd = capRoundArtifactMarkdown(renderRoundArtifactMarkdown(artifact), deps.cfg.roles.harvest.artifactMaxChars);
         const rendered = renderFactsTemplate(template, factVars(artifact, artifactMd));
         const role = deps.cfg.roles.harvest;
         // RoleRunner.run never throws on the session's OWN outcome (failed/timeout return
@@ -262,7 +257,10 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
           runner: deps.runner,
           state: deps.state,
           session: {
-            roleId: "harvest", prompt: rendered, model: role.model, effort: role.effort,
+            roleId: "harvest",
+            prompt: rendered,
+            model: role.model,
+            effort: role.effort,
             disallowedTools: HARVEST_DISALLOWED_TOOLS,
           },
           // Round-level spend, no single associated issue — 0 is the sentinel (spend_ledger's
@@ -276,7 +274,10 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
           // that degraded on invalid output still reports "done" here; harvestDegradeReason
           // (below, stderr-only) is where the invalid-output cause is actually named.
           degradePayload: (result) => ({
-            round_id: roundId, outcome: result.outcome, session: result.name, attempts: 2,
+            round_id: roundId,
+            outcome: result.outcome,
+            session: result.name,
+            attempts: 2,
           }),
           degradeMessage: (result) =>
             `[sapwood:harvest] round ${roundId}: ${harvestDegradeReason(result, needsHumanIssues)} — ` +

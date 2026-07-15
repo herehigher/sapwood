@@ -3,16 +3,14 @@
 // session/forge involved); align.test.ts/architect.test.ts cover the prompt-injection wiring on
 // top of it.
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  resolveRoundDirective, directiveArchivePath, NO_ROUND_DIRECTIVE, type DirectiveAppliedPayload,
-} from "./directive.js";
+import { test } from "node:test";
 import { State } from "../state/state.js";
 import { ConfigSchema, type SapwoodConfig } from "./config.js";
+import { type DirectiveAppliedPayload, directiveArchivePath, NO_ROUND_DIRECTIVE, resolveRoundDirective } from "./directive.js";
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
@@ -113,7 +111,9 @@ test("resolveRoundDirective: crash-rerun — event already recorded but the sour
     // Simulate the crash window: the event is durable, but the file is still sitting at the
     // live path (as if the process died right after appendEvent, right before renameSync).
     const payload: DirectiveAppliedPayload = {
-      round_id: 5, path: directiveFile, content: "steer toward the payments module",
+      round_id: 5,
+      path: directiveFile,
+      content: "steer toward the payments module",
       sha256: createHash("sha256").update("steer toward the payments module", "utf8").digest("hex"),
     };
     state.appendEvent("directive-applied", payload);
@@ -136,7 +136,9 @@ test("resolveRoundDirective: crash-rerun — event recorded AND the rename alrea
     const state = new State(":memory:");
     const cfg = mkCfg({ round: { directiveFile } });
     const payload: DirectiveAppliedPayload = {
-      round_id: 2, path: directiveFile, content: "done already",
+      round_id: 2,
+      path: directiveFile,
+      content: "done already",
       sha256: createHash("sha256").update("done already", "utf8").digest("hex"),
     };
     state.appendEvent("directive-applied", payload);
@@ -155,7 +157,10 @@ test("resolveRoundDirective: round-scoped — a directive-applied event from a D
     const state = new State(":memory:");
     const cfg = mkCfg({ round: { directiveFile } });
     state.appendEvent("directive-applied", {
-      round_id: 99, path: directiveFile, content: "stale from another round", sha256: "x".repeat(64),
+      round_id: 99,
+      path: directiveFile,
+      content: "stale from another round",
+      sha256: "x".repeat(64),
     });
     // No file present for THIS round (round 1) and no event scoped to round 1 — falls back to
     // the 'none' placeholder rather than reusing round 99's event.
@@ -166,10 +171,7 @@ test("resolveRoundDirective: round-scoped — a directive-applied event from a D
 });
 
 test("directiveArchivePath: a sibling directives/ dir next to the configured directive file, named round-<id>.md", () => {
-  assert.equal(
-    directiveArchivePath("/repo/data/DIRECTIVE.md", 42),
-    "/repo/data/directives/round-42.md",
-  );
+  assert.equal(directiveArchivePath("/repo/data/DIRECTIVE.md", 42), "/repo/data/directives/round-42.md");
 });
 
 // ── Gate② I1: the idempotent rename must never swallow a FRESH directive ────────────────────
@@ -197,7 +199,8 @@ test("resolveRoundDirective I1: prior event + a live file with a DIFFERENT sha (
     assert.equal(existsSync(directiveFile), true, "the fresh directive must not be swallowed");
     assert.equal(readFileSync(directiveFile, "utf8"), "round-2 steering, dropped mid-round-1");
     assert.equal(
-      readFileSync(directiveArchivePath(directiveFile, 1), "utf8"), "round-1 steering",
+      readFileSync(directiveArchivePath(directiveFile, 1), "utf8"),
+      "round-1 steering",
       "round 1's archive must still match round 1's event",
     );
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1);
@@ -219,7 +222,9 @@ test("resolveRoundDirective I1: the crash-leftover cleanup (prior event + live f
     const state = new State(":memory:");
     const cfg = mkCfg({ round: { directiveFile } });
     const payload: DirectiveAppliedPayload = {
-      round_id: 4, path: directiveFile, content: "crash leftover",
+      round_id: 4,
+      path: directiveFile,
+      content: "crash leftover",
       sha256: createHash("sha256").update("crash leftover", "utf8").digest("hex"),
     };
     state.appendEvent("directive-applied", payload);
