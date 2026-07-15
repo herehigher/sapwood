@@ -932,9 +932,20 @@ export class WorkerSupervisor implements Supervisor {
     // instead confirms death (and writes .handoff) from INSIDE probe(), the next time it's
     // called for this lane; see finalizeDetachedHandoffIfConfirmedDead.
     if (this.detachedHandoffRequested.has(name) || this.detachedReclaiming.has(name)) return false;
+    const runningPath = this.path(name, "running.json");
+    const running = this.readJson(runningPath);
     const pid = this.persistedPid(name);
     if (pid == null || this.wrapperAlive(name) !== 1) return false;
     this.detachedHandoffRequested.add(name);
+    if (running?.handoff_requested === true) {
+      // #169: re-signal once per restarted engine to close the write-before-signal crash
+      // window (the flag was persisted, but SIGTERM may never have been sent). Return false
+      // because the flag dedups only the lane-adopted event. Accepted blind spot: a crash after
+      // SIGTERM but before appendEvent permanently loses that honesty event; fixing that tiny
+      // window needs new conductor-side event-log dedup machinery.
+      this.signalGroup(pid, "SIGTERM");
+      return false;
+    }
     // #63: persist the request onto running.json itself (not just this process's in-memory
     // set) so a SECOND engine restart — before probe() ever confirms the pid is dead — doesn't
     // forget the request. The in-memory set alone only survives one restart (it's how THIS
@@ -955,8 +966,7 @@ export class WorkerSupervisor implements Supervisor {
     // succeeded. The in-memory set above already covers this process's lifetime regardless; the
     // persisted field is purely an enhancement for surviving a second restart.
     try {
-      const running = this.readJson(this.path(name, "running.json"));
-      if (running) this.writeJsonAtomic(this.path(name, "running.json"), { ...running, handoff_requested: true });
+      if (running) this.writeJsonAtomic(runningPath, { ...running, handoff_requested: true });
     } catch (e) {
       this.log(`[sapwood:worker] lane ${name}: failed to persist handoff_requested (non-fatal — SIGTERM still sent): ${String(e)}`);
     }
@@ -1232,6 +1242,10 @@ export class WorkerSupervisor implements Supervisor {
     const handoff = existsSync(this.path(name, "handoff.json"));
     const hbAge = this.heartbeatAge(name);
     const wrapperAlive = this.wrapperAlive(name);
+    // #169: reuse the immutable first-dispatch baseline already persisted for timeout/dirty-
+    // worktree policy. NaN is intentional fail-safe input: an unbounded detached lane is never
+    // adoptable merely because its heartbeat is stale and its pid currently answers kill -0.
+    const dispatchedAgeSec = (this.now().getTime() - this.dispatchedBaselineMs(name)) / 1000;
     const issue = this.laneIssue(name);
     let hasPr = false;
     let prNumber: number | undefined;
@@ -1269,6 +1283,7 @@ export class WorkerSupervisor implements Supervisor {
       handoff,
       hbAge,
       wrapperAlive,
+      dispatchedAgeSec,
       hasPr,
       costUsd,
       modelUsage,

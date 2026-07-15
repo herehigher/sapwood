@@ -40,19 +40,35 @@ export function nextRoundId(prev?: string | number): number {
   return /^[1-9][0-9]*$/.test(s) ? Number(s) + 1 : 1;
 }
 
-export type LaneClass = "KEEP" | "DONE" | "FAILED" | "DEAD";
+export type LaneClass = "KEEP" | "DONE" | "FAILED" | "ADOPT" | "DEAD";
 
 /**
- * Classify an in-flight lane from the 4 completion signals (§7), priority high->low:
- * failed sentinel > done sentinel > wrapper-confirmed-dead(no sentinel) | heartbeat-timeout > KEEP.
+ * Classify an in-flight lane from the completion signals (§7), priority high->low:
+ * failed sentinel > done sentinel > wrapper-confirmed-dead(no sentinel) > restart adoption |
+ * heartbeat-timeout > KEEP.
  * wrapperAlive: 1 alive | 0 dead (kill -0 failed) | -1 unknown (no readable pid).
  * hbAge < 0 means "no heartbeat file yet" (just spawned) — not a timeout.
+ * #169: only a stale-heartbeat, confirmed-alive detached lane with a parseable, bounded
+ * first-dispatch age is adoptable. Unknown age fails safe to the pre-#169 DEAD behavior.
  */
-export function classifyLane(done: boolean, failed: boolean, hbAge: number, threshold: number, wrapperAlive: -1 | 0 | 1): LaneClass {
+export function classifyLane(
+  done: boolean,
+  failed: boolean,
+  hbAge: number,
+  threshold: number,
+  wrapperAlive: -1 | 0 | 1,
+  dispatchedAgeSec = Number.NaN,
+  timeoutSec = 0,
+): LaneClass {
   if (failed) return "FAILED";
   if (done) return "DONE";
   if (wrapperAlive === 0) return "DEAD"; // confirmed dead, no sentinel -> crashed without trace
-  if (hbAge >= 0 && hbAge > threshold) return "DEAD"; // heartbeat stale
+  if (hbAge >= 0 && hbAge > threshold) {
+    if (wrapperAlive === 1 && Number.isFinite(dispatchedAgeSec) && dispatchedAgeSec >= 0 && dispatchedAgeSec <= timeoutSec) {
+      return "ADOPT";
+    }
+    return "DEAD"; // stale + dead/unknown/too-old/unbounded keeps today's hard-reclaim path
+  }
   return "KEEP";
 }
 
@@ -277,6 +293,11 @@ export interface LaneProbe {
   handoff: boolean; // soft-budget graceful handoff sentinel: resumable, do NOT kill
   hbAge: number; // seconds since heartbeat mtime; -1 if no heartbeat file yet (just spawned)
   wrapperAlive: -1 | 0 | 1; // 1 alive | 0 confirmed dead (kill -0 failed) | -1 unknown
+  /** #169: seconds since running.json's persisted first `dispatched_at`; NaN when absent or
+   *  unparseable. This is existing persisted data surfaced for bounded restart adoption, not
+   *  new lane state. Optional only for pre-#169 probe fixtures; stale lanes without it fail
+   *  safe to DEAD. */
+  dispatchedAgeSec?: number;
   hasPr: boolean; // an open PR exists for this lane's issue
   /** The open PR's number, when hasPr — the merge driver's gate/merge target (#13). Optional:
    *  probe fixtures that predate #13 (hasPr only, no number) still type-check; a driving lane
@@ -958,7 +979,7 @@ async function reclaimTerminalLane(
     settleCanary(state, w.name, false, iso);
     return { kind: "handoff", worker: w.name, issue: w.issue, costUsd, modelUsage };
   }
-  const cls = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive);
+  const cls = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive, p.dispatchedAgeSec, cfg.worker.timeoutSec);
   if (cls === "DONE") {
     // #155: leaving `running` either way (driving or done/escalated) — clear LIVE telemetry.
     state.clearLiveTelemetry(w.name);
@@ -1233,7 +1254,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // and the reclaimed[] outcome — computed once so the two never drift apart.
     const costUsd = p.costUsd ?? 0;
     const modelUsage = p.modelUsage ?? [];
-    if (classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive) === "KEEP") {
+    const laneClass = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive, p.dispatchedAgeSec, cfg.worker.timeoutSec);
+    if (laneClass === "KEEP") {
       // #155: refresh the lane's LIVE per-probe telemetry (priced-cost snapshot, context
       // tokens, token composition) — update-in-place, no history, no per-probe event. Absent
       // (a DETACHED post-restart lane: the new supervisor has no in-memory Lane, so worker.ts
@@ -1243,6 +1265,24 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // for a detached lane — a number we can no longer refresh must not look live.
       if (p.liveTelemetry) state.setLiveTelemetry(w.name, p.liveTelemetry);
       else state.clearLiveTelemetry(w.name);
+      reclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
+      continue;
+    }
+    if (laneClass === "ADOPT") {
+      // #169: a restart stopped the engine-owned heartbeat timer, but kill -0 proves the
+      // detached wrapper still lives. Ask it to checkpoint through the existing graceful
+      // handoff protocol and HOLD the lane while it drains. requestHandoff's persisted flag
+      // makes repeated ticks/restarts no-ops; only the first request gets the honesty event.
+      if (supervisor.requestHandoff(w.name)) {
+        state.appendEvent("lane-adopted", {
+          worker: w.name,
+          issue: w.issue,
+          note: "Spend during engine downtime was unobserved.",
+        });
+      }
+      // A detached lane has no refreshable live telemetry. Keep the ordinary `kept` outcome
+      // so adoption adds no new scheduler/result machinery while the lane drains.
+      state.clearLiveTelemetry(w.name);
       reclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
       continue;
     }
