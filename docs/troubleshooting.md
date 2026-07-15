@@ -70,7 +70,9 @@ remove the `needs-human` label. The lane will not be reused until you do.
 ## Kill switch recovery
 
 If `data/KILL_SWITCH` is set (via `/sapwood-stop` or by hand), all new dispatch and
-merges are frozen and running workers are being drained. Recovery:
+merges are frozen and running workers are being drained. The switch is part of the stateful
+data directory; see [Data directory is stateful](configuration.md#data-directory-is-stateful)
+before moving, deleting, or restoring `data/`. Recovery:
 
 1. Check `sapwood status` — it reports `kill switch: ACTIVE` and shows any in-flight
    lanes still draining.

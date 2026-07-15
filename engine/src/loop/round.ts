@@ -135,6 +135,9 @@ export class RoundScopedForge implements IForge {
   listUnplacedIssues() {
     return this.inner.listUnplacedIssues();
   }
+  readStartupReconcileData() {
+    return this.inner.readStartupReconcileData();
+  }
 
   detectOwnerKind(owner: string) {
     return this.inner.detectOwnerKind(owner);

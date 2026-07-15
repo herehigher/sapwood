@@ -270,6 +270,23 @@ test("findOpenPrForIssue: passes an explicit high --limit (gh's default 30 would
   assert.ok(Number(seen[0]![limitIdx + 1]) >= 200, "limit is high enough to cover deep PR lists");
 });
 
+test("readStartupReconcileData returns board placements plus open PR bodies using read-only gh calls", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return args[0] === "api" ? PROJECT_JSON : JSON.stringify([{ number: 200, body: "Fixes #171" }]);
+  };
+  const result = await forge.readStartupReconcileData();
+  assert.ok(result.placements.some((placement) => placement.number === 10 && placement.status === "Ready"));
+  assert.deepEqual(result.openPrs, [{ number: 200, body: "Fixes #171" }]);
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[1]!.slice(0, 2), ["pr", "list"]);
+  assert.ok(seen[1]!.includes("open"));
+  assert.ok(!seen.flat().some((arg) => ["edit", "create", "merge", "comment"].includes(arg)));
+});
+
 test("projectQuery: no line is a // comment (GraphQL uses #, not //) — Codex R5 P1 guard", () => {
   for (const root of ["user", "organization"] as const) {
     const q = projectQuery(root, "Status");

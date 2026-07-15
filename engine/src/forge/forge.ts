@@ -104,6 +104,11 @@ export interface IForge {
   /** Issue-number-addressable board items with no Status, plus draft/non-issue items that
    *  cannot be moved through setBoardStatus. Used once at engine startup, never for dispatch. */
   listUnplacedIssues(): Promise<UnplacedIssues>;
+  /** One startup-only, read-only view used to surface management-side orphans after local
+   *  state loss. It is observability input only: callers must never rebuild workers from it.
+   *  PR orphan detection shares findOpenPrForIssue's 200-open-PR bound (#50 residual), so PRs
+   *  beyond it are not reported. */
+  readStartupReconcileData(): Promise<StartupReconcileData>;
   getReadyIssues(): Promise<Issue[]>;
   claimIssue(issue: number): Promise<void>;
   setBoardStatus(issue: number, status: "backlog" | "ready" | "inProgress" | "done"): Promise<void>;
@@ -275,6 +280,28 @@ export class GithubForge implements IForge {
     return selectUnplacedIssues(project.placements, `${this.cfg.board.owner}/${this.cfg.board.repo}`);
   }
 
+  async readStartupReconcileData(): Promise<StartupReconcileData> {
+    const project = await this.fetchProject();
+    return { placements: project.placements, openPrs: await this.listOpenPrBodies() };
+  }
+
+  private async listOpenPrBodies(): Promise<OpenPrBody[]> {
+    const out = await this.gh([
+      "pr",
+      "list",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--state",
+      "open",
+      "--limit",
+      "200",
+      "--json",
+      "number,body",
+    ]);
+    const prs = JSON.parse(out) as { number: number; body?: string }[];
+    return prs.map((pr) => ({ number: pr.number, body: pr.body ?? "" }));
+  }
+
   async claimIssue(issue: number): Promise<void> {
     // Atomic-ish claim: board -> In Progress, then the in-progress label. If the label step
     // fails, roll the board back to Ready so a partial claim can't strand the issue out of
@@ -432,33 +459,9 @@ export class GithubForge implements IForge {
    *  (closing keywords > oldest-among-closing > a single unambiguous bare `#N` mention;
    *  multiple bare mentions -> null, the lane queues rather than gating a guessed PR). */
   async findOpenPrForIssue(issue: number): Promise<number | null> {
-    const out = await this.gh([
-      "pr",
-      "list",
-      "--repo",
-      `${this.cfg.board.owner}/${this.repo()}`,
-      // gh's default --limit is 30 (Codex PR #50, forge.ts thread): a worker's PR beyond the
-      // first page would probe hasPr=false and wrongly escalate a completed lane to
-      // needs-human. 200 comfortably covers any repo this loop realistically operates on
-      // (lanes.max caps concurrent PRs in single digits). A targeted `--search "#N"` was
-      // considered and rejected: GitHub's search tokenizer doesn't reliably exact-match
-      // issue-reference tokens (fuzzy hits on similar numbers), which would reintroduce the
-      // ambiguity findOpenPrNumber exists to fail closed on. RESIDUAL: a repo with >200 open
-      // PRs could still hide the target past the page — accepted for v1 trusted repos;
-      // fail direction is the conductor's existing no-PR fail-safe (escalate), never a
-      // wrong-PR merge.
-      "--state",
-      "open",
-      "--limit",
-      "200",
-      "--json",
-      "number,body",
-    ]);
-    const prs = JSON.parse(out) as { number: number; body?: string }[];
-    return findOpenPrNumber(
-      prs.map((p) => ({ number: p.number, body: p.body ?? "" })),
-      issue,
-    );
+    // listOpenPrBodies owns the shared --state open/--limit 200 read used by startup
+    // reconciliation too. The residual >200-open-PR fail-safe documented in #50 remains.
+    return findOpenPrNumber(await this.listOpenPrBodies(), issue);
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
@@ -627,6 +630,16 @@ export interface BoardPlacement {
   number: number | null;
   repo: string | null;
   status: string | null;
+}
+
+export interface OpenPrBody {
+  number: number;
+  body: string;
+}
+
+export interface StartupReconcileData {
+  placements: BoardPlacement[];
+  openPrs: OpenPrBody[];
 }
 
 export interface UnplacedIssues {
@@ -798,11 +811,26 @@ export function hasVerificationPlan(body: string, labels: string[], verifyNaLabe
  *     46), accepted ONLY when exactly one candidate matches. Multiple bare-mention candidates
  *     are ambiguous -> null (the lane stays undrivable/queued rather than gating a guessed PR).
  */
+const CLOSING_ISSUE_PREFIX = String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#`;
+const BARE_ISSUE_PREFIX = `(^|[^0-9])#`;
+const ISSUE_NUMBER_END = String.raw`(?!\d)`;
+
+/** Paired with findOpenPrNumber below: both PR-body readers derive their closing-keyword and
+ *  bare-reference regexes from the fragments above so their accepted syntax cannot drift. */
+export function referencedIssue(body: string): number | null {
+  const closing = [...body.matchAll(new RegExp(`${CLOSING_ISSUE_PREFIX}(\\d+)`, "gi"))].map((match) => Number(match[1]));
+  const closingIssues = [...new Set(closing)];
+  if (closingIssues.length > 0) return closingIssues.length === 1 ? closingIssues[0]! : null;
+  const mentions = [...body.matchAll(new RegExp(`${BARE_ISSUE_PREFIX}(\\d+)${ISSUE_NUMBER_END}`, "g"))].map((match) => Number(match[2]));
+  const issues = [...new Set(mentions)];
+  return issues.length === 1 ? issues[0]! : null;
+}
+
 export function findOpenPrNumber(prs: { number: number; body: string }[], issue: number): number | null {
-  const closing = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\\s+#${issue}(?!\\d)`, "i");
+  const closing = new RegExp(`${CLOSING_ISSUE_PREFIX}${issue}${ISSUE_NUMBER_END}`, "i");
   const closingMatches = prs.filter((pr) => closing.test(pr.body));
   if (closingMatches.length > 0) return closingMatches[closingMatches.length - 1]!.number; // oldest
-  const mention = new RegExp(`(^|[^0-9])#${issue}(?!\\d)`);
+  const mention = new RegExp(`${BARE_ISSUE_PREFIX}${issue}${ISSUE_NUMBER_END}`);
   const mentions = prs.filter((pr) => mention.test(pr.body));
   return mentions.length === 1 ? mentions[0]!.number : null;
 }

@@ -932,6 +932,65 @@ test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => 
   assert.match(formatStatus(snapshot), /park: inactive/);
 });
 
+test("formatStatus renders latest reconcile orphans and omits an absent/healthy report", () => {
+  const base: StatusSnapshot = {
+    dbPath: "data/sapwood.sqlite",
+    schemaVersion: SCHEMA_VERSION,
+    active: [],
+    driving: [],
+    killSwitchActive: false,
+    pauseActive: false,
+    ceilingBreach: null,
+    dailySpendUsd: 0,
+    lanesMax: 3,
+    dailyBudgetUsd: 100,
+    parked: [],
+  };
+  assert.doesNotMatch(formatStatus(base), /orphans:/);
+  assert.doesNotMatch(formatStatus({ ...base, orphanReport: { orphans: [], overflow: 0 } }), /orphans:/);
+  const out = formatStatus({
+    ...base,
+    orphanReport: {
+      orphans: [
+        { kind: "issue", issue: 171, reason: "unplaced" },
+        { kind: "pr", pr: 200, issue: 171, reason: "open-engine-pr" },
+      ],
+      overflow: 3,
+    },
+  });
+  assert.match(out, /orphans: 5/);
+  assert.match(out, /unplaced issue #171/);
+  assert.match(out, /open engine PR #200 \(issue #171\)/);
+  assert.match(out, /and 3 more/);
+});
+
+test("runStatus sources orphans from the latest reconcile-completed event", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-orphans-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const state = new State(dbPath);
+  state.appendEvent("reconcile-completed", {
+    ok: true,
+    count: 1,
+    orphans: [{ kind: "issue", issue: 170, reason: "in-progress" }],
+    overflow: 0,
+  });
+  state.appendEvent("reconcile-completed", {
+    ok: true,
+    count: 1,
+    orphans: [{ kind: "pr", pr: 200, issue: 171, reason: "open-engine-pr" }],
+    overflow: 0,
+  });
+  state.close();
+  try {
+    const result = runStatus(["node", "sapwood", "status", dbPath, "--config", join(dir, "missing.yaml")]);
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /open engine PR #200/);
+    assert.doesNotMatch(result.stdout, /issue #170/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("formatStatus: a mixed storm renders BOTH episodes (one line per source), canary lane shown when in flight (#168 P1-1a)", () => {
   const snapshot: StatusSnapshot = {
     dbPath: "data/sapwood.sqlite",

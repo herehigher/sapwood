@@ -47,6 +47,9 @@ class FakeForge implements IForge {
   async listUnplacedIssues() {
     return { issues: [], skipped: 0 };
   }
+  async readStartupReconcileData() {
+    return { placements: [], openPrs: [] };
+  }
   ready: Issue[] = [];
   labelsAdded: Array<[number, string]> = [];
   prLabelsAdded: Array<[number, string]> = [];
