@@ -143,35 +143,159 @@ test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section
   assert.equal(hasVerificationPlan("", [], "verify:n/a"), false);
 });
 
-// ── extractVerificationPlan (#46: the section text hasVerificationPlan/gate②'s trigger share) ──
+// ── extractVerificationPlan (#194: every matching section, without overlap duplication) ──
 
-test("extractVerificationPlan: returns the heading through the next same-or-shallower heading", () => {
-  const body = [
-    "# Title",
-    "Some intro text.",
-    "## Verification",
-    "1. run `npm test`",
-    "2. run `npm run typecheck`",
-    "## Notes",
-    "irrelevant",
-  ].join("\n");
-  const plan = extractVerificationPlan(body);
-  assert.match(plan!, /^## Verification/);
-  assert.match(plan!, /npm test/);
-  assert.match(plan!, /npm run typecheck/);
-  assert.ok(!plan!.includes("irrelevant")); // stops before the next heading
-  assert.ok(!plan!.includes("Some intro text")); // doesn't leak content before the heading
+test("extractVerificationPlan: sibling Acceptance criteria and Verification plan sections are concatenated", () => {
+  const body = `## Acceptance criteria
+
+- [ ] the command succeeds
+
+## Verification plan
+
+Run \`npm test\` and inspect the output.
+
+## Notes
+
+Not part of the plan.`;
+  assert.equal(
+    extractVerificationPlan(body),
+    `## Acceptance criteria
+
+- [ ] the command succeeds
+
+## Verification plan
+
+Run \`npm test\` and inspect the output.`,
+  );
 });
 
-test("extractVerificationPlan: a plan section that runs to the end of the body (no trailing heading)", () => {
-  const plan = extractVerificationPlan("### Acceptance criteria\n- it works");
-  assert.match(plan!, /^### Acceptance criteria/);
-  assert.match(plan!, /it works/);
+test("extractVerificationPlan: nested ### Verification is included fully and overlap is not duplicated", () => {
+  const body = `## Acceptance criteria
+
+- [ ] it works
+
+### Verification
+
+Run the focused test.
+
+#### Expected result
+
+The test passes.
+
+## Notes
+
+Unrelated.`;
+  const plan = extractVerificationPlan(body)!;
+  assert.match(plan, /^## Acceptance criteria/);
+  assert.match(plan, /#### Expected result\n\nThe test passes\./);
+  assert.equal(plan.match(/### Verification/g)?.length, 1, "nested matching text is emitted once");
+  assert.ok(!plan.includes("Unrelated"));
 });
 
-test("extractVerificationPlan: no Verification/Acceptance heading -> null (fail-closed, matches hasVerificationPlan)", () => {
+test("extractVerificationPlan: Acceptance-only and Verification-only bodies both match", () => {
+  assert.equal(extractVerificationPlan("### Acceptance criteria\n- it works"), "### Acceptance criteria\n- it works");
+  assert.equal(extractVerificationPlan("## Verification\nrun tests"), "## Verification\nrun tests");
+});
+
+test("extractVerificationPlan: neither heading -> null (fail-closed, matches hasVerificationPlan)", () => {
   assert.equal(extractVerificationPlan("no plan here"), null);
   assert.equal(extractVerificationPlan(""), null);
+});
+
+test("extractVerificationPlan: multiple non-overlapping matches retain body order", () => {
+  const body = `## Verification first
+step one
+## Notes
+middle
+## Acceptance second
+criterion two
+## Appendix
+ignored
+### Verification third
+step three`;
+  const plan = extractVerificationPlan(body)!;
+  assert.ok(plan.indexOf("Verification first") < plan.indexOf("Acceptance second"));
+  assert.ok(plan.indexOf("Acceptance second") < plan.indexOf("Verification third"));
+  assert.ok(!plan.includes("middle"));
+  assert.ok(!plan.includes("ignored"));
+});
+
+test("extractVerificationPlan: #182-shaped issue body carries sibling verification steps verbatim", () => {
+  const issue182ShapedBody = `## Why
+
+The current behavior silently drops required review context.
+
+## What
+
+Generalize the extractor without changing its callers.
+
+Out of scope: reviewer trigger-comment changes.
+
+## Acceptance criteria
+
+- [ ] Every matching section is extracted in body order.
+- [ ] Missing sections still fail closed.
+
+## Verification plan
+
+- Add node:test coverage for sibling headings.
+- Run \`npm run typecheck && npm run lint && npm test\` from the repo root.`;
+  const plan = extractVerificationPlan(issue182ShapedBody)!;
+  assert.match(plan, /^## Acceptance criteria/);
+  assert.match(plan, /Every matching section is extracted/);
+  assert.match(plan, /^## Verification plan/m);
+  assert.match(plan, /Add node:test coverage for sibling headings/);
+  assert.match(plan, /npm run typecheck && npm run lint && npm test/);
+});
+
+test("extractVerificationPlan: a fenced pseudo-heading alone is not a verification plan", () => {
+  assert.equal(extractVerificationPlan("```markdown\n## Verification\nrun nothing\n```"), null);
+});
+
+test("extractVerificationPlan: fenced pseudo-headings neither terminate a real section nor create phantom sections", () => {
+  const body = `## Acceptance criteria
+- [ ] real criterion
+
+\`\`\`markdown
+## Notes
+fenced text stays in the plan
+## Verification
+fenced pseudo-plan
+\`\`\`
+
+## Real notes
+outside the plan`;
+  const plan = extractVerificationPlan(body)!;
+  assert.match(plan, /fenced text stays in the plan/);
+  assert.match(plan, /fenced pseudo-plan/);
+  assert.equal(plan.match(/## Verification/g)?.length, 1, "fenced pseudo-heading is not emitted as a second section");
+  assert.ok(!plan.includes("outside the plan"));
+});
+
+test("extractVerificationPlan: an unclosed fence at EOF keeps its pseudo-headings inside the open real section", () => {
+  const body = "## Verification plan\nrun the real test\n~~~text\n## Acceptance pseudo-heading\nfenced through EOF";
+  const plan = extractVerificationPlan(body)!;
+  assert.equal(plan, body);
+  assert.equal(plan.match(/## Acceptance/g)?.length, 1, "unclosed fence does not create a phantom section");
+});
+
+test("extractVerificationPlan: a shorter backtick run does not close a longer backtick fence", () => {
+  const body = "````md\n```\n## Verification\npseudo-plan\n````";
+  assert.equal(extractVerificationPlan(body), null);
+});
+
+test("extractVerificationPlan: a tilde fence is closed only by a sufficient tilde run", () => {
+  const body = "~~~md\n```\n## Verification\npseudo-plan\n~~~\n## Verification plan\nreal-plan";
+  assert.equal(extractVerificationPlan(body), "## Verification plan\nreal-plan");
+});
+
+test("extractVerificationPlan: fence openers and closers may be indented by up to three spaces", () => {
+  const body = "   ```md\n## Verification\npseudo-plan\n   ```\n## Verification plan\nreal-plan";
+  assert.equal(extractVerificationPlan(body), "## Verification plan\nreal-plan");
+});
+
+test("extractVerificationPlan: a three-space-indented pseudo-heading inside a fence is ignored", () => {
+  assert.equal(extractVerificationPlan("```md\n   ## Verification\npseudo-plan\n```"), null);
 });
 
 test("hasVerificationPlan and extractVerificationPlan agree on every case (shared parser, not duplicated)", () => {

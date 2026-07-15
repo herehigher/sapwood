@@ -45,6 +45,7 @@ import type { IForge, Issue } from "../forge/forge.js";
 import type { PeripheralStub } from "../loop/round.js";
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
+import { extractMarkdownSections } from "../util/markdown.js";
 import { type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 
@@ -126,13 +127,7 @@ const NO_ALIGNED_GOALS_YET =
  *  heading exists; callers must supply an explicit fallback (never silently substitute the
  *  whole file — a fail-closed stance the caller documents at each call site). */
 export function extractArchitectureChapter(planMd: string): string | null {
-  const heading = /^(#{1,6})\s*Architecture\b[^\n]*$/im.exec(planMd);
-  if (!heading) return null;
-  const level = heading[1]!.length;
-  const afterHeading = planMd.slice(heading.index + heading[0].length);
-  const nextHeading = new RegExp(`^#{1,${level}}\\s`, "m").exec(afterHeading);
-  const section = nextHeading ? afterHeading.slice(0, nextHeading.index) : afterHeading;
-  return (heading[0] + section).trim();
+  return extractMarkdownSections(planMd, /Architecture\b/)[0] ?? null;
 }
 
 /** Load + extract the architecture chapter from disk. Missing/unreadable file or missing
