@@ -59,6 +59,11 @@ sapwood init
    (`Ready` / `In Progress` / `Done` by default) — if the board doesn't exist at the
    configured `board.projectNumber`, init reports what to create rather than guessing.
 6. **Writes a starter `sapwood.config.yaml`** (with inline comments) if none exists yet.
+7. **Scaffolds starter goal and review-doctrine files** at their configured paths
+   (`goal.file`, `doctrine.file`) if missing — never overwrites an existing file.
+8. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
+   structure the gate⓪ plan-drafter normalizes toward) — each template is written only
+   if that file is missing, so repos with their own templates are untouched.
 
 If `init` fails partway through (e.g. a `gh` scope problem), fix the reported issue and
 re-run — every step is detect-before-create, so nothing is duplicated.
