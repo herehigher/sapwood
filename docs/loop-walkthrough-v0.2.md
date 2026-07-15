@@ -207,9 +207,9 @@ Two overlays that are **not** Status moves:
   only by a human** — label removal is the explicit act that re-admits
   automation (#147 reentry semantics). Status stays In Progress, so the
   column alone under-reads; the truth is Status × hold-labels.
-- **Known "Status lies" sources**: a handoff-stranded lane (resume wiring,
-  #172) and state-DB loss (startup reconcile, #171) can leave In Progress
-  items with no live lane behind them.
+- **Known "Status lies" source**: state-DB loss can leave In Progress items with no
+  live lane behind them; startup reconciliation (#171) surfaces that mismatch. A graceful
+  handoff remains In Progress and is recovered by the pre-DISPATCH RESUME phase (#172).
 
 No item may sit in No Status (decided 2026-07-14): the default `Todo` lane is
 the configured backlog (`board.status.backlog`). Humans own the

@@ -216,7 +216,10 @@ Two different things are both called "budget," and they behave differently on pu
   estimate is reconciled against the real terminal cost when a lane finishes (the
   divergence is logged, not enforced) — it is a trigger signal, not a billing source
   of truth, so `worker.timeoutSec` plus the hard ceiling below remain the actual
-  backstop.
+  backstop. A handed-off lane re-enters before fresh dispatch when capacity and spend
+  gates permit. Each resumed leg gets a fresh soft budget, bounded by
+  `worker.maxResumes` (default 2); resumed `total_cost_usd` is per-leg and is ledgered
+  directly, so total recorded spend is the sum of the real legs.
 - **`cost.dailyBudgetUsd` / `cost.maxWallClockSec`** are **hard** engine-wide ceilings —
   the actual runaway-spend safety boundary, independent of any single worker. Breaching
   either freezes new dispatch/merges and starts draining in-flight workers

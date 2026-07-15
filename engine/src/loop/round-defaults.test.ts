@@ -122,6 +122,12 @@ class MinimalSupervisor implements Supervisor {
   async dispatch(issue: Issue): Promise<{ name: string; sessionId: string }> {
     return { name: `lane-${issue.number}`, sessionId: "s" };
   }
+  async resume(_issue: Issue, worker: string): Promise<{ name: string; sessionId: string }> {
+    return { name: worker, sessionId: "s" };
+  }
+  resumeIntentState(): "none" {
+    return "none";
+  }
   async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
     return { worktreePath: null, worktreeRetained: false };
   }

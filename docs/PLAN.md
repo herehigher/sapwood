@@ -87,7 +87,7 @@ sapwood/
 ├── skills/                  # dev-round, dev-loop (ported from 0day skills)
 ├── commands/                # /sapwood-init, /sapwood-run, /sapwood-status, /sapwood-stop ...
 ├── engine/                  # TS orchestration engine (the port)
-│   ├── conductor.ts         # scheduler: tick (reclaim→drive→dispatch), state machine
+│   ├── conductor.ts         # scheduler: tick (reclaim→drive→resume→dispatch), state machine
 │   ├── worker.ts            # headless `claude -p` wrapper in a worktree + sentinels
 │   ├── merge-driver.ts      # the only place a merge happens (autonomous-merge mode)
 │   ├── forge.ts             # IForge interface + GithubForge impl (gh CLI/GraphQL)
@@ -208,7 +208,7 @@ domain (no reserve/SLA/eval-report/HTML machinery).
   `labelsBlockers`, `budgetExceeded`, `codingFloor`/`isCodingRank`/`metaLaneAllowed`
   anti-starvation, `laneOnReclaim*`, `driveDecision`). **Structured discriminated-union tick
   result** replaces 0day's stringly-typed `DISPATCHED/RECLAIMED` text protocol. `tick()` =
-  reclaim→drive→dispatch with **dependency injection** (`IForge` + `Supervisor` + `State`
+  reclaim→drive→resume→dispatch with **dependency injection** (`IForge` + `Supervisor` + `State`
   injected → the whole tick is unit-testable with no real `claude`/`gh`). New **`driving`**
   lane state: a PR-backed reclaimed lane keeps occupying a lane against `lanes.max` until the
   M3 review gate resolves it. Claim-before-launch with board rollback on dispatch failure.
@@ -289,8 +289,7 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   else is blocked: no dispatch, no drive/merge, no rollback retry, and no kill+requeue
   of crashed (no-sentinel) lanes. Accepted trade-off: a switch flipped mid-tick takes
   effect at the next tick's gate, not within the same tick. The per-worker *soft*
-  budget stays a graceful handoff, never a mid-work kill (#33, still open — needs a
-  live cost signal).
+  budget stays a graceful handoff, never a mid-work kill (#33).
 - **Drain contract is sentinel-only; the supervisor never runs git in a worker
   worktree (#69, superseding #60/#62/#63's supervisor-side commit+push)** — a
   drain SIGTERM ends with the supervisor writing the `.handoff` sentinel
@@ -364,10 +363,10 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   ~~live `findOpenPr` forge wiring and the live end-to-end merge-gate run move to M4
   with the loop driver (which MUST pass `tickIntervalSec` into `tick()` and handle the
   `--resume` cost-delta — both flagged in code)~~ **→ #46 (M4): the loop driver
-  (`driver.ts`) now passes `tickIntervalSec` into every `tick()`; `State.recordSpend`
-  now records only the incremental delta above what's already ledgered for a worker
-  name, so a `--resume`d lane (`WorkerSupervisor.resume()`) can't double-count its
-  pre-handoff cost; `GithubForge.findOpenPrForIssue` gives `sapwood run` a first-pass
+  (`driver.ts`) now passes `tickIntervalSec` into every `tick()`; #172's live empirical
+  verification established that resumed `total_cost_usd` is per-leg, so
+  `State.recordSpend` records every handoff/resume leg directly with no baseline
+  subtraction or double count; `GithubForge.findOpenPrForIssue` gives `sapwood run` a first-pass
   (not yet hardened) live wiring.** ~~**The gate② verification-plan re-check (Decision
   #8) is NOT yet wired:** the plan gate holds at *dispatch* (`getReadyIssues` refuses
   issues without a verification plan, fail-closed), but the M3 gate data carries no
@@ -381,9 +380,10 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   review IS the re-check); this only gives it the plan.** Still deferred: the **live**
   merge-gate run and the **live** ceiling/kill-switch run on a real repo (#46 scope
   3/4) — everything above ships covered by fakes only, no real `claude`/`gh` in the
-  loop yet; an auto-resume *scheduling* policy (deciding WHEN a handed-off lane should
-  be resumed during `tick()`) is also not wired — `resume()` is a callable mechanism,
-  not yet an automatic one.
+  loop yet. **#172 wires graceful-handoff recovery:** a RESUME phase before DISPATCH
+  re-admits eligible `handoff` rows through `WorkerSupervisor.resume()` while capacity and
+  fresh-spend gates permit; `worker.maxResumes` bounds the additional legs and escalates a
+  capped lane once through `needs-human`.
 
 ## Security & trust model (trusted-first, designed toward public)
 
@@ -547,7 +547,7 @@ marker idempotency, output schema, escalation path) see
   decisions in "M1 guard" above. Live hook wiring into worker sessions landed in **M2
   (#26)** — see "M2 engine core" above.
 - **M2 — Engine core:** ✅ **delivered (PRs #30, #32, #34; dogfood #35→#36).**
-  `conductor.ts` (tick: reclaim→drive→dispatch, structured results, parity core), `worker.ts`
+  `conductor.ts` (tick: reclaim→drive→resume→dispatch, structured results, parity core), `worker.ts`
   (headless `claude -p` in a worktree), and the guard **wired live** into worker sessions
   (#26, hard-default/soft-opt-in). Parity tests against 0day's pure-function tests
   (`test_loop_conductor.sh`); **dogfooded end-to-end** (claim→worktree→TDD→PR, guard live, no
@@ -566,7 +566,8 @@ marker idempotency, output schema, escalation path) see
   wall-clock ceiling sees the real cadence, not its floor default), stops cleanly on
   SIGINT/SIGTERM after the in-flight tick (never mid-tick), and supports `--once` /
   `--until-idle` alongside the daemon default — `sapwood run [--once|--until-idle]` in
-  `cli.ts`. Resume cost-delta protected in `State.recordSpend` (see M3 section above).
+  `cli.ts`. Resumed per-leg cost is recorded directly in `State.recordSpend` (see M3
+  section above), and #172 wires capped handoff reentry into `tick()` before DISPATCH.
   gate② now carries the issue's verification plan into the review trigger (Decision
   #8, see M3 section above). **Reviewer failover (#54):** an explicit, ordered,
   opt-in `reviewer.fallback` list (e.g. `[same-model-trusted, human]`) + a

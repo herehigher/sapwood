@@ -8,10 +8,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer } from "../roles/reviewer.js";
+import { WorkerSupervisor } from "../roles/worker.js";
 import { State } from "../state/state.js";
 import {
   budgetExceeded,
@@ -36,6 +38,7 @@ import {
   nextRoundId,
   orderForDispatch,
   type ReclaimResult,
+  resumeDecision,
   type Supervisor,
   tick,
 } from "./conductor.js";
@@ -51,6 +54,7 @@ class FakeForge implements IForge {
     return { placements: [], openPrs: [] };
   }
   ready: Issue[] = [];
+  readyReads = 0;
   labelsAdded: Array<[number, string]> = [];
   prLabelsAdded: Array<[number, string]> = [];
   boardSet: Array<[number, string]> = [];
@@ -85,6 +89,7 @@ class FakeForge implements IForge {
     return "user";
   }
   async getReadyIssues(): Promise<Issue[]> {
+    this.readyReads++;
     return this.ready;
   }
   async claimIssue(n: number): Promise<void> {
@@ -167,6 +172,8 @@ class FakeSupervisor implements Supervisor {
   probes: Record<string, LaneProbe> = {};
   dispatched: Issue[] = [];
   reclaimed: string[] = [];
+  resumed: Array<{ issue: Issue; worker: string }> = [];
+  resumeIntents: Record<string, "none" | "confirmed" | "unconfirmed"> = {};
   handoffRequested: string[] = [];
   /** #69: per-lane reclaim result. Default: no worktree ever existed (nothing retained). */
   reclaimResults: Record<string, ReclaimResult> = {};
@@ -181,6 +188,13 @@ class FakeSupervisor implements Supervisor {
     this.dispatched.push(issue);
     const name = `lane-${++this.n}`;
     return { name, sessionId: `sess-${name}` };
+  }
+  async resume(issue: Issue, worker: string): Promise<{ name: string; sessionId: string }> {
+    this.resumed.push({ issue, worker });
+    return { name: worker, sessionId: `s-${worker}` };
+  }
+  resumeIntentState(worker: string): "none" | "confirmed" | "unconfirmed" {
+    return this.resumeIntents[worker] ?? "none";
   }
   async reclaim(w: string): Promise<ReclaimResult> {
     this.reclaimed.push(w);
@@ -973,6 +987,43 @@ test("tick: kill switch active -> DRAIN + TERMINAL-RECLAIM only: no rollback ret
   }
 });
 
+test("#172 kill switch adopts a confirmed-intent handoff and drains it in the same tick", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-resume-adopt-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    st.upsertWorker({
+      name: "lane-confirmed",
+      issue: 172,
+      session_id: "pre-adopt-session",
+      state: "handoff",
+      started_at: "t0",
+      ended_at: "t1",
+    });
+    sup.resumeIntents["lane-confirmed"] = "confirmed";
+    sup.probes["lane-confirmed"] = { ...DEFAULT_PROBE }; // adopted child is alive/KEEP
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+
+    const result = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    assert.deepEqual(result.resumed, [{ kind: "resumed", worker: "lane-confirmed", issue: 172, attempt: 1 }]);
+    assert.equal(st.getWorker("lane-confirmed")?.state, "running");
+    assert.equal(st.getWorker("lane-confirmed")?.resume_attempts, 1);
+    assert.deepEqual(
+      sup.resumed.map((x) => x.worker),
+      ["lane-confirmed"],
+    );
+    assert.deepEqual(result.drainRequested, ["lane-confirmed"]);
+    assert.deepEqual(sup.handoffRequested, ["lane-confirmed"]);
+    assert.deepEqual(result.reclaimed, []);
+    assert.deepEqual(sup.dispatched, []);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("#69 P2 (Codex PR #72): kill switch active + a lane that already wrote .handoff -> its terminal state IS recorded (handoff), NOT drained or mislabeled failed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-gate-"));
   try {
@@ -1177,6 +1228,293 @@ test("tick reclaim: handoff sentinel -> resumable, not killed", async () => {
   assert.equal(r.reclaimed[0]!.kind, "handoff");
   assert.deepEqual(sup.reclaimed, []); // NOT reclaimed/killed
   assert.equal(st.getWorker("lane-ho")?.state, "handoff");
+  st.close();
+});
+
+test("#172 integration: handoff settles for one tick, RESUME reuses the lane next tick, then the ordinary done+PR DRIVE path completes; per-leg costs sum", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const gate = new FakeMergeGate();
+  gate.outcomes[77] = { kind: "merged", pr: 77, headOid: "H77" };
+  seedRunning(st, "lane-ho", 172);
+
+  // Leg 0 reaches its soft budget. It is reclaimed to handoff but must NOT be resumed in the
+  // same tick (the RESUME candidate set was snapshotted before RECLAIM).
+  sup.probes["lane-ho"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 3 };
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-ho")?.state, "handoff");
+  assert.deepEqual(r1.resumed, []);
+  assert.equal(st.spentUsdForWorker("lane-ho"), 3);
+
+  // Next tick: RESUME gets the lane before fresh work and makes it an ordinary running lane.
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(r2.resumed, [{ kind: "resumed", worker: "lane-ho", issue: 172, attempt: 1 }]);
+  assert.equal(st.getWorker("lane-ho")?.state, "running");
+  assert.equal(st.getWorker("lane-ho")?.resume_attempts, 1);
+
+  // The resumed leg finishes with a PR. Ordinary RECLAIM -> DRIVE handles it in the same tick.
+  sup.probes["lane-ho"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 77, costUsd: 2 };
+  const r3 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(r3.driven, [{ kind: "merged", worker: "lane-ho", issue: 172, pr: 77 }]);
+  assert.equal(st.getWorker("lane-ho")?.state, "done");
+  assert.equal(st.spentUsdForWorker("lane-ho"), 5); // $3 initial leg + $2 resumed leg
+  st.close();
+});
+
+test("#172 confirmed intent is adopted under PAUSE, then ordinary supervision reclaims its result", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-resume-crash-"));
+  const st = new State(join(dir, "sapwood.sqlite"));
+  const cfg = mkCfg({ guard: { mode: "soft" } });
+  const supervisor = new WorkerSupervisor({
+    cfg,
+    stateDir: dir,
+    claudeBin: join(dir, "must-not-spawn"),
+    hasOpenPr: async () => false,
+  });
+  try {
+    st.upsertWorker({
+      name: "lane-crash",
+      issue: 172,
+      session_id: "pre-resume",
+      state: "handoff",
+      started_at: "t",
+      ended_at: "t",
+    });
+    writeFileSync(
+      join(dir, "lane-crash.running.json"),
+      JSON.stringify({
+        name: "lane-crash",
+        issue: 172,
+        session_id: "surviving-session",
+        wrapper_pid: 999_999_999,
+        estimate_baseline_usd: 0.25,
+        jsonl_leg_offset: 0,
+        resume_pending_db: true,
+        spawn_confirmed: true,
+      }),
+    );
+    writeFileSync(
+      join(dir, "lane-crash.handoff.json"),
+      JSON.stringify({ name: "lane-crash", issue: 172, session_id: "pre-resume", total_cost_usd: 99 }),
+    );
+    writeFileSync(
+      join(dir, "lane-crash.jsonl"),
+      JSON.stringify({ type: "result", total_cost_usd: 1.25, model: "claude-opus-4-6", usage: { input_tokens: 10 } }),
+    );
+    writeFileSync(join(dir, "PAUSE"), "");
+
+    const result = await tick({ forge: new FakeForge(), state: st, supervisor, cfg });
+    assert.deepEqual(result.resumed, [{ kind: "resumed", worker: "lane-crash", issue: 172, attempt: 1 }]);
+    assert.equal(st.getWorker("lane-crash")?.state, "running");
+    assert.equal(st.getWorker("lane-crash")?.session_id, "surviving-session");
+    assert.equal(existsSync(join(dir, "lane-crash.handoff.json")), false, "adoption completes stale handoff removal");
+    assert.equal(st.maxSpendLedgerId(), 0, "the stale prior-leg handoff is not re-recorded");
+
+    const reclaimed = await tick({ forge: new FakeForge(), state: st, supervisor, cfg });
+    assert.equal(reclaimed.reclaimed[0]?.kind, "dead");
+    assert.equal(st.getWorker("lane-crash")?.state, "failed");
+    assert.equal(st.spentUsdForWorker("lane-crash"), 1.25);
+    await tick({ forge: new FakeForge(), state: st, supervisor, cfg });
+    assert.equal(st.maxSpendLedgerId(), 1, "adoption and reclaim happen once without resume oscillation");
+  } finally {
+    supervisor.dispose();
+    st.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#172 unconfirmed resume intent escalates and latches under PAUSE without spawning", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-resume-undecidable-"));
+  const st = new State(join(dir, "sapwood.sqlite"));
+  const cfg = mkCfg({ guard: { mode: "soft" } });
+  const supervisor = new WorkerSupervisor({
+    cfg,
+    stateDir: dir,
+    claudeBin: join(dir, "must-not-spawn"),
+    hasOpenPr: async () => false,
+  });
+  const forge = new FakeForge();
+  try {
+    st.upsertWorker({
+      name: "lane-ambiguous",
+      issue: 1172,
+      session_id: "session-evidence",
+      state: "handoff",
+      started_at: "t",
+      ended_at: "t",
+    });
+    writeFileSync(
+      join(dir, "lane-ambiguous.running.json"),
+      JSON.stringify({
+        name: "lane-ambiguous",
+        issue: 1172,
+        session_id: "session-evidence",
+        resume_pending_db: true,
+        spawn_confirmed: false,
+      }),
+    );
+    writeFileSync(
+      join(dir, "lane-ambiguous.handoff.json"),
+      JSON.stringify({ name: "lane-ambiguous", issue: 1172, session_id: "session-evidence" }),
+    );
+    writeFileSync(join(dir, "PAUSE"), "");
+
+    const result = await tick({ forge, state: st, supervisor, cfg });
+    assert.deepEqual(result.resumed, [{ kind: "capped", worker: "lane-ambiguous", issue: 1172, attempts: 0 }]);
+    assert.equal(st.getWorker("lane-ambiguous")?.resume_capped, 1);
+    assert.deepEqual(forge.labelsAdded, [[1172, "needs-human"]]);
+    assert.equal(forge.issueComments.length, 1);
+    assert.match(forge.issueComments[0]![1], /ambiguous crash state/i);
+    assert.match(forge.issueComments[0]![1], /session-evidence/);
+    assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["resume-undecidable"]).length, 1);
+    assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["resume-failed"]).length, 0);
+    assert.equal(existsSync(join(dir, "lane-ambiguous.handoff.json")), true, "evidence remains for human triage");
+
+    const again = await tick({ forge, state: st, supervisor, cfg });
+    assert.deepEqual(again.resumed, []);
+    assert.equal(forge.labelsAdded.length, 1);
+  } finally {
+    supervisor.dispose();
+    st.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#172 detached dispatch marker is not adopted: handoff spawns one real resume and each leg is ledgered once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-detached-handoff-"));
+  const state = new State(join(dir, "sapwood.sqlite"));
+  const cfg = mkCfg({ guard: { mode: "soft" } });
+  const bin = join(dir, "claude-stub");
+  writeFileSync(
+    bin,
+    [
+      "#!/usr/bin/env bash",
+      'echo \'{"type":"result","total_cost_usd":2,"model":"claude-stub","usage":{"input_tokens":2}}\'',
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const supervisor = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false });
+  try {
+    state.upsertWorker({
+      name: "lane-detached",
+      issue: 172,
+      session_id: "session-172",
+      state: "handoff",
+      started_at: "t",
+      ended_at: "t",
+    });
+    // Dispatch-authored marker: deliberately no resume_pending_db. The detached worker's
+    // handoff sentinel is the authoritative resume anchor; this stale running marker must not
+    // masquerade as proof that a resume already spawned.
+    writeFileSync(
+      join(dir, "lane-detached.running.json"),
+      JSON.stringify({ name: "lane-detached", issue: 172, session_id: "session-172", wrapper_pid: 999_999_999 }),
+    );
+    writeFileSync(
+      join(dir, "lane-detached.handoff.json"),
+      JSON.stringify({ name: "lane-detached", issue: 172, session_id: "session-172", total_cost_usd: 1, model_usage: [] }),
+    );
+    writeFileSync(
+      join(dir, "lane-detached.jsonl"),
+      JSON.stringify({ type: "result", total_cost_usd: 1, model: "claude-stub", usage: { input_tokens: 1 } }) + "\n",
+    );
+    state.recordSpend("lane-detached", 172, 1, new Date().toISOString());
+    assert.equal(state.maxSpendLedgerId(), 1);
+
+    const resumed = await tick({ forge: new FakeForge(), state, supervisor, cfg });
+    assert.deepEqual(resumed.resumed, [{ kind: "resumed", worker: "lane-detached", issue: 172, attempt: 1 }]);
+    assert.equal(state.getWorker("lane-detached")?.state, "running");
+    assert.equal(existsSync(join(dir, "lane-detached.handoff.json")), false, "normal resume consumed the handoff anchor");
+    assert.equal(state.maxSpendLedgerId(), 1, "resume itself does not re-ledger leg 1");
+
+    for (let i = 0; i < 400 && !existsSync(join(dir, "lane-detached.done.json")); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, "lane-detached.done.json")), "the real resumed process completed");
+    await tick({ forge: new FakeForge(), state, supervisor, cfg });
+    assert.equal(state.getWorker("lane-detached")?.state, "done");
+    assert.equal(state.spentUsdForWorker("lane-detached"), 3);
+    assert.equal(state.maxSpendLedgerId(), 2, "exactly one ledger row per leg");
+
+    await tick({ forge: new FakeForge(), state, supervisor, cfg });
+    assert.equal(state.maxSpendLedgerId(), 2, "no handoff-running oscillation can re-record spend");
+  } finally {
+    supervisor.dispose();
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick dispatch cap 0 is quiet and never fetches Ready issues", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.ready = [{ number: 999, title: "must not be fetched", labels: ["prio:3-feature"] }];
+  const result = await tick({ forge, state: st, supervisor: new FakeSupervisor(), cfg: mkCfg(), dispatchCapOverride: 0 });
+  assert.equal(forge.readyReads, 0);
+  assert.deepEqual(result.dispatched, []);
+  st.close();
+});
+
+test("#172 cap latch: a second handoff past maxResumes escalates exactly once and is never selected again", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ worker: { maxResumes: 1 } });
+  seedRunning(st, "lane-cap", 173);
+
+  sup.probes["lane-cap"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 1 };
+  await tick({ forge, state: st, supervisor: sup, cfg }); // leg 0 -> handoff
+  await tick({ forge, state: st, supervisor: sup, cfg }); // resume attempt 1
+  sup.probes["lane-cap"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 0.5 };
+  await tick({ forge, state: st, supervisor: sup, cfg }); // resumed leg -> handoff
+
+  const capped = await tick({ forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(capped.resumed, [{ kind: "capped", worker: "lane-cap", issue: 173, attempts: 1 }]);
+  assert.equal(st.getWorker("lane-cap")?.resume_capped, 1);
+  assert.deepEqual(forge.labelsAdded, [[173, "needs-human"]]);
+  assert.equal(sup.resumed.length, 1);
+
+  const again = await tick({ forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(again.resumed, []);
+  assert.equal(forge.labelsAdded.length, 1);
+  assert.equal(st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]).length, 1);
+  st.close();
+});
+
+test("#172 pause + full hold-set: a handoff does not resume until PAUSE and configured human holds are both cleared", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-resume-pause-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    st.upsertWorker({ name: "lane-p", issue: 174, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
+    forge.issueLabelsByIssue[174] = ["blocked"]; // full configured hold set, not needs-human only
+    writeFileSync(join(dir, "PAUSE"), "");
+
+    assert.deepEqual((await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, []);
+    rmSync(join(dir, "PAUSE"), { force: true });
+    assert.deepEqual((await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, []);
+    forge.issueLabelsByIssue[174] = [];
+    assert.deepEqual((await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() })).resumed, [
+      { kind: "resumed", worker: "lane-p", issue: 174, attempt: 1 },
+    ]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#172 ordering: with one free slot, RESUME claims it before a fresh Ready issue reaches DISPATCH", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  st.upsertWorker({ name: "lane-old", issue: 175, session_id: "s", state: "handoff", started_at: "t", ended_at: "t" });
+  forge.ready = [{ number: 176, title: "fresh", labels: ["prio:3-feature"] }];
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }) });
+  assert.deepEqual(r.resumed, [{ kind: "resumed", worker: "lane-old", issue: 175, attempt: 1 }]);
+  assert.deepEqual(sup.dispatched, []);
+  assert.deepEqual(r.dispatched, [{ kind: "skipped", issue: 176, reason: "no-lane" }]);
   st.close();
 });
 
@@ -1670,6 +2008,33 @@ test("gatedReentryDecision: any human-hold label present -> SKIP (no complete hu
   assert.equal(gatedReentryDecision(false, 2, 2), "CAPPED");
   assert.equal(gatedReentryDecision(false, 3, 2), "CAPPED");
   assert.equal(gatedReentryDecision(false, 0, 0), "CAPPED"); // cap=0 disables reentry outright
+});
+
+test("resumeDecision (#172): exhaustive confirmed × undecidable × paused × kill-switch × holds × attempts-vs-cap × capacity table", () => {
+  const cap = 2;
+  for (const confirmed of [false, true]) {
+    for (const undecidable of [false, true]) {
+      for (const paused of [false, true]) {
+        for (const killed of [false, true]) {
+          for (const held of [false, true]) {
+            for (const attempts of [1, 2, 3]) {
+              for (const full of [false, true]) {
+                const actual = resumeDecision(paused, killed, held, confirmed, undecidable, attempts, cap, full ? 2 : 1, 2);
+                let expected = "RESUME";
+                if (confirmed) expected = "ADOPT";
+                else if (killed || held) expected = "SKIP";
+                else if (undecidable) expected = "UNDECIDABLE";
+                else if (attempts >= cap) expected = "CAPPED";
+                else if (paused || full) expected = "SKIP";
+                assert.equal(actual, expected, JSON.stringify({ confirmed, undecidable, paused, killed, held, attempts, full }));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.equal(resumeDecision(false, false, false, false, false, 0, 0, 0, 1), "CAPPED");
 });
 
 test("#170 review silence: aged episode labels PR + emits once while driving; verdict is human-held; label removal re-enters and merges", async () => {

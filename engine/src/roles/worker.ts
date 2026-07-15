@@ -38,8 +38,20 @@ import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
 import type { Issue } from "../forge/forge.js";
-import type { LaneProbe, ReclaimResult, Supervisor } from "../loop/conductor.js";
+import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "../loop/conductor.js";
 import type { CategorizedTokenUsage, ModelUsageEntry } from "../state/state.js";
+
+/** A durable resume intent exists, but the engine restarted before spawn confirmation made
+ *  the outcome knowable. Retrying could create a second Claude process in the same worktree. */
+export class UnresumableLaneError extends Error {
+  constructor(
+    readonly lane: string,
+    readonly issue: number,
+  ) {
+    super(`resume: ${lane} issue #${issue} has an unconfirmed spawn intent`);
+    this.name = "UnresumableLaneError";
+  }
+}
 
 /** Last `total_cost_usd` across the stream-json result lines (0 if none/garbage). #60/#69: a
  *  lane that's hard-killed (escalated past drain, or never resumed after a handoff) before ever
@@ -543,9 +555,12 @@ interface Lane {
    *  baseline) against worker.budgetUsdSoft: the soft budget bounds spend PER RUN, not per
    *  issue lifetime — without the baseline, a lane that handed off AT the budget would re-cross
    *  it on the first heartbeat tick after resume and hand off again instantly, forever (an
-   *  unresumable handoff loop). The estimator-side mirror of State.recordSpend's resume
-   *  cost-delta baseline. */
+   *  unresumable handoff loop). This estimator baseline is needed because the jsonl appends;
+   *  terminal total_cost_usd itself is already reported per leg (#172). */
   estimateBaselineUsd: number;
+  /** Byte boundary where this leg begins in the append-only jsonl. Result/model parsing must
+   *  never reuse a prior leg's terminal result when the current resumed leg has none. */
+  jsonlLegOffset: number;
 }
 
 export class WorkerSupervisor implements Supervisor {
@@ -660,6 +675,7 @@ export class WorkerSupervisor implements Supervisor {
       timedOut: false,
       estimatedCostUsd: 0,
       estimateBaselineUsd: 0,
+      jsonlLegOffset: 0,
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -697,6 +713,8 @@ export class WorkerSupervisor implements Supervisor {
         session_id: sessionId,
         wrapper_pid: child.pid,
         started_at: startedIso,
+        estimate_baseline_usd: 0,
+        jsonl_leg_offset: 0,
         // #69 (fable P1): the IMMUTABLE first-dispatch time, the dirty-worktree retention
         // baseline. Distinct from started_at, which resume() resets to resume-time for the
         // wall-clock timeout — baselining retention on that would judge pre-handoff WIP (older
@@ -709,26 +727,53 @@ export class WorkerSupervisor implements Supervisor {
     return { name: laneName, sessionId };
   }
 
+  resumeIntentState(name: string, issue: number): ResumeIntentState {
+    const running = this.readJson(this.path(name, "running.json"));
+    if (
+      running?.resume_pending_db !== true ||
+      running.name !== name ||
+      running.issue !== issue ||
+      typeof running.session_id !== "string" ||
+      !running.session_id
+    )
+      return "none";
+    if (running.spawn_confirmed === true) return "confirmed";
+    return running.spawn_confirmed === false ? "unconfirmed" : "none";
+  }
+
   /**
    * #46: resume a lane the wrapper handed off (`.handoff` sentinel) via `claude --resume`,
    * reusing the ORIGINAL session id (no --fork-session) so claude continues the same
-   * conversation — the "M4 --resume" PLAN.md/#41 flagged. Fail-closed: throws if `name` has no
-   * `.handoff` sentinel (nothing resumable — never resume a lane that's still running, already
-   * terminal done/failed, or was never confirmed handed off) or the sentinel carries no
-   * session_id. The jsonl is APPENDED, not truncated: the pre-handoff stream stays as an audit
-   * trail, and parseCostUsd/parseModelUsage already take the LAST "result" line, so a resumed
-   * run's terminal line — expected to be the whole session's cumulative total (State.recordSpend
-   * handles the double-count risk that assumption carries) — is picked up exactly the same way
-   * a fresh single-run jsonl would be.
-   *
-   * Note: nothing in this engine calls resume() automatically yet. Deciding WHEN a handed-off
-   * lane should be resumed (an auto-resume scheduling policy in the conductor/driver) is a
-   * separate, not-yet-scoped question — this method is the callable mechanism a future
-   * scheduler (or an operator) invokes; #46 only asked for the mechanism + the cost-delta
-   * protection it depends on, not the scheduling policy.
+   * conversation — the "M4 --resume" PLAN.md/#41 flagged. Fail-closed: absent a narrowly
+   * recognized interrupted-resume `.running` sentinel, throws if `name` has no `.handoff`
+   * sentinel or it carries no session_id. The jsonl is APPENDED, not truncated: the pre-handoff stream stays as an audit
+   * trail, and parseCostUsd/parseModelUsage take the LAST "result" line. Live verification for
+   * #172 established that resumed total_cost_usd is PER-LEG, so the conductor records it
+   * directly; tick()'s RESUME phase is this method's production caller.
    */
   async resume(issue: Issue, name: string): Promise<{ name: string; sessionId: string }> {
     const handoffPath = this.path(name, "handoff.json");
+    const runningPath = this.path(name, "running.json");
+    const running = this.readJson(runningPath);
+    const runningSessionId = typeof running?.session_id === "string" ? running.session_id : null;
+    const matchingResumeIntent =
+      running?.resume_pending_db === true && running.name === name && running.issue === issue.number && runningSessionId;
+    // #172 resume crash matrix (bounded to this marker protocol; broader adoption is #169):
+    //   before intent write                         -> .handoff intact, safe retry
+    //   after intent, before/while spawn confirmation -> unconfirmed after restart, human
+    //   confirmed spawn, before .handoff removal    -> adopt and finish removal
+    //   after .handoff removal, before DB persist   -> adopt
+    //   confirmed spawn error                       -> intent removed, .handoff intact, safe retry
+    // `spawn_confirmed` is the boundary: only resume()'s confirmed marker proves a child was
+    // started. A dispatch-authored running marker must never masquerade as resume evidence.
+    if (matchingResumeIntent && running.spawn_confirmed === true) {
+      this.removeIfExists(handoffPath);
+      return { name, sessionId: runningSessionId };
+    }
+    if (matchingResumeIntent && running.spawn_confirmed === false) {
+      if (!this.lanes.has(name)) throw new UnresumableLaneError(name, issue.number);
+      throw new Error(`resume: ${name} already has an in-memory unconfirmed spawn`);
+    }
     if (!existsSync(handoffPath)) {
       throw new Error(`resume: ${name} has no .handoff sentinel — nothing to resume`);
     }
@@ -755,11 +800,10 @@ export class WorkerSupervisor implements Supervisor {
     // resumed run appends anything, so checkSoftBudget can compare only THIS RUN's new spend
     // against worker.budgetUsdSoft. Without this, a lane that handed off AT the budget would
     // re-cross it on the first heartbeat tick after resume — an unresumable handoff loop.
-    // The estimator-side mirror of State.recordSpend's resume cost-delta baseline.
-    const estimateBaselineUsd = parseAssistantUsageDeltas(this.readJsonl(jsonlPath)).reduce(
-      (sum, d) => sum + estimateUsd(d, this.pricing),
-      0,
-    );
+    // This is estimator-only: terminal total_cost_usd itself is reported per leg (#172).
+    const priorJsonl = this.readJsonl(jsonlPath);
+    const estimateBaselineUsd = parseAssistantUsageDeltas(priorJsonl).reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0);
+    const jsonlLegOffset = Buffer.byteLength(priorJsonl);
     const jsonlFd = openSync(jsonlPath, "a"); // append: preserve the pre-handoff stream
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     const args = claudeArgs({
@@ -773,11 +817,39 @@ export class WorkerSupervisor implements Supervisor {
       resumeSessionId: sessionId,
       settings: settingsJson,
     });
-    const child = spawn(this.bin, args, {
-      detached: true,
-      stdio: ["ignore", jsonlFd, jsonlFd],
-      env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
-    });
+    const startedMs = this.now().getTime();
+    const runningMarker = {
+      name,
+      issue: issue.number,
+      session_id: sessionId,
+      started_at: new Date(startedMs).toISOString(),
+      estimate_baseline_usd: estimateBaselineUsd,
+      jsonl_leg_offset: jsonlLegOffset,
+      resume_pending_db: true,
+      spawn_confirmed: false,
+      // Preserve the original first-dispatch baseline (not this resume's start).
+      ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
+    };
+    // Intent precedes spawn: after this durable point, a restart never guesses whether it is
+    // safe to create another process in the same worktree/session.
+    try {
+      this.writeJsonAtomic(runningPath, runningMarker);
+    } catch (e) {
+      closeSync(jsonlFd);
+      throw e;
+    }
+    let child: ChildProcess;
+    try {
+      child = spawn(this.bin, args, {
+        detached: true,
+        stdio: ["ignore", jsonlFd, jsonlFd],
+        env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
+      });
+    } catch (e) {
+      closeSync(jsonlFd);
+      this.removeIfExists(runningPath);
+      throw new Error(`worker resume-spawn failed (${this.bin}): ${String(e)}`);
+    }
     const lane: Lane = {
       child,
       issue: issue.number,
@@ -787,17 +859,27 @@ export class WorkerSupervisor implements Supervisor {
       hb: undefined,
       handoffRequested: false,
       reclaiming: false,
-      startedMs: this.now().getTime(),
+      startedMs,
       timedOut: false,
       estimatedCostUsd: 0,
       estimateBaselineUsd,
+      jsonlLegOffset,
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
 
     let spawnErr: unknown;
     await new Promise<void>((resolve) => {
-      child.once("spawn", () => resolve());
+      child.once("spawn", () => {
+        try {
+          this.writeJsonAtomic(runningPath, { ...runningMarker, spawn_confirmed: true, wrapper_pid: child.pid });
+          resolve();
+        } catch (e) {
+          spawnErr = e;
+          lane.reclaiming = true;
+          void this.killTree(child).finally(resolve);
+        }
+      });
       child.once("error", (e) => {
         spawnErr = e;
         resolve();
@@ -810,22 +892,14 @@ export class WorkerSupervisor implements Supervisor {
       } catch {
         /* noop */
       }
+      this.removeIfExists(runningPath);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     child.on("error", () => this.onExit(name, 1));
-    // Clear the handoff sentinel now that the lane is live again — a probe() racing this
-    // resume must not still read the lane as terminally handed-off.
+    // `.handoff` may disappear only after the confirmed marker is durable. Adoption completes
+    // this same removal if the engine crashes between these two writes.
     this.removeIfExists(handoffPath);
     if (this.lanes.has(name) && child.exitCode === null && child.signalCode === null) {
-      this.writeJsonAtomic(this.path(name, "running.json"), {
-        name,
-        issue: issue.number,
-        session_id: sessionId,
-        wrapper_pid: child.pid,
-        started_at: new Date(lane.startedMs).toISOString(),
-        // Preserve the original first-dispatch baseline (not this resume's start).
-        ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
-      });
       this.touchHeartbeat(name);
       lane.hb = setInterval(() => this.heartbeatTick(name), this.hbMs);
     }
@@ -1004,7 +1078,16 @@ export class WorkerSupervisor implements Supervisor {
       // died or what state its worktree is in. timedOut is always .failed — a wall-clock
       // timeout is a distinct, non-drain-requested hard kill.
       const tag = lane.timedOut ? "failed" : lane.handoffRequested ? "handoff" : code === 0 ? "done" : "failed";
-      this.writeTerminalSentinel(name, lane.issue, lane.sessionId, lane.jsonlPath, tag, code, lane.estimatedCostUsd);
+      this.writeTerminalSentinel(
+        name,
+        lane.issue,
+        lane.sessionId,
+        lane.jsonlPath,
+        tag,
+        code,
+        lane.estimateBaselineUsd,
+        lane.jsonlLegOffset,
+      );
     }
     this.lanes.delete(name);
   }
@@ -1022,33 +1105,52 @@ export class WorkerSupervisor implements Supervisor {
     jsonlPath: string,
     tag: "done" | "failed" | "handoff",
     exitCode: number | null,
-    // #33: the live token-ESTIMATE this lane accumulated (undefined for the detached-lane path
-    // below, which has no in-memory Lane to have accumulated one). Purely for the divergence log
-    // below — never affects what gets written to the sentinel.
-    estimatedCostUsd?: number,
+    // The estimator total already present before this leg began. Persisted in running.json so
+    // the detached finalize path can recover the same per-leg boundary after an engine restart.
+    estimateBaselineUsd?: number,
+    jsonlLegOffset?: number,
   ): void {
     const jsonl = this.readJsonl(jsonlPath);
-    const cost = parseCostUsd(jsonl);
-    const modelUsage = parseModelUsage(jsonl);
-    // #33: reconcile the live estimate against the REAL terminal total_cost_usd and log the gap
+    const running = this.readJson(this.path(name, "running.json"));
+    const persistedBaseline =
+      typeof running?.estimate_baseline_usd === "number" && Number.isFinite(running.estimate_baseline_usd)
+        ? running.estimate_baseline_usd
+        : 0;
+    const baseline = estimateBaselineUsd ?? persistedBaseline;
+    const persistedOffset =
+      typeof running?.jsonl_leg_offset === "number" && Number.isSafeInteger(running.jsonl_leg_offset) && running.jsonl_leg_offset >= 0
+        ? running.jsonl_leg_offset
+        : 0;
+    const legOffset = jsonlLegOffset ?? persistedOffset;
+    const legJsonl = this.readJsonlFromByte(jsonlPath, legOffset);
+    const estimatedLegCost = Math.max(
+      0,
+      parseAssistantUsageDeltas(jsonl).reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0) - baseline,
+    );
+    const reportedCost = parseCostUsd(legJsonl);
+    const cost = reportedCost > 0 ? reportedCost : estimatedLegCost;
+    const modelUsage = parseModelUsage(legJsonl);
+    // #33: reconcile the leg estimate against the REAL per-leg total_cost_usd and log the gap
     // — this is how the pricing.ts rate table's known drift (see its module doc) is made
-    // visible instead of silent, per the estimate-vs-real divergence requirement. Never fatal,
-    // never gates anything — logging only. NB: the estimate is RUN-scoped (post-resume spend
-    // only — see Lane.estimateBaselineUsd) while a resumed session's total_cost_usd is expected
-    // to be session-CUMULATIVE, so a resumed lane's logged divergence is structurally larger;
-    // that's a known semantic mismatch of the log line, not rate-table drift.
-    if (estimatedCostUsd !== undefined && cost > 0) {
-      const divergence = estimatedCostUsd - cost;
+    // visible instead of silent. A SIGTERM'd handoff commonly has no result line; in that shape
+    // the same baseline-adjusted estimator becomes the recorded leg cost rather than silently
+    // ledgering $0, and this explicit line records that provenance without a new schema field.
+    if (reportedCost > 0) {
+      const divergence = estimatedLegCost - reportedCost;
       this.log(
-        `[sapwood:worker] lane ${name}: cost estimate $${estimatedCostUsd.toFixed(4)} vs real ` +
-          `total_cost_usd $${cost.toFixed(4)} (estimate ${divergence >= 0 ? "+" : ""}${divergence.toFixed(4)})`,
+        `[sapwood:worker] lane ${name}: cost estimate $${estimatedLegCost.toFixed(4)} vs real ` +
+          `total_cost_usd $${reportedCost.toFixed(4)} (estimate ${divergence >= 0 ? "+" : ""}${divergence.toFixed(4)})`,
+      );
+    } else {
+      this.log(
+        `[sapwood:worker] lane ${name}: total_cost_usd unavailable; recording estimated leg spend ` +
+          `$${estimatedLegCost.toFixed(4)} (source=assistant-usage-estimate)`,
       );
     }
     // #69 (fable P1): carry the immutable first-dispatch baseline out of running.json (still
     // present here — removed only at the tail below) into the terminal sentinel, so resume()
     // and the terminal-lane dirty check (inspectWorktree) can recover it after running.json
     // is gone. Omitted when absent (legacy) -> the baseline resolves to NaN -> fail-safe dirty.
-    const running = this.readJson(this.path(name, "running.json"));
     const dispatchedAt = typeof running?.dispatched_at === "string" ? running.dispatched_at : null;
     const base = {
       name,
@@ -1060,7 +1162,10 @@ export class WorkerSupervisor implements Supervisor {
       ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
     };
     this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: exitCode });
-    this.removeIfExists(this.path(name, "running.json"));
+    // A resumed child may terminate before the conductor persists DB=running. Keep its durable
+    // adoption marker through that window; probe removes it after the terminal outcome is read
+    // on the next ordinary running-lane reclaim tick.
+    if (running?.resume_pending_db !== true) this.removeIfExists(this.path(name, "running.json"));
   }
 
   /** #63: the detached-lane counterpart to onExit's in-process finalize. A detached lane
@@ -1109,9 +1214,8 @@ export class WorkerSupervisor implements Supervisor {
     const issue = typeof running.issue === "number" ? running.issue : -1;
     const sessionId = typeof running.session_id === "string" ? running.session_id : "";
     // Unconditionally "handoff" — no timedOut/code branching (there's no exit code at all
-    // here, no live process to report one for). cost will often parse to 0 since a SIGTERM'd
-    // claude usually never writes its terminal stream-json result line — the same pre-existing
-    // #60 ceiling as the in-process path, not a new gap introduced here.
+    // here, no live process to report one for). SIGTERM commonly omits the result line;
+    // writeTerminalSentinel then records its persisted-baseline-adjusted usage estimate.
     this.writeTerminalSentinel(name, issue, sessionId, this.path(name, "jsonl"), "handoff", null);
     this.detachedHandoffRequested.delete(name);
   }
@@ -1155,6 +1259,10 @@ export class WorkerSupervisor implements Supervisor {
     // computing it unconditionally would re-read the jsonl on every probe of every lane for no
     // reason.
     const failureText = failed ? this.terminalFailureText(name) : undefined;
+    const running = this.readJson(this.path(name, "running.json"));
+    if ((done || failed || handoff) && running?.resume_pending_db === true) {
+      this.removeIfExists(this.path(name, "running.json"));
+    }
     return {
       done,
       failed,
@@ -1187,7 +1295,7 @@ export class WorkerSupervisor implements Supervisor {
       const r = this.readJson(this.path(name, ext));
       if (typeof r?.total_cost_usd === "number") return r.total_cost_usd;
     }
-    return parseCostUsd(this.readJsonl(this.path(name, "jsonl")));
+    return parseCostUsd(this.currentLegJsonl(name));
   }
 
   /** #47: same terminal-sentinel-first, jsonl-fallback shape as terminalCostUsd (see its
@@ -1198,7 +1306,7 @@ export class WorkerSupervisor implements Supervisor {
       const r = this.readJson(this.path(name, ext));
       if (Array.isArray(r?.model_usage)) return r.model_usage as ModelUsageEntry[];
     }
-    return parseModelUsage(this.readJsonl(this.path(name, "jsonl")));
+    return parseModelUsage(this.currentLegJsonl(name));
   }
 
   /** #168: a FAILED lane's own captured ERROR output, for conductor.ts's env-failure
@@ -1433,6 +1541,22 @@ export class WorkerSupervisor implements Supervisor {
     } catch {
       return "";
     }
+  }
+  private readJsonlFromByte(p: string, offset: number): string {
+    try {
+      const raw = readFileSync(p);
+      return raw.subarray(Math.min(offset, raw.length)).toString("utf8");
+    } catch {
+      return "";
+    }
+  }
+  private currentLegJsonl(name: string): string {
+    const running = this.readJson(this.path(name, "running.json"));
+    const offset =
+      typeof running?.jsonl_leg_offset === "number" && Number.isSafeInteger(running.jsonl_leg_offset) && running.jsonl_leg_offset >= 0
+        ? running.jsonl_leg_offset
+        : 0;
+    return this.readJsonlFromByte(this.path(name, "jsonl"), offset);
   }
   private readJson(p: string): Record<string, unknown> | null {
     try {

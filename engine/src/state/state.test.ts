@@ -381,9 +381,7 @@ test("recordSpend clamps negative/non-finite cost: the safety accumulator can on
   s.close();
 });
 
-// ── #46: resume cost-delta (a resumed lane reuses the SAME worker name; `--resume`'s
-//   total_cost_usd is the whole session's cumulative cost, so recording it again in full at
-//   the resumed run's terminal transition would double-count the pre-handoff portion) ──
+// ── #172: resumed total_cost_usd is empirically PER-LEG; same-name terminal rows sum directly ──
 
 test("spentUsdForWorker: 0 for a name with no ledger rows yet", () => {
   const s = mem();
@@ -391,41 +389,40 @@ test("spentUsdForWorker: 0 for a name with no ledger rows yet", () => {
   s.close();
 });
 
-test("recordSpend: a SECOND call for the SAME worker name records only the delta above what's already ledgered", () => {
+test("recordSpend: a SECOND per-leg call for the SAME worker name is recorded directly", () => {
   const s = mem();
   const day = "2026-07-06T12:00:00.000Z";
   s.recordSpend("lane-a", 1, 3, day); // pre-handoff: $3
   assert.equal(s.spentUsdForWorker("lane-a"), 3);
-  // Resumed run's terminal total_cost_usd is $3 (pre-handoff) + $2 (new leg) = $5 cumulative.
-  s.recordSpend("lane-a", 1, 5, day);
-  assert.equal(s.spentUsdForWorker("lane-a"), 5); // NOT 8 — the delta ($2), not the full $5, was added
-  assert.equal(s.dailySpendUsd(new Date(day)), 5); // the daily cap sees the true total once, not twice
-  s.close();
-});
-
-test("recordSpend: a THIRD resume on the same name keeps recording only the newest delta", () => {
-  const s = mem();
-  const day = "2026-07-06T12:00:00.000Z";
-  s.recordSpend("lane-a", 1, 3, day);
-  s.recordSpend("lane-a", 1, 5, day); // +2
-  s.recordSpend("lane-a", 1, 9, day); // +4
-  assert.equal(s.spentUsdForWorker("lane-a"), 9);
-  assert.equal(s.dailySpendUsd(new Date(day)), 9);
-  s.close();
-});
-
-test("recordSpend: a lower/equal report on a resumed name never subtracts from the ledger (floored at 0)", () => {
-  const s = mem();
-  const day = "2026-07-06T12:00:00.000Z";
-  s.recordSpend("lane-a", 1, 5, day);
-  s.recordSpend("lane-a", 1, 5, day); // equal report -> +0
-  s.recordSpend("lane-a", 1, 2, day); // lower report (e.g. a corrupt/short read) -> +0, never negative
+  s.recordSpend("lane-a", 1, 2, day); // resumed leg reports its own $2 directly
   assert.equal(s.spentUsdForWorker("lane-a"), 5);
   assert.equal(s.dailySpendUsd(new Date(day)), 5);
   s.close();
 });
 
-test("recordSpend: different worker names never share a baseline (each lane's delta is independent)", () => {
+test("recordSpend: multiple resumed legs on the same name sum their per-leg reports", () => {
+  const s = mem();
+  const day = "2026-07-06T12:00:00.000Z";
+  s.recordSpend("lane-a", 1, 3, day);
+  s.recordSpend("lane-a", 1, 2, day);
+  s.recordSpend("lane-a", 1, 4, day);
+  assert.equal(s.spentUsdForWorker("lane-a"), 9);
+  assert.equal(s.dailySpendUsd(new Date(day)), 9);
+  s.close();
+});
+
+test("recordSpend: equal/lower positive per-leg reports are legitimate spend and never subtracted", () => {
+  const s = mem();
+  const day = "2026-07-06T12:00:00.000Z";
+  s.recordSpend("lane-a", 1, 5, day);
+  s.recordSpend("lane-a", 1, 5, day);
+  s.recordSpend("lane-a", 1, 2, day);
+  assert.equal(s.spentUsdForWorker("lane-a"), 12);
+  assert.equal(s.dailySpendUsd(new Date(day)), 12);
+  s.close();
+});
+
+test("recordSpend: different worker names remain independent", () => {
   const s = mem();
   const day = "2026-07-06T12:00:00.000Z";
   s.recordSpend("lane-a", 1, 10, day);
@@ -448,7 +445,7 @@ test("#154 maxSpendLedgerId: 0 on an empty ledger; a captured cursor excludes ev
   s.close();
 });
 
-test("resume cost-delta survives an engine restart between the handoff and the resume (DB-backed baseline)", () => {
+test("per-leg resume accounting survives an engine restart between handoff and resume", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
   try {
     const path = join(dir, "sapwood.sqlite");
@@ -458,9 +455,9 @@ test("resume cost-delta survives an engine restart between the handoff and the r
     s1.close();
 
     const s2 = new State(path); // "restart": a brand-new State instance, same on-disk ledger
-    assert.equal(s2.spentUsdForWorker("lane-a"), 3); // baseline recovered from disk, not memory
-    s2.recordSpend("lane-a", 1, 5, day); // resumed run's cumulative total
-    assert.equal(s2.spentUsdForWorker("lane-a"), 5); // delta ($2) recorded, not the full $5 again
+    assert.equal(s2.spentUsdForWorker("lane-a"), 3);
+    s2.recordSpend("lane-a", 1, 2, day); // resumed leg's own report
+    assert.equal(s2.spentUsdForWorker("lane-a"), 5);
     assert.equal(s2.dailySpendUsd(new Date(day)), 5);
     s2.close();
   } finally {
@@ -1216,51 +1213,54 @@ test("park: escalation marker is written to the engine's own data dir; clearing 
   }
 });
 
-// ── #168 (PR #180 review P3-2): REAL v11 -> v12 migration — data survives, park_state lands ──
+// ── #172: REAL v12 -> v13 migration — data survives, resume columns land ──
 
-test("migration v11->v12: a populated v11 DB opens on the current engine with all data intact, an empty park_state, user_version 12, and an idempotent reopen", () => {
+test("migration v12->v13: a populated v12 DB opens with data intact, resume defaults, user_version 13, and idempotent reopen", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
   try {
     const dbPath = join(dir, "sapwood.sqlite");
-    // Build a REAL v11 DB: run the shipped migrations 0..10 exactly as a v11 engine would have.
+    // Build a REAL v12 DB: run the shipped migrations 0..11 exactly as that engine would have.
     const raw = new DatabaseSync(dbPath);
     raw.exec("PRAGMA journal_mode = WAL");
-    for (let v = 0; v < 11; v++) MIGRATIONS[v]!(raw);
-    raw.exec("PRAGMA user_version = 11");
-    // Populate representative rows across the v11 tables.
+    for (let v = 0; v < 12; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 12");
+    // Populate representative rows across the v12 tables.
     raw
       .prepare(
         "INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, gated_reentry_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("lane-v11", 9, "sess-9", "failed", "2026-07-01T00:00:00Z", "2026-07-01T01:00:00Z", 55, 1);
+      .run("lane-v12", 9, "sess-9", "handoff", "2026-07-01T00:00:00Z", "2026-07-01T01:00:00Z", 55, 1);
     raw
       .prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)")
-      .run("2026-07-01T00:30:00Z", "dispatched", JSON.stringify({ worker: "lane-v11", issue: 9 }));
+      .run("2026-07-01T00:30:00Z", "dispatched", JSON.stringify({ worker: "lane-v12", issue: 9 }));
     raw
       .prepare(
         "INSERT INTO spend_ledger (ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("2026-07-01T01:00:00Z", "lane-v11", 9, 1.25, "opus", 10, 20, 0, 0);
+      .run("2026-07-01T01:00:00Z", "lane-v12", 9, 1.25, "opus", 10, 20, 0, 0);
     raw
       .prepare("INSERT INTO pending_rollbacks (issue, target, reason, attempts, created_at) VALUES (?, ?, ?, 0, ?)")
       .run(9, "ready", "dead-lane-requeue", "2026-07-01T01:00:00Z");
-    // park_state must not exist yet — that's exactly what migration 12 adds.
-    assert.throws(() => raw.prepare("SELECT * FROM park_state").get());
+    assert.doesNotThrow(() => raw.prepare("SELECT * FROM park_state").get());
+    assert.throws(() => raw.prepare("SELECT resume_attempts FROM workers").get());
     raw.close();
 
-    // Open with the CURRENT engine -> migrates 11 -> 12.
+    // Open with the CURRENT engine -> migrates 12 -> 13.
     const s = new State(dbPath);
-    assert.equal(s.userVersion(), 12);
-    assert.equal(SCHEMA_VERSION, 12);
+    assert.equal(s.userVersion(), 13);
+    assert.equal(SCHEMA_VERSION, 13);
     // Pre-existing data survived intact.
-    const w = s.getWorker("lane-v11");
+    const w = s.getWorker("lane-v12");
     assert.equal(w?.issue, 9);
     assert.equal(w?.pr, 55);
     assert.equal(w?.gated_reentry_attempts, 1);
-    assert.equal(s.spentUsdForWorker("lane-v11"), 1.25);
+    assert.equal(w?.resume_attempts, 0);
+    assert.equal(w?.resume_capped, 0);
+    assert.equal(s.handoffWorkers().length, 1);
+    assert.equal(s.spentUsdForWorker("lane-v12"), 1.25);
     assert.equal(s.pendingRollbacks().length, 1);
     assert.equal(s.eventsSince("2026-01-01T00:00:00Z", ["dispatched"]).length, 1);
-    // park_state exists and is empty; the new API works on the migrated DB.
+    // The existing park state and API remain intact.
     assert.equal(s.isParked(), false);
     assert.deepEqual(s.parkedSources(), []);
     assert.equal(s.enterPark("forge", "post-migration episode", null, "2026-07-14T00:00:00Z"), true);
@@ -1270,8 +1270,9 @@ test("migration v11->v12: a populated v11 DB opens on the current engine with al
 
     // Idempotent reopen: no re-migration, same version, same data.
     const s2 = new State(dbPath);
-    assert.equal(s2.userVersion(), 12);
-    assert.equal(s2.getWorker("lane-v11")?.issue, 9);
+    assert.equal(s2.userVersion(), 13);
+    assert.equal(s2.getWorker("lane-v12")?.issue, 9);
+    assert.equal(s2.getWorker("lane-v12")?.resume_attempts, 0);
     assert.equal(s2.isParked(), false);
     s2.close();
   } finally {

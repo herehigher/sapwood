@@ -120,6 +120,12 @@ class FakeSupervisor implements Supervisor {
     const name = `lane-${issue.number}-${++this.n}`;
     return { name, sessionId: `sess-${name}` };
   }
+  async resume(_issue: Issue, worker: string): Promise<{ name: string; sessionId: string }> {
+    return { name: worker, sessionId: `sess-${worker}` };
+  }
+  resumeIntentState(): "none" {
+    return "none";
+  }
   async reclaim(): Promise<{ worktreePath: string | null; worktreeRetained: boolean }> {
     return { worktreePath: null, worktreeRetained: false };
   }
@@ -212,6 +218,22 @@ test("runDriver --until-idle: stops once a tick leaves nothing in flight and dis
   const result = await runDriver(deps);
   assert.deepEqual(result, { ticks: 1, tickErrors: 0, stoppedBy: "idle" });
   deps.state.close();
+});
+
+test("runDriver --until-idle (#172): a just-reclaimed handoff gets its next RESUME beat before idle exit", async () => {
+  const { sleep, calls } = mkSleepSpy();
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const state = new State(":memory:");
+  state.upsertWorker({ name: "lane-ho", issue: 172, session_id: "s", state: "running", started_at: "t", ended_at: null });
+  sup.probes["lane-ho"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: false };
+  const deps = baseDeps({ forge, supervisor: sup, state, sleep, stopMode: "until-idle", cfg: mkCfg({ worker: { maxResumes: 0 } }) });
+
+  const result = await runDriver(deps);
+  assert.deepEqual(result, { ticks: 2, tickErrors: 0, stoppedBy: "idle" });
+  assert.equal(state.getWorker("lane-ho")?.resume_capped, 1); // tick 2 ran the cap path
+  assert.deepEqual(calls, [5000]);
+  state.close();
 });
 
 test("runDriver --until-idle: keeps ticking while a dispatched lane is still active", async () => {

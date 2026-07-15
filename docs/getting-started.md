@@ -123,7 +123,7 @@ Don't point sapwood at a live backlog and walk away. Ramp up in stages:
    pre-#106 apply:
    - **`sapwood run --once`** — dispatch one wave, then hand back the terminal. Leave
      exactly one issue `Ready` on the board and run `sapwood run --once`. This runs a
-     single tick (reclaim → drive → dispatch) and exits. Note what that does NOT mean:
+     single tick (reclaim → drive → resume → dispatch) and exits. Note what that does NOT mean:
      the dispatched worker keeps running **detached in the background** after the CLI
      returns — its TDD work, the PR, and the review gate all happen later, driven by
      subsequent ticks. Watch it with `sapwood status`, and run `sapwood run --once`

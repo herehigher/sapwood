@@ -13,6 +13,7 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.board.status.ready, "Ready"); // default
   assert.equal(cfg.lanes.roundDispatchCap, 6); // #124: per-round quota, 2x lanes.max default
   assert.equal(cfg.worker.budgetUsdSoft, 10);
+  assert.equal(cfg.worker.maxResumes, 2);
   assert.equal(cfg.reviewer.mode, "different-model-codex");
   assert.equal(cfg.labels.verifyNa, "verify:n/a");
   assert.equal(cfg.labels.planApproved, "plan:approved"); // #88 gate⓪
@@ -20,6 +21,15 @@ test("applies defaults when only required board fields given", () => {
   assert.equal(cfg.cost.dailyBudgetUsd, 100);
   assert.equal(cfg.cost.maxWallClockSec, 14400);
   assert.equal(cfg.cost.drainWindowSec, 300);
+});
+
+test("worker.maxResumes (#172): non-negative integer, default 2, 0 disables resume", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.equal(parseConfig(base).worker.maxResumes, 2);
+  assert.equal(parseConfig(`${base}worker: { maxResumes: 0 }`).worker.maxResumes, 0);
+  assert.equal(parseConfig(`${base}worker: { maxResumes: 5 }`).worker.maxResumes, 5);
+  assert.throws(() => parseConfig(`${base}worker: { maxResumes: -1 }`), /maxResumes/i);
+  assert.throws(() => parseConfig(`${base}worker: { maxResumes: 1.5 }`), /maxResumes/i);
 });
 
 test("board.status.backlog is overridable and the status object remains strict", () => {

@@ -1,8 +1,8 @@
-// pricing.ts — loads the ESTIMATE-only per-model rate table (#33) from a user-editable YAML
-// file, and prices token usage against it. Used ONLY to estimate a worker's in-flight spend
-// for the SOFT per-worker budget (worker.budgetUsdSoft) — never for the engine's HARD cost
-// ceiling, which is billed off the REAL `total_cost_usd` the Claude CLI reports in its
-// terminal stream-json result line (parseCostUsd / state.recordSpend).
+// pricing.ts — loads the per-model estimate rate table (#33) from a user-editable YAML file
+// and prices token usage against it. Primarily used for a worker's in-flight SOFT budget.
+// The engine's hard cost ceiling prefers the real terminal `total_cost_usd`; a SIGTERM'd
+// handoff with no result line falls back to this estimator so confirmed usage is not silently
+// ledgered as $0.
 //
 // Rates live in a YAML file, not in source (PR #85 human review: users won't edit source
 // code): the engine ships a commented default at `engine/pricing.yaml` (same shipped-preset

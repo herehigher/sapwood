@@ -64,6 +64,8 @@ worker:
   #                   rate-table approximation (see pricingFile below), not the real billed
   #                   cost; it's reconciled against the real total_cost_usd (logged) once the
   #                   worker finishes.
+  # maxResumes: 2   # Fresh budgeted legs allowed after the initial leg hands off. 0 disables
+  #                   automatic resume; exhaustion latches the lane + adds needs-human once.
   # pricingFile: pricing/my-rates.yaml
   #                   Override the model rate table the soft-budget estimator prices against.
   #                   Relative paths resolve against THIS config file's directory (like

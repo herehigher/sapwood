@@ -172,6 +172,12 @@ test("sapwood run startup reconcile is quiet when rows match and forge-down is n
     started_at: "2026-07-15T00:00:00.000Z",
     ended_at: null,
     pr: 200,
+    // #171 deliberately used handoff here to prove that a terminal-resumable row still owns
+    // its In Progress issue + open PR during startup reconciliation. #172 makes an uncapped
+    // handoff live work; cap this sentinel-less fixture so the test remains reconcile-only
+    // without erasing that original handoff-ownership coverage.
+    resume_attempts: cfg.worker.maxResumes,
+    resume_capped: 1,
   });
   const healthyForge = new FakeForge();
   healthyForge.reconcileData = {
@@ -184,6 +190,7 @@ test("sapwood run startup reconcile is quiet when rows match and forge-down is n
       0,
     );
     assert.equal(healthyState.eventsSince("1970-01-01T00:00:00.000Z", ["orphan-detected"]).length, 0);
+    assert.equal(healthyState.eventsSince("1970-01-01T00:00:00.000Z", ["resume-failed"]).length, 0);
   } finally {
     healthyState.close();
   }
