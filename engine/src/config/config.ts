@@ -155,13 +155,6 @@ const Reviewer = z
     // format is out of scope here (v1.x reviewer adapters).
     triggerCommand: z.string().min(1).default("@codex review"),
     trustedReviewers: z.array(z.string()).default([]),
-    // How often the Conductor's tick re-polls a triggered review (documents the operational
-    // policy; the actual re-poll cadence is driven by the tick loop itself, not a timer here).
-    pollIntervalSec: z.number().int().positive().default(120),
-    // How long a triggered review may sit unresolved (no verdict past "reviewing") before the
-    // merge driver treats it as REVIEW_UNAVAILABLE (rate-limit/timeout) and QUEUES the PR —
-    // gate② must never be skipped or softened on an unavailable review (#13).
-    pollTimeoutSec: z.number().int().positive().default(1200),
     // #54: EXPLICIT, ordered opt-in list of reviewer modes to fail over to when the primary
     // (reviewer.mode) is unavailable for longer than failoverAfterSec. Each entry keeps its OWN
     // mode semantics (identity allowlist for bot modes; any-non-author-approval for human) —
@@ -175,8 +168,11 @@ const Reviewer = z
     // primary reviewer may stay non-decisive (WAIT_REVIEW / REVIEW_UNAVAILABLE) before
     // merge-driver.ts's resolveReviewVerdict hands gate② to the first fallback entry that itself
     // reaches a decisive verdict. Irrelevant when `fallback` is empty. Conservative default: 20
-    // minutes — same order of magnitude as the (separate, still-unwired) pollTimeoutSec above.
+    // minutes.
     failoverAfterSec: z.number().int().positive().default(1200),
+    // #170: wall-clock age of a current-head, non-decisive review trigger before the engine
+    // calls a human. Visibility only: the PR receives needs-human while gate② stays unchanged.
+    escalateAfterSec: z.number().int().positive().default(86400),
   })
   .strict()
   .superRefine((r, ctx) => {
@@ -700,7 +696,21 @@ const ConfigSchemaRaw = z
     // labels + board lanes, not milestones — those are the user's organizational choice).
     milestones: z.array(z.string()).default([]),
   })
-  .strict();
+  .strict()
+  .superRefine((cfg, ctx) => {
+    // #170 review-silence escalation writes labels.needsHuman, while the existing PR gate
+    // and the issue-side gated-reentry hold both recognize escalation.humanLabels. Reject drift
+    // between them so the label latch cannot suppress visibility without holding both paths.
+    if (!cfg.escalation.humanLabels.includes(cfg.labels.needsHuman)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labels", "needsHuman"],
+        message:
+          `labels.needsHuman ("${cfg.labels.needsHuman}") must be listed exactly in ` +
+          `escalation.humanLabels so the escalation label is recognized by both PR and issue holds`,
+      });
+    }
+  });
 
 // #128: `goal.file` is ALWAYS a string once ConfigSchema.parse has run (resolveGoalFile below
 // either takes the explicit value, falls back to the deprecated `roles.architect.planMdPath`, or

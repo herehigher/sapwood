@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
-import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision } from "./merge-driver.js";
+import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision, reviewSilenceDuration } from "./merge-driver.js";
 import type { ReviewAction, Reviewer, ReviewVerdict } from "./reviewer.js";
 import { CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
 
@@ -241,6 +241,76 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
 // below ("review-trigger pin (#55 P1-B)").
 const ALREADY_TRIGGERED = { head: "HEAD", at: "2020-01-01T00:00:00Z" };
 const noopRecord = (_head: string, _at: string): void => {};
+
+test("#170 reviewSilenceDuration: non-decisive age, label latch, and failover window", () => {
+  const base = {
+    action: "WAIT_REVIEW" as ReviewAction,
+    triggerPin: { head: "HEAD", at: "2026-07-14T00:00:00.000Z" },
+    now: new Date("2026-07-15T00:00:00.000Z"),
+    escalateAfterSec: 86400,
+    needsHumanLabelPresent: false,
+    fallbackConfigured: false,
+    failoverAfterSec: 1200,
+  };
+  assert.equal(reviewSilenceDuration(base), 86400);
+  assert.equal(reviewSilenceDuration({ ...base, action: "REVIEW_UNAVAILABLE" }), 86400);
+  assert.equal(reviewSilenceDuration({ ...base, action: "MERGE_OK" }), null);
+  assert.equal(reviewSilenceDuration({ ...base, now: new Date("2026-07-14T23:59:59.000Z") }), null);
+  assert.equal(reviewSilenceDuration({ ...base, needsHumanLabelPresent: true }), null);
+  assert.equal(reviewSilenceDuration({ ...base, triggerPin: { head: "HEAD", at: null } }), null);
+  assert.equal(
+    reviewSilenceDuration({
+      ...base,
+      escalateAfterSec: 300,
+      fallbackConfigured: true,
+      failoverAfterSec: 1200,
+      now: new Date("2026-07-14T00:10:00.000Z"),
+    }),
+    null,
+  );
+  assert.equal(
+    reviewSilenceDuration({
+      ...base,
+      escalateAfterSec: 300,
+      fallbackConfigured: true,
+      failoverAfterSec: 1200,
+      now: new Date("2026-07-14T00:20:00.000Z"),
+    }),
+    1200,
+  );
+});
+
+test("#170 MergeDriver: an aged silent current-head review signals once; a fresh head resets the clock", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "WAIT_REVIEW", headOid: null };
+  const driver = new MergeDriver({
+    forge,
+    reviewer,
+    cfg: mkCfg({ reviewer: { escalateAfterSec: 60 } }),
+    now: () => new Date("2026-07-15T00:02:00.000Z"),
+  });
+  const pin = { head: "HEAD", at: "2026-07-15T00:00:00.000Z" };
+  assert.deepEqual(await driver.driveOne(7, 46, pin, noopRecord), {
+    kind: "queued",
+    pr: 7,
+    reason: "gate-pending:WAIT_REVIEW",
+    reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 },
+  });
+
+  forge.reviewData = { ...forge.reviewData, labels: ["needs-human"] };
+  assert.equal((await driver.driveOne(7, 46, pin, noopRecord)).reviewSilenceEscalation, undefined);
+
+  forge.reviewData = { ...forge.reviewData, headOid: "FRESH", labels: [] };
+  forge.status = { ...forge.status, headOid: "FRESH" };
+  let recorded: [string, string] | null = null;
+  const fresh = await driver.driveOne(7, 46, pin, (head, at) => {
+    recorded = [head, at];
+  });
+  assert.equal(fresh.kind, "queued");
+  assert.equal(fresh.reviewSilenceEscalation, undefined);
+  assert.deepEqual(recorded, ["FRESH", "2026-07-15T00:02:00.000Z"]);
+});
 
 test("MergeDriver.driveOne: gates pass (CI green + MERGE_OK) -> merges with the PINNED head oid", async () => {
   const forge = new FakeForge();

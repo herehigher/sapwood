@@ -146,12 +146,46 @@ test("rejects a non-finite budget ceiling (overflow must not disable the cap)", 
   );
 });
 
-test("#13: reviewer/merge defaults — codex reviewer, conductor-merge, sane poll bounds", () => {
+test("#13/#170: reviewer/merge defaults — codex reviewer, conductor-merge, silence escalation", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.reviewer.mode, "different-model-codex");
-  assert.equal(cfg.reviewer.pollIntervalSec, 120);
-  assert.equal(cfg.reviewer.pollTimeoutSec, 1200);
+  assert.equal(cfg.reviewer.escalateAfterSec, 86400);
   assert.equal(cfg.merge.mode, "conductor-merge");
+});
+
+test("#170: reviewer.escalateAfterSec accepts a positive integer override", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { escalateAfterSec: 3600 }");
+  assert.equal(cfg.reviewer.escalateAfterSec, 3600);
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { escalateAfterSec: 0 }"),
+    /escalateAfterSec/i,
+  );
+});
+
+test("#170: removed reviewer poll keys are rejected clearly by the strict schema", () => {
+  for (const key of ["pollIntervalSec", "pollTimeoutSec"]) {
+    assert.throws(
+      () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { ${key}: 120 }`),
+      new RegExp(`${key}|unrecognized`, "i"),
+    );
+  }
+});
+
+test("#170: the needs-human write label must be recognized by the human-label hold", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.doesNotThrow(() => parseConfig(base)); // shipped defaults agree
+  assert.throws(
+    () => parseConfig(`${base}labels: { needsHuman: human-review }`),
+    /labels\.needsHuman.*must be listed exactly in escalation\.humanLabels/i,
+  );
+  assert.equal(
+    parseConfig(`${base}labels: { needsHuman: human-review }\nescalation: { humanLabels: [human-review] }`).labels.needsHuman,
+    "human-review",
+  );
+  assert.throws(
+    () => parseConfig(`${base}labels: { needsHuman: needs-human-now }\nescalation: { humanLabels: [needs-human] }`),
+    /labels\.needsHuman.*must be listed exactly in escalation\.humanLabels/i,
+  );
 });
 
 // ── #156: reviewer.triggerCommand — user-defined review trigger entry point ─────────────────

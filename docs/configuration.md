@@ -285,10 +285,9 @@ Gate② — who reviews a PR before it can merge.
 | `mode` | `different-model-codex` | The reviewer kind: `different-model-codex` (0day-style fresh non-author Codex review), `same-model-trusted` (allowlisted reviewers only), or `human` (any non-author approval). |
 | `triggerCommand` | `"@codex review"` | The PR-comment text posted to request a review (`different-model-codex` mode). Non-empty string; rejected empty at parse. |
 | `trustedReviewers` | `[]` | Allowlisted reviewer logins, used by `same-model-trusted`. |
-| `pollIntervalSec` | `120` | Documents the operational review re-poll cadence (the actual cadence is driven by the tick loop). |
-| `pollTimeoutSec` | `1200` | **Accepted, not yet wired** — the timeout it describes isn't enforced yet. Today `REVIEW_UNAVAILABLE` (which queues the PR — never skips or softens gate②) arises only from review-data read failures. |
 | `fallback` | `[]` | Ordered, opt-in list of reviewer modes to fail over to when the primary is unavailable past `failoverAfterSec`. Each entry keeps its own mode semantics (identity allowlist for bot modes, any-non-author-approval for `human`). Empty (the default) is byte-for-byte pre-failover behavior: an unavailable primary queues the PR forever, no silent degradation. `same-model-trusted` in `fallback` with an empty `trustedReviewers` is rejected at parse — it could never produce a verdict, so the failover would be silently inert. |
 | `failoverAfterSec` | `1200` (20min) | How long the primary reviewer may stay non-decisive before gate② hands off to the first fallback entry that itself reaches a decisive verdict. Irrelevant when `fallback` is empty. |
+| `escalateAfterSec` | `86400` (24h) | How long a current-head review may stay non-decisive before sapwood applies `needs-human` to the PR and emits `review-silence-escalated`. This adds visibility only: the lane stays driving, polling continues, and gate② is never softened. A configured failover receives its full `failoverAfterSec` evaluation window first. |
 
 A fallback-obtained approval is **advisory, never verdict-bearing** on its own: it's
 re-verified against live PR data through the recorded mode's own rules at every use, and
@@ -318,7 +317,7 @@ The label taxonomy the loop reads and writes. `sapwood init` provisions all of t
 | Key | Default | Meaning |
 |---|---|---|
 | `inProgress` | `in-progress` | Applied to a claimed issue. |
-| `needsHuman` | `needs-human` | Escalation — stop autonomy on this issue/PR, ask a human. |
+| `needsHuman` | `needs-human` | Escalation — stop autonomy on this issue/PR, ask a human. Its value must be listed in `escalation.humanLabels` so the written label is recognized by both PR and issue holds. |
 | `blocked` | `blocked` | Held out of the main dispatch lane. |
 | `reserve` | `reserve` | Not part of the main dispatch lane. |
 | `verifyNa` | `verify:n/a` | Marks an issue as inherently unverifiable by tests — skips the verification-plan gate and routes through the doc-gate path instead. |
@@ -471,7 +470,7 @@ that failed and degraded to local.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `humanLabels` | `[needs-human, blocked]` | Any of these labels on an issue means "stop autonomy, ask a human" for that issue. |
+| `humanLabels` | `[needs-human, blocked]` | Any of these labels on an issue means "stop autonomy, ask a human" for that issue. It must list `labels.needsHuman` exactly so PR and issue holds recognize the same escalation label. |
 
 ## `coverage`
 

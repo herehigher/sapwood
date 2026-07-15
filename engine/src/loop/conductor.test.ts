@@ -101,6 +101,7 @@ class FakeForge implements IForge {
   }
   async addPRLabel(n: number, l: string): Promise<void> {
     this.prLabelsAdded.push([n, l]);
+    if (!this.prReviewData.labels.includes(l)) this.prReviewData = { ...this.prReviewData, labels: [...this.prReviewData.labels, l] };
   }
   async openPR(): Promise<number> {
     return 1;
@@ -1669,6 +1670,83 @@ test("gatedReentryDecision: any human-hold label present -> SKIP (no complete hu
   assert.equal(gatedReentryDecision(false, 2, 2), "CAPPED");
   assert.equal(gatedReentryDecision(false, 3, 2), "CAPPED");
   assert.equal(gatedReentryDecision(false, 0, 0), "CAPPED"); // cap=0 disables reentry outright
+});
+
+test("#170 review silence: aged episode labels PR + emits once while driving; verdict is human-held; label removal re-enters and merges", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-review-silence-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const st = new State(path);
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    const cfg = mkCfg({ reviewer: { escalateAfterSec: 60 } });
+    const now = new Date("2026-07-15T00:02:00.000Z");
+    const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now: () => now });
+
+    st.upsertWorker({
+      name: "lane-silent",
+      issue: 170,
+      session_id: "s-lane-silent",
+      state: "driving",
+      started_at: "t0",
+      ended_at: null,
+      pr: 170,
+      review_triggered_head: "H1",
+      review_triggered_at: "2026-07-15T00:00:00.000Z",
+    });
+    forge.prStatus = { number: 170, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+    forge.prReviewData = { ...forge.prReviewData, headOid: "H1", labels: [], reviews: [] };
+
+    const silent = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.equal(st.getWorker("lane-silent")?.state, "driving");
+    assert.deepEqual(silent.driven, [{ kind: "queued", worker: "lane-silent", issue: 170, pr: 170, reason: "gate-pending:WAIT_REVIEW" }]);
+    assert.deepEqual(forge.prLabelsAdded, [[170, "needs-human"]]);
+
+    const raw = new DatabaseSync(path);
+    const event = raw.prepare("SELECT kind, payload FROM events WHERE kind = ?").get("review-silence-escalated") as
+      | { kind: string; payload: string }
+      | undefined;
+    raw.close();
+    assert.equal(event?.kind, "review-silence-escalated");
+    assert.deepEqual(JSON.parse(event!.payload), {
+      worker: "lane-silent",
+      issue: 170,
+      pr: 170,
+      head: "H1",
+      silenceSec: 120,
+    });
+
+    // A decisive review later arrives, but the PR label wins: existing gate semantics route the
+    // lane to HUMAN and put the issue on the existing gated-reentry hold.
+    forge.prReviewData = {
+      ...forge.prReviewData,
+      reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-15T00:01:00Z" }],
+    };
+    const held = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.equal(st.getWorker("lane-silent")?.state, "failed");
+    assert.deepEqual(held.driven, [{ kind: "needs-human", worker: "lane-silent", issue: 170, pr: 170, reason: "gate:HUMAN:MERGE_OK" }]);
+    assert.equal(rawEventKinds(path).filter((k) => k === "review-silence-escalated").length, 1);
+
+    // Human clears both synchronized holds. Existing gated reentry clears the old pin and posts
+    // a fresh trigger; only a post-trigger review can then merge.
+    forge.issueLabelsByIssue[170] = [];
+    forge.prReviewData = { ...forge.prReviewData, labels: [], reviews: [] };
+    const reentered = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(reentered.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-silent", issue: 170, pr: 170, attempt: 1 }]);
+    assert.deepEqual(reentered.driven, [{ kind: "queued", worker: "lane-silent", issue: 170, pr: 170, reason: "review-triggered" }]);
+
+    forge.prReviewData = {
+      ...forge.prReviewData,
+      reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-15T00:03:00Z" }],
+    };
+    const merged = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(merged.driven, [{ kind: "merged", worker: "lane-silent", issue: 170, pr: 170 }]);
+    assert.deepEqual(forge.merged, [[170, "H1"]]);
+    assert.equal(sup.dispatched.length, 0);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("#147 round-4 P2 (Codex PR #151): needs-human removed but `blocked` (another escalation.humanLabels entry) still on the issue -> SKIP, no reclaim; clearing blocked too on a later tick -> RECLAIM proceeds", async () => {
