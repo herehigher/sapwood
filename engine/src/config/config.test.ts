@@ -334,6 +334,17 @@ test("roles.planReviewer.model/effort: default to a lighter model/effort than wo
   assert.equal(over.roles.planReviewer.effort, "high");
 });
 
+test("worker/roles fallbackModel: default to sonnet, allow an override, and accept explicit none", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.worker.fallbackModel, "sonnet");
+  assert.equal(cfg.roles.planReviewer.fallbackModel, "sonnet");
+  const over = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { fallbackModel: haiku }\nroles: { planReviewer: { fallbackModel: none } }",
+  );
+  assert.equal(over.worker.fallbackModel, "haiku");
+  assert.equal(over.roles.planReviewer.fallbackModel, "none");
+});
+
 test("roles.planDrafter: promptFile unset by default, model/effort defaulted, strict schema (#74/#77 Amendment 2 pattern)", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.roles.planDrafter.promptFile, undefined);

@@ -320,7 +320,13 @@ async function reviewOneIssue(
     const reviewResult = await runSessionWithRetry({
       runner: deps.runner,
       state: deps.state,
-      session: { roleId: "plan-reviewer", prompt: reviewerPrompt, model: reviewerRole.model, effort: reviewerRole.effort },
+      session: {
+        roleId: "plan-reviewer",
+        prompt: reviewerPrompt,
+        model: reviewerRole.model,
+        effort: reviewerRole.effort,
+        fallbackModel: reviewerRole.fallbackModel,
+      },
       issue: issue.number,
       now,
       degradeEvent: "plan-review-escalated",
@@ -391,6 +397,7 @@ async function reviewOneIssue(
         prompt: drafterPrompt,
         model: drafterRole.model,
         effort: drafterRole.effort,
+        fallbackModel: drafterRole.fallbackModel,
         // Best-effort pattern layer only (peripheral.ts doc) — the authoritative enforcement of
         // "the drafter never applies a label" is now structural (see the function doc above),
         // not this deny-list. Left in place: PR1 changes the write mechanism, not the grants.

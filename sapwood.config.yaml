@@ -47,6 +47,9 @@ lanes:
 worker:
   model: opus
   effort: high # low | medium | high
+  # fallbackModel: sonnet # Default fallback when the primary model is unavailable. Set to
+  #                       # "none" to omit --fallback-model and fail loud instead of silently
+  #                       # downgrading quality; see #168 for the environment-failure path.
   timeoutSec: 3600 # wall-clock hard cap (safety bound)
   budgetUsdSoft: 10 # SOFT per-worker budget: auto-enforced via a live TOKEN-ESTIMATE (#33) —
   #                   crossing it triggers a graceful handoff (commit+push WIP, progress note,
@@ -128,6 +131,8 @@ labels: # taxonomy used by the loop
 #     #                   Unset = the engine's shipped prompts/po.md.
 #     model: sonnet
 #     effort: medium
+#     # fallbackModel: sonnet # Every role accepts this key too. Set "none" to fail loud rather
+#                           # than silently downgrade quality; see #168's environment-failure path.
 #     enabled: true      # #127: false -> the aligning phase no-ops every round. WARNING: with
 #                        # the PO off, plan-less issues are never triaged into gate⓪ — they
 #                        # need a verification plan from a human/external process instead.
@@ -281,4 +286,3 @@ optimize:
 # needs labels + board lanes, not milestones (those are your organizational choice).
 milestones: []
 # milestones: [M0, M1, v1.0]
-

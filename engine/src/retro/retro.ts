@@ -291,6 +291,7 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
           prompt: rendered,
           model: role.model,
           effort: role.effort,
+          fallbackModel: role.fallbackModel,
           allowedTools: RETRO_ALLOWED_TOOLS,
           disallowedTools: RETRO_DISALLOWED_TOOLS,
           scratchFile: RETRO_SCRATCH_FILE,
