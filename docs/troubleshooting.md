@@ -210,19 +210,33 @@ logged, and the next tick tries again on its normal cadence.
 state), but it will show whether lanes are stuck (no progress on `running`/`driving`
 workers) as a symptom of the same underlying connectivity problem.
 
-## Stale heartbeat reclaim
+## Stale heartbeat reclaim (and restart adoption)
 
-Each running worker writes a heartbeat; if the most recent one is older than
-`worker.heartbeatStaleSecs` (default 180s), the conductor considers that worker dead and
-reclaims its lane on the next tick — regardless of whether the worker process is
-actually still running (e.g. a hung process that stopped heartbeating). This is
-expected recovery behavior, not a bug: it's what makes a session-bound engine
-(`sapwood run` dies on SIGHUP) safe to restart — a stale-heartbeat worker is always
-reclaimed on the next tick rather than silently holding its lane forever.
+Each running worker writes a heartbeat, refreshed by the *engine's* in-process timer —
+so engine downtime (crash, restart, SIGHUP killing a session-bound `sapwood run`)
+stops the heartbeat while detached workers keep working. What happens when the most
+recent heartbeat is older than `worker.heartbeatStaleSecs` (default 180s) depends on
+whether the worker process itself is still alive (#169):
 
-If reclaim finds no terminal sentinel and a possibly-dirty worktree, it follows the
-dirty-worktree degrade path above (retain + `needs-human`), never a silent requeue of
-in-progress work.
+- **Worker process still alive**, and its first dispatch is within `worker.timeoutSec`:
+  the lane is **adopted**, not killed. The engine requests a graceful handoff (SIGTERM),
+  holds the lane while the worker drains and exits — the worktree is left exactly as the
+  worker left it — then writes the `.handoff` sentinel and resumes the same session in
+  that same worktree through the ordinary handoff/resume path. An engine restart never
+  hard-kills a healthy worker mid-work. Adoption is recorded as a `lane-adopted` event,
+  which also notes that spend during the engine's downtime was unobserved (nothing was
+  supervising the worker while the engine was down — a deliberate, bounded blind spot).
+- **Worker process dead, unknown, or past `worker.timeoutSec`**: the conductor considers
+  the lane dead and reclaims it on the next tick. A hung process that stopped
+  heartbeating, or one that has outlived the wall-clock bound, cannot hold a lane
+  forever.
+
+Both are expected recovery behavior, not bugs: they are what make the engine safe to
+restart at any time.
+
+If dead-lane reclaim finds no terminal sentinel and a possibly-dirty worktree, it
+follows the dirty-worktree degrade path above (retain + `needs-human`), never a silent
+requeue of in-progress work.
 
 ## `gh` auth / scope problems (`init`)
 
