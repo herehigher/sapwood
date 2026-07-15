@@ -603,6 +603,8 @@ test("probe: costUsd is 0 while a lane is still running (no terminal sentinel ye
     const probe = await s.probe(name);
     assert.equal(probe.done, false);
     assert.equal(probe.costUsd, 0);
+    assert.ok(Number.isFinite(probe.dispatchedAgeSec));
+    assert.ok(probe.dispatchedAgeSec! >= 0, "probe surfaces age from persisted dispatched_at");
     await s.reclaim(name);
     s.dispose();
   } finally {
@@ -625,6 +627,7 @@ test("probe: recovers costUsd from the jsonl when a restart-orphaned lane has NO
     );
     const probe = await s.probe("lane-orphan");
     assert.equal(probe.done, false); // no sentinel — classifyLane will call this DEAD (pid gone)
+    assert.ok(Number.isNaN(probe.dispatchedAgeSec), "missing dispatched_at is an explicit unbounded/fail-safe age");
     assert.equal(probe.costUsd, 1.25); // but the real cost is still recovered from the jsonl
     // #47: same fallback recovery applies to model usage — no sentinel, so it's reparsed too.
     assert.deepEqual(probe.modelUsage, [
@@ -1982,6 +1985,11 @@ test("#63: a SECOND engine restart before death is confirmed still finalizes —
     // Simulate restart #2 landing before anyone ever calls probe() on sMid (i.e. before death
     // is confirmed): a brand-new instance whose in-memory detachedHandoffRequested is empty.
     const s2 = sup(dir, bin);
+    assert.equal(
+      s2.requestHandoff(laneName),
+      false,
+      "second restart reads handoff_requested and neither re-signals nor re-announces adoption",
+    );
 
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
     assert.equal(alive(pid), false, "the SIGTERM sent before restart #2 still killed it");

@@ -3,7 +3,7 @@
 // the bash 0/1 sentinel/flag args, string[] for the CSV label args). If a row here
 // disagrees with the bash row it mirrors, that's a parity regression.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -44,7 +44,15 @@ import {
 } from "./conductor.js";
 
 // ── tick test doubles (real State, fake forge + supervisor — no claude, no gh) ──
-const DEFAULT_PROBE: LaneProbe = { done: false, failed: false, handoff: false, hbAge: 10, wrapperAlive: 1, hasPr: false };
+const DEFAULT_PROBE: LaneProbe = {
+  done: false,
+  failed: false,
+  handoff: false,
+  hbAge: 10,
+  wrapperAlive: 1,
+  dispatchedAgeSec: 10,
+  hasPr: false,
+};
 
 class FakeForge implements IForge {
   async listUnplacedIssues() {
@@ -205,6 +213,7 @@ class FakeSupervisor implements Supervisor {
     return this.inspectResults[w] ?? { worktreePath: null, worktreeRetained: false };
   }
   requestHandoff(w: string): boolean {
+    if (this.handoffRequested.includes(w)) return false;
     this.handoffRequested.push(w);
     return true;
   }
@@ -1247,6 +1256,159 @@ test("tick reclaim: handoff sentinel -> resumable, not killed", async () => {
   st.close();
 });
 
+test("#169 restart adoption: stale confirmed-alive lane requests one graceful handoff, stays held, then follows .handoff -> resume", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-adopt", 169);
+  sup.probes["lane-adopt"] = {
+    ...DEFAULT_PROBE,
+    hbAge: 181,
+    wrapperAlive: 1,
+    dispatchedAgeSec: 300,
+  };
+  const cfg = mkCfg({ worker: { heartbeatStaleSecs: 180, timeoutSec: 3600 } });
+
+  const r1 = await tick({ forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(r1.reclaimed, [{ kind: "kept", worker: "lane-adopt", issue: 169 }]);
+  assert.deepEqual(sup.handoffRequested, ["lane-adopt"]);
+  assert.deepEqual(sup.reclaimed, [], "adoption never enters the hard-kill reclaim path");
+  assert.equal(st.getWorker("lane-adopt")?.state, "running", "lane stays held while SIGTERM drains it");
+  assert.deepEqual(forge.labelsAdded, [], "adoption never escalates to needs-human");
+  assert.deepEqual(st.latestEvent("lane-adopted"), {
+    kind: "lane-adopted",
+    payload: {
+      worker: "lane-adopt",
+      issue: 169,
+      note: "Spend during engine downtime was unobserved.",
+    },
+  });
+
+  // The detached wrapper is still draining on the next tick. Persisted/in-memory handoff
+  // dedup returns false, so it stays held without a second signal or honesty event.
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(r2.reclaimed, [{ kind: "kept", worker: "lane-adopt", issue: 169 }]);
+  assert.deepEqual(sup.handoffRequested, ["lane-adopt"]);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["lane-adopted"]).length, 1);
+
+  // probe()'s real detached path writes this sentinel once the pid is confirmed dead. The
+  // conductor settles it on one tick and the existing resume path starts it on the next.
+  sup.probes["lane-adopt"] = { ...DEFAULT_PROBE, handoff: true };
+  const r3 = await tick({ forge, state: st, supervisor: sup, cfg });
+  assert.equal(r3.reclaimed[0]?.kind, "handoff");
+  assert.equal(st.getWorker("lane-adopt")?.state, "handoff");
+  assert.deepEqual(r3.resumed, []);
+
+  const r4 = await tick({ forge, state: st, supervisor: sup, cfg });
+  assert.deepEqual(r4.resumed, [{ kind: "resumed", worker: "lane-adopt", issue: 169, attempt: 1 }]);
+  assert.equal(st.getWorker("lane-adopt")?.state, "running");
+  assert.deepEqual(forge.labelsAdded, []);
+  st.close();
+});
+
+test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, probe finalizes .handoff, and conductor resumes with zero needs-human", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-adopt-detached-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const bin = join(dir, "claude-stub");
+  writeFileSync(bin, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`, { mode: 0o755 });
+  const cfg = mkCfg({ guard: { mode: "soft" }, worker: { heartbeatStaleSecs: 1, timeoutSec: 30 } });
+  const forge = new FakeForge();
+  const st = new State(dbPath);
+  const issue = { number: 169, title: "restart adoption", labels: [] };
+  const s1 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
+  let s2: WorkerSupervisor | undefined;
+  try {
+    const { name, sessionId } = await s1.dispatch(issue, "lane-169-integration");
+    await sleep(500); // let bash install its TERM trap before simulating the restart
+    st.upsertWorker({
+      name,
+      issue: issue.number,
+      session_id: sessionId,
+      state: "running",
+      started_at: new Date().toISOString(),
+      ended_at: null,
+    });
+    const running = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")) as { wrapper_pid: number };
+    assert.doesNotThrow(() => process.kill(running.wrapper_pid, 0));
+    s1.dispose(); // new engine has no in-memory ChildProcess/heartbeat timer
+    utimesSync(join(dir, `${name}.heartbeat`), new Date(0), new Date(0));
+
+    s2 = new WorkerSupervisor({ cfg, stateDir: dir, claudeBin: bin, hasOpenPr: async () => false, heartbeatMs: 60_000 });
+    const adopted = await tick({ forge, state: st, supervisor: s2, cfg });
+    assert.deepEqual(adopted.reclaimed, [{ kind: "kept", worker: name, issue: 169 }]);
+    assert.equal(st.getWorker(name)?.state, "running");
+    assert.deepEqual(forge.labelsAdded, []);
+    assert.deepEqual(st.latestEvent("lane-adopted")?.payload, {
+      worker: name,
+      issue: 169,
+      note: "Spend during engine downtime was unobserved.",
+    });
+
+    for (let i = 0; i < 400; i++) {
+      try {
+        process.kill(running.wrapper_pid, 0);
+        await sleep(20);
+      } catch {
+        break;
+      }
+    }
+    assert.throws(() => process.kill(running.wrapper_pid, 0), "cooperative wrapper exited from the graceful SIGTERM");
+
+    const settled = await tick({ forge, state: st, supervisor: s2, cfg });
+    assert.equal(settled.reclaimed[0]?.kind, "handoff");
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "probe wrote the detached .handoff sentinel");
+    assert.equal(st.getWorker(name)?.state, "handoff");
+
+    const resumed = await tick({ forge, state: st, supervisor: s2, cfg });
+    assert.deepEqual(resumed.resumed, [{ kind: "resumed", worker: name, issue: 169, attempt: 1 }]);
+    assert.equal(st.getWorker(name)?.state, "running");
+    assert.deepEqual(forge.labelsAdded, [], "the full adoption/handoff/resume path never labels needs-human");
+    await s2.reclaim(name); // stop the resumed fake worker before test cleanup
+  } finally {
+    s1.dispose();
+    s2?.dispose();
+    st.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#169 restart adoption bound: stale alive lane past timeout and confirmed-dead lane keep today's DEAD reclaim", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-hung", 1691);
+  seedRunning(st, "lane-dead", 1692);
+  sup.probes["lane-hung"] = {
+    ...DEFAULT_PROBE,
+    hbAge: 181,
+    wrapperAlive: 1,
+    dispatchedAgeSec: 3600.001,
+  };
+  sup.probes["lane-dead"] = {
+    ...DEFAULT_PROBE,
+    hbAge: 181,
+    wrapperAlive: 0,
+    dispatchedAgeSec: 10,
+  };
+
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg({ worker: { heartbeatStaleSecs: 180, timeoutSec: 3600 } }),
+  });
+  assert.deepEqual(sup.handoffRequested, []);
+  assert.deepEqual(sup.reclaimed, ["lane-dead", "lane-hung"]); // State orders worker names
+  assert.deepEqual(
+    r.reclaimed.map((x) => x.kind),
+    ["dead", "dead"],
+  );
+  assert.equal(st.latestEvent("lane-adopted"), undefined);
+  assert.equal(st.getWorker("lane-hung")?.state, "failed");
+  assert.equal(st.getWorker("lane-dead")?.state, "failed");
+  st.close();
+});
+
 test("#172 integration: handoff settles for one tick, RESUME reuses the lane next tick, then the ordinary done+PR DRIVE path completes; per-leg costs sum", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -1613,8 +1775,8 @@ test("nextRoundId: dirty/missing -> 1, else prev+1", () => {
   assert.equal(nextRoundId(6), 7); // numeric form also accepted
 });
 
-test("classifyLane: failed > done > (wrapper-dead | hb-timeout) -> DEAD > KEEP", () => {
-  // args: done, failed, hbAge, threshold, wrapperAlive(1 alive | 0 dead | -1 unknown)
+test("classifyLane: #169 stale-heartbeat decision table has exactly one ADOPT branch", () => {
+  // args: done, failed, hbAge, threshold, wrapperAlive, dispatchedAgeSec, timeoutSec
   assert.equal(classifyLane(false, false, 30, 600, 1), "KEEP"); // alive, fresh hb, unfinished
   assert.equal(classifyLane(false, false, -1, 600, 1), "KEEP"); // alive, no hb file (just spawned)
   assert.equal(classifyLane(true, false, 30, 600, 1), "DONE");
@@ -1628,6 +1790,16 @@ test("classifyLane: failed > done > (wrapper-dead | hb-timeout) -> DEAD > KEEP",
   assert.equal(classifyLane(false, false, -1, 600, 0), "DEAD"); // no hb + wrapper dead
   assert.equal(classifyLane(false, false, 30, 600, -1), "KEEP"); // liveness unknown + fresh hb -> don't kill
   assert.equal(classifyLane(false, false, -1, 600, -1), "KEEP"); // unknown + no hb (just spawned)
+
+  // #169 table: only stale heartbeat × confirmed alive × bounded first-dispatch age adopts.
+  assert.equal(classifyLane(false, false, 601, 600, 1, 3599, 3600), "ADOPT");
+  assert.equal(classifyLane(false, false, 601, 600, 1, 3600, 3600), "ADOPT"); // equal is still within bound
+  assert.equal(classifyLane(false, false, 601, 600, 1, 3600.001, 3600), "DEAD");
+  assert.equal(classifyLane(false, false, 601, 600, 1, Number.NaN, 3600), "DEAD"); // unparseable dispatched_at
+  assert.equal(classifyLane(false, false, 601, 600, 1, -1, 3600), "DEAD"); // invalid/future baseline fails safe
+  assert.equal(classifyLane(false, false, 601, 600, 0, 10, 3600), "DEAD"); // confirmed dead unchanged
+  assert.equal(classifyLane(false, false, 601, 600, -1, 10, 3600), "DEAD"); // unknown pid unchanged
+  assert.equal(classifyLane(false, false, 30, 600, 1, 9999, 3600), "KEEP"); // fast-restart/fresh heartbeat unchanged
 });
 
 test("budgetExceeded: total > cap (float); equal is not over", () => {
