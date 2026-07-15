@@ -143,35 +143,109 @@ test("hasVerificationPlan: verify:n/a label OR a verification/acceptance section
   assert.equal(hasVerificationPlan("", [], "verify:n/a"), false);
 });
 
-// ── extractVerificationPlan (#46: the section text hasVerificationPlan/gate②'s trigger share) ──
+// ── extractVerificationPlan (#194: every matching section, without overlap duplication) ──
 
-test("extractVerificationPlan: returns the heading through the next same-or-shallower heading", () => {
-  const body = [
-    "# Title",
-    "Some intro text.",
-    "## Verification",
-    "1. run `npm test`",
-    "2. run `npm run typecheck`",
-    "## Notes",
-    "irrelevant",
-  ].join("\n");
-  const plan = extractVerificationPlan(body);
-  assert.match(plan!, /^## Verification/);
-  assert.match(plan!, /npm test/);
-  assert.match(plan!, /npm run typecheck/);
-  assert.ok(!plan!.includes("irrelevant")); // stops before the next heading
-  assert.ok(!plan!.includes("Some intro text")); // doesn't leak content before the heading
+test("extractVerificationPlan: sibling Acceptance criteria and Verification plan sections are concatenated", () => {
+  const body = `## Acceptance criteria
+
+- [ ] the command succeeds
+
+## Verification plan
+
+Run \`npm test\` and inspect the output.
+
+## Notes
+
+Not part of the plan.`;
+  assert.equal(
+    extractVerificationPlan(body),
+    `## Acceptance criteria
+
+- [ ] the command succeeds
+
+## Verification plan
+
+Run \`npm test\` and inspect the output.`,
+  );
 });
 
-test("extractVerificationPlan: a plan section that runs to the end of the body (no trailing heading)", () => {
-  const plan = extractVerificationPlan("### Acceptance criteria\n- it works");
-  assert.match(plan!, /^### Acceptance criteria/);
-  assert.match(plan!, /it works/);
+test("extractVerificationPlan: nested ### Verification is included fully and overlap is not duplicated", () => {
+  const body = `## Acceptance criteria
+
+- [ ] it works
+
+### Verification
+
+Run the focused test.
+
+#### Expected result
+
+The test passes.
+
+## Notes
+
+Unrelated.`;
+  const plan = extractVerificationPlan(body)!;
+  assert.match(plan, /^## Acceptance criteria/);
+  assert.match(plan, /#### Expected result\n\nThe test passes\./);
+  assert.equal(plan.match(/### Verification/g)?.length, 1, "nested matching text is emitted once");
+  assert.ok(!plan.includes("Unrelated"));
 });
 
-test("extractVerificationPlan: no Verification/Acceptance heading -> null (fail-closed, matches hasVerificationPlan)", () => {
+test("extractVerificationPlan: Acceptance-only and Verification-only bodies both match", () => {
+  assert.equal(extractVerificationPlan("### Acceptance criteria\n- it works"), "### Acceptance criteria\n- it works");
+  assert.equal(extractVerificationPlan("## Verification\nrun tests"), "## Verification\nrun tests");
+});
+
+test("extractVerificationPlan: neither heading -> null (fail-closed, matches hasVerificationPlan)", () => {
   assert.equal(extractVerificationPlan("no plan here"), null);
   assert.equal(extractVerificationPlan(""), null);
+});
+
+test("extractVerificationPlan: multiple non-overlapping matches retain body order", () => {
+  const body = `## Verification first
+step one
+## Notes
+middle
+## Acceptance second
+criterion two
+## Appendix
+ignored
+### Verification third
+step three`;
+  const plan = extractVerificationPlan(body)!;
+  assert.ok(plan.indexOf("Verification first") < plan.indexOf("Acceptance second"));
+  assert.ok(plan.indexOf("Acceptance second") < plan.indexOf("Verification third"));
+  assert.ok(!plan.includes("middle"));
+  assert.ok(!plan.includes("ignored"));
+});
+
+test("extractVerificationPlan: #182-shaped issue body carries sibling verification steps verbatim", () => {
+  const issue182ShapedBody = `## Why
+
+The current behavior silently drops required review context.
+
+## What
+
+Generalize the extractor without changing its callers.
+
+Out of scope: reviewer trigger-comment changes.
+
+## Acceptance criteria
+
+- [ ] Every matching section is extracted in body order.
+- [ ] Missing sections still fail closed.
+
+## Verification plan
+
+- Add node:test coverage for sibling headings.
+- Run \`npm run typecheck && npm run lint && npm test\` from the repo root.`;
+  const plan = extractVerificationPlan(issue182ShapedBody)!;
+  assert.match(plan, /^## Acceptance criteria/);
+  assert.match(plan, /Every matching section is extracted/);
+  assert.match(plan, /^## Verification plan/m);
+  assert.match(plan, /Add node:test coverage for sibling headings/);
+  assert.match(plan, /npm run typecheck && npm run lint && npm test/);
 });
 
 test("hasVerificationPlan and extractVerificationPlan agree on every case (shared parser, not duplicated)", () => {

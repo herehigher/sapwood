@@ -315,6 +315,29 @@ function ensureDoctrineFile(cfg: SapwoodConfig, cwd: string): string | null {
   return target;
 }
 
+// ---- #194: GitHub issue-template scaffold -----------------------------------------------
+
+export const ISSUE_TEMPLATE_NAMES = ["feature.md", "fix.md", "docs.md", "chore.md"] as const;
+export type IssueTemplateName = (typeof ISSUE_TEMPLATE_NAMES)[number];
+
+/** Resolve one of the four issue templates shipped inside the engine package. */
+export function defaultIssueTemplatePath(name: IssueTemplateName): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "..", "prompts", "issue-templates", name);
+}
+
+/** Write each missing issue template into the target repo, preserving every existing file. */
+function ensureIssueTemplates(cwd: string): Array<{ path: string; written: boolean }> {
+  const targetDir = join(cwd, ".github", "ISSUE_TEMPLATE");
+  return ISSUE_TEMPLATE_NAMES.map((name) => {
+    const target = join(targetDir, name);
+    if (existsSync(target)) return { path: target, written: false };
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(target, readFileSync(defaultIssueTemplatePath(name), "utf8"));
+    return { path: target, written: true };
+  });
+}
+
 // ---- orchestrator ---------------------------------------------------------------
 
 export interface InitResult {
@@ -362,6 +385,10 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
       ? `wrote starter doctrine file ${doctrineWritten}`
       : `doctrine file already present (${resolveDoctrineFilePath(cfg.doctrine.file, cwd)})`,
   );
+
+  for (const template of ensureIssueTemplates(cwd)) {
+    actions.push(template.written ? `wrote issue template ${template.path}` : `issue template already present (${template.path})`);
+  }
 
   actions.push("guard hook: deferred to M1 (guard.ts not built yet) — human-merge-only when wired");
   return { actions };

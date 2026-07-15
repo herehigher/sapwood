@@ -7,6 +7,7 @@
 // exec/shell:true). Issue text is treated as data, never interpolated into a shell.
 
 import type { SapwoodConfig } from "../config/config.js";
+import { extractMarkdownSections } from "../util/markdown.js";
 import { gh } from "./gh.js";
 
 export type OwnerKind = "user" | "org";
@@ -769,22 +770,18 @@ function statusValue(item: RawItem, statusField: string): string | null {
 }
 
 /**
- * Extract the Verification/Acceptance section's raw text from an issue body (Decision #8's
+ * Extract every Verification/Acceptance section's raw text from an issue body (Decision #8's
  * plan) — the SAME fail-closed heading match `hasVerificationPlan` uses to gate dispatch,
  * shared here (not duplicated) so gate②'s reviewer trigger (#46, reviewer.ts) carries exactly
- * the section the `Ready` gate already required to exist. Returns the heading line through
- * (exclusive) the next heading of equal-or-shallower level, or the rest of the body if there is
- * none. null when no such section exists — callers MUST supply an explicit fallback text, never
- * silently omit the plan (verify:n/a issues have no section and are expected to hit this null).
+ * all sections the `Ready` gate already required to exist. Sections are concatenated in body
+ * order. Each runs through (exclusive) the next heading of equal-or-shallower level; a nested
+ * matching section is already present in its matching ancestor and is not duplicated. null when
+ * no such section exists — callers MUST supply an explicit fallback text, never silently omit
+ * the plan (verify:n/a issues have no section and are expected to hit this null).
  */
 export function extractVerificationPlan(body: string): string | null {
-  const heading = /^(#{1,6})\s*(verification|acceptance)[^\n]*$/im.exec(body);
-  if (!heading) return null;
-  const level = heading[1]!.length;
-  const afterHeading = body.slice(heading.index + heading[0].length);
-  const nextHeading = new RegExp(`^#{1,${level}}\\s`, "m").exec(afterHeading);
-  const section = nextHeading ? afterHeading.slice(0, nextHeading.index) : afterHeading;
-  return (heading[0] + section).trim();
+  const sections = extractMarkdownSections(body, /(verification|acceptance)/);
+  return sections.length ? sections.join("\n\n") : null;
 }
 
 /** True if the issue carries a verification plan (Decision #8): verify:n/a label OR a

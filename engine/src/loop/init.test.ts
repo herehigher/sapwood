@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { parseConfig } from "../config/config.js";
 import type { GhRunner } from "../forge/gh.js";
 import {
   defaultDoctrineTemplatePath,
   defaultGoalTemplatePath,
+  defaultIssueTemplatePath,
   InitError,
+  ISSUE_TEMPLATE_NAMES,
   init,
   missing,
   parseAuthScopes,
@@ -334,6 +337,85 @@ test("init scaffolds the goal file at a custom goal.file location, creating inte
     const goalPath = join(dir, "notes", "nested", "GOAL.md");
     assert.ok(existsSync(goalPath));
     assert.ok(actions.some((a) => /wrote starter goal file/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #194: GitHub issue-template scaffold — each file is created iff missing ─────────────────
+
+test("repo-root issue templates stay byte-identical to the packaged scaffold templates", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  for (const name of ISSUE_TEMPLATE_NAMES) {
+    assert.deepEqual(
+      readFileSync(join(repoRoot, ".github", "ISSUE_TEMPLATE", name)),
+      readFileSync(defaultIssueTemplatePath(name)),
+      `${name} drifted from its packaged scaffold copy`,
+    );
+  }
+});
+
+test("default issue-template paths resolve to four readable shipped files with the standard structure", () => {
+  for (const name of ISSUE_TEMPLATE_NAMES) {
+    const path = defaultIssueTemplatePath(name);
+    assert.ok(existsSync(path), `expected shipped issue template at ${path}`);
+    const text = readFileSync(path, "utf8");
+    assert.match(text, /^---\nname:/);
+    assert.match(text, /^## Why$/m);
+    assert.match(text, /^## What$/m);
+    assert.match(text, /^Out of scope:/m);
+    assert.match(text, /^## Acceptance criteria$/m);
+    assert.match(text, /^- \[ \]/m);
+    assert.match(text, /^## Verification plan$/m);
+    assert.doesNotMatch(text, /^### Verification/m);
+    assert.equal(/^## Constraints$/m.test(text), name === "feature.md" || name === "fix.md");
+  }
+});
+
+test("init creates a missing ISSUE_TEMPLATE directory with all four files and reports each action", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    const targetDir = join(dir, ".github", "ISSUE_TEMPLATE");
+    assert.deepEqual(readdirSync(targetDir).sort(), [...ISSUE_TEMPLATE_NAMES].sort());
+    for (const name of ISSUE_TEMPLATE_NAMES) {
+      assert.equal(readFileSync(join(targetDir, name), "utf8"), readFileSync(defaultIssueTemplatePath(name), "utf8"));
+      assert.ok(actions.some((action) => action === `wrote issue template ${join(targetDir, name)}`));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init never overwrites a pre-existing issue template and an idempotent re-run reports all four present", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    const targetDir = join(dir, ".github", "ISSUE_TEMPLATE");
+    mkdirSync(targetDir, { recursive: true });
+    const existingPath = join(targetDir, "feature.md");
+    const userContent = Buffer.from("custom feature template\n\u0000byte-preserved\n");
+    writeFileSync(existingPath, userContent);
+
+    const first = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    assert.deepEqual(readFileSync(existingPath), userContent);
+    assert.ok(first.actions.some((action) => action === `issue template already present (${existingPath})`));
+
+    const second = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir });
+    assert.deepEqual(readFileSync(existingPath), userContent);
+    for (const name of ISSUE_TEMPLATE_NAMES) {
+      const path = join(targetDir, name);
+      assert.ok(second.actions.some((action) => action === `issue template already present (${path})`));
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
