@@ -782,7 +782,7 @@ export function resolveGoalFile(cfg: z.infer<typeof ConfigSchemaRaw>): SapwoodCo
 export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): SapwoodConfig {
   const prefix = normalizeLabel(cfg.labels.prefix);
   const defaults = workflowLabelDefaults(prefix);
-  cfg.labels = {
+  const resolvedLabels: SapwoodConfig["labels"] = {
     prefix,
     inProgress: cfg.labels.inProgress ?? defaults.inProgress,
     needsHuman: cfg.labels.needsHuman ?? defaults.needsHuman,
@@ -792,7 +792,8 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
     planApproved: cfg.labels.planApproved ?? defaults.planApproved,
     originAgent: cfg.labels.originAgent ?? defaults.originAgent,
   };
-  cfg.escalation.humanLabels ??= [cfg.labels.needsHuman, cfg.labels.blocked];
+  cfg.labels = resolvedLabels;
+  cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked];
   return resolveGoalFile(cfg);
 }
 
