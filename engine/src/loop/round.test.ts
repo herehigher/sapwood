@@ -54,14 +54,16 @@ class FakeForge implements IForge {
   addLabelCalls: Array<[number, string]> = [];
   async addLabel(n: number, l: string): Promise<void> {
     this.addLabelCalls.push([n, l]);
-    const issue = this.ready.find((i) => i.number === n);
-    if (issue && !issue.labels.includes(l)) issue.labels = [...issue.labels, l];
+    for (const issue of [...this.ready, ...this.openIssues]) {
+      if (issue.number === n && !issue.labels.includes(l)) issue.labels = [...issue.labels, l];
+    }
   }
   removeLabelCalls: Array<[number, string]> = [];
   async removeLabel(n: number, l: string): Promise<void> {
     this.removeLabelCalls.push([n, l]);
-    const issue = this.ready.find((i) => i.number === n);
-    if (issue) issue.labels = issue.labels.filter((x) => x !== l);
+    for (const issue of [...this.ready, ...this.openIssues]) {
+      if (issue.number === n) issue.labels = issue.labels.filter((x) => x !== l);
+    }
   }
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
@@ -2107,27 +2109,37 @@ test("PoolScopedForge #212: filters LIVE label state on every call — a dead-la
   assert.deepEqual(forge.addLabelCalls, [], "PoolScopedForge itself never writes a label — read-only filtering");
 });
 
-test("runRounds #212: round close clears the pool label from an undispatched member; a dispatched member (already left Ready) is untouched", async () => {
+test("runRounds #212 (gate① F2): round close clears the pool label from EVERY undispatched member, including one that moved OFF Ready mid-round — not just still-Ready ones; a member actually dispatched this round is untouched", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
   const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 } }); // cap 1 -> only #1 dispatches
-  forge.ready = [
-    { number: 1, title: "dispatch me", labels: [cfg.labels.roundPool] },
-    { number: 2, title: "stay pooled but undispatched", labels: [cfg.labels.roundPool] },
-  ];
+  const dispatchMe = { number: 1, title: "dispatch me", labels: [cfg.labels.roundPool] };
+  const stayReadyPooled = { number: 2, title: "stay pooled but undispatched", labels: [cfg.labels.roundPool] };
+  // #212 gate① F2: a pool member that left Ready mid-round for a reason OTHER than this round's
+  // own dispatch (human board action, milestone edit, gate⓪ revoking plan:approved, ...) — it
+  // is open but no longer in forge.ready. Pre-fix, round close only swept getReadyIssues() and
+  // would leave this label stuck forever (a future-round selection bypass); post-fix it must be
+  // cleared too, via the full-open-backlog sweep (forge.listOpenIssues()).
+  const offReadyPooled = { number: 3, title: "moved off Ready mid-round, still open", labels: [cfg.labels.roundPool] };
+  forge.ready = [dispatchMe, stayReadyPooled];
+  forge.openIssues = [dispatchMe, stayReadyPooled, offReadyPooled];
   const sup = new AutoCompleteSupervisor();
   const deps = baseDeps({ forge, supervisor: sup, sleep, cfg, poolLabel: cfg.labels.roundPool });
   const stopSafety = boundedStopOnPhase(deps, 5);
   await runRounds(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1]);
-  const remaining = forge.ready.find((i) => i.number === 2);
-  assert.ok(remaining, "issue #2 is still open/Ready");
-  assert.ok(!remaining!.labels.includes(cfg.labels.roundPool), "its pool label was cleared at round close");
+  assert.ok(dispatchMe.labels.includes(cfg.labels.roundPool), "the DISPATCHED member's label persists (lifecycle item 2)");
+  assert.ok(!stayReadyPooled.labels.includes(cfg.labels.roundPool), "the still-Ready undispatched member's label was cleared");
+  assert.ok(!offReadyPooled.labels.includes(cfg.labels.roundPool), "the off-Ready undispatched member's label was ALSO cleared (F2)");
   assert.deepEqual(
-    forge.removeLabelCalls,
-    [[2, cfg.labels.roundPool]],
-    "removeLabel fired exactly once, only for the undispatched member, only with the pool label",
+    forge.removeLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [2, 3],
+    "removeLabel fired for both undispatched members (Ready and off-Ready), never the dispatched one",
+  );
+  assert.ok(
+    forge.removeLabelCalls.every(([, l]) => l === cfg.labels.roundPool),
+    "only the pool label is ever removed",
   );
   deps.state.close();
 });

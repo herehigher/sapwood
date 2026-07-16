@@ -332,13 +332,25 @@ const Roles = z
     // CONFIG FILE's directory (see loadConfig below), not the CLI's cwd.
     po: RoleSession.extend({
       promptFile: z.string().optional(),
+      // #212 (gate① F1): the round-pool SELECTION session's own prompt — a distinct file from
+      // promptFile above (align/triage), same #74 pattern: unset -> the engine's shipped
+      // `prompts/po-pool.md`; a relative path resolves against the CONFIG FILE's directory (see
+      // loadConfig below). Runs after align/triage, reuses this same role's model/effort/
+      // fallbackModel — a separate template because its job (choose up to cap issues from an
+      // engine-supplied candidate digest) is unrelated to align/triage's issue-authoring job.
+      poolPromptFile: z.string().optional(),
       // #215: hard bound on the engine-assembled {{backlog.digest}} injected into align mode.
       // capDigest marks every cut; the floor leaves room for its marker and for the explicit
       // zero/read-failure notes, which must never collapse into an indistinguishable blank.
+      // #212: also reused (unmodified) as the pool-selection candidate digest's cap — that
+      // digest is naturally far smaller (bounded by the pool cap, a handful of issues), so this
+      // shared knob is a safety valve there too, not a dedicated budget most deployments tune.
       backlogDigestMaxChars: z.number().int().min(200).default(20_000),
       // #127: false -> round-defaults.ts omits the aligning stub; the phase no-ops via
       // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
-      // for the shared rationale).
+      // for the shared rationale). #212: pool SELECTION is the one exception — it still runs
+      // (deterministically, no session) even when this is false; see align.ts's
+      // runPoolSelection.
       enabled: z.boolean().default(true),
     })
       .strict()
@@ -905,6 +917,10 @@ export function loadConfig(path?: string): SapwoodConfig {
   // #89: same rule for the PO prompt.
   if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {
     cfg.roles.po.promptFile = resolve(dirname(file), cfg.roles.po.promptFile);
+  }
+  // #212: same rule for the PO's round-pool SELECTION prompt (a distinct file from promptFile).
+  if (cfg.roles.po.poolPromptFile !== undefined && !isAbsolute(cfg.roles.po.poolPromptFile)) {
+    cfg.roles.po.poolPromptFile = resolve(dirname(file), cfg.roles.po.poolPromptFile);
   }
   // #91: same rule for the harvest prompt.
   if (cfg.roles.harvest.promptFile !== undefined && !isAbsolute(cfg.roles.harvest.promptFile)) {

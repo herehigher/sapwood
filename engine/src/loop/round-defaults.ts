@@ -22,7 +22,7 @@ import { type ArchitectDeps, createArchitectStub, NO_PRIOR_ROUND_YET } from "../
 import type { RoleRunner } from "../roles/peripheral.js";
 import { createPlanReviewStub } from "../roles/plan-review.js";
 import type { State } from "../state/state.js";
-import { alignMarker, createAligningStub, selectRoundPool } from "./align.js";
+import { alignMarker, createAligningStub, runPoolSelection } from "./align.js";
 import { createHarvestStub } from "./harvest.js";
 import { type PeripheralPhase, type PeripheralStub, RoundScopedForge } from "./round.js";
 import { type AlignSection, mergeAlignSummary, type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
@@ -176,23 +176,29 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   // #212 AC7: the aligning phase's round-pool selection is NEVER gated by roles.po.enabled —
   // "the selection bound must not depend on an optional role". So, unlike every other role
   // below, `aligning` is ALWAYS populated: with the PO on, it runs the real alignStub (goal
-  // decomposition + triage) THEN selects the pool from whatever Ready looks like afterward;
-  // with the PO off, it skips straight to the same deterministic, engine-computed selection
-  // (align.ts's selectRoundPool) — the documented AC7 fallback, no session at all. The
-  // rerun-not-resume marker check happens HERE (not inside alignStub) so a crash mid-selection
-  // (after alignStub's own work already externalized) restarts at THIS phase with a still-null
-  // marker and safely redoes only the (idempotent) selection pass, never re-running alignStub's
-  // own internally-idempotent proposal/triage logic a second time for nothing.
+  // decomposition + triage) THEN runs the PO's SEPARATE pool-selection session over whatever
+  // Ready looks like afterward (align.ts's runPoolSelection — a real session, gate① F1: NOT a
+  // purely deterministic bound on the enabled path); with the PO off, runPoolSelection itself
+  // skips the session and falls straight through to the same deterministic, engine-computed
+  // selection — the documented AC7 fallback. The rerun-not-resume marker check happens HERE
+  // (not inside alignStub) so a crash mid-selection (after alignStub's own work already
+  // externalized) restarts at THIS phase with a still-null marker and safely redoes only the
+  // (idempotent) selection pass, never re-running alignStub's own internally-idempotent
+  // proposal/triage logic a second time for nothing.
   peripherals.aligning = {
     async run(ctx) {
       if (ctx.marker != null) return { marker: ctx.marker }; // already externalized this round
-      if (deps.cfg.roles.po.enabled) {
-        const result = await alignStub.run(ctx);
-        await selectRoundPool({ forge, cfg: deps.cfg, ...(deps.log !== undefined ? { log: deps.log } : {}) });
-        return result;
-      }
-      await selectRoundPool({ forge, cfg: deps.cfg, ...(deps.log !== undefined ? { log: deps.log } : {}) });
-      return { marker: alignMarker(ctx.roundId) };
+      const result = deps.cfg.roles.po.enabled ? await alignStub.run(ctx) : { marker: alignMarker(ctx.roundId) };
+      await runPoolSelection({
+        forge,
+        cfg: deps.cfg,
+        state: deps.state,
+        runner: deps.runner,
+        roundId: ctx.roundId,
+        ...(deps.now !== undefined ? { now: deps.now } : {}),
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
+      });
+      return result;
     },
   };
   if (deps.cfg.roles.architect.enabled) {

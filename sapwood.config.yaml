@@ -129,18 +129,29 @@ reviewer:
 # wedging the round. planDrafter has no toggle of its own — it rides along with planReviewer
 # (gate⓪ is one unit, `roles.planReviewer.enabled` switches both off together).
 # roles:
-#   po: # aligning phase — goal alignment (decomposition) + round-start plan triage
+#   po: # aligning phase — goal alignment (decomposition) + round-start plan triage +
+#       # round-pool selection (#212)
 #     # promptFile: prompts/my-po.md
-#     #                   Unset = the engine's shipped prompts/po.md.
+#     #                   Unset = the engine's shipped prompts/po.md (align + triage).
+#     # poolPromptFile: prompts/my-po-pool.md
+#     #                   #212: a SEPARATE prompt for the round-pool SELECTION session (choosing
+#     #                   which of this round's top candidate issues actually belong in the
+#     #                   pool). Unset = the engine's shipped prompts/po-pool.md.
 #     backlogDigestMaxChars: 20000 # Max chars for the milestone-scoped open-issue digest
 #                                  # injected into align mode; deterministic cuts are marked.
+#                                  # #212: also reused, unmodified, as the pool-selection
+#                                  # candidate digest's cap (naturally far smaller).
 #     model: sonnet
 #     effort: medium
 #     # fallbackModel: sonnet # Every role accepts this key too. Set "none" to fail loud rather
 #                           # than silently downgrade quality; see #168's environment-failure path.
-#     enabled: true      # #127: false -> the aligning phase no-ops every round. WARNING: with
-#                        # the PO off, plan-less issues are never triaged into gate⓪ — they
-#                        # need a verification plan from a human/external process instead.
+#     enabled: true      # #127: false -> the aligning phase's decomposition/triage session
+#                        # no-ops every round. WARNING: with the PO off, plan-less issues are
+#                        # never triaged into gate⓪ — they need a verification plan from a
+#                        # human/external process instead. #212: round-pool selection is the
+#                        # ONE exception — it still runs every round (deterministically,
+#                        # engine-computed, no session) even with this false, since the
+#                        # selection bound must not depend on an optional role.
 #   planReviewer:
 #     # promptFile: prompts/my-plan-reviewer.md
 #     #                   #74-style override; relative paths resolve against THIS config file's

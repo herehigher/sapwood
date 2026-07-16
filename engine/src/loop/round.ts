@@ -952,19 +952,33 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "kill-switch" };
       }
 
-      // #212: release any still-undispatched pool member back to plain Ready — GitHub is the
-      // source of truth for pool membership (PoolScopedForge's own doc comment), so this is a
-      // live re-read of Ready + the pool label, never a durable pointer. A pool member that WAS
-      // dispatched this round already left the Ready lane (claimIssue), so it simply doesn't
-      // show up here — its label persists untouched, exactly the lifecycle #212 specifies.
-      // Contained: same fail-toward-closing-the-round stance as the artifact persistence below —
-      // a forge failure here degrades to a tick-error, never blocks the round from closing (a
-      // stray label is a cosmetic residual, not a correctness hazard: the next round's selection
-      // simply treats an already-labelled issue as already-idempotently-labelled).
+      // #212 (gate① F2): release any still-undispatched pool member back to plain Ready — GitHub
+      // is the source of truth for pool membership (PoolScopedForge's own doc comment), so this
+      // is a live re-read, never a durable pointer. Sweeps the FULL open backlog
+      // (forge.listOpenIssues(), not just getReadyIssues()) so a pool member that moved OFF
+      // Ready mid-round for any reason other than this round's own dispatch — a human board
+      // action, a milestone edit, gate⓪ revoking plan:approved — still gets its label cleared:
+      // a stale pool label surviving on a non-Ready issue would make it dispatch-eligible again
+      // in some FUTURE round the moment it re-enters Ready, without ever going through that
+      // round's own selection (a selection bypass). A pool member actually DISPATCHED this
+      // round is the one deliberate exception — its label persists (the #212 lifecycle) — so
+      // this round's own "dispatched" events (the same durable per-round ledger window
+      // dispatchedThisRound() inside runExecuting reads) are the exclusion set. Contained: same
+      // fail-toward-closing-the-round stance as the artifact persistence below — a forge failure
+      // here degrades to a tick-error, never blocks the round from closing (a stray label is a
+      // cosmetic residual the NEXT sweep still catches, not a correctness hazard on its own —
+      // this is exactly the residual F2 closes by making that next sweep exhaustive).
       if (deps.poolLabel) {
         try {
-          const stillReady = await forge.getReadyIssues();
-          for (const issue of stillReady) {
+          const dispatchedThisRoundIssues = new Set(
+            deps.state
+              .eventsAfterId(round.start_event_id ?? 0, ["dispatched"])
+              .map((e) => (e.payload as { issue?: unknown }).issue)
+              .filter((n): n is number => typeof n === "number"),
+          );
+          const openIssues = await forge.listOpenIssues();
+          for (const issue of openIssues) {
+            if (dispatchedThisRoundIssues.has(issue.number)) continue; // persists — dispatched this round
             if (labelsInclude(issue.labels, deps.poolLabel)) {
               await removeRoundPoolLabel(forge, cfg, issue.number, deps.poolLabel);
             }

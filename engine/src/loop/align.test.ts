@@ -9,7 +9,7 @@
 // direct `gh issue create/edit` side effect. The engine reads `resultText`, validates it, and
 // performs every forge write itself — exactly what createAligningStub is being tested for here.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -25,13 +25,16 @@ import {
   alignMarker,
   buildBacklogDigest,
   createAligningStub,
+  defaultPoolPromptPath,
   defaultPoPromptPath,
   loadPlanMd,
   normalizeProposalTitle,
   proposalId,
   proposalMarker,
+  runPoolSelection,
   selectRoundPool,
   validateAlignOutput,
+  validatePoolSelectionOutput,
   validateTriageOutput,
 } from "./align.js";
 import { RoundScopedForge } from "./round.js";
@@ -1401,4 +1404,151 @@ test("selectRoundPool: a Ready read failure degrades to an empty pool (logged, n
   assert.deepEqual(selected, []);
   assert.equal(forge.addLabelCalls.length, 0);
   assert.ok(logged.some((l) => l.includes("simulated forge outage")));
+});
+
+// ── #212 gate① F1: runPoolSelection — the PO's OWN pool-selection session ──────────────────────
+
+/** A po-pool session's structured output: the selected issue numbers only, no BODY block. */
+const poolResultText = (selected: number[]): string => sapwoodResult({ selected });
+
+test("runPoolSelection: roles.po.enabled — a fake runner's selection is validated and the engine applies labels to EXACTLY that subset, never the full candidate set", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1.5 } }); // cap = 3
+  forge.ready = [1, 2, 3, 4, 5].map((n) => mkReady(n, 3));
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1, 3]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1, 3],
+    "only the session's validated selection, a proper subset of the 3-issue candidate set",
+  );
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 3],
+    "labels applied to exactly the selected subset — never #2 (a candidate, but not selected) and never #4/#5 (outside the cap)",
+  );
+  assert.equal(runner.calls.length, 1, "exactly one po-pool session — a valid first attempt needs no retry");
+  const call = runner.calls[0]!;
+  assert.equal(call.roleId, "po-pool");
+  assert.equal(call.allowedTools, PO_ALLOWED_TOOLS, "zero gh grants — same containment as align/triage");
+  assert.equal(call.disallowedTools, PO_DISALLOWED_TOOLS);
+  assert.match(call.prompt, /#1 —/);
+  assert.match(call.prompt, /#3 —/);
+  assert.doesNotMatch(call.prompt, /#4 —/, "the candidate digest itself is already cap-bounded — #4 was never even shown");
+});
+
+test("runPoolSelection: an out-of-bounds selection (an issue number outside the candidate list) is invalid, retried once, then degrades OPEN to the full deterministic candidate set", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(999, 3)]; // #999 past the cap, never a candidate
+  const badSelection = poolResultText([1, 999]); // #999 is not in the candidate list
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", badSelection), doneResult("role-po-pool-2", badSelection)]);
+  const state = new State(":memory:");
+  const events = tapEvents(state);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 7 });
+  assert.equal(runner.calls.length, 2, "retried exactly once before degrading");
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "degraded to the FULL deterministic candidate set (the top-cap Ready issues), not an empty pool",
+  );
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 2],
+  );
+  const degraded = events.find(([kind]) => kind === "pool-degraded");
+  assert.ok(degraded, "a durable honesty event was recorded");
+  assert.equal((degraded![1] as { round_id: number }).round_id, 7);
+});
+
+test("runPoolSelection: an over-cap selection (more issues than the candidate list itself) is invalid the same way", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  // Candidates are exactly [1, 2] (cap 2) — a session claiming BOTH plus a duplicate exceeds
+  // what schema+bound validation allows (len > cap after a would-be dedupe is still invalid;
+  // here it's a straightforward "more than exists" case via an out-of-range extra number).
+  const overCap = poolResultText([1, 2, 3]);
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", overCap), doneResult("role-po-pool-2", overCap)]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 2);
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "degraded to the deterministic candidate set",
+  );
+});
+
+test("runPoolSelection: roles.po.enabled=false -> the deterministic path directly, no session dispatched at all", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { enabled: false } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 0, "the PO role is disabled — no session, not even an attempt");
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "the full deterministic top-cap candidate set — the documented AC7 fallback",
+  );
+});
+
+test("runPoolSelection: zero Ready candidates -> no session dispatched (nothing to choose from), empty selection", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  forge.ready = [];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 0);
+  assert.deepEqual(selected, []);
+});
+
+test("validatePoolSelectionOutput: a valid proper subset of the candidate list is ok", () => {
+  const result = validatePoolSelectionOutput(poolResultText([2, 5]), [1, 2, 5, 9], 3);
+  assert.ok(result.ok);
+  if (result.ok)
+    assert.deepEqual(
+      result.selected.sort((a, b) => a - b),
+      [2, 5],
+    );
+});
+
+test("validatePoolSelectionOutput: an empty selection is a valid, complete outcome", () => {
+  const result = validatePoolSelectionOutput(poolResultText([]), [1, 2, 3], 3);
+  assert.ok(result.ok);
+  if (result.ok) assert.deepEqual(result.selected, []);
+});
+
+test("validatePoolSelectionOutput: a selected number outside the candidate list -> fail-closed", () => {
+  const result = validatePoolSelectionOutput(poolResultText([1, 42]), [1, 2, 3], 3);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /not in the candidate list/.test(result.reason));
+});
+
+test("validatePoolSelectionOutput: a selection longer than the cap -> fail-closed even if every number is a real candidate", () => {
+  const result = validatePoolSelectionOutput(poolResultText([1, 2, 3]), [1, 2, 3, 4, 5], 2);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /exceeding the cap/.test(result.reason));
+});
+
+test("validatePoolSelectionOutput: a duplicate issue number in the selection -> fail-closed", () => {
+  const result = validatePoolSelectionOutput(poolResultText([1, 1]), [1, 2, 3], 3);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /duplicate/.test(result.reason));
+});
+
+test("validatePoolSelectionOutput: no structured output block -> fail-closed", () => {
+  const result = validatePoolSelectionOutput("no sentinel here", [1, 2, 3], 3);
+  assert.equal(result.ok, false);
+});
+
+test("defaultPoolPromptPath resolves to a real, readable shipped file with a selected-numbers structured-output example", () => {
+  const path = defaultPoolPromptPath();
+  assert.ok(existsSync(path));
+  const text = readFileSync(path, "utf8");
+  assert.match(text, /selected/);
 });
