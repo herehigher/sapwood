@@ -534,6 +534,97 @@ test("#223 crash-simulation: a State reopened after a mid-transaction spend fail
   }
 });
 
+test("#223 table: EVERY terminal reclaim outcome — a throwing recordSpend leaves the worker NOT terminal and NOTHING ledgered, never terminal-without-spend", async () => {
+  // One case per distinct settleTerminalWorker call site audited for #223 (gate② P2: the
+  // original fault-injection tests only exercised done/ESCALATE_NOPR — a revert of any OTHER
+  // outcome back to separate upsertWorker+recordSpend writes must fail HERE). Cases where a
+  // forge write deliberately precedes the transaction (ordinary-failed ESCALATE, dead-requeue,
+  // env-failure dirty-worktree) are included too — the invariant must hold there as well, even
+  // though the forge call itself isn't exercised by this recordSpend-only injection.
+  const cases: Array<{
+    label: string;
+    issue: number;
+    probe: LaneProbe;
+    inspectResult?: ReclaimResult;
+  }> = [
+    { label: "handoff", issue: 200, probe: { ...DEFAULT_PROBE, handoff: true, costUsd: 1 } },
+    { label: "done -> DRIVING (has PR)", issue: 201, probe: { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 2001, costUsd: 1 } },
+    { label: "done -> ESCALATE_NOPR (no PR)", issue: 202, probe: { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 1 } },
+    {
+      label: "env-failure, no PR (llm signature)",
+      issue: 203,
+      probe: { ...DEFAULT_PROBE, failed: true, hasPr: false, failureText: "rate_limit_error", costUsd: 1 },
+    },
+    {
+      label: "env-failure, PR, DIRTY worktree (forge signature; zero forge writes by design)",
+      issue: 204,
+      probe: {
+        ...DEFAULT_PROBE,
+        failed: true,
+        hasPr: true,
+        prNumber: 2004,
+        failureText: "gh: Service Unavailable (HTTP 503)",
+        costUsd: 1,
+      },
+      inspectResult: { worktreePath: "/tmp/wt-204", worktreeRetained: true },
+    },
+    {
+      label: "env-failure, PR, CLEAN worktree -> rescue to driving",
+      issue: 205,
+      probe: {
+        ...DEFAULT_PROBE,
+        failed: true,
+        hasPr: true,
+        prNumber: 2005,
+        failureText: "gh: Service Unavailable (HTTP 503)",
+        costUsd: 1,
+      },
+    },
+    {
+      label: "ordinary failed -> DRIVING (has PR, clean worktree, no env signature)",
+      issue: 206,
+      probe: { ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 2006, costUsd: 1 },
+    },
+    {
+      label: "ordinary failed -> ESCALATE (no PR, no env signature; forge writes precede the transaction by design)",
+      issue: 207,
+      probe: { ...DEFAULT_PROBE, failed: true, hasPr: false, costUsd: 1 },
+    },
+    {
+      label: "dead, rescued to driving (has PR)",
+      issue: 208,
+      probe: { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: true, prNumber: 2008, costUsd: 1 },
+    },
+    {
+      label: "dead, requeued (no PR; forge/board write precedes the transaction by design)",
+      issue: 209,
+      probe: { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0, hasPr: false, costUsd: 1 },
+    },
+  ];
+
+  for (const c of cases) {
+    const st = new State(":memory:");
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    const name = `lane-${c.issue}`;
+    seedRunning(st, name, c.issue);
+    sup.probes[name] = c.probe;
+    if (c.inspectResult) sup.inspectResults[name] = c.inspectResult;
+    // Fake state: recordSpend always throws (simulates a crash/corruption at the ledger write).
+    st.recordSpend = () => {
+      throw new Error("simulated recordSpend failure");
+    };
+    await assert.rejects(
+      () => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }),
+      /simulated recordSpend failure/,
+      `[${c.label}] tick should propagate the injected recordSpend failure`,
+    );
+    assert.equal(st.getWorker(name)?.state, "running", `[${c.label}] worker must stay reclaimable — never terminal-without-spend`);
+    assert.equal(st.spentUsdForWorker(name), 0, `[${c.label}] no partial ledger row either`);
+    st.close();
+  }
+});
+
 // ── #155: per-probe lane telemetry — persisted while KEEP, cleared the instant a lane leaves
 // `running` (any reclaim outcome: done/driving, failed/driving, handoff, dead). ────────────
 
