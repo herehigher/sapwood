@@ -520,6 +520,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  over-dispatches past the quota across its own waves, which a fresh durable read on every
    *  wave decision gives for free.
    *
+   *  Round spend is the durable spend-ledger window anchored by `round.start_spend_id` at
+   *  startRound(), so opening peripherals and settled worker legs share one exact accounting
+   *  basis across crash/resume. A missing cursor (only possible for a legacy/injected row)
+   *  degrades to the former per-lane sum rather than throwing.
+   *
    *  `freshBatch` is false only when we RESUMED directly into `executing` after a crash
    *  mid-drain — re-attempting ANY new wave in that case would risk double-dispatching on top
    *  of lanes already recovering via tick()'s own reclaim logic, so a resumed pass NEVER
@@ -529,22 +534,25 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   const runExecuting = async (round: RoundRow, freshBatch: boolean): Promise<number> => {
     let stopHit: RoundStopHit | undefined;
     const dispatchedNames: string[] = [];
-    const spentSoFar = (): number => dispatchedNames.reduce((sum, n) => sum + deps.state.spentUsdForWorker(n), 0);
-
-    // #95 follow-up: a resumed drain (crash mid-`executing`, restart resumes directly into this
-    // phase — freshBatch false) never runs a dispatch tick, so dispatchedNames would stay
-    // permanently empty and cost.roundBudgetUsd could never fire for it (Codex PR #95 review) —
-    // a resumed round could overspend without limit. The exact set of lanes THIS round
-    // originally dispatched isn't recoverable (that identity isn't persisted anywhere; only the
-    // round's phase cursor + marker survive a crash), so the best available proxy is every lane
-    // still ACTIVE right now (state.activeWorkers()) — exactly the lanes this resumed drain
-    // loop is waiting on below. Known, accepted gap: a dispatched lane that already finished
-    // (and had its spend recorded) in the crash-to-restart gap is invisible here and
-    // under-counted — but that is strictly better than never evaluating the budget at all, and
-    // it correctly tracks everything the drain loop's own exit condition depends on.
-    if (!freshBatch) {
-      for (const w of deps.state.activeWorkers()) dispatchedNames.push(w.name);
+    const inheritedActiveWorkers = freshBatch ? [] : deps.state.activeWorkers();
+    const inheritedActiveCount = inheritedActiveWorkers.length;
+    if (round.start_spend_id == null && !freshBatch) {
+      for (const worker of inheritedActiveWorkers) dispatchedNames.push(worker.name);
     }
+    const spentSoFar = (): number =>
+      round.start_spend_id == null
+        ? dispatchedNames.reduce((sum, name) => sum + deps.state.spentUsdForWorker(name), 0)
+        : deps.state.spentUsdAfterId(round.start_spend_id);
+
+    /** Observability only: tick() owns the dispatch gate. Recording after each tick makes an
+     *  opening-peripheral-only crossing visible even when zero lanes were dispatched. */
+    const recordBudgetStop = (): void => {
+      const spent = spentSoFar();
+      if (!stopHit && spent >= cfg.cost.roundBudgetUsd) {
+        stopHit = { name: "roundBudgetUsd", detail: `spent $${spent.toFixed(2)}` };
+        emitRoundStop(round, stopHit);
+      }
+    };
 
     // #124: the durable per-round dispatch count — see this function's own doc comment above.
     const dispatchedThisRound = (): number => deps.state.eventsAfterId(round.start_event_id ?? 0, ["dispatched"]).length;
@@ -588,9 +596,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // Wave 1: a fresh round always attempts its first dispatch tick IMMEDIATELY (no inter-tick
     // wait) — same zero-latency start as pre-#124's single batch. roundSpendUsd is a THUNK
     // (gate② P1-2 on PR #157): tick() evaluates it AFTER its own reclaim phase, right where
-    // overBudget is computed — spentSoFar reads live durable state (spentUsdForWorker), so
-    // spend banked by THIS tick's reclaim is visible to THIS tick's dispatch gate, and a lane
-    // freed by a budget-blowing reclaim is never refilled in the same tick.
+    // overBudget is computed — spentSoFar reads the live durable round ledger window, so both
+    // opening-peripheral spend and spend banked by THIS tick's reclaim are visible to THIS
+    // tick's dispatch gate. A lane freed by a budget-blowing reclaim is never refilled in the
+    // same tick.
     // #172: a resumed `executing` phase may start with no running/driving lane but a durable
     // handoff waiting for RESUME. Give it one recovery tick before judging the round drained.
     // Thereafter only a handoff RECLAIMED by the immediately-previous successful tick arms the
@@ -617,6 +626,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         recoveryBeatPending = batchResult.reclaimed.some((r) => r.kind === "handoff");
       }
     }
+    recordBudgetStop();
 
     // Drain + later waves, on cadence, until nothing's left in flight. tick() handles
     // KILL_SWITCH drain-then-escalate entirely internally — no special-casing needed here.
@@ -647,15 +657,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         }
         recoveryBeatPending = tickResult.reclaimed.some((r) => r.kind === "handoff");
       }
-      if (!stopHit && dispatchedNames.length > 0 && spentSoFar() >= cfg.cost.roundBudgetUsd) {
-        stopHit = { name: "roundBudgetUsd", detail: `spent $${spentSoFar().toFixed(2)}` };
-        emitRoundStop(round, stopHit);
-      }
+      recordBudgetStop();
       if (deps.state.activeWorkers().length === 0 && !recoveryBeatPending) break;
     }
     // stopHit has already been externalized (emitRoundStop) — the caller only needs the
     // in-flight count for the idle throttle.
-    return dispatchedNames.length;
+    return Math.max(inheritedActiveCount, dispatchedNames.length);
   };
 
   try {
