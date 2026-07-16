@@ -485,7 +485,7 @@ checklist item**):
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
-| `worktree-released` | Lane {worker}'s retained folder was cleaned up (engine follow-up event, filed with the §3 Needs-attention amendment) |
+| `worktree-released` | Lane {worker}'s retained folder was cleaned up |
 | `env-failure` | Lane {worker} hit an environment problem — not the work itself (subsequent events narrate the disposition; this sentence claims none of it — `hasPr` alone cannot pick the outcome) |
 | `env-failure-preserved` | Kept lane {worker}'s work safe after an environment problem — its PR needs a human to continue it |
 | `park-escalated` | The environment keeps failing — paused dispatch and flagged a human |
@@ -800,7 +800,7 @@ overlay** (est telemetry, config, board). Replay is not a second UI — it is
 the same UI with a different cursor. §9's single reducer is this mechanism;
 the overlay is the named boundary.
 
-### Engine follow-ups (all additive; #1–2 filed as #206, #3 as #207)
+### Engine follow-ups (all additive; #1–2 filed as #206, #3 as #207; #4–5 from the round-2 amendment, to be filed with it)
 
 1. **`round-phase` event** (#206) — `appendEvent("round-phase",
    { round_id, phase })` covering the **full trail**: the initial `aligning`
@@ -818,6 +818,19 @@ the overlay is the named boundary.
    (board query / forge response) — never an extra GitHub call. Powers the
    §3 C hover tooltips offline and in replay; entities without a
    title-bearing event degrade to no tooltip.
+4. **`worktree-released` event** (round-2 amendment) — payload
+   `{ worker, issue, worktreePath }`, mirroring `worktree-retained`'s.
+   Emission: on tick/startup the engine checks each retained path it has
+   recorded; when the folder no longer exists (the human cleaned it up), it
+   appends the event once. Matching for the §3 Needs-attention clear is
+   **by `worktreePath`** (lane names are reused slots; the path is the
+   identity); a retained event whose `worktreePath` is null can never be
+   matched and its row therefore never auto-clears — the engine must not
+   emit retention without a path going forward. Purpose: the strip's only
+   missing resolution signal, replay-consistent like every event.
+5. **`dashboard.controls` config key** (round-2 amendment) — boolean,
+   default `true`, added to the strict config schema; gates the §3
+   Operations verbs and the §8 `POST /api/control` route.
 
 New event kinds must land in the §7 copy map in the same PR (gate②
 checklist); payload-only additions like #3 need no copy entry.
