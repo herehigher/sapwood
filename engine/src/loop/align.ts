@@ -25,6 +25,7 @@
 // Locked decision 5 (only a human confirms `Ready`) remains enforced STRUCTURALLY: this module
 // never calls forge.setBoardStatus, and the PO session's allowed tools (PO_ALLOWED_TOOLS) carry
 // no `gh api`/`gh project` capability at all — the only channel GithubForge.setBoardStatus uses.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +48,29 @@ import type { PeripheralStub } from "./round.js";
  *  so a round's alignment activity is traceable directly on GitHub. */
 export function alignMarker(roundId: number): string {
   return `<!-- sapwood:round:${roundId}:aligning -->`;
+}
+
+/** Stable identity for one validated proposal. The index distinguishes intentionally similar
+ *  proposals while the title hash keeps the marker useful when inspecting raw issue bodies. */
+export function proposalId(roundId: number, index: number, title: string): string {
+  const titleHash = createHash("sha256").update(title).digest("hex").slice(0, 16);
+  return `${roundId}-${index}-${titleHash}`;
+}
+
+export function proposalMarker(id: string): string {
+  return `<!-- sapwood:proposal:${id} -->`;
+}
+
+/** Mechanical duplicate guard only: case, compatibility forms, punctuation, and whitespace
+ *  do not make two otherwise-identical titles distinct. Semantic duplication remains a PO
+ *  judgment problem (#215). */
+export function normalizeProposalTitle(title: string): string {
+  return title
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
 export function defaultPoPromptPath(): string {
@@ -74,14 +98,15 @@ export function loadPlanMd(path: string = DEFAULT_PLAN_MD_PATH): string {
 const NO_OPEN_ISSUES = "(no open issues yet)";
 const BACKLOG_READ_FAILED = "(backlog digest unavailable: open-issue read failed)";
 
-/** Engine-side PO context (#215): deterministic, milestone-scopeable via RoundScopedForge,
+/** Engine-side PO context (#215): deterministic, milestone-scoped here at the digest consumer,
  *  and contained on forge failure. Sorting here (rather than trusting gh's presentation order)
  *  makes crash-rerun assembly byte-identical for the same backlog. Every return path is capped
  *  at the boundary so placeholders cannot accidentally bypass the configured size limit. */
 export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Promise<string> {
   let uncapped: string;
   try {
-    const issues = await forge.listOpenIssues();
+    const allIssues = await forge.listOpenIssues();
+    const issues = filterIssuesByMilestone(allIssues, cfg.round.milestone);
     if (issues.length === 0) {
       uncapped = NO_OPEN_ISSUES;
     } else {
@@ -98,6 +123,10 @@ export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Pro
     uncapped = BACKLOG_READ_FAILED;
   }
   return capDigest(uncapped, cfg.roles.po.backlogDigestMaxChars);
+}
+
+function filterIssuesByMilestone(issues: Issue[], milestone: string | undefined): Issue[] {
+  return milestone === undefined ? issues : issues.filter((issue) => issue.milestone === milestone);
 }
 
 // Placeholder Issue for template rendering in "align" mode: there is no single issue in scope
@@ -158,6 +187,72 @@ function splitAlignIssueBodies(raw: string, count: number): string[] | null {
 }
 
 export type AlignValidation = { ok: true; issues: Array<{ title: string; body: string }> } | { ok: false; reason: string };
+
+interface PersistedProposal {
+  proposalId: string;
+  index: number;
+  title: string;
+  body: string;
+}
+
+const PersistedProposalSchema = z
+  .object({ proposalId: z.string().min(1), index: z.number().int().nonnegative(), title: z.string().min(1), body: z.string().min(1) })
+  .strict();
+const ProposalSetEventSchema = z.object({ round_id: z.number().int().positive(), proposals: z.array(PersistedProposalSchema) }).strict();
+const ProposalCreatedEventSchema = z
+  .object({ round_id: z.number().int().positive(), proposalId: z.string().min(1), issue: z.number().int().positive() })
+  .passthrough();
+const ProposalSkippedEventSchema = z.object({ round_id: z.number().int().positive(), proposalId: z.string().min(1) }).passthrough();
+
+/** Read this round's persist-first proposal journal. Malformed or divergent durable records
+ *  fail closed: guessing would risk recreating issues. */
+function proposalProgress(
+  state: State,
+  roundId: number,
+): { proposals: PersistedProposal[] | null; terminalIds: Set<string>; createdIssues: Map<string, number> } {
+  const events = state.eventsAfterId(0, ["proposal-set-persisted", "proposal-created", "proposal-skipped"]);
+  let proposals: PersistedProposal[] | null = null;
+  const terminalIds = new Set<string>();
+  const createdIssues = new Map<string, number>();
+  for (const event of events) {
+    const payloadRound =
+      typeof event.payload === "object" && event.payload !== null && "round_id" in event.payload
+        ? (event.payload as { round_id?: unknown }).round_id
+        : undefined;
+    if (payloadRound !== roundId) continue;
+    if (event.kind === "proposal-set-persisted") {
+      const parsed = ProposalSetEventSchema.safeParse(event.payload);
+      if (!parsed.success) throw new Error(`malformed persisted proposal set for round ${roundId}`);
+      if (proposals != null) throw new Error(`multiple persisted proposal sets for round ${roundId}`);
+      proposals = parsed.data.proposals;
+      continue;
+    }
+    const parsedCreated = event.kind === "proposal-created" ? ProposalCreatedEventSchema.safeParse(event.payload) : null;
+    const parsedSkipped = event.kind === "proposal-skipped" ? ProposalSkippedEventSchema.safeParse(event.payload) : null;
+    const terminal = parsedCreated?.success ? parsedCreated.data : parsedSkipped?.success ? parsedSkipped.data : null;
+    if (terminal === null) throw new Error(`malformed proposal terminal event for round ${roundId}`);
+    if (terminalIds.has(terminal.proposalId)) {
+      throw new Error(`multiple terminal events for proposal ${terminal.proposalId} in round ${roundId}`);
+    }
+    terminalIds.add(terminal.proposalId);
+    if (parsedCreated?.success) createdIssues.set(parsedCreated.data.proposalId, parsedCreated.data.issue);
+  }
+  if (proposals == null && terminalIds.size > 0)
+    throw new Error(`proposal terminal event exists without a proposal set for round ${roundId}`);
+  if (proposals != null) {
+    const ids = new Set<string>();
+    proposals.forEach((proposal, index) => {
+      if (proposal.index !== index || proposal.proposalId !== proposalId(roundId, index, proposal.title) || ids.has(proposal.proposalId)) {
+        throw new Error(`invalid persisted proposal identity for round ${roundId} at index ${index}`);
+      }
+      ids.add(proposal.proposalId);
+    });
+    for (const id of terminalIds) {
+      if (!ids.has(id)) throw new Error(`unknown terminal proposal ${id} for round ${roundId}`);
+    }
+  }
+  return { proposals, terminalIds, createdIssues };
+}
 
 /** Parse + schema-validate a po-align session's structured output. Deliberately does NOT
  *  content-check each issue body for a verification-plan section (unlike plan-review.ts's
@@ -289,67 +384,97 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         ...(deps.log !== undefined ? { log: deps.log } : {}),
       });
 
-      // Compute at align invocation time from the injected forge. In live round wiring that
-      // forge is RoundScopedForge, so the digest inherits the exact existing milestone boundary.
+      let priorProgress: ReturnType<typeof proposalProgress>;
+      try {
+        priorProgress = proposalProgress(deps.state, roundId);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        // Align degrades open, but creation fails closed: preserve the corrupt journal as a
+        // durable honesty event, perform no forge writes, and advance this phase so restarts do
+        // not wedge forever on the same malformed record.
+        deps.state.appendEvent("proposal-journal-corrupt", { round_id: roundId, reason });
+        (deps.log ?? console.error)(`[sapwood:po] round ${roundId}: proposal journal corrupt — creating nothing: ${reason}`);
+        return { marker: mark };
+      }
+
+      // Compute at align invocation time from the full injected forge backlog. Milestone scope
+      // belongs only to the digest; reconciliation/title dedup below must see every open issue.
       // Reuse the same snapshot for triage prompt rendering later in this phase.
       const backlogDigest = await buildBacklogDigest(deps.forge, deps.cfg);
 
-      // ── Alignment/decomposition pass: ONE session, dispatched even with an unscoped round
-      // (round.milestone unset) — decomposition still has docs/PLAN.md to work from alone.
+      // ── Alignment/decomposition pass: at most ONE session, dispatched even with an unscoped
+      // fresh round (round.milestone unset) — decomposition still has docs/PLAN.md to work from
+      // alone. A persisted proposal set bypasses the session entirely on a crash rerun.
       // #104: ported to peripheral.ts's shared runSessionWithRetry (outcome-check -> retry-once
       // -> visible-degradation). Same retry-once stance as plan-review.ts's reviewer sessions;
       // the divergence from plan-review's needs-human escalation is deliberate and cheap here:
       // this phase runs PRE-Ready, so a double failure never poisons a dispatch decision — the
       // round advances (marker still set) and the degradation is made observable (a durable
       // event + a log line) instead of wedging the round; the next round retries naturally. ──
-      const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
-        "po.mode": "align",
-        "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
-        // #128: deps.planMdPath is a TEST override only now — a real caller omits it and gets
-        // cfg.goal.file (the same resolved value architect.ts's own goal-file read honors).
-        "plan.md": loadPlanMd(deps.planMdPath ?? deps.cfg.goal.file),
-        "round.directive": directive,
-        "backlog.digest": backlogDigest,
-      });
-      const alignResult = await runSessionWithRetry({
-        runner: deps.runner,
-        state: deps.state,
-        session: {
-          roleId: "po-align",
-          prompt: alignPrompt,
-          model: role.model,
-          effort: role.effort,
-          fallbackModel: role.fallbackModel,
-          allowedTools: PO_ALLOWED_TOOLS,
-          disallowedTools: PO_DISALLOWED_TOOLS,
-        },
-        // Align spend is round-scoped, not tied to any single issue — `issue` is a plain int
-        // column with no FK, so 0 is a documented sentinel ("no single issue").
-        issue: 0,
-        now,
-        ...(deps.log !== undefined ? { log: deps.log } : {}),
-        degradeEvent: "po-degraded",
-        degradePayload: (result) => ({
-          round_id: roundId,
-          outcome: result.outcome,
-          session: result.name,
-          reason: alignDegradeReason(result),
-        }),
-        degradeMessage: (result) =>
-          `[sapwood:po] round ${roundId}: po-align session failed twice (${result.outcome}) — ` +
-          `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result)}`,
-        isValid: (result) => validateAlignOutput(result.resultText ?? "").ok,
-      });
-      const alignValidated: AlignValidation =
-        alignResult.outcome === "done"
-          ? validateAlignOutput(alignResult.resultText ?? "")
-          : { ok: false, reason: `po-align session failed twice (${alignResult.outcome})` };
+      let persistedProposals = priorProgress.proposals;
+      let alignValidated: AlignValidation;
+      if (persistedProposals != null) {
+        // Crash reruns replay the durable proposal set directly. They never resume an old model
+        // session, and they do not pay for a fresh session whose output would be discarded.
+        alignValidated = { ok: true, issues: persistedProposals.map(({ title, body }) => ({ title, body })) };
+      } else {
+        const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
+          "po.mode": "align",
+          "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
+          "plan.md": loadPlanMd(deps.planMdPath ?? deps.cfg.goal.file),
+          "round.directive": directive,
+          "backlog.digest": backlogDigest,
+        });
+        const alignResult = await runSessionWithRetry({
+          runner: deps.runner,
+          state: deps.state,
+          session: {
+            roleId: "po-align",
+            prompt: alignPrompt,
+            model: role.model,
+            effort: role.effort,
+            fallbackModel: role.fallbackModel,
+            allowedTools: PO_ALLOWED_TOOLS,
+            disallowedTools: PO_DISALLOWED_TOOLS,
+          },
+          issue: 0,
+          now,
+          ...(deps.log !== undefined ? { log: deps.log } : {}),
+          degradeEvent: "po-degraded",
+          degradePayload: (result) => ({
+            round_id: roundId,
+            outcome: result.outcome,
+            session: result.name,
+            reason: alignDegradeReason(result),
+          }),
+          degradeMessage: (result) =>
+            `[sapwood:po] round ${roundId}: po-align session failed twice (${result.outcome}) — ` +
+            `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result)}`,
+          isValid: (result) => validateAlignOutput(result.resultText ?? "").ok,
+        });
+        alignValidated =
+          alignResult.outcome === "done"
+            ? validateAlignOutput(alignResult.resultText ?? "")
+            : { ok: false, reason: `po-align session failed twice (${alignResult.outcome})` };
+      }
+      if (persistedProposals == null) {
+        if (alignValidated.ok) {
+          persistedProposals = alignValidated.issues.map(({ title, body }, index) => ({
+            proposalId: proposalId(roundId, index, title),
+            index,
+            title,
+            body,
+          }));
+          // Persist-first: no forge creation is reachable until the full validated set lands.
+          deps.state.appendEvent("proposal-set-persisted", { round_id: roundId, proposals: persistedProposals });
+        }
+      }
 
       // Every created issue originates from the VALIDATED array above — the engine is the only
       // caller of forge.createIssue, and its (title, body) signature carries no label field, so
       // a created issue structurally cannot carry a dispatch-path label at creation (the
       // pre-#110 poisoned-label post-check this replaces is deleted outright, see module doc).
-      const createdIssues = alignValidated.ok ? alignValidated.issues : [];
+      const createdIssues = alignValidated.ok ? (persistedProposals ?? []) : [];
       // #123: the aligning phase's own structured summary — what the PO actually decomposed/
       // triaged this round — collected as the loops run and externalized as ONE `align-summary`
       // event at the end. Consumed by the round artifact (round-artifact.ts) and by the
@@ -357,14 +482,58 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // pointer note. State event only — no new forge write.
       const alignSummaryCreated: Array<{ issue: number; title: string; hasPlan: boolean }> = [];
       const alignSummaryTriaged: Array<{ issue: number; drafted: boolean }> = [];
-      for (const { title, body } of createdIssues) {
-        const issueNumber = await deps.forge.createIssue(title, body);
-        // Labels are the orchestrator's job, unconditionally — the session has no label channel
-        // at all, so there is no race to guard against here (unlike the pre-#110 before/after
-        // diff, which could observe a concurrently-human-created issue and had to check for a
-        // pre-existing origin:agent label first; that race is gone along with the diff).
-        await deps.forge.addLabel(issueNumber, l.originAgent);
+      const terminalIds = priorProgress.terminalIds;
+      // This read is deliberately fail-closed (unlike the prompt's best-effort digest): it is
+      // the reconciliation and pre-create duplicate boundary, so an incomplete backlog must
+      // stop creation rather than turn into duplicates.
+      const openIssues = createdIssues.length > 0 ? await deps.forge.listOpenIssues() : [];
+      const knownOpenIssues = [...openIssues];
+      for (const { proposalId: id, title, body } of createdIssues) {
+        if (terminalIds.has(id)) {
+          const issue = priorProgress.createdIssues.get(id);
+          if (issue !== undefined) alignSummaryCreated.push({ issue, title, hasPlan: extractVerificationPlan(body) != null });
+          continue;
+        }
+        const marker = proposalMarker(id);
+        const reconciled = knownOpenIssues.find((issue) => issue.body?.includes(marker));
+        if (reconciled) {
+          const hasPlan = extractVerificationPlan(body) != null;
+          await applyProposalGovernance(reconciled.number, hasPlan);
+          deps.state.appendEvent("proposal-created", { round_id: roundId, proposalId: id, issue: reconciled.number, reconciled: true });
+          terminalIds.add(id);
+          alignSummaryCreated.push({ issue: reconciled.number, title, hasPlan });
+          continue;
+        }
+        const normalizedTitle = normalizeProposalTitle(title);
+        const collision = knownOpenIssues.find((issue) => normalizeProposalTitle(issue.title) === normalizedTitle);
+        if (collision) {
+          deps.state.appendEvent("proposal-skipped", {
+            round_id: roundId,
+            proposalId: id,
+            title,
+            reason: "normalized-title-collision",
+            existingIssue: collision.number,
+          });
+          terminalIds.add(id);
+          continue;
+        }
+        const markedBody = `${body}\n\n${marker}`;
+        const issueNumber = await deps.forge.createIssue(title, markedBody);
+        knownOpenIssues.push({ number: issueNumber, title, labels: [], body: markedBody });
         const hasPlan = extractVerificationPlan(body) != null;
+        await applyProposalGovernance(issueNumber, hasPlan);
+        // A receipt means both creation AND its load-bearing governance writes completed.
+        // A crash before this append is reconciled by the body marker on the next run.
+        deps.state.appendEvent("proposal-created", { round_id: roundId, proposalId: id, issue: issueNumber });
+        terminalIds.add(id);
+        alignSummaryCreated.push({ issue: issueNumber, title, hasPlan });
+      }
+
+      async function applyProposalGovernance(issueNumber: number, hasPlan: boolean): Promise<void> {
+        // Labels are idempotent and load-bearing. On the rare marker-reconcile path the audit
+        // comment may be duplicated; that is accepted in preference to leaving governance
+        // incomplete after an accepted-create/lost-receipt crash.
+        await deps.forge.addLabel(issueNumber, l.originAgent);
         const note = hasPlan
           ? `Created by sapwood's round ${roundId} PO alignment pass (goal decomposition).`
           : `Created by sapwood's round ${roundId} PO alignment pass, but with no verification ` +
@@ -372,7 +541,6 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             `planless. A human (or a future triage pass) needs to supply one.`;
         if (!hasPlan) await deps.forge.addLabel(issueNumber, l.needsHuman);
         await deps.forge.addIssueComment(issueNumber, `${note}\n\n${mark}`);
-        alignSummaryCreated.push({ issue: issueNumber, title, hasPlan });
       }
 
       // ── Triage pass: existing plan-less issues get a plan drafted directly into the body.

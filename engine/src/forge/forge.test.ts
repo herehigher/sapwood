@@ -1031,25 +1031,25 @@ test("listOpenIssueNumbers: every open issue number in this repo", async () => {
   assert.ok(args.includes("--state") && args.includes("open"));
 });
 
-test("listOpenIssues #215: returns number, title, labels, and milestone digest fields", async () => {
+test("listOpenIssues #215/#216: returns digest fields plus bodies for marker reconciliation", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
     return JSON.stringify([
-      { number: 5, title: "Parked gap", labels: [{ name: "blocked" }], milestone: { title: "M4" } },
-      { number: 7, title: "Unassigned gap", labels: [], milestone: null },
+      { number: 5, title: "Parked gap", body: "one", labels: [{ name: "blocked" }], milestone: { title: "M4" } },
+      { number: 7, title: "Unassigned gap", body: "two", labels: [], milestone: null },
     ]);
   };
   assert.deepEqual(await forge.listOpenIssues(), [
-    { number: 5, title: "Parked gap", labels: ["blocked"], milestone: "M4" },
-    { number: 7, title: "Unassigned gap", labels: [] },
+    { number: 5, title: "Parked gap", body: "one", labels: ["blocked"], milestone: "M4" },
+    { number: 7, title: "Unassigned gap", body: "two", labels: [] },
   ]);
   const args = seen[0]!;
   assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
   assert.ok(args.includes("--state") && args.includes("open"));
-  assert.ok(args.includes("number,title,labels,milestone"));
+  assert.ok(args.includes("number,title,body,labels,milestone"));
 });
 
 test("listOpenIssues #215: rejects an exactly-limit-sized response but accepts limit minus one", async () => {

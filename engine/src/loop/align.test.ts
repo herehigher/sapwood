@@ -27,6 +27,9 @@ import {
   createAligningStub,
   defaultPoPromptPath,
   loadPlanMd,
+  normalizeProposalTitle,
+  proposalId,
+  proposalMarker,
   validateAlignOutput,
   validateTriageOutput,
 } from "./align.js";
@@ -124,6 +127,7 @@ class FakeForge implements IForge {
     this.createdIssues.push({ title, body });
     this.issueBodies[n] = body;
     this.openIssueNumbers.push(n);
+    this.backlogIssues.push({ number: n, title, labels: [], body });
     return n;
   }
   async listOpenIssueNumbers(): Promise<number[]> {
@@ -264,7 +268,11 @@ test("createAligningStub: a declared issue with a plan section gets stamped orig
   const stub = createAligningStub(deps);
   await stub.run({ roundId: 1, phase: "aligning", marker: null });
   assert.equal(forge.createdIssues.length, 1);
-  assert.deepEqual(forge.createdIssues[0], { title: "Do the thing", body: PLAN_BODY });
+  const expectedProposalId = proposalId(1, 0, "Do the thing");
+  assert.deepEqual(forge.createdIssues[0], {
+    title: "Do the thing",
+    body: `${PLAN_BODY}\n\n${proposalMarker(expectedProposalId)}`,
+  });
   const newIssue = forge.openIssueNumbers[0]!;
   assert.ok(forge.issueLabels[newIssue]!.includes("origin:agent"));
   assert.ok(!forge.issueLabels[newIssue]!.includes(cfg.labels.needsHuman));
@@ -359,6 +367,304 @@ test("createAligningStub: multiple declared issues are each processed independen
   assert.ok(!forge.issueLabels[a]!.includes(cfg.labels.needsHuman));
   assert.ok(forge.issueLabels[b]!.includes("origin:agent"));
   assert.ok(forge.issueLabels[b]!.includes(cfg.labels.needsHuman));
+  state.close();
+});
+
+// ── #216: persist-first proposal creation + per-proposal crash recovery ───────────────────
+
+const THREE_PROPOSALS = [
+  { title: "first", body: PLAN_BODY },
+  { title: "second", body: PLAN_BODY },
+  { title: "third", body: PLAN_BODY },
+];
+
+test("createAligningStub #216: crash before the first creation leaves a durable proposal set; rerun creates the full persisted batch once", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  const realCreate = forge.createIssue.bind(forge);
+  let failFirst = true;
+  forge.createIssue = async (title, body) => {
+    assert.equal(state.eventsAfterId(0, ["proposal-set-persisted"]).length, 1, "proposal set lands before create");
+    if (failFirst) {
+      failFirst = false;
+      throw new Error("crash before create");
+    }
+    return realCreate(title, body);
+  };
+  const firstRunner = new ScriptedRunner([doneResult("po-align-1", alignResultText(THREE_PROPOSALS))]);
+  await assert.rejects(
+    () => createAligningStub({ forge, state, cfg, runner: firstRunner }).run({ roundId: 216, phase: "aligning", marker: null }),
+    /crash before create/,
+  );
+  assert.equal(forge.createdIssues.length, 0);
+
+  // The scripted result deliberately differs, but must never be consumed: externalization
+  // replays the already-persisted validated set without starting another align session.
+  const rerun = new ScriptedRunner([doneResult("po-align-2", alignResultText([]))]);
+  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 216, phase: "aligning", marker: null });
+  assert.equal(rerun.calls.length, 0, "a persisted proposal set bypasses the align session entirely");
+  assert.deepEqual(
+    forge.createdIssues.map((issue) => issue.title),
+    ["first", "second", "third"],
+  );
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 3);
+  state.close();
+});
+
+test("createAligningStub #216: crash after k of n creations reruns exactly the remaining n-k", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  const realCreate = forge.createIssue.bind(forge);
+  let attempts = 0;
+  forge.createIssue = async (title, body) => {
+    attempts++;
+    if (attempts === 3) throw new Error("crash after two");
+    return realCreate(title, body);
+  };
+  const firstRunner = new ScriptedRunner([doneResult("po-align-1", alignResultText(THREE_PROPOSALS))]);
+  await assert.rejects(
+    () => createAligningStub({ forge, state, cfg, runner: firstRunner }).run({ roundId: 217, phase: "aligning", marker: null }),
+    /crash after two/,
+  );
+  assert.deepEqual(
+    forge.createdIssues.map((issue) => issue.title),
+    ["first", "second"],
+  );
+
+  const rerun = new ScriptedRunner([doneResult("po-align-2", alignResultText(THREE_PROPOSALS))]);
+  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 217, phase: "aligning", marker: null });
+  assert.equal(rerun.calls.length, 0);
+  assert.deepEqual(
+    forge.createdIssues.map((issue) => issue.title),
+    ["first", "second", "third"],
+  );
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 3);
+  const summaries = state.eventsAfterId(0, ["align-summary"]);
+  assert.equal(summaries.length, 1);
+  assert.deepEqual((summaries[0]!.payload as { created: Array<{ issue: number; title: string; hasPlan: boolean }> }).created, [
+    { issue: 100, title: "first", hasPlan: true },
+    { issue: 101, title: "second", hasPlan: true },
+    { issue: 102, title: "third", hasPlan: true },
+  ]);
+  state.close();
+});
+
+test("createAligningStub #216: lost creation receipt reconciles by body marker and never recreates the accepted in-flight issue", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  const realCreate = forge.createIssue.bind(forge);
+  let attempts = 0;
+  forge.createIssue = async (title, body) => {
+    attempts++;
+    const issue = await realCreate(title, body); // GitHub accepted it
+    if (attempts === 2) throw new Error("receipt lost");
+    return issue;
+  };
+  const firstRunner = new ScriptedRunner([doneResult("po-align-1", alignResultText(THREE_PROPOSALS))]);
+  await assert.rejects(
+    () => createAligningStub({ forge, state, cfg, runner: firstRunner }).run({ roundId: 218, phase: "aligning", marker: null }),
+    /receipt lost/,
+  );
+  assert.deepEqual(
+    forge.createdIssues.map((issue) => issue.title),
+    ["first", "second"],
+  );
+
+  const rerun = new ScriptedRunner([doneResult("po-align-2", alignResultText(THREE_PROPOSALS))]);
+  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 218, phase: "aligning", marker: null });
+  assert.deepEqual(
+    forge.createdIssues.map((issue) => issue.title),
+    ["first", "second", "third"],
+  );
+  const receipts = state.eventsAfterId(0, ["proposal-created"]).map((event) => event.payload as { reconciled?: boolean });
+  assert.ok(receipts.some((receipt) => receipt.reconciled === true));
+  state.close();
+});
+
+test("createAligningStub #216: milestone-scoped lost receipt sees an unassigned marker and does not recreate", async () => {
+  const innerForge = new FakeForge();
+  const forge = new RoundScopedForge(innerForge, "M4");
+  const state = new State(":memory:");
+  const cfg = mkCfg({ round: { milestone: "M4" } });
+  const realCreate = innerForge.createIssue.bind(innerForge);
+  let loseReceipt = true;
+  innerForge.createIssue = async (title, body) => {
+    const issue = await realCreate(title, body);
+    if (loseReceipt) {
+      loseReceipt = false;
+      throw new Error("accepted without receipt");
+    }
+    return issue;
+  };
+  await assert.rejects(
+    () =>
+      createAligningStub({
+        forge,
+        state,
+        cfg,
+        runner: new ScriptedRunner([doneResult("po-align-1", alignResultText([THREE_PROPOSALS[0]!]))]),
+      }).run({ roundId: 221, phase: "aligning", marker: null }),
+    /accepted without receipt/,
+  );
+  assert.equal(innerForge.createdIssues.length, 1);
+  assert.equal(innerForge.backlogIssues[0]!.milestone, undefined, "createIssue assigns no milestone");
+
+  const rerun = new ScriptedRunner([failedResult("must-not-run")]);
+  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 221, phase: "aligning", marker: null });
+  assert.equal(rerun.calls.length, 0);
+  assert.equal(innerForge.createdIssues.length, 1, "the full-backlog marker scan reconciles instead of recreating");
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 1);
+  state.close();
+});
+
+test("createAligningStub #216: proposal receipt lands only after reconciled governance labels, fence, and comment complete", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  const realAddIssueComment = forge.addIssueComment.bind(forge);
+  let failComment = true;
+  forge.addIssueComment = async (issue, body) => {
+    if (failComment) {
+      failComment = false;
+      throw new Error("crash before audit comment");
+    }
+    return realAddIssueComment(issue, body);
+  };
+  await assert.rejects(
+    () =>
+      createAligningStub({
+        forge,
+        state,
+        cfg,
+        runner: new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "planless", body: NO_PLAN_BODY }]))]),
+      }).run({ roundId: 222, phase: "aligning", marker: null }),
+    /crash before audit comment/,
+  );
+  assert.equal(forge.createdIssues.length, 1);
+  const issue = forge.openIssueNumbers[0]!;
+  assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.originAgent));
+  assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.needsHuman));
+  assert.equal(forge.issueCommentsPosted.length, 0);
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 0, "partial governance is not terminal");
+
+  const rerun = new ScriptedRunner([failedResult("must-not-run")]);
+  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 222, phase: "aligning", marker: null });
+  assert.equal(rerun.calls.length, 0);
+  assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.originAgent));
+  assert.ok(forge.issueLabels[issue]!.includes(cfg.labels.needsHuman));
+  assert.equal(forge.issueCommentsPosted.filter(([number]) => number === issue).length, 1);
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 1);
+  state.close();
+});
+
+test("createAligningStub #216: divergent proposal journal records honesty and advances with zero forge writes", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const roundId = 224;
+  const title = "persisted proposal";
+  state.appendEvent("proposal-set-persisted", {
+    round_id: roundId,
+    proposals: [{ proposalId: proposalId(roundId, 0, title), index: 0, title, body: PLAN_BODY }],
+  });
+  state.appendEvent("proposal-created", { round_id: roundId, proposalId: "unknown-proposal", issue: 77 });
+  const logs: string[] = [];
+  const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
+
+  const result = await createAligningStub({ forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) }).run({
+    roundId,
+    phase: "aligning",
+    marker: null,
+  });
+
+  assert.equal(result.marker, alignMarker(roundId));
+  assert.equal(runner.calls.length, 0);
+  assert.equal(forge.createdIssues.length, 0);
+  assert.equal(forge.issueCommentsPosted.length, 0);
+  assert.equal(Object.values(forge.issueLabels).flat().length, 0);
+  const honesty = state.eventsAfterId(0, ["proposal-journal-corrupt"]);
+  assert.deepEqual(honesty[0]!.payload, {
+    round_id: roundId,
+    reason: `unknown terminal proposal unknown-proposal for round ${roundId}`,
+  });
+  assert.match(logs[0]!, /proposal journal corrupt — creating nothing/);
+  state.close();
+});
+
+test("createAligningStub #216: corrupt proposal journal records honesty and advances with zero forge writes", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 7, title: "would otherwise triage", labels: [], body: NO_PLAN_BODY }];
+  const state = new State(":memory:");
+  state.appendEvent("proposal-set-persisted", { round_id: 223, proposals: "not-an-array" });
+  const logs: string[] = [];
+  const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
+  const result = await createAligningStub({ forge, state, cfg: mkCfg(), runner, log: (line) => logs.push(line) }).run({
+    roundId: 223,
+    phase: "aligning",
+    marker: null,
+  });
+  assert.equal(result.marker, alignMarker(223));
+  assert.equal(runner.calls.length, 0);
+  assert.deepEqual(
+    {
+      creates: forge.createdIssues.length,
+      labels: Object.values(forge.issueLabels).flat().length,
+      comments: forge.issueCommentsPosted.length,
+      bodyUpdates: forge.updateIssueBodyCalls.length,
+    },
+    { creates: 0, labels: 0, comments: 0, bodyUpdates: 0 },
+  );
+  const honesty = state.eventsAfterId(0, ["proposal-journal-corrupt"]);
+  assert.equal(honesty.length, 1);
+  assert.deepEqual(honesty[0]!.payload, { round_id: 223, reason: "malformed persisted proposal set for round 223" });
+  assert.match(logs[0]!, /proposal journal corrupt — creating nothing/);
+  state.close();
+});
+
+test("createAligningStub #216: normalized-title collision is skipped with a durable honesty event", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [{ number: 44, title: "Fix:  Payment   Retry!", labels: [], body: "existing" }];
+  assert.equal(normalizeProposalTitle("FIX payment retry"), normalizeProposalTitle(forge.backlogIssues[0]!.title));
+  const state = new State(":memory:");
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "FIX payment retry", body: PLAN_BODY }]))]);
+  await createAligningStub({ forge, state, cfg: mkCfg(), runner }).run({ roundId: 219, phase: "aligning", marker: null });
+  assert.equal(forge.createdIssues.length, 0);
+  const skipped = state.eventsAfterId(0, ["proposal-skipped"]);
+  assert.equal(skipped.length, 1);
+  assert.deepEqual(skipped[0]!.payload, {
+    round_id: 219,
+    proposalId: proposalId(219, 0, "FIX payment retry"),
+    title: "FIX payment retry",
+    reason: "normalized-title-collision",
+    existingIssue: 44,
+  });
+  state.close();
+});
+
+test("createAligningStub #216: marker-null full-success rerun performs zero forge writes", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  const first = new ScriptedRunner([doneResult("po-align-1", alignResultText(THREE_PROPOSALS))]);
+  await createAligningStub({ forge, state, cfg, runner: first }).run({ roundId: 220, phase: "aligning", marker: null });
+  const writes = {
+    creates: forge.createdIssues.length,
+    labels: Object.values(forge.issueLabels).flat().length,
+    comments: forge.issueCommentsPosted.length,
+  };
+
+  const rerun = new ScriptedRunner([doneResult("po-align-2", alignResultText(THREE_PROPOSALS))]);
+  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 220, phase: "aligning", marker: null });
+  assert.deepEqual(
+    {
+      creates: forge.createdIssues.length,
+      labels: Object.values(forge.issueLabels).flat().length,
+      comments: forge.issueCommentsPosted.length,
+    },
+    writes,
+  );
   state.close();
 });
 
@@ -722,6 +1028,17 @@ test("buildBacklogDigest: zero issues and a contained read failure are distinct 
   assert.equal(await buildBacklogDigest(forge, cfg), "(backlog digest unavailable: open-issue read failed)");
 });
 
+test("buildBacklogDigest #215/#216: milestone filtering is local to the digest consumer", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [
+    { number: 1, title: "M4 work", labels: [], milestone: "M4" },
+    { number: 2, title: "M5 work", labels: [], milestone: "M5" },
+    { number: 3, title: "unassigned proposal", labels: [] },
+  ];
+  assert.equal(await buildBacklogDigest(forge, mkCfg({ round: { milestone: "M4" } })), "- #1 — M4 work");
+  assert.match(await buildBacklogDigest(forge, mkCfg()), /#3 — unassigned proposal/);
+});
+
 test("createAligningStub #215: the align prompt receives only the milestone-scoped current backlog digest", async () => {
   const innerForge = new FakeForge();
   innerForge.backlogIssues = [
@@ -863,9 +1180,12 @@ test("createAligningStub #126: crash-rerun — a resumed call for the SAME round
     // null — the earlier attempt never got far enough to persist one) after an operator (or a
     // race) leaves a DIFFERENT file at the live path.
     writeFileSync(directiveFile, "a later, different directive", "utf8");
-    const runner2 = new ScriptedRunner([doneResult("po-align-2", alignResultText([]))]);
+    forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [] }];
+    const runner2 = new ScriptedRunner([doneResult("po-triage-2", triageResultText(9, PLAN_BODY))]);
     const deps2: AlignDeps = { forge, state, cfg, runner: runner2 };
     await createAligningStub(deps2).run({ roundId: 2, phase: "aligning", marker: null });
+    assert.equal(runner2.calls.length, 1, "the persisted proposal set skips po-align; triage still runs");
+    assert.equal(runner2.calls[0]!.roleId, "po-triage");
     assert.ok(runner2.calls[0]!.prompt.includes("original steering"));
     assert.ok(!runner2.calls[0]!.prompt.includes("a later, different directive"));
 
