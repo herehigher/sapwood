@@ -43,8 +43,9 @@ dispatch**):
    `lanes.roundDispatchCap`, also bounded by free lanes under `lanes.max`),
    then **drain ticks** (dispatch frozen) until zero lanes in flight. DRIVE
    runs during drain, so this round's PRs merge *before* the round closes.
-   Round spend is tallied each drain tick against `cost.roundBudgetUsd` —
-   over budget marks a round-stop, **never kills a running worker**.
+   Every ledgered session after round open — opening peripherals plus worker
+   legs — is tallied against `cost.roundBudgetUsd` from a durable id cursor.
+   Over budget blocks dispatch, **never kills a running worker**.
 6. **Peripheral second half** — `harvesting` (judgment + needs-human
    briefings over the engine-built artifact), `retro` (engine-built digest
    in; scratch-file proposal out → engine verifies the branch exists and

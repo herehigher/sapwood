@@ -443,6 +443,104 @@ test("runRounds round.milestone: 0 open issues left skips the batch dispatch ent
   deps.state.close();
 });
 
+test("runRounds #211: opening peripheral spend can exhaust the round budget before executing; zero lanes dispatch and harvest/retro still run", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 211, title: "must stay ready", labels: ["prio:3-feature"] }];
+  const state = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const peripherals = {
+    ...allPeripherals(log),
+    aligning: {
+      async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+        log.push({ phase: ctx.phase, marker: ctx.marker });
+        state.recordSpend("po-align-211", 0, 6, new Date().toISOString(), []);
+        return { marker: `aligning-r${ctx.roundId}` };
+      },
+    },
+  };
+  const hits: RoundStopHit[] = [];
+  const overBudgetSkips: number[] = [];
+  const deps = baseDeps({
+    forge,
+    supervisor: sup,
+    state,
+    sleep,
+    cfg: mkCfg({ cost: { roundBudgetUsd: 5 } }),
+    peripherals,
+    onRoundStop: (_id, hit) => hits.push(hit),
+    onTick: (result) => {
+      for (const outcome of result.dispatched)
+        if (outcome.kind === "skipped" && outcome.reason === "over-budget") overBudgetSkips.push(outcome.issue);
+    },
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+
+  assert.deepEqual(sup.dispatchedIssues, []);
+  assert.deepEqual(overBudgetSkips, [211], "the first executing tick saw the opening session's ledgered spend");
+  assert.ok(hits.some((hit) => hit.name === "roundBudgetUsd" && hit.detail === "spent $6.00"));
+  assert.deepEqual(
+    log.map((entry) => entry.phase),
+    ["aligning", "architecting", "plan_review", "harvesting", "retro"],
+  );
+  assert.equal(result.rounds, 1);
+  assert.equal(state.getRound(1)?.status, "done");
+  state.close();
+});
+
+test("runRounds #211: mixed peripheral and worker entries use one round ledger window and count each row once", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [
+    { number: 1, title: "first", labels: ["prio:3-feature"] },
+    { number: 2, title: "blocked refill", labels: ["prio:3-feature"] },
+  ];
+  const state = new State(":memory:");
+  state.recordSpend("prior-round", 999, 40, "2020-01-01T00:00:00.000Z", []);
+  const sup = new FakeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false, costUsd: 3 };
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const peripherals = {
+    ...allPeripherals(log),
+    aligning: {
+      async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+        log.push({ phase: ctx.phase, marker: ctx.marker });
+        state.recordSpend("po-align-mixed", 0, 2, new Date().toISOString(), []);
+        return { marker: `aligning-r${ctx.roundId}` };
+      },
+    },
+  };
+  const observedWindowSpend: number[] = [];
+  const realSpentAfterId = state.spentUsdAfterId.bind(state);
+  state.spentUsdAfterId = (afterId: number) => {
+    const total = realSpentAfterId(afterId);
+    observedWindowSpend.push(total);
+    return total;
+  };
+  const deps = baseDeps({
+    forge,
+    supervisor: sup,
+    state,
+    sleep,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 5 }, cost: { roundBudgetUsd: 4 } }),
+    peripherals,
+  });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+
+  assert.deepEqual(sup.dispatchedIssues, [1], "the $2 peripheral entry permits wave 1; the exact $5 window blocks wave 2");
+  assert.ok(observedWindowSpend.includes(2), "opening peripheral spend was visible before dispatch");
+  assert.ok(observedWindowSpend.includes(5), "peripheral $2 + worker $3 was observed exactly once");
+  const artifact = RoundArtifactSchema.parse(JSON.parse(state.getRoundArtifact(1)!.json));
+  assert.equal(artifact.spendUsd, 5, "the prior-round $40 is excluded and no round entry is double-counted");
+  assert.equal(result.rounds, 1);
+  state.close();
+});
+
 test("runRounds cost.roundBudgetUsd: recorded once this round's cumulative worker spend crosses the cap; harvest/retro still run", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
@@ -506,18 +604,16 @@ test("runRounds #95: every round-stop hit is persisted via appendEvent, not just
   deps.state.close();
 });
 
-test("runRounds #95: a resumed-into-executing drain evaluates cost.roundBudgetUsd against currently-active workers (never silently disabled)", async () => {
+test("runRounds #211: a crash-resumed executing phase reuses its persisted spend-ledger anchor", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
   try {
     const { sleep } = mkSleepSpy();
-    const state = new State(join(dir, "sapwood.sqlite"));
-    // Simulate a crash mid-`executing`: the round is already there, and a lane from the
-    // pre-crash dispatch is still on record as `running` with spend already ledgered above the
-    // round budget — exactly the case #95's review flagged as invisible (dispatchedNames was
-    // always [] on a resumed drain, so this could never fire).
-    const round = state.startRound("2026-07-09T00:00:00.000Z");
-    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
-    state.upsertWorker({
+    const path = join(dir, "sapwood.sqlite");
+    const beforeCrash = new State(path);
+    beforeCrash.recordSpend("prior-round-worker", 1, 100, "2026-07-08T00:00:00.000Z");
+    const round = beforeCrash.startRound("2026-07-09T00:00:00.000Z");
+    beforeCrash.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    beforeCrash.upsertWorker({
       name: "lane-99",
       issue: 99,
       session_id: "s99",
@@ -525,7 +621,15 @@ test("runRounds #95: a resumed-into-executing drain evaluates cost.roundBudgetUs
       started_at: "2026-07-09T00:00:30.000Z",
       ended_at: null,
     });
-    state.recordSpend("lane-99", 99, 50, "2026-07-09T00:00:45.000Z");
+    beforeCrash.recordSpend("lane-99", 99, 50, "2026-07-09T00:00:45.000Z");
+    const persistedAnchor = round.start_spend_id;
+    beforeCrash.close();
+
+    // A new State instance is the actual crash/restart boundary. The open round must retain
+    // the old cursor: prior-round $100 excluded, this round's already-settled $50 included.
+    const state = new State(path);
+    assert.equal(state.openRound()?.start_spend_id, persistedAnchor);
+    assert.equal(state.spentUsdAfterId(state.openRound()!.start_spend_id!), 50);
 
     const forge = new FakeForge();
     forge.ready = [];
@@ -547,9 +651,91 @@ test("runRounds #95: a resumed-into-executing drain evaluates cost.roundBudgetUs
     stopSafety();
     assert.ok(
       hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $50.00"),
-      "the resumed drain detected the already-banked spend against the currently-active lane",
+      "the resumed drain detected all spend banked after the persisted round cursor",
     );
     assert.equal(result.rounds, 1);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #211: a crash-resumed executing phase with no spend anchor retains the active-lane budget proxy", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const path = join(dir, "sapwood.sqlite");
+    const beforeCrash = new State(path);
+    const round = beforeCrash.startRound("2026-07-09T00:00:00.000Z");
+    beforeCrash.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    beforeCrash.upsertWorker({
+      name: "lane-legacy",
+      issue: 95,
+      session_id: "s95",
+      state: "running",
+      started_at: "2026-07-09T00:00:30.000Z",
+      ended_at: null,
+    });
+    beforeCrash.recordSpend("lane-legacy", 95, 7, "2026-07-09T00:00:45.000Z");
+    const realOpenRound = beforeCrash.openRound.bind(beforeCrash);
+    beforeCrash.openRound = () => {
+      const row = realOpenRound();
+      return row ? { ...row, start_spend_id: undefined } : undefined;
+    };
+    assert.equal(beforeCrash.openRound()?.start_spend_id, undefined);
+    const sup = new FakeSupervisor();
+    sup.probes["lane-legacy"] = { done: true, failed: false, handoff: false, hbAge: 1, wrapperAlive: 1, hasPr: false };
+    const hits: RoundStopHit[] = [];
+    const deps = baseDeps({
+      forge: new FakeForge(),
+      supervisor: sup,
+      state: beforeCrash,
+      sleep,
+      cfg: mkCfg({ cost: { roundBudgetUsd: 5 } }),
+      onRoundStop: (_id, hit) => hits.push(hit),
+    });
+    const stopSafety = boundedStopOnPhase(deps, 2);
+    const result = await runRounds(deps);
+    stopSafety();
+
+    assert.equal(result.rounds, 1);
+    assert.ok(
+      hits.some((hit) => hit.name === "roundBudgetUsd" && hit.detail === "spent $7.00"),
+      "the missing-anchor fallback retained the pre-#211 active-lane spend proxy",
+    );
+    beforeCrash.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #211: a crash-resumed executing phase with no lanes records an existing budget hit exactly once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.recordSpend("settled-lane", 211, 5, "2026-07-09T00:00:30.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-09T00:01:00.000Z");
+    const hits: RoundStopHit[] = [];
+    const deps = baseDeps({
+      forge: new FakeForge(),
+      supervisor: new FakeSupervisor(),
+      state,
+      sleep,
+      cfg: mkCfg({ cost: { roundBudgetUsd: 5 } }),
+      onRoundStop: (_id, hit) => hits.push(hit),
+    });
+    const stopSafety = boundedStopOnPhase(deps, 2);
+    const result = await runRounds(deps);
+    stopSafety();
+
+    assert.equal(result.rounds, 1);
+    assert.deepEqual(hits, [{ name: "roundBudgetUsd", detail: "spent $5.00" }]);
+    const durableHits = state
+      .eventsAfterId(round.start_event_id ?? 0, ["round-stop"])
+      .filter((event) => event.payload.name === "roundBudgetUsd");
+    assert.equal(durableHits.length, 1);
     state.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

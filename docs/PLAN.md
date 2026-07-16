@@ -809,7 +809,10 @@ that also filters which issues a round selects. Final-level conditions are v1's
 `stop.*` (#76) — preemptive: hitting one mid-round means no new round opens, the current
 one winds down, and the process exits. The two levels count different things: round
 level counts PRs opened; final level counts issues merged — matching `stop.*`'s existing
-semantics exactly.
+semantics exactly. **#211:** round-budget accounting is the durable spend-ledger window
+anchored when the round opens (`start_spend_id`), so opening/closing peripherals and
+worker legs all count exactly once across crash/resume. The budget gates dispatch only;
+harvest and retro still close an over-budget round.
 
 **Peripherals never review or merge.** The goal-alignment/PO, architect, gate⓪
 plan-reviewer, harvest, and retrospective roles read and write issues and docs only.

@@ -501,9 +501,10 @@ export interface TickDeps {
    *  tick's reclaim be refilled by THIS tick's dispatch — so spend banked by that reclaim
    *  (which can cross cfg.cost.roundBudgetUsd) must be visible to the same tick's budget gate,
    *  or a fresh wave launches after the budget is already blown. A caller-supplied scalar,
-   *  captured before the tick ran, could never see it. round.ts passes `() => spentSoFar()`
-   *  (backed by live durable state, State.spentUsdForWorker); the tick driver (driver.ts)
-   *  never sets this — default 0 (no spend known). */
+   *  captured before the tick ran, could never see it. round.ts passes a live read over the
+   *  round's durable spend-ledger id window, which includes opening peripherals and every
+   *  settled worker leg exactly once across restart; the tick driver (driver.ts) never sets
+   *  this — default 0 (no spend known). */
   roundSpendUsd?: () => number;
   /** The caller's tick cadence in seconds, when ticks run on a fixed schedule. Scales the
    *  wall-clock session stale gap (engineSessionGapSec: max(900, 2× cadence)) so a legal
