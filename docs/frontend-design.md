@@ -54,12 +54,12 @@ in/out call:
 
 | # | Suggestion | Decision | Rationale |
 |---|---|---|---|
-| 1 | Dynamic visual of the whole flow (anime.js) | **IN — the hero.** One animated Loop scene: Backlog → Lanes → Gate ① → Gate ② → Merged. | The promo centerpiece. anime.js (~10 kB) is the single animation dependency, scoped to this scene; all other motion is CSS. |
-| 2 | See the agent roles interacting | **IN**: conductor, worker, reviewer, merge driver as actors in the hero scene and lane cards; the round-orchestrator roles (PO/architect/plan review/harvest/retro) as a phase strip lit from live data. | The `rounds` table carries the live phase cursor and `round_artifacts` the per-round history (#123, [round-artifact.md](round-artifact.md)) — the phase strip renders real state, never fake animation. Deep round-browse views stay deferred (§10). |
-| 3 | Per-node status, output summary, cost | **IN**: lane board from `workers` (+ per-lane cost from `spend_ledger`); header status strip with daily-spend meter. | Settled (real) cost comes from `spend_ledger` at lane end; **in-flight cost is the engine's #33 estimate** (the pricing.yaml table that already drives the soft worker budget), shown marked `est` and settling to real when the lane ends. |
+| 1 | Dynamic visual of the whole flow (anime.js) | **IN — the hero.** One animated **closed-loop** scene (§6): phase arc → Backlog → Lanes → Gate ① → Gate ② → rings, returning to Planning. | The promo centerpiece. anime.js (~10 kB) is the single animation dependency, scoped to this scene; all other motion is CSS. |
+| 2 | See the agent roles interacting | **IN**: conductor, worker, reviewer, merge driver as actors in the hero scene and lane cards; the round-orchestrator roles (PO/architect/plan review/harvest/retro) as stage nodes on the loop's arcs, lit from live data. | The `rounds` table carries the live phase cursor and `round_artifacts` the per-round history (#123, [round-artifact.md](round-artifact.md)) — the stage nodes render real state, never fake animation. Deep round-browse views stay deferred (§10). |
+| 3 | Per-node status, output summary, cost | **IN**: lane board from `workers` (+ per-lane cost from `spend_ledger`); header status strip with the run-tier spend meter (daily ceiling as the secondary readout, §3 A). | Settled (real) cost comes from `spend_ledger` at lane end; **in-flight cost is the engine's #33 estimate** (the pricing.yaml table that already drives the soft worker budget), shown marked `est` and settling to real when the lane ends. |
 | 4 | Browse past loop rounds | **IN via replay, not metrics.** The `events` table is a complete append-only history → a replay player (play/pause/scrub) re-drives the whole UI from any point. | History-*aggregation* metrics (cycle time, merge/rework rate) stay **OUT** — PLAN.md defers them to a later phase gated on GitHub-history work. |
 | 5 | Config panel | **IN as read-only.** Grouped, plain-language view of the resolved config. **Editing is OUT.** | A write path would break the dashboard's read-only security posture, and security-relevant config is human-merge-only territory. Edit via the YAML file, where review applies. |
-| 6 | Avoid jargon | **IN as a copy layer**: one map from the 19 event kinds to plain sentences (§7). UI language is English (repo/launch artifact); the map is a single module, trivially localizable later — no i18n framework. | |
+| 6 | Avoid jargon | **IN as a copy layer**: one map covering **every** event kind — the §7 table is the authoritative list (a hard-coded count here would drift). UI language is English (repo/launch artifact); the map is a single module, trivially localizable later — no i18n framework. | |
 | 7 | Spec-first, consistent styling | **IN — this document.** Design tokens (§5) are defined before any component; one CSS file of custom properties is the only styling mechanism. | |
 
 **Weight budget** (a plugin-local tool must stay light — this table is the
@@ -94,7 +94,7 @@ Single page, no routing. Five modules, one screen:
 │ │ $1.20  │ │ PR #97 │ │        │  │  Started issue #90       │
 │ └────────┘ └────────┘ └────────┘  │  …                       │
 ├───────────────────────────────────┴──────────────────────────┤
-│ E cost strip — today by lane / by model (SVG bars)  [Config ▸]│
+│ E cost strip — today by phase / by model (SVG bars) [Config ▸]│
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -118,20 +118,23 @@ Single page, no routing. Five modules, one screen:
 - **C — Lane board.** One card per lane up to `lanes.max`; empty lanes render
   as quiet outlines ("an empty lane is capacity, not absence"). Card: issue
   number (linking to GitHub), state word, PR link when driving, elapsed time,
-  the lane's model·effort caption (mono, e.g. `opus · high`, from the config
-  allowlist — flips with `reviewer-fallback-*` / fallbackModel events where
-  applicable), and cost — the engine's in-flight **estimate** (marked `est`,
-  #33) while running, settling to the `spend_ledger` real sum when the lane
-  ends.
+  the lane's model·effort caption (mono, e.g. `opus · high` — the
+  **configured** value from the config allowlist, not live telemetry), and
+  cost — the engine's in-flight **estimate** (marked `est`, #33) while
+  running, settling to the `spend_ledger` real sum when the lane ends.
 
   **Issue/PR numbers — everywhere they appear** (lane cards, feed, hero
   droplets, ring tags): (a) a **type glyph** distinguishes them at a glance —
   issue = circle-dot ⊙, PR = merge-arrow, inline SVG, never color as the
-  sole carrier (§5); (b) **hover shows the title** in a tooltip. Titles come
-  from event payloads persisted by the engine at dispatch/PR-open/merge
-  (§11 follow-up #3) — the dashboard never queries GitHub for them, so
-  tooltips work offline and in replay. Events predating the payload field
-  simply show no tooltip.
+  sole carrier (§5); (b) **hover shows the title** where one is known. The
+  reducer remembers each entity's title from the first **title-bearing
+  event** it folds (`dispatched` carries the issue title; the PR-open
+  transition and `merged` carry the PR title — #207); the dashboard never
+  queries GitHub for titles, so tooltips work offline and in replay. A
+  number whose entity has no title-bearing event — pre-dispatch mentions in
+  the feed (`no-plan-after-draft`, `plan-review-escalated`, …) and all
+  pre-#207 history — simply shows no tooltip; that bounded blind spot is
+  accepted, never patched with a live lookup.
 - **D — Activity feed.** The `events` stream through the copy map (§7),
   newest first, relative timestamps; kind-colored dot per entry. Payload
   details (worker, head, mode) collapse behind each entry — never in the
@@ -144,7 +147,9 @@ Single page, no routing. Five modules, one screen:
   the phase bucketing matches the replay round tier (§11). `Config ▸` opens a
   read-only drawer: an **allowlisted subset** of the resolved config (the
   server serves named keys, never the whole object — the no-secrets guarantee
-  stays structural even if future config grows sensitive keys), grouped as
+  stays structural even if future config grows sensitive keys; the allowlist
+  **must include** the per-role `model`/`effort` keys the §3 C/§6 captions
+  read), grouped as
   **Board · Lanes · Worker · Safety · Review & merge · Labels**, each key with
   its plain-language caption
   (e.g. `worker.budgetUsdSoft` → "Budget per worker — reaching it asks the
@@ -195,7 +200,15 @@ better than a generic cream landing page. Consequence: `--moss` (success)
 loses signal against a greenish ground, so the light theme's success color
 shifts to a deeper teal-green, and **every text-on-ground pair is re-checked
 for WCAG AA per theme** (the §5 quality floor already requires this; the
-palette shift makes it load-bearing, not pro-forma):
+palette shift makes it load-bearing, not pro-forma).
+
+Light-theme starting values (#143 implements these; AA-verify each pair with
+a contrast tool at implementation and adjust the failing side, per the
+quality floor): ground `#EEF3E6` (milky pale green), panel `#E2EAD4`,
+primary text `#251B10` (heartwood, reused), muted text `#57604A`, accent
+amber as text/fill `#8A5A14`, success `#3E6B4F` (the teal-green shift),
+failure `#A34620`. Borders keep `--bark`. Dark-theme values below are
+unchanged:
 
 | Token | Hex | Role |
 |---|---|---|
@@ -249,11 +262,15 @@ circuit (§3's sketch): the round-phase arc across the top (PO → architect →
 gate⓪ plan review), feeding down into the worker pipeline through the middle
 (backlog stack → lane channels, `lanes.max` of them → gate ① checks →
 gate ② review → trunk cross-section), whose rings arc closes along the bottom
-(harvest ← retro) with a dashed return path back to PO. Roles are labeled
+(harvest → retro) with a dashed return path back to PO. Roles are labeled
 *on the stage itself* in plain words (§7's stage-label rule): the conductor
 is the stage (it schedules everything); workers are the lane channels; the
 reviewer sits at gate ②; the merge driver is the arm between gate ② and the
-trunk. Each stage node carries its model·effort caption (§3 C).
+trunk. **LLM-backed** stage nodes (Planning, Design review, Plan approval,
+lanes, Round summary, Self-improvement) carry their configured model·effort
+caption (§3 C); gate ② shows the review *mode* word instead (e.g. `codex`),
+flipped by `reviewer-fallback-*` events; checks and the merge arm are not
+model-backed and carry no caption.
 
 **Two kinds of motion, one honesty rule.** A **droplet** is a real entity —
 an issue or a PR — and only real events move it (table below). The **pipes
@@ -266,17 +283,30 @@ the droplets say "this artifact moved". Nothing animates that isn't backed
 by live state.
 
 **Phase inspector** (new, this amendment): clicking any stage node opens a
-read-only side drawer for that phase — the stage's inputs/outputs and its
-paper trail, not just its light. Contents, by data source: the phase's slice
-of the **latest round's data** — for the open round, folded from its events
-so far (e.g. `align-summary` → created/triaged list); for a phase the open
-round hasn't reached, the most recent **closed** round's `round_artifacts`
-slice (labeled with its round id — never presented as current); plus the
-node's model·effort (config allowlist), links out to the GitHub artifacts
-the phase produced (issues, plan comments, PRs), and a "view log" pointer to
-the run-scoped engine log (#193). Cross-round *browsing* stays deferred
-(§10) — the inspector is one drawer about the latest state of one phase,
-not a history UI.
+read-only side drawer for that phase — the stage's paper trail, not just
+its light. Contents are **strictly what existing sources hold** — the
+explicit per-phase mapping (no field here may exceed the `events` /
+`round_artifacts` contracts):
+
+| Node | Drawer contents (source) |
+|---|---|
+| Planning | `align-summary` slice: created issues (with titles) + triaged issues (`align` in the artifact / the event, verbatim) |
+| Design review / Plan approval | that phase's `degradedPhases` entries, `plan-review-escalated` / `no-plan-after-draft` counts from events |
+| Lanes / checks / review / merge | the round's `dispatches`, `merges`, `retries`, `escalations`, `handoffs` counters (artifact fields) |
+| Round summary | the artifact's own top-line numbers (spend vs round budget, throughput counters) |
+| Self-improvement | the `retro` outcome object (opened PR / degraded / neither) |
+
+Every row also shows the node's configured model·effort (or gate ②'s review
+mode). GitHub links are **derived from issue/PR numbers only** — no comment
+anchors are persisted, so links go to the issue/PR, never a specific
+comment. The "view log" entry displays the run's log-file **path**
+(`logPath` in `/api/loop/state`, live-only — the server serves no log
+content). Binding follows §11 mode purity: in live mode the drawer binds to
+the open round (falling back per phase to the most recent **closed** round's
+slice, labeled with its round id — never presented as current); in replay it
+binds to the scrubbed round at the cursor, never a mix. Cross-round
+*browsing* stays deferred (§10) — the inspector is one drawer about one
+phase, not a history UI.
 
 An issue is a **sap droplet** (amber dot with the issue number). Real events
 drive it, via one anime.js timeline per transition:
@@ -284,7 +314,7 @@ drive it, via one anime.js timeline per transition:
 | Event(s) | Animation |
 |---|---|
 | `dispatched` | Droplet detaches from the backlog stack, travels into a lane channel (`--travel`); the lane card (§3 C) lights `--sap` in the same beat. |
-| lane `running → driving` (from `/state` polling) | Droplet emerges from the lane carrying a PR tag and parks **in the gate section** (drawn as the two gates ①②, labeled "checks" and "review"), which breathes softly while the PR waits. The engine computes gate progress live against GitHub and persists no substate, so v0.2 renders the review passage as one *waiting* state — the gates never fake per-gate progress. (A persisted `gate-advanced` event unlocking the two-step animation is deferred, §10.) |
+| lane `running → driving` (canonical source: the PR-open transition event, `reclaim-done` with `payload.next: driving` — `/state` polling is only the live overlay that may show it a beat earlier) | Droplet emerges from the lane carrying a PR tag and parks **in the gate section** (drawn as the two gates ①②, labeled "checks" and "review"), which breathes softly while the PR waits. The engine computes gate progress live against GitHub and persists no substate, so v0.2 renders the review passage as one *waiting* state — the gates never fake per-gate progress. (A persisted `gate-advanced` event unlocking the two-step animation is deferred, §10.) |
 | `merged` | Both gates flash `--moss` with a ✓, the droplet crosses the merge arm into the trunk and **becomes a ring**: a new circle strokes in over 1.2 s, ring counter increments in Fraunces. The one celebratory moment. |
 | `handoff` | Droplet folds back into the backlog with a small progress badge ("saved for a successor"). |
 | `reclaim-failed`, `reclaim-dead`, `drive-needs-human`, `rollback-escalated` | Droplet stops, flips `--rust` with a static ✕, and pins a marker above its position; no shaking, no bouncing — failures are still, not loud. |
@@ -323,10 +353,13 @@ on-panel "live only" badge — never merely a footnote.
 
 **Launch artifact** — two forms, both from the recorded dogfood run:
 (a) a screen capture of the replay for README/launch page, and (b) a **demo
-fixture mode**: the run's event log ships as a bundled JSON fixture, and
-`?demo` feeds it to the same replay player — an interactive demo that runs
-with no engine, no DB, on a static host. No new dependency; the replay reducer
-is the mechanism either way.
+fixture mode**: the run ships as one bundled JSON fixture carrying all
+three replayable sources — `events`, `spend_ledger` rows, and the `rounds`
+chapter rows (cursors + artifacts) — and `?demo` feeds it through the same
+replay adapters, so replay cost and the phase inspector work in the demo
+exactly as in replay. An events-only fixture could not (§11 folds
+`events + spend_ledger`; the inspector reads artifacts). No new dependency;
+the replay reducer is the mechanism either way.
 
 ## 7. Copy — the plain-language layer
 
@@ -403,7 +436,7 @@ onboarding surface — no tour, no modal sequence.
 
 ## 8. Data contract
 
-Three read-only endpoints, served from the existing SQLite tables
+Four read-only endpoints, served from the existing SQLite tables
 (schema v11, `engine/src/state/state.ts` — including `rounds` and
 `round_artifacts`); no dashboard-specific engine tables. Response shapes
 mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
@@ -430,7 +463,8 @@ mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
   "lanes": {
     "max": 3,                       // config lanes.max (null if config unreadable)
     "items": [{                     // workers rows, running + driving
-      "lane": "w1", "issue": 86,    // numbers link out to GitHub; no title (deferred, §10)
+      "lane": "w1", "issue": 86,    // numbers link out to GitHub; titles come from the
+                                    // entity's title-bearing events (#207, §3 C), not from here
       "state": "driving", "pr": 97,
       "startedAt": "…", "endedAt": null,
       "costUsd": null,              // SUM(spend_ledger) per worker — real cost, written at
@@ -467,8 +501,12 @@ mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
                   "inputTokens": 0, "outputTokens": 0 }]
   },
   "rings": 27,                      // COUNT(events WHERE kind='merged') — the ring count
+  "logPath": "data/logs/run-….log", // the run-scoped engine log file's path (#193) — shown by
+                                    // the phase inspector's "view log" entry (§6); live-only,
+                                    // path only — the server never serves log content
   "config": { /* ALLOWLISTED subset of resolved config (§3 E) — the server names the
-                 keys it serves; never the whole object */ }
+                 keys it serves, never the whole object; includes the per-role
+                 model/effort keys the §3 C/§6 captions read */ }
 }
 ```
 
@@ -489,11 +527,23 @@ replay cursor maps event → spend position by timestamp
 (`spend_ledger.ts <= current event's ts`) — display-grade alignment, no
 cross-table join.
 
+**Phase bucketing** (the §3 E "by phase" bars): a spend row belongs to the
+phase whose `round-phase` window (#206's full trail — initial `aligning`,
+every transition, terminal `closed`) contains its `ts`; same
+display-grade timestamp rule as the cursor mapping. Rows outside any known
+phase window — all pre-#206 history — bucket as **"unattributed"**, drawn
+last and labeled; a silent misfile into a real phase is worse than an
+honest leftover bucket.
+
 **`GET /api/rounds`** — replay chapter marks and (deferred) round browsing;
 one row per closed round from `round_artifacts`, ascending:
 
 ```jsonc
 { "rounds": [{ "roundId": 12, "schemaVersion": 1,
+               "startEventId": 480, "startSpendId": 3111,
+                                 // the #123 id cursors from the `rounds` row —
+                                 // replay's exact chapter windows (§11); they are
+                                 // NOT artifact fields, the server joins them in
                "artifact": { /* the validated JSON, verbatim —
                                 docs/round-artifact.md is the contract; the UI
                                 checks schemaVersion and says "newer schema —
@@ -501,9 +551,9 @@ one row per closed round from `round_artifacts`, ascending:
 ```
 
 Server: `node:http` on `127.0.0.1` (port configurable, default 4517), SQLite
-opened read-only, serves `dashboard/dist` statics plus these two routes. No
-POST/PUT/DELETE routes exist — the read-only posture is structural, not
-policy.
+opened read-only, serves `dashboard/dist` statics plus these four GET
+routes. No POST/PUT/DELETE routes exist — the read-only posture is
+structural, not policy.
 
 ## 9. Tech architecture
 
@@ -539,7 +589,7 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 - **Config editing** — needs a write path + auth story; contradicts v0.2's
   read-only posture.
 - **Deep round-browse views** (per-round drill-down pages beyond the lit
-  phase strip, the replay chapters, and the single-phase inspector drawer
+  stage nodes, the replay chapters, and the single-phase inspector drawer
   (§6), which are IN for v0.2) — the `round_artifacts` data exists; the
   additional cross-round UI surface is not v0.2 scope.
 - **History-aggregation metrics** (cycle time, merge/rework rate) — deferred
@@ -627,20 +677,24 @@ overlay** (est telemetry, config, board). Replay is not a second UI — it is
 the same UI with a different cursor. §9's single reducer is this mechanism;
 the overlay is the named boundary.
 
-### Engine follow-ups (all additive; #1–2 filed as #206)
+### Engine follow-ups (all additive; #1–2 filed as #206, #3 as #207)
 
-1. **`round-phase` event** — `appendEvent("round-phase", { round_id, phase })`
-   beside `advanceRoundPhase` (`round.ts`); without it the hero's phase strip
-   cannot replay.
-2. **`run-started` event** — appended once at CLI startup, payload carrying
-   the resolved-config snapshot (or its hash). Gives replay its run grouping
-   and later makes the config drawer historically honest (§10).
-3. **Titles in event payloads** (design-director amendment) — `dispatched`
-   carries the issue title, PR-producing/merging events carry the PR title,
-   read from data the engine already holds at those moments (board query /
-   forge response) — never an extra GitHub call. Powers the §3 C hover
-   tooltips offline and in replay; older events without the field degrade to
-   no tooltip.
+1. **`round-phase` event** (#206) — `appendEvent("round-phase",
+   { round_id, phase })` covering the **full trail**: the initial `aligning`
+   at round open, every `advanceRoundPhase` transition, and the terminal
+   `closed`; without it the hero's phase lighting cannot replay and the
+   §8 spend phase-bucketing has no windows.
+2. **`run-started` event** (#206) — appended once at CLI startup, payload
+   `{ config: <allowlisted subset>, configHash }` — the same allowlist the
+   config drawer serves (§3 E); a hash alone cannot power historical
+   captions or budgets. Gives replay its run grouping and later makes the
+   config drawer historically honest (§10).
+3. **Titles in event payloads** (#207, design-director amendment) —
+   `dispatched` carries the issue title, PR-producing/merging events carry
+   the PR title, read from data the engine already holds at those moments
+   (board query / forge response) — never an extra GitHub call. Powers the
+   §3 C hover tooltips offline and in replay; entities without a
+   title-bearing event degrade to no tooltip.
 
 New event kinds must land in the §7 copy map in the same PR (gate②
 checklist); payload-only additions like #3 need no copy entry.
