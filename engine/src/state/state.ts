@@ -835,6 +835,32 @@ export class State {
     });
   }
 
+  /** #223: transition a worker row to a TERMINAL state and record its settled spend in ONE
+   *  sqlite transaction — same shape as registerCanaryDispatch above. conductor.ts's reclaim
+   *  path used to persist the terminal `upsertWorker` first and `recordSpend` second as two
+   *  separate writes; a crash (or a thrown forge call the caller awaited in between) between
+   *  them permanently removed the worker from reclaim while its cost never reached
+   *  spend_ledger — every ledger consumer under-counted forever, including the dailyBudgetUsd
+   *  hard safety ceiling. Bundling the pair here makes that partial state unrepresentable: it
+   *  either both land or neither does, so a lane is always either still reclaimable (retry next
+   *  tick) or (terminal AND spend ledgered) — never terminal-without-spend. Callers must do any
+   *  forge label/board write AFTER this call, never between the two writes it bundles — a lost
+   *  label is cosmetic, a lost ledger row is money (issue #223's ordering rule). */
+  settleTerminalWorker(
+    row: WorkerRow,
+    spend: { worker: string; issue: number; usd: number; at: string; models?: ModelUsageEntry[] },
+  ): void {
+    this.db.exec("BEGIN");
+    try {
+      this.upsertWorker(row);
+      this.recordSpend(spend.worker, spend.issue, spend.usd, spend.at, spend.models ?? []);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   /** Cumulative usd ledgered under this worker NAME across all of its terminal legs. */
   spentUsdForWorker(worker: string): number {
     const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE worker = ?").get(worker) as {

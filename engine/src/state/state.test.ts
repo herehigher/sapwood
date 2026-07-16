@@ -1150,6 +1150,48 @@ test("park (P2-A): registerCanaryDispatch is ATOMIC — worker row + canary assi
   s.close();
 });
 
+test("#223: settleTerminalWorker is ATOMIC — the terminal worker row + its settled spend row land together; a failure inside the transaction rolls back BOTH (never terminal-without-spend)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 10, session_id: "s1", state: "running", started_at: "t0", ended_at: null });
+
+  // Happy path: one call, both land.
+  s.settleTerminalWorker(
+    { name: "lane-1", issue: 10, session_id: "s1", state: "done", started_at: "t0", ended_at: "t1" },
+    { worker: "lane-1", issue: 10, usd: 2.5, at: "t1" },
+  );
+  assert.equal(s.getWorker("lane-1")?.state, "done");
+  assert.equal(s.spentUsdForWorker("lane-1"), 2.5);
+
+  // Unrepresentable partial state: a recordSpend failure rolls back the terminal upsertWorker
+  // too — the exact crash-window shape #223 reports (worker row terminal, spend_ledger row
+  // missing) cannot be produced through this method.
+  s.upsertWorker({ name: "lane-2", issue: 11, session_id: "s2", state: "running", started_at: "t0", ended_at: null });
+  const realRecordSpend = s.recordSpend.bind(s);
+  s.recordSpend = () => {
+    throw new Error("simulated recordSpend failure");
+  };
+  assert.throws(
+    () =>
+      s.settleTerminalWorker(
+        { name: "lane-2", issue: 11, session_id: "s2", state: "done", started_at: "t0", ended_at: "t1" },
+        { worker: "lane-2", issue: 11, usd: 3, at: "t1" },
+      ),
+    /simulated recordSpend failure/,
+  );
+  assert.equal(s.getWorker("lane-2")?.state, "running", "the terminal transition rolled back with the failed spend write");
+  assert.equal(s.spentUsdForWorker("lane-2"), 0, "no partial ledger row either");
+
+  // A clean retry (spend now succeeds) commits both, exactly once.
+  s.recordSpend = realRecordSpend;
+  s.settleTerminalWorker(
+    { name: "lane-2", issue: 11, session_id: "s2", state: "done", started_at: "t0", ended_at: "t2" },
+    { worker: "lane-2", issue: 11, usd: 3, at: "t2" },
+  );
+  assert.equal(s.getWorker("lane-2")?.state, "done");
+  assert.equal(s.spentUsdForWorker("lane-2"), 3);
+  s.close();
+});
+
 test("park: a fresh episode after clearPark starts with its own clean enteredAt/probeAttempts", () => {
   const s = mem();
   s.enterPark("llm", "first episode", 1, "2026-07-14T00:00:00Z");

@@ -441,6 +441,99 @@ test("tick reclaim: KEEP stays, DONE+PR -> done/DRIVING, DONE+noPR -> escalate+n
   st.close();
 });
 
+// ── #223: terminal worker state + settled spend must be ONE atomic transaction, and any forge
+//   write must run strictly AFTER it — a crash or thrown forge call between separate writes
+//   used to leave a lane terminal (out of reclaim forever) with its cost never reaching
+//   spend_ledger, silently under-counting every ledger consumer including the dailyBudgetUsd
+//   hard safety ceiling. ─────────────────────────────────────────────────────────────────────
+
+test("#223: recordSpend throwing rolls back the WHOLE terminal transition — the worker stays reclaimable (never terminal-without-spend); a clean retry commits state+spend exactly once", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-x", 30);
+  sup.probes["lane-x"] = { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 4.5 };
+
+  // Fake state: recordSpend throws (simulates a crash/corruption at the ledger write) —
+  // settleTerminalWorker's own BEGIN/COMMIT/ROLLBACK must undo the terminal upsertWorker too.
+  const realRecordSpend = st.recordSpend.bind(st);
+  st.recordSpend = () => {
+    throw new Error("simulated recordSpend failure");
+  };
+  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated recordSpend failure/);
+  assert.equal(st.getWorker("lane-x")?.state, "running", "terminal transition rolled back with the failed spend write");
+  assert.equal(st.spentUsdForWorker("lane-x"), 0);
+  assert.deepEqual(forge.labelsAdded, [], "the transaction never committed, so the (now-correctly-ordered) label write never ran");
+
+  // Rerun: recordSpend recovers — the SAME still-`running` lane reclaims and records exactly once.
+  st.recordSpend = realRecordSpend;
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getWorker("lane-x")?.state, "done");
+  assert.equal(st.spentUsdForWorker("lane-x"), 4.5, "recorded exactly once — the failed attempt left no partial row to double up on");
+  assert.deepEqual(forge.labelsAdded, [[30, "needs-human"]]);
+  assert.deepEqual(r.reclaimed, [{ kind: "done", worker: "lane-x", issue: 30, next: "ESCALATE_NOPR", costUsd: 4.5, modelUsage: [] }]);
+  st.close();
+});
+
+test("#223: a forge label write throwing AFTER the atomic transition leaves the worker terminal WITH spend already ledgered — never terminal-without-spend; the lost label is the accepted cosmetic gap, not a money gap", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-y", 31);
+  sup.probes["lane-y"] = { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 6 };
+  forge.throwOnAddLabel = true;
+
+  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated forge failure/);
+  // The #223 fix: state+spend commit BEFORE the forge write now, so a thrown label call can
+  // only cost the (cosmetic) label — never the (money) ledger row.
+  assert.equal(st.getWorker("lane-y")?.state, "done");
+  assert.equal(st.spentUsdForWorker("lane-y"), 6);
+  assert.deepEqual(forge.labelsAdded, []);
+
+  // The worker is already terminal, so it never re-enters runningWorkers() — a rerun cannot
+  // re-reclaim it and cannot double-record its spend.
+  forge.throwOnAddLabel = false;
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.spentUsdForWorker("lane-y"), 6, "recorded exactly once — the retry never re-touches an already-terminal lane");
+  assert.deepEqual(r.reclaimed, []);
+  st.close();
+});
+
+test("#223 crash-simulation: a State reopened after a mid-transaction spend failure shows no terminal-without-spend row on disk (same reopen pattern as the #211 crash-resume tests)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-atomic-spend-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const before = new State(path);
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedRunning(before, "lane-z", 32);
+    sup.probes["lane-z"] = { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 9 };
+    before.recordSpend = () => {
+      throw new Error("simulated crash mid-transaction");
+    };
+    await assert.rejects(() => tick({ forge, state: before, supervisor: sup, cfg: mkCfg() }));
+    before.close();
+
+    // Reopen — the crash/restart boundary. On-disk state must show the terminal transition
+    // rolled back WITH the failed spend write, never a terminal row with an empty ledger.
+    const after = new State(path);
+    assert.equal(after.getWorker("lane-z")?.state, "running", "on-disk row never went terminal without its spend");
+    assert.equal(after.spentUsdForWorker("lane-z"), 0);
+
+    // The resumed engine reclaims normally on the next tick and records exactly once.
+    const sup2 = new FakeSupervisor();
+    sup2.probes["lane-z"] = { ...DEFAULT_PROBE, done: true, hasPr: false, costUsd: 9 };
+    const forge2 = new FakeForge();
+    const r = await tick({ forge: forge2, state: after, supervisor: sup2, cfg: mkCfg() });
+    assert.equal(after.getWorker("lane-z")?.state, "done");
+    assert.equal(after.spentUsdForWorker("lane-z"), 9);
+    assert.deepEqual(r.reclaimed, [{ kind: "done", worker: "lane-z", issue: 32, next: "ESCALATE_NOPR", costUsd: 9, modelUsage: [] }]);
+    after.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #155: per-probe lane telemetry — persisted while KEEP, cleared the instant a lane leaves
 // `running` (any reclaim outcome: done/driving, failed/driving, handoff, dead). ────────────
 
