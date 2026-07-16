@@ -528,6 +528,24 @@ test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits
   state.close();
 });
 
+test("createDefaultPeripherals (#212 gate② P2-4): every pool label write failing propagates OUT of the aligning phase — round.ts never persists the marker, so a rerun retries selection from scratch", async () => {
+  const state = new State(":memory:");
+  class FailAddLabelForge extends FakeForge {
+    override async addLabel(): Promise<void> {
+      throw new Error("simulated forge failure");
+    }
+  }
+  const forge = new FailAddLabelForge();
+  forge.ready = [{ number: 1, title: "t", labels: [] }];
+  // roles.po disabled keeps this test focused on applyPoolLabels' own throw behavior (the
+  // deterministic path also routes every write through it) rather than session scripting.
+  const cfg = mkCfg({ roles: { po: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  await assert.rejects(() => peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null }), /ALL 1 label write\(s\) failed/);
+  state.close();
+});
+
 test("architecting stub (#127 gate② F3): with roles.po.enabled=false the architect context states the aligning phase is switched off — never the 'ran but recorded no summary' fallback (a fabricated phase)", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();

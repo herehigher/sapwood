@@ -842,6 +842,37 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
         `escalation.humanLabels so the escalation label is recognized by both PR and issue holds`,
     });
   }
+  // #212 gate② P1-1: round close auto-REMOVES labels.roundPool (round.ts's removeRoundPoolLabel)
+  // — the ONE engine-owned label that's ever stripped without a human act. If an operator
+  // configures labels.roundPool equal to any OTHER protected/workflow label (needsHuman,
+  // blocked, planApproved, verifyNa, ..., or any escalation.humanLabels entry), that same
+  // auto-removal would silently strip the aliased label too, forging exactly the human-release
+  // signature #147's gated reentry (and gate⓪'s plan:approved/verify:n/a adjudication) depends
+  // on being human-only. Reject the collision at config load, same case-insensitive comparison
+  // labelsInclude uses everywhere else.
+  const otherLabels: Array<[string, string]> = [
+    ["labels.inProgress", cfg.labels.inProgress],
+    ["labels.needsHuman", cfg.labels.needsHuman],
+    ["labels.blocked", cfg.labels.blocked],
+    ["labels.reserve", cfg.labels.reserve],
+    ["labels.verifyNa", cfg.labels.verifyNa],
+    ["labels.planApproved", cfg.labels.planApproved],
+    ["labels.originAgent", cfg.labels.originAgent],
+    ...cfg.escalation.humanLabels.map((label, i): [string, string] => [`escalation.humanLabels[${i}]`, label]),
+  ];
+  for (const [key, value] of otherLabels) {
+    if (labelsInclude([value], cfg.labels.roundPool)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labels", "roundPool"],
+        message:
+          `labels.roundPool ("${cfg.labels.roundPool}") collides with ${key} ("${value}") — round ` +
+          `close auto-removes labels.roundPool (round.ts's removeRoundPoolLabel), so aliasing it to ` +
+          `a protected label would let the engine silently strip that label too; use a distinct ` +
+          `value for labels.roundPool.`,
+      });
+    }
+  }
 });
 
 /** Parse + validate raw YAML/JSON text. Exported for testing without disk I/O. */

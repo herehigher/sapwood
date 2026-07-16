@@ -114,7 +114,27 @@ reviewer:
   # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
   escalateAfterSec: 86400
 
-# labels omitted: this repo adopts the shipped sapwood:* namespace defaults.
+# labels omitted: this repo adopts the shipped sapwood:* namespace defaults. Shown here (all
+# commented) so every workflow-label key has ONE documented home; see docs/configuration.md's
+# `labels` table for the full description of each.
+# labels:
+#   prefix: "sapwood:"        # namespace for every omitted default below + the type:*/prio:*
+#                              # taxonomy. "" selects bare (unprefixed) names.
+#   inProgress: sapwood:in-progress
+#   needsHuman: sapwood:needs-human
+#   blocked: sapwood:blocked
+#   reserve: sapwood:reserve
+#   verifyNa: "sapwood:verify:n/a"
+#   planApproved: "sapwood:plan:approved"
+#   originAgent: sapwood:origin:agent
+#   roundPool: sapwood:round:pool
+#                              # #212: round-pool membership (applied by the aligning phase's
+#                              # selection pass, cleared by the engine at round close — see
+#                              # round.poolFactor below). MUST be distinct from every other
+#                              # label above and from every escalation.humanLabels entry — round
+#                              # close auto-removes labels.roundPool, so aliasing it to a
+#                              # protected label (e.g. needsHuman) would let the engine silently
+#                              # strip that label too. Config load rejects the collision.
 
 # #87/#104: peripheral role sessions — the round orchestrator's aligning (PO)/architecting/
 # plan_review (gate⓪)/harvesting/retro phases, each a role-scoped session wired into runRounds's

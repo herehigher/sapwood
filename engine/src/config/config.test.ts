@@ -242,6 +242,53 @@ test("#170: the needs-human write label must be recognized by the human-label ho
   );
 });
 
+// ── #212 gate② P1-1: labels.roundPool must not alias any other protected/workflow label ────────
+
+test("#212 gate② P1-1: labels.roundPool colliding with labels.needsHuman is rejected — round close auto-removes roundPool, so aliasing it would silently strip the human-hold label too", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}labels: { roundPool: sapwood:needs-human }`),
+    /labels\.roundPool.*collides with labels\.needsHuman/is,
+  );
+});
+
+test("#212 gate② P1-1: the collision check is case-insensitive, same semantics as labelsInclude", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}labels: { roundPool: SAPWOOD:NEEDS-HUMAN }`),
+    /labels\.roundPool.*collides with labels\.needsHuman/is,
+  );
+});
+
+test("#212 gate② P1-1: labels.roundPool colliding with an escalation.humanLabels entry (not just labels.needsHuman itself) is rejected", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () =>
+      parseConfig(
+        `${base}labels: { needsHuman: needs-human, roundPool: extra-hold }\nescalation: { humanLabels: [needs-human, extra-hold] }`,
+      ),
+    /labels\.roundPool.*collides with escalation\.humanLabels/is,
+  );
+});
+
+test("#212 gate② P1-1: labels.roundPool colliding with labels.planApproved or labels.verifyNa is rejected", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}labels: { roundPool: sapwood:plan:approved }`),
+    /labels\.roundPool.*collides with labels\.planApproved/is,
+  );
+  assert.throws(
+    () => parseConfig(`${base}labels: { roundPool: "sapwood:verify:n/a" }`),
+    /labels\.roundPool.*collides with labels\.verifyNa/is,
+  );
+});
+
+test("#212 gate② P1-1: a distinct labels.roundPool value (including the shipped default) is accepted", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.doesNotThrow(() => parseConfig(base)); // shipped default: sapwood:round:pool, no collision
+  assert.doesNotThrow(() => parseConfig(`${base}labels: { roundPool: sapwood:my-custom-pool }`));
+});
+
 // ── #156: reviewer.triggerCommand — user-defined review trigger entry point ─────────────────
 
 test("#156: reviewer.triggerCommand defaults to `@codex review` (byte-for-byte today's hardcoded trigger)", () => {

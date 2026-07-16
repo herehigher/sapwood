@@ -2109,39 +2109,87 @@ test("PoolScopedForge #212: filters LIVE label state on every call — a dead-la
   assert.deepEqual(forge.addLabelCalls, [], "PoolScopedForge itself never writes a label — read-only filtering");
 });
 
-test("runRounds #212 (gate① F2): round close clears the pool label from EVERY undispatched member, including one that moved OFF Ready mid-round — not just still-Ready ones; a member actually dispatched this round is untouched", async () => {
+test("runRounds #212 (gate② P1-3, superseding gate① F2): round close clears the pool label from EVERY still-open member — including one actually DISPATCHED this round (no exemption) and one that moved OFF Ready mid-round", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
   const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 } }); // cap 1 -> only #1 dispatches
-  const dispatchMe = { number: 1, title: "dispatch me", labels: [cfg.labels.roundPool] };
+  // #212 gate② P1-3: gate① F2's "dispatched this round" exemption is dropped entirely — a
+  // dispatched-but-still-open issue (in review, not yet merged by round close) is NOT exempt.
+  // "Persists through dispatch" covers only a SAME-ROUND dead-lane requeue (PoolScopedForge
+  // re-filters live label state on every dispatch tick, so a requeue mid-round never needs
+  // re-labelling); a LATER round must re-select it, never inherit a stale label.
+  const dispatchedStillOpen = { number: 1, title: "dispatched this round, PR still open", labels: [cfg.labels.roundPool] };
   const stayReadyPooled = { number: 2, title: "stay pooled but undispatched", labels: [cfg.labels.roundPool] };
-  // #212 gate① F2: a pool member that left Ready mid-round for a reason OTHER than this round's
-  // own dispatch (human board action, milestone edit, gate⓪ revoking plan:approved, ...) — it
-  // is open but no longer in forge.ready. Pre-fix, round close only swept getReadyIssues() and
-  // would leave this label stuck forever (a future-round selection bypass); post-fix it must be
-  // cleared too, via the full-open-backlog sweep (forge.listOpenIssues()).
+  // A pool member that left Ready mid-round for a reason OTHER than this round's own dispatch
+  // (human board action, milestone edit, gate⓪ revoking plan:approved, ...) — open but no
+  // longer in forge.ready. The sweep is over the FULL open backlog (listOpenIssues()), not just
+  // getReadyIssues(), so this gets cleared too.
   const offReadyPooled = { number: 3, title: "moved off Ready mid-round, still open", labels: [cfg.labels.roundPool] };
-  forge.ready = [dispatchMe, stayReadyPooled];
-  forge.openIssues = [dispatchMe, stayReadyPooled, offReadyPooled];
+  forge.ready = [dispatchedStillOpen, stayReadyPooled];
+  forge.openIssues = [dispatchedStillOpen, stayReadyPooled, offReadyPooled];
   const sup = new AutoCompleteSupervisor();
   const deps = baseDeps({ forge, supervisor: sup, sleep, cfg, poolLabel: cfg.labels.roundPool });
   const stopSafety = boundedStopOnPhase(deps, 5);
   await runRounds(deps);
   stopSafety();
   assert.deepEqual(sup.dispatchedIssues, [1]);
-  assert.ok(dispatchMe.labels.includes(cfg.labels.roundPool), "the DISPATCHED member's label persists (lifecycle item 2)");
+  assert.ok(
+    !dispatchedStillOpen.labels.includes(cfg.labels.roundPool),
+    "the dispatched-but-still-open member's label is ALSO cleared — no exemption",
+  );
   assert.ok(!stayReadyPooled.labels.includes(cfg.labels.roundPool), "the still-Ready undispatched member's label was cleared");
-  assert.ok(!offReadyPooled.labels.includes(cfg.labels.roundPool), "the off-Ready undispatched member's label was ALSO cleared (F2)");
+  assert.ok(!offReadyPooled.labels.includes(cfg.labels.roundPool), "the off-Ready undispatched member's label was cleared too");
   assert.deepEqual(
     forge.removeLabelCalls.map(([n]) => n).sort((a, b) => a - b),
-    [2, 3],
-    "removeLabel fired for both undispatched members (Ready and off-Ready), never the dispatched one",
+    [1, 2, 3],
+    "removeLabel fired for every still-open pool member, with zero exemptions",
   );
   assert.ok(
     forge.removeLabelCalls.every(([, l]) => l === cfg.labels.roundPool),
     "only the pool label is ever removed",
   );
   deps.state.close();
+});
+
+test("runRounds #212 (gate② P2-5): a removeLabel failure on ONE issue doesn't abort the round-close sweep — the remaining pool members still get cleared", async () => {
+  const { sleep } = mkSleepSpy();
+  const cfg = mkCfg();
+  class FlakyRemoveForge extends FakeForge {
+    override async removeLabel(n: number, l: string): Promise<void> {
+      // Record the ATTEMPT (base FakeForge.removeLabel only records on its own body, which a
+      // pre-throw override never reaches) before deciding whether to fail it — the test asserts
+      // on removeLabelCalls to prove #2 was still attempted after #1 failed.
+      this.removeLabelCalls.push([n, l]);
+      if (n === 1) throw new Error("simulated forge failure removing #1");
+      for (const issue of [...this.ready, ...this.openIssues]) {
+        if (issue.number === n) issue.labels = issue.labels.filter((x) => x !== l);
+      }
+    }
+  }
+  const forge = new FlakyRemoveForge();
+  forge.ready = [];
+  forge.openIssues = [
+    { number: 1, title: "removal fails", labels: [cfg.labels.roundPool] },
+    { number: 2, title: "removal succeeds", labels: [cfg.labels.roundPool] },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const deps = baseDeps({ forge, state, sleep, cfg, poolLabel: cfg.labels.roundPool });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(
+    forge.removeLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 2],
+    "both issues were attempted — the first one's failure did not skip the second",
+  );
+  const issue2 = forge.openIssues.find((i) => i.number === 2);
+  assert.ok(!issue2!.labels.includes(cfg.labels.roundPool), "the SECOND issue's label was actually cleared despite the first failing");
+  assert.ok(
+    events.some(([kind, payload]) => kind === "tick-error" && String((payload as { error: string }).error).includes("#1")),
+    "the #1 failure was recorded as a tick-error, never silently swallowed and never aborting the sweep",
+  );
+  state.close();
 });
 
 test("runRounds #212: poolLabel unset -> round close never calls removeLabel at all (no pool feature configured, nothing to clear)", async () => {

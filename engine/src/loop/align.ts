@@ -381,7 +381,9 @@ async function computePoolCandidates(forge: IForge, cfg: SapwoodConfig): Promise
  *  the SAME set on a crash-rerun, no durable marker of its own needed (round.ts's rerun-not-
  *  resume phase marker covers the narrow post-return crash window, same as every other
  *  peripheral). A per-issue write failure is contained and logged — it stays out of the pool
- *  rather than aborting the whole selection. */
+ *  rather than aborting the whole selection, UNLESS every single one failed (see the throw
+ *  below): a non-empty selection that landed ZERO labels is not a partial degrade, it's total
+ *  forge failure, and must not read as "the pool is now correctly empty." */
 async function applyPoolLabels(
   forge: IForge,
   cfg: SapwoodConfig,
@@ -389,13 +391,33 @@ async function applyPoolLabels(
   log?: (message: string) => void,
 ): Promise<void> {
   const warn = log ?? console.error;
+  let successes = 0;
   for (const issue of issues) {
-    if (labelsInclude(issue.labels, cfg.labels.roundPool)) continue; // already labelled — idempotent skip
+    if (labelsInclude(issue.labels, cfg.labels.roundPool)) {
+      successes++; // already labelled — idempotent skip counts as achieved
+      continue;
+    }
     try {
       await forge.addLabel(issue.number, cfg.labels.roundPool);
+      successes++;
     } catch (e) {
       warn(`[sapwood:pool] round-pool selection: failed to label #${issue.number} — it stays out of this round's pool: ${String(e)}`);
     }
+  }
+  // #212 gate② P2-4: propagate a TOTAL failure (every write in a non-empty set failed) instead
+  // of returning as if the pool were legitimately empty. Thrown out of the aligning phase's
+  // PeripheralStub, this reaches round.ts's runPeripheral uncaught — the phase marker is never
+  // persisted, so a crash-rerun (the SAME rerun-not-resume contract every peripheral relies on)
+  // retries selection from scratch instead of silently advancing past aligning with an empty
+  // pool and a marker that claims the phase succeeded. A validly EMPTY selection (the session
+  // chose zero candidates, or the deterministic path had zero candidates to begin with) never
+  // hits this — `issues.length === 0` short-circuits the guard, exactly the "select none is a
+  // valid, complete outcome" case the po-pool prompt documents.
+  if (issues.length > 0 && successes === 0) {
+    throw new Error(
+      `round-pool selection: ALL ${issues.length} label write(s) failed — refusing to silently advance past ` +
+        `aligning with an empty pool; the phase will retry on the next attempt`,
+    );
   }
 }
 
@@ -509,6 +531,33 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
     return selectRoundPool({ forge, cfg, ...(deps.log !== undefined ? { log: deps.log } : {}) });
   }
   const log = deps.log ?? console.error;
+
+  // #212 gate② P1-2: "crash recovery = re-read the label" (issue #212's own design line). A
+  // crash AFTER the PO session's labels were applied but BEFORE the aligning phase's marker
+  // persisted (round.ts's runPeripheral) restarts this whole function from scratch with the
+  // marker still null. A FRESH session's selection can differ from the prior attempt's (LLM
+  // nondeterminism) — and applyPoolLabels only ADDS, so a second pass would UNION the two
+  // selections onto the same issues, breaking the cap and pooling issues the fresh session
+  // never actually chose. If ANY open issue already carries the pool label, this IS that exact
+  // same-round rerun: adopt it verbatim, no session, no additional labels. Prior-round
+  // staleness cannot produce a false positive here — the round-close sweep (round.ts, gate②
+  // P1-3) is now exhaustive over the full open backlog, so the label never survives past its
+  // own round's close.
+  let existing: Issue[];
+  try {
+    existing = (await forge.listOpenIssues()).filter((i) => labelsInclude(i.labels, cfg.labels.roundPool));
+  } catch (e) {
+    log(`[sapwood:pool] round ${deps.roundId}: existing-pool read failed — proceeding to a fresh selection: ${String(e)}`);
+    existing = [];
+  }
+  if (existing.length > 0) {
+    log(
+      `[sapwood:pool] round ${deps.roundId}: adopted existing pool (${existing.length} issue(s) already carry ` +
+        `${cfg.labels.roundPool}) — same-round crash-rerun, no new session, no additional labels.`,
+    );
+    return existing;
+  }
+
   let candidates: Issue[];
   try {
     candidates = await computePoolCandidates(forge, cfg);

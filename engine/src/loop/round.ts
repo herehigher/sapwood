@@ -952,43 +952,46 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "kill-switch" };
       }
 
-      // #212 (gate① F2): release any still-undispatched pool member back to plain Ready — GitHub
-      // is the source of truth for pool membership (PoolScopedForge's own doc comment), so this
-      // is a live re-read, never a durable pointer. Sweeps the FULL open backlog
-      // (forge.listOpenIssues(), not just getReadyIssues()) so a pool member that moved OFF
-      // Ready mid-round for any reason other than this round's own dispatch — a human board
-      // action, a milestone edit, gate⓪ revoking plan:approved — still gets its label cleared:
-      // a stale pool label surviving on a non-Ready issue would make it dispatch-eligible again
-      // in some FUTURE round the moment it re-enters Ready, without ever going through that
-      // round's own selection (a selection bypass). A pool member actually DISPATCHED this
-      // round is the one deliberate exception — its label persists (the #212 lifecycle) — so
-      // this round's own "dispatched" events (the same durable per-round ledger window
-      // dispatchedThisRound() inside runExecuting reads) are the exclusion set. Contained: same
-      // fail-toward-closing-the-round stance as the artifact persistence below — a forge failure
-      // here degrades to a tick-error, never blocks the round from closing (a stray label is a
-      // cosmetic residual the NEXT sweep still catches, not a correctness hazard on its own —
-      // this is exactly the residual F2 closes by making that next sweep exhaustive).
+      // #212 (gate② P1-3, superseding gate① F2's dispatched-events exemption): clear the pool
+      // label from EVERY still-open issue that carries it — no exemption for "dispatched this
+      // round." GitHub is the source of truth for pool membership (PoolScopedForge's own doc
+      // comment), so this is a live re-read, never a durable pointer, and it sweeps the FULL
+      // open backlog (forge.listOpenIssues(), not just getReadyIssues()) so a pool member that
+      // moved OFF Ready for ANY reason — this round's own dispatch, a human board action, a
+      // milestone edit, gate⓪ revoking plan:approved — still gets cleared. "Persists through
+      // dispatch" (the #212 lifecycle) covers only a SAME-ROUND dead-lane requeue (see
+      // PoolScopedForge's own doc comment) — a dispatched issue that requeues in some LATER
+      // round must re-enter the pool via that round's own selection, never by inheriting a
+      // stale label (the exact selection-bypass gate① F2 was meant to close, and gate② review
+      // found the F2 fix still hadn't gone far enough: an actually-dispatched-but-still-open
+      // issue was the one remaining exempted case). Merged/closed issues are already excluded —
+      // listOpenIssues() never returns them. P2-5: the try/catch is PER ISSUE (not wrapped
+      // around the whole loop) — one failed removeLabel logs a tick-error and the sweep
+      // continues to every remaining issue, rather than a single bad issue aborting the clear
+      // for everything after it in iteration order.
       if (deps.poolLabel) {
+        let openIssues: Issue[] = [];
         try {
-          const dispatchedThisRoundIssues = new Set(
-            deps.state
-              .eventsAfterId(round.start_event_id ?? 0, ["dispatched"])
-              .map((e) => (e.payload as { issue?: unknown }).issue)
-              .filter((n): n is number => typeof n === "number"),
-          );
-          const openIssues = await forge.listOpenIssues();
-          for (const issue of openIssues) {
-            if (dispatchedThisRoundIssues.has(issue.number)) continue; // persists — dispatched this round
-            if (labelsInclude(issue.labels, deps.poolLabel)) {
-              await removeRoundPoolLabel(forge, cfg, issue.number, deps.poolLabel);
-            }
-          }
+          openIssues = await forge.listOpenIssues();
         } catch (e) {
           tickErrors++;
           try {
-            deps.state.appendEvent("tick-error", { error: `round-pool label clear failed: ${String(e)}` });
+            deps.state.appendEvent("tick-error", { error: `round-pool label clear failed (listOpenIssues): ${String(e)}` });
           } catch {
             /* state write failed too — tickErrors still counts it */
+          }
+        }
+        for (const issue of openIssues) {
+          if (!labelsInclude(issue.labels, deps.poolLabel)) continue;
+          try {
+            await removeRoundPoolLabel(forge, cfg, issue.number, deps.poolLabel);
+          } catch (e) {
+            tickErrors++;
+            try {
+              deps.state.appendEvent("tick-error", { error: `round-pool label clear failed for #${issue.number}: ${String(e)}` });
+            } catch {
+              /* state write failed too — tickErrors still counts it */
+            }
           }
         }
       }

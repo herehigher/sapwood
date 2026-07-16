@@ -1507,6 +1507,63 @@ test("runPoolSelection: zero Ready candidates -> no session dispatched (nothing 
   assert.deepEqual(selected, []);
 });
 
+test("runPoolSelection (gate② P1-2): a pre-existing pool-labelled open issue is adopted verbatim — no session dispatched, no new label writes (same-round crash-rerun, not prior-round staleness)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  // Ready still shows fresh candidates as the backlog stands NOW — but an already-labelled
+  // issue in the open backlog is the crash signature: a prior attempt THIS round already
+  // applied labels from its own (now-lost) session output before the process crashed, and the
+  // aligning phase marker never persisted (round.ts's rerun-not-resume). A fresh session here
+  // would pick a possibly-DIFFERENT selection and applyPoolLabels only adds — unionizing onto
+  // the prior attempt's labels would break the cap. Adopt the existing labelled set instead.
+  forge.ready = [mkReady(5, 3), mkReady(6, 3)];
+  forge.backlogIssues = [{ number: 9, title: "already selected before the crash", labels: [cfg.labels.roundPool] }];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([5]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [9],
+    "the ADOPTED set, never a fresh selection over the current Ready backlog",
+  );
+  assert.equal(runner.calls.length, 0, "no session dispatched — the existing pool was adopted instead");
+  assert.equal(forge.addLabelCalls.length, 0, "no new label writes — the adopted issue already carries the label");
+});
+
+test("runPoolSelection (gate② P1-2): with NO pre-existing pool-labelled issue, a fresh session runs normally (the adoption check is a same-round-rerun guard, not a standing bypass)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  forge.backlogIssues = []; // nothing already labelled
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+  );
+  assert.equal(runner.calls.length, 1, "a fresh session runs — nothing to adopt");
+});
+
+test("applyPoolLabels (gate② P2-4, via selectRoundPool): every label write failing for a non-empty selection THROWS — never silently returns as though the pool were correctly empty", async () => {
+  const cfg = mkCfg();
+  const forge = new (class extends FakeForge {
+    override async addLabel(): Promise<void> {
+      throw new Error("simulated forge failure");
+    }
+  })();
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  await assert.rejects(() => selectRoundPool({ forge, cfg }), /ALL 2 label write\(s\) failed/);
+});
+
+test("applyPoolLabels (gate② P2-4): a validly EMPTY selection (zero candidates) never throws — 'select/have nothing' is a legitimate outcome, not a failure", async () => {
+  const cfg = mkCfg();
+  const forge = new FakeForge();
+  forge.ready = [];
+  const selected = await selectRoundPool({ forge, cfg });
+  assert.deepEqual(selected, []);
+});
+
 test("validatePoolSelectionOutput: a valid proper subset of the candidate list is ok", () => {
   const result = validatePoolSelectionOutput(poolResultText([2, 5]), [1, 2, 5, 9], 3);
   assert.ok(result.ok);
