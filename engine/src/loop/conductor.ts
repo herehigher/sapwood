@@ -969,11 +969,16 @@ async function reclaimTerminalLane(
     // #155: leaving `running` — clear the LIVE telemetry trio (settled real cost stays in
     // spend_ledger, recordSpend below, unchanged).
     state.clearLiveTelemetry(w.name);
-    state.upsertWorker({ ...w, state: "handoff", ended_at: iso() });
     // #172 verified live 2026-07-14: resumed Claude Code legs report PER-LEG total_cost_usd,
     // not a cumulative session total. Each terminal transition records that leg directly;
     // spend across the initial handoff + resumed legs therefore sums exactly once.
-    state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+    // #223: state + spend in ONE transaction (settleTerminalWorker) — no forge call in this
+    // branch, so the only crash window was the two separate writes themselves.
+    const handoffAt = iso();
+    state.settleTerminalWorker(
+      { ...w, state: "handoff", ended_at: handoffAt },
+      { worker: w.name, issue: w.issue, usd: costUsd, at: handoffAt, models: modelUsage },
+    );
     state.appendEvent("handoff", { worker: w.name, issue: w.issue });
     // #168 P1-1b: a handed-off canary RAN (crossed its soft budget doing real work) — the
     // strongest possible non-env terminal signal. Resume.
@@ -987,16 +992,26 @@ async function reclaimTerminalLane(
     // #168 P1-1b: a DONE canary proves the provider is back — resume the llm episode.
     settleCanary(state, w.name, false, iso);
     const next = laneOnReclaimDone(p.hasPr);
+    // #223: state + spend atomic (settleTerminalWorker) BEFORE any forge write — a lost label
+    // is cosmetic, a lost ledger row is money. This was the bug named in #223: the ESCALATE_NOPR
+    // branch used to await forge.addLabel BETWEEN the terminal upsertWorker and recordSpend, so
+    // a thrown label write skipped recordSpend with the worker already terminal.
+    const doneAt = iso();
     if (next === "DRIVING") {
       // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
       // gate resolves it). No requeue, no human escalation.
-      state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
+      state.settleTerminalWorker(
+        { ...w, state: "driving", ended_at: doneAt, pr: p.prNumber ?? w.pr ?? null },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: doneAt, models: modelUsage },
+      );
     } else {
       // ESCALATE_NOPR: done but no PR -> nothing to drive; free the lane, escalate to human.
-      state.upsertWorker({ ...w, state: "done", ended_at: iso() });
+      state.settleTerminalWorker(
+        { ...w, state: "done", ended_at: doneAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: doneAt, models: modelUsage },
+      );
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
     }
-    state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
     state.appendEvent("reclaim-done", { worker: w.name, issue: w.issue, next });
     return { kind: "done", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
@@ -1036,7 +1051,16 @@ async function reclaimTerminalLane(
       // forever. Persist-first means the worst crash outcome is a duplicate requeue attempt
       // (setBoardStatus to `ready` twice — idempotent on the board), never a stranded issue.
       const rollbackId = state.addPendingRollback(w.issue, "ready", ENV_FAILURE_REQUEUE_REASON, iso());
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      // #223: state + spend atomic (settleTerminalWorker), BEFORE attemptRollback's forge/board
+      // write. The old code called attemptRollback (awaited) between the terminal upsertWorker
+      // and recordSpend — attemptRollback itself never throws (it catches internally), but a
+      // hard process crash during that awaited call still used to leave the row terminal with
+      // no ledger row. Moving the atomic pair first removes that window entirely.
+      const failedAt = iso();
+      state.settleTerminalWorker(
+        { ...w, state: "failed", ended_at: failedAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage },
+      );
       // SUSPENSION (PR #180 review P1-2): while a FORGE park episode is open, the requeue is
       // NOT attempted — persisting the durable row above is the whole action (zero forge
       // writes while the forge is known-down; the frozen row drains via the ROLLBACK RETRY
@@ -1052,7 +1076,6 @@ async function reclaimTerminalLane(
           iso,
         );
       }
-      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
       return { kind: "env-failure", worker: w.name, issue: w.issue, source: envSource, costUsd, modelUsage };
     }
     if (envSource && p.hasPr) {
@@ -1070,14 +1093,13 @@ async function reclaimTerminalLane(
       // where a human eventually learns about it.
       const retained = supervisor.inspectWorktree(w.name);
       if (retained.worktreeRetained) {
-        state.upsertWorker({
-          ...w,
-          state: "failed",
-          ended_at: iso(),
-          pr: p.prNumber ?? w.pr ?? null,
-          gated_escalation_labeled: 0,
-        });
-        state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+        // #223: state + spend atomic — no forge write in this branch (deliberately ZERO forge
+        // calls, see comment above), so only the two-write crash window needed closing.
+        const preservedAt = iso();
+        state.settleTerminalWorker(
+          { ...w, state: "failed", ended_at: preservedAt, pr: p.prNumber ?? w.pr ?? null, gated_escalation_labeled: 0 },
+          { worker: w.name, issue: w.issue, usd: costUsd, at: preservedAt, models: modelUsage },
+        );
         state.appendEvent("env-failure-preserved", {
           worker: w.name,
           issue: w.issue,
@@ -1088,8 +1110,12 @@ async function reclaimTerminalLane(
         return { kind: "env-failure", worker: w.name, issue: w.issue, source: envSource, costUsd, modelUsage };
       }
       // Clean + PR: rescue to driving, exactly the ordinary disposition (no label either way).
-      state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
-      state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
+      // #223: state + spend atomic — no forge write on this path either.
+      const rescuedAt = iso();
+      state.settleTerminalWorker(
+        { ...w, state: "driving", ended_at: rescuedAt, pr: p.prNumber ?? w.pr ?? null },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: rescuedAt, models: modelUsage },
+      );
       state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next: "DRIVING" });
       return { kind: "failed", worker: w.name, issue: w.issue, next: "DRIVING", costUsd, modelUsage };
     }
@@ -1104,10 +1130,19 @@ async function reclaimTerminalLane(
       retained = supervisor.inspectWorktree(w.name);
       if (retained.worktreeRetained) next = "ESCALATE";
     }
+    // #223: state + spend atomic (settleTerminalWorker) either way below. The ESCALATE branch's
+    // forge writes already ran BEFORE the terminal upsert here (parity with the DEAD path,
+    // unchanged) — a thrown label write there aborts before any terminal write lands, so the
+    // worker just stays reclaimable next tick. No reordering needed on that side; only the
+    // upsertWorker+recordSpend pair itself needed to become one transaction.
+    const failedAt = iso();
     if (next === "DRIVING") {
       // Failed but a clean PR exists (e.g. budget-exhausted after opening it): rescue — hold
       // the lane driving for the review gate rather than escalating.
-      state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
+      state.settleTerminalWorker(
+        { ...w, state: "driving", ended_at: failedAt, pr: p.prNumber ?? w.pr ?? null },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage },
+      );
     } else {
       // Forge work BEFORE the terminal upsert (parity with the DEAD path's ordering). needs-human
       // lands on the PR too, where the merge gate reads labels, when the escalation is dirty-WIP.
@@ -1116,9 +1151,11 @@ async function reclaimTerminalLane(
         if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
         await reportRetainedWorktree(forge, state, w.name, w.issue, retained.worktreePath, cfg.labels.needsHuman);
       }
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      state.settleTerminalWorker(
+        { ...w, state: "failed", ended_at: failedAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage },
+      );
     }
-    state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
     state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next });
     return { kind: "failed", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
@@ -1251,8 +1288,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       reclaimed.push(terminal);
       continue;
     }
-    // #47: the same {costUsd, modelUsage} pair feeds BOTH state.recordSpend (the #14 ledger)
-    // and the reclaimed[] outcome — computed once so the two never drift apart.
+    // #47: the same {costUsd, modelUsage} pair feeds BOTH the eventual settleTerminalWorker
+    // spend (the #14 ledger, #223: atomic with the terminal state write) and the reclaimed[]
+    // outcome — computed once so the two never drift apart.
     const costUsd = p.costUsd ?? 0;
     const modelUsage = p.modelUsage ?? [];
     const laneClass = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive, p.dispatchedAgeSec, cfg.worker.timeoutSec);
@@ -1312,18 +1350,37 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // failed (never driving -> DRIVE never sees it) and land `needs-human` where the gate
     // looks — on the PR too, when its number is known.
     const rescued = p.hasPr && !r.worktreeRetained;
+    // #223: state + spend atomic (settleTerminalWorker) in every branch below. The retained-
+    // worktree branch's forge writes already ran BEFORE the terminal upsert (unchanged — a
+    // thrown label write there aborts before any terminal write lands). The else branch used to
+    // call attemptRollback (awaited forge/board write) BETWEEN the terminal upsertWorker and the
+    // trailing recordSpend at the end of the loop body — same crash-window bug named in #223,
+    // just reached via the DEAD path rather than a terminal sentinel. Fixed the same way: settle
+    // state+spend first, attempt the rollback after.
+    // Usually 0 (a DEAD lane has no terminal sentinel to parse a cost from) but record whatever
+    // the probe knows — harmless, and future probes may recover a partial cost.
+    const deadAt = iso();
     if (r.worktreeRetained) {
       await forge.addLabel(w.issue, cfg.labels.needsHuman);
       if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
       await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      state.settleTerminalWorker(
+        { ...w, state: "failed", ended_at: deadAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
       // No requeue to Ready: an open PR must not be raced by a fresh worker, and a no-PR dirty
       // lane is a human-salvage case (needs-human already blocks re-dispatch), not a clean
       // re-dispatch. The retained worktree + needs-human hold it for human triage.
     } else if (rescued) {
-      state.upsertWorker({ ...w, state: "driving", ended_at: iso(), pr: p.prNumber ?? w.pr ?? null });
+      state.settleTerminalWorker(
+        { ...w, state: "driving", ended_at: deadAt, pr: p.prNumber ?? w.pr ?? null },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
     } else {
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
+      state.settleTerminalWorker(
+        { ...w, state: "failed", ended_at: deadAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
       // #31 (finding 2): persist the requeue BEFORE attempting it. The old code awaited this
       // unguarded AFTER the row above already went terminal — a transient forge failure here
       // used to propagate straight out of tick() with the worker row already `failed` and the
@@ -1342,9 +1399,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         ),
       );
     }
-    // Usually 0 (a DEAD lane has no terminal sentinel to parse a cost from) but record whatever
-    // the probe knows — harmless, and future probes may recover a partial cost.
-    state.recordSpend(w.name, w.issue, costUsd, iso(), modelUsage);
     state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
     reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
