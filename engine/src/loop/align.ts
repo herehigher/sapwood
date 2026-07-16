@@ -42,7 +42,7 @@ import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.j
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { issuePriority } from "./conductor.js";
-import type { PeripheralStub } from "./round.js";
+import { type PeripheralStub, removeRoundPoolLabel } from "./round.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
  *  ledger's persisted marker for this phase, also embedded in every comment this phase posts
@@ -353,15 +353,75 @@ function triageDegradeReason(result: RoleSessionResult, expectedIssue: number): 
 // never from anything the session could name directly (no label field exists in the schema:
 // the removeLabel/addLabel containment invariant holds structurally, the same "engine performs
 // every write itself" stance as align/triage above). Invalid-twice or a failed session degrades
-// OPEN to the full deterministic candidate set (selectRoundPool below) — never an empty pool,
-// never a wedged round. roles.po.enabled=false skips the session entirely and IS that same
-// deterministic path (#212 AC7: "the selection bound must not depend on an optional role") —
-// round-defaults.ts calls runPoolSelection unconditionally every round regardless of the PO
-// role's enabled state; only whether it *pays for a session* differs.
+// OPEN to the full deterministic candidate set — never an empty pool, never a wedged round.
+// roles.po.enabled=false skips the session entirely and IS that same deterministic path (#212
+// AC7: "the selection bound must not depend on an optional role") — round-defaults.ts calls
+// runPoolSelection unconditionally every round regardless of the PO role's enabled state; only
+// whether it *pays for a session* differs.
+//
+// #212 gate② r2 (replacing r1's "adopt existing" heuristic, found unsalvageable in review):
+// labels alone cannot tell a SAME-ROUND crash rerun apart from a PRIOR-round residual — a
+// persistent removeLabel failure or the disabled/fail-open read paths could each starve a fresh
+// selection or union onto stale state indefinitely. The fix is a durable EVENT, not a label
+// heuristic: the instant this round's target is computed (whichever path computed it), the
+// engine appends a `pool-selected` event {round_id, issues} — BEFORE any label write — and a
+// crash-rerun of this exact phase (marker still null) replays that event's issue numbers
+// verbatim instead of recomputing. This is what kills PO-session nondeterminism-on-rerun
+// structurally: a fresh session could pick a DIFFERENT subset than the crashed attempt, and
+// union-only label application would then break the cap. Once the target (replayed or freshly
+// computed) is known, `reconcilePoolLabels` makes the open backlog's labels match it EXACTLY —
+// adding where missing, removing from anything labelled but not in the target — which also
+// heals prior-round residuals and cross-milestone strays as a side effect, with no heuristic of
+// its own needed.
 export interface PoolSelectionDeps {
   forge: IForge;
   cfg: SapwoodConfig;
   log?: (message: string) => void;
+}
+
+const PoolSelectedEventSchema = z.object({ round_id: z.number().int().positive(), issues: z.array(z.number().int().positive()) }).strict();
+
+/** Read THIS round's durable pool-selection record (the crash-rerun REPLAY target), if any.
+ *  Same "scan from event id 0, filter by round_id in the payload" pattern as proposalProgress
+ *  above — pool-selected events are round-scoped by their own payload field, not by a cursor.
+ *  Fail CLOSED on a malformed or duplicated record (never guess which of two conflicting
+ *  decisions is authoritative) — the caller (runPoolSelection) treats a thrown read as "no
+ *  persisted decision yet" and computes fresh, the same degrade-toward-availability stance as
+ *  every other contained read in this module. `null` means no record exists for this round at
+ *  all; an empty array `[]` is itself a valid persisted decision ("this round selected
+ *  nothing") and must be told apart from `null` — callers check `!= null`, never truthiness. */
+function readPersistedPoolSelection(state: State, roundId: number): number[] | null {
+  const events = state.eventsAfterId(0, ["pool-selected"]);
+  let found: number[] | null = null;
+  for (const event of events) {
+    const payloadRound =
+      typeof event.payload === "object" && event.payload !== null && "round_id" in event.payload
+        ? (event.payload as { round_id?: unknown }).round_id
+        : undefined;
+    if (payloadRound !== roundId) continue;
+    const parsed = PoolSelectedEventSchema.safeParse(event.payload);
+    if (!parsed.success) throw new Error(`malformed pool-selected event for round ${roundId}`);
+    if (found != null) throw new Error(`multiple pool-selected events for round ${roundId}`);
+    found = parsed.data.issues;
+  }
+  return found;
+}
+
+/** Persist THIS round's pool-selection decision, ONCE, BEFORE any label write — the durable
+ *  record runPoolSelection's replay-first check (readPersistedPoolSelection above) reads back
+ *  on a crash-rerun. Written at most once per round by construction: this is only ever called
+ *  from runPoolSelection's "no persisted record found yet" branch, never from the replay
+ *  branch. Best-effort: a write failure here is logged, never thrown — GitHub's live label
+ *  state (reconciled immediately after this call returns) remains the actual source of truth;
+ *  losing the durable record only costs a future crash-rerun the replay optimization (it
+ *  recomputes, and — on the session path — pays for a fresh session), never correctness:
+ *  reconcile still converges labels to whatever target that rerun lands on. */
+function persistPoolSelection(state: State, roundId: number, target: readonly Issue[], log?: (message: string) => void): void {
+  try {
+    state.appendEvent("pool-selected", { round_id: roundId, issues: target.map((i) => i.number) });
+  } catch (e) {
+    (log ?? console.error)(`[sapwood:pool] round ${roundId}: failed to persist the pool-selection record: ${String(e)}`);
+  }
 }
 
 /** The deterministic candidate/fallback ordering: Ready, sorted prio:0-first then issue-number-
@@ -421,14 +481,55 @@ async function applyPoolLabels(
   }
 }
 
+/** Reconcile the open backlog's round-pool labels to EXACTLY `target`: add the label to every
+ *  target member lacking it (applyPoolLabels above — idempotent, throws on TOTAL add failure
+ *  per #212 gate② P2-4), then remove it from every OTHER open issue that carries it. This heals
+ *  prior-round residuals, cross-milestone strays, and partial-crash leftovers as a side effect
+ *  of selection itself — no adopt-existing heuristic needed (gate② r1's version of that idea is
+ *  removed entirely; the durable pool-selected event, see readPersistedPoolSelection/
+ *  persistPoolSelection above, is what owns crash-rerun safety now — this function only owns
+ *  convergence). REMOVE failures are logged and skipped, never thrown: round.ts's own
+ *  round-close sweep, and the NEXT round's reconcile pass, are further nets against a stray
+ *  label that resists removal here. Removal is routed through round.ts's removeRoundPoolLabel —
+ *  the SAME hardcoded, non-session-reachable containment as round close, never a bespoke
+ *  `forge.removeLabel` call site. */
+async function reconcilePoolLabels(
+  forge: IForge,
+  cfg: SapwoodConfig,
+  target: readonly Issue[],
+  log?: (message: string) => void,
+): Promise<void> {
+  const warn = log ?? console.error;
+  await applyPoolLabels(forge, cfg, target, log);
+
+  const targetNumbers = new Set(target.map((i) => i.number));
+  let openIssues: Issue[];
+  try {
+    openIssues = await forge.listOpenIssues();
+  } catch (e) {
+    warn(`[sapwood:pool] round-pool reconcile: open-backlog read failed — stray labels left unhealed this pass: ${String(e)}`);
+    return;
+  }
+  for (const issue of openIssues) {
+    if (targetNumbers.has(issue.number)) continue;
+    if (!labelsInclude(issue.labels, cfg.labels.roundPool)) continue;
+    try {
+      await removeRoundPoolLabel(forge, cfg, issue.number, cfg.labels.roundPool);
+    } catch (e) {
+      warn(`[sapwood:pool] round-pool reconcile: failed to remove the stale pool label from #${issue.number}: ${String(e)}`);
+    }
+  }
+}
+
 /** The deterministic, no-session pool selection: the FULL candidate set (computePoolCandidates),
- *  labelled unconditionally. This is (1) roles.po.enabled=false's documented AC7 fallback, and
- *  (2) the degrade-OPEN target when the PO's selection session is invalid twice or fails twice
- *  (runPoolSelection below) — "no LLM judgment available" always degrades to "take the whole
- *  bound," never to an empty pool. A forge read failure degrades to "pool left as whatever it
- *  already was" (logged, never thrown) — the executing phase simply dispatches into whatever
- *  the pool already contains this round. Returns the selected issues (empty on a read failure)
- *  for callers/tests that want to observe the pick. */
+ *  reconciled unconditionally (reconcilePoolLabels above — adds to every candidate, removes from
+ *  every other open issue that's stray-labelled). This is (1) roles.po.enabled=false's
+ *  documented AC7 fallback, called directly by runPoolSelection below, and (2) still exported
+ *  for direct testing/any caller that wants "the label state made to match top-cap Ready" with
+ *  no event bookkeeping of its own. A forge read failure degrades to "pool left as whatever it
+ *  already was" (logged, never thrown, no reconcile attempted at all) — the executing phase
+ *  simply dispatches into whatever the pool already contains this round. Returns the selected
+ *  issues (empty on a read failure) for callers/tests that want to observe the pick. */
 export async function selectRoundPool(deps: PoolSelectionDeps): Promise<Issue[]> {
   const { forge, cfg } = deps;
   const log = deps.log ?? console.error;
@@ -439,7 +540,7 @@ export async function selectRoundPool(deps: PoolSelectionDeps): Promise<Issue[]>
     log(`[sapwood:pool] round-pool selection: Ready read failed — pool left unchanged this round: ${String(e)}`);
     return [];
   }
-  await applyPoolLabels(forge, cfg, candidates, deps.log);
+  await reconcilePoolLabels(forge, cfg, candidates, deps.log);
   return candidates;
 }
 
@@ -516,110 +617,137 @@ export interface PoolSelectionRunDeps extends PoolSelectionDeps {
 
 /** Orchestrates one round's pool selection end to end (round-defaults.ts's ONE call site,
  *  invoked every round regardless of roles.po.enabled — see this section's own module doc for
- *  the AC7 rationale). roles.po.enabled=false, or zero Ready candidates, never dispatches a
- *  session: the former is the documented deterministic fallback, the latter is simply nothing
- *  to choose from (no point paying for a session over an empty list). Otherwise: build the
- *  candidate digest, run the po-pool session (same runner machinery + zero-gh-grant tool scope
- *  as align/triage: PO_ALLOWED_TOOLS/PO_DISALLOWED_TOOLS, runSessionWithRetry's retry-once-then-
- *  degrade), validate its output against the candidate bound, and apply labels to exactly the
- *  validated selection. Invalid twice / failed twice degrades OPEN to the full candidate set
- *  (selectRoundPool's own deterministic path) — a durable `pool-degraded` event + a log line,
- *  never an empty pool from a session outage. */
+ *  the AC7 rationale and the gate② r2 durable-event design). Shape:
+ *
+ *  1. REPLAY FIRST, on both the enabled and disabled paths: read this round's persisted
+ *     `pool-selected` event (readPersistedPoolSelection). Found -> the target is that event's
+ *     issue numbers (mapped back to live Issue objects via a fresh listOpenIssues() read) —
+ *     no session, no recompute, straight to reconcile. This is the crash-rerun path: a prior
+ *     attempt this round already decided, and replaying is what makes a fresh (possibly
+ *     DIFFERENT) PO session on rerun structurally impossible.
+ *  2. Not found, roles.po.enabled=false: the target is the deterministic candidate set
+ *     (computePoolCandidates) — the documented AC7 fallback, no session ever.
+ *  3. Not found, roles.po.enabled=true, zero candidates: nothing to choose from — the target is
+ *     simply empty (still persisted + reconciled, so any stale labels get healed).
+ *  4. Not found, roles.po.enabled=true, candidates exist: run the po-pool session (same runner
+ *     machinery + zero-gh-grant tool scope as align/triage — PO_ALLOWED_TOOLS/
+ *     PO_DISALLOWED_TOOLS, runSessionWithRetry's retry-once-then-degrade), validate its output
+ *     against the candidate bound, and the target is either the validated selection (a proper
+ *     subset is a real outcome) or — invalid/failed twice — the full candidate set (degrade
+ *     OPEN, a durable `pool-degraded` event + a log line, never an empty pool from a session
+ *     outage).
+ *
+ *  Once the target is known (replayed OR freshly computed), a fresh computation is persisted
+ *  (persistPoolSelection, before any label write) and EVERY path converges through the same
+ *  `reconcilePoolLabels` call — add where the target lacks the label, remove it from any other
+ *  open issue that has it. Reconcile is what heals residuals; the event is what makes reruns
+ *  safe; neither alone would be. */
 export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issue[]> {
   const { forge, cfg } = deps;
-  if (!cfg.roles.po.enabled) {
-    return selectRoundPool({ forge, cfg, ...(deps.log !== undefined ? { log: deps.log } : {}) });
-  }
   const log = deps.log ?? console.error;
 
-  // #212 gate② P1-2: "crash recovery = re-read the label" (issue #212's own design line). A
-  // crash AFTER the PO session's labels were applied but BEFORE the aligning phase's marker
-  // persisted (round.ts's runPeripheral) restarts this whole function from scratch with the
-  // marker still null. A FRESH session's selection can differ from the prior attempt's (LLM
-  // nondeterminism) — and applyPoolLabels only ADDS, so a second pass would UNION the two
-  // selections onto the same issues, breaking the cap and pooling issues the fresh session
-  // never actually chose. If ANY open issue already carries the pool label, this IS that exact
-  // same-round rerun: adopt it verbatim, no session, no additional labels. Prior-round
-  // staleness cannot produce a false positive here — the round-close sweep (round.ts, gate②
-  // P1-3) is now exhaustive over the full open backlog, so the label never survives past its
-  // own round's close.
-  let existing: Issue[];
+  let persisted: number[] | null;
   try {
-    existing = (await forge.listOpenIssues()).filter((i) => labelsInclude(i.labels, cfg.labels.roundPool));
+    persisted = readPersistedPoolSelection(deps.state, deps.roundId);
   } catch (e) {
-    log(`[sapwood:pool] round ${deps.roundId}: existing-pool read failed — proceeding to a fresh selection: ${String(e)}`);
-    existing = [];
+    log(`[sapwood:pool] round ${deps.roundId}: persisted pool-selection record corrupt — treating as absent: ${String(e)}`);
+    persisted = null;
   }
-  if (existing.length > 0) {
+
+  let target: Issue[];
+  if (persisted != null) {
+    const targetSet = new Set(persisted);
+    let openIssues: Issue[];
+    try {
+      openIssues = await forge.listOpenIssues();
+    } catch (e) {
+      log(
+        `[sapwood:pool] round ${deps.roundId}: open-backlog read failed while replaying the persisted selection — ` +
+          `pool left unchanged this pass: ${String(e)}`,
+      );
+      return [];
+    }
+    target = openIssues.filter((i) => targetSet.has(i.number));
     log(
-      `[sapwood:pool] round ${deps.roundId}: adopted existing pool (${existing.length} issue(s) already carry ` +
-        `${cfg.labels.roundPool}) — same-round crash-rerun, no new session, no additional labels.`,
+      `[sapwood:pool] round ${deps.roundId}: replaying the persisted selection (${target.length}/${persisted.length} ` +
+        `target issue(s) still open) — no session, no recompute.`,
     );
-    return existing;
+  } else if (!cfg.roles.po.enabled) {
+    let candidates: Issue[];
+    try {
+      candidates = await computePoolCandidates(forge, cfg);
+    } catch (e) {
+      log(`[sapwood:pool] round-pool selection: Ready read failed — pool left unchanged this round: ${String(e)}`);
+      return [];
+    }
+    persistPoolSelection(deps.state, deps.roundId, candidates, log);
+    target = candidates;
+  } else {
+    let candidates: Issue[];
+    try {
+      candidates = await computePoolCandidates(forge, cfg);
+    } catch (e) {
+      log(`[sapwood:pool] round-pool selection: Ready read failed — pool left unchanged this round: ${String(e)}`);
+      return [];
+    }
+    if (candidates.length === 0) {
+      persistPoolSelection(deps.state, deps.roundId, candidates, log);
+      target = candidates;
+    } else {
+      const now = deps.now ?? ((): Date => new Date());
+      const role = cfg.roles.po;
+      const template = loadRolePromptTemplate(role.poolPromptFile, defaultPoolPromptPath());
+      const candidateNumbers = candidates.map((c) => c.number);
+      // computePoolCandidates already slices to ceil(roundDispatchCap * poolFactor) — the
+      // candidate list's own length IS the effective cap (it can be smaller when Ready itself
+      // has fewer eligible issues than the configured bound allows).
+      const cap = candidates.length;
+      const prompt = renderRolePrompt(template, NO_ISSUE, cfg, {
+        "pool.digest": buildPoolCandidateDigest(candidates, cfg),
+        "pool.cap": String(cap),
+      });
+      const result = await runSessionWithRetry({
+        runner: deps.runner,
+        state: deps.state,
+        session: {
+          roleId: "po-pool",
+          prompt,
+          model: role.model,
+          effort: role.effort,
+          fallbackModel: role.fallbackModel,
+          allowedTools: PO_ALLOWED_TOOLS,
+          disallowedTools: PO_DISALLOWED_TOOLS,
+        },
+        issue: 0,
+        now,
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
+        degradeEvent: "pool-degraded",
+        degradePayload: (r) => ({
+          round_id: deps.roundId,
+          outcome: r.outcome,
+          session: r.name,
+          reason: poolDegradeReason(r, candidateNumbers, cap),
+        }),
+        degradeMessage: (r) =>
+          `[sapwood:pool] round ${deps.roundId}: po-pool selection session failed twice (${r.outcome}) — ` +
+          `degrading to the deterministic top-${cap} selection: ${poolDegradeReason(r, candidateNumbers, cap)}`,
+        isValid: (r) => validatePoolSelectionOutput(r.resultText ?? "", candidateNumbers, cap).ok,
+      });
+      const validated: PoolSelectionValidation =
+        result.outcome === "done"
+          ? validatePoolSelectionOutput(result.resultText ?? "", candidateNumbers, cap)
+          : { ok: false, reason: `po-pool session failed twice (${result.outcome})` };
+
+      // Degrade OPEN (invalid twice / failed twice) -> the full deterministic candidate set,
+      // never an empty pool from a session outage. Otherwise the validated selection itself —
+      // a proper subset is a real outcome, not a degrade.
+      target = validated.ok ? candidates.filter((c) => new Set(validated.selected).has(c.number)) : candidates;
+      persistPoolSelection(deps.state, deps.roundId, target, log);
+    }
   }
 
-  let candidates: Issue[];
-  try {
-    candidates = await computePoolCandidates(forge, cfg);
-  } catch (e) {
-    log(`[sapwood:pool] round-pool selection: Ready read failed — pool left unchanged this round: ${String(e)}`);
-    return [];
-  }
-  if (candidates.length === 0) return [];
-
-  const now = deps.now ?? ((): Date => new Date());
-  const role = deps.cfg.roles.po;
-  const template = loadRolePromptTemplate(role.poolPromptFile, defaultPoolPromptPath());
-  const candidateNumbers = candidates.map((c) => c.number);
-  // computePoolCandidates already slices to ceil(roundDispatchCap * poolFactor) — the candidate
-  // list's own length IS the effective cap (it can be smaller when Ready itself has fewer
-  // eligible issues than the configured bound allows).
-  const cap = candidates.length;
-  const prompt = renderRolePrompt(template, NO_ISSUE, cfg, {
-    "pool.digest": buildPoolCandidateDigest(candidates, cfg),
-    "pool.cap": String(cap),
-  });
-  const result = await runSessionWithRetry({
-    runner: deps.runner,
-    state: deps.state,
-    session: {
-      roleId: "po-pool",
-      prompt,
-      model: role.model,
-      effort: role.effort,
-      fallbackModel: role.fallbackModel,
-      allowedTools: PO_ALLOWED_TOOLS,
-      disallowedTools: PO_DISALLOWED_TOOLS,
-    },
-    issue: 0,
-    now,
-    ...(deps.log !== undefined ? { log: deps.log } : {}),
-    degradeEvent: "pool-degraded",
-    degradePayload: (r) => ({
-      round_id: deps.roundId,
-      outcome: r.outcome,
-      session: r.name,
-      reason: poolDegradeReason(r, candidateNumbers, cap),
-    }),
-    degradeMessage: (r) =>
-      `[sapwood:pool] round ${deps.roundId}: po-pool selection session failed twice (${r.outcome}) — ` +
-      `degrading to the deterministic top-${cap} selection: ${poolDegradeReason(r, candidateNumbers, cap)}`,
-    isValid: (r) => validatePoolSelectionOutput(r.resultText ?? "", candidateNumbers, cap).ok,
-  });
-  const validated: PoolSelectionValidation =
-    result.outcome === "done"
-      ? validatePoolSelectionOutput(result.resultText ?? "", candidateNumbers, cap)
-      : { ok: false, reason: `po-pool session failed twice (${result.outcome})` };
-
-  if (!validated.ok) {
-    // Degrade OPEN: the full deterministic candidate set, not an empty pool.
-    await applyPoolLabels(forge, cfg, candidates, deps.log);
-    return candidates;
-  }
-  const selectedNumbers = new Set(validated.selected);
-  const chosen = candidates.filter((c) => selectedNumbers.has(c.number));
-  await applyPoolLabels(forge, cfg, chosen, deps.log);
-  return chosen;
+  await reconcilePoolLabels(forge, cfg, target, log);
+  return target;
 }
 
 export interface AlignDeps {

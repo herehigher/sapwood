@@ -358,8 +358,10 @@ export class PoolScopedForge implements IForge {
  *  signature. This function is the ONE place engine code may call `forge.removeLabel` — it
  *  fails CLOSED (throws, never removes) for any label other than the engine-owned
  *  `cfg.labels.roundPool`, so a future call site (or a schema field a session could ever
- *  populate) accidentally wired to a different label can never silently slip through. Round
- *  close (below) is the only caller today. */
+ *  populate) accidentally wired to a different label can never silently slip through. Two
+ *  callers today, both engine-only: round close (below) and align.ts's pool-selection reconcile
+ *  pass (clears a stray pool label from an open issue outside this round's selected target, at
+ *  selection time rather than waiting for close). */
 export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, issue: number, label: string): Promise<void> {
   if (!labelsInclude([label], cfg.labels.roundPool)) {
     throw new Error(

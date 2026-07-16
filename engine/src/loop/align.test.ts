@@ -1507,34 +1507,62 @@ test("runPoolSelection: zero Ready candidates -> no session dispatched (nothing 
   assert.deepEqual(selected, []);
 });
 
-test("runPoolSelection (gate② P1-2): a pre-existing pool-labelled open issue is adopted verbatim — no session dispatched, no new label writes (same-round crash-rerun, not prior-round staleness)", async () => {
+test("runPoolSelection (gate② r2): replay path — a persisted pool-selected event is replayed verbatim, no session dispatched, no adopt-existing heuristic involved", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
-  // Ready still shows fresh candidates as the backlog stands NOW — but an already-labelled
-  // issue in the open backlog is the crash signature: a prior attempt THIS round already
-  // applied labels from its own (now-lost) session output before the process crashed, and the
-  // aligning phase marker never persisted (round.ts's rerun-not-resume). A fresh session here
-  // would pick a possibly-DIFFERENT selection and applyPoolLabels only adds — unionizing onto
-  // the prior attempt's labels would break the cap. Adopt the existing labelled set instead.
+  // Ready still shows fresh candidates as the backlog stands NOW — but a durable pool-selected
+  // event from a PRIOR (crashed) attempt this round already recorded a decision. Replay must
+  // win over a fresh session: a fresh session's own selection could differ (LLM nondeterminism)
+  // from what the crashed attempt already decided, and reconciling to a NEW decision would
+  // fight the durable record instead of finishing what it started.
   forge.ready = [mkReady(5, 3), mkReady(6, 3)];
-  forge.backlogIssues = [{ number: 9, title: "already selected before the crash", labels: [cfg.labels.roundPool] }];
-  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([5]))]);
+  forge.backlogIssues = [{ number: 9, title: "the persisted target", labels: [cfg.labels.roundPool] }];
   const state = new State(":memory:");
+  state.appendEvent("pool-selected", { round_id: 1, issues: [9] });
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([5]))]);
   const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
   assert.deepEqual(
     selected.map((i) => i.number),
     [9],
-    "the ADOPTED set, never a fresh selection over the current Ready backlog",
+    "the event's target, never a fresh selection over current Ready",
   );
-  assert.equal(runner.calls.length, 0, "no session dispatched — the existing pool was adopted instead");
-  assert.equal(forge.addLabelCalls.length, 0, "no new label writes — the adopted issue already carries the label");
+  assert.equal(runner.calls.length, 0, "no session dispatched — the persisted event was replayed");
+  assert.deepEqual(forge.addLabelCalls, [], "already labelled — reconcile's idempotent add-skip, no redundant write");
+  assert.deepEqual(forge.removeLabelCalls, [], "nothing else carries the pool label — nothing to heal here");
 });
 
-test("runPoolSelection (gate② P1-2): with NO pre-existing pool-labelled issue, a fresh session runs normally (the adoption check is a same-round-rerun guard, not a standing bypass)", async () => {
+test("runPoolSelection (gate② r2): crash window — the event is persisted but ZERO labels landed before the crash (right after the event write); rerun reconciles the FULL target, still no session", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
-  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
-  forge.backlogIssues = []; // nothing already labelled
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 3 }, round: { poolFactor: 1 } });
+  forge.ready = [];
+  forge.backlogIssues = [
+    { number: 9, title: "target, not yet labelled", labels: [] },
+    { number: 10, title: "also target, not yet labelled", labels: [] },
+  ];
+  const state = new State(":memory:");
+  state.appendEvent("pool-selected", { round_id: 1, issues: [9, 10] });
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [9, 10],
+  );
+  assert.equal(runner.calls.length, 0, "no session — the crash-window rerun replays the persisted target");
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [9, 10],
+    "the crashed attempt never got to label either issue — reconcile finishes the job on rerun",
+  );
+});
+
+test("runPoolSelection (gate② r2): residual healing (session path) — an open issue carrying a STALE pool label that is NOT part of this round's target has it removed during selection", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } }); // cap = 1
+  forge.ready = [mkReady(1, 3)];
+  forge.backlogIssues = [
+    { number: 1, title: "candidate", labels: [] },
+    { number: 99, title: "stale residual — not a candidate this round", labels: [cfg.labels.roundPool] },
+  ];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
   const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
@@ -1542,7 +1570,26 @@ test("runPoolSelection (gate② P1-2): with NO pre-existing pool-labelled issue,
     selected.map((i) => i.number),
     [1],
   );
-  assert.equal(runner.calls.length, 1, "a fresh session runs — nothing to adopt");
+  assert.deepEqual(forge.removeLabelCalls, [[99, cfg.labels.roundPool]], "the stray residual's label was removed, never left dangling");
+});
+
+test("runPoolSelection (gate② r2): residual healing on the DISABLED path too — roles.po.enabled=false still clears a stray pool label from a non-candidate open issue", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { enabled: false } }, lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(1, 3)];
+  forge.backlogIssues = [
+    { number: 1, title: "candidate", labels: [] },
+    { number: 99, title: "stale residual", labels: [cfg.labels.roundPool] },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+  );
+  assert.equal(runner.calls.length, 0, "the PO role is disabled — no session, ever");
+  assert.deepEqual(forge.removeLabelCalls, [[99, cfg.labels.roundPool]]);
 });
 
 test("applyPoolLabels (gate② P2-4, via selectRoundPool): every label write failing for a non-empty selection THROWS — never silently returns as though the pool were correctly empty", async () => {

@@ -546,6 +546,55 @@ test("createDefaultPeripherals (#212 gate② P2-4): every pool label write faili
   state.close();
 });
 
+test("runRounds (#212 gate② r2 finding 3): every pool-label write failing keeps the round in_progress at aligning with a null marker; a second runRounds call resumes the SAME round and retries the phase — never silently advances, never opens a new round", async () => {
+  const state = new State(":memory:");
+  class FailAddLabelForge extends FakeForge {
+    override async addLabel(): Promise<void> {
+      throw new Error("simulated forge failure");
+    }
+    // The base FakeForge hardcodes listOpenIssues() to [] — this test's SECOND runRounds call
+    // replays the persisted pool-selected event (gate② r2) and needs the target issue to
+    // actually resolve as "still open" (same as a real GithubForge would report for a genuinely
+    // open issue), or the replayed target would spuriously resolve empty and mask the
+    // total-failure throw this test is pinning.
+    override async listOpenIssues(): Promise<Issue[]> {
+      return this.ready;
+    }
+  }
+  const forge = new FailAddLabelForge();
+  forge.ready = [{ number: 1, title: "t", labels: [] }];
+  const cfg = mkCfg({ roles: { po: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const deps: RoundDeps = {
+    forge,
+    state,
+    supervisor: new MinimalSupervisor(),
+    cfg,
+    tickIntervalSec: 1,
+    sleep: async () => {},
+    peripherals,
+    registerSignals: () => () => {}, // never touch real process signals in this test
+  };
+
+  // round.ts's runPeripheral has no try/catch around stub.run() — an uncaught peripheral
+  // exception propagates straight out of runRounds, the same crash-rerun contract every
+  // peripheral relies on (a real deployment restarts the process; here, a second runRounds
+  // call over the SAME state simulates exactly that restart).
+  await assert.rejects(() => runRounds(deps), /ALL 1 label write\(s\) failed/);
+  const round = state.getRound(1)!;
+  assert.equal(round.status, "in_progress", "the round never closed");
+  assert.equal(round.phase, "aligning", "still sitting at the phase that threw");
+  assert.equal(round.artifact_ref, null, "the phase marker was never persisted");
+
+  await assert.rejects(() => runRounds(deps), /ALL 1 label write\(s\) failed/);
+  const roundAfterRetry = state.getRound(1)!;
+  assert.equal(roundAfterRetry.round_id, round.round_id, "the SAME round was resumed — openRound() picked it back up, no new round opened");
+  assert.equal(roundAfterRetry.phase, "aligning");
+  assert.equal(roundAfterRetry.artifact_ref, null);
+  state.close();
+});
+
 test("architecting stub (#127 gate② F3): with roles.po.enabled=false the architect context states the aligning phase is switched off — never the 'ran but recorded no summary' fallback (a fabricated phase)", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
