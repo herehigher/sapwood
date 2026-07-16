@@ -173,17 +173,32 @@ the calm default stays calm. It is the promoted form of the old
 convention to a first-class surface. One row per open item, each showing:
 the affected entity (issue/PR number with its type glyph and hover title),
 the plain-language reason (the same §7 copy map sentence that produced the
-feed line — no second vocabulary), *when*, and what the engine did about it
-(stopped the lane / parked the issue / paused the run — from the event
-payload, verbatim fields only). Each row links to the GitHub issue/PR and
-opens the relevant inspector drawer on click. Sources are **strictly
-rust-class events** (`reclaim-failed`, `reclaim-dead`, `drive-needs-human`,
-`rollback-escalated`, `plan-review-escalated`, `ceiling-escalated`,
-environment-park) plus the `stalled` / `disconnected` engine states; an item
-clears when a newer event resolves its entity (dispatch, merge, close, or
-round close for round-scoped escalations) — the strip never invents state
-and never requires an acknowledge action. In replay the strip rebuilds from
-the same fold at the cursor, like every other event-backed surface (§11).
+feed line — no second vocabulary), *when*, and — **only when the payload
+carries it, verbatim fields, never synthesized** — what the engine did
+about it. Each row links to the GitHub issue/PR and opens the relevant
+inspector drawer on click.
+
+Membership is carried by the copy map, not a second list: an event kind
+whose §7 sentence names a human carries `attention: true` on its `copy.ts`
+entry, and the strip renders exactly the flagged kinds — one vocabulary, so
+the strip cannot drift from the sentences. Flagged today:
+`drive-needs-human`, `rollback-escalated`, `plan-review-escalated`,
+`gated-reentry-capped`, `gated-reentry-capped-label-failed`,
+`worktree-retained`, `park-escalated`, `ceiling-escalated`, and
+`reclaim-failed` **only when `payload.next` is not an automatic
+continuation** (a lane whose PR keeps driving is not an open item; a clean
+`reclaim-dead` requeue likewise is not — its human case arrives separately
+as `worktree-retained`). The `stalled` / `disconnected` engine states add
+**entity-less** rows: the state word plus its §3 remedy direction, no
+issue/PR. Clearing is per scope, from the same fold: issue-scoped items
+clear when a later event moves that issue (`dispatched`, `merged`,
+`gated-reentry`); `worktree-retained` clears when its lane next dispatches;
+`park-escalated` clears on `park-resumed`; `ceiling-escalated` clears on
+the next `run-started`; round-scoped escalations clear when their round
+closes; `stalled`/`disconnected` clear when polling recovers. The strip
+never invents state and never requires an acknowledge action. In replay it
+rebuilds from the same fold at the cursor, like every other event-backed
+surface (§11).
 
 **Operations — start · pause · resume · stop** (design-director round 2,
 user decision): the release dashboard is no longer a pure spectator — the
@@ -196,12 +211,13 @@ own control signals:
 |---|---|
 | Pause | Create the PAUSE sentinel: lanes finish their current work, nothing new dispatches. |
 | Resume | Remove the PAUSE sentinel; the next tick continues the run. |
-| Stop | Create the kill-switch sentinel: **graceful drain** — active lanes hand off or finish, then the engine stops. Never a mid-work kill (the PLAN.md security model owns hard-stop). |
+| Stop | Create the kill-switch sentinel — the PLAN.md safety tier, described honestly: active lanes get the bounded drain window (`cost.drainWindowSec`) to finish or hand off; a lane still running after it is hard-stopped by the engine. Drain-first with the existing hard backstop — the dashboard adds no new stop mechanism and must not promise a softer one than the engine has. |
 | Start | Clear stop/pause sentinels so the next tick runs. If the engine *process* is dead, the dashboard cannot spawn it — the button flips to showing the CLI launch command instead (honest boundary; process supervision is not a browser feature). |
 
 **Misfire protection is mandatory**: every verb is two-step — the control
 opens a confirm that names the consequence in §7 plain language ("Stop —
-lanes finish or hand off first; nothing is killed mid-work"), with the
+lanes get the drain window to finish or hand off; any lane still running
+after that is stopped hard"), with the
 confirm action requiring a deliberate second click; Stop additionally arms
 only after a short hold (the one irreversible-feeling verb gets the extra
 beat). While a verb is taking effect the header shows the engine's real
@@ -209,8 +225,17 @@ transition state (`winding down`, `stopping` — §8 derivations, not an
 optimistic flip); controls disable during transitions. Buttons reflect
 validity (Resume only while paused, etc.). Server side this is **one**
 allowlisted `POST /api/control {verb}` route (§8) — sentinel files only, no
-DB, config, or GitHub writes; `dashboard.controls: false` in config removes
-the route and the buttons entirely. Config *editing* stays out (§2 #5,
+DB, config, or GitHub writes. The route defends itself **server-side** — a
+UI confirm binds nobody: it requires `Content-Type: application/json` plus
+a custom `X-Sapwood-Control` header (a cross-origin page hits a CORS
+preflight the server never grants) and rejects requests whose `Origin`
+header, when present, is not the dashboard's own. `dashboard.controls`
+defaults to **true** — the release decision is that operators get these
+verbs out of the box — and `false` removes the route and the buttons
+entirely; the key is new to the (strict) config schema, filed as an engine
+follow-up with this amendment alongside the control-sentinel wiring the
+verbs assume (PAUSE `#75` and the kill switch already exist; only the
+schema key is new). Config *editing* stays out (§2 #5,
 §10) — flipping a documented run-state signal the engine already honors is
 a different risk class from mutating reviewed YAML.
 
@@ -418,10 +443,12 @@ the replay reducer is the mechanism either way.
 
 All user-visible sentences live in one module (`copy.ts`), keyed by event
 kind. Voice: active, specific, no system internals (say "lane", "checks",
-"review", never "reclaim", "tick", "worktree"). The 33 kinds (12 added
-post-lock by #110/#123/#125/#147, plus `run-started`/`round-phase` required
-by §11 and pending their engine issue — **every engine PR that adds an event
-kind must extend this map; make it a gate② checklist item**):
+"review", never "reclaim", "tick", "worktree"). The kinds — counted by the
+map, never by this prose: an earlier hard-coded "33" here had already
+drifted past #180's park/environment family, proving §2's own rule
+(`run-started`/`round-phase` remain pending their engine issue; **every
+engine PR that adds an event kind must extend this map; make it a gate②
+checklist item**):
 
 | Event kind | Feed sentence |
 |---|---|
@@ -443,6 +470,14 @@ kind must extend this map; make it a gate② checklist item**):
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
+| `env-failure` | Lane {worker} hit an environment problem — not the work itself; issue #{issue} goes back with its progress kept |
+| `env-failure-preserved` | Kept lane {worker}'s work safe after an environment problem |
+| `park-escalated` | The environment keeps failing — paused dispatch and flagged a human |
+| `park-probe` | Checking whether the environment has recovered |
+| `park-resumed` | Environment recovered — resuming work |
+| `park-canary` | Sent one test lane to check the environment |
+| `park-canary-failed` | The test lane failed — still waiting on the environment |
+| `park-canary-inconclusive` | The test lane didn't settle it — still waiting on the environment |
 | `tick-error` | The engine hit an error this cycle — it will retry |
 | `standby-wait` | Nothing to work on — checking again in {waitSec} s |
 | `standby-exit` | Work appeared — resuming after {attempts} quiet check(s) |
@@ -461,7 +496,10 @@ kind must extend this map; make it a gate② checklist item**):
 
 The same module captions lane states (`running` → "writing", `driving` → "PR
 under review", `handoff` → "handed off") and config keys (§3 E). Adding an
-event kind without a copy entry is a type error.
+event kind without a copy entry is a type error. Kinds whose sentence names
+a human additionally carry `attention: true` on the same entry — the §3
+Needs-attention strip reads that flag, so the strip and the sentences share
+one map and cannot drift apart.
 
 **Stage labels lead with plain language** (decided at the design-director
 review: PO / gate⓪ / harvest / retro are jargon to anyone who hasn't read
@@ -612,11 +650,15 @@ routes and exactly one write route:
 **`POST /api/control`** — body `{ "verb": "start" | "pause" | "resume" |
 "stop" }`, allowlist-validated; anything else is 400. Effect is sentinel-file
 creation/removal only (§3 Operations) — the SQLite handle stays read-only,
-no config or GitHub writes exist. Response is the §8 engine state after the
-signal (`{"state": "winding-down"}`), so the UI renders the real transition,
-never an optimistic flip. When `dashboard.controls: false`, the route is not
-registered (404) and the buttons don't render — the pure-spectator posture
-remains available as configuration.
+no config or GitHub writes exist. Requests must be same-origin JSON:
+`Content-Type: application/json` plus the `X-Sapwood-Control` header (§3
+Operations); the server grants no CORS, so a foreign page cannot preflight
+through. Response is the §8 engine state after the signal — for Stop that
+is `{"state": "stopping"}` (KILL_SWITCH + active lanes, per the derivation
+above), so the UI renders the real transition, never an optimistic flip.
+When `dashboard.controls: false`, the route is not registered (404) and the
+buttons don't render — the pure-spectator posture remains available as
+configuration.
 
 ## 9. Tech architecture
 
