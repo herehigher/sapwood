@@ -539,12 +539,22 @@ test("roles.po: promptFile unset by default, model/effort defaulted, strict sche
   assert.equal(cfg.roles.po.promptFile, undefined);
   assert.equal(cfg.roles.po.model, "sonnet");
   assert.equal(cfg.roles.po.effort, "medium");
+  assert.equal(cfg.roles.po.backlogDigestMaxChars, 20_000);
   const over = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFile: prompts/custom-po.md, model: opus, effort: high } }",
   );
   assert.equal(over.roles.po.promptFile, "prompts/custom-po.md");
   assert.equal(over.roles.po.model, "opus");
   assert.equal(over.roles.po.effort, "high");
+});
+
+test("roles.po.backlogDigestMaxChars: accepts a bounded override and rejects values too small for explicit placeholders", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { backlogDigestMaxChars: 500 } }");
+  assert.equal(cfg.roles.po.backlogDigestMaxChars, 500);
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { backlogDigestMaxChars: 199 } }"),
+    /backlogDigestMaxChars|greater than or equal to 200/,
+  );
 });
 
 test("roles.po: a typo'd key is rejected, not silently dropped (.strict())", () => {

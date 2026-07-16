@@ -41,6 +41,14 @@ Round context:
 {{plan.md}}
 </plan-md>
 
+The list below IS the current milestone-scoped open backlog. Do not re-propose work it already
+covers, even when the title uses different wording. Hold annotations identify parked gaps; they
+remain existing work and must not be duplicated.
+
+<backlog-digest>
+{{backlog.digest}}
+</backlog-digest>
+
 Read the milestone/theme and the north-star goal file together, then decompose the gap between them into
 zero or more well-scoped issues. For EVERY issue you propose:
 
@@ -49,8 +57,8 @@ zero or more well-scoped issues. For EVERY issue you propose:
   the issue is fit for a headless worker to pick up later; a title alone is not an issue.
   Inherently unverifiable work (pure docs/chore) still needs a `## Verification` or
   `## Acceptance criteria` section explaining why, even if it just says so.
-- Do not duplicate an issue that already covers the same gap — if you cannot tell whether one
-  already exists, say so in a brief note in the body rather than guessing.
+- The backlog digest above is authoritative for current open issues: do not duplicate an issue
+  that already covers the same gap. If overlap is uncertain, propose nothing for that gap.
 - Scope each issue to one coherent unit of work. Prefer several small, well-bounded issues over
   one sprawling one. If nothing needs decomposing this round, propose zero issues — that is a
   valid, complete outcome, not a failure to find something to do.

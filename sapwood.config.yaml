@@ -132,6 +132,8 @@ reviewer:
 #   po: # aligning phase — goal alignment (decomposition) + round-start plan triage
 #     # promptFile: prompts/my-po.md
 #     #                   Unset = the engine's shipped prompts/po.md.
+#     backlogDigestMaxChars: 20000 # Max chars for the milestone-scoped open-issue digest
+#                                  # injected into align mode; deterministic cuts are marked.
 #     model: sonnet
 #     effort: medium
 #     # fallbackModel: sonnet # Every role accepts this key too. Set "none" to fail loud rather

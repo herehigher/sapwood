@@ -328,6 +328,10 @@ const Roles = z
     // CONFIG FILE's directory (see loadConfig below), not the CLI's cwd.
     po: RoleSession.extend({
       promptFile: z.string().optional(),
+      // #215: hard bound on the engine-assembled {{backlog.digest}} injected into align mode.
+      // capDigest marks every cut; the floor leaves room for its marker and for the explicit
+      // zero/read-failure notes, which must never collapse into an indistinguishable blank.
+      backlogDigestMaxChars: z.number().int().min(200).default(20_000),
       // #127: false -> round-defaults.ts omits the aligning stub; the phase no-ops via
       // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
       // for the shared rationale).

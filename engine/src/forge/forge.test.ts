@@ -1031,6 +1031,46 @@ test("listOpenIssueNumbers: every open issue number in this repo", async () => {
   assert.ok(args.includes("--state") && args.includes("open"));
 });
 
+test("listOpenIssues #215: returns number, title, labels, and milestone digest fields", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify([
+      { number: 5, title: "Parked gap", labels: [{ name: "blocked" }], milestone: { title: "M4" } },
+      { number: 7, title: "Unassigned gap", labels: [], milestone: null },
+    ]);
+  };
+  assert.deepEqual(await forge.listOpenIssues(), [
+    { number: 5, title: "Parked gap", labels: ["blocked"], milestone: "M4" },
+    { number: 7, title: "Unassigned gap", labels: [] },
+  ]);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
+  assert.ok(args.includes("--state") && args.includes("open"));
+  assert.ok(args.includes("number,title,labels,milestone"));
+});
+
+test("listOpenIssues #215: rejects an exactly-limit-sized response but accepts limit minus one", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  let issueCount = 999;
+  (forge as unknown as { gh: () => Promise<string> }).gh = async () =>
+    JSON.stringify(
+      Array.from({ length: issueCount }, (_, index) => ({
+        number: index + 1,
+        title: `Issue ${index + 1}`,
+        labels: [],
+        milestone: null,
+      })),
+    );
+
+  assert.equal((await forge.listOpenIssues()).length, 999);
+  issueCount = 1000;
+  await assert.rejects(() => forge.listOpenIssues(), /backlog read is incomplete \(limit 1000\)/);
+});
+
 // ── #110 PR0: updateIssueBody — the WRITE counterpart to getIssueBody, additive infra for the
 //    structured-output rework (unused by any call site in this PR). ──
 
