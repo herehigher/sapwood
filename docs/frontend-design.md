@@ -197,20 +197,22 @@ as `worktree-retained`.) The `stalled` / `disconnected` engine states add
 **entity-less** rows: the state word plus its §3 remedy direction, no
 issue/PR.
 
-Clearing is per scope, from the same fold: issue-scoped items (including
-`env-failure-preserved`) clear when a later event moves that issue
-(`dispatched`, `merged`, `gated-reentry`); `park-escalated` clears on
-`park-resumed`; `ceiling-escalated` clears on the next `run-started` —
-that row is the **breach itself**, while per-entity fallout from the
-breach keeps its own rows with their own entity-scoped clearing;
-round-scoped escalations clear when their round closes;
-`stalled`/`disconnected` clear when polling recovers. One kind has **no
-resolution signal**: nothing marks a retained folder "inspected", so
-`worktree-retained` rows persist until the next `run-started` and say so
-on the row ("clears with the next run") — a documented bounded blind spot,
-chosen over inventing an acknowledge mechanism. The strip never invents
-state and never requires an acknowledge action. In replay it rebuilds from
-the same fold at the cursor, like every other event-backed surface (§11).
+The strip is **run-scoped, like the fold that feeds it**: it shows the
+current run's open items, so a new run naturally starts an empty strip —
+run boundaries are scope, never claimed as resolution. Within the run,
+clearing uses only events that actually resolve the item: issue-scoped
+items (including `ceiling-escalated`, which the engine emits **per
+hard-stopped worker**, and `env-failure-preserved`) clear when a later
+event moves that issue (`dispatched`, `merged`, `gated-reentry`);
+`park-escalated` clears on `park-resumed`; round-scoped escalations clear
+when their round closes; `stalled`/`disconnected` clear when polling
+recovers. One kind has **no resolution signal**: nothing marks a retained
+folder "inspected", so `worktree-retained` rows persist for the rest of
+the run and their row says what to do ("inspect and clean before the next
+run") — a documented bounded blind spot, chosen over inventing an
+acknowledge mechanism. The strip never invents state and never requires
+an acknowledge action. In replay it rebuilds from the same fold at the
+cursor, like every other event-backed surface (§11).
 
 **Operations — start · pause · resume · stop** (design-director round 2,
 user decision): the release dashboard is no longer a pure spectator — the
@@ -482,10 +484,10 @@ checklist item**):
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
-| `env-failure` | Branches on `payload.hasPr`: without a PR → "Lane {worker} hit an environment problem — not the work itself; issue #{issue} goes back with its progress kept"; with a PR → "Lane {worker} hit an environment problem — its open PR keeps driving" |
-| `env-failure-preserved` | Kept lane {worker}'s work safe after an environment problem |
+| `env-failure` | Lane {worker} hit an environment problem — not the work itself (the disposition is narrated by the events that follow: `env-failure-preserved`, `park-*`, or the issue's next `dispatched` — this sentence claims none of them; `hasPr` alone cannot pick the outcome) |
+| `env-failure-preserved` | Kept lane {worker}'s work safe after an environment problem — its PR needs a human to continue it |
 | `park-escalated` | The environment keeps failing — paused dispatch and flagged a human |
-| `park-probe` | Branches on `payload.success`: passed → "Environment check passed — resuming"; failed → "Environment check failed — still waiting on the environment" |
+| `park-probe` | Branches on `payload.success` **and** `payload.source`: forge + passed → "Environment check passed — resuming"; llm + passed → "Initial check passed — testing with one lane" (the LLM park stays until that canary lands); failed → "Environment check failed — still waiting on the environment" |
 | `park-resumed` | Environment recovered — resuming work |
 | `park-canary` | Sent one test lane to check the environment |
 | `park-canary-failed` | The test lane failed — still waiting on the environment |
