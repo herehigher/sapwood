@@ -84,6 +84,19 @@ identical, as a regression trip-wire: a future PR that re-widens the allow-list 
 `Bash(...)` entry lands back inside those denies rather than silently reopening a
 closed bypass class.
 
+Every `RoleRunner` session is additionally spawned without forge credentials:
+`peripheralSessionEnv()` in `peripheral.ts` strips inherited `GH_*`,
+`GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, and `GIT_CONFIG_*`
+variables through a case-normalized denylist, while preserving the CLI's own
+Anthropic authentication and `SAPWOOD_GUARD_MODE`. For the five issues-only roles,
+the empty tool allowlist remains the primary boundary; environment absence is a
+backstop, regression-tested with a poisoned parent environment, so a future
+allowlist-widening regression cannot turn an inherited engine credential into forge
+authority. Worker-class `retro` receives the same stripped environment but keeps
+push working through the ambient git credential helper, as described below.
+Code-producing worker lanes are unaffected: they legitimately hold the token,
+mediated by the guard hook.
+
 **`retro` is the one exception**, by session class rather than role name: it is
 worker-class, with `Read` + local git only — file edits, commit, and push inside its
 own ephemeral worktree (proposals land exclusively as PRs through the normal review
