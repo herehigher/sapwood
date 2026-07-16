@@ -1592,6 +1592,95 @@ test("runPoolSelection (gate② r2): residual healing on the DISABLED path too �
   assert.deepEqual(forge.removeLabelCalls, [[99, cfg.labels.roundPool]]);
 });
 
+// ── #212 gate② r3 ────────────────────────────────────────────────────────────────────────────
+
+test("runPoolSelection (gate② r3 finding 1): a reconcile REMOVAL failure stays degrade-open — a durable pool-reconcile-incomplete event is appended, the phase still completes (never a retry loop over a prioritization mechanism)", async () => {
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } }); // cap = 1
+  const forge = new (class extends FakeForge {
+    override async removeLabel(n: number, l: string): Promise<void> {
+      if (n === 99) throw new Error("simulated forge failure removing #99");
+      await super.removeLabel(n, l);
+    }
+  })();
+  forge.ready = [mkReady(1, 3)];
+  forge.backlogIssues = [
+    { number: 1, title: "candidate", labels: [] },
+    { number: 99, title: "stale residual whose removal will fail", labels: [cfg.labels.roundPool] },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const events = tapEvents(state);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 }); // must NOT throw
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+    "the phase's own target still resolved correctly",
+  );
+  const incomplete = events.find(([kind]) => kind === "pool-reconcile-incomplete");
+  assert.ok(incomplete, "a durable honesty event was recorded");
+  assert.deepEqual(incomplete![1], { round_id: 1, failed_issues: [99] });
+});
+
+test("runPoolSelection (gate② r3 finding 1): a listOpenIssues read failure during reconcile also stays degrade-open, with a read_failed honesty event — never a throw", async () => {
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } });
+  const forge = new (class extends FakeForge {
+    override async listOpenIssues(): Promise<Issue[]> {
+      throw new Error("simulated open-backlog read failure");
+    }
+  })();
+  forge.ready = [mkReady(1, 3)];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const events = tapEvents(state);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+    "the ADD side still succeeded — only the REMOVE side's read failed",
+  );
+  const incomplete = events.find(([kind]) => kind === "pool-reconcile-incomplete");
+  assert.ok(incomplete);
+  assert.deepEqual(incomplete![1], { round_id: 1, read_failed: true });
+});
+
+test("runPoolSelection (gate② r3 finding 3): two pool-selected events for the same round — the LAST one wins, replayed verbatim, no session", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [];
+  forge.backlogIssues = [
+    { number: 1, title: "first event's target (stale)", labels: [] },
+    { number: 2, title: "second (LAST) event's target", labels: [] },
+  ];
+  const state = new State(":memory:");
+  state.appendEvent("pool-selected", { round_id: 1, issues: [1] });
+  state.appendEvent("pool-selected", { round_id: 1, issues: [2] });
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [2],
+    "the LAST event's target, not the first",
+  );
+  assert.equal(runner.calls.length, 0, "no session — replay wins over recompute");
+});
+
+test("runPoolSelection (gate② r3 finding 3): the LAST pool-selected event for this round is malformed — treated as absent (fresh compute), never a throw; growth stops at one extra append", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(5, 3)];
+  const state = new State(":memory:");
+  state.appendEvent("pool-selected", { round_id: 1, issues: [9] }); // an earlier, well-formed event
+  state.appendEvent("pool-selected", { round_id: 1, malformed: true }); // the LAST one — fails the schema
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([5]))]);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [5],
+    "a fresh session ran over the current Ready backlog",
+  );
+  assert.equal(runner.calls.length, 1, "no replay — the malformed LAST event reads as absent, never a throw");
+});
+
 test("applyPoolLabels (gate② P2-4, via selectRoundPool): every label write failing for a non-empty selection THROWS — never silently returns as though the pool were correctly empty", async () => {
   const cfg = mkCfg();
   const forge = new (class extends FakeForge {

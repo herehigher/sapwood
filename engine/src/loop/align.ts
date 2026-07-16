@@ -384,27 +384,40 @@ const PoolSelectedEventSchema = z.object({ round_id: z.number().int().positive()
 /** Read THIS round's durable pool-selection record (the crash-rerun REPLAY target), if any.
  *  Same "scan from event id 0, filter by round_id in the payload" pattern as proposalProgress
  *  above — pool-selected events are round-scoped by their own payload field, not by a cursor.
- *  Fail CLOSED on a malformed or duplicated record (never guess which of two conflicting
- *  decisions is authoritative) — the caller (runPoolSelection) treats a thrown read as "no
- *  persisted decision yet" and computes fresh, the same degrade-toward-availability stance as
- *  every other contained read in this module. `null` means no record exists for this round at
- *  all; an empty array `[]` is itself a valid persisted decision ("this round selected
- *  nothing") and must be told apart from `null` — callers check `!= null`, never truthiness. */
+ *
+ *  #212 gate② r3 (finding 3): LAST-EVENT-WINS, never a throw. Rationale: persistPoolSelection
+ *  is written at most once per round UNDER NORMAL OPERATION, but a corrupt/unparseable record
+ *  (a prior schema, manual DB surgery, ...) must not become a self-amplifying failure — the
+ *  r2 design threw on a malformed OR duplicated record, which (if that record survives) wedges
+ *  EVERY future attempt this round: recompute -> append ANOTHER event -> still throws on the
+ *  next read (now with two-plus matches) -> recompute again, forever. Taking only the LAST
+ *  matching event and treating it — and it alone — as authoritative bounds the damage to
+ *  exactly one extra append: a malformed last event reads as "no persisted decision," so this
+ *  call computes fresh and appends ONE new (valid) event; the very next read then finds THAT
+ *  event last and replays it normally. Growth stops at +1, never runs away.
+ *
+ *  `null` means no record exists for this round at all (or the only/last one found is
+ *  malformed — indistinguishable from "no decision yet" for replay purposes); an empty array
+ *  `[]` is itself a valid persisted decision ("this round selected nothing") and must be told
+ *  apart from `null` — callers check `!= null`, never truthiness. A thrown `state.eventsAfterId`
+ *  (e.g. a DB read failure) still propagates — that's the caller's (runPoolSelection's) own
+ *  contained-read boundary, unchanged. */
 function readPersistedPoolSelection(state: State, roundId: number): number[] | null {
   const events = state.eventsAfterId(0, ["pool-selected"]);
-  let found: number[] | null = null;
+  let lastForRound: unknown;
+  let found = false;
   for (const event of events) {
     const payloadRound =
       typeof event.payload === "object" && event.payload !== null && "round_id" in event.payload
         ? (event.payload as { round_id?: unknown }).round_id
         : undefined;
     if (payloadRound !== roundId) continue;
-    const parsed = PoolSelectedEventSchema.safeParse(event.payload);
-    if (!parsed.success) throw new Error(`malformed pool-selected event for round ${roundId}`);
-    if (found != null) throw new Error(`multiple pool-selected events for round ${roundId}`);
-    found = parsed.data.issues;
+    lastForRound = event.payload; // chronological order (ORDER BY id) — later matches overwrite
+    found = true;
   }
-  return found;
+  if (!found) return null;
+  const parsed = PoolSelectedEventSchema.safeParse(lastForRound);
+  return parsed.success ? parsed.data.issues : null;
 }
 
 /** Persist THIS round's pool-selection decision, ONCE, BEFORE any label write — the durable
@@ -481,6 +494,15 @@ async function applyPoolLabels(
   }
 }
 
+/** Optional durable-event context for reconcilePoolLabels' incomplete-removal honesty record —
+ *  omitted by callers (e.g. selectRoundPool) that have no round context of their own; the
+ *  reconcile still runs identically, it just can't durably record an incomplete pass (a log
+ *  line still fires either way). */
+interface ReconcileEventCtx {
+  state: Pick<State, "appendEvent">;
+  roundId: number;
+}
+
 /** Reconcile the open backlog's round-pool labels to EXACTLY `target`: add the label to every
  *  target member lacking it (applyPoolLabels above — idempotent, throws on TOTAL add failure
  *  per #212 gate② P2-4), then remove it from every OTHER open issue that carries it. This heals
@@ -488,9 +510,18 @@ async function applyPoolLabels(
  *  of selection itself — no adopt-existing heuristic needed (gate② r1's version of that idea is
  *  removed entirely; the durable pool-selected event, see readPersistedPoolSelection/
  *  persistPoolSelection above, is what owns crash-rerun safety now — this function only owns
- *  convergence). REMOVE failures are logged and skipped, never thrown: round.ts's own
+ *  convergence).
+ *
+ *  #212 gate② r3 (finding 1): REMOVE-side failures (a per-issue removeLabel throw, or the
+ *  listOpenIssues read itself failing) stay DEGRADE-OPEN — logged and skipped, never thrown.
+ *  A transient forge blip must not turn a prioritization mechanism (which pool an already
+ *  plan-approved, governed issue sits in) into a phase-retry loop; the aligning marker
+ *  advancing past an incomplete reconcile is an accepted bounded residual — round.ts's own
  *  round-close sweep, and the NEXT round's reconcile pass, are further nets against a stray
- *  label that resists removal here. Removal is routed through round.ts's removeRoundPoolLabel —
+ *  label that resists removal here. But "logged" alone is not durable, so when `eventCtx` is
+ *  supplied, any such failure also appends a `pool-reconcile-incomplete` {round_id,
+ *  failed_issues | read_failed} event — an honesty record a human/dashboard can act on, without
+ *  making the phase itself retry. Removal is routed through round.ts's removeRoundPoolLabel —
  *  the SAME hardcoded, non-session-reachable containment as round close, never a bespoke
  *  `forge.removeLabel` call site. */
 async function reconcilePoolLabels(
@@ -498,9 +529,19 @@ async function reconcilePoolLabels(
   cfg: SapwoodConfig,
   target: readonly Issue[],
   log?: (message: string) => void,
+  eventCtx?: ReconcileEventCtx,
 ): Promise<void> {
   const warn = log ?? console.error;
   await applyPoolLabels(forge, cfg, target, log);
+
+  const recordIncomplete = (detail: { read_failed: true } | { failed_issues: number[] }): void => {
+    if (!eventCtx) return;
+    try {
+      eventCtx.state.appendEvent("pool-reconcile-incomplete", { round_id: eventCtx.roundId, ...detail });
+    } catch (e) {
+      warn(`[sapwood:pool] round-pool reconcile: failed to record the incomplete-reconcile honesty event: ${String(e)}`);
+    }
+  };
 
   const targetNumbers = new Set(target.map((i) => i.number));
   let openIssues: Issue[];
@@ -508,8 +549,10 @@ async function reconcilePoolLabels(
     openIssues = await forge.listOpenIssues();
   } catch (e) {
     warn(`[sapwood:pool] round-pool reconcile: open-backlog read failed — stray labels left unhealed this pass: ${String(e)}`);
+    recordIncomplete({ read_failed: true });
     return;
   }
+  const failedRemovals: number[] = [];
   for (const issue of openIssues) {
     if (targetNumbers.has(issue.number)) continue;
     if (!labelsInclude(issue.labels, cfg.labels.roundPool)) continue;
@@ -517,8 +560,10 @@ async function reconcilePoolLabels(
       await removeRoundPoolLabel(forge, cfg, issue.number, cfg.labels.roundPool);
     } catch (e) {
       warn(`[sapwood:pool] round-pool reconcile: failed to remove the stale pool label from #${issue.number}: ${String(e)}`);
+      failedRemovals.push(issue.number);
     }
   }
+  if (failedRemovals.length > 0) recordIncomplete({ failed_issues: failedRemovals });
 }
 
 /** The deterministic, no-session pool selection: the FULL candidate set (computePoolCandidates),
@@ -742,11 +787,26 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       // never an empty pool from a session outage. Otherwise the validated selection itself —
       // a proper subset is a real outcome, not a degrade.
       target = validated.ok ? candidates.filter((c) => new Set(validated.selected).has(c.number)) : candidates;
+      // #212 gate② r3 (finding 2, documented not fixed — this crash window is INHERENT): the
+      // po-pool SESSION above (an external `claude` process, seconds to minutes) and this
+      // sqlite write are two separate operations that cannot be made atomic — no lock spans a
+      // subprocess boundary. A crash between the session returning and this line means the
+      // decision it just made is lost: on rerun, readPersistedPoolSelection finds nothing and
+      // this whole branch runs AGAIN, paying for a SECOND (possibly differently-selected)
+      // po-pool session. A session-started sentinel (persisted before dispatch, not after)
+      // would only trade this for a WORSE failure mode: a crash mid-session would then leave a
+      // sentinel claiming "in progress" forever with no result to replay, wedging every future
+      // attempt behind a decision that never landed — a wedge risk in exchange for avoiding a
+      // rare double-spend. Not worth it. Correctness (as opposed to cost) is preserved
+      // regardless: reconcilePoolLabels REPLACES the label state to match the target, it never
+      // unions — so even if this exact window fires twice in a row, the FINAL attempt's
+      // selection is what the open backlog's labels converge to; a duplicate session only ever
+      // costs money, never a wrong pool.
       persistPoolSelection(deps.state, deps.roundId, target, log);
     }
   }
 
-  await reconcilePoolLabels(forge, cfg, target, log);
+  await reconcilePoolLabels(forge, cfg, target, log, { state: deps.state, roundId: deps.roundId });
   return target;
 }
 
