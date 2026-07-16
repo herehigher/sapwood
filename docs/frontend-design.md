@@ -20,6 +20,15 @@ round identity, and replay cost semantics decided — see §11. Spend panels now
 for spend); the header meter's tier rule changed from daily to run (§3 A);
 two additive engine events are required (`round-phase`, `run-started` — §11).
 
+Amended 2026-07-16 (design-director review, second amendment): the hero is now
+a **closed loop**, not a horizontal stage (§6); the light theme shifts from
+cream to pale sapwood green (§5); the cost strip re-buckets to **phase +
+model** (§3 E); issue/PR numbers gain title tooltips and type glyphs, and
+stages/lanes gain model·effort captions (§3, §5); clicking a stage node opens
+a read-only **phase inspector** drawer (§6); stage labels lead with plain
+language, backed by hover explainers and a legend (§7). One additional engine
+follow-up: issue/PR titles persisted in event payloads (§11).
+
 ---
 
 ## 1. Goals & audiences
@@ -73,9 +82,11 @@ Single page, no routing. Five modules, one screen:
 ┌──────────────────────────────────────────────────────────────┐
 │ ◉ sapwood    ● running     spend ▓▓▓░░ $12 / $100    [Replay]│  A header
 ├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│  Backlog ─▶ ┃lane┃lane┃lane┃ ─▶ ① checks ─▶ ② review ─▶ ◎   │  B hero
-│   (issues)    workers write      CI green    independent  rings│
+│      ╭─▶ PO ─▶ Architect ─▶ ⓪ plan review ─╮                 │
+│      ┆                                     ▼                 │  B hero
+│  Backlog ─▶ ┃lane┃lane┃lane┃ ─▶ ①checks ─▶ ②review ─▶ ◎rings│  (closed
+│      ┆                                     │                 │   loop)
+│      ╰╌╌ Retro ◀─ Harvest ◀────────────────╯                 │
 ├───────────────────────────────────┬──────────────────────────┤
 │ C lanes                           │ D activity               │
 │ ┌────────┐ ┌────────┐ ┌────────┐  │  Merged PR #94           │
@@ -98,21 +109,39 @@ Single page, no routing. Five modules, one screen:
   never a mixed-tier fraction. The daily hard ceiling stays visible as a
   small secondary readout — it is the line that actually stops the engine.
   Then the Live ↔ Replay toggle.
-- **B — Hero: the Loop.** The whole pipeline as one horizontal scene (§6).
-  Fixed stage; real events move tokens through it. Ends in the **trunk
-  cross-section**: every merged PR accretes one growth ring (§5, signature).
+- **B — Hero: the Loop.** The whole pipeline as one **closed loop** (§6):
+  round phases arc across the top, the worker pipeline runs through the
+  middle, harvest/retro return along the bottom back to PO. Fixed stage;
+  real events move tokens through it. The worker pipeline ends in the
+  **trunk cross-section**: every merged PR accretes one growth ring (§5,
+  signature). Stage nodes are clickable — the phase inspector (§6).
 - **C — Lane board.** One card per lane up to `lanes.max`; empty lanes render
   as quiet outlines ("an empty lane is capacity, not absence"). Card: issue
-  number (linking to GitHub — title enrichment is deferred, §10), state word,
-  PR link when driving, elapsed time, and cost — the engine's in-flight
-  **estimate** (marked `est`, #33) while running, settling to the
-  `spend_ledger` real sum when the lane ends.
+  number (linking to GitHub), state word, PR link when driving, elapsed time,
+  the lane's model·effort caption (mono, e.g. `opus · high`, from the config
+  allowlist — flips with `reviewer-fallback-*` / fallbackModel events where
+  applicable), and cost — the engine's in-flight **estimate** (marked `est`,
+  #33) while running, settling to the `spend_ledger` real sum when the lane
+  ends.
+
+  **Issue/PR numbers — everywhere they appear** (lane cards, feed, hero
+  droplets, ring tags): (a) a **type glyph** distinguishes them at a glance —
+  issue = circle-dot ⊙, PR = merge-arrow, inline SVG, never color as the
+  sole carrier (§5); (b) **hover shows the title** in a tooltip. Titles come
+  from event payloads persisted by the engine at dispatch/PR-open/merge
+  (§11 follow-up #3) — the dashboard never queries GitHub for them, so
+  tooltips work offline and in replay. Events predating the payload field
+  simply show no tooltip.
 - **D — Activity feed.** The `events` stream through the copy map (§7),
   newest first, relative timestamps; kind-colored dot per entry. Payload
   details (worker, head, mode) collapse behind each entry — never in the
   sentence.
 - **E — Cost strip + Config drawer.** Two small SVG bar groups: today's spend
-  by lane, and by model (token split available on hover). `Config ▸` opens a
+  **by phase** (align / architect / gate⓪ / workers / harvest / retro) and
+  **by model** (token split available on hover). Phase, not lane: lanes are
+  short-lived reused slots (w1/w2/w3), so a by-lane day aggregate carries
+  little meaning — per-lane cost already lives on the lane cards (§3 C), and
+  the phase bucketing matches the replay round tier (§11). `Config ▸` opens a
   read-only drawer: an **allowlisted subset** of the resolved config (the
   server serves named keys, never the whole object — the no-secrets guarantee
   stays structural even if future config grows sensitive keys), grouped as
@@ -159,7 +188,14 @@ is the default — it is a monitoring surface — with a light ("sapwood") theme
 via `prefers-color-scheme` and a manual override.
 
 **Color** (dark theme values; light theme swaps grounds and darkens accents
-one step for contrast):
+one step for contrast). The light theme's grounds are **pale sapwood green**,
+not cream: background a milky warm pale green, panels one step greener — the
+literal color of a trunk's living sapwood layer, which carries the identity
+better than a generic cream landing page. Consequence: `--moss` (success)
+loses signal against a greenish ground, so the light theme's success color
+shifts to a deeper teal-green, and **every text-on-ground pair is re-checked
+for WCAG AA per theme** (the §5 quality floor already requires this; the
+palette shift makes it load-bearing, not pro-forma):
 
 | Token | Hex | Role |
 |---|---|---|
@@ -199,23 +235,48 @@ movement in the hero), easing `cubic-bezier(.3,.7,.3,1)`; ambient pulses ≥ 3 s
 contrast in both themes — **every text-on-ground token pair is checked with a
 contrast tool at implementation, per theme**, `prefers-reduced-motion` honored
 (§6). Color is never the sole carrier: gate resolutions get a ✓/✕ glyph,
-failed lanes a static ✕ (moss/rust is deuteranopia-ambiguous), and the
+failed lanes a static ✕ (moss/rust is deuteranopia-ambiguous), issue vs PR
+numbers carry their type glyphs (⊙ / merge-arrow, §3 C), and the
 activity feed is the hero's accessible text channel (`aria-live="polite"` on
 new entries). The est/settled budget-bar split (§3 E) also never relies on
 color alone — the est segment carries a texture (hatch) or the `est` label.
 
 ## 6. Motion spec — the hero Loop
 
-The hero is a fixed stage (SVG): backlog stack → lane channels (`lanes.max`
-of them) → gate ① (checks) → gate ② (review) → trunk cross-section. Roles are
-labeled *on the stage itself* in plain words: the conductor is the stage (it
-schedules everything); workers are the lane channels; the reviewer sits at
-gate ②; the merge driver is the arm between gate ② and the trunk. A slot row above
-the stage names the round phases (PO · goal alignment → architect → gate⓪
-plan review → harvest → retro); the slot matching the open round's
-`rounds.phase` is lit, the rest stay dimmed. Illumination only — phase slots
-never animate droplets (peripheral work externalizes as issues and comments,
-not lanes).
+The hero is a fixed stage (SVG) drawn as a **closed loop** — the round's
+circular nature is the geometry itself, not a caption. Three tiers, one
+circuit (§3's sketch): the round-phase arc across the top (PO → architect →
+gate⓪ plan review), feeding down into the worker pipeline through the middle
+(backlog stack → lane channels, `lanes.max` of them → gate ① checks →
+gate ② review → trunk cross-section), whose rings arc closes along the bottom
+(harvest ← retro) with a dashed return path back to PO. Roles are labeled
+*on the stage itself* in plain words (§7's stage-label rule): the conductor
+is the stage (it schedules everything); workers are the lane channels; the
+reviewer sits at gate ②; the merge driver is the arm between gate ② and the
+trunk. Each stage node carries its model·effort caption (§3 C).
+
+**Two kinds of motion, one honesty rule.** A **droplet** is a real entity —
+an issue or a PR — and only real events move it (table below). The **pipes
+themselves carry sap flow**: the segment belonging to the open round's
+`rounds.phase` renders a slow liquid-flow ambient (CSS, ≥ 3 s cycle) while
+that phase is active, and stills when it isn't. Phase nodes light with their
+segment but never emit droplets — peripheral work externalizes as issues and
+comments, not lanes; the flow says "this part of the organism is working",
+the droplets say "this artifact moved". Nothing animates that isn't backed
+by live state.
+
+**Phase inspector** (new, this amendment): clicking any stage node opens a
+read-only side drawer for that phase — the stage's inputs/outputs and its
+paper trail, not just its light. Contents, by data source: the phase's slice
+of the **latest round's data** — for the open round, folded from its events
+so far (e.g. `align-summary` → created/triaged list); for a phase the open
+round hasn't reached, the most recent **closed** round's `round_artifacts`
+slice (labeled with its round id — never presented as current); plus the
+node's model·effort (config allowlist), links out to the GitHub artifacts
+the phase produced (issues, plan comments, PRs), and a "view log" pointer to
+the run-scoped engine log (#193). Cross-round *browsing* stays deferred
+(§10) — the inspector is one drawer about the latest state of one phase,
+not a history UI.
 
 An issue is a **sap droplet** (amber dot with the issue number). Real events
 drive it, via one anime.js timeline per transition:
@@ -315,6 +376,30 @@ kind must extend this map; make it a gate② checklist item**):
 The same module captions lane states (`running` → "writing", `driving` → "PR
 under review", `handoff` → "handed off") and config keys (§3 E). Adding an
 event kind without a copy entry is a type error.
+
+**Stage labels lead with plain language** (decided at the design-director
+review: PO / gate⓪ / harvest / retro are jargon to anyone who hasn't read
+PLAN.md, and the small-print caption "PO · goal alignment" is still jargon).
+On the stage the plain word is the **primary** label and the internal term
+the secondary small print — not the other way around:
+
+| Stage (internal) | Primary label | Hover explainer (one sentence, from `copy.ts`) |
+|---|---|---|
+| PO / aligning | Planning | Decides what's worth doing this round and files it as issues |
+| Architect | Design review | Checks the round's plans fit the architecture before work starts |
+| gate⓪ plan review | Plan approval | An independent review approves each plan before any code is written |
+| Lanes / workers | Writing | Autonomous workers implement approved issues, one lane each |
+| gate① checks | Checks | CI must pass before a PR moves on |
+| gate② review | Review | An independent reviewer approves the PR against its plan |
+| Merge / rings | Merged | Approved work lands; every merged PR adds one ring |
+| Harvest | Round summary | Collects what the round produced and what needs a human |
+| Retro | Self-improvement | The loop proposes one improvement to itself |
+
+These labels and explainers live in the same `copy.ts` module — one map, no
+second vocabulary. A small **"?" legend toggle** in the header overlays the
+three metaphor keys in one line each: droplet = an issue moving through the
+loop; lane = one autonomous worker; ring = one merged PR. That is the whole
+onboarding surface — no tour, no modal sequence.
 
 ## 8. Data contract
 
@@ -454,14 +539,17 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 - **Config editing** — needs a write path + auth story; contradicts v0.2's
   read-only posture.
 - **Deep round-browse views** (per-round drill-down pages beyond the lit
-  phase strip and replay chapters, which are IN for v0.2) — the
-  `round_artifacts` data exists; the additional UI surface is not v0.2 scope.
+  phase strip, the replay chapters, and the single-phase inspector drawer
+  (§6), which are IN for v0.2) — the `round_artifacts` data exists; the
+  additional cross-round UI surface is not v0.2 scope.
 - **History-aggregation metrics** (cycle time, merge/rework rate) — deferred
   by PLAN.md, gated on GitHub-history work.
 - **WebSocket push** — polling at 3 s is indistinguishable for a local
   single-viewer tool; revisit only if a hosted multi-viewer mode ever exists.
-- **Issue-title enrichment** in lane cards (needs a GitHub read from the
-  dashboard server; v0.2 links out instead).
+- ~~Issue-title enrichment~~ — **un-deferred** by the design-director
+  amendment: titles now ride event payloads written by the engine (§3 C,
+  §11 follow-up #3); no GitHub read from the dashboard server was ever
+  needed. Only pre-amendment events lack tooltips.
 - **Per-gate progress in the hero** — needs the engine to persist gate
   substate (a `gate-advanced` event); v0.2 renders the review passage as one
   waiting state (§6).
@@ -539,7 +627,7 @@ overlay** (est telemetry, config, board). Replay is not a second UI — it is
 the same UI with a different cursor. §9's single reducer is this mechanism;
 the overlay is the named boundary.
 
-### Engine follow-ups (both additive one-liners; file as one issue)
+### Engine follow-ups (all additive; #1–2 filed as #206)
 
 1. **`round-phase` event** — `appendEvent("round-phase", { round_id, phase })`
    beside `advanceRoundPhase` (`round.ts`); without it the hero's phase strip
@@ -547,6 +635,13 @@ the overlay is the named boundary.
 2. **`run-started` event** — appended once at CLI startup, payload carrying
    the resolved-config snapshot (or its hash). Gives replay its run grouping
    and later makes the config drawer historically honest (§10).
+3. **Titles in event payloads** (design-director amendment) — `dispatched`
+   carries the issue title, PR-producing/merging events carry the PR title,
+   read from data the engine already holds at those moments (board query /
+   forge response) — never an extra GitHub call. Powers the §3 C hover
+   tooltips offline and in replay; older events without the field degrade to
+   no tooltip.
 
-Both kinds must land in the §7 copy map in the same PR (gate② checklist).
+New event kinds must land in the §7 copy map in the same PR (gate②
+checklist); payload-only additions like #3 need no copy entry.
 - **Localization** — the copy map is the seam; add locales when someone asks.
