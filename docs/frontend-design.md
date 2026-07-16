@@ -178,27 +178,39 @@ carries it, verbatim fields, never synthesized** — what the engine did
 about it. Each row links to the GitHub issue/PR and opens the relevant
 inspector drawer on click.
 
-Membership is carried by the copy map, not a second list: an event kind
-whose §7 sentence names a human carries `attention: true` on its `copy.ts`
-entry, and the strip renders exactly the flagged kinds — one vocabulary, so
-the strip cannot drift from the sentences. Flagged today:
-`drive-needs-human`, `rollback-escalated`, `plan-review-escalated`,
-`gated-reentry-capped`, `gated-reentry-capped-label-failed`,
-`worktree-retained`, `park-escalated`, `ceiling-escalated`, and
-`reclaim-failed` **only when `payload.next` is not an automatic
-continuation** (a lane whose PR keeps driving is not an open item; a clean
-`reclaim-dead` requeue likewise is not — its human case arrives separately
-as `worktree-retained`). The `stalled` / `disconnected` engine states add
+Membership is carried by the copy map, not a second list — and it is
+defined **semantically, not by sentence wording**: a kind whose event
+*leaves work waiting on a person* carries an `attention` field on its
+`copy.ts` entry, either `true` or a **payload predicate** for kinds where
+only some payloads qualify (the entry owns its own condition — no side
+list to drift, and gate②'s existing extend-the-map checklist item curates
+the flag with the sentence). Flagged today: `drive-needs-human`,
+`rollback-escalated`, `plan-review-escalated`, `gated-reentry-capped`,
+`gated-reentry-capped-label-failed`, `worktree-retained`,
+`park-escalated`, `env-failure-preserved` (that path deliberately leaves
+the lane failed — the preserved PR needs a manual drive),
+`ceiling-escalated`; plus two predicate kinds: `reclaim-failed` when
+`payload.next` is not an automatic continuation, and `reclaim-done` on its
+no-PR branch. (A lane whose PR keeps driving is not an open item; a clean
+`reclaim-dead` requeue is not either — its human case arrives separately
+as `worktree-retained`.) The `stalled` / `disconnected` engine states add
 **entity-less** rows: the state word plus its §3 remedy direction, no
-issue/PR. Clearing is per scope, from the same fold: issue-scoped items
-clear when a later event moves that issue (`dispatched`, `merged`,
-`gated-reentry`); `worktree-retained` clears when its lane next dispatches;
-`park-escalated` clears on `park-resumed`; `ceiling-escalated` clears on
-the next `run-started`; round-scoped escalations clear when their round
-closes; `stalled`/`disconnected` clear when polling recovers. The strip
-never invents state and never requires an acknowledge action. In replay it
-rebuilds from the same fold at the cursor, like every other event-backed
-surface (§11).
+issue/PR.
+
+Clearing is per scope, from the same fold: issue-scoped items (including
+`env-failure-preserved`) clear when a later event moves that issue
+(`dispatched`, `merged`, `gated-reentry`); `park-escalated` clears on
+`park-resumed`; `ceiling-escalated` clears on the next `run-started` —
+that row is the **breach itself**, while per-entity fallout from the
+breach keeps its own rows with their own entity-scoped clearing;
+round-scoped escalations clear when their round closes;
+`stalled`/`disconnected` clear when polling recovers. One kind has **no
+resolution signal**: nothing marks a retained folder "inspected", so
+`worktree-retained` rows persist until the next `run-started` and say so
+on the row ("clears with the next run") — a documented bounded blind spot,
+chosen over inventing an acknowledge mechanism. The strip never invents
+state and never requires an acknowledge action. In replay it rebuilds from
+the same fold at the cursor, like every other event-backed surface (§11).
 
 **Operations — start · pause · resume · stop** (design-director round 2,
 user decision): the release dashboard is no longer a pure spectator — the
@@ -470,10 +482,10 @@ checklist item**):
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
-| `env-failure` | Lane {worker} hit an environment problem — not the work itself; issue #{issue} goes back with its progress kept |
+| `env-failure` | Branches on `payload.hasPr`: without a PR → "Lane {worker} hit an environment problem — not the work itself; issue #{issue} goes back with its progress kept"; with a PR → "Lane {worker} hit an environment problem — its open PR keeps driving" |
 | `env-failure-preserved` | Kept lane {worker}'s work safe after an environment problem |
 | `park-escalated` | The environment keeps failing — paused dispatch and flagged a human |
-| `park-probe` | Checking whether the environment has recovered |
+| `park-probe` | Branches on `payload.success`: passed → "Environment check passed — resuming"; failed → "Environment check failed — still waiting on the environment" |
 | `park-resumed` | Environment recovered — resuming work |
 | `park-canary` | Sent one test lane to check the environment |
 | `park-canary-failed` | The test lane failed — still waiting on the environment |
@@ -496,10 +508,10 @@ checklist item**):
 
 The same module captions lane states (`running` → "writing", `driving` → "PR
 under review", `handoff` → "handed off") and config keys (§3 E). Adding an
-event kind without a copy entry is a type error. Kinds whose sentence names
-a human additionally carry `attention: true` on the same entry — the §3
-Needs-attention strip reads that flag, so the strip and the sentences share
-one map and cannot drift apart.
+event kind without a copy entry is a type error. Kinds whose event leaves
+work waiting on a person additionally carry `attention` on the same entry —
+`true`, or a payload predicate where only some payloads qualify (§3) — so
+the strip and the sentences share one map and cannot drift apart.
 
 **Stage labels lead with plain language** (decided at the design-director
 review: PO / gate⓪ / harvest / retro are jargon to anyone who hasn't read
