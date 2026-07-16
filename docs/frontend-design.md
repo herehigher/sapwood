@@ -197,22 +197,23 @@ as `worktree-retained`.) The `stalled` / `disconnected` engine states add
 **entity-less** rows: the state word plus its §3 remedy direction, no
 issue/PR.
 
-The strip is **run-scoped, like the fold that feeds it**: it shows the
-current run's open items, so a new run naturally starts an empty strip —
-run boundaries are scope, never claimed as resolution. Within the run,
-clearing uses only events that actually resolve the item: issue-scoped
-items (including `ceiling-escalated`, which the engine emits **per
-hard-stopped worker**, and `env-failure-preserved`) clear when a later
-event moves that issue (`dispatched`, `merged`, `gated-reentry`);
+Attention items fold over the **whole event history, not the current
+run** — a restart must not empty the strip while the human task remains
+(the strip answers "does anything need me?", and an uninspected folder
+still does). Clearing uses only events that actually resolve the item:
+issue-scoped items (including `ceiling-escalated`, which the engine emits
+**per hard-stopped worker**, and `env-failure-preserved`) clear when a
+later event moves that issue (`dispatched`, `merged`, `gated-reentry`);
 `park-escalated` clears on `park-resumed`; round-scoped escalations clear
 when their round closes; `stalled`/`disconnected` clear when polling
-recovers. One kind has **no resolution signal**: nothing marks a retained
-folder "inspected", so `worktree-retained` rows persist for the rest of
-the run and their row says what to do ("inspect and clean before the next
-run") — a documented bounded blind spot, chosen over inventing an
-acknowledge mechanism. The strip never invents state and never requires
-an acknowledge action. In replay it rebuilds from the same fold at the
-cursor, like every other event-backed surface (§11).
+recovers. `worktree-retained` clears on `worktree-released` — a new
+**additive** engine event (follow-up, filed with this amendment alongside
+the `dashboard.controls` schema key): the engine already owns the retained
+path, so on tick/startup it notices the folder is gone (the human cleaned
+it up) and appends the event; the filesystem it manages is the resolution
+signal, no acknowledge UI invented. The strip never invents state and
+never requires an acknowledge action. In replay it rebuilds from the same
+fold at the cursor, like every other event-backed surface (§11).
 
 **Operations — start · pause · resume · stop** (design-director round 2,
 user decision): the release dashboard is no longer a pure spectator — the
@@ -484,10 +485,11 @@ checklist item**):
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
-| `env-failure` | Lane {worker} hit an environment problem — not the work itself (the disposition is narrated by the events that follow: `env-failure-preserved`, `park-*`, or the issue's next `dispatched` — this sentence claims none of them; `hasPr` alone cannot pick the outcome) |
+| `worktree-released` | Lane {worker}'s retained folder was cleaned up (engine follow-up event, filed with the §3 Needs-attention amendment) |
+| `env-failure` | Lane {worker} hit an environment problem — not the work itself (subsequent events narrate the disposition; this sentence claims none of it — `hasPr` alone cannot pick the outcome) |
 | `env-failure-preserved` | Kept lane {worker}'s work safe after an environment problem — its PR needs a human to continue it |
 | `park-escalated` | The environment keeps failing — paused dispatch and flagged a human |
-| `park-probe` | Branches on `payload.success` **and** `payload.source`: forge + passed → "Environment check passed — resuming"; llm + passed → "Initial check passed — testing with one lane" (the LLM park stays until that canary lands); failed → "Environment check failed — still waiting on the environment" |
+| `park-probe` | Branches on `payload.success` and `payload.source`, stating **only the check's own result** — never a global outcome (a mixed forge+LLM park can pass one check and stay parked): forge + passed → "Forge check passed"; llm + passed → "Model check passed"; failed → "Environment check failed — still waiting". What happens next is narrated by `park-resumed` / `park-canary` themselves |
 | `park-resumed` | Environment recovered — resuming work |
 | `park-canary` | Sent one test lane to check the environment |
 | `park-canary-failed` | The test lane failed — still waiting on the environment |
