@@ -14,6 +14,12 @@ landed (#123), standby (#125), gated re-entry (#147), and live in-flight cost
 estimates (#33) are engine reality on `main` — sections below updated to
 match; the stacked budget-bar rule (§3 E) was decided on issue #17.
 
+Amended 2026-07-16 (replay/live boundary review): replay ↔ live boundary,
+round identity, and replay cost semantics decided — see §11. Spend panels now
+**replay** from `spend_ledger` (supersedes the earlier §6/§10 grey-out rule
+for spend); the header meter's tier rule changed from daily to run (§3 A);
+two additive engine events are required (`round-phase`, `run-started` — §11).
+
 ---
 
 ## 1. Goals & audiences
@@ -84,8 +90,14 @@ Single page, no routing. Five modules, one screen:
 - **A — Header.** Wordmark; engine state as one word + dot (`running` /
   `standby` / `stalled` / `paused` / `winding down` / `stopping` / `stopped` —
   derived from sentinels, ceiling breach, standby events, and `lastTickAt`
-  age, §8; `standby` renders calm, never as an error); daily-spend meter
-  (today vs `cost.dailyBudgetUsd`); the Live ↔ Replay toggle.
+  age, §8; `standby` renders calm, never as an error); the spend meter —
+  **run-cumulative vs the per-run stop budget** (`stop.afterSpendUsd`, the
+  #154 run-scoped ledger sum): numerator and denominator must always come
+  from the **same budget tier** (§11); with no run budget configured the
+  meter falls back whole to the daily tier (today vs `cost.dailyBudgetUsd`),
+  never a mixed-tier fraction. The daily hard ceiling stays visible as a
+  small secondary readout — it is the line that actually stops the engine.
+  Then the Live ↔ Replay toggle.
 - **B — Hero: the Loop.** The whole pipeline as one horizontal scene (§6).
   Fixed stage; real events move tokens through it. Ends in the **trunk
   cross-section**: every merged PR accretes one growth ring (§5, signature).
@@ -231,16 +243,22 @@ animates. The hero must never lag behind the state it claims to show.
 rings appear without stroke animation; ambient shimmer off. The scene remains
 fully legible — motion is commentary, never the only carrier of state.
 
-**Replay mode** drives the identical scene from historical events: a transport
-(play/pause, speed ×1/×4/×16, scrub bar spanning the event log — with chapter
-marks, one per closed round from `round_artifacts`) replaces the polling
-source. Scrubbing rebuilds state by folding events up to the cursor —
-same reducer as live mode, one code path; the fold keeps periodic checkpoints
-(every ~500 events) so scrubbing stays O(distance), not O(log-length).
-**Replay covers event-backed panels only** — hero, lane narrative, feed, ring
-count. Snapshot-backed panels (spend meter, cost strip, config drawer) have no
-historical source (event payloads carry no cost; spend lives in
-`spend_ledger`) and grey out in replay with the caption "live only".
+**Replay mode** drives the identical scene from history: a transport
+(play/pause, speed ×1/×4/×16, scrub bar) replaces the polling source. The
+**unit of replay is the round** (§11): the scrubber spans one round's event
+window ("event 12 / 33"), with chapter navigation across rounds — a full-run
+replay is simply the ordered chapter list, and inter-round events attach to
+the start of the following chapter. Scrubbing rebuilds state by folding
+events up to the cursor — same reducer as live mode, one code path; the fold
+keeps periodic checkpoints (every ~500 events) so scrubbing stays
+O(distance), not O(log-length).
+
+What replays and what doesn't follows one rule — **append-only sources
+replay; mutable or external state is live-only** (§11). Hero, lane
+narrative, feed, and ring count (from `events`) *and* the spend meter + cost
+strip (from `spend_ledger`, equally append-only) all replay; est overlays,
+the config drawer, and backlog/board counts are live-only and dim with an
+on-panel "live only" badge — never merely a footnote.
 
 **Launch artifact** — two forms, both from the recorded dogfood run:
 (a) a screen capture of the replay for README/launch page, and (b) a **demo
@@ -253,9 +271,10 @@ is the mechanism either way.
 
 All user-visible sentences live in one module (`copy.ts`), keyed by event
 kind. Voice: active, specific, no system internals (say "lane", "checks",
-"review", never "reclaim", "tick", "worktree"). The 31 kinds (12 added
-post-lock by #110/#123/#125/#147 — **every engine PR that adds an event kind
-must extend this map; make it a gate② checklist item**):
+"review", never "reclaim", "tick", "worktree"). The 33 kinds (12 added
+post-lock by #110/#123/#125/#147, plus `run-started`/`round-phase` required
+by §11 and pending their engine issue — **every engine PR that adds an event
+kind must extend this map; make it a gate② checklist item**):
 
 | Event kind | Feed sentence |
 |---|---|
@@ -290,6 +309,8 @@ must extend this map; make it a gate② checklist item**):
 | `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |
 | `retro-pr-opened` | The loop proposed an improvement to itself — PR #{pr} awaits review |
 | `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
+| `run-started` | Engine started a new run |
+| `round-phase` | Round {round_id} moved into {phase} |
 
 The same module captions lane states (`running` → "writing", `driving` → "PR
 under review", `handoff` → "handed off") and config keys (§3 E). Adding an
@@ -353,6 +374,10 @@ mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
   "spend": {
     "todayUsd": 12.4,               // dailySpendUsd()
     "dailyBudgetUsd": 100,          // config (null if unreadable)
+    "runUsd": 13.3,                 // #154 run-scoped ledger sum (spentUsdAfterId from the
+                                    // startup anchor) — the header meter's numerator (§3 A)
+    "runBudgetUsd": 100,            // stop.afterSpendUsd (null when unconfigured → the header
+                                    // meter falls back whole to the daily tier, §3 A)
     "byModel": [{ "model": "opus", "usd": 10.1,
                   "inputTokens": 0, "outputTokens": 0 }]
   },
@@ -371,6 +396,13 @@ by `id`; live mode polls with the last seen id, replay mode pages from
                "payload": { /* stored JSON, verbatim */ } }],
   "lastId": 512 }
 ```
+
+**`GET /api/spend?after=<id>&limit=<n>`** — the append-only `spend_ledger`,
+same paging contract as `/api/events`; replay's cost source (§11). Rows are
+served verbatim (`id, ts, worker, issue, usd, model`, token counts); the
+replay cursor maps event → spend position by timestamp
+(`spend_ledger.ts <= current event's ts`) — display-grade alignment, no
+cross-table join.
 
 **`GET /api/rounds`** — replay chapter marks and (deferred) round browsing;
 one row per closed round from `round_artifacts`, ascending:
@@ -409,8 +441,10 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 - **One state reducer** folds events into UI state; live mode feeds it the
   polling tail, replay (and the `?demo` fixture) feeds it history. The hero,
   lane narrative, feed, and ring count render from the reducer output, so
-  those panels replay for free. Snapshot-backed panels (spend, config) render
-  from `/api/loop/state` only and grey out in replay (§6).
+  those panels replay for free. Spend panels fold `/api/spend` the same way
+  (§11); only genuinely non-replayable surfaces (est overlays, config
+  drawer, backlog counts) render from `/api/loop/state` alone and dim in
+  replay (§6).
 - Launched via a `sapwood dashboard` CLI/slash command that starts the server
   and opens the browser. Read-only DB handle; safe to run beside a live engine
   (WAL mode).
@@ -431,6 +465,88 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 - **Per-gate progress in the hero** — needs the engine to persist gate
   substate (a `gate-advanced` event); v0.2 renders the review passage as one
   waiting state (§6).
-- **Replayable cost panels** — needs cost folded into `merged`/reclaim event
-  payloads; v0.2 greys spend panels in replay.
+- **Config replay** — becomes possible once `run-started` carries a
+  resolved-config snapshot (§11); v0.2 keeps the config drawer live-only.
+  (The earlier "replayable cost panels" deferral is superseded: `spend_ledger`
+  is itself the historical source — no event-payload folding needed, §11.)
+
+## 11. Replay ↔ Live — boundary, identity, and cost semantics
+
+Decided 2026-07-16 (engine-behavior review against schema v11). Where this
+section conflicts with older text, this section wins.
+
+### The boundary rule
+
+The replay/live boundary is drawn **by data shape, not by panel**: anything
+reconstructible from an append-only source replays; anything that lives as a
+mutable snapshot or outside the engine's own DB is live-only.
+
+| Source | Shape | Replays? |
+|---|---|---|
+| `events` | append-only, id-ordered | **Yes** — the replay stream itself |
+| `spend_ledger` | append-only, id-ordered | **Yes** — settled cost at any cursor is `SUM(usd)` up to it |
+| `rounds.phase` | in-place UPDATE (`advanceRoundPhase` appends no event) | **Not today** — needs the `round-phase` event below |
+| live telemetry (`est_cost_usd`, `contextTokens`, token split) | overwritten per probe, cleared when the lane leaves `running` (#155) | **Never** — the history never existed. Est never replays; settled only (§3 E's settled/est grammar is the same line) |
+| resolved config | read at startup, unversioned | Live-only until `run-started` snapshots it |
+| backlog / board | external GitHub state | Live-only |
+
+### Round identity & the replay unit
+
+- **`rounds.round_id` is the canonical locator** — SQLite autoincrement,
+  globally monotonic, survives restarts, never reused. The UI shows it
+  directly ("round 12").
+- **No composite "run N, round M" identity.** Both coordinates would be
+  synthetic; `round_id` alone already pinpoints a round. Run *grouping* is
+  derived from `run-started` events — never inferred from the
+  `engine_session` gap heuristic, which serves the wall-clock ceiling and
+  deliberately resets on quiet gaps.
+- **The unit of replay is the round.** Its event window is exact via the
+  #123 id cursors (`start_event_id` / `start_spend_id`), immune to
+  same-millisecond boundary collisions. A run replays as the ordered chapter
+  list of its rounds; inter-round events attach to the following chapter.
+
+### Cost in replay — two scales, both truncated at the cursor
+
+- **Header meter: run tier.** Spend as of the cursor within the replayed
+  run, over that run's budget — the same tier rule as live (§3 A), truncated
+  at the cursor. Watching spend approach the budget while scrubbing is a
+  core replay payoff.
+- **Cost strip: round tier.** The replayed round's own window
+  (`start_spend_id` → cursor), bucketed by phase/model. The live title
+  "TODAY BY …" becomes **"THIS ROUND BY …"** in replay — "today" has no
+  meaning against a historical round.
+- Both numbers grow monotonically under the scrubber; **no est segments
+  exist in replay** — history has only settled values.
+- Cursor mapping: the scrubber cursor is an `events.id`; spend truncates by
+  the current event's timestamp. Display-grade precision, no join table.
+
+### Mode purity
+
+- The toggle is **global**: entering Replay swaps the data source for the
+  whole screen. Live values must never render beside replayed state as if
+  they were one moment — the header in replay shows the *as-of-cursor*
+  round/phase/spend plus a persistent REPLAY badge; whether the engine is
+  currently alive shrinks to one small live indicator.
+- Panels that cannot replay dim with an **on-panel** "live only" badge. A
+  footer note alone is not acceptable — the badge belongs on the panel that
+  would otherwise lie.
+
+### Renderer contract
+
+One pure fold: `render(stateAt(cursor))`, where `stateAt` folds
+`events + spend_ledger` up to the cursor. **Live is `stateAt(HEAD)` plus an
+overlay** (est telemetry, config, board). Replay is not a second UI — it is
+the same UI with a different cursor. §9's single reducer is this mechanism;
+the overlay is the named boundary.
+
+### Engine follow-ups (both additive one-liners; file as one issue)
+
+1. **`round-phase` event** — `appendEvent("round-phase", { round_id, phase })`
+   beside `advanceRoundPhase` (`round.ts`); without it the hero's phase strip
+   cannot replay.
+2. **`run-started` event** — appended once at CLI startup, payload carrying
+   the resolved-config snapshot (or its hash). Gives replay its run grouping
+   and later makes the config drawer historically honest (§10).
+
+Both kinds must land in the §7 copy map in the same PR (gate② checklist).
 - **Localization** — the copy map is the seam; add locales when someone asks.
