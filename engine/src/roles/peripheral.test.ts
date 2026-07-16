@@ -79,6 +79,55 @@ test("run: stub claude exits 0 -> outcome done, cost/model usage parsed, running
   }
 });
 
+test("run: peripheral spawn strips forge/git credentials while preserving Claude auth and guard mode", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const poisoned = {
+    GH_TOKEN: "poison-gh-token",
+    GITHUB_TOKEN: "poison-github-token",
+    GITHUB_ENTERPRISE_TOKEN: "poison-github-enterprise-token",
+    GH_CONFIG_DIR: "/poison/gh-config",
+    GH_HOST: "poison.example",
+    GIT_ASKPASS: "/poison/askpass",
+    GIT_CONFIG_GLOBAL: "/poison/gitconfig",
+    GIT_CONFIG_COUNT: "1",
+    ANTHROPIC_API_KEY: "preserved-anthropic-auth",
+  } as const;
+  const previous = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, poisoned);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+printf '{"type":"env_check","gh_token":"%s","github_token":"%s","github_enterprise_token":"%s","gh_config_dir":"%s","gh_host":"%s","git_askpass":"%s","git_config_global":"%s","git_config_count":"%s","anthropic_api_key":"%s","guard_mode":"%s"}\\n' "\${GH_TOKEN-unset}" "\${GITHUB_TOKEN-unset}" "\${GITHUB_ENTERPRISE_TOKEN-unset}" "\${GH_CONFIG_DIR-unset}" "\${GH_HOST-unset}" "\${GIT_ASKPASS-unset}" "\${GIT_CONFIG_GLOBAL-unset}" "\${GIT_CONFIG_COUNT-unset}" "\${ANTHROPIC_API_KEY-unset}" "\${SAPWOOD_GUARD_MODE-unset}"
+echo '{"type":"result","subtype":"success","total_cost_usd":0}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const envCheck = JSON.parse(readFileSync(join(dir, `${result.name}.jsonl`), "utf8").split("\n")[0]!);
+    assert.deepEqual(envCheck, {
+      type: "env_check",
+      gh_token: "unset",
+      github_token: "unset",
+      github_enterprise_token: "unset",
+      gh_config_dir: "unset",
+      gh_host: "unset",
+      git_askpass: "unset",
+      git_config_global: "unset",
+      git_config_count: "unset",
+      anthropic_api_key: "preserved-anthropic-auth",
+      guard_mode: "hard",
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: non-zero exit -> outcome failed, .failed sentinel", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {

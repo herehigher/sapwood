@@ -157,6 +157,34 @@ export interface RoleRunnerDeps {
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "jsonl"];
 
+/** Build a peripheral session environment without forge credentials or git credential
+ *  injection vectors. This is deliberately a denylist rather than a small allowlist: the
+ *  Claude CLI may authenticate through Anthropic environment variables or user config, and
+ *  also relies on platform-specific runtime variables. Peripheral roles need that runtime
+ *  environment, but never need GitHub credentials because they have no forge responsibilities.
+ *
+ *  Keep this boundary paired with ROLE_ALLOWED_TOOLS's empty allowlist. The empty allowlist is
+ *  the primary action boundary; stripping credentials ensures a future tool-widening regression
+ *  cannot silently turn an inherited engine credential into forge authority. */
+function peripheralSessionEnv(guardMode: SapwoodConfig["guard"]["mode"]): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    const normalized = key.toUpperCase();
+    if (
+      normalized === "GITHUB_TOKEN" ||
+      normalized === "GITHUB_ENTERPRISE_TOKEN" ||
+      normalized.startsWith("GH_") ||
+      normalized === "GIT_ASKPASS" ||
+      normalized.startsWith("GIT_CONFIG_")
+    ) {
+      continue;
+    }
+    env[key] = value;
+  }
+  env.SAPWOOD_GUARD_MODE = guardMode;
+  return env;
+}
+
 export class RoleRunner {
   private readonly dir: string;
   private readonly worktreeRoot: string;
@@ -221,7 +249,7 @@ export class RoleRunner {
     const startedMs = this.now().getTime();
     const session = spawnClaudeSession(this.bin, args, {
       jsonlFd,
-      env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
+      env: peripheralSessionEnv(guardMode),
     });
 
     // Register the exit listener BEFORE any await — same rationale as worker.ts's dispatch():
