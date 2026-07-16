@@ -823,7 +823,9 @@ worker legs all count exactly once across crash/resume. The budget gates dispatc
 harvest and retro still close an over-budget round.
 
 **The round pool — explicit per-round task selection (locked 2026-07-16, issue #212).**
-"This round's tasks" is an explicit, bounded set, not a live query: during the aligning
+"This round's tasks" is an explicit, bounded selection, not an open-ended per-tick
+query (the pool *label* remains the effective dispatch authority — the durable event
+below records the selection for replay; labels are what dispatch reads): during the aligning
 phase the PO selects up to `ceil(lanes.roundDispatchCap × round.poolFactor)` issues from
 Ready (milestone-scoped; the factor, default 1.5, absorbs review attrition). Selection is
 a PO session choosing from an engine-computed, prio-ordered candidate digest; the session
@@ -836,14 +838,19 @@ executing phase dispatches **pool members only** (a dispatch-scoped forge wrappe
 standby probe still sees all of Ready), and the same probe now ignores milestones whose
 open issues all carry a human-hold label — a backlog nothing enabled can consume no
 longer pins rounds open. Crash model: the chosen selection is persisted as a durable
-`pool-selected` event *before* any label write (rerun replays it — last event wins —
-so a rerun can never run a second selection session for the same round), and label
-writes are a *reconcile* to that target (add missing, remove strays; incomplete passes
-leave a `pool-reconcile-incomplete` honesty event). The pool label lives exactly one
-round: round close clears it from every open issue that still carries it. **Label-removal
-containment invariant:** `removeLabel` is the one engine-side label-strip capability, is
-hardcoded to `labels.roundPool` (fail-closed on anything else, enforced at config load
-against aliasing), and is reachable from no session output schema — removing
+`pool-selected` event *before* any label write, and a rerun replays it (last event
+wins) instead of recomputing — a duplicate selection session is confined to the rare
+crash window between the session returning and the event write (inherent: an external
+process and a local write cannot be atomic; reconcile keeps the last attempt
+authoritative either way). Label writes are a *reconcile* to that target — add
+missing, remove strays — with read/remove failures degrading open and leaving a
+`pool-reconcile-incomplete` honesty event. The pool label is *intended* to live one
+round: round close sweeps it from every open issue that still carries it, best-effort
+(failures log as tick-errors; the next selection's reconcile is the further net).
+**Label-removal containment invariant:** every engine call site that strips a label
+routes through one guard function that fail-closes on anything but `labels.roundPool`
+(aliasing to a protected label is additionally rejected at config load), and no
+session output schema carries a label field — removing
 `needs-human`/`blocked`/`plan:approved`/`verify:n/a` remains an exclusively human act
 (#147's signature). Follow-ups cut from the same design: architect batch review of the
 pool (#213) and pool-scoped gate⓪ with freshness re-confirm (#214).
