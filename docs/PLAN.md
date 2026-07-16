@@ -387,10 +387,36 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
 
 ## Security & trust model (trusted-first, designed toward public)
 
-The committee's keystone finding: 0day's guard was built for a *trusted* model on a
-*private* repo. v1 stays in that context, so the guard's honest-mistake posture is
-adequate — **but we build the seams so public-repo hardening is additive, not a
-rewrite.** v1 requirements:
+**The trust boundary is on the ACTION side, not the content side.** Under the locked
+trusted-repos-first scope, issue and PR content is semi-trusted input, and every model
+session — worker or peripheral — is assumed corruptible by prompt injection,
+hallucination, or drift; at the boundary those causes are indistinguishable. Workers
+already read issue bodies while holding a write-capable token. The safety claim
+therefore rests on what a session can *do*, not on making everything it can *read*
+trusted. In the shipped defaults, the guard hook's fail-closed hard mode constrains
+worker actions, while producer ≠ reviewer ≠ merger keeps production, gate②'s fresh
+different-model review, and the Conductor's merge in separate hands (soft guard mode,
+other reviewer choices, and produce-PR-and-stop remain selectable). Issues-only
+peripheral sessions (PO alignment/triage, architect, plan review/drafting, and harvest)
+carry zero tool grants via an empty `--allowedTools` allowlist, with a
+deny-list of forge-write patterns retained as regression trip-wires; the engine alone
+executes forge writes from schema-validated structured output. The board workflow
+supplies the `origin:agent` governance gate: agent-created issues land outside `Ready`,
+and a human moves them to `Ready`; the dispatch code does not verify who moved the card.
+
+**Capability/context decision rule:** within the trusted-repos threat model,
+input-side prompt-injection hardening neither drives nor vetoes capability or context
+choices. Prompt scope is governed by noise, size, and determinism; capability is
+decided by whether its effects are enforceable at the action boundary. This is why
+the zero-`gh` peripheral design (#110) was decided by enforceability, and the same
+rule governs engine-injected context plus two-pass retrieval (#215, #217). Revisit
+input-side hardening when untrusted-repo support is actually scheduled, as its own
+milestone-level threat-model decision rather than a standing constraint on trusted-
+repo capabilities.
+
+The committee's keystone finding remains: 0day's guard was built for a *trusted* model
+on a *private* repo. v1 stays in that deployment context, **but we build the seams so
+public-repo hardening is additive, not a rewrite.** v1 requirements:
 
 - **Guard port hardening (M1, ships green before anything autonomous runs):**
   `guard.ts` is a **zero-dependency** module; reproduce 0day's ~100 bypass cases
