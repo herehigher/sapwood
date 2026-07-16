@@ -60,6 +60,9 @@ class FakeForge implements IForge {
     this.labelsAdded.push([n, l]);
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
+  async removeLabel(n: number, l: string): Promise<void> {
+    this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
+  }
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
     return 1;

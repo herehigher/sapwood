@@ -60,6 +60,9 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     { name: l.verifyNa, color: "c5def5", description: "Verification N/A — skips the Decision #8 gate" },
     { name: l.planApproved, color: "0e8a16", description: "Verification plan approved by gate zero" },
     { name: l.originAgent, color: "bfd4f2", description: "Issue was created by an agent, not a human" },
+    // #212: round-pool membership — applied by the aligning phase's pool-selection pass,
+    // cleared by the engine at round close (never by a session — see removeRoundPoolLabel).
+    { name: l.roundPool, color: "5319e7", description: "In this round's dispatch-eligible pool" },
   ];
 }
 

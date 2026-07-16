@@ -112,6 +112,11 @@ class FakeForge implements IForge {
     const cur = this.issueLabelsByIssue[n] ?? [];
     if (!cur.includes(l)) this.issueLabelsByIssue[n] = [...cur, l];
   }
+  labelsRemoved: Array<[number, string]> = [];
+  async removeLabel(n: number, l: string): Promise<void> {
+    this.labelsRemoved.push([n, l]);
+    this.issueLabelsByIssue[n] = (this.issueLabelsByIssue[n] ?? []).filter((x) => x !== l);
+  }
   async addPRLabel(n: number, l: string): Promise<void> {
     this.prLabelsAdded.push([n, l]);
     if (!this.prReviewData.labels.includes(l)) this.prReviewData = { ...this.prReviewData, labels: [...this.prReviewData.labels, l] };

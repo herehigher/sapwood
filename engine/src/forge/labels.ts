@@ -13,6 +13,9 @@ export function workflowLabelDefaults(prefix: string) {
     verifyNa: `${normalizedPrefix}verify:n/a`,
     planApproved: `${normalizedPrefix}plan:approved`,
     originAgent: `${normalizedPrefix}origin:agent`,
+    // #212: round-pool membership — applied by the aligning phase's pool-selection pass,
+    // consumed by the executing phase's dispatch-scoping wrapper (round.ts's PoolScopedForge).
+    roundPool: `${normalizedPrefix}round:pool`,
   };
 }
 

@@ -228,6 +228,10 @@ const Labels = z
     // session creates. Config-driven like every sibling label here — never a hardcoded
     // string at the call site (fable PR #101 P3).
     originAgent: z.string().optional(),
+    // #212: round-pool membership label — applied by the aligning phase's pool-selection pass
+    // (align.ts's selectRoundPool), consumed by the executing phase's dispatch-scoping wrapper
+    // (round.ts's PoolScopedForge). Same omitted-default pattern as every sibling label above.
+    roundPool: z.string().optional(),
   })
   .strict();
 
@@ -328,13 +332,25 @@ const Roles = z
     // CONFIG FILE's directory (see loadConfig below), not the CLI's cwd.
     po: RoleSession.extend({
       promptFile: z.string().optional(),
+      // #212 (gate① F1): the round-pool SELECTION session's own prompt — a distinct file from
+      // promptFile above (align/triage), same #74 pattern: unset -> the engine's shipped
+      // `prompts/po-pool.md`; a relative path resolves against the CONFIG FILE's directory (see
+      // loadConfig below). Runs after align/triage, reuses this same role's model/effort/
+      // fallbackModel — a separate template because its job (choose up to cap issues from an
+      // engine-supplied candidate digest) is unrelated to align/triage's issue-authoring job.
+      poolPromptFile: z.string().optional(),
       // #215: hard bound on the engine-assembled {{backlog.digest}} injected into align mode.
       // capDigest marks every cut; the floor leaves room for its marker and for the explicit
       // zero/read-failure notes, which must never collapse into an indistinguishable blank.
+      // #212: also reused (unmodified) as the pool-selection candidate digest's cap — that
+      // digest is naturally far smaller (bounded by the pool cap, a handful of issues), so this
+      // shared knob is a safety valve there too, not a dedicated budget most deployments tune.
       backlogDigestMaxChars: z.number().int().min(200).default(20_000),
       // #127: false -> round-defaults.ts omits the aligning stub; the phase no-ops via
       // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
-      // for the shared rationale).
+      // for the shared rationale). #212: pool SELECTION is the one exception — it still runs
+      // (deterministically, no session) even when this is false; see align.ts's
+      // runPoolSelection.
       enabled: z.boolean().default(true),
     })
       .strict()
@@ -524,6 +540,15 @@ const Round = z
     // prompts. Same user-tunable-in-config, marked-cut contract as roles.harvest.artifactMaxChars
     // / roles.retro.digestMaxChars.
     directiveMaxChars: z.number().int().positive().default(20_000),
+    // #212: the round-pool selection multiplier — the aligning phase picks up to
+    // ceil(lanes.roundDispatchCap * poolFactor) issues from Ready (milestone-scoped when
+    // `milestone` above is set), ordered by prio label then issue number, and labels them the
+    // round's dispatch-eligible pool (round.ts's PoolScopedForge restricts the executing phase's
+    // dispatch to pool members only). >1 so the pool absorbs gate⓪/review attrition (a pool
+    // member that later escalates to needs-human, or never got plan:approved, must not starve
+    // the executing phase down to fewer candidates than lanes.roundDispatchCap could otherwise
+    // fill). User-tunable, shipped commented in sapwood.config.yaml.
+    poolFactor: z.number().finite().positive().default(1.5),
   })
   .strict();
 
@@ -795,6 +820,7 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
     verifyNa: cfg.labels.verifyNa ?? defaults.verifyNa,
     planApproved: cfg.labels.planApproved ?? defaults.planApproved,
     originAgent: cfg.labels.originAgent ?? defaults.originAgent,
+    roundPool: cfg.labels.roundPool ?? defaults.roundPool,
   };
   cfg.labels = resolvedLabels;
   cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked];
@@ -815,6 +841,37 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
         `labels.needsHuman ("${cfg.labels.needsHuman}") must be listed case-insensitively in ` +
         `escalation.humanLabels so the escalation label is recognized by both PR and issue holds`,
     });
+  }
+  // #212 gate② P1-1: round close auto-REMOVES labels.roundPool (round.ts's removeRoundPoolLabel)
+  // — the ONE engine-owned label that's ever stripped without a human act. If an operator
+  // configures labels.roundPool equal to any OTHER protected/workflow label (needsHuman,
+  // blocked, planApproved, verifyNa, ..., or any escalation.humanLabels entry), that same
+  // auto-removal would silently strip the aliased label too, forging exactly the human-release
+  // signature #147's gated reentry (and gate⓪'s plan:approved/verify:n/a adjudication) depends
+  // on being human-only. Reject the collision at config load, same case-insensitive comparison
+  // labelsInclude uses everywhere else.
+  const otherLabels: Array<[string, string]> = [
+    ["labels.inProgress", cfg.labels.inProgress],
+    ["labels.needsHuman", cfg.labels.needsHuman],
+    ["labels.blocked", cfg.labels.blocked],
+    ["labels.reserve", cfg.labels.reserve],
+    ["labels.verifyNa", cfg.labels.verifyNa],
+    ["labels.planApproved", cfg.labels.planApproved],
+    ["labels.originAgent", cfg.labels.originAgent],
+    ...cfg.escalation.humanLabels.map((label, i): [string, string] => [`escalation.humanLabels[${i}]`, label]),
+  ];
+  for (const [key, value] of otherLabels) {
+    if (labelsInclude([value], cfg.labels.roundPool)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["labels", "roundPool"],
+        message:
+          `labels.roundPool ("${cfg.labels.roundPool}") collides with ${key} ("${value}") — round ` +
+          `close auto-removes labels.roundPool (round.ts's removeRoundPoolLabel), so aliasing it to ` +
+          `a protected label would let the engine silently strip that label too; use a distinct ` +
+          `value for labels.roundPool.`,
+      });
+    }
   }
 });
 
@@ -891,6 +948,10 @@ export function loadConfig(path?: string): SapwoodConfig {
   // #89: same rule for the PO prompt.
   if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {
     cfg.roles.po.promptFile = resolve(dirname(file), cfg.roles.po.promptFile);
+  }
+  // #212: same rule for the PO's round-pool SELECTION prompt (a distinct file from promptFile).
+  if (cfg.roles.po.poolPromptFile !== undefined && !isAbsolute(cfg.roles.po.poolPromptFile)) {
+    cfg.roles.po.poolPromptFile = resolve(dirname(file), cfg.roles.po.poolPromptFile);
   }
   // #91: same rule for the harvest prompt.
   if (cfg.roles.harvest.promptFile !== undefined && !isAbsolute(cfg.roles.harvest.promptFile)) {

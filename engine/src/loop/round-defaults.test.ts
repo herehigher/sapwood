@@ -39,13 +39,17 @@ class FakeForge implements IForge {
   async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
+  ready: Issue[] = [];
   async getReadyIssues(): Promise<Issue[]> {
-    return [];
+    return this.ready;
   }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
+  }
+  async removeLabel(n: number, l: string): Promise<void> {
+    this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
@@ -499,7 +503,7 @@ test("createDefaultPeripherals (#127): roles.<role>.enabled=false omits that pha
   state.close();
 });
 
-test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits every phase — an all-noop map, same shape as an empty peripherals override", () => {
+test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits every session phase — aligning alone stays wired for #212's engine-computed round-pool selection, an all-noop map otherwise", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
   const cfg = mkCfg({
@@ -513,9 +517,81 @@ test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits
   });
   const runner = new ScriptedRunner(forge, cfg);
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
-  for (const phase of ["aligning", "architecting", "plan_review", "harvesting", "retro"] as const) {
+  for (const phase of ["architecting", "plan_review", "harvesting", "retro"] as const) {
     assert.equal(peripherals[phase], undefined, `${phase} omitted when disabled`);
   }
+  // #212 AC7: aligning is never omitted — with the PO off it still runs the engine-computed
+  // fallback selection (no session at all).
+  assert.ok(peripherals.aligning, "aligning stays wired even with every role disabled");
+  await peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null });
+  assert.equal(runner.calls.length, 0, "no session was dispatched — the fallback is pure engine computation");
+  state.close();
+});
+
+test("createDefaultPeripherals (#212 gate② P2-4): every pool label write failing propagates OUT of the aligning phase — round.ts never persists the marker, so a rerun retries selection from scratch", async () => {
+  const state = new State(":memory:");
+  class FailAddLabelForge extends FakeForge {
+    override async addLabel(): Promise<void> {
+      throw new Error("simulated forge failure");
+    }
+  }
+  const forge = new FailAddLabelForge();
+  forge.ready = [{ number: 1, title: "t", labels: [] }];
+  // roles.po disabled keeps this test focused on applyPoolLabels' own throw behavior (the
+  // deterministic path also routes every write through it) rather than session scripting.
+  const cfg = mkCfg({ roles: { po: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  await assert.rejects(() => peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null }), /ALL 1 label write\(s\) failed/);
+  state.close();
+});
+
+test("runRounds (#212 gate② r2 finding 3): every pool-label write failing keeps the round in_progress at aligning with a null marker; a second runRounds call resumes the SAME round and retries the phase — never silently advances, never opens a new round", async () => {
+  const state = new State(":memory:");
+  class FailAddLabelForge extends FakeForge {
+    override async addLabel(): Promise<void> {
+      throw new Error("simulated forge failure");
+    }
+    // The base FakeForge hardcodes listOpenIssues() to [] — this test's SECOND runRounds call
+    // replays the persisted pool-selected event (gate② r2) and needs the target issue to
+    // actually resolve as "still open" (same as a real GithubForge would report for a genuinely
+    // open issue), or the replayed target would spuriously resolve empty and mask the
+    // total-failure throw this test is pinning.
+    override async listOpenIssues(): Promise<Issue[]> {
+      return this.ready;
+    }
+  }
+  const forge = new FailAddLabelForge();
+  forge.ready = [{ number: 1, title: "t", labels: [] }];
+  const cfg = mkCfg({ roles: { po: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const deps: RoundDeps = {
+    forge,
+    state,
+    supervisor: new MinimalSupervisor(),
+    cfg,
+    tickIntervalSec: 1,
+    sleep: async () => {},
+    peripherals,
+    registerSignals: () => () => {}, // never touch real process signals in this test
+  };
+
+  // round.ts's runPeripheral has no try/catch around stub.run() — an uncaught peripheral
+  // exception propagates straight out of runRounds, the same crash-rerun contract every
+  // peripheral relies on (a real deployment restarts the process; here, a second runRounds
+  // call over the SAME state simulates exactly that restart).
+  await assert.rejects(() => runRounds(deps), /ALL 1 label write\(s\) failed/);
+  const round = state.getRound(1)!;
+  assert.equal(round.status, "in_progress", "the round never closed");
+  assert.equal(round.phase, "aligning", "still sitting at the phase that threw");
+  assert.equal(round.artifact_ref, null, "the phase marker was never persisted");
+
+  await assert.rejects(() => runRounds(deps), /ALL 1 label write\(s\) failed/);
+  const roundAfterRetry = state.getRound(1)!;
+  assert.equal(roundAfterRetry.round_id, round.round_id, "the SAME round was resumed — openRound() picked it back up, no new round opened");
+  assert.equal(roundAfterRetry.phase, "aligning");
+  assert.equal(roundAfterRetry.artifact_ref, null);
   state.close();
 });
 
@@ -527,7 +603,10 @@ test("architecting stub (#127 gate② F3): with roles.po.enabled=false the archi
   const cfg = mkCfg({ roles: { po: { enabled: false } } });
   const runner = new ScriptedRunner(forge, cfg);
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
-  assert.equal(peripherals.aligning, undefined, "the disabled PO's aligning stub is omitted");
+  // #212 AC7: aligning is no longer omitted when the PO is disabled — it still runs the
+  // engine-computed round-pool selection every round (no session); only the PO's OWN
+  // decomposition/triage session is skipped (see the architect-context assertions below).
+  assert.ok(peripherals.aligning, "aligning still runs #212's round-pool selection with the PO disabled");
   const round = state.startRound("2026-07-13T00:00:00.000Z");
   await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
   const architectCall = runner.calls.find((c) => c.roleId === "architect");

@@ -20,6 +20,7 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
+import { labelsInclude } from "../forge/labels.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
 import { type MergeGate, type Supervisor, type TickDeps, type TickResult, tick } from "./conductor.js";
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
@@ -83,6 +84,14 @@ export interface RoundDeps {
   onRoundStop?: (roundId: number, hit: RoundStopHit) => void;
   /** Peripheral stub per phase; unset phases default to noopPeripheralStub. */
   peripherals?: Partial<Record<PeripheralPhase, PeripheralStub>>;
+  /** #212: when set, restricts the executing phase's dispatch to Ready issues carrying this
+   *  label (round.ts wraps the executing-phase forge in PoolScopedForge, see its own doc
+   *  comment) and clears the label from any still-undispatched pool member at round close.
+   *  Unset (the default for a bare round.ts caller/test) means no pool scoping at all — today's
+   *  behavior, unchanged. A real caller (cli.ts) always passes `cfg.labels.roundPool` so
+   *  production dispatch is pool-restricted; round.ts's own skeleton tests opt in explicitly
+   *  per-test, the same "unset = passthrough" convention as cfg.round.milestone/RoundScopedForge. */
+  poolLabel?: string;
   /** FINAL (whole-run) stop conditions — same shape/semantics as driver.ts's StopConfig,
    *  checked preemptively before opening a NEW round (never mid-round: a round already open
    *  always finishes its remaining phases, including harvest+retro, first). */
@@ -151,6 +160,9 @@ export class RoundScopedForge implements IForge {
   }
   addLabel(issue: number, label: string) {
     return this.inner.addLabel(issue, label);
+  }
+  removeLabel(issue: number, label: string) {
+    return this.inner.removeLabel(issue, label);
   }
   addPRLabel(pr: number, label: string) {
     return this.inner.addPRLabel(pr, label);
@@ -230,6 +242,135 @@ export class RoundScopedForge implements IForge {
     const issues = await this.inner.getIssuesNeedingPlanTriage();
     return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
   }
+}
+
+/** #212: wraps an IForge so getReadyIssues() only returns issues carrying the round-pool label
+ *  — used EXCLUSIVELY for the executing phase's own dispatch-tick calls (see runExecuting
+ *  below), never for the peripherals' forge or the standby probe's: an un-pooled Ready issue
+ *  must keep counting as probe work (probeHasWork below), and the aligning phase's own
+ *  pool-selection pass (align.ts's selectRoundPool) needs the FULL, un-pool-filtered Ready list
+ *  to choose from. Same explicit-passthrough shape as RoundScopedForge above (no Proxy magic).
+ *  Only constructed when a poolLabel is actually configured (see RoundDeps.poolLabel) — unset
+ *  means no pool scoping, today's behavior, unchanged (same "unset = passthrough" convention as
+ *  RoundScopedForge's milestone). */
+export class PoolScopedForge implements IForge {
+  constructor(
+    private readonly inner: IForge,
+    private readonly poolLabel: string,
+  ) {}
+
+  async getReadyIssues(): Promise<Issue[]> {
+    const issues = await this.inner.getReadyIssues();
+    return issues.filter((i) => labelsInclude(i.labels, this.poolLabel));
+  }
+
+  listUnplacedIssues() {
+    return this.inner.listUnplacedIssues();
+  }
+  readStartupReconcileData() {
+    return this.inner.readStartupReconcileData();
+  }
+  detectOwnerKind(owner: string) {
+    return this.inner.detectOwnerKind(owner);
+  }
+  claimIssue(issue: number) {
+    return this.inner.claimIssue(issue);
+  }
+  setBoardStatus(issue: number, status: Parameters<IForge["setBoardStatus"]>[1]) {
+    return this.inner.setBoardStatus(issue, status);
+  }
+  addLabel(issue: number, label: string) {
+    return this.inner.addLabel(issue, label);
+  }
+  removeLabel(issue: number, label: string) {
+    return this.inner.removeLabel(issue, label);
+  }
+  addPRLabel(pr: number, label: string) {
+    return this.inner.addPRLabel(pr, label);
+  }
+  openPR(branch: string, title: string, body: string) {
+    return this.inner.openPR(branch, title, body);
+  }
+  getPRStatus(pr: number) {
+    return this.inner.getPRStatus(pr);
+  }
+  mergePR(pr: number, headOid: string) {
+    return this.inner.mergePR(pr, headOid);
+  }
+  addPRComment(pr: number, body: string) {
+    return this.inner.addPRComment(pr, body);
+  }
+  addIssueComment(issue: number, body: string) {
+    return this.inner.addIssueComment(issue, body);
+  }
+  getPRReviewData(pr: number) {
+    return this.inner.getPRReviewData(pr);
+  }
+  getPRDiff(pr: number) {
+    return this.inner.getPRDiff(pr);
+  }
+  getCommitsSince(sinceIso: string) {
+    return this.inner.getCommitsSince(sinceIso);
+  }
+  branchExists(branch: string) {
+    return this.inner.branchExists(branch);
+  }
+  getIssueBody(issue: number) {
+    return this.inner.getIssueBody(issue);
+  }
+  updateIssueBody(issue: number, body: string) {
+    return this.inner.updateIssueBody(issue, body);
+  }
+  countOpenIssuesInMilestone(milestone: string) {
+    return this.inner.countOpenIssuesInMilestone(milestone);
+  }
+  listMilestoneTitles() {
+    return this.inner.listMilestoneTitles();
+  }
+  getIssueLabels(issue: number) {
+    return this.inner.getIssueLabels(issue);
+  }
+  getIssueComments(issue: number) {
+    return this.inner.getIssueComments(issue);
+  }
+  getIssuesNeedingPlanReview() {
+    return this.inner.getIssuesNeedingPlanReview();
+  }
+  createIssue(title: string, body: string) {
+    return this.inner.createIssue(title, body);
+  }
+  listOpenIssueNumbers() {
+    return this.inner.listOpenIssueNumbers();
+  }
+  listOpenIssues() {
+    return this.inner.listOpenIssues();
+  }
+  getIssuesNeedingPlanTriage() {
+    return this.inner.getIssuesNeedingPlanTriage();
+  }
+}
+
+/** #212 (2026-07-16 AC addendum): `IForge.removeLabel` is a new capability this issue
+ *  introduces, and label REMOVAL is otherwise reserved for an explicit human act — #147's gated
+ *  reentry reads a human clearing `needs-human`/`blocked` as the very signal that authorizes
+ *  reclaiming a lane, and gate⓪ treats `plan:approved`/`verify:n/a` presence as a human-trusted
+ *  adjudication. An engine- or session-driven removal of any of those would forge that
+ *  signature. This function is the ONE place engine code may call `forge.removeLabel` — it
+ *  fails CLOSED (throws, never removes) for any label other than the engine-owned
+ *  `cfg.labels.roundPool`, so a future call site (or a schema field a session could ever
+ *  populate) accidentally wired to a different label can never silently slip through. Two
+ *  callers today, both engine-only: round close (below) and align.ts's pool-selection reconcile
+ *  pass (clears a stray pool label from an open issue outside this round's selected target, at
+ *  selection time rather than waiting for close). */
+export async function removeRoundPoolLabel(forge: IForge, cfg: SapwoodConfig, issue: number, label: string): Promise<void> {
+  if (!labelsInclude([label], cfg.labels.roundPool)) {
+    throw new Error(
+      `removeRoundPoolLabel: refusing to remove label "${label}" — engine code may only ever remove ` +
+        `cfg.labels.roundPool ("${cfg.labels.roundPool}"); every other label (needs-human, blocked, ` +
+        `plan:approved, verify:n/a, ...) is removable by a human only (#147 invariant)`,
+    );
+  }
+  await forge.removeLabel(issue, label);
 }
 
 /**
@@ -430,10 +571,26 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // that signal either; the only consumable signal left is Ready+dispatchable, already
       // covered by the getReadyIssues check above. Counting it anyway would pin the probe true
       // and defeat standby, the same failure class as the two role-gated signals above.
-      // Residual imprecision (pre-existing, intentionally untouched): with the roles ENABLED, a
-      // milestone holding only needs-human/blocked issues still pins the probe true.
       if (cfg.round.milestone && (cfg.roles.po.enabled || cfg.roles.planReviewer.enabled)) {
-        return (await forge.countOpenIssuesInMilestone(cfg.round.milestone)) > 0;
+        // Cheapest read first: zero open issues in the milestone settles the question with no
+        // further fetch.
+        const count = await forge.countOpenIssuesInMilestone(cfg.round.milestone);
+        if (count === 0) return false;
+        // #212 (documented residual, round.ts:426-427 pre-fix): a milestone holding open issues
+        // ALL carrying a human-hold label (cfg.escalation.humanLabels) is not consumable by
+        // anything enabled either — a human is already in the loop for every one of them, same
+        // "only a consumable signal counts" rule as the two role-gated checks above. Nothing
+        // enabled can ever act on a held issue, so it must not pin the probe true forever (a
+        // milestone that's gone all-held would otherwise open an empty round after empty round,
+        // burning every peripheral session on a backlog nothing can consume). One non-held open
+        // issue in the milestone still counts. listOpenIssues() is the full open backlog
+        // (RoundScopedForge deliberately does not milestone-scope it — see its own doc comment),
+        // so the milestone filter is applied here, matching what countOpenIssuesInMilestone
+        // itself counts.
+        const openIssues = await forge.listOpenIssues();
+        return openIssues.some(
+          (i) => i.milestone === cfg.round.milestone && !cfg.escalation.humanLabels.some((label) => labelsInclude(i.labels, label)),
+        );
       }
       return false;
     } catch (e) {
@@ -538,6 +695,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  dispatches (not even if quota/lanes still have room) — it only drains what's already
    *  there. Returns how many workers this round put in flight (dispatched, or — resumed —
    *  inherited from activeWorkers): the caller's idle-throttle signal (#109 gate② P1, below). */
+  // #212: the executing phase's OWN dispatch-scoped forge — restricted to pool-labelled Ready
+  // issues when a poolLabel is configured (see RoundDeps.poolLabel's own doc comment). Built
+  // ONCE, outside runExecuting, since it wraps the same (possibly milestone-scoped) `forge`
+  // instance every dispatch tick this round already uses; unset poolLabel is a plain
+  // passthrough (no behavior change at all — same "unset = no scoping" contract as `forge`
+  // itself above).
+  const dispatchForge: IForge = deps.poolLabel ? new PoolScopedForge(forge, deps.poolLabel) : forge;
+
   const runExecuting = async (round: RoundRow, freshBatch: boolean): Promise<number> => {
     let stopHit: RoundStopHit | undefined;
     const dispatchedNames: string[] = [];
@@ -617,7 +782,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
       const batchResult = await runTick(
         toTickDeps({
-          forge,
+          forge: dispatchForge,
           // A crash-resumed drain forbids NEW dispatch waves, but its handoff lanes still need
           // RESUME. A zero dispatch cap expresses that distinction without PAUSE-blocking resume.
           forceDispatchPause: freshBatch && !attempt,
@@ -649,7 +814,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       const remaining = Math.max(0, cfg.lanes.roundDispatchCap - dispatchedThisRound());
       const tickResult = await runTick(
         toTickDeps({
-          forge,
+          forge: dispatchForge,
           forceDispatchPause: freshBatch && !attempt,
           // Same thunk as wave 1 (gate② P1-2): evaluated inside tick(), post-reclaim, so a
           // same-tick reclaim that crosses cost.roundBudgetUsd blocks the same tick's refill.
@@ -787,6 +952,50 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       if (killSwitchStop) {
         return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "kill-switch" };
+      }
+
+      // #212 (gate② P1-3, superseding gate① F2's dispatched-events exemption): clear the pool
+      // label from EVERY still-open issue that carries it — no exemption for "dispatched this
+      // round." GitHub is the source of truth for pool membership (PoolScopedForge's own doc
+      // comment), so this is a live re-read, never a durable pointer, and it sweeps the FULL
+      // open backlog (forge.listOpenIssues(), not just getReadyIssues()) so a pool member that
+      // moved OFF Ready for ANY reason — this round's own dispatch, a human board action, a
+      // milestone edit, gate⓪ revoking plan:approved — still gets cleared. "Persists through
+      // dispatch" (the #212 lifecycle) covers only a SAME-ROUND dead-lane requeue (see
+      // PoolScopedForge's own doc comment) — a dispatched issue that requeues in some LATER
+      // round must re-enter the pool via that round's own selection, never by inheriting a
+      // stale label (the exact selection-bypass gate① F2 was meant to close, and gate② review
+      // found the F2 fix still hadn't gone far enough: an actually-dispatched-but-still-open
+      // issue was the one remaining exempted case). Merged/closed issues are already excluded —
+      // listOpenIssues() never returns them. P2-5: the try/catch is PER ISSUE (not wrapped
+      // around the whole loop) — one failed removeLabel logs a tick-error and the sweep
+      // continues to every remaining issue, rather than a single bad issue aborting the clear
+      // for everything after it in iteration order.
+      if (deps.poolLabel) {
+        let openIssues: Issue[] = [];
+        try {
+          openIssues = await forge.listOpenIssues();
+        } catch (e) {
+          tickErrors++;
+          try {
+            deps.state.appendEvent("tick-error", { error: `round-pool label clear failed (listOpenIssues): ${String(e)}` });
+          } catch {
+            /* state write failed too — tickErrors still counts it */
+          }
+        }
+        for (const issue of openIssues) {
+          if (!labelsInclude(issue.labels, deps.poolLabel)) continue;
+          try {
+            await removeRoundPoolLabel(forge, cfg, issue.number, deps.poolLabel);
+          } catch (e) {
+            tickErrors++;
+            try {
+              deps.state.appendEvent("tick-error", { error: `round-pool label clear failed for #${issue.number}: ${String(e)}` });
+            } catch {
+              /* state write failed too — tickErrors still counts it */
+            }
+          }
+        }
       }
 
       const closedAt = iso();

@@ -9,7 +9,7 @@
 // direct `gh issue create/edit` side effect. The engine reads `resultText`, validates it, and
 // performs every forge write itself — exactly what createAligningStub is being tested for here.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -25,12 +25,16 @@ import {
   alignMarker,
   buildBacklogDigest,
   createAligningStub,
+  defaultPoolPromptPath,
   defaultPoPromptPath,
   loadPlanMd,
   normalizeProposalTitle,
   proposalId,
   proposalMarker,
+  runPoolSelection,
+  selectRoundPool,
   validateAlignOutput,
+  validatePoolSelectionOutput,
   validateTriageOutput,
 } from "./align.js";
 import { RoundScopedForge } from "./round.js";
@@ -55,15 +59,23 @@ class FakeForge implements IForge {
   async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
+  ready: Issue[] = [];
   async getReadyIssues(): Promise<Issue[]> {
-    return [];
+    return this.ready;
   }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     this.boardStatusCalls.push([n, s]);
   }
+  addLabelCalls: Array<[number, string]> = [];
   async addLabel(n: number, l: string): Promise<void> {
+    this.addLabelCalls.push([n, l]);
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
+  }
+  removeLabelCalls: Array<[number, string]> = [];
+  async removeLabel(n: number, l: string): Promise<void> {
+    this.removeLabelCalls.push([n, l]);
+    this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
@@ -1310,4 +1322,426 @@ test("validateTriageOutput: well-formed draft -> ok, returns the body verbatim",
   const text = triageResultText(1, PLAN_BODY);
   const result = validateTriageOutput(text, 1);
   assert.ok(result.ok && result.body === PLAN_BODY);
+});
+
+// ── #212: selectRoundPool ────────────────────────────────────────────────────────────────────
+
+const mkReady = (number: number, prio: number, milestone?: string): Issue => ({
+  number,
+  title: `issue ${number}`,
+  labels: [`sapwood:prio:${prio}`],
+  ...(milestone !== undefined ? { milestone } : {}),
+});
+
+test("selectRoundPool: caps the pool at ceil(lanes.roundDispatchCap * round.poolFactor)", async () => {
+  const forge = new FakeForge();
+  forge.ready = [1, 2, 3, 4, 5].map((n) => mkReady(n, 3));
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1.5 } }); // cap = ceil(3) = 3
+  const selected = await selectRoundPool({ forge, cfg });
+  assert.equal(selected.length, 3, "exactly ceil(2 * 1.5) = 3 issues selected");
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1, 2, 3],
+  );
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 2, 3],
+  );
+  assert.ok(
+    forge.addLabelCalls.every(([, l]) => l === cfg.labels.roundPool),
+    "only the pool label is ever applied",
+  );
+  assert.equal(forge.issueLabels[4], undefined, "issue #4 (past the cap) was never labelled");
+});
+
+test("selectRoundPool: orders by prio label ascending (prio:0 first) then issue number ascending", async () => {
+  const forge = new FakeForge();
+  forge.ready = [mkReady(30, 2), mkReady(10, 0), mkReady(20, 0), mkReady(40, 1)];
+  const cfg = mkCfg({ lanes: { max: 10, roundDispatchCap: 10 }, round: { poolFactor: 1 } }); // cap = 10, everyone fits
+  const selected = await selectRoundPool({ forge, cfg });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [10, 20, 40, 30],
+    "prio:0 (10 then 20 by number) -> prio:1 (40) -> prio:2 (30)",
+  );
+});
+
+test("selectRoundPool: milestone-scoped when the caller passes an already-scoped forge (RoundScopedForge) — never re-derives scoping itself", async () => {
+  const forge = new FakeForge();
+  forge.ready = [mkReady(1, 0, "M4"), mkReady(2, 0), mkReady(3, 0, "M4"), mkReady(4, 0, "M5")];
+  const scoped = new RoundScopedForge(forge, "M4");
+  const cfg = mkCfg({ lanes: { max: 10, roundDispatchCap: 10 }, round: { poolFactor: 1, milestone: "M4" } });
+  const selected = await selectRoundPool({ forge: scoped, cfg });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1, 3],
+    "only the M4-milestone issues were selected",
+  );
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 3],
+  );
+});
+
+test("selectRoundPool: idempotent — an already-pool-labelled issue is not re-labelled (crash-rerun safety)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 10, roundDispatchCap: 10 }, round: { poolFactor: 1 } });
+  forge.ready = [{ number: 1, title: "a", labels: [cfg.labels.roundPool] }, mkReady(2, 3)];
+  const selected = await selectRoundPool({ forge, cfg });
+  assert.equal(selected.length, 2, "both issues are still part of the selection");
+  assert.deepEqual(forge.addLabelCalls, [[2, cfg.labels.roundPool]], "issue #1 was already labelled — no redundant write");
+});
+
+test("selectRoundPool: a Ready read failure degrades to an empty pool (logged, never thrown)", async () => {
+  const cfg = mkCfg();
+  const logged: string[] = [];
+  const forge = new (class extends FakeForge {
+    override async getReadyIssues(): Promise<Issue[]> {
+      throw new Error("simulated forge outage");
+    }
+  })();
+  const selected = await selectRoundPool({ forge, cfg, log: (m) => logged.push(m) });
+  assert.deepEqual(selected, []);
+  assert.equal(forge.addLabelCalls.length, 0);
+  assert.ok(logged.some((l) => l.includes("simulated forge outage")));
+});
+
+// ── #212 gate① F1: runPoolSelection — the PO's OWN pool-selection session ──────────────────────
+
+/** A po-pool session's structured output: the selected issue numbers only, no BODY block. */
+const poolResultText = (selected: number[]): string => sapwoodResult({ selected });
+
+test("runPoolSelection: roles.po.enabled — a fake runner's selection is validated and the engine applies labels to EXACTLY that subset, never the full candidate set", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1.5 } }); // cap = 3
+  forge.ready = [1, 2, 3, 4, 5].map((n) => mkReady(n, 3));
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1, 3]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1, 3],
+    "only the session's validated selection, a proper subset of the 3-issue candidate set",
+  );
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 3],
+    "labels applied to exactly the selected subset — never #2 (a candidate, but not selected) and never #4/#5 (outside the cap)",
+  );
+  assert.equal(runner.calls.length, 1, "exactly one po-pool session — a valid first attempt needs no retry");
+  const call = runner.calls[0]!;
+  assert.equal(call.roleId, "po-pool");
+  assert.equal(call.allowedTools, PO_ALLOWED_TOOLS, "zero gh grants — same containment as align/triage");
+  assert.equal(call.disallowedTools, PO_DISALLOWED_TOOLS);
+  assert.match(call.prompt, /#1 —/);
+  assert.match(call.prompt, /#3 —/);
+  assert.doesNotMatch(call.prompt, /#4 —/, "the candidate digest itself is already cap-bounded — #4 was never even shown");
+});
+
+test("runPoolSelection: an out-of-bounds selection (an issue number outside the candidate list) is invalid, retried once, then degrades OPEN to the full deterministic candidate set", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(999, 3)]; // #999 past the cap, never a candidate
+  const badSelection = poolResultText([1, 999]); // #999 is not in the candidate list
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", badSelection), doneResult("role-po-pool-2", badSelection)]);
+  const state = new State(":memory:");
+  const events = tapEvents(state);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 7 });
+  assert.equal(runner.calls.length, 2, "retried exactly once before degrading");
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "degraded to the FULL deterministic candidate set (the top-cap Ready issues), not an empty pool",
+  );
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 2],
+  );
+  const degraded = events.find(([kind]) => kind === "pool-degraded");
+  assert.ok(degraded, "a durable honesty event was recorded");
+  assert.equal((degraded![1] as { round_id: number }).round_id, 7);
+});
+
+test("runPoolSelection: an over-cap selection (more issues than the candidate list itself) is invalid the same way", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  // Candidates are exactly [1, 2] (cap 2) — a session claiming BOTH plus a duplicate exceeds
+  // what schema+bound validation allows (len > cap after a would-be dedupe is still invalid;
+  // here it's a straightforward "more than exists" case via an out-of-range extra number).
+  const overCap = poolResultText([1, 2, 3]);
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", overCap), doneResult("role-po-pool-2", overCap)]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 2);
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "degraded to the deterministic candidate set",
+  );
+});
+
+test("runPoolSelection: roles.po.enabled=false -> the deterministic path directly, no session dispatched at all", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { enabled: false } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 0, "the PO role is disabled — no session, not even an attempt");
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "the full deterministic top-cap candidate set — the documented AC7 fallback",
+  );
+});
+
+test("runPoolSelection: zero Ready candidates -> no session dispatched (nothing to choose from), empty selection", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  forge.ready = [];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 0);
+  assert.deepEqual(selected, []);
+});
+
+test("runPoolSelection (gate② r2): replay path — a persisted pool-selected event is replayed verbatim, no session dispatched, no adopt-existing heuristic involved", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  // Ready still shows fresh candidates as the backlog stands NOW — but a durable pool-selected
+  // event from a PRIOR (crashed) attempt this round already recorded a decision. Replay must
+  // win over a fresh session: a fresh session's own selection could differ (LLM nondeterminism)
+  // from what the crashed attempt already decided, and reconciling to a NEW decision would
+  // fight the durable record instead of finishing what it started.
+  forge.ready = [mkReady(5, 3), mkReady(6, 3)];
+  forge.backlogIssues = [{ number: 9, title: "the persisted target", labels: [cfg.labels.roundPool] }];
+  const state = new State(":memory:");
+  state.appendEvent("pool-selected", { round_id: 1, issues: [9] });
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([5]))]);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [9],
+    "the event's target, never a fresh selection over current Ready",
+  );
+  assert.equal(runner.calls.length, 0, "no session dispatched — the persisted event was replayed");
+  assert.deepEqual(forge.addLabelCalls, [], "already labelled — reconcile's idempotent add-skip, no redundant write");
+  assert.deepEqual(forge.removeLabelCalls, [], "nothing else carries the pool label — nothing to heal here");
+});
+
+test("runPoolSelection (gate② r2): crash window — the event is persisted but ZERO labels landed before the crash (right after the event write); rerun reconciles the FULL target, still no session", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 3 }, round: { poolFactor: 1 } });
+  forge.ready = [];
+  forge.backlogIssues = [
+    { number: 9, title: "target, not yet labelled", labels: [] },
+    { number: 10, title: "also target, not yet labelled", labels: [] },
+  ];
+  const state = new State(":memory:");
+  state.appendEvent("pool-selected", { round_id: 1, issues: [9, 10] });
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [9, 10],
+  );
+  assert.equal(runner.calls.length, 0, "no session — the crash-window rerun replays the persisted target");
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [9, 10],
+    "the crashed attempt never got to label either issue — reconcile finishes the job on rerun",
+  );
+});
+
+test("runPoolSelection (gate② r2): residual healing (session path) — an open issue carrying a STALE pool label that is NOT part of this round's target has it removed during selection", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } }); // cap = 1
+  forge.ready = [mkReady(1, 3)];
+  forge.backlogIssues = [
+    { number: 1, title: "candidate", labels: [] },
+    { number: 99, title: "stale residual — not a candidate this round", labels: [cfg.labels.roundPool] },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+  );
+  assert.deepEqual(forge.removeLabelCalls, [[99, cfg.labels.roundPool]], "the stray residual's label was removed, never left dangling");
+});
+
+test("runPoolSelection (gate② r2): residual healing on the DISABLED path too — roles.po.enabled=false still clears a stray pool label from a non-candidate open issue", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { enabled: false } }, lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(1, 3)];
+  forge.backlogIssues = [
+    { number: 1, title: "candidate", labels: [] },
+    { number: 99, title: "stale residual", labels: [cfg.labels.roundPool] },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+  );
+  assert.equal(runner.calls.length, 0, "the PO role is disabled — no session, ever");
+  assert.deepEqual(forge.removeLabelCalls, [[99, cfg.labels.roundPool]]);
+});
+
+// ── #212 gate② r3 ────────────────────────────────────────────────────────────────────────────
+
+test("runPoolSelection (gate② r3 finding 1): a reconcile REMOVAL failure stays degrade-open — a durable pool-reconcile-incomplete event is appended, the phase still completes (never a retry loop over a prioritization mechanism)", async () => {
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } }); // cap = 1
+  const forge = new (class extends FakeForge {
+    override async removeLabel(n: number, l: string): Promise<void> {
+      if (n === 99) throw new Error("simulated forge failure removing #99");
+      await super.removeLabel(n, l);
+    }
+  })();
+  forge.ready = [mkReady(1, 3)];
+  forge.backlogIssues = [
+    { number: 1, title: "candidate", labels: [] },
+    { number: 99, title: "stale residual whose removal will fail", labels: [cfg.labels.roundPool] },
+  ];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const events = tapEvents(state);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 }); // must NOT throw
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+    "the phase's own target still resolved correctly",
+  );
+  const incomplete = events.find(([kind]) => kind === "pool-reconcile-incomplete");
+  assert.ok(incomplete, "a durable honesty event was recorded");
+  assert.deepEqual(incomplete![1], { round_id: 1, failed_issues: [99] });
+});
+
+test("runPoolSelection (gate② r3 finding 1): a listOpenIssues read failure during reconcile also stays degrade-open, with a read_failed honesty event — never a throw", async () => {
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } });
+  const forge = new (class extends FakeForge {
+    override async listOpenIssues(): Promise<Issue[]> {
+      throw new Error("simulated open-backlog read failure");
+    }
+  })();
+  forge.ready = [mkReady(1, 3)];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const events = tapEvents(state);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+    "the ADD side still succeeded — only the REMOVE side's read failed",
+  );
+  const incomplete = events.find(([kind]) => kind === "pool-reconcile-incomplete");
+  assert.ok(incomplete);
+  assert.deepEqual(incomplete![1], { round_id: 1, read_failed: true });
+});
+
+test("runPoolSelection (gate② r3 finding 3): two pool-selected events for the same round — the LAST one wins, replayed verbatim, no session", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [];
+  forge.backlogIssues = [
+    { number: 1, title: "first event's target (stale)", labels: [] },
+    { number: 2, title: "second (LAST) event's target", labels: [] },
+  ];
+  const state = new State(":memory:");
+  state.appendEvent("pool-selected", { round_id: 1, issues: [1] });
+  state.appendEvent("pool-selected", { round_id: 1, issues: [2] });
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [2],
+    "the LAST event's target, not the first",
+  );
+  assert.equal(runner.calls.length, 0, "no session — replay wins over recompute");
+});
+
+test("runPoolSelection (gate② r3 finding 3): the LAST pool-selected event for this round is malformed — treated as absent (fresh compute), never a throw; growth stops at one extra append", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(5, 3)];
+  const state = new State(":memory:");
+  state.appendEvent("pool-selected", { round_id: 1, issues: [9] }); // an earlier, well-formed event
+  state.appendEvent("pool-selected", { round_id: 1, malformed: true }); // the LAST one — fails the schema
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([5]))]);
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [5],
+    "a fresh session ran over the current Ready backlog",
+  );
+  assert.equal(runner.calls.length, 1, "no replay — the malformed LAST event reads as absent, never a throw");
+});
+
+test("applyPoolLabels (gate② P2-4, via selectRoundPool): every label write failing for a non-empty selection THROWS — never silently returns as though the pool were correctly empty", async () => {
+  const cfg = mkCfg();
+  const forge = new (class extends FakeForge {
+    override async addLabel(): Promise<void> {
+      throw new Error("simulated forge failure");
+    }
+  })();
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  await assert.rejects(() => selectRoundPool({ forge, cfg }), /ALL 2 label write\(s\) failed/);
+});
+
+test("applyPoolLabels (gate② P2-4): a validly EMPTY selection (zero candidates) never throws — 'select/have nothing' is a legitimate outcome, not a failure", async () => {
+  const cfg = mkCfg();
+  const forge = new FakeForge();
+  forge.ready = [];
+  const selected = await selectRoundPool({ forge, cfg });
+  assert.deepEqual(selected, []);
+});
+
+test("validatePoolSelectionOutput: a valid proper subset of the candidate list is ok", () => {
+  const result = validatePoolSelectionOutput(poolResultText([2, 5]), [1, 2, 5, 9], 3);
+  assert.ok(result.ok);
+  if (result.ok)
+    assert.deepEqual(
+      result.selected.sort((a, b) => a - b),
+      [2, 5],
+    );
+});
+
+test("validatePoolSelectionOutput: an empty selection is a valid, complete outcome", () => {
+  const result = validatePoolSelectionOutput(poolResultText([]), [1, 2, 3], 3);
+  assert.ok(result.ok);
+  if (result.ok) assert.deepEqual(result.selected, []);
+});
+
+test("validatePoolSelectionOutput: a selected number outside the candidate list -> fail-closed", () => {
+  const result = validatePoolSelectionOutput(poolResultText([1, 42]), [1, 2, 3], 3);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /not in the candidate list/.test(result.reason));
+});
+
+test("validatePoolSelectionOutput: a selection longer than the cap -> fail-closed even if every number is a real candidate", () => {
+  const result = validatePoolSelectionOutput(poolResultText([1, 2, 3]), [1, 2, 3, 4, 5], 2);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /exceeding the cap/.test(result.reason));
+});
+
+test("validatePoolSelectionOutput: a duplicate issue number in the selection -> fail-closed", () => {
+  const result = validatePoolSelectionOutput(poolResultText([1, 1]), [1, 2, 3], 3);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /duplicate/.test(result.reason));
+});
+
+test("validatePoolSelectionOutput: no structured output block -> fail-closed", () => {
+  const result = validatePoolSelectionOutput("no sentinel here", [1, 2, 3], 3);
+  assert.equal(result.ok, false);
+});
+
+test("defaultPoolPromptPath resolves to a real, readable shipped file with a selected-numbers structured-output example", () => {
+  const path = defaultPoolPromptPath();
+  assert.ok(existsSync(path));
+  const text = readFileSync(path, "utf8");
+  assert.match(text, /selected/);
 });

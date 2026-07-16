@@ -114,7 +114,27 @@ reviewer:
   # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
   escalateAfterSec: 86400
 
-# labels omitted: this repo adopts the shipped sapwood:* namespace defaults.
+# labels omitted: this repo adopts the shipped sapwood:* namespace defaults. Shown here (all
+# commented) so every workflow-label key has ONE documented home; see docs/configuration.md's
+# `labels` table for the full description of each.
+# labels:
+#   prefix: "sapwood:"        # namespace for every omitted default below + the type:*/prio:*
+#                              # taxonomy. "" selects bare (unprefixed) names.
+#   inProgress: sapwood:in-progress
+#   needsHuman: sapwood:needs-human
+#   blocked: sapwood:blocked
+#   reserve: sapwood:reserve
+#   verifyNa: "sapwood:verify:n/a"
+#   planApproved: "sapwood:plan:approved"
+#   originAgent: sapwood:origin:agent
+#   roundPool: sapwood:round:pool
+#                              # #212: round-pool membership (applied by the aligning phase's
+#                              # selection pass, cleared by the engine at round close — see
+#                              # round.poolFactor below). MUST be distinct from every other
+#                              # label above and from every escalation.humanLabels entry — round
+#                              # close auto-removes labels.roundPool, so aliasing it to a
+#                              # protected label (e.g. needsHuman) would let the engine silently
+#                              # strip that label too. Config load rejects the collision.
 
 # #87/#104: peripheral role sessions — the round orchestrator's aligning (PO)/architecting/
 # plan_review (gate⓪)/harvesting/retro phases, each a role-scoped session wired into runRounds's
@@ -129,18 +149,29 @@ reviewer:
 # wedging the round. planDrafter has no toggle of its own — it rides along with planReviewer
 # (gate⓪ is one unit, `roles.planReviewer.enabled` switches both off together).
 # roles:
-#   po: # aligning phase — goal alignment (decomposition) + round-start plan triage
+#   po: # aligning phase — goal alignment (decomposition) + round-start plan triage +
+#       # round-pool selection (#212)
 #     # promptFile: prompts/my-po.md
-#     #                   Unset = the engine's shipped prompts/po.md.
+#     #                   Unset = the engine's shipped prompts/po.md (align + triage).
+#     # poolPromptFile: prompts/my-po-pool.md
+#     #                   #212: a SEPARATE prompt for the round-pool SELECTION session (choosing
+#     #                   which of this round's top candidate issues actually belong in the
+#     #                   pool). Unset = the engine's shipped prompts/po-pool.md.
 #     backlogDigestMaxChars: 20000 # Max chars for the milestone-scoped open-issue digest
 #                                  # injected into align mode; deterministic cuts are marked.
+#                                  # #212: also reused, unmodified, as the pool-selection
+#                                  # candidate digest's cap (naturally far smaller).
 #     model: sonnet
 #     effort: medium
 #     # fallbackModel: sonnet # Every role accepts this key too. Set "none" to fail loud rather
 #                           # than silently downgrade quality; see #168's environment-failure path.
-#     enabled: true      # #127: false -> the aligning phase no-ops every round. WARNING: with
-#                        # the PO off, plan-less issues are never triaged into gate⓪ — they
-#                        # need a verification plan from a human/external process instead.
+#     enabled: true      # #127: false -> the aligning phase's decomposition/triage session
+#                        # no-ops every round. WARNING: with the PO off, plan-less issues are
+#                        # never triaged into gate⓪ — they need a verification plan from a
+#                        # human/external process instead. #212: round-pool selection is the
+#                        # ONE exception — it still runs every round (deterministically,
+#                        # engine-computed, no session) even with this false, since the
+#                        # selection bound must not depend on an optional role.
 #   planReviewer:
 #     # promptFile: prompts/my-plan-reviewer.md
 #     #                   #74-style override; relative paths resolve against THIS config file's
@@ -222,6 +253,15 @@ reviewer:
 #   directiveMaxChars: 20000 # deterministic truncation cap on the directive text (same
 #                         # marked-cut-never-silent-drop contract as roles.harvest.artifactMaxChars
 #                         # / roles.retro.digestMaxChars).
+#   poolFactor: 1.5 # #212: the aligning phase selects up to ceil(lanes.roundDispatchCap *
+#                    # poolFactor) issues from Ready (milestone-scoped when `milestone` above is
+#                    # set), ordered by prio label then issue number, and labels them this
+#                    # round's dispatch-eligible pool — the executing phase only dispatches pool
+#                    # members. >1 so the pool absorbs gate⓪/review attrition (a member that
+#                    # later escalates or never gets plan:approved must not starve dispatch below
+#                    # what roundDispatchCap could otherwise fill). Runs every round regardless of
+#                    # roles.po.enabled — with the PO off, selection is still engine-computed
+#                    # (no session).
 
 # #128: the loop's north-star goal file — the alignment yardstick the aligning (PO) and
 # architecting peripherals read every round, and the entry retro proposals must cite as their

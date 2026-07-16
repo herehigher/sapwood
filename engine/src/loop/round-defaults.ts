@@ -22,7 +22,7 @@ import { type ArchitectDeps, createArchitectStub, NO_PRIOR_ROUND_YET } from "../
 import type { RoleRunner } from "../roles/peripheral.js";
 import { createPlanReviewStub } from "../roles/plan-review.js";
 import type { State } from "../state/state.js";
-import { alignMarker, createAligningStub } from "./align.js";
+import { alignMarker, createAligningStub, runPoolSelection } from "./align.js";
 import { createHarvestStub } from "./harvest.js";
 import { type PeripheralPhase, type PeripheralStub, RoundScopedForge } from "./round.js";
 import { type AlignSection, mergeAlignSummary, type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
@@ -172,7 +172,35 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   // no-ops with its marker set exactly like the pre-#127 skeleton did — no round.ts change.
   // planDrafter has no toggle of its own: it only ever runs from inside the plan_review
   // stub, so roles.planReviewer.enabled is gate⓪'s ONE unit switch.
-  if (deps.cfg.roles.po.enabled) peripherals.aligning = alignStub;
+  //
+  // #212 AC7: the aligning phase's round-pool selection is NEVER gated by roles.po.enabled —
+  // "the selection bound must not depend on an optional role". So, unlike every other role
+  // below, `aligning` is ALWAYS populated: with the PO on, it runs the real alignStub (goal
+  // decomposition + triage) THEN runs the PO's SEPARATE pool-selection session over whatever
+  // Ready looks like afterward (align.ts's runPoolSelection — a real session, gate① F1: NOT a
+  // purely deterministic bound on the enabled path); with the PO off, runPoolSelection itself
+  // skips the session and falls straight through to the same deterministic, engine-computed
+  // selection — the documented AC7 fallback. The rerun-not-resume marker check happens HERE
+  // (not inside alignStub) so a crash mid-selection (after alignStub's own work already
+  // externalized) restarts at THIS phase with a still-null marker and safely redoes only the
+  // (idempotent) selection pass, never re-running alignStub's own internally-idempotent
+  // proposal/triage logic a second time for nothing.
+  peripherals.aligning = {
+    async run(ctx) {
+      if (ctx.marker != null) return { marker: ctx.marker }; // already externalized this round
+      const result = deps.cfg.roles.po.enabled ? await alignStub.run(ctx) : { marker: alignMarker(ctx.roundId) };
+      await runPoolSelection({
+        forge,
+        cfg: deps.cfg,
+        state: deps.state,
+        runner: deps.runner,
+        roundId: ctx.roundId,
+        ...(deps.now !== undefined ? { now: deps.now } : {}),
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
+      });
+      return result;
+    },
+  };
   if (deps.cfg.roles.architect.enabled) {
     peripherals.architecting = {
       async run(ctx) {
@@ -233,7 +261,20 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     .filter(([role]) => !deps.cfg.roles[role].enabled)
     .map(([, phase]) => phase);
   if (disabledPhases.length > 0) {
-    let line = `[sapwood:round] peripheral role(s) disabled by config — these phases will no-op every round: ${disabledPhases.join(", ")}`;
+    // #212: `aligning` is a partial exception since AC7 — with the PO off it still runs the
+    // deterministic, engine-computed round-pool selection every round (no session); it's the
+    // PO's own decomposition/triage work that no-ops, not the whole phase. Worded separately so
+    // this line stays literally true for every phase it names.
+    const noopPhases = disabledPhases.filter((p) => p !== "aligning");
+    let line =
+      noopPhases.length > 0
+        ? `[sapwood:round] peripheral role(s) disabled by config — these phases will no-op every round: ${noopPhases.join(", ")}`
+        : `[sapwood:round] peripheral role(s) disabled by config: ${disabledPhases.join(", ")}`;
+    if (disabledPhases.includes("aligning")) {
+      line +=
+        `. NOTE: aligning still runs its #212 engine-computed round-pool selection every round with ` +
+        `roles.po.enabled: false (no session) — only the PO's own decomposition/triage passes no-op.`;
+    }
     // #127 gate② F1: disabling gate⓪'s roles silently starves ALL dispatch — forge.ts's
     // dispatchability gate still (correctly, PLAN Decision #8) requires the planApproved label
     // (or verifyNa), and only the plan-reviewer applies planApproved; the PO is what triages
