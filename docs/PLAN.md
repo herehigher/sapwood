@@ -822,6 +822,39 @@ anchored when the round opens (`start_spend_id`), so opening/closing peripherals
 worker legs all count exactly once across crash/resume. The budget gates dispatch only;
 harvest and retro still close an over-budget round.
 
+**The round pool — explicit per-round task selection (locked 2026-07-16, issue #212).**
+"This round's tasks" is an explicit, bounded selection, not an open-ended per-tick
+query (the pool *label* remains the effective dispatch authority — the durable event
+below records the selection for replay; labels are what dispatch reads): during the aligning
+phase the PO selects up to `ceil(lanes.roundDispatchCap × round.poolFactor)` issues from
+Ready (milestone-scoped; the factor, default 1.5, absorbs review attrition). Selection is
+a PO session choosing from an engine-computed, prio-ordered candidate digest; the session
+returns issue numbers only and the **engine** applies the pool label
+(`labels.roundPool`, default `sapwood:round:pool`) from validated output — the role keeps
+zero forge grants (#110). With `roles.po.enabled: false`, or when the session degrades
+(invalid twice — degrade *open*, `pool-degraded` event), the pool is the deterministic
+top-of-candidates set: the selection *bound* never depends on an optional role. The
+executing phase dispatches **pool members only** (a dispatch-scoped forge wrapper; the
+standby probe still sees all of Ready), and the same probe now ignores milestones whose
+open issues all carry a human-hold label — a backlog nothing enabled can consume no
+longer pins rounds open. Crash model: the chosen selection is persisted as a durable
+`pool-selected` event *before* any label write, and a rerun replays it (last event
+wins) instead of recomputing — a duplicate selection session is confined to the rare
+crash window between the session returning and the event write (inherent: an external
+process and a local write cannot be atomic; reconcile keeps the last attempt
+authoritative either way). Label writes are a *reconcile* to that target — add
+missing, remove strays — with read/remove failures degrading open and leaving a
+`pool-reconcile-incomplete` honesty event. The pool label is *intended* to live one
+round: round close sweeps it from every open issue that still carries it, best-effort
+(failures log as tick-errors; the next selection's reconcile is the further net).
+**Label-removal containment invariant:** every engine call site that strips a label
+routes through one guard function that fail-closes on anything but `labels.roundPool`
+(aliasing to a protected label is additionally rejected at config load), and no
+session output schema carries a label field — removing
+`needs-human`/`blocked`/`plan:approved`/`verify:n/a` remains an exclusively human act
+(#147's signature). Follow-ups cut from the same design: architect batch review of the
+pool (#213) and pool-scoped gate⓪ with freshness re-confirm (#214).
+
 **Peripherals never review or merge.** The goal-alignment/PO, architect, gate⓪
 plan-reviewer, harvest, and retrospective roles read and write issues and docs only.
 `guard.ts`, `reviewer.ts`, and `merge-driver.ts` stay fixed and non-configurable
