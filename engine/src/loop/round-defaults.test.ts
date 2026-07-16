@@ -109,6 +109,9 @@ class FakeForge implements IForge {
   async listOpenIssueNumbers(): Promise<number[]> {
     return this.openIssueNumbers;
   }
+  async listOpenIssues(): Promise<Issue[]> {
+    return [];
+  }
   planTriageCandidates: Issue[] = [];
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;

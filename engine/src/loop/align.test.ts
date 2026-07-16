@@ -23,12 +23,14 @@ import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START 
 import {
   type AlignDeps,
   alignMarker,
+  buildBacklogDigest,
   createAligningStub,
   defaultPoPromptPath,
   loadPlanMd,
   validateAlignOutput,
   validateTriageOutput,
 } from "./align.js";
+import { RoundScopedForge } from "./round.js";
 
 class FakeForge implements IForge {
   async listUnplacedIssues() {
@@ -41,6 +43,7 @@ class FakeForge implements IForge {
   issueBodies: Record<number, string> = {};
   issueCommentsPosted: Array<[number, string]> = [];
   openIssueNumbers: number[] = [];
+  backlogIssues: Issue[] = [];
   createdIssues: Array<{ title: string; body: string }> = [];
   nextIssueNumber = 100;
   boardStatusCalls: Array<[number, string]> = [];
@@ -125,6 +128,9 @@ class FakeForge implements IForge {
   }
   async listOpenIssueNumbers(): Promise<number[]> {
     return this.openIssueNumbers;
+  }
+  async listOpenIssues(): Promise<Issue[]> {
+    return this.backlogIssues;
   }
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;
@@ -687,6 +693,74 @@ test("defaultPoPromptPath: resolves to a real shipped file with both align and t
   assert.ok(template.includes("{{issue.number}}"));
   assert.ok(template.includes("{{issue.body}}"));
   assert.ok(template.includes("{{round.directive}}"), "#126: the shipped po.md must reference the round directive var");
+  assert.ok(template.includes("{{backlog.digest}}"));
+});
+
+test("buildBacklogDigest: number-sorted titles + configured hold annotations are deterministic and capDigest-bounded", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { backlogDigestMaxChars: 200 } } });
+  forge.backlogIssues = [
+    { number: 20, title: "z".repeat(220), labels: ["blocked"] },
+    { number: 3, title: "Earlier gap", labels: ["NEEDS-HUMAN", "unrelated"] },
+  ];
+  const first = await buildBacklogDigest(forge, cfg);
+  forge.backlogIssues.reverse();
+  const rerun = await buildBacklogDigest(forge, cfg);
+  assert.equal(first, rerun, "the same backlog is byte-identical regardless of forge ordering");
+  assert.equal(first.length, 200);
+  assert.match(first, /^- #3 — Earlier gap \[hold: needs-human\]/);
+  assert.match(first, /digest truncated/);
+});
+
+test("buildBacklogDigest: zero issues and a contained read failure are distinct explicit lines", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  assert.equal(await buildBacklogDigest(forge, cfg), "(no open issues yet)");
+  forge.listOpenIssues = async () => {
+    throw new Error("forge unavailable");
+  };
+  assert.equal(await buildBacklogDigest(forge, cfg), "(backlog digest unavailable: open-issue read failed)");
+});
+
+test("createAligningStub #215: the align prompt receives only the milestone-scoped current backlog digest", async () => {
+  const innerForge = new FakeForge();
+  innerForge.backlogIssues = [
+    { number: 42, title: "Existing bounded work", labels: ["blocked"], milestone: "M4" },
+    { number: 43, title: "Other milestone work", labels: [], milestone: "M5" },
+  ];
+  const forge = new RoundScopedForge(innerForge, "M4");
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const state = new State(":memory:");
+  await createAligningStub({ forge, state, cfg: mkCfg({ round: { milestone: "M4" } }), runner }).run({
+    roundId: 1,
+    phase: "aligning",
+    marker: null,
+  });
+  assert.ok(runner.calls[0]!.prompt.includes("- #42 — Existing bounded work [hold: blocked]"));
+  assert.ok(!runner.calls[0]!.prompt.includes("Other milestone work"));
+  assert.ok(!runner.calls[0]!.prompt.includes("{{backlog.digest}}"));
+  state.close();
+});
+
+test("createAligningStub #215: a pre-existing custom PO prompt without {{backlog.digest}} still renders", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-po-custom-"));
+  try {
+    const promptPath = join(dir, "po.md");
+    writeFileSync(promptPath, "custom mode={{po.mode}}\ndirective={{round.directive}}\n");
+    const forge = new FakeForge();
+    forge.backlogIssues = [{ number: 8, title: "Unused by this override", labels: [] }];
+    const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+    const state = new State(":memory:");
+    await createAligningStub({ forge, state, cfg: mkCfg({ roles: { po: { promptFile: promptPath } } }), runner }).run({
+      roundId: 1,
+      phase: "aligning",
+      marker: null,
+    });
+    assert.match(runner.calls[0]!.prompt, /^custom mode=align/m);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("#128: a real caller (deps.planMdPath omitted) renders {{plan.md}} from cfg.goal.file, the single resolved north-star path", async () => {

@@ -11,6 +11,8 @@ import { extractMarkdownSections } from "../util/markdown.js";
 import { gh } from "./gh.js";
 import { labelsInclude } from "./labels.js";
 
+const OPEN_ISSUES_LIMIT = 1000;
+
 export type OwnerKind = "user" | "org";
 
 export interface Issue {
@@ -204,6 +206,10 @@ export interface IForge {
    *  this diff is the only way align.ts learns what got made. Same fail-closed-on-error stance
    *  as the rest of IForge: a thrown gh call propagates, never a partial/empty list. */
   listOpenIssueNumbers(): Promise<number[]>;
+  /** #215: every OPEN issue's digest fields. The PO/alignment peripheral uses this engine-side
+   *  read to see the current backlog without receiving ambient forge credentials. `milestone`
+   *  is populated so RoundScopedForge can apply the round's existing milestone boundary. */
+  listOpenIssues(): Promise<Issue[]>;
   /** #89: OPEN issues in this repo that still lack a verification-plan section in their body —
    *  the PO/triage peripheral's candidate set. Broader than getIssuesNeedingPlanReview: every
    *  open issue regardless of board Status, not just the Ready lane, because triage runs
@@ -591,6 +597,38 @@ export class GithubForge implements IForge {
     ]);
     const issues = JSON.parse(out) as { number: number }[];
     return issues.map((i) => i.number);
+  }
+
+  async listOpenIssues(): Promise<Issue[]> {
+    // Keep this separate from listOpenIssueNumbers: that smaller read is also the cheap forge
+    // reachability probe, while the PO digest needs richer fields and milestone scoping.
+    const out = await this.gh([
+      "issue",
+      "list",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--state",
+      "open",
+      "--json",
+      "number,title,labels,milestone",
+      "--limit",
+      String(OPEN_ISSUES_LIMIT),
+    ]);
+    const issues = JSON.parse(out) as Array<{
+      number: number;
+      title: string;
+      labels: Array<{ name: string }>;
+      milestone: { title: string } | null;
+    }>;
+    if (issues.length === OPEN_ISSUES_LIMIT) {
+      throw new Error(`listOpenIssues: backlog read is incomplete (limit ${OPEN_ISSUES_LIMIT})`);
+    }
+    return issues.map((i) => ({
+      number: i.number,
+      title: i.title,
+      labels: i.labels.map((label) => label.name),
+      ...(i.milestone ? { milestone: i.milestone.title } : {}),
+    }));
   }
 
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {

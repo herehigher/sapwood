@@ -33,6 +33,8 @@ import type { SapwoodConfig } from "../config/config.js";
 import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
+import { labelsInclude } from "../forge/labels.js";
+import { capDigest } from "../retro/retro-digest.js";
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
@@ -67,6 +69,35 @@ export function loadPlanMd(path: string = DEFAULT_PLAN_MD_PATH): string {
   } catch {
     return "";
   }
+}
+
+const NO_OPEN_ISSUES = "(no open issues yet)";
+const BACKLOG_READ_FAILED = "(backlog digest unavailable: open-issue read failed)";
+
+/** Engine-side PO context (#215): deterministic, milestone-scopeable via RoundScopedForge,
+ *  and contained on forge failure. Sorting here (rather than trusting gh's presentation order)
+ *  makes crash-rerun assembly byte-identical for the same backlog. Every return path is capped
+ *  at the boundary so placeholders cannot accidentally bypass the configured size limit. */
+export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Promise<string> {
+  let uncapped: string;
+  try {
+    const issues = await forge.listOpenIssues();
+    if (issues.length === 0) {
+      uncapped = NO_OPEN_ISSUES;
+    } else {
+      const ordered = [...issues].sort((a, b) => a.number - b.number);
+      uncapped = ordered
+        .map((issue) => {
+          const holds = cfg.escalation.humanLabels.filter((label) => labelsInclude(issue.labels, label));
+          const annotation = holds.length > 0 ? ` [hold: ${holds.join(", ")}]` : "";
+          return `- #${issue.number} — ${issue.title}${annotation}`;
+        })
+        .join("\n");
+    }
+  } catch {
+    uncapped = BACKLOG_READ_FAILED;
+  }
+  return capDigest(uncapped, cfg.roles.po.backlogDigestMaxChars);
 }
 
 // Placeholder Issue for template rendering in "align" mode: there is no single issue in scope
@@ -258,6 +289,11 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         ...(deps.log !== undefined ? { log: deps.log } : {}),
       });
 
+      // Compute at align invocation time from the injected forge. In live round wiring that
+      // forge is RoundScopedForge, so the digest inherits the exact existing milestone boundary.
+      // Reuse the same snapshot for triage prompt rendering later in this phase.
+      const backlogDigest = await buildBacklogDigest(deps.forge, deps.cfg);
+
       // ── Alignment/decomposition pass: ONE session, dispatched even with an unscoped round
       // (round.milestone unset) — decomposition still has docs/PLAN.md to work from alone.
       // #104: ported to peripheral.ts's shared runSessionWithRetry (outcome-check -> retry-once
@@ -273,6 +309,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         // cfg.goal.file (the same resolved value architect.ts's own goal-file read honors).
         "plan.md": loadPlanMd(deps.planMdPath ?? deps.cfg.goal.file),
         "round.directive": directive,
+        "backlog.digest": backlogDigest,
       });
       const alignResult = await runSessionWithRetry({
         runner: deps.runner,
@@ -349,6 +386,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           "round.milestone": deps.cfg.round.milestone ?? "",
           "plan.md": "",
           "round.directive": directive,
+          "backlog.digest": backlogDigest,
         });
         const triageResult = await runSessionWithRetry({
           runner: deps.runner,

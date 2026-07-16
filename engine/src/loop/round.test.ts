@@ -121,6 +121,10 @@ class FakeForge implements IForge {
   async listOpenIssueNumbers(): Promise<number[]> {
     return this.openIssueNumbers;
   }
+  openIssues: Issue[] = [];
+  async listOpenIssues(): Promise<Issue[]> {
+    return this.openIssues;
+  }
   planTriageCandidates: Issue[] = [];
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;
@@ -1095,6 +1099,23 @@ test("RoundScopedForge: filters getReadyIssues() by milestone; passthrough when 
   assert.deepEqual(
     (await unscoped.getReadyIssues()).map((i) => i.number),
     [1, 2],
+  );
+});
+
+test("RoundScopedForge #215: listOpenIssues inherits the existing milestone boundary", async () => {
+  const forge = new FakeForge();
+  forge.openIssues = [
+    { number: 1, title: "in scope", labels: [], milestone: "M4" },
+    { number: 2, title: "other milestone", labels: [], milestone: "M5" },
+    { number: 3, title: "unassigned", labels: [] },
+  ];
+  assert.deepEqual(
+    (await new RoundScopedForge(forge, "M4").listOpenIssues()).map((issue) => issue.number),
+    [1],
+  );
+  assert.deepEqual(
+    (await new RoundScopedForge(forge, undefined).listOpenIssues()).map((issue) => issue.number),
+    [1, 2, 3],
   );
 });
 
