@@ -207,7 +207,7 @@ later event moves that issue (`dispatched`, `merged`, `gated-reentry`);
 `park-escalated` clears on `park-resumed`; round-scoped escalations clear
 when their round closes; `stalled`/`disconnected` clear when polling
 recovers. `worktree-retained` clears on `worktree-released` — a new
-**additive** engine event (follow-up, filed with this amendment alongside
+**additive** engine event (follow-up #210, alongside
 the `dashboard.controls` schema key): the engine already owns the retained
 path, so on tick/startup it notices the folder is gone (the human cleaned
 it up) and appends the event; the filesystem it manages is the resolution
@@ -247,9 +247,8 @@ preflight the server never grants) and rejects requests whose `Origin`
 header, when present, is not the dashboard's own. `dashboard.controls`
 defaults to **true** — the release decision is that operators get these
 verbs out of the box — and `false` removes the route and the buttons
-entirely; the key is new to the (strict) config schema, filed as an engine
-follow-up with this amendment alongside the control-sentinel wiring the
-verbs assume (PAUSE `#75` and the kill switch already exist; only the
+entirely; the key is new to the (strict) config schema — engine follow-up
+#210 (PAUSE `#75` and the kill switch already exist; only the
 schema key is new). Config *editing* stays out (§2 #5,
 §10) — flipping a documented run-state signal the engine already honors is
 a different risk class from mutating reviewed YAML.
@@ -800,7 +799,7 @@ overlay** (est telemetry, config, board). Replay is not a second UI — it is
 the same UI with a different cursor. §9's single reducer is this mechanism;
 the overlay is the named boundary.
 
-### Engine follow-ups (all additive; #1–2 filed as #206, #3 as #207; #4–5 from the round-2 amendment, to be filed with it)
+### Engine follow-ups (all additive; #1–2 filed as #206, #3 as #207, #4–5 as #210)
 
 1. **`round-phase` event** (#206) — `appendEvent("round-phase",
    { round_id, phase })` covering the **full trail**: the initial `aligning`
@@ -818,7 +817,7 @@ the overlay is the named boundary.
    (board query / forge response) — never an extra GitHub call. Powers the
    §3 C hover tooltips offline and in replay; entities without a
    title-bearing event degrade to no tooltip.
-4. **`worktree-released` event** (round-2 amendment) — payload
+4. **`worktree-released` event** (#210, round-2 amendment) — payload
    `{ worker, issue, worktreePath }`, mirroring `worktree-retained`'s.
    Emission: on tick/startup the engine checks each retained path it has
    recorded; when the folder no longer exists (the human cleaned it up), it
@@ -828,7 +827,7 @@ the overlay is the named boundary.
    matched and its row therefore never auto-clears — the engine must not
    emit retention without a path going forward. Purpose: the strip's only
    missing resolution signal, replay-consistent like every event.
-5. **`dashboard.controls` config key** (round-2 amendment) — boolean,
+5. **`dashboard.controls` config key** (#210, round-2 amendment) — boolean,
    default `true`, added to the strict config schema; gates the §3
    Operations verbs and the §8 `POST /api/control` route.
 
