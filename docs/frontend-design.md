@@ -58,7 +58,7 @@ in/out call:
 | 2 | See the agent roles interacting | **IN**: conductor, worker, reviewer, merge driver as actors in the hero scene and lane cards; the round-orchestrator roles (PO/architect/plan review/harvest/retro) as stage nodes on the loop's arcs, lit from live data. | The `rounds` table carries the live phase cursor and `round_artifacts` the per-round history (#123, [round-artifact.md](round-artifact.md)) — the stage nodes render real state, never fake animation. Deep round-browse views stay deferred (§10). |
 | 3 | Per-node status, output summary, cost | **IN**: lane board from `workers` (+ per-lane cost from `spend_ledger`); header status strip with the run-tier spend meter (daily ceiling as the secondary readout, §3 A). | Settled (real) cost comes from `spend_ledger` at lane end; **in-flight cost is the engine's #33 estimate** (the pricing.yaml table that already drives the soft worker budget), shown marked `est` and settling to real when the lane ends. |
 | 4 | Browse past loop rounds | **IN via replay, not metrics.** The `events` table is a complete append-only history → a replay player (play/pause/scrub) re-drives the whole UI from any point. | History-*aggregation* metrics (cycle time, merge/rework rate) stay **OUT** — PLAN.md defers them to a later phase gated on GitHub-history work. |
-| 5 | Config panel | **IN as read-only.** Grouped, plain-language view of the resolved config. **Editing is OUT.** | A write path would break the dashboard's read-only security posture, and security-relevant config is human-merge-only territory. Edit via the YAML file, where review applies. |
+| 5 | Config panel | **IN as read-only.** Grouped, plain-language view of the resolved config. **Editing is OUT.** | A config write path would break the dashboard's no-config-writes security posture, and security-relevant config is human-merge-only territory. Edit via the YAML file, where review applies. (The §3 control verbs are the sole, narrower write surface — run-state signals, never config.) |
 | 6 | Avoid jargon | **IN as a copy layer**: one map covering **every** event kind — the §7 table is the authoritative list (a hard-coded count here would drift). UI language is English (repo/launch artifact); the map is a single module, trivially localizable later — no i18n framework. | |
 | 7 | Spec-first, consistent styling | **IN — this document.** Design tokens (§5) are defined before any component; one CSS file of custom properties is the only styling mechanism. | |
 
@@ -70,7 +70,7 @@ acceptance bar, checked at review):
 | Runtime dependencies | ≤ 5: `react`, `react-dom`, `@tanstack/react-query`, `animejs` |
 | Chart library | none — cost bars/sparklines are hand-rolled SVG |
 | CSS framework / CSS-in-JS | none — one `tokens.css` + one `app.css` |
-| Server | `node:http` + `node:sqlite` (read-only), 127.0.0.1-bound; no Express |
+| Server | `node:http` + `node:sqlite` (read-only), 127.0.0.1-bound; no Express. One guarded `POST /api/control` route (§3 Operations) — sentinel writes only |
 | Transport | HTTP polling (3 s via TanStack Query); no WebSocket |
 | Fonts | one bundled display face (subset woff2); system stacks for body & data |
 
@@ -165,12 +165,61 @@ Single page, no routing. Five modules, one screen:
   header daily meter (and a round meter, if shown) use the split. When a lane
   settles, one feed line calibrates the estimate ("est $1.10 → real $0.97").
 
+**Needs attention strip** (design-director round 2 — the target-user
+review's strongest ask): a conditional strip between header and hero,
+rendered **only** when something needs a person — zero height otherwise, so
+the calm default stays calm. It is the promoted form of the old
+"`needs-human` pins to the top of the feed" rule, upgraded from a feed
+convention to a first-class surface. One row per open item, each showing:
+the affected entity (issue/PR number with its type glyph and hover title),
+the plain-language reason (the same §7 copy map sentence that produced the
+feed line — no second vocabulary), *when*, and what the engine did about it
+(stopped the lane / parked the issue / paused the run — from the event
+payload, verbatim fields only). Each row links to the GitHub issue/PR and
+opens the relevant inspector drawer on click. Sources are **strictly
+rust-class events** (`reclaim-failed`, `reclaim-dead`, `drive-needs-human`,
+`rollback-escalated`, `plan-review-escalated`, `ceiling-escalated`,
+environment-park) plus the `stalled` / `disconnected` engine states; an item
+clears when a newer event resolves its entity (dispatch, merge, close, or
+round close for round-scoped escalations) — the strip never invents state
+and never requires an acknowledge action. In replay the strip rebuilds from
+the same fold at the cursor, like every other event-backed surface (§11).
+
+**Operations — start · pause · resume · stop** (design-director round 2,
+user decision): the release dashboard is no longer a pure spectator — the
+four engine-level verbs get UI entry points in the header, next to the
+engine state word they act on. The **data surface stays read-only**; the
+verbs are the *only* write path, and they write nothing but the engine's
+own control signals:
+
+| Verb | Meaning (existing engine semantics — nothing new invented) |
+|---|---|
+| Pause | Create the PAUSE sentinel: lanes finish their current work, nothing new dispatches. |
+| Resume | Remove the PAUSE sentinel; the next tick continues the run. |
+| Stop | Create the kill-switch sentinel: **graceful drain** — active lanes hand off or finish, then the engine stops. Never a mid-work kill (the PLAN.md security model owns hard-stop). |
+| Start | Clear stop/pause sentinels so the next tick runs. If the engine *process* is dead, the dashboard cannot spawn it — the button flips to showing the CLI launch command instead (honest boundary; process supervision is not a browser feature). |
+
+**Misfire protection is mandatory**: every verb is two-step — the control
+opens a confirm that names the consequence in §7 plain language ("Stop —
+lanes finish or hand off first; nothing is killed mid-work"), with the
+confirm action requiring a deliberate second click; Stop additionally arms
+only after a short hold (the one irreversible-feeling verb gets the extra
+beat). While a verb is taking effect the header shows the engine's real
+transition state (`winding down`, `stopping` — §8 derivations, not an
+optimistic flip); controls disable during transitions. Buttons reflect
+validity (Resume only while paused, etc.). Server side this is **one**
+allowlisted `POST /api/control {verb}` route (§8) — sentinel files only, no
+DB, config, or GitHub writes; `dashboard.controls: false` in config removes
+the route and the buttons entirely. Config *editing* stays out (§2 #5,
+§10) — flipping a documented run-state signal the engine already honors is
+a different risk class from mutating reviewed YAML.
+
 Empty/error states are directions, not moods: fresh DB → hero idles with
 "Waiting for the first dispatch — point sapwood at a Ready issue"; API
 unreachable → header flips to `disconnected` with the command to restart;
 config unreadable (`lanes.max` null) → hero draws a single placeholder channel
-captioned "lane count unknown — config unreadable"; `needs-human` events pin
-to the top of the feed until newer than any escalation.
+captioned "lane count unknown — config unreadable"; `needs-human` events land
+in the Needs attention strip (above) rather than pinning inside the feed.
 
 ## 4. Visual identity — growth rings
 
@@ -264,7 +313,11 @@ gate⓪ plan review), feeding down into the worker pipeline through the middle
 gate ② review → trunk cross-section), whose rings arc closes along the bottom
 (harvest → retro) with a dashed return path back to PO. Roles are labeled
 *on the stage itself* in plain words (§7's stage-label rule): the conductor
-is the stage (it schedules everything); workers are the lane channels; the
+is the stage (it schedules everything); workers are the lane channels — each
+channel carries its own plain primary label **"Work lane 1…N"** with the
+mono id (`w1`) demoted to secondary small print, exactly the treatment the
+stage nodes get (a bare `w2` on the stage is jargon by the §7 rule; the
+design-director round-2 user test confirmed it reads as noise); the
 reviewer sits at gate ②; the merge driver is the arm between gate ② and the
 trunk. **LLM-backed** stage nodes (Planning, Design review, Plan approval,
 lanes, Round summary, Self-improvement) carry their configured model·effort
@@ -422,6 +475,7 @@ the secondary small print — not the other way around:
 | Architect | Design review | Checks the round's plans fit the architecture before work starts |
 | gate⓪ plan review | Plan approval | An independent review approves each plan before any code is written |
 | Lanes / workers | Writing | Autonomous workers implement approved issues, one lane each |
+| lane channel `wN` | Work lane {N} | One autonomous worker's slot — reused across issues |
 | gate① checks | Checks | CI must pass before a PR moves on |
 | gate② review | Review | An independent reviewer approves the PR against its plan |
 | Merge / rings | Merged | Approved work lands; every merged PR adds one ring |
@@ -436,7 +490,8 @@ onboarding surface — no tour, no modal sequence.
 
 ## 8. Data contract
 
-Four read-only endpoints, served from the existing SQLite tables
+Four read-only GET endpoints plus the single `POST /api/control` route
+(below), served from the existing SQLite tables
 (schema v11, `engine/src/state/state.ts` — including `rounds` and
 `round_artifacts`); no dashboard-specific engine tables. Response shapes
 mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
@@ -552,8 +607,16 @@ one row per closed round from `round_artifacts`, ascending:
 
 Server: `node:http` on `127.0.0.1` (port configurable, default 4517), SQLite
 opened read-only, serves `dashboard/dist` statics plus these four GET
-routes. No POST/PUT/DELETE routes exist — the read-only posture is
-structural, not policy.
+routes and exactly one write route:
+
+**`POST /api/control`** — body `{ "verb": "start" | "pause" | "resume" |
+"stop" }`, allowlist-validated; anything else is 400. Effect is sentinel-file
+creation/removal only (§3 Operations) — the SQLite handle stays read-only,
+no config or GitHub writes exist. Response is the §8 engine state after the
+signal (`{"state": "winding-down"}`), so the UI renders the real transition,
+never an optimistic flip. When `dashboard.controls: false`, the route is not
+registered (404) and the buttons don't render — the pure-spectator posture
+remains available as configuration.
 
 ## 9. Tech architecture
 
@@ -566,7 +629,8 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
     api/              # fetch + TanStack Query hooks (poll 3 s)  ── the data layer
     replay/           # event-folding reducer + player hook      ── shared with live
     hero/             # SVG stage + anime.js timelines
-    components/       # Header, LaneBoard, Feed, CostStrip, ConfigDrawer
+    components/       # Header, NeedsAttention, LaneBoard, Feed, CostStrip,
+                      # ConfigDrawer, Controls (the §3 verbs + confirm flow)
     copy.ts           # §7 — the single copy map
     tokens.css  app.css
 ```
@@ -586,8 +650,9 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 
 ## 10. Deferred (v0.3+)
 
-- **Config editing** — needs a write path + auth story; contradicts v0.2's
-  read-only posture.
+- **Config editing** — needs a config write path + auth story; contradicts
+  v0.2's no-config-writes posture (the §3 control verbs are deliberately not
+  a precedent: run-state signals, not config mutation).
 - **Deep round-browse views** (per-round drill-down pages beyond the lit
   stage nodes, the replay chapters, and the single-phase inspector drawer
   (§6), which are IN for v0.2) — the `round_artifacts` data exists; the
