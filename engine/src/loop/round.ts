@@ -215,9 +215,12 @@ export class RoundScopedForge implements IForge {
   listOpenIssueNumbers() {
     return this.inner.listOpenIssueNumbers();
   }
-  async listOpenIssues(): Promise<Issue[]> {
-    const issues = await this.inner.listOpenIssues();
-    return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
+  listOpenIssues(): Promise<Issue[]> {
+    // This is intentionally the full OPEN backlog: PO proposal marker reconciliation and
+    // normalized-title dedup must see issues created without a milestone. A reconciled issue
+    // CLOSED by a human between crash and rerun remains a known, accepted blind spot because
+    // this scan is open-issues-only by design. Digest-only milestone scoping lives in align.ts.
+    return this.inner.listOpenIssues();
   }
 
   /** #89: same milestone scoping as getIssuesNeedingPlanReview above — the PO/triage

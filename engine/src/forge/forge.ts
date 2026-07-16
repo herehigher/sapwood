@@ -206,9 +206,10 @@ export interface IForge {
    *  this diff is the only way align.ts learns what got made. Same fail-closed-on-error stance
    *  as the rest of IForge: a thrown gh call propagates, never a partial/empty list. */
   listOpenIssueNumbers(): Promise<number[]>;
-  /** #215: every OPEN issue's digest fields. The PO/alignment peripheral uses this engine-side
-   *  read to see the current backlog without receiving ambient forge credentials. `milestone`
-   *  is populated so RoundScopedForge can apply the round's existing milestone boundary. */
+  /** #215/#216: every OPEN issue's digest fields plus body. The PO/alignment peripheral uses
+   *  the body to reconcile proposal markers after GitHub accepted a create whose local receipt
+   *  was lost. Consumers apply any narrower milestone scope locally; reconciliation and title
+   *  dedup deliberately operate on this full OPEN backlog. */
   listOpenIssues(): Promise<Issue[]>;
   /** #89: OPEN issues in this repo that still lack a verification-plan section in their body —
    *  the PO/triage peripheral's candidate set. Broader than getIssuesNeedingPlanReview: every
@@ -610,13 +611,14 @@ export class GithubForge implements IForge {
       "--state",
       "open",
       "--json",
-      "number,title,labels,milestone",
+      "number,title,body,labels,milestone",
       "--limit",
       String(OPEN_ISSUES_LIMIT),
     ]);
     const issues = JSON.parse(out) as Array<{
       number: number;
       title: string;
+      body?: string;
       labels: Array<{ name: string }>;
       milestone: { title: string } | null;
     }>;
@@ -626,6 +628,7 @@ export class GithubForge implements IForge {
     return issues.map((i) => ({
       number: i.number,
       title: i.title,
+      ...(i.body !== undefined ? { body: i.body } : {}),
       labels: i.labels.map((label) => label.name),
       ...(i.milestone ? { milestone: i.milestone.title } : {}),
     }));

@@ -1288,7 +1288,7 @@ test("RoundScopedForge: filters getReadyIssues() by milestone; passthrough when 
   );
 });
 
-test("RoundScopedForge #215: listOpenIssues inherits the existing milestone boundary", async () => {
+test("RoundScopedForge #215/#216: listOpenIssues exposes the full open backlog for proposal reconciliation", async () => {
   const forge = new FakeForge();
   forge.openIssues = [
     { number: 1, title: "in scope", labels: [], milestone: "M4" },
@@ -1297,7 +1297,7 @@ test("RoundScopedForge #215: listOpenIssues inherits the existing milestone boun
   ];
   assert.deepEqual(
     (await new RoundScopedForge(forge, "M4").listOpenIssues()).map((issue) => issue.number),
-    [1],
+    [1, 2, 3],
   );
   assert.deepEqual(
     (await new RoundScopedForge(forge, undefined).listOpenIssues()).map((issue) => issue.number),

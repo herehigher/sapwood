@@ -772,7 +772,15 @@ marker idempotency, output schema, escalation path) see
   (status + `data/ESCALATION` marker + log); while forge-parked, env-failure
   requeues and escalation are write-suppressed (frozen durable, never degraded to
   `needs-human`) — in-flight DRIVE activity and non-env rollbacks keep their
-  existing retry behavior.
+  existing retry behavior. **#216 made PO issue creation persist-first and
+  per-proposal idempotent:** the validated proposal set is durably journaled before
+  any forge write; each successful creation gets a durable receipt only after its
+  governance labels/fence/comment complete; a deterministic HTML body marker reconciles
+  the remaining accepted-write/lost-receipt window; and a normalized-title collision
+  against the open backlog is durably
+  skipped. A crash-rerun with a persisted proposal set skips the aligning session
+  entirely; externalization replays the journaled set and creates only proposals
+  without a receipt or marker.
 
 ## v0.2 north star: the round orchestrator
 
