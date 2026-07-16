@@ -1007,12 +1007,15 @@ test("guard hook wrapper fails closed: a crashing hook exits 2 in hard mode, 0 i
 
 test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_GUARD_MODE in the worker env (#26)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const previousGhToken = process.env.GH_TOKEN;
   try {
+    process.env.GH_TOKEN = "worker-forge-token";
     const hook = mkHook(dir);
-    // stub records its argv + the guard mode env, proving the inline settings + env reach the process.
+    // Stub records argv + security-relevant env. Unlike peripherals, workers legitimately
+    // retain forge credentials so they can push branches and open PRs through the guard.
     const bin = mkStub(
       dir,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho "$SAPWOOD_GUARD_MODE" > "${join(dir, "mode.seen")}"\nexit 0\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho "$GH_TOKEN" > "${join(dir, "token.seen")}"\necho "$SAPWOOD_GUARD_MODE" > "${join(dir, "mode.seen")}"\nexit 0\n`,
     );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const s = new WorkerSupervisor({
@@ -1034,8 +1037,11 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     assert.match(args, /guard-hook\.js/); // the inline JSON carries the hook command
     assert.match(args, /disableAllHooks/);
     assert.equal(readFileSync(join(dir, "mode.seen"), "utf8").trim(), "soft"); // env reached the worker
+    assert.equal(readFileSync(join(dir, "token.seen"), "utf8").trim(), "worker-forge-token");
     s.dispose();
   } finally {
+    if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previousGhToken;
     rmSync(dir, { recursive: true, force: true });
   }
 });
