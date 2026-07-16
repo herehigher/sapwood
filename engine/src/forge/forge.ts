@@ -117,6 +117,11 @@ export interface IForge {
   claimIssue(issue: number): Promise<void>;
   setBoardStatus(issue: number, status: "backlog" | "ready" | "inProgress" | "done"): Promise<void>;
   addLabel(issue: number, label: string): Promise<void>;
+  /** #212: remove a label from an ISSUE (the WRITE counterpart to addLabel) — round.ts's
+   *  round-close pool cleanup uses this to release an undispatched round-pool member back to
+   *  plain Ready. Idempotent: removing an absent label is a no-op on GitHub's side, never an
+   *  error. */
+  removeLabel(issue: number, label: string): Promise<void>;
   /** Add a label to a PULL REQUEST. #69 P1: the merge gate reads a PR's OWN labels
    *  (getPRReviewData → deriveGate's humanLabels check), not the source issue's, so escalating
    *  a crashed-with-WIP lane to `needs-human` must land here to actually gate the PR. */
@@ -353,6 +358,10 @@ export class GithubForge implements IForge {
 
   async addLabel(issue: number, label: string): Promise<void> {
     await this.gh(["issue", "edit", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--add-label", label]);
+  }
+
+  async removeLabel(issue: number, label: string): Promise<void> {
+    await this.gh(["issue", "edit", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--remove-label", label]);
   }
 
   async openPR(branch: string, title: string, body: string): Promise<number> {

@@ -228,6 +228,10 @@ const Labels = z
     // session creates. Config-driven like every sibling label here — never a hardcoded
     // string at the call site (fable PR #101 P3).
     originAgent: z.string().optional(),
+    // #212: round-pool membership label — applied by the aligning phase's pool-selection pass
+    // (align.ts's selectRoundPool), consumed by the executing phase's dispatch-scoping wrapper
+    // (round.ts's PoolScopedForge). Same omitted-default pattern as every sibling label above.
+    roundPool: z.string().optional(),
   })
   .strict();
 
@@ -524,6 +528,15 @@ const Round = z
     // prompts. Same user-tunable-in-config, marked-cut contract as roles.harvest.artifactMaxChars
     // / roles.retro.digestMaxChars.
     directiveMaxChars: z.number().int().positive().default(20_000),
+    // #212: the round-pool selection multiplier — the aligning phase picks up to
+    // ceil(lanes.roundDispatchCap * poolFactor) issues from Ready (milestone-scoped when
+    // `milestone` above is set), ordered by prio label then issue number, and labels them the
+    // round's dispatch-eligible pool (round.ts's PoolScopedForge restricts the executing phase's
+    // dispatch to pool members only). >1 so the pool absorbs gate⓪/review attrition (a pool
+    // member that later escalates to needs-human, or never got plan:approved, must not starve
+    // the executing phase down to fewer candidates than lanes.roundDispatchCap could otherwise
+    // fill). User-tunable, shipped commented in sapwood.config.yaml.
+    poolFactor: z.number().finite().positive().default(1.5),
   })
   .strict();
 
@@ -795,6 +808,7 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
     verifyNa: cfg.labels.verifyNa ?? defaults.verifyNa,
     planApproved: cfg.labels.planApproved ?? defaults.planApproved,
     originAgent: cfg.labels.originAgent ?? defaults.originAgent,
+    roundPool: cfg.labels.roundPool ?? defaults.roundPool,
   };
   cfg.labels = resolvedLabels;
   cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked];

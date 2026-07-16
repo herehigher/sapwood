@@ -155,6 +155,7 @@ class FakeForge implements IForge {
   async addLabel(n: number, l: string): Promise<void> {
     this.labelsAdded.push([n, l]);
   }
+  async removeLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
     return 1;

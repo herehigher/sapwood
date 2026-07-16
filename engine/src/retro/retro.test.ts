@@ -605,6 +605,7 @@ class MinimalForge implements IForge {
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}
   // #111 PR-B: recording + programmable — the engine-side PR-creation tests drive these.
   openPRCalls: Array<[string, string, string]> = [];

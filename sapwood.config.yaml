@@ -222,6 +222,15 @@ reviewer:
 #   directiveMaxChars: 20000 # deterministic truncation cap on the directive text (same
 #                         # marked-cut-never-silent-drop contract as roles.harvest.artifactMaxChars
 #                         # / roles.retro.digestMaxChars).
+#   poolFactor: 1.5 # #212: the aligning phase selects up to ceil(lanes.roundDispatchCap *
+#                    # poolFactor) issues from Ready (milestone-scoped when `milestone` above is
+#                    # set), ordered by prio label then issue number, and labels them this
+#                    # round's dispatch-eligible pool — the executing phase only dispatches pool
+#                    # members. >1 so the pool absorbs gate⓪/review attrition (a member that
+#                    # later escalates or never gets plan:approved must not starve dispatch below
+#                    # what roundDispatchCap could otherwise fill). Runs every round regardless of
+#                    # roles.po.enabled — with the PO off, selection is still engine-computed
+#                    # (no session).
 
 # #128: the loop's north-star goal file — the alignment yardstick the aligning (PO) and
 # architecting peripherals read every round, and the entry retro proposals must cite as their

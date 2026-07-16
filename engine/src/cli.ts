@@ -916,6 +916,9 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     mergeGate,
     tickIntervalSec: cfg.engine.tickIntervalSec,
     peripherals,
+    // #212: restrict the executing phase's dispatch to this round's pool (round-defaults.ts's
+    // aligning wrapper always populates it, PO on or off — see selectRoundPool/AC7).
+    poolLabel: cfg.labels.roundPool,
     stop,
     probeLlmReachable,
     log,

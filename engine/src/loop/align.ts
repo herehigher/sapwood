@@ -41,6 +41,7 @@ import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../r
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
+import { issuePriority } from "./conductor.js";
 import type { PeripheralStub } from "./round.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
@@ -338,6 +339,63 @@ function triageDegradeReason(result: RoleSessionResult, expectedIssue: number): 
   if (result.outcome !== "done") return `po-triage session failed twice (${result.outcome})`;
   const v = validateTriageOutput(result.resultText ?? "", expectedIssue);
   return v.ok ? "po-triage output valid" : `po-triage produced invalid structured output twice: ${v.reason}`;
+}
+
+// ── #212: round-pool selection ──────────────────────────────────────────────────────────────
+//
+// Deterministic, engine-only computation — never a session, never schema-validated LLM output.
+// The architecture note ("the PO explicitly selects a round pool") describes WHERE this runs
+// (the aligning phase, after the goal-alignment/triage passes above) and WHY (prioritization is
+// agentic under the autonomy principle), not a literal LLM judgment call for v1: the acceptance
+// criteria pin a fully mechanical bound (cap = ceil(roundDispatchCap * poolFactor), prio-ordered,
+// milestone-scoped) that must hold regardless of whether the PO role is even enabled (#212 AC7:
+// "the selection bound must not depend on an optional role") — so round-defaults.ts calls this
+// function unconditionally, whether or not roles.po.enabled gated the alignStub session above it
+// this round. Only ADDS the pool label (idempotent, addLabel is idempotent on GitHub's side);
+// clearing is round.ts's OWN round-close job (removeRoundPoolLabel), never this pass's — see
+// that function's doc comment for why label REMOVAL is deliberately routed through one
+// hardcoded, non-session-reachable call site.
+export interface PoolSelectionDeps {
+  forge: IForge;
+  cfg: SapwoodConfig;
+  log?: (message: string) => void;
+}
+
+/** Compute this round's pool (Ready, milestone-scoped by whatever `forge` already applies —
+ *  same "caller passes an already-scoped forge" convention align.ts's own triage/align passes
+ *  rely on, see AlignDeps.forge — ordered prio:0-first then issue-number-ascending, capped at
+ *  `ceil(cfg.lanes.roundDispatchCap * cfg.round.poolFactor)`) and apply `cfg.labels.roundPool`
+ *  to every selected issue that doesn't already carry it. Crash-rerun idempotent by
+ *  construction: recomputing from the CURRENT live Ready backlog and re-applying an idempotent
+ *  label write produces no duplicate side effect, unlike proposal creation above — no durable
+ *  marker of its own is needed (round.ts's rerun-not-resume phase marker still covers the
+ *  narrow post-return crash window, same as every other peripheral). A forge read/write failure
+ *  degrades to "pool left as whatever it already was" (logged, never thrown) — the executing
+ *  phase simply dispatches into whatever the pool already contains this round. Returns the
+ *  selected issues (empty on a read failure) for callers/tests that want to observe the pick. */
+export async function selectRoundPool(deps: PoolSelectionDeps): Promise<Issue[]> {
+  const { forge, cfg } = deps;
+  const log = deps.log ?? console.error;
+  const cap = Math.ceil(cfg.lanes.roundDispatchCap * cfg.round.poolFactor);
+  let ready: Issue[];
+  try {
+    ready = await forge.getReadyIssues();
+  } catch (e) {
+    log(`[sapwood:pool] round-pool selection: Ready read failed — pool left unchanged this round: ${String(e)}`);
+    return [];
+  }
+  const selected = [...ready]
+    .sort((a, b) => issuePriority(a.labels, cfg.labels.prefix) - issuePriority(b.labels, cfg.labels.prefix) || a.number - b.number)
+    .slice(0, cap);
+  for (const issue of selected) {
+    if (labelsInclude(issue.labels, cfg.labels.roundPool)) continue; // already labelled — idempotent skip
+    try {
+      await forge.addLabel(issue.number, cfg.labels.roundPool);
+    } catch (e) {
+      log(`[sapwood:pool] round-pool selection: failed to label #${issue.number} — it stays out of this round's pool: ${String(e)}`);
+    }
+  }
+  return selected;
 }
 
 export interface AlignDeps {

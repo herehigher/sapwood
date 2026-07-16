@@ -74,6 +74,7 @@ class MinimalForge implements IForge {
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
     return 1;

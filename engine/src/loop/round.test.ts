@@ -16,9 +16,11 @@ import {
   noopPeripheralStub,
   type PeripheralPhase,
   type PeripheralStub,
+  PoolScopedForge,
   type RoundDeps,
   RoundScopedForge,
   type RoundStopHit,
+  removeRoundPoolLabel,
   runRounds,
 } from "./round.js";
 import { RoundArtifactSchema } from "./round-artifact.js";
@@ -49,7 +51,18 @@ class FakeForge implements IForge {
     this.ready = this.ready.filter((i) => i.number !== issue);
   }
   async setBoardStatus(): Promise<void> {}
-  async addLabel(): Promise<void> {}
+  addLabelCalls: Array<[number, string]> = [];
+  async addLabel(n: number, l: string): Promise<void> {
+    this.addLabelCalls.push([n, l]);
+    const issue = this.ready.find((i) => i.number === n);
+    if (issue && !issue.labels.includes(l)) issue.labels = [...issue.labels, l];
+  }
+  removeLabelCalls: Array<[number, string]> = [];
+  async removeLabel(n: number, l: string): Promise<void> {
+    this.removeLabelCalls.push([n, l]);
+    const issue = this.ready.find((i) => i.number === n);
+    if (issue) issue.labels = issue.labels.filter((x) => x !== l);
+  }
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
     return 1;
@@ -1718,6 +1731,16 @@ test("runRounds standby: round.milestone open issues count as work even with Rea
   const forge = new FakeForge();
   forge.ready = []; // isolates the milestone-goals signal from Ready/plan-review
   forge.milestoneOpenCounts = [3]; // the milestone still has undecomposed open issues
+  // #212 probe residual fix: the milestone catch-all now ALSO requires at least one non-held
+  // (no cfg.escalation.humanLabels label) open issue actually IN the milestone — populate the
+  // full-open-backlog fixture the fix reads (listOpenIssues), or this would now (correctly)
+  // read as "nothing consumable" and the test's own premise (undecomposed, non-held issues)
+  // would go untested.
+  forge.openIssues = [
+    { number: 50, title: "undecomposed", labels: [], milestone: "M4" },
+    { number: 51, title: "also undecomposed", labels: [], milestone: "M4" },
+    { number: 52, title: "not this milestone", labels: [] },
+  ];
   const state = new State(":memory:");
   const events = spyOnEvents(state);
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
@@ -2023,5 +2046,177 @@ test("#168: RoundDeps.probeLlmReachable omitted -> a pre-parked (llm) episode is
   stopSafety();
   assert.equal(state.isParked(), true, "never probed -> never auto-resumed");
   assert.equal(state.parkRow("llm")?.probeAttempts, 0);
+  state.close();
+});
+
+// ── #212: round-pool dispatch scoping, round-close label cleanup, removeLabel containment ────
+
+test("runRounds #212: dispatch is restricted to pool-labelled Ready issues — an approved Ready issue outside the pool is never dispatched", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 3 } });
+  forge.ready = [
+    { number: 1, title: "pooled", labels: [cfg.labels.roundPool] },
+    { number: 2, title: "not pooled", labels: [] },
+  ];
+  const sup = new AutoCompleteSupervisor();
+  const deps = baseDeps({ forge, supervisor: sup, sleep, cfg, poolLabel: cfg.labels.roundPool });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(sup.dispatchedIssues, [1], "only the pool-labelled issue dispatched — #2 was left untouched in Ready");
+  deps.state.close();
+});
+
+test("runRounds #212: poolLabel unset -> no pool scoping at all, every approved Ready issue dispatches (today's behavior, unchanged — the opt-in default)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 3 } });
+  forge.ready = [
+    { number: 1, title: "a", labels: [] },
+    { number: 2, title: "b", labels: [] },
+  ];
+  const sup = new AutoCompleteSupervisor();
+  const deps = baseDeps({ forge, supervisor: sup, sleep, cfg }); // poolLabel NOT set
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(sup.dispatchedIssues.sort(), [1, 2], "no pool scoping configured — both dispatch");
+  deps.state.close();
+});
+
+test("PoolScopedForge #212: filters LIVE label state on every call — a dead-lane requeue that keeps its pool label reappears as dispatchable, with no new label write (persists through dispatch, #212 lifecycle item 2)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  forge.ready = [{ number: 1, title: "t", labels: [cfg.labels.roundPool] }];
+  const scoped = new PoolScopedForge(forge, cfg.labels.roundPool);
+  assert.deepEqual(
+    (await scoped.getReadyIssues()).map((i) => i.number),
+    [1],
+  );
+  await forge.claimIssue(1); // dispatched — leaves the Ready column, same as real GitHub
+  assert.deepEqual(await scoped.getReadyIssues(), [], "claimed -> no longer Ready");
+  // A dead-lane requeue puts it back in Ready — its pool label was never touched by claim, so
+  // it's still there with zero new label writes.
+  forge.ready = [{ number: 1, title: "t", labels: [cfg.labels.roundPool] }];
+  assert.deepEqual(
+    (await scoped.getReadyIssues()).map((i) => i.number),
+    [1],
+    "reappears as pool-scoped-dispatchable — no re-label needed",
+  );
+  assert.deepEqual(forge.addLabelCalls, [], "PoolScopedForge itself never writes a label — read-only filtering");
+});
+
+test("runRounds #212: round close clears the pool label from an undispatched member; a dispatched member (already left Ready) is untouched", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 } }); // cap 1 -> only #1 dispatches
+  forge.ready = [
+    { number: 1, title: "dispatch me", labels: [cfg.labels.roundPool] },
+    { number: 2, title: "stay pooled but undispatched", labels: [cfg.labels.roundPool] },
+  ];
+  const sup = new AutoCompleteSupervisor();
+  const deps = baseDeps({ forge, supervisor: sup, sleep, cfg, poolLabel: cfg.labels.roundPool });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(sup.dispatchedIssues, [1]);
+  const remaining = forge.ready.find((i) => i.number === 2);
+  assert.ok(remaining, "issue #2 is still open/Ready");
+  assert.ok(!remaining!.labels.includes(cfg.labels.roundPool), "its pool label was cleared at round close");
+  assert.deepEqual(
+    forge.removeLabelCalls,
+    [[2, cfg.labels.roundPool]],
+    "removeLabel fired exactly once, only for the undispatched member, only with the pool label",
+  );
+  deps.state.close();
+});
+
+test("runRounds #212: poolLabel unset -> round close never calls removeLabel at all (no pool feature configured, nothing to clear)", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  forge.ready = [{ number: 1, title: "t", labels: [cfg.labels.roundPool] }];
+  const sup = new AutoCompleteSupervisor();
+  const deps = baseDeps({ forge, supervisor: sup, sleep, cfg }); // poolLabel NOT set
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  assert.deepEqual(forge.removeLabelCalls, []);
+  deps.state.close();
+});
+
+test("removeRoundPoolLabel #212: refuses to remove any label other than cfg.labels.roundPool — the engine may never forge a human-release signature (needs-human/blocked/plan:approved/verify:n/a are removable by a human only, #147 invariant)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  await assert.rejects(() => removeRoundPoolLabel(forge, cfg, 1, cfg.labels.needsHuman), /refusing to remove/);
+  await assert.rejects(() => removeRoundPoolLabel(forge, cfg, 1, cfg.labels.blocked), /refusing to remove/);
+  await assert.rejects(() => removeRoundPoolLabel(forge, cfg, 1, cfg.labels.planApproved), /refusing to remove/);
+  await assert.rejects(() => removeRoundPoolLabel(forge, cfg, 1, cfg.labels.verifyNa), /refusing to remove/);
+  await assert.rejects(() => removeRoundPoolLabel(forge, cfg, 1, "some-arbitrary-label"), /refusing to remove/);
+  assert.deepEqual(forge.removeLabelCalls, [], "not one rejected call ever reached the forge");
+  await removeRoundPoolLabel(forge, cfg, 1, cfg.labels.roundPool); // the ONE allowed label
+  assert.deepEqual(forge.removeLabelCalls, [[1, cfg.labels.roundPool]]);
+});
+
+// ── #212: standby probe residual (round.ts:426-427 pre-fix) ────────────────────────────────
+
+test("runRounds standby (#212 probe residual fix): a milestone whose open issues ALL carry a human-hold label no longer counts as work — standby engages instead of opening empty rounds forever", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.milestoneOpenCounts = [2];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 1, title: "held a", labels: [cfg.labels.needsHuman], milestone: "M4" },
+    { number: 2, title: "held b", labels: [cfg.labels.blocked], milestone: "M4" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  // Standby, correctly engaged here, never opens a second round on its own (an all-held
+  // milestone stays all-held) — boundedStopOnPhase's phase-count net never fires (no further
+  // peripheral phase ever runs), so this test needs its OWN bounded exit from inside the
+  // backoff loop, same idiom as the #127 gate② F2 tests above.
+  let stop = (): void => {};
+  const sleepCalls: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    if (sleepCalls.length >= 4) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1, "only the always-open first round — standby engaged after it");
+  assert.ok(
+    events.some(([kind]) => kind === "standby-wait"),
+    "standby actually engaged — an all-held milestone no longer pins the probe true",
+  );
+  assert.ok(forge.milestoneQueries.includes("M4"), "the cheap count was still checked first");
+  state.close();
+});
+
+test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, one not) still counts as work — no standby", async () => {
+  const forge = new FakeForge();
+  forge.ready = [];
+  forge.milestoneOpenCounts = [2];
+  const cfg = mkCfg({ round: { milestone: "M4", standby: { enabled: true } } });
+  forge.openIssues = [
+    { number: 1, title: "held", labels: [cfg.labels.needsHuman], milestone: "M4" },
+    { number: 2, title: "not held", labels: [], milestone: "M4" },
+  ];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ forge, state, sleep, cfg, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 10);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — never entered standby");
+  assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "the one non-held issue was enough to count as work");
   state.close();
 });

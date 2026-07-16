@@ -39,13 +39,17 @@ class FakeForge implements IForge {
   async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
+  ready: Issue[] = [];
   async getReadyIssues(): Promise<Issue[]> {
-    return [];
+    return this.ready;
   }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(n: number, l: string): Promise<void> {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
+  }
+  async removeLabel(n: number, l: string): Promise<void> {
+    this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
@@ -499,7 +503,7 @@ test("createDefaultPeripherals (#127): roles.<role>.enabled=false omits that pha
   state.close();
 });
 
-test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits every phase — an all-noop map, same shape as an empty peripherals override", () => {
+test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits every session phase — aligning alone stays wired for #212's engine-computed round-pool selection, an all-noop map otherwise", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
   const cfg = mkCfg({
@@ -513,9 +517,14 @@ test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits
   });
   const runner = new ScriptedRunner(forge, cfg);
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
-  for (const phase of ["aligning", "architecting", "plan_review", "harvesting", "retro"] as const) {
+  for (const phase of ["architecting", "plan_review", "harvesting", "retro"] as const) {
     assert.equal(peripherals[phase], undefined, `${phase} omitted when disabled`);
   }
+  // #212 AC7: aligning is never omitted — with the PO off it still runs the engine-computed
+  // fallback selection (no session at all).
+  assert.ok(peripherals.aligning, "aligning stays wired even with every role disabled");
+  await peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null });
+  assert.equal(runner.calls.length, 0, "no session was dispatched — the fallback is pure engine computation");
   state.close();
 });
 
@@ -527,7 +536,10 @@ test("architecting stub (#127 gate② F3): with roles.po.enabled=false the archi
   const cfg = mkCfg({ roles: { po: { enabled: false } } });
   const runner = new ScriptedRunner(forge, cfg);
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
-  assert.equal(peripherals.aligning, undefined, "the disabled PO's aligning stub is omitted");
+  // #212 AC7: aligning is no longer omitted when the PO is disabled — it still runs the
+  // engine-computed round-pool selection every round (no session); only the PO's OWN
+  // decomposition/triage session is skipped (see the architect-context assertions below).
+  assert.ok(peripherals.aligning, "aligning still runs #212's round-pool selection with the PO disabled");
   const round = state.startRound("2026-07-13T00:00:00.000Z");
   await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
   const architectCall = runner.calls.find((c) => c.roleId === "architect");

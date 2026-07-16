@@ -30,6 +30,7 @@ import {
   normalizeProposalTitle,
   proposalId,
   proposalMarker,
+  selectRoundPool,
   validateAlignOutput,
   validateTriageOutput,
 } from "./align.js";
@@ -55,15 +56,23 @@ class FakeForge implements IForge {
   async detectOwnerKind(): Promise<"user"> {
     return "user";
   }
+  ready: Issue[] = [];
   async getReadyIssues(): Promise<Issue[]> {
-    return [];
+    return this.ready;
   }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     this.boardStatusCalls.push([n, s]);
   }
+  addLabelCalls: Array<[number, string]> = [];
   async addLabel(n: number, l: string): Promise<void> {
+    this.addLabelCalls.push([n, l]);
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
+  }
+  removeLabelCalls: Array<[number, string]> = [];
+  async removeLabel(n: number, l: string): Promise<void> {
+    this.removeLabelCalls.push([n, l]);
+    this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
   async addPRLabel(): Promise<void> {}
   async openPR(): Promise<number> {
@@ -1310,4 +1319,86 @@ test("validateTriageOutput: well-formed draft -> ok, returns the body verbatim",
   const text = triageResultText(1, PLAN_BODY);
   const result = validateTriageOutput(text, 1);
   assert.ok(result.ok && result.body === PLAN_BODY);
+});
+
+// ── #212: selectRoundPool ────────────────────────────────────────────────────────────────────
+
+const mkReady = (number: number, prio: number, milestone?: string): Issue => ({
+  number,
+  title: `issue ${number}`,
+  labels: [`sapwood:prio:${prio}`],
+  ...(milestone !== undefined ? { milestone } : {}),
+});
+
+test("selectRoundPool: caps the pool at ceil(lanes.roundDispatchCap * round.poolFactor)", async () => {
+  const forge = new FakeForge();
+  forge.ready = [1, 2, 3, 4, 5].map((n) => mkReady(n, 3));
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1.5 } }); // cap = ceil(3) = 3
+  const selected = await selectRoundPool({ forge, cfg });
+  assert.equal(selected.length, 3, "exactly ceil(2 * 1.5) = 3 issues selected");
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1, 2, 3],
+  );
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 2, 3],
+  );
+  assert.ok(
+    forge.addLabelCalls.every(([, l]) => l === cfg.labels.roundPool),
+    "only the pool label is ever applied",
+  );
+  assert.equal(forge.issueLabels[4], undefined, "issue #4 (past the cap) was never labelled");
+});
+
+test("selectRoundPool: orders by prio label ascending (prio:0 first) then issue number ascending", async () => {
+  const forge = new FakeForge();
+  forge.ready = [mkReady(30, 2), mkReady(10, 0), mkReady(20, 0), mkReady(40, 1)];
+  const cfg = mkCfg({ lanes: { max: 10, roundDispatchCap: 10 }, round: { poolFactor: 1 } }); // cap = 10, everyone fits
+  const selected = await selectRoundPool({ forge, cfg });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [10, 20, 40, 30],
+    "prio:0 (10 then 20 by number) -> prio:1 (40) -> prio:2 (30)",
+  );
+});
+
+test("selectRoundPool: milestone-scoped when the caller passes an already-scoped forge (RoundScopedForge) — never re-derives scoping itself", async () => {
+  const forge = new FakeForge();
+  forge.ready = [mkReady(1, 0, "M4"), mkReady(2, 0), mkReady(3, 0, "M4"), mkReady(4, 0, "M5")];
+  const scoped = new RoundScopedForge(forge, "M4");
+  const cfg = mkCfg({ lanes: { max: 10, roundDispatchCap: 10 }, round: { poolFactor: 1, milestone: "M4" } });
+  const selected = await selectRoundPool({ forge: scoped, cfg });
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1, 3],
+    "only the M4-milestone issues were selected",
+  );
+  assert.deepEqual(
+    forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
+    [1, 3],
+  );
+});
+
+test("selectRoundPool: idempotent — an already-pool-labelled issue is not re-labelled (crash-rerun safety)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 10, roundDispatchCap: 10 }, round: { poolFactor: 1 } });
+  forge.ready = [{ number: 1, title: "a", labels: [cfg.labels.roundPool] }, mkReady(2, 3)];
+  const selected = await selectRoundPool({ forge, cfg });
+  assert.equal(selected.length, 2, "both issues are still part of the selection");
+  assert.deepEqual(forge.addLabelCalls, [[2, cfg.labels.roundPool]], "issue #1 was already labelled — no redundant write");
+});
+
+test("selectRoundPool: a Ready read failure degrades to an empty pool (logged, never thrown)", async () => {
+  const cfg = mkCfg();
+  const logged: string[] = [];
+  const forge = new (class extends FakeForge {
+    override async getReadyIssues(): Promise<Issue[]> {
+      throw new Error("simulated forge outage");
+    }
+  })();
+  const selected = await selectRoundPool({ forge, cfg, log: (m) => logged.push(m) });
+  assert.deepEqual(selected, []);
+  assert.equal(forge.addLabelCalls.length, 0);
+  assert.ok(logged.some((l) => l.includes("simulated forge outage")));
 });
