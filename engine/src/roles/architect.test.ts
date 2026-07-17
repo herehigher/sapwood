@@ -32,6 +32,7 @@ import {
   renderArchitectPrompt,
   validateArchitectOutput,
 } from "./architect.js";
+import type { ContextManifest } from "./context-manifest.js";
 import { ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 
@@ -172,6 +173,28 @@ const failedResult = (name: string): RoleSessionResult => ({
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
 
+/** A structurally-valid ContextManifest for #236 persistence tests — `model` doubles as a tag so
+ *  the persisted json is trivially distinguishable from another fixture's. */
+const mkFakeManifest = (tag: string): ContextManifest => ({
+  sources: [],
+  probedPaths: [],
+  knownUnprobed: "imports, ancestor dirs, managed policy",
+  capturedPreSpawn: "2026-07-17T00:00:00Z",
+  capturedPostExit: "2026-07-17T00:00:01Z",
+  captureBasis: "init-observed",
+  model: tag,
+  modelSource: "requested-fallback",
+  cliBin: "claude",
+  cliVersion: null,
+  toolInventoryHash: null,
+  promptTemplateVersion: null,
+  mcpTools: [],
+  worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
+  settingsHash: "hash",
+  hookHash: null,
+  recordedAt: "2026-07-17T00:00:01Z",
+});
+
 // ── round-level marker idempotence (acceptance criterion 1) ────────────────────────────────
 
 test("createArchitectStub: marker present -> returns it unchanged, no forge call, no session run (idempotence)", async () => {
@@ -217,6 +240,25 @@ test("createArchitectStub: runs exactly ONE session for the whole round regardle
   assert.equal(marker, architectMarker(9));
   // Spend recorded against the architect session's own name.
   assert.equal(state.spentUsdForWorker("architect-1"), 0.02);
+  state.close();
+});
+
+test("createArchitectStub (#236): a done session's context manifest is persisted, keyed by (round, 'architecting', 'architect', session name, attempt 1)", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
+  const manifest = mkFakeManifest("architect-attempt");
+  const runner = new ScriptedRunner([{ result: { ...doneResult("architect-1", architectResult("note")), contextManifest: manifest } }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const stub = createArchitectStub(deps);
+  await stub.run({ roundId: 9, phase: "architecting", marker: null });
+  const rows = state.listContextManifestsForRound(9);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.phase, "architecting");
+  assert.equal(rows[0]?.role, "architect");
+  assert.equal(rows[0]?.session, "architect-1");
+  assert.equal(rows[0]?.attempt, 1);
+  assert.deepEqual(JSON.parse(rows[0]?.json ?? "{}"), manifest);
   state.close();
 });
 

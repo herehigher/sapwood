@@ -104,6 +104,84 @@ export function parseResultText(jsonl: string): string {
   return text;
 }
 
+/** #236: the session's OWN report of what it started with — parsed from stream-json's
+ *  `{"type":"system","subtype":"init",...}` line (verified against Claude Code CLI 2.1.212 by
+ *  running a real probe session; see roles/context-manifest.ts's module doc for how this feeds
+ *  the ambient context manifest). This is the most honest source for "what a session actually
+ *  saw": the tool-schema inventory (`tools`), MCP server availability (`mcp_servers`, each
+ *  carrying its own connection `status` — pending/disabled/needs-auth, not just a name), the
+ *  CLI's own version (`claude_code_version`), the model it actually ran under (`model` — may
+ *  differ from the requested `--model` on a fallback-model switch), and the auto-memory
+ *  directory it loaded from (`memory_paths.auto`). Scans for the FIRST such line only (the init
+ *  event fires once, near stream start); tolerant exactly like parseCostUsd/parseModelUsage/
+ *  parseResultText — never throws, a missing/malformed line or absent field resolves to
+ *  null/[], never a guess. (The init event also carries the session's working directory, but
+ *  callers derive that themselves from the lane/worktree name they already know, so it's not
+ *  duplicated here.) */
+export interface SessionInitInfo {
+  model: string | null;
+  cliVersion: string | null;
+  tools: string[];
+  mcpServers: { name: string; status: string }[];
+  memoryPathAuto: string | null;
+}
+
+export function parseSessionInit(jsonl: string): SessionInitInfo {
+  const empty: SessionInitInfo = { model: null, cliVersion: null, tools: [], mcpServers: [], memoryPathAuto: null };
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // partial/garbage line — ignore (stream may be mid-write)
+    }
+    if (obj.type !== "system" || obj.subtype !== "init") continue;
+    const tools = Array.isArray(obj.tools) ? obj.tools.filter((x): x is string => typeof x === "string") : [];
+    const mcpServersRaw = Array.isArray(obj.mcp_servers) ? obj.mcp_servers : [];
+    const mcpServers = mcpServersRaw
+      .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
+      .map((s) => ({
+        name: typeof s.name === "string" ? s.name : "unknown",
+        status: typeof s.status === "string" ? s.status : "unknown",
+      }));
+    const memoryPaths = obj.memory_paths;
+    const memoryPathAuto =
+      memoryPaths && typeof memoryPaths === "object" && typeof (memoryPaths as Record<string, unknown>).auto === "string"
+        ? ((memoryPaths as Record<string, unknown>).auto as string)
+        : null;
+    return {
+      model: typeof obj.model === "string" ? obj.model : null,
+      cliVersion: typeof obj.claude_code_version === "string" ? obj.claude_code_version : null,
+      tools,
+      mcpServers,
+      memoryPathAuto,
+    };
+  }
+  return empty; // no init line found — honest empty, never a thrown error
+}
+
+/** #236 (Codex F1 residual, R1): a cheap presence check for the SAME init line parseSessionInit
+ *  looks for — used to POLL a still-growing jsonl file (peripheral.ts's context-manifest
+ *  capture) without paying the full parse-and-build cost on every poll tick. The init line is
+ *  the CLI's own signal that it finished loading its context (CLAUDE.md layers, MCP servers,
+ *  tool schema) and is about to hand control to the model — i.e. exactly the "what the session
+ *  saw" moment, and (as a side effect) proof the worktree provisioning this same startup did is
+ *  complete. Same tolerance as every other parser here: a partial/garbage line is skipped, never
+ *  thrown. */
+export function hasSessionInitLine(jsonl: string): boolean {
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      const obj = JSON.parse(t) as { type?: string; subtype?: string };
+      if (obj.type === "system" && obj.subtype === "init") return true;
+    } catch {}
+  }
+  return false;
+}
+
 /** Per-model token usage from the last stream-json result line (#47). Mirrors parseCostUsd's
  *  tolerance exactly: a missing result line, a malformed `usage`/`modelUsage`, or a garbage
  *  line never throws — it just yields zeros. Cost accounting (parseCostUsd) must keep working

@@ -264,6 +264,12 @@ test("sapwood run (default driver): runEngine reaches runRounds via createDefaul
         claudeBin: bin,
         heartbeatMs: 50,
         guardHookPath: mkHook(dir),
+        // #236 (Codex R1): this suite's stub `claude` binaries emit no init line, so a REAL
+        // RoleRunner would otherwise wait the full production preSpawnCaptureTimeoutMs (30s) per
+        // dispatched role session before falling back — a fast bound keeps this test's REAL
+        // multi-phase round loop fast without changing what it actually proves.
+        preSpawnCaptureTimeoutMs: 150,
+        preSpawnCapturePollMs: 10,
       },
       sleep: async () => {},
       registerSignals: (requestStop) => {
@@ -336,6 +342,8 @@ test("sapwood run (default driver): KILL_SWITCH blocks every peripheral AND disp
         claudeBin: bin,
         heartbeatMs: 50,
         guardHookPath: mkHook(dir),
+        preSpawnCaptureTimeoutMs: 150,
+        preSpawnCapturePollMs: 10,
       },
       sleep: async () => {},
       registerSignals: () => () => {},

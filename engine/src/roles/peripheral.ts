@@ -13,18 +13,29 @@
 // dirty-worktree retention (a role session never writes code — allowedTools scoping AND the
 // unchanged guard hook both block it — so its worktree is always safe to delete afterward).
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
-import type { ModelUsageEntry, State } from "../state/state.js";
+import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
+import {
+  assembleContextManifest,
+  type ContextManifest,
+  type RawContextSource,
+  readAmbientSource,
+  resolveWorktreeHead,
+  type WorktreeGitState,
+} from "./context-manifest.js";
 import {
   claudeArgs,
   discoverClaudeBin,
   guardSettings,
+  hasSessionInitLine,
   parseCostUsd,
   parseModelUsage,
   parseResultText,
+  parseSessionInit,
   type SpawnedSession,
   spawnClaudeSession,
 } from "./worker.js";
@@ -136,6 +147,17 @@ export interface RoleSessionResult {
    *  missing file means (retro.ts treats it as an invalid attempt: fail closed, retry once,
    *  then the degrade path — never a silently skipped deliverable). */
   scratchText?: string;
+  /** #236: this attempt's ambient-context manifest — every effective CLAUDE.md/policy source,
+   *  model/CLI/tool-schema/prompt-template info, MCP availability, worktree HEAD, and settings/
+   *  hook hashes, gathered right before the worktree is deleted below. Most role sessions hold
+   *  no write-capable tool grant at all, so their worktree is provably unchanged from spawn time
+   *  (capturing here is equivalent to "at spawn"); `retro` is the one exception (Write + local
+   *  git) — see WorktreeGitState's `dirtyBasis` doc for how that case is honestly represented
+   *  rather than assumed clean. Always present on a REAL RoleRunner.run() result; optional here
+   *  only so existing test fakes (which construct a RoleSessionResult literal directly, never
+   *  through RoleRunner.run()) keep compiling without updating every literal — same convention
+   *  resultText/scratchText already use. */
+  contextManifest?: ContextManifest;
 }
 
 export interface RoleRunnerDeps {
@@ -153,9 +175,99 @@ export interface RoleRunnerDeps {
   guardHookPath?: string;
   heartbeatMs?: number;
   now?: () => Date;
+  /** #236 (Codex F1, corrected in R1): bounded poll of the session's OWN stream-json jsonl file
+   *  for its `{"type":"system","subtype":"init"}` line, before capturing the filesystem-derived
+   *  half of the context manifest. The init line is the CLI's own signal that it finished
+   *  loading context (CLAUDE.md layers, MCP servers, tool schema) — the exact "what the session
+   *  saw" moment, and (as a side effect) proof the worktree provisioning that same startup did
+   *  is complete. This REPLACES the original design (a bounded wait for the worktree DIRECTORY
+   *  to exist), which a focused-suite run caught racing: directory existence does not imply
+   *  checkout-complete, so a fast poll could observe an empty/partial worktree and record
+   *  `CLAUDE.md` as absent when it was actually still being written. Default 100ms poll / 30s
+   *  bound (generous — production worktree+context-load is normally well under a second),
+   *  overridden lower in tests that don't care about the timeout-fallback path itself. */
+  preSpawnCaptureTimeoutMs?: number;
+  preSpawnCapturePollMs?: number;
 }
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "jsonl"];
+
+/** #236: the FILESYSTEM-derived half of one session attempt's context manifest, captured by
+ *  RoleRunner.capturePreSpawnManifestData right after the init-line anchor fires (or the bound
+ *  times out) — see that method's doc. Combined with the POST-EXIT self-report half in
+ *  RoleRunner.assembleManifest. */
+interface PreSpawnManifestCapture {
+  sources: RawContextSource[];
+  probedPaths: string[];
+  head: string | null;
+  /** False when the init-line-anchored capture ran but the worktree still didn't exist on disk
+   *  at that instant — a distinct fact from "worktree present but every source happened to be
+   *  absent" (Codex F5d). Independent of `captureBasis` below: a timeout-fallback capture can
+   *  still find a worktree that eventually appeared just after the bound expired, and (in
+   *  principle, for a very slow/broken CLI) an init-observed capture could still race a
+   *  not-yet-flushed worktree — this is a direct `existsSync` check at capture time, not an
+   *  inference from which basis fired. */
+  worktreeAppeared: boolean;
+  hookContent: string | null;
+  capturedAt: string;
+  /** Codex F1 (R1): which anchor actually fired — never silently assumed. `"init-observed"`:
+   *  the session's own init line was seen in its jsonl before the bound expired (the honest,
+   *  intended case). `"timeout-fallback"`: the bound expired with no init line ever observed
+   *  (a hung/crashed-before-init session, or a CLI slower than the configured bound) — capture
+   *  still proceeds (best-effort, never blocks the session), but the manifest names the
+   *  ambiguity rather than silently presenting it as equally reliable. */
+  captureBasis: "init-observed" | "timeout-fallback";
+}
+
+/** Codex F2b: the fixed, honest note every manifest carries naming what this module deliberately
+ *  does NOT enumerate — see context-manifest.ts's module doc and ContextManifest.knownUnprobed's
+ *  own doc for the full rationale. A single shared constant (not per-call prose) keeps this
+ *  claim consistent across every manifest this engine ever writes. */
+const KNOWN_UNPROBED_NOTE =
+  "Deliberately NOT enumerated: @import directives inside any probed file, ancestor-directory " +
+  "CLAUDE.md files above the worktree root, and any managed/enterprise policy layer — this " +
+  "engine records the standard sources it can cheaply probe (see probedPaths), not Claude " +
+  "Code's full CLAUDE.md resolution graph.";
+
+/** Sorted `*.md` file names under `dirPath`, RECURSIVELY (Codex F2 residual, R2b — the original
+ *  scan took only direct children, missing e.g. `.claude/rules/sub/nested.md`) — tolerant of a
+ *  missing/unreadable directory (returns `[]`, never throws). Each entry is a path RELATIVE to
+ *  `dirPath` (so a nested file reads as `"sub/nested.md"`, joinable back onto `dirPath` by the
+ *  caller) — used for the `.claude/rules/` scan. Node's `recursive: true` readdir option
+ *  requires Node 20.17+/22.2+; this engine's floor is Node >=24 (root `package.json`), so it's
+ *  always available. */
+function listMarkdownFileNames(dirPath: string): string[] {
+  try {
+    return readdirSync(dirPath, { withFileTypes: true, recursive: true })
+      .filter((d) => d.isFile() && d.name.endsWith(".md"))
+      .map((d) => relative(dirPath, join((d.parentPath as string | undefined) ?? dirPath, d.name)))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/** Bounded poll of `jsonlPath` for the session's own init line — the synchronization primitive
+ *  #236's pre-spawn manifest capture uses (Codex F1, R1). Resolves `true` the instant the line
+ *  is observed, or `false` once `timeoutMs` elapses without it ever appearing (a hung/crashed-
+ *  before-init session) — never throws, never waits longer than the bound. Reads the file fresh
+ *  on every poll tick (the same tolerant, still-growing-file reader every other jsonl consumer
+ *  in this codebase uses); a file that doesn't exist yet reads as `""`, not an error. */
+async function waitForInitLine(jsonlPath: string, timeoutMs: number, pollMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let content = "";
+    try {
+      content = readFileSync(jsonlPath, "utf8");
+    } catch {
+      /* not created / not flushed yet — keep polling */
+    }
+    if (hasSessionInitLine(content)) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await sleep(Math.min(pollMs, remaining));
+  }
+}
 
 /** Build a peripheral session environment without forge credentials or git credential
  *  injection vectors. This is deliberately a denylist rather than a small allowlist: the
@@ -191,6 +303,8 @@ export class RoleRunner {
   private readonly bin: string;
   private readonly hbMs: number;
   private readonly guardHookPath: string;
+  private readonly preSpawnCaptureTimeoutMs: number;
+  private readonly preSpawnCapturePollMs: number;
 
   constructor(private readonly deps: RoleRunnerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "roles");
@@ -198,6 +312,8 @@ export class RoleRunner {
     this.bin = deps.claudeBin ?? discoverClaudeBin(process.env);
     this.hbMs = deps.heartbeatMs ?? 30_000;
     this.guardHookPath = deps.guardHookPath ?? fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url));
+    this.preSpawnCaptureTimeoutMs = deps.preSpawnCaptureTimeoutMs ?? 30_000;
+    this.preSpawnCapturePollMs = deps.preSpawnCapturePollMs ?? 100;
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -288,6 +404,27 @@ export class RoleRunner {
       started_at: new Date(startedMs).toISOString(),
     });
 
+    // #236 (Codex F1, anchor corrected in R1): capture the FILESYSTEM-derived half of the
+    // context manifest (CLAUDE.md-family sources, worktree HEAD, guard hook content) as early as
+    // this engine can possibly observe it — right after spawn confirmation, BEFORE waiting out
+    // the session. Anchored to the session's OWN init line (worker.ts's hasSessionInitLine),
+    // polled from its still-growing jsonl — NOT a bounded wait for the worktree DIRECTORY to
+    // exist (the original design): directory existence does not imply checkout-complete, and a
+    // focused-suite run caught that race live (CLAUDE.md recorded absent once, flaky). The init
+    // line is the CLI's own signal that context loading (worktree provisioning included) is
+    // done — the model has not yet taken a turn, so this is exactly the "what the session saw"
+    // moment. This matters most for a write-capable session (retro): capturing at TEARDOWN (the
+    // pre-#236-fix behavior) would record "what the session left behind" (its own proposal
+    // commit, a possibly-edited CLAUDE.md) — not what it started with. If the init line is never
+    // observed within the bound, capture proceeds anyway (best-effort, never blocks the
+    // session) — `captureBasis` on the resulting manifest names which case fired, never silently
+    // presenting a timeout-fallback capture as equally reliable.
+    const worktreePath = join(this.worktreeRoot, name);
+    const initObserved = await waitForInitLine(jsonlPath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
+    const captureBasis: PreSpawnManifestCapture["captureBasis"] = initObserved ? "init-observed" : "timeout-fallback";
+    const worktreeAppeared = existsSync(worktreePath);
+    const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared, captureBasis);
+
     // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
     // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
     // mid-run): past worker.timeoutSec, kill the tree; the exit handler above still resolves
@@ -359,6 +496,18 @@ export class RoleRunner {
       }
     }
 
+    // #236: assemble the POST-EXIT half of the manifest (the session's own self-report — model/
+    // cliVersion/tools/mcpTools — plus the auto-memory source, whose path is only knowable from
+    // that same self-report) and combine it with the pre-spawn capture above. Never lets
+    // manifest gathering fail the session — every read inside is individually tolerant, and the
+    // whole block is still guarded here as defense-in-depth.
+    let contextManifest: ContextManifest | undefined;
+    try {
+      contextManifest = this.assembleManifest(name, opts, jsonl, settingsJson, preSpawn);
+    } catch (e) {
+      (this.deps.log ?? console.error)(`[sapwood:context-manifest] session ${name}: failed to assemble (non-fatal): ${String(e)}`);
+    }
+
     // Always delete the worktree — see the module doc: a role session never writes code
     // (allowedTools scoping + the unchanged guard hook both block it), so unlike worker.ts's
     // dirty-vs-clean retention there is no WIP that could ever need preserving here. Retro's
@@ -378,7 +527,135 @@ export class RoleRunner {
       name,
       resultText,
       ...(scratchText !== undefined ? { scratchText } : {}),
+      ...(contextManifest !== undefined ? { contextManifest } : {}),
     };
+  }
+
+  /** #236 (Codex F1/F2/F3, R1/R2 residual fixes): the FILESYSTEM-derived half of the context
+   *  manifest — read once the init-line anchor fires (see run()'s call site doc). Probes a
+   *  deliberately bounded, ENUMERATED set of standard CLAUDE.md-family sources (F2 ruling —
+   *  never the full resolution graph): `<worktree>/CLAUDE.md`, `<worktree>/CLAUDE.local.md`,
+   *  `<worktree>/.claude/CLAUDE.md` (Codex R2a — an officially documented layer the original F2
+   *  fix missed), every `*.md` RECURSIVELY under `<worktree>/.claude/rules/` (Codex R2b — the
+   *  original scan took only direct children), and the user-global CLAUDE.md — from
+   *  `$CLAUDE_CONFIG_DIR/CLAUDE.md` when that env var is set, else `~/.claude/CLAUDE.md` (Codex
+   *  R2c — the original hardcoded `homedir()` unconditionally, which is simply wrong when the
+   *  operator has relocated Claude Code's config dir). Every source is captured INLINE (F3 —
+   *  content-addressed, never a bare git-commit pointer, even for worktree-rooted files: a
+   *  write-capable session could still modify/add/remove/untrack one before its own commit, so
+   *  `gitCommit` here is ADVISORY metadata only, never a recoverability claim). `worktreeAppeared`
+   *  false means the worktree still wasn't on disk at the moment of capture — every source
+   *  therefore reads as absent for a real reason (there was nothing to read), which the caller
+   *  folds into a `"worktree-missing"` dirtyBasis rather than a plain "clean" or "dirty" guess. */
+  private capturePreSpawnManifestData(
+    worktreePath: string,
+    worktreeAppeared: boolean,
+    captureBasis: PreSpawnManifestCapture["captureBasis"],
+  ): PreSpawnManifestCapture {
+    const capturedAt = this.now().toISOString();
+    const probedPaths: string[] = [];
+    const sources: RawContextSource[] = [];
+    const head = resolveWorktreeHead(worktreePath);
+
+    const addSource = (label: string, path: string): void => {
+      probedPaths.push(path);
+      const r = readAmbientSource(path);
+      sources.push({
+        label,
+        path,
+        content: r.content,
+        ...(r.reason !== undefined ? { reason: r.reason } : {}),
+        ...(r.content !== null && head ? { gitCommit: head } : {}),
+      });
+    };
+
+    addSource("repo CLAUDE.md", join(worktreePath, "CLAUDE.md"));
+    addSource("repo CLAUDE.local.md", join(worktreePath, "CLAUDE.local.md"));
+    addSource("repo .claude/CLAUDE.md", join(worktreePath, ".claude", "CLAUDE.md"));
+
+    const rulesDirPath = join(worktreePath, ".claude", "rules");
+    probedPaths.push(join(rulesDirPath, "**", "*.md")); // recorded even if the directory is absent
+    for (const fileName of listMarkdownFileNames(rulesDirPath)) {
+      addSource(`repo .claude/rules/${fileName}`, join(rulesDirPath, fileName));
+    }
+
+    // Mutable, global — path known upfront (no worktree dependency at all), never git-pinned.
+    // CLAUDE_CONFIG_DIR (Codex R2c), when set, IS the effective user-global config directory —
+    // honoring it here is the difference between probing the real ambient source and a path
+    // that's simply wrong on any machine that relocated it.
+    const userConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
+    addSource("user-global CLAUDE.md", join(userConfigDir, "CLAUDE.md"));
+
+    const hookRead = readAmbientSource(this.guardHookPath);
+
+    return { sources, probedPaths, head, worktreeAppeared, hookContent: hookRead.content, capturedAt, captureBasis };
+  }
+
+  /** #236: the POST-EXIT half — the session's own stream-json self-report (worker.ts's
+   *  parseSessionInit) plus the auto-memory source (its path is only knowable from that same
+   *  report) — combined with the pre-spawn capture into the final manifest. */
+  private assembleManifest(
+    name: string,
+    opts: RoleSessionOpts,
+    jsonl: string,
+    settingsJson: string,
+    pre: PreSpawnManifestCapture,
+  ): ContextManifest {
+    const init = parseSessionInit(jsonl);
+    const capturedPostExit = this.now().toISOString();
+
+    const sources = [...pre.sources];
+    const probedPaths = [...pre.probedPaths];
+    if (init.memoryPathAuto) {
+      const memoryPath = join(init.memoryPathAuto, "MEMORY.md");
+      probedPaths.push(memoryPath);
+      const memRead = readAmbientSource(memoryPath);
+      sources.push({
+        label: "auto-memory MEMORY.md",
+        path: memoryPath,
+        content: memRead.content,
+        ...(memRead.reason !== undefined ? { reason: memRead.reason } : {}),
+      });
+    }
+
+    // See WorktreeGitState.dirtyBasis's doc: an EMPTY effective tool grant (every issues-only
+    // role) is a structural "cannot have been dirtied" guarantee; a NON-EMPTY one (today: only
+    // `retro`, which holds Write + local git) means the engine cannot rule out a write without a
+    // live `git status` it structurally never performs — record that conservatively as dirty,
+    // never a false "definitely clean" borrowed from the empty-allowlist case. A worktree that
+    // never appeared at all (Codex F5d) gets its OWN distinct basis, never folded into either.
+    const worktreePath = join(this.worktreeRoot, name);
+    const effectiveAllowedTools = opts.allowedTools ?? ROLE_ALLOWED_TOOLS;
+    const hasWriteCapableTools = effectiveAllowedTools.trim().length > 0;
+    const worktree: WorktreeGitState = !pre.worktreeAppeared
+      ? { path: worktreePath, head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "worktree-missing" }
+      : {
+          path: worktreePath,
+          head: pre.head,
+          headResolution: pre.head ? "resolved" : "unresolved",
+          dirty: hasWriteCapableTools,
+          dirtyBasis: hasWriteCapableTools ? "unknown-write-capable-session" : "structural-no-write-tools",
+        };
+
+    return assembleContextManifest({
+      sources,
+      probedPaths,
+      knownUnprobed: KNOWN_UNPROBED_NOTE,
+      capturedPreSpawn: pre.capturedAt,
+      capturedPostExit,
+      captureBasis: pre.captureBasis,
+      model: init.model ?? opts.model,
+      modelSource: init.model ? "session-init" : "requested-fallback",
+      cliBin: this.bin,
+      cliVersion: init.cliVersion,
+      toolInventoryTools: init.tools,
+      promptTemplateSource: opts.prompt,
+      mcpTools: init.mcpServers.map((s) => `${s.name}:${s.status}`),
+      worktree,
+      settingsJson,
+      hookContent: pre.hookContent,
+      recordedAt: capturedPostExit,
+    });
   }
 
   private async killTree(session: SpawnedSession): Promise<void> {
@@ -459,6 +736,27 @@ export interface RetriedSession {
    *  twice -> degrade path, never a wedged round". Omitted -> today's behavior is
    *  byte-identical: only `outcome` decides done vs. not-done. */
   isValid?: (result: RoleSessionResult) => boolean;
+  /** #236: OPTIONAL context-manifest recording — round/phase key prefix plus the persist
+   *  callback. Kept as a SEPARATE field rather than widening `state` above's Pick type, so
+   *  every existing caller/test fake (typed against `Pick<State,"recordSpend"|"appendEvent">`)
+   *  is UNCHANGED — omitted here means no manifest is recorded, zero behavior change. When
+   *  supplied, EVERY attempt (not just the final one) is persisted — that's the whole point:
+   *  two attempts of one phase must be independently reconstructable, and ambient drift between
+   *  them (a CLAUDE.md edited mid-retry, a dirty worktree) is exactly what would otherwise be
+   *  lost. `role`/`session`/`attempt` are filled in by runSessionWithRetry itself (role from
+   *  `session.roleId`, session from each attempt's own result name, attempt from the 1-or-2
+   *  retry ordinal) — the caller supplies only the round/phase half of the key. See
+   *  context-manifest.ts's module doc for the (round, phase, role, session, attempt) tuple
+   *  #231's separately-developed input manifest joins on later; this module never depends on
+   *  that work. */
+  contextManifest?: {
+    roundId: number;
+    phase: string;
+    /** Typically `state.recordContextManifest.bind(state)` — kept as a plain function (not a
+     *  `Pick<State,...>` object) so a caller can wrap it (e.g. to no-op in a test) without
+     *  needing a second fake-state shape. */
+    record: (key: ContextManifestKey, json: string, recordedAt: string) => void;
+  };
 }
 
 /** Run one role session; on a non-"done" outcome (or, when `isValid` is supplied, a "done"
@@ -470,9 +768,27 @@ export interface RetriedSession {
  *  helper only owns the retry-and-degrade mechanics, never the phase's own business logic). */
 export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSessionResult> {
   const iso = (): string => opts.now().toISOString();
-  const attempt = async (): Promise<RoleSessionResult> => {
+  const attempt = async (n: number): Promise<RoleSessionResult> => {
     const result = await opts.runner.run(opts.session);
     opts.state.recordSpend(result.name, opts.issue, result.costUsd, iso(), result.modelUsage);
+    // #236: persist THIS attempt's context manifest, if the caller opted in and the runner
+    // produced one (a fake runner in tests typically won't — RoleSessionResult.contextManifest
+    // is optional exactly for that reason, see its own doc). Contained: a persist failure is
+    // logged, never propagated — recording ambient context must never itself wedge a round.
+    if (opts.contextManifest && result.contextManifest) {
+      try {
+        const key: ContextManifestKey = {
+          roundId: opts.contextManifest.roundId,
+          phase: opts.contextManifest.phase,
+          role: opts.session.roleId,
+          session: result.name,
+          attempt: n,
+        };
+        opts.contextManifest.record(key, JSON.stringify(result.contextManifest), iso());
+      } catch (e) {
+        (opts.log ?? console.error)(`[sapwood:context-manifest] ${result.name} attempt ${n}: failed to persist (non-fatal): ${String(e)}`);
+      }
+    }
     return result;
   };
   // isValid omitted -> isDone reduces to the original `outcome === "done"` check exactly.
@@ -487,9 +803,9 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
       return false;
     }
   };
-  let result = await attempt();
+  let result = await attempt(1);
   if (!isDone(result)) {
-    result = await attempt();
+    result = await attempt(2);
     if (!isDone(result)) {
       try {
         opts.state.appendEvent(opts.degradeEvent, opts.degradePayload(result));

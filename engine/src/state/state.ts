@@ -380,6 +380,35 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       CREATE UNIQUE INDEX input_manifest_dim ON input_manifest (round_id, phase, role, session, attempt, channel);
     `);
   },
+  // 14 -> 15: ambient session context manifests (#236 — "record, don't seal"). Peripheral role
+  // sessions legitimately absorb ambient repo context (CLAUDE.md layers, memory, dynamic
+  // system-prompt sections — #219's locked action-side trust boundary; sealing this channel was
+  // rejected). The obligation is honesty: a recorded session ATTEMPT states exactly what it saw
+  // (and its own capture timing/coverage — see roles/context-manifest.ts), so ambient drift
+  // between retries of the same phase never makes two attempts look comparable when they
+  // weren't. Keyed by the SAME (round, phase, role, session, attempt) tuple the migration
+  // 13->14 `input_manifest` table (#231, landed first) also uses — this table is deliberately
+  // self-contained (own table, own methods below) so the two features merge independently;
+  // nothing here depends on #231's schema, and nothing there depends on this one. `json` is an
+  // opaque, schema-validated-by-the-caller blob (same round_artifacts.json convention, migration
+  // 9->10) — state.ts stores it, never interprets it (see roles/context-manifest.ts for the
+  // shape). UNIQUE + upsert-on-conflict (State.recordContextManifest) makes a crash-rerun of the
+  // SAME attempt idempotent rather than a duplicate row.
+  (db) => {
+    db.exec(`
+      CREATE TABLE context_manifests (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id    INTEGER NOT NULL,
+        phase       TEXT NOT NULL,
+        role        TEXT NOT NULL,
+        session     TEXT NOT NULL,
+        attempt     INTEGER NOT NULL,
+        recorded_at TEXT NOT NULL,
+        json        TEXT NOT NULL,
+        UNIQUE(round_id, phase, role, session, attempt)
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -626,6 +655,23 @@ export interface ParkRow {
   probeAttempts: number;
   escalatedAt: string | null;
   canaryWorker: string | null;
+}
+
+// ── Ambient session context manifests (#236) ──────────────────────────────────────────────
+
+/** The context_manifests row identity — ONE manifest per session ATTEMPT, keyed by exactly the
+ *  tuple documented on the schema v13->v14 migration above. `role` is the RoleSessionOpts.roleId
+ *  the caller used ("harvest", "aligning-pool", ...); `session` is the lane/session NAME the
+ *  attempt actually ran under (peripheral.ts generates a fresh name per RoleRunner.run() call,
+ *  so two attempts of the same phase get two distinct `session` values — `attempt` is still
+ *  recorded separately because it's the caller's own retry ordinal, not derivable from the name
+ *  alone). */
+export interface ContextManifestKey {
+  roundId: number;
+  phase: string;
+  role: string;
+  session: string;
+  attempt: number;
 }
 
 export class State {
@@ -1477,6 +1523,63 @@ export class State {
       truncated: r.truncated === 1,
       detail: r.detail,
       ts: r.ts,
+    }));
+  }
+
+  // ── #236: ambient session context manifests (context_manifests, migration 14->15) ────────
+
+  /** Upsert ONE session attempt's context manifest. `json` is the caller's already-serialized,
+   *  already-assembled manifest (roles/context-manifest.ts's `assembleContextManifest` output —
+   *  state.ts stores it opaquely, same round_artifacts.json convention). Idempotent per
+   *  (round, phase, role, session, attempt): a crash-rerun that re-records the SAME attempt
+   *  overwrites rather than duplicates. Never called for a round/phase/attempt this table
+   *  doesn't already understand — the caller (peripheral.ts's runSessionWithRetry) owns
+   *  building the key; this method only persists it. */
+  recordContextManifest(key: ContextManifestKey, json: string, recordedAt: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO context_manifests (round_id, phase, role, session, attempt, recorded_at, json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(round_id, phase, role, session, attempt) DO UPDATE SET
+           recorded_at = excluded.recorded_at, json = excluded.json`,
+      )
+      .run(key.roundId, key.phase, key.role, key.session, key.attempt, recordedAt, json);
+  }
+
+  /** The persisted manifest for one exact attempt, or undefined if that attempt never recorded
+   *  one. `json` is returned RAW — the caller parses it against the shape it understands
+   *  (roles/context-manifest.ts's ContextManifest), same reader contract as getRoundArtifact. */
+  getContextManifest(key: ContextManifestKey): { recordedAt: string; json: string } | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT recorded_at, json FROM context_manifests WHERE round_id = ? AND phase = ? AND role = ? AND session = ? AND attempt = ?",
+      )
+      .get(key.roundId, key.phase, key.role, key.session, key.attempt) as { recorded_at: string; json: string } | undefined;
+    return row ? { recordedAt: row.recorded_at, json: row.json } : undefined;
+  }
+
+  /** Every manifest recorded for a round, insertion order — the "reconstruct the whole round's
+   *  ambient-context history" read (e.g. comparing two attempts of the same phase). */
+  listContextManifestsForRound(roundId: number): Array<ContextManifestKey & { recordedAt: string; json: string }> {
+    const rows = this.db
+      .prepare("SELECT round_id, phase, role, session, attempt, recorded_at, json FROM context_manifests WHERE round_id = ? ORDER BY id")
+      .all(roundId) as Array<{
+      round_id: number;
+      phase: string;
+      role: string;
+      session: string;
+      attempt: number;
+      recorded_at: string;
+      json: string;
+    }>;
+    return rows.map((r) => ({
+      roundId: r.round_id,
+      phase: r.phase,
+      role: r.role,
+      session: r.session,
+      attempt: r.attempt,
+      recordedAt: r.recorded_at,
+      json: r.json,
     }));
   }
 }
