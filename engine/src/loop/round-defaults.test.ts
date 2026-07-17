@@ -20,8 +20,19 @@ import { noopPeripheralStub, type RoundDeps, runRounds } from "./round.js";
 import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMergedFromArtifact } from "./round-defaults.js";
 
+// #231: createAligningStub now treats an unreadable goal file as an EXPLICIT align-creation
+// failure (no session dispatched) rather than the pre-#231 silent "" — every test here that
+// expects a real po-align session dispatch needs a REAL, readable default goal file.
+const DEFAULT_TEST_GOAL_DIR = mkdtempSync(join(tmpdir(), "sapwood-round-defaults-goal-"));
+const DEFAULT_TEST_GOAL_FILE = join(DEFAULT_TEST_GOAL_DIR, "PLAN.md");
+writeFileSync(DEFAULT_TEST_GOAL_FILE, "# Test goal\nHarmless default content for tests that don't care about plan.md.\n");
+
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
+  ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    goal: { file: DEFAULT_TEST_GOAL_FILE },
+    ...over,
+  });
 
 class FakeForge implements IForge {
   async listUnplacedIssues() {

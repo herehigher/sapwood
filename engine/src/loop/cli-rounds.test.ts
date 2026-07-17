@@ -18,8 +18,20 @@ import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcil
 import { State } from "../state/state.js";
 import type { PeripheralPhase } from "./round.js";
 
+// #231: createAligningStub now treats an unreadable goal file as an EXPLICIT align-creation
+// failure (no session dispatched) rather than the pre-#231 silent "" — this suite's default
+// config needs a REAL, readable goal file so the round path still dispatches a real po-align
+// session (this file proves the REAL RoleRunner wiring, so at least one real session must run).
+const DEFAULT_TEST_GOAL_DIR = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-goal-"));
+const DEFAULT_TEST_GOAL_FILE = join(DEFAULT_TEST_GOAL_DIR, "PLAN.md");
+writeFileSync(DEFAULT_TEST_GOAL_FILE, "# Test goal\nHarmless default content for tests that don't care about plan.md.\n");
+
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
+  ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    goal: { file: DEFAULT_TEST_GOAL_FILE },
+    ...over,
+  });
 const silentLogger = { log(_message: string): void {} };
 
 const mkStub = (dir: string, body: string): string => {
