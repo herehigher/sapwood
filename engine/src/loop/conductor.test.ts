@@ -1509,11 +1509,9 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
   // scheduled in time to install the trap before a fixed-duration sleep elapses, so the
   // later SIGTERM would hit the shell's default (trap-less) handling and the process would
   // die WITHOUT running the trap, silently starving termMarker below (issue #229).
-  writeFileSync(
-    bin,
-    `#!/usr/bin/env bash\ntrap 'touch "${termMarker}" ; exit 0' TERM\ntouch "${trapReadyMarker}"\nsleep 30\n`,
-    { mode: 0o755 },
-  );
+  writeFileSync(bin, `#!/usr/bin/env bash\ntrap 'touch "${termMarker}" ; exit 0' TERM\ntouch "${trapReadyMarker}"\nsleep 30\n`, {
+    mode: 0o755,
+  });
   const cfg = mkCfg({ guard: { mode: "soft" }, worker: { heartbeatStaleSecs: 1, timeoutSec: 30 } });
   const forge = new FakeForge();
   const st = new State(dbPath);
