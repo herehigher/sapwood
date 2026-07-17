@@ -1429,9 +1429,14 @@ query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
  *  shape) whose `repository.nameWithOwner` does not match it — including a node with NO
  *  repository field at all, a malformed/partial response — is DROPPED, never returned (#234 F2,
  *  PR #252 review, P1, Codex #1: fail-closed on ambiguity, same stance as this file's other
- *  scope-boundary parsers, e.g. selectReadyIssues' own repo filter). Malformed/missing fields
- *  beyond that degrade to empty connections — never a throw (same tolerance as every other
- *  GraphQL parser in this file); a genuinely failed gh call still throws upstream of this
+ *  scope-boundary parsers, e.g. selectReadyIssues' own repo filter). The comparison is
+ *  CASE-INSENSITIVE (#234 F2b, PR #252 review round 2, P2, Codex): GitHub's own casing for
+ *  `nameWithOwner` need not match whatever casing an operator happened to type into
+ *  `board.owner`/`board.repo` in config — a naive exact-match would silently drop EVERY
+ *  same-repo relation whenever the two disagree only in case, an availability regression, not a
+ *  security fix (the fail-closed stance is about WHICH repo, not letter case). Malformed/missing
+ *  fields beyond that degrade to empty connections — never a throw (same tolerance as every
+ *  other GraphQL parser in this file); a genuinely failed gh call still throws upstream of this
  *  (JSON.parse on non-JSON stderr text). */
 export function parseIssueRelations(json: string, cap: number, expectedRepoFullName: string): IssueRelations {
   type LabelNode = { labels?: { nodes?: { name: string }[] } };
@@ -1439,7 +1444,8 @@ export function parseIssueRelations(json: string, cap: number, expectedRepoFullN
   type RefNode = { __typename?: string; number?: number; title?: string; state?: string } & LabelNode & RepoNode;
   type TimelineNode = { __typename?: string; source?: RefNode; subject?: RefNode };
   const labelsOf = (n: LabelNode): string[] => (n.labels?.nodes ?? []).map((l) => l.name);
-  const sameRepo = (n: RepoNode): boolean => n.repository?.nameWithOwner === expectedRepoFullName;
+  const expectedRepoLower = expectedRepoFullName.toLowerCase();
+  const sameRepo = (n: RepoNode): boolean => n.repository?.nameWithOwner?.toLowerCase() === expectedRepoLower;
   const d = JSON.parse(json) as {
     data?: {
       repository?: {

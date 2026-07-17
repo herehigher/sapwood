@@ -102,6 +102,33 @@ test("validateToolArgs: search_issues empty query -> invalid_args", () => {
   assert.equal(!r.ok && r.error.code, "invalid_args");
 });
 
+// ── #234 F1b (PR #252 review round 2, P1, defense-in-depth): a repo:/org:/user: qualifier
+//    inside the search QUERY TEXT is a second scope-redirection surface, independent of the
+//    argv-flag-injection vector F1 already closed — must be provable at THIS boundary, never
+//    dependent on gh/GitHub's implicit qualifier-combination behavior. ─────────────────────────
+
+test("validateToolArgs: search_issues rejects a query containing a repo: qualifier -> invalid_args, case-insensitive, embedded anywhere in the text", () => {
+  for (const query of ["repo:other/repo", "is:open OR repo:x/y", "REPO:x/y", "foo repo:x/y bar"]) {
+    const r = validateToolArgs(TOOL_SEARCH_ISSUES, { query }, CAPS);
+    assert.equal(r.ok, false, `expected rejection for query: ${query}`);
+    assert.equal(!r.ok && r.error.code, "invalid_args", `expected invalid_args for query: ${query}`);
+  }
+});
+
+test("validateToolArgs: search_issues rejects a query containing an org: or user: qualifier, case-insensitive", () => {
+  for (const query of ["org:evil", "foo org:evil", "user:someone", "USER:someone"]) {
+    const r = validateToolArgs(TOOL_SEARCH_ISSUES, { query }, CAPS);
+    assert.equal(r.ok, false, `expected rejection for query: ${query}`);
+    assert.equal(!r.ok && r.error.code, "invalid_args", `expected invalid_args for query: ${query}`);
+  }
+});
+
+test("validateToolArgs: search_issues still ACCEPTS a benign query using in-scope qualifiers (is:/label:/free text)", () => {
+  const r = validateToolArgs(TOOL_SEARCH_ISSUES, { query: "is:open label:bug flaky" }, CAPS);
+  assert.equal(r.ok, true);
+  assert.equal(r.ok && (r.value as { query: string }).query, "is:open label:bug flaky");
+});
+
 // ── sanitizeUpstreamError: nothing token-bearing in any error surface ───────────────────────
 
 test("sanitizeUpstreamError: scrubs GitHub PAT-shaped tokens, Bearer headers, and bare 40-hex strings", () => {

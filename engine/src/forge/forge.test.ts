@@ -1471,6 +1471,46 @@ test("parseIssueRelations: a node with NO repository field at all is treated as 
   assert.deepEqual(parseIssueRelations(json, 10, OWN_REPO).linkedPRs, []);
 });
 
+// #234 F2b (PR #252 review round 2, P2, Codex new finding): the repo comparison must be
+// case-INSENSITIVE — GitHub's own `nameWithOwner` casing need not match whatever casing an
+// operator typed into config, and an exact-match comparison would silently drop every same-repo
+// relation on a casing mismatch (an availability regression, not a security property).
+test("parseIssueRelations: a SAME-repo node whose nameWithOwner casing differs from the configured value is RETAINED (case-insensitive compare); a genuinely foreign-repo node is still dropped", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        issue: {
+          closedByPullRequestsReferences: {
+            nodes: [
+              // Differently-cased same repo — GitHub's actual casing vs. whatever the operator typed.
+              {
+                number: 220,
+                title: "our fix, differently-cased repo",
+                state: "MERGED",
+                repository: { nameWithOwner: "HereHigher/Sapwood" },
+                labels: { nodes: [] },
+              },
+              {
+                number: 99,
+                title: "a foreign fix",
+                state: "MERGED",
+                repository: { nameWithOwner: "someone-else/private-repo" },
+                labels: { nodes: [] },
+              },
+            ],
+          },
+          timelineItems: { nodes: [] },
+        },
+      },
+    },
+  });
+  // OWN_REPO ("herehigher/sapwood") is all-lowercase; GraphQL's node carries the
+  // differently-cased "HereHigher/Sapwood" above — a real-world casing mismatch.
+  const r = parseIssueRelations(json, 10, OWN_REPO);
+  assert.deepEqual(r.linkedPRs, [{ number: 220, title: "our fix, differently-cased repo", state: "MERGED", labels: [], kind: "pr" }]);
+  assert.ok(!r.linkedPRs.some((p) => p.number === 99), "the genuinely foreign-repo PR is still dropped");
+});
+
 test("parseIssueRelations: truncation is judged on the RAW (pre-filter) node count, never under-reported because a filter shrank the visible count", () => {
   const json = JSON.stringify({
     data: {

@@ -62,7 +62,31 @@ export interface ProxyCaps {
 export const IssueDetailsArgs = z.object({ numbers: z.array(z.number().int().positive()).min(1) }).strict();
 export const IssueCommentsArgs = z.object({ number: z.number().int().positive(), lastN: z.number().int().positive().optional() }).strict();
 export const IssueRelationsArgs = z.object({ number: z.number().int().positive() }).strict();
-export const SearchIssuesArgs = z.object({ query: z.string().min(1) }).strict();
+
+/** #234 F1b (PR #252 review round 2, P1, defense-in-depth): a `repo:`/`org:`/`user:` qualifier
+ *  INSIDE the GitHub search query text is a SECOND scope-redirection surface, entirely separate
+ *  from the argv-flag-injection vector the `--` terminator (searchIssues, forge.ts) already
+ *  closes — GitHub's search query LANGUAGE has its own scope qualifiers, independent of how the
+ *  query string reaches `gh` as an argv token. An embedded `repo:` empirically combines with the
+ *  forced `--repo` (GitHub ANDs them, observed to return no/same-repo-only results) rather than
+ *  overriding it — but a credential-mediating proxy's scope boundary must never rest on an
+ *  implicit, unspecified combination behavior of the far side's query language; it must be
+ *  provable at THIS boundary. The repository is already forced server-side, so a session has no
+ *  legitimate reason to pass any of these three qualifiers — reject before the query ever reaches
+ *  `gh`. Every OTHER qualifier (`is:`, `in:`, `label:`, `state:`, `author:`, date ranges, free
+ *  text) filters WITHIN the forced scope and stays allowed. Word-boundary anchored (`(^|\s)`) so
+ *  a legitimate mention inside free text (rare, but e.g. "cannot find repo:xyz in error output")
+ *  is still caught — false positives here are the safe direction (an over-broad reject, never an
+ *  under-broad one), and there is no realistic query that legitimately NEEDS these three tokens. */
+const SCOPE_QUALIFIER_RE = /(^|\s)(repo|org|user):/i;
+
+export const SearchIssuesArgs = z
+  .object({ query: z.string().min(1) })
+  .strict()
+  .refine((v) => !SCOPE_QUALIFIER_RE.test(v.query), {
+    message: "query must not contain a repo:/org:/user: scope qualifier — the repository is forced server-side, never caller-controlled",
+    path: ["query"],
+  });
 
 const ARG_SCHEMAS: Record<ToolName, z.ZodTypeAny> = {
   [TOOL_ISSUE_DETAILS]: IssueDetailsArgs,
