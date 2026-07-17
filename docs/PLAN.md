@@ -847,6 +847,17 @@ missing, remove strays — with read/remove failures degrading open and leaving 
 `pool-reconcile-incomplete` honesty event. The pool label is *intended* to live one
 round: round close sweeps it from every open issue that still carries it, best-effort
 (failures log as tick-errors; the next selection's reconcile is the further net).
+**Write-ahead is load-bearing (#232):** the `pool-selected` write
+described above is fail-closed, not best-effort — an append failure now SKIPS label
+reconcile for that pass entirely (a `pool-selection-decision-lost` honesty event +
+tick-error recorded instead), rather than labeling GitHub against a decision with no
+durable record behind it. Degrades open at the *round* level (marker still advances,
+next round retries fresh), never a wedge. The same round's `po-triage` pass got the
+same treatment: a validated draft is durably recorded as an accepted decision *before*
+the body write, so a crash-rerun resumes the write from that record instead of paying
+for a second session; the write itself carries the body hash the session actually
+read and is refused (old body kept, `triage-stale-hash-skipped` recorded) if the live
+body no longer matches — a concurrent human edit wins over a blind overwrite.
 **Label-removal containment invariant:** every engine call site that strips a label
 routes through one guard function that fail-closes on anything but `labels.roundPool`
 (aliasing to a protected label is additionally rejected at config load), and no
