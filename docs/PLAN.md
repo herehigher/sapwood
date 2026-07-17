@@ -858,6 +858,18 @@ the body write, so a crash-rerun resumes the write from that record instead of p
 for a second session; the write itself carries the body hash the session actually
 read and is refused (old body kept, `triage-stale-hash-skipped` recorded) if the live
 body no longer matches — a concurrent human edit wins over a blind overwrite.
+Recovery is *by issue number* from the decision journal, not by re-querying "still
+needs triage" — the ordinary candidate query excludes an issue the instant its body
+has a plan, which is exactly what a landed-but-unreceipted write produces, so a
+number-only recovery scan (gate② review, PR #249) is what keeps that decision
+reachable. Every decision and its receipts (body-committed, comment-posted,
+effects-committed) share one *attempt* number (the same one the #231 input-manifest
+row for that dispatch carries — literal join key, not a separate lookup), so a stale
+receipt from a superseded or unreadable prior attempt can never be mistaken for the
+current one's. The align-creation proposal journal (#216) got the matching fix for its
+own audit comment: a `proposal-comment-posted` receipt now guards that non-idempotent
+write the same way, so a crash between the comment landing and the final
+`proposal-created` receipt reconciles without reposting it.
 **Label-removal containment invariant:** every engine call site that strips a label
 routes through one guard function that fail-closes on anything but `labels.roundPool`
 (aliasing to a protected label is additionally rejected at config load), and no

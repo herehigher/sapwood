@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { extractVerificationPlan } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
@@ -160,7 +161,15 @@ class FakeForge implements IForge {
     for (const c of this.planTriageCandidates) {
       if (!(c.number in this.issueBodies)) this.issueBodies[c.number] = c.body ?? "";
     }
-    return this.planTriageCandidates;
+    // #232 gate② F1 (Codex sol high review of PR #249): the REAL selector (forge.ts's
+    // getIssuesNeedingPlanTriage) excludes any issue whose body already has a plan section — a
+    // static-array fake that ignores live body content masks exactly the bug the reviewer found
+    // (a landed-but-unreceipted body write becoming permanently invisible to the recovery loop).
+    // Honor live body content here too, same as real GitHub would — including returning the
+    // LIVE body (not the possibly-stale candidate fixture body), same as a real `gh` listing.
+    return this.planTriageCandidates
+      .map((c) => ({ ...c, body: this.issueBodies[c.number] ?? c.body ?? "" }))
+      .filter((c) => extractVerificationPlan(c.body) == null);
   }
 }
 
@@ -795,6 +804,58 @@ test("createAligningStub #216: proposal receipt lands only after reconciled gove
   state.close();
 });
 
+test("createAligningStub #232 F3 (Codex sol high review of PR #249): crash after the audit comment lands but BEFORE the proposal-created receipt — rerun reconciles via the marker WITHOUT reposting the comment", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  // The #216 deviation this closes: proposal-created was previously written only AFTER every
+  // governance effect including the comment, so a crash strictly between the comment landing and
+  // this receipt would repost the (non-idempotent) comment on a marker-reconcile rerun. Intercept
+  // ONLY the outer `proposal-created` append (never `proposal-comment-posted`, which
+  // applyProposalGovernance appends BEFORE this one, right after the comment itself lands) —
+  // same "intercept one call site" idiom the #216 tests above use for forge calls.
+  const realAppend = state.appendEvent.bind(state);
+  let failReceipt = true;
+  state.appendEvent = (kind: string, payload: unknown) => {
+    if (kind === "proposal-created" && failReceipt) {
+      failReceipt = false;
+      throw new Error("crash after comment, before receipt");
+    }
+    realAppend(kind, payload);
+  };
+  await assert.rejects(
+    () =>
+      createAligningStub({
+        forge,
+        state,
+        cfg,
+        runner: new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "planned", body: PLAN_BODY }]))]),
+      }).run({ roundId: 231, phase: "aligning", marker: null }),
+    /crash after comment, before receipt/,
+  );
+  assert.equal(forge.createdIssues.length, 1, "the create + governance (incl. the audit comment) already landed before the crash");
+  const issue = forge.openIssueNumbers[0]!;
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === issue).length, 1);
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 0, "the receipt itself never landed");
+  assert.equal(
+    state.eventsAfterId(0, ["proposal-comment-posted"]).length,
+    1,
+    "but the comment's OWN receipt did — this is what prevents a repost on rerun",
+  );
+
+  const rerun = new ScriptedRunner([failedResult("must-not-run")]);
+  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 231, phase: "aligning", marker: null });
+  assert.equal(rerun.calls.length, 0, "the persisted proposal set skips po-align entirely on rerun");
+  assert.equal(forge.createdIssues.length, 1, "no re-create — reconciled via the body marker");
+  assert.equal(
+    forge.issueCommentsPosted.filter(([n]) => n === issue).length,
+    1,
+    "no duplicate comment — the proposal-comment-posted receipt skipped reposting",
+  );
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 1, "the receipt-less remainder (just this receipt) now completes");
+  state.close();
+});
+
 test("createAligningStub #216: divergent proposal journal records honesty and advances with zero forge writes", async () => {
   const forge = new FakeForge();
   const state = new State(":memory:");
@@ -1183,7 +1244,16 @@ test("createAligningStub #232: crash-rerun resume — a persisted triage-decisio
   // write, comment, receipts) landed.
   const draftedBody = "no plan yet\n## Verification\n- run npm test";
   const expectedHash = contentVersionForTest("no plan yet");
-  state.appendEvent("triage-decision-accepted", { round_id: 22, issue: 93, body: draftedBody, expected_hash: expectedHash });
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 22,
+    issue: 93,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:93",
+    attempt: 1,
+    body: draftedBody,
+    expected_hash: expectedHash,
+  });
   // Only an align-pass script step: if a po-triage session were (wrongly) dispatched, the
   // ScriptedRunner would repeat this same "done, declares nothing" step for it too, so any
   // triage dispatch would be silently absorbed rather than crashing — the roleId assertion below
@@ -1210,8 +1280,24 @@ test("createAligningStub #232: crash-rerun resume — a triage-body-committed re
   const state = new State(":memory:");
   const draftedBody = "no plan yet\n## Verification\n- run npm test";
   const expectedHash = contentVersionForTest("no plan yet");
-  state.appendEvent("triage-decision-accepted", { round_id: 23, issue: 94, body: draftedBody, expected_hash: expectedHash });
-  state.appendEvent("triage-body-committed", { round_id: 23, issue: 94 });
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 23,
+    issue: 94,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:94",
+    attempt: 1,
+    body: draftedBody,
+    expected_hash: expectedHash,
+  });
+  state.appendEvent("triage-body-committed", {
+    round_id: 23,
+    issue: 94,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:94",
+    attempt: 1,
+  });
   // The prior (crashed) attempt's body write already landed on the live issue before it crashed.
   forge.issueBodies[94] = draftedBody;
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
@@ -1231,18 +1317,86 @@ test("createAligningStub #232: crash-rerun resume — a triage-body-committed re
   state.close();
 });
 
+test("createAligningStub #232 gate② F1 (Codex sol high review of PR #249): crash after the body write lands but BEFORE the body-committed receipt — with REAL selector semantics (the issue no longer needs triage) the journal still discovers it by number, completes the remainder, zero new sessions", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 95, title: "t", labels: [], body: "no plan yet" }];
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const draftedBody = "no plan yet\n## Verification\n- run npm test";
+  const expectedHash = contentVersionForTest("no plan yet");
+  // Write-ahead decision persisted by a PRIOR (crashed) attempt.
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 24,
+    issue: 95,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:95",
+    attempt: 1,
+    body: draftedBody,
+    expected_hash: expectedHash,
+  });
+  // The body write itself landed on GitHub — but the crash happened strictly BEFORE the
+  // triage-body-committed receipt was ever appended (no receipt of any kind exists for #95).
+  forge.issueBodies[95] = draftedBody;
+
+  // Sanity check proving the bug this test targets: the FIXED (live-body-aware) selector no
+  // longer surfaces #95 as a candidate at all, since its live body already has a plan — exactly
+  // the condition that made the OLD "iterate triageCandidates only" recovery loop unreachable.
+  const freshCandidates = await forge.getIssuesNeedingPlanTriage();
+  assert.ok(
+    !freshCandidates.some((i) => i.number === 95),
+    "sanity: the fixed selector excludes an issue whose live body already has a plan",
+  );
+
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 24, phase: "aligning", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align"],
+    "zero po-triage sessions — recovered from the journal BY NUMBER, never rediscovered via the selector",
+  );
+  assert.equal(
+    forge.updateIssueBodyCalls.length,
+    0,
+    "no duplicate write — updateIssueBodyIfUnchanged's current===newBody short-circuit applies since the write already landed",
+  );
+  assert.ok(
+    forge.issueCommentsPosted.some(([n]) => n === 95),
+    "the receipt-less remainder (comment + both receipts) still completes",
+  );
+  const events = state.eventsAfterId(0, ["triage-body-committed", "triage-effects-committed"]);
+  assert.ok(
+    events.some((e) => e.kind === "triage-body-committed" && (e.payload as { issue: number }).issue === 95),
+    "the missing body-committed receipt is backfilled",
+  );
+  assert.ok(
+    events.some((e) => e.kind === "triage-effects-committed" && (e.payload as { issue: number }).issue === 95),
+    "the decision reaches its terminal receipt",
+  );
+  state.close();
+});
+
 test("createAligningStub #232: concurrent-edit guard — a live body change since the session read it REFUSES the write, keeps the old body, records triage-stale-hash-skipped, degrades open", async () => {
   const forge = new FakeForge();
   forge.planTriageCandidates = [{ number: 92, title: "t", labels: [], body: "original body, no plan" }];
-  // Simulate a human editing the issue WHILE the session was drafting — the live body diverges
-  // from what the candidate query (and thus the rendered prompt, and the write-ahead decision's
-  // expected_hash) captured.
-  forge.issueBodies[92] = "a human edited this issue concurrently";
   const cfg = mkCfg();
-  const runner = new ScriptedRunner([
-    doneResult("po-align-1", alignResultText([])),
-    doneResult("po-triage-92", triageResultText(92, "## Verification\n- x")),
-  ]);
+  // #232: getIssuesNeedingPlanTriage now reflects LIVE body content (the F1 fixture fix above),
+  // so the concurrent edit must land AFTER the candidate fetch (which is what expected_hash is
+  // derived from) but BEFORE the guard's re-read — i.e. "during" the po-triage session itself,
+  // exactly where a real concurrent edit would race a real (seconds-to-minutes) session.
+  const runner = {
+    calls: [] as RoleSessionOpts[],
+    async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
+      this.calls.push(opts);
+      if (opts.roleId === "po-triage") {
+        forge.issueBodies[92] = "a human edited this issue concurrently";
+        return doneResult("po-triage-92", triageResultText(92, "## Verification\n- x"));
+      }
+      return doneResult("po-align-1", alignResultText([]));
+    },
+  };
   const state = new State(":memory:");
   const logged = tapEvents(state);
   const deps: AlignDeps = { forge, state, cfg, runner };
