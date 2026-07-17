@@ -330,6 +330,14 @@ const Roles = z
       // issue/PR/worker triples (no titles or diffs — see renderLastMergedFromArtifact's doc
       // comment for why), so even a large round's merge list stays well under a modest cap.
       lastMergedMaxChars: z.number().int().positive().default(10_000),
+      // #213: cap on the {{round.pool}} text substituted into the architect prompt — this
+      // round's batch-review target (number/title/body of every cfg.labels.roundPool member,
+      // #212), engine-assembled at architect-invocation time (round-defaults.ts). Same
+      // user-tunable-in-config, capDigest-bounded contract as lastMergedMaxChars above; kept as
+      // its OWN key (not reused) since the pool digest carries full issue BODIES (like
+      // candidates.summary), a very different size profile than lastMergedMaxChars's
+      // numbers-only render.
+      poolDigestMaxChars: z.number().int().positive().default(20_000),
       // #127: false -> round-defaults.ts omits the architecting stub; the phase no-ops via
       // round.ts's existing noopPeripheralStub default (see roles.planReviewer.enabled above
       // for the shared rationale).
