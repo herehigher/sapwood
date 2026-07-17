@@ -1227,3 +1227,179 @@ test("#110 PR5 final integration: a role session spawns with empty Bash grants, 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #234: forge MCP proxy wiring — mint/inject/widen-allowedTools/revoke-on-teardown ────────
+
+function fakeProxyHandle(over: Partial<{ mcpConfigJson: string; toolNames: string[] }> = {}) {
+  const calls = { minted: 0, stopped: 0 };
+  const handle = {
+    mcpConfigJson: JSON.stringify({
+      mcpServers: { forge: { type: "http", url: "http://127.0.0.1:1/mcp", headers: { Authorization: "Bearer proxy-test-token" } } },
+    }),
+    toolNames: ["mcp__forge__issue_details", "mcp__forge__issue_comments", "mcp__forge__issue_relations", "mcp__forge__search_issues"],
+    ...over,
+    stop: async () => {
+      calls.stopped++;
+    },
+  };
+  return { calls, handle };
+}
+
+test("run: a proxy opt mints a handle, widens allowedTools with mcp__forge__* tool names, and injects --mcp-config inline JSON", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    const { calls, handle } = fakeProxyHandle();
+    let mintedFor: { role: string; session: string } | undefined;
+    const result = await runner.run({
+      roleId: "architect",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      proxy: {
+        mint: async (session) => {
+          mintedFor = session;
+          calls.minted++;
+          return handle as unknown as Awaited<ReturnType<NonNullable<Parameters<typeof runner.run>[0]["proxy"]>["mint"]>>;
+        },
+      },
+    });
+    assert.equal(calls.minted, 1);
+    assert.equal(mintedFor?.role, "architect");
+    assert.equal(mintedFor?.session, result.name);
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const allowedTools = seen[seen.indexOf("--allowedTools") + 1] ?? "";
+    for (const t of handle.toolNames) assert.ok(allowedTools.includes(t), `${t} missing from allowedTools: ${allowedTools}`);
+    const mcpConfigIdx = seen.indexOf("--mcp-config");
+    assert.ok(mcpConfigIdx !== -1);
+    assert.equal(seen[mcpConfigIdx + 1], handle.mcpConfigJson);
+    assert.equal(calls.stopped, 1, "the proxy is torn down once the session exits");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: proxy teardown (stop()) happens on EVERY outcome, including a timed-out session", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
+    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
+    const runner = new RoleRunner({
+      cfg: tcfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 100,
+      guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
+    });
+    const { calls, handle } = fakeProxyHandle();
+    const result = await runner.run({
+      roleId: "architect",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      proxy: { mint: async () => handle as unknown as Awaited<ReturnType<NonNullable<Parameters<typeof runner.run>[0]["proxy"]>["mint"]>> },
+    });
+    assert.equal(result.outcome, "timeout");
+    assert.equal(calls.stopped, 1, "even a timed-out session tears down its proxy");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: a proxy mint FAILURE is non-fatal — the session still runs to completion, unattached", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({
+      roleId: "architect",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      proxy: {
+        mint: async () => {
+          throw new Error("simulated bind failure");
+        },
+      },
+    });
+    assert.equal(result.outcome, "done");
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.ok(!seen.includes("--mcp-config"), "no proxy attached -> no --mcp-config flag");
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], ROLE_ALLOWED_TOOLS, "falls back to the base allowedTools, unwidened");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: #218 regression, extended to a proxy-attached session — the spawn env stays forge/git credential-free, and the proxy's bearer token travels ONLY via --mcp-config, never the env", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const poisoned = {
+    GH_TOKEN: "poison-gh-token",
+    GITHUB_TOKEN: "poison-github-token",
+    GITHUB_ENTERPRISE_TOKEN: "poison-github-enterprise-token",
+    GH_CONFIG_DIR: "/poison/gh-config",
+    GH_HOST: "poison.example",
+    GIT_ASKPASS: "/poison/askpass",
+    GIT_CONFIG_GLOBAL: "/poison/gitconfig",
+    GIT_CONFIG_COUNT: "1",
+    ANTHROPIC_API_KEY: "preserved-anthropic-auth",
+  } as const;
+  const previous = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, poisoned);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+env > "${join(dir, "env.seen")}"
+echo '{"type":"result","subtype":"success","total_cost_usd":0}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin);
+    const { handle } = fakeProxyHandle();
+    await runner.run({
+      roleId: "architect",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      proxy: { mint: async () => handle as unknown as Awaited<ReturnType<NonNullable<Parameters<typeof runner.run>[0]["proxy"]>["mint"]>> },
+    });
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    for (const key of [
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "GITHUB_ENTERPRISE_TOKEN",
+      "GH_CONFIG_DIR",
+      "GH_HOST",
+      "GIT_ASKPASS",
+      "GIT_CONFIG_GLOBAL",
+    ]) {
+      assert.ok(!envText.includes(`${key}=poison`), `${key} leaked into the proxy-attached session's env`);
+    }
+    assert.ok(envText.includes("ANTHROPIC_API_KEY=preserved-anthropic-auth"), "Claude auth is preserved");
+    assert.ok(
+      !envText.includes("proxy-test-token"),
+      "the proxy's bearer token never reaches the spawn env — it travels via --mcp-config only",
+    );
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

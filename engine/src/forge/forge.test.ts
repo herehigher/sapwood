@@ -11,6 +11,8 @@ import {
   GithubForge,
   hasVerificationPlan,
   parseIssueLabels,
+  parseIssueMeta,
+  parseIssueRelations,
   parsePageInfo,
   parsePRComments,
   parsePRReactions,
@@ -18,6 +20,7 @@ import {
   parsePRStatus,
   parseProject,
   parseReviewThreadsPage,
+  parseSearchIssues,
   projectQuery,
   selectPlanReviewCandidates,
   selectPlanTriageCandidates,
@@ -1237,4 +1240,154 @@ test("getIssueComments: reuses parsePRComments' shape/pagination tolerance off t
   assert.deepEqual(comments, [{ login: "plan-reviewer", createdAt: "2026-01-01T00:00:00Z", body: "please fix the plan" }]);
   assert.ok(seen[0]!.some((a) => a.includes("issues/9/comments")));
   assert.ok(seen[0]!.includes("--paginate") && seen[0]!.includes("--slurp"));
+});
+
+// ── #234: forge MCP proxy read surface — pure parsers ───────────────────────────────────────
+
+test("parseIssueMeta: parses gh issue view --json number,title,state,labels,updatedAt,milestone", () => {
+  const json = JSON.stringify({
+    number: 42,
+    title: "fix the thing",
+    state: "OPEN",
+    labels: [{ name: "bug" }, { name: "prio:1" }],
+    updatedAt: "2026-07-17T00:00:00Z",
+    milestone: { title: "M8" },
+  });
+  assert.deepEqual(parseIssueMeta(json), {
+    number: 42,
+    title: "fix the thing",
+    state: "OPEN",
+    labels: ["bug", "prio:1"],
+    updatedAt: "2026-07-17T00:00:00Z",
+    milestone: "M8",
+  });
+});
+
+test("parseIssueMeta: no milestone -> the key is omitted, not null", () => {
+  const json = JSON.stringify({ number: 1, title: "t", state: "CLOSED", labels: [], updatedAt: "x", milestone: null });
+  const meta = parseIssueMeta(json);
+  assert.equal(meta.state, "CLOSED");
+  assert.ok(!("milestone" in meta));
+});
+
+test("getIssueMeta: scoped to owner/repo, requests the right --json fields", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({ number: 1, title: "t", state: "OPEN", labels: [], updatedAt: "x", milestone: null });
+  };
+  await forge.getIssueMeta(1);
+  assert.deepEqual(seen[0]!.slice(0, 2), ["issue", "view"]);
+  assert.ok(seen[0]!.includes("--repo") && seen[0]!.includes("o/r"));
+  assert.ok(seen[0]!.some((a) => a === "number,title,state,labels,updatedAt,milestone"));
+});
+
+// Real response shape (verified live, 2026-07-17, herehigher/sapwood#217 via gh api graphql),
+// with labels added per the query this module actually sends.
+const RELATIONS_JSON = JSON.stringify({
+  data: {
+    repository: {
+      issue: {
+        closedByPullRequestsReferences: { nodes: [{ number: 220, title: "fix", state: "MERGED", labels: { nodes: [] } }] },
+        timelineItems: {
+          nodes: [
+            {
+              __typename: "CrossReferencedEvent",
+              source: {
+                __typename: "Issue",
+                number: 219,
+                title: "security model",
+                state: "CLOSED",
+                labels: { nodes: [{ name: "type:docs" }] },
+              },
+            },
+            {
+              __typename: "CrossReferencedEvent",
+              source: { __typename: "PullRequest", number: 220, title: "fix", state: "MERGED", labels: { nodes: [] } },
+            },
+            {
+              __typename: "ConnectedEvent",
+              subject: { __typename: "Issue", number: 238, title: "doctrine", state: "OPEN", labels: { nodes: [{ name: "type:docs" }] } },
+            },
+          ],
+        },
+      },
+    },
+  },
+});
+
+test("parseIssueRelations: parses linked PRs + cross-references/connections (both source and subject shapes), with labels", () => {
+  const r = parseIssueRelations(RELATIONS_JSON, 10);
+  assert.deepEqual(r.linkedPRs, [{ number: 220, title: "fix", state: "MERGED", labels: [], kind: "pr" }]);
+  assert.equal(r.crossReferences.length, 3);
+  assert.deepEqual(r.crossReferences[0], { number: 219, title: "security model", state: "CLOSED", labels: ["type:docs"], kind: "issue" });
+  assert.deepEqual(r.crossReferences[2], { number: 238, title: "doctrine", state: "OPEN", labels: ["type:docs"], kind: "issue" });
+  assert.equal(r.truncated, false);
+});
+
+test("parseIssueRelations: hitting the cap exactly on either connection sets truncated (GraphQL first:cap gives no total count)", () => {
+  const cap2 = JSON.stringify({
+    data: {
+      repository: {
+        issue: {
+          closedByPullRequestsReferences: {
+            nodes: [
+              { number: 1, title: "a", state: "OPEN", labels: { nodes: [] } },
+              { number: 2, title: "b", state: "OPEN", labels: { nodes: [] } },
+            ],
+          },
+          timelineItems: { nodes: [] },
+        },
+      },
+    },
+  });
+  assert.equal(parseIssueRelations(cap2, 2).truncated, true);
+});
+
+test("parseIssueRelations: malformed/missing fields degrade to empty connections, never throw", () => {
+  assert.deepEqual(parseIssueRelations(JSON.stringify({ data: {} }), 10), { linkedPRs: [], crossReferences: [], truncated: false });
+});
+
+test("getIssueRelations: passes owner/repo/number/cap through the query variables", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return RELATIONS_JSON;
+  };
+  await forge.getIssueRelations(217, 10);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
+  assert.ok(args.includes("owner=o"));
+  assert.ok(args.includes("repo=r"));
+  assert.ok(args.includes("number=217"));
+  assert.ok(args.includes("cap=10"));
+});
+
+test("parseSearchIssues: parses gh search issues --json output", () => {
+  const json = JSON.stringify([
+    { number: 244, title: "extends #234", state: "open", labels: [{ name: "type:feature" }], updatedAt: "2026-07-17T06:43:00Z" },
+  ]);
+  assert.deepEqual(parseSearchIssues(json), [
+    { number: 244, title: "extends #234", state: "open", labels: ["type:feature"], updatedAt: "2026-07-17T06:43:00Z" },
+  ]);
+});
+
+test("searchIssues: scopes the query to --repo owner/repo (never caller-controlled) and applies --limit cap", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "[]";
+  };
+  await forge.searchIssues("is:open flaky", 5);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["search", "issues"]);
+  assert.ok(args.includes("is:open flaky"));
+  assert.ok(args.includes("--repo") && args.includes("o/r"));
+  assert.ok(args.includes("--limit") && args.includes("5"));
 });

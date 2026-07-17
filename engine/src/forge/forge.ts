@@ -223,6 +223,66 @@ export interface IForge {
    *  the time gate⓪ sees it. needs-human/blocked/verify:n/a issues are excluded — settled
    *  state, not a drafting target (same exclusion stance as needsPlanReview). */
   getIssuesNeedingPlanTriage(): Promise<Issue[]>;
+  /** #234: one issue's core metadata (title/state/labels/updatedAt/milestone) — the forge MCP
+   *  proxy's `issue_details` tool composes this with getIssueBody/getIssueComments/
+   *  getIssueRelations into the default view. Read-only; a nonexistent issue number propagates
+   *  gh's own error (fail-closed, same stance as every other single-issue read in this file). */
+  getIssueMeta(issue: number): Promise<IssueMeta>;
+  /** #234: an issue's relations — PRs that close it (`closedByPullRequestsReferences`) plus
+   *  incoming cross-references/connections from its timeline (issues/PRs that mention or link
+   *  this one) — the forge MCP proxy's `issue_relations` tool. Each connection is capped
+   *  server-side (GraphQL `first: cap`) — the proxy's own tool-level cap is layered on top of,
+   *  never wider than, this. Outgoing mentions (this issue's body/comments referencing another
+   *  #N) are NOT fetched here — GitHub's GraphQL schema has no such reverse index; the proxy
+   *  layer derives those from the body/comment text it already reads for `issue_details`.
+   *  Verified against the live GitHub GraphQL schema (2026-07-17, herehigher/sapwood#217: both
+   *  `closedByPullRequestsReferences(includeClosedPrs: true)` and
+   *  `timelineItems(itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT])` return the expected
+   *  shape). */
+  getIssueRelations(issue: number, cap: number): Promise<IssueRelations>;
+  /** #234: `gh search issues` scoped to this forge's own repo (never caller-controlled — the
+   *  query is opaque GitHub search syntax, this forge always adds `--repo owner/repo` itself) —
+   *  the proxy's `search_issues` tool. Capped server-side (`--limit cap`). */
+  searchIssues(query: string, cap: number): Promise<IssueSearchResult[]>;
+}
+
+/** #234: one issue's core metadata — see IForge.getIssueMeta's doc. */
+export interface IssueMeta {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED";
+  labels: string[];
+  updatedAt: string;
+  milestone?: string;
+}
+
+/** #234: one related issue/PR reference — see IForge.getIssueRelations' doc. `state` is passed
+ *  through verbatim from GitHub (OPEN/CLOSED for an issue, OPEN/CLOSED/MERGED for a PR). */
+export interface RelatedRef {
+  number: number;
+  title: string;
+  state: string;
+  labels: string[];
+  kind: "issue" | "pr";
+}
+
+/** #234: an issue's relations — see IForge.getIssueRelations' doc. `truncated` is true when
+ *  either connection returned exactly `cap` entries — GraphQL's `first: cap` gives no total
+ *  count, so hitting the cap exactly is the only honest truncation signal available (fail
+ *  toward flagging a possible truncation rather than silently under-reporting one). */
+export interface IssueRelations {
+  linkedPRs: RelatedRef[];
+  crossReferences: RelatedRef[];
+  truncated: boolean;
+}
+
+/** #234: one `gh search issues` match — see IForge.searchIssues' doc. */
+export interface IssueSearchResult {
+  number: number;
+  title: string;
+  state: string;
+  labels: string[];
+  updatedAt: string;
 }
 
 export class GithubForge implements IForge {
@@ -646,6 +706,52 @@ export class GithubForge implements IForge {
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     const project = await this.fetchProject();
     return selectPlanTriageCandidates(project, this.cfg);
+  }
+
+  async getIssueMeta(issue: number): Promise<IssueMeta> {
+    const out = await this.gh([
+      "issue",
+      "view",
+      String(issue),
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--json",
+      "number,title,state,labels,updatedAt,milestone",
+    ]);
+    return parseIssueMeta(out);
+  }
+
+  async getIssueRelations(issue: number, cap: number): Promise<IssueRelations> {
+    const out = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${ISSUE_RELATIONS_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `number=${issue}`,
+      "-F",
+      `cap=${cap}`,
+    ]);
+    return parseIssueRelations(out, cap);
+  }
+
+  async searchIssues(query: string, cap: number): Promise<IssueSearchResult[]> {
+    const out = await this.gh([
+      "search",
+      "issues",
+      query,
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--json",
+      "number,title,state,labels,updatedAt",
+      "--limit",
+      String(cap),
+    ]);
+    return parseSearchIssues(out);
   }
 
   private repo(): string {
@@ -1236,4 +1342,119 @@ export function assemblePRReviewData(
     comments: parsePRComments(commentsJson),
     unresolvedThreads,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #234: forge MCP proxy read surface — pure parsers for the 3 new IForge methods above. Same
+// impure-gh-call/pure-parse split as everywhere else in this file.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Pure parse of `gh issue view --json number,title,state,labels,updatedAt,milestone`. */
+export function parseIssueMeta(json: string): IssueMeta {
+  const d = JSON.parse(json) as {
+    number: number;
+    title: string;
+    state: string;
+    labels?: { name: string }[];
+    updatedAt: string;
+    milestone: { title: string } | null;
+  };
+  return {
+    number: d.number,
+    title: d.title,
+    state: d.state === "CLOSED" ? "CLOSED" : "OPEN",
+    labels: (d.labels ?? []).map((l) => l.name),
+    updatedAt: d.updatedAt,
+    ...(d.milestone ? { milestone: d.milestone.title } : {}),
+  };
+}
+
+/** The relations query (#234) — verified against the live GitHub GraphQL schema, see
+ *  IForge.getIssueRelations' doc. `includeClosedPrs: true` on closedByPullRequestsReferences:
+ *  a PR that closed this issue and was later itself closed/merged is still a real relation,
+ *  never silently dropped. `timelineItems` covers both directions GitHub tracks natively:
+ *  CROSS_REFERENCED_EVENT (another issue/PR's body/comment mentioned this one) and
+ *  CONNECTED_EVENT (an explicit "linked issue" connection, distinct from the closing-PR case
+ *  above). */
+export const ISSUE_RELATIONS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      closedByPullRequestsReferences(first: $cap, includeClosedPrs: true) {
+        nodes { number title state labels(first: 20) { nodes { name } } }
+      }
+      timelineItems(first: $cap, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+        nodes {
+          __typename
+          ... on CrossReferencedEvent {
+            source {
+              __typename
+              ... on Issue { number title state labels(first: 20) { nodes { name } } }
+              ... on PullRequest { number title state labels(first: 20) { nodes { name } } }
+            }
+          }
+          ... on ConnectedEvent {
+            subject {
+              __typename
+              ... on Issue { number title state labels(first: 20) { nodes { name } } }
+              ... on PullRequest { number title state labels(first: 20) { nodes { name } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** Pure parse of the ISSUE_RELATIONS_QUERY response. Malformed/missing fields degrade to empty
+ *  connections — never a throw (same tolerance as every other GraphQL parser in this file); a
+ *  genuinely failed gh call still throws upstream of this (JSON.parse on non-JSON stderr text). */
+export function parseIssueRelations(json: string, cap: number): IssueRelations {
+  type LabelNode = { labels?: { nodes?: { name: string }[] } };
+  type RefNode = { __typename?: string; number?: number; title?: string; state?: string } & LabelNode;
+  type TimelineNode = { __typename?: string; source?: RefNode; subject?: RefNode };
+  const labelsOf = (n: LabelNode): string[] => (n.labels?.nodes ?? []).map((l) => l.name);
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        issue?: {
+          closedByPullRequestsReferences?: { nodes?: ({ number: number; title: string; state: string } & LabelNode)[] };
+          timelineItems?: { nodes?: TimelineNode[] };
+        };
+      };
+    };
+  };
+  const issue = d.data?.repository?.issue;
+  const linkedPRs: RelatedRef[] = (issue?.closedByPullRequestsReferences?.nodes ?? []).map((n) => ({
+    number: n.number,
+    title: n.title,
+    state: n.state,
+    labels: labelsOf(n),
+    kind: "pr" as const,
+  }));
+  const crossReferences: RelatedRef[] = [];
+  for (const n of issue?.timelineItems?.nodes ?? []) {
+    const ref = n.source ?? n.subject;
+    if (!ref || ref.number == null) continue;
+    crossReferences.push({
+      number: ref.number,
+      title: ref.title ?? "",
+      state: ref.state ?? "",
+      labels: labelsOf(ref),
+      kind: ref.__typename === "PullRequest" ? "pr" : "issue",
+    });
+  }
+  return { linkedPRs, crossReferences, truncated: linkedPRs.length >= cap || crossReferences.length >= cap };
+}
+
+/** Pure parse of `gh search issues ... --json number,title,state,labels,updatedAt`. */
+export function parseSearchIssues(json: string): IssueSearchResult[] {
+  const parsed = JSON.parse(json) as { number: number; title: string; state: string; labels?: { name: string }[]; updatedAt: string }[];
+  return parsed.map((i) => ({
+    number: i.number,
+    title: i.title,
+    state: i.state,
+    labels: (i.labels ?? []).map((l) => l.name),
+    updatedAt: i.updatedAt,
+  }));
 }

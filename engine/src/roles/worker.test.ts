@@ -424,6 +424,33 @@ test("claudeArgs: --settings only when given (guard hook wiring lands in #26)", 
   ]);
 });
 
+test("claudeArgs: --mcp-config only when given (#234), inline JSON — never a file path", () => {
+  const withoutProxy = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+  });
+  assert.ok(!withoutProxy.includes("--mcp-config"));
+  const inlineJson = JSON.stringify({ mcpServers: { forge: { type: "http", url: "http://127.0.0.1:1/mcp", headers: {} } } });
+  const withProxy = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "w",
+    name: "w",
+    sessionId: "s",
+    mcpConfig: inlineJson,
+  });
+  const i = withProxy.indexOf("--mcp-config");
+  assert.ok(i !== -1);
+  assert.equal(withProxy[i + 1], inlineJson);
+});
+
 // ── Integration: stub `claude` (zero token) drives the real spawn/sentinel/probe path ──
 const mkStub = (dir: string, body: string): string => {
   const p = join(dir, "claude-stub");

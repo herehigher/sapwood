@@ -21,6 +21,46 @@
 // ran out of turns mid-emit, a context-window cutoff) is treated as "no block found" — this
 // module NEVER returns a partial/best-guess slice.
 //
+// #234 (adjudicated 2026-07-17, supersedes #217's two-pass needsDetails protocol): abstention as
+// a FIRST-CLASS, COMPLETE deliverable — "a mediation system that denies an information request
+// and still demands a definitive judgment is a shackle; explicit denial with first-class
+// abstention is a guardrail" (the adjudication's shackle criterion). UnresolvedContextSchema is
+// the shared shape any per-role metadata schema composes (typically via a zod discriminated
+// union alongside that role's own decision variants) so a session that genuinely cannot reach a
+// decision from what the forge MCP proxy delivered — budget exhausted mid-session, a needed fact
+// simply isn't retrievable within the tool algebra's bounds — can say so directly, with a reason,
+// rather than being forced to manufacture a confident-sounding decision it doesn't have grounds
+// for. Deliberately lives here (not on any one role's own schema file) because it's a reusable
+// building block, not a role-specific shape — same rationale ArchitectContradictionSchema etc.
+// stay LOCAL to architect.ts (role-specific) while this one is shared. No consumer composes it
+// into a live per-role schema in this PR (#234's scope ruling: proxy-consumer wiring is later,
+// separately-flagged work) — this is the primitive that PR wires in.
+import { z } from "zod";
+
+export const UnresolvedContextSchema = z
+  .object({
+    unresolvedContext: z
+      .object({
+        /** Why the session could not reach a decision — required, non-empty: an abstention with
+         *  no reason is exactly as unaccountable as a decision with no rationale, and this
+         *  schema exists specifically to avoid the alternative (a manufactured decision) without
+         *  trading it for an equally silent abstention. */
+        reason: z.string().min(1),
+      })
+      .strict(),
+  })
+  .strict();
+
+export type UnresolvedContext = z.infer<typeof UnresolvedContextSchema>;
+
+/** True when `metadata` (already-JSON.parsed metadata from a StructuredBlock) validates as a
+ *  complete `unresolvedContext` deliverable. Never throws — a caller composes this as one arm of
+ *  its own outcome handling (parse the role's own decision schema first; on failure, fall back to
+ *  this check before treating the output as genuinely malformed). */
+export function isUnresolvedContext(metadata: unknown): metadata is UnresolvedContext {
+  return UnresolvedContextSchema.safeParse(metadata).success;
+}
+
 // SENTINEL CONTAINMENT (dual-review round 1, P1 — fable + Codex): the BODY segment's raw-text
 // nature means a body whose markdown content itself contains a sentinel string (realistic —
 // issue #110's own body documents these very sentinels) would otherwise be SILENTLY TRUNCATED

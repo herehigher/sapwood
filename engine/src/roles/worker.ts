@@ -416,6 +416,12 @@ export interface ClaudeArgsOpts {
    *  is — see guardSettings). */
   allowedTools?: string;
   disallowedTools?: string;
+  /** #234: inline `--mcp-config` JSON for the engine-hosted read-only forge MCP proxy — same
+   *  inline-never-a-file stance as `settings` above (a file under stateDir would be a
+   *  worker/session-writable on-disk target). Omitted -> no `--mcp-config` flag, unchanged
+   *  behavior for every caller that doesn't attach a proxy (peripheral.ts's RoleRunner is the
+   *  only caller that ever supplies it, and only when its own `proxy` opt is present). */
+  mcpConfig?: string;
 }
 
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
@@ -444,6 +450,7 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     o.disallowedTools ?? "Bash(gh pr merge*),Bash(gh pr ready*)",
     ...(o.addDir ? ["--add-dir", o.addDir] : []),
     ...(o.settings ? ["--settings", o.settings] : []),
+    ...(o.mcpConfig ? ["--mcp-config", o.mcpConfig] : []),
     "--output-format",
     "stream-json",
     "--include-hook-events",

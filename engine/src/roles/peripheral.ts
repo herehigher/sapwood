@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
+import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
 import {
   assembleContextManifest,
@@ -123,6 +124,19 @@ export interface RoleSessionOpts {
    *  absolute) is refused with a stderr line and reads as absent (scratchText undefined),
    *  never a file read outside the root. */
   scratchFile?: string;
+  /** #234: optional read-only forge MCP proxy attached to this session. When present,
+   *  RoleRunner.run() mints a fresh per-session server+token via `mint` (keyed by this exact
+   *  session's generated lane name), widens the effective `--allowedTools` with the proxy's
+   *  fixed `mcp__forge__*` tool names, injects the resulting inline `--mcp-config`, and
+   *  revokes/tears down the handle once the session exits — in EVERY outcome (done/failed/
+   *  timeout), before the worktree is deleted. A mint failure is non-fatal (logged, session
+   *  proceeds without the proxy attached) — an optional capability's setup failure must never
+   *  wedge a role session that would otherwise run fine unaugmented. peripheralSessionEnv's
+   *  credential-stripping is unaffected either way: the proxy's bearer token travels via the
+   *  `--mcp-config` header, never the spawn env — the proxy is the session's only forge reach. */
+  proxy?: {
+    mint: (session: { role: string; session: string }) => Promise<ForgeProxyHandle>;
+  };
 }
 
 export interface RoleSessionResult {
@@ -348,6 +362,23 @@ export class RoleRunner {
     // Same inline-JSON (never a file) guard wiring as worker.ts's dispatch(), for the same
     // reason: a settings FILE would be an on-disk target the session could try to mutate.
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
+    // #234: mint the read-only forge MCP proxy BEFORE building argv — the resulting tool names
+    // widen allowedTools and the mcp-config is an inline argv value, so both must be known before
+    // claudeArgs runs. Non-fatal on failure (see RoleSessionOpts.proxy's doc): the session simply
+    // runs without the proxy attached, never a wedged/aborted role session over an optional
+    // capability's own setup failure.
+    let proxyHandle: ForgeProxyHandle | undefined;
+    if (opts.proxy) {
+      try {
+        proxyHandle = await opts.proxy.mint({ role: opts.roleId, session: name });
+      } catch (e) {
+        (this.deps.log ?? console.error)(`[sapwood:forge-proxy] session ${name}: mint failed (non-fatal, proxy unattached): ${String(e)}`);
+      }
+    }
+    const baseAllowedTools = opts.allowedTools ?? ROLE_ALLOWED_TOOLS;
+    const allowedTools = proxyHandle
+      ? [baseAllowedTools, ...proxyHandle.toolNames].filter((s) => s.length > 0).join(",")
+      : baseAllowedTools;
     const args = claudeArgs({
       prompt: opts.prompt,
       model: opts.model,
@@ -357,8 +388,9 @@ export class RoleRunner {
       name,
       sessionId,
       settings: settingsJson,
-      allowedTools: opts.allowedTools ?? ROLE_ALLOWED_TOOLS,
+      allowedTools,
       disallowedTools: opts.disallowedTools ?? ROLE_DISALLOWED_TOOLS,
+      ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
       // NB: no addDir — same as worker.ts's dispatch(): a role session must never see engine
       // state (sentinels, the sqlite db) via --add-dir.
     });
@@ -444,6 +476,17 @@ export class RoleRunner {
       closeSync(jsonlFd);
     } catch {
       /* already closed */
+    }
+    // #234: revoke + tear down the proxy in EVERY outcome (done/failed/timeout — this is a
+    // single linear flow past exitPromise, not a per-outcome branch) — before the worktree is
+    // deleted below. A teardown failure is logged, never propagated: the session's own result is
+    // never invalidated by the proxy's own cleanup failing.
+    if (proxyHandle) {
+      try {
+        await proxyHandle.stop();
+      } catch (e) {
+        (this.deps.log ?? console.error)(`[sapwood:forge-proxy] session ${name}: teardown failed (non-fatal): ${String(e)}`);
+      }
     }
 
     const jsonl = this.readJsonl(jsonlPath);

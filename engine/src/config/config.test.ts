@@ -1110,3 +1110,34 @@ test("envFailure: probeBackoffMaxSec below probeBackoffBaseSec is rejected at lo
   );
   assert.equal(flat.envFailure.probeBackoffMaxSec, 60);
 });
+
+// ── #234: forge MCP proxy config — ships OFF, shadow-mode-first when enabled ────────────────
+
+test("proxy: defaults are off, shadow, and conservative caps/budget/timeout", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n");
+  assert.equal(cfg.proxy.enabled, false);
+  assert.equal(cfg.proxy.shadow, true);
+  assert.equal(cfg.proxy.caps.maxIssuesPerCall, 10);
+  assert.equal(cfg.proxy.caps.defaultCommentsPerIssue, 20);
+  assert.equal(cfg.proxy.caps.maxCommentsPerCall, 100);
+  assert.equal(cfg.proxy.caps.maxRelationsPerIssue, 20);
+  assert.equal(cfg.proxy.caps.maxSearchResults, 20);
+  assert.equal(cfg.proxy.caps.fullCommentStreamOptIn, false);
+  assert.equal(cfg.proxy.budget.maxCallsPerSession, 30);
+  assert.equal(cfg.proxy.budget.maxBytesPerSession, 2_000_000);
+  assert.equal(cfg.proxy.timeoutMs, 30_000);
+});
+
+test("proxy: every key is overridable, and the section remains strict (rejects an unknown key)", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+      "proxy:\n  enabled: true\n  shadow: false\n  caps: { maxIssuesPerCall: 3 }\n  budget: { maxCallsPerSession: 5 }\n  timeoutMs: 5000\n",
+  );
+  assert.equal(cfg.proxy.enabled, true);
+  assert.equal(cfg.proxy.shadow, false);
+  assert.equal(cfg.proxy.caps.maxIssuesPerCall, 3);
+  assert.equal(cfg.proxy.caps.defaultCommentsPerIssue, 20, "other caps keep their own defaults");
+  assert.equal(cfg.proxy.budget.maxCallsPerSession, 5);
+  assert.equal(cfg.proxy.timeoutMs, 5000);
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nproxy: { bogusKey: true }\n"));
+});

@@ -4,7 +4,46 @@
 // no body) is covered here so callers can trust "block found" actually means well-formed.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BODY_BLOCK_END, BODY_BLOCK_START, parseStructuredBlock, RESULT_BLOCK_END, RESULT_BLOCK_START } from "./structured-output.js";
+import {
+  BODY_BLOCK_END,
+  BODY_BLOCK_START,
+  isUnresolvedContext,
+  parseStructuredBlock,
+  RESULT_BLOCK_END,
+  RESULT_BLOCK_START,
+  UnresolvedContextSchema,
+} from "./structured-output.js";
+
+// ── #234: unresolvedContext — abstention as a first-class, COMPLETE deliverable ─────────────
+
+test("UnresolvedContextSchema: a reason-bearing unresolvedContext validates as a complete deliverable", () => {
+  const parsed = UnresolvedContextSchema.safeParse({ unresolvedContext: { reason: "budget exhausted before reaching a decisive fact" } });
+  assert.equal(parsed.success, true);
+});
+
+test("UnresolvedContextSchema: an empty reason fails (an abstention with no reason is as unaccountable as an ungrounded decision)", () => {
+  assert.equal(UnresolvedContextSchema.safeParse({ unresolvedContext: { reason: "" } }).success, false);
+});
+
+test("UnresolvedContextSchema: strict — an extra field (e.g. a smuggled decision) fails", () => {
+  assert.equal(UnresolvedContextSchema.safeParse({ unresolvedContext: { reason: "x" }, decision: "approve" }).success, false);
+});
+
+test("isUnresolvedContext: true for a valid shape, false (never throws) for anything else", () => {
+  assert.equal(isUnresolvedContext({ unresolvedContext: { reason: "x" } }), true);
+  assert.equal(isUnresolvedContext({ decision: "approve" }), false);
+  assert.equal(isUnresolvedContext(null), false);
+  assert.equal(isUnresolvedContext(undefined), false);
+  assert.equal(isUnresolvedContext("not even an object"), false);
+});
+
+test("isUnresolvedContext: round-trips through the real parseStructuredBlock + JSON.parse path a role session would produce", () => {
+  const text = `${RESULT_BLOCK_START}\n${JSON.stringify({ unresolvedContext: { reason: "the needed fact was never retrievable within budget" } })}\n${RESULT_BLOCK_END}\n`;
+  const block = parseStructuredBlock(text);
+  assert.ok(block);
+  const metadata = JSON.parse(block!.metadataRaw);
+  assert.equal(isUnresolvedContext(metadata), true);
+});
 
 test("parseStructuredBlock: metadata only, no BODY block — body is undefined", () => {
   const text = `Some reasoning preamble.\n\n${RESULT_BLOCK_START}\n{"decision":"approve","issue":1}\n${RESULT_BLOCK_END}\n`;

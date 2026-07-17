@@ -409,6 +409,78 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       );
     `);
   },
+  // 15 -> 16: forge MCP proxy journal + frozen evidence bundles (#234). The proxy's write-ahead
+  // contract (issue #234's Journal contract): persist request intent -> fetch+cap -> persist
+  // canonical response + hash -> deliver to the session; a response-persist failure yields a
+  // typed tool error, never an undeliverable-but-unrecorded call. One row per CALL (not per
+  // session, unlike context_manifests/input_manifest's one-row-per-attempt-dimension shape —
+  // here `seq` is the dimension, incrementing per call within a session attempt), keyed by the
+  // SAME (round, phase, role, session, attempt) 5-tuple #231/#236 already established as this
+  // codebase's shared join key across manifest tables, plus a monotonic `seq` (State.
+  // nextForgeProxySeq, same MAX()+1-over-durable-rows pattern as nextInputManifestAttempt — the
+  // table itself is the counter, nothing to lose on restart). `status` is the row's own
+  // write-ahead cursor: 'intent' (persisted before any fetch) -> 'fetched' (canonical response +
+  // hash persisted) or 'error' (upstream/timeout, sanitized) -> 'delivered' (handed to the
+  // session; audit refinement only — the completeness invariant already holds once a row reaches
+  // 'fetched', since the server never delivers a response it hasn't persisted first). Caps/scope/
+  // budget are recorded per call (not just the schema version) so a later cap/config change never
+  // makes an old row's enforcement ambiguous. `response_json`/`content_hash` are NULL until the
+  // fetch step lands — an 'intent'-only row with a NULL response is exactly the shape a crash
+  // between intent-persist and fetch leaves behind, and is expected, not corrupt.
+  //
+  // `forge_proxy_bundles` is a SEPARATE, independently keyed table (own primary key: the content
+  // hash) — a frozen evidence bundle (default view + exact responses) persisted once per accepted
+  // decision, addressed by its own SHA-256 content hash, optionally linked to a decision record
+  // via `decision_ref` (a free-text pointer the caller supplies — no consumer produces one in
+  // this PR, see #234's scope ruling; the column exists so the first real caller has somewhere to
+  // write it without a further migration). `path` is the on-disk JSON file
+  // (`<dataDir>/proxy-bundles/<hash>.json`) — NULL for an in-memory State (tests), same
+  // null-means-no-directory convention as roundArtifactMdPath.
+  (db) => {
+    db.exec(`
+      CREATE TABLE forge_proxy_journal (
+        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id                INTEGER NOT NULL,
+        phase                   TEXT NOT NULL,
+        role                    TEXT NOT NULL,
+        session                 TEXT NOT NULL,
+        attempt                 INTEGER NOT NULL,
+        seq                     INTEGER NOT NULL,
+        tool                    TEXT NOT NULL,
+        proxy_version           TEXT NOT NULL,
+        args_json               TEXT NOT NULL,
+        scope_json              TEXT NOT NULL,
+        caps_json               TEXT NOT NULL,
+        budget_remaining_calls  INTEGER,
+        budget_remaining_bytes  INTEGER,
+        status                  TEXT NOT NULL CHECK (status IN ('intent', 'fetched', 'error', 'delivered')),
+        upstream_ids_json       TEXT,
+        upstream_updated_at     TEXT,
+        counts_json             TEXT,
+        truncated               INTEGER NOT NULL DEFAULT 0,
+        response_json           TEXT,
+        content_hash            TEXT,
+        error                   TEXT,
+        timed_out               INTEGER NOT NULL DEFAULT 0,
+        requested_at            TEXT NOT NULL,
+        fetched_at              TEXT,
+        delivered_at            TEXT
+      );
+      CREATE UNIQUE INDEX forge_proxy_journal_dim ON forge_proxy_journal (round_id, phase, role, session, attempt, seq);
+
+      CREATE TABLE forge_proxy_bundles (
+        hash         TEXT PRIMARY KEY,
+        round_id     INTEGER NOT NULL,
+        phase        TEXT NOT NULL,
+        role         TEXT NOT NULL,
+        session      TEXT NOT NULL,
+        decision_ref TEXT,
+        byte_size    INTEGER NOT NULL,
+        path         TEXT,
+        created_at   TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -672,6 +744,95 @@ export interface ContextManifestKey {
   role: string;
   session: string;
   attempt: number;
+}
+
+// ── #234: forge MCP proxy journal + frozen evidence bundles ────────────────────────────────
+
+/** The same (round, phase, role, session, attempt) 5-tuple ContextManifestKey/InputManifestRow
+ *  use — see the schema v15->v16 migration comment for why the journal reuses it rather than
+ *  inventing its own identity shape. */
+export interface ForgeProxyIdentity {
+  roundId: number;
+  phase: string;
+  role: string;
+  session: string;
+  attempt: number;
+}
+
+export type ForgeProxyJournalStatus = "intent" | "fetched" | "error" | "delivered";
+
+/** Fields State.appendForgeProxyJournalIntent persists BEFORE any upstream fetch — the
+ *  write-ahead "intent" half of the row (issue #234's Journal contract: "persist request intent
+ *  -> fetch+cap -> persist canonical response + hash -> deliver"). `seq` must come from
+ *  State.nextForgeProxySeq (never a caller-held in-memory counter — same durable-counter
+ *  rationale as nextInputManifestAttempt). */
+export interface ForgeProxyJournalIntent {
+  identity: ForgeProxyIdentity;
+  seq: number;
+  tool: string;
+  proxyVersion: string;
+  /** Canonical (deterministically key-sorted) JSON of the validated tool arguments. */
+  argsCanonical: string;
+  /** Canonical JSON of the server-enforced scope (e.g. `{"owner":...,"repo":...}`) — recorded
+   *  even though it never varies per call, so a row is self-describing without joining config. */
+  scopeCanonical: string;
+  /** Canonical JSON of the caps this call was checked against. */
+  capsCanonical: string;
+  budgetRemainingCalls: number | null;
+  budgetRemainingBytes: number | null;
+  requestedAt: string;
+}
+
+/** Fields State.recordForgeProxyJournalResponse persists once the fetch+cap step succeeds — the
+ *  write-ahead "response" half. A row that never reaches this (or recordForgeProxyJournalError)
+ *  stays status='intent' forever — the honest shape of "we asked, then crashed/restarted before
+ *  we knew the outcome". */
+export interface ForgeProxyJournalResponse {
+  /** Canonical JSON of the exact response delivered — the frozen-bundle source. */
+  responseCanonical: string;
+  contentHash: string;
+  upstreamIds?: string | null; // canonical JSON array, when the tool has upstream ids to name
+  upstreamUpdatedAt?: string | null;
+  countsCanonical?: string | null; // canonical JSON of counts (e.g. {"total":N,"returned":M})
+  truncated: boolean;
+  fetchedAt: string;
+}
+
+export interface ForgeProxyJournalRow {
+  id: number;
+  identity: ForgeProxyIdentity;
+  seq: number;
+  tool: string;
+  proxyVersion: string;
+  argsCanonical: string;
+  scopeCanonical: string;
+  capsCanonical: string;
+  budgetRemainingCalls: number | null;
+  budgetRemainingBytes: number | null;
+  status: ForgeProxyJournalStatus;
+  upstreamIds: string | null;
+  upstreamUpdatedAt: string | null;
+  countsCanonical: string | null;
+  truncated: boolean;
+  responseCanonical: string | null;
+  contentHash: string | null;
+  error: string | null;
+  timedOut: boolean;
+  requestedAt: string;
+  fetchedAt: string | null;
+  deliveredAt: string | null;
+}
+
+/** State.recordForgeProxyBundle's insert shape — see the schema v15->v16 migration comment for
+ *  the table's own rationale. `path` is what State.forgeProxyBundleDir-derived write actually
+ *  wrote to disk, or null when there is no data dir (in-memory State). */
+export interface ForgeProxyBundleRow {
+  hash: string;
+  identity: Pick<ForgeProxyIdentity, "roundId" | "phase" | "role" | "session">;
+  decisionRef: string | null;
+  byteSize: number;
+  path: string | null;
+  createdAt: string;
 }
 
 export class State {
@@ -1582,4 +1743,243 @@ export class State {
       json: r.json,
     }));
   }
+
+  // ── #234: forge MCP proxy journal (forge_proxy_journal, migration 15->16) ───────────────
+
+  /** The next per-session sequence number for (round, phase, role, session, attempt) — MAX(seq)+1,
+   *  or 1 for the first call. Same durable-counter pattern as nextInputManifestAttempt: the table
+   *  itself is the counter, so a crash-rerun continues the sequence with zero extra bookkeeping. */
+  nextForgeProxySeq(identity: ForgeProxyIdentity): number {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(seq), 0) AS m FROM forge_proxy_journal WHERE round_id = ? AND phase = ? AND role = ? AND session = ? AND attempt = ?",
+      )
+      .get(identity.roundId, identity.phase, identity.role, identity.session, identity.attempt) as { m: number };
+    return row.m + 1;
+  }
+
+  /** Write-ahead step 1: persist request intent BEFORE any upstream fetch. Returns the row id —
+   *  the caller threads it into recordForgeProxyJournalResponse/recordForgeProxyJournalError/
+   *  markForgeProxyJournalDelivered. Throws straight through on a write failure (fail-closed: the
+   *  proxy server must not proceed to fetch when it can't even record that it's about to). */
+  appendForgeProxyJournalIntent(row: ForgeProxyJournalIntent): number {
+    const result = this.db
+      .prepare(
+        `INSERT INTO forge_proxy_journal
+           (round_id, phase, role, session, attempt, seq, tool, proxy_version, args_json, scope_json,
+            caps_json, budget_remaining_calls, budget_remaining_bytes, status, requested_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'intent', ?)`,
+      )
+      .run(
+        row.identity.roundId,
+        row.identity.phase,
+        row.identity.role,
+        row.identity.session,
+        row.identity.attempt,
+        row.seq,
+        row.tool,
+        row.proxyVersion,
+        row.argsCanonical,
+        row.scopeCanonical,
+        row.capsCanonical,
+        row.budgetRemainingCalls,
+        row.budgetRemainingBytes,
+        row.requestedAt,
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Write-ahead step 2 (success path): persist the canonical response + hash. The proxy server
+   *  MUST deliver nothing to the session until this call returns — a throw here (disk full,
+   *  corrupt DB handle, ...) must reach the caller as a typed tool error, never a silently
+   *  undelivered-but-unrecorded response (issue #234's Journal contract). */
+  recordForgeProxyJournalResponse(id: number, r: ForgeProxyJournalResponse): void {
+    this.db
+      .prepare(
+        `UPDATE forge_proxy_journal SET
+           status = 'fetched', response_json = ?, content_hash = ?, upstream_ids_json = ?,
+           upstream_updated_at = ?, counts_json = ?, truncated = ?, fetched_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        r.responseCanonical,
+        r.contentHash,
+        r.upstreamIds ?? null,
+        r.upstreamUpdatedAt ?? null,
+        r.countsCanonical ?? null,
+        r.truncated ? 1 : 0,
+        r.fetchedAt,
+        id,
+      );
+  }
+
+  /** Write-ahead step 2 (failure path): record a sanitized (never token-bearing — the caller
+   *  scrubs upstream text before this reaches state.ts) error/timeout in place of a response. */
+  recordForgeProxyJournalError(id: number, error: string, timedOut: boolean, at: string): void {
+    this.db
+      .prepare("UPDATE forge_proxy_journal SET status = 'error', error = ?, timed_out = ?, fetched_at = ? WHERE id = ?")
+      .run(error, timedOut ? 1 : 0, at, id);
+  }
+
+  /** Audit refinement only (see the schema v15->v16 migration comment): the completeness
+   *  invariant already holds once a row reaches 'fetched' — a persist failure never reaches this
+   *  call at all (recordForgeProxyJournalResponse already ran, or the caller returned a typed
+   *  error instead). A write failure here is caller-tolerated (best-effort), never propagated. */
+  markForgeProxyJournalDelivered(id: number, at: string): void {
+    this.db.prepare("UPDATE forge_proxy_journal SET status = 'delivered', delivered_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** One journal row by id — test/inspection reader. */
+  getForgeProxyJournalRow(id: number): ForgeProxyJournalRow | undefined {
+    const row = this.db.prepare("SELECT * FROM forge_proxy_journal WHERE id = ?").get(id) as RawForgeProxyJournalRow | undefined;
+    return row ? mapForgeProxyJournalRow(row) : undefined;
+  }
+
+  /** Every journal row for one session attempt, sequence order — the fake-runner integration
+   *  tests' "did the whole call sequence get journaled correctly" read, and the primitive a
+   *  future final-output-acceptance gate would query (issue #234 AC: "final-output acceptance
+   *  blocked while any delivered response lacks a journal row" — no consumer wires that gate in
+   *  this PR; see journalIsComplete in proxy/journal.ts for the predicate it would use). */
+  listForgeProxyJournal(identity: ForgeProxyIdentity): ForgeProxyJournalRow[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM forge_proxy_journal WHERE round_id = ? AND phase = ? AND role = ? AND session = ? AND attempt = ? ORDER BY seq",
+      )
+      .all(identity.roundId, identity.phase, identity.role, identity.session, identity.attempt) as unknown as RawForgeProxyJournalRow[];
+    return rows.map(mapForgeProxyJournalRow);
+  }
+
+  /** Cumulative call count + response bytes already ledgered for this session attempt — the
+   *  budget-exhaustion check meters against this (issue #234's Budget: "meter call count +
+   *  response bytes against the round ledger machinery" — this table IS that ledger for the
+   *  proxy, same SUM-over-a-durable-table shape as spend_ledger's dailySpendUsd/roundSpendSince).
+   *  Counts only 'fetched'/'delivered' rows (a call that errored or is still mid-flight consumed
+   *  no response bytes and — for 'error' — still counts toward the CALL budget, since the
+   *  upstream request was actually made; an 'intent'-only row from a crash mid-call is NOT
+   *  counted, since neither a call nor bytes were confirmed to have completed). */
+  forgeProxyUsage(identity: ForgeProxyIdentity): { calls: number; bytes: number } {
+    const row = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) FILTER (WHERE status IN ('fetched', 'delivered', 'error')) AS calls,
+           COALESCE(SUM(LENGTH(response_json)) FILTER (WHERE status IN ('fetched', 'delivered')), 0) AS bytes
+         FROM forge_proxy_journal
+         WHERE round_id = ? AND phase = ? AND role = ? AND session = ? AND attempt = ?`,
+      )
+      .get(identity.roundId, identity.phase, identity.role, identity.session, identity.attempt) as { calls: number; bytes: number };
+    return { calls: row.calls, bytes: row.bytes };
+  }
+
+  // ── #234: frozen evidence bundles (forge_proxy_bundles, migration 15->16) ────────────────
+
+  /** Where frozen evidence bundle JSON files live on disk — null for an in-memory State (tests),
+   *  same convention as roundArtifactMdPath. */
+  forgeProxyBundleDir(): string | null {
+    return this.dataDir ? join(this.dataDir, "proxy-bundles") : null;
+  }
+
+  /** Index one frozen evidence bundle. Idempotent on hash (ON CONFLICT DO NOTHING): the same
+   *  content re-persisted (e.g. a retried decision citing an unchanged bundle) is the same
+   *  address, not a duplicate row — the FIRST persist's decision_ref/created_at win. */
+  recordForgeProxyBundle(row: ForgeProxyBundleRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO forge_proxy_bundles (hash, round_id, phase, role, session, decision_ref, byte_size, path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(hash) DO NOTHING`,
+      )
+      .run(
+        row.hash,
+        row.identity.roundId,
+        row.identity.phase,
+        row.identity.role,
+        row.identity.session,
+        row.decisionRef,
+        row.byteSize,
+        row.path,
+        row.createdAt,
+      );
+  }
+
+  /** One bundle by content hash — undefined if never indexed. */
+  getForgeProxyBundle(hash: string): ForgeProxyBundleRow | undefined {
+    const row = this.db.prepare("SELECT * FROM forge_proxy_bundles WHERE hash = ?").get(hash) as
+      | {
+          hash: string;
+          round_id: number;
+          phase: string;
+          role: string;
+          session: string;
+          decision_ref: string | null;
+          byte_size: number;
+          path: string | null;
+          created_at: string;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      hash: row.hash,
+      identity: { roundId: row.round_id, phase: row.phase, role: row.role, session: row.session },
+      decisionRef: row.decision_ref,
+      byteSize: row.byte_size,
+      path: row.path,
+      createdAt: row.created_at,
+    };
+  }
+}
+
+interface RawForgeProxyJournalRow {
+  id: number;
+  round_id: number;
+  phase: string;
+  role: string;
+  session: string;
+  attempt: number;
+  seq: number;
+  tool: string;
+  proxy_version: string;
+  args_json: string;
+  scope_json: string;
+  caps_json: string;
+  budget_remaining_calls: number | null;
+  budget_remaining_bytes: number | null;
+  status: ForgeProxyJournalStatus;
+  upstream_ids_json: string | null;
+  upstream_updated_at: string | null;
+  counts_json: string | null;
+  truncated: number;
+  response_json: string | null;
+  content_hash: string | null;
+  error: string | null;
+  timed_out: number;
+  requested_at: string;
+  fetched_at: string | null;
+  delivered_at: string | null;
+}
+
+function mapForgeProxyJournalRow(r: RawForgeProxyJournalRow): ForgeProxyJournalRow {
+  return {
+    id: r.id,
+    identity: { roundId: r.round_id, phase: r.phase, role: r.role, session: r.session, attempt: r.attempt },
+    seq: r.seq,
+    tool: r.tool,
+    proxyVersion: r.proxy_version,
+    argsCanonical: r.args_json,
+    scopeCanonical: r.scope_json,
+    capsCanonical: r.caps_json,
+    budgetRemainingCalls: r.budget_remaining_calls,
+    budgetRemainingBytes: r.budget_remaining_bytes,
+    status: r.status,
+    upstreamIds: r.upstream_ids_json,
+    upstreamUpdatedAt: r.upstream_updated_at,
+    countsCanonical: r.counts_json,
+    truncated: r.truncated === 1,
+    responseCanonical: r.response_json,
+    contentHash: r.content_hash,
+    error: r.error,
+    timedOut: r.timed_out === 1,
+    requestedAt: r.requested_at,
+    fetchedAt: r.fetched_at,
+    deliveredAt: r.delivered_at,
+  };
 }
