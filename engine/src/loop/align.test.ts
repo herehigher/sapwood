@@ -9,12 +9,14 @@
 // direct `gh issue create/edit` side effect. The engine reads `resultText`, validates it, and
 // performs every forge write itself — exactly what createAligningStub is being tested for here.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import { extractVerificationPlan } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
@@ -150,7 +152,24 @@ class FakeForge implements IForge {
     return this.backlogIssues;
   }
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
-    return this.planTriageCandidates;
+    // #232: getIssueBody/updateIssueBody read/write `issueBodies`, a store independent of this
+    // array by construction (tests build candidates directly) — but on REAL GitHub both calls
+    // hit the SAME issue, so the concurrent-edit guard's fresh getIssueBody() re-read must see
+    // what the candidate query already reported unless a test deliberately diverges them (to
+    // simulate a concurrent edit, by pre-setting issueBodies BEFORE this first runs). Seed
+    // once, never overwrite an already-present (possibly test-diverged) body.
+    for (const c of this.planTriageCandidates) {
+      if (!(c.number in this.issueBodies)) this.issueBodies[c.number] = c.body ?? "";
+    }
+    // #232 gate② F1 (Codex sol high review of PR #249): the REAL selector (forge.ts's
+    // getIssuesNeedingPlanTriage) excludes any issue whose body already has a plan section — a
+    // static-array fake that ignores live body content masks exactly the bug the reviewer found
+    // (a landed-but-unreceipted body write becoming permanently invisible to the recovery loop).
+    // Honor live body content here too, same as real GitHub would — including returning the
+    // LIVE body (not the possibly-stale candidate fixture body), same as a real `gh` listing.
+    return this.planTriageCandidates
+      .map((c) => ({ ...c, body: this.issueBodies[c.number] ?? c.body ?? "" }))
+      .filter((c) => extractVerificationPlan(c.body) == null);
   }
 }
 
@@ -219,6 +238,28 @@ const tapEvents = (state: State): Array<[string, unknown]> => {
   };
   return logged;
 };
+
+/** #232: same tap as tapEvents, but appendEvent(poisonKind, ...) THROWS instead of landing —
+ *  the scripted fixture for the "load-bearing decision event" crash-boundary tests (the write
+ *  itself never lands durably, so the caller's fail-closed handling must skip any effect that
+ *  would otherwise follow). Every OTHER kind still lands for real (so the honesty-event/tick-
+ *  error appends the production code makes IN RESPONSE to the poisoned failure are themselves
+ *  observable in `logged`). */
+const tapAndPoisonEvents = (state: State, poisonKind: string): Array<[string, unknown]> => {
+  const logged: Array<[string, unknown]> = [];
+  const realAppend = state.appendEvent.bind(state);
+  state.appendEvent = (kind: string, payload: unknown) => {
+    logged.push([kind, payload]);
+    if (kind === poisonKind) throw new Error(`simulated ${poisonKind} append failure`);
+    realAppend(kind, payload);
+  };
+  return logged;
+};
+
+/** #232: content-version hash — MUST mirror align.ts's own (unexported) `contentVersion`
+ *  exactly (sha256 hex, first 16 chars) so a test can construct a matching/mismatching
+ *  `expected_hash` for the concurrent-edit guard and the write-ahead decision fixtures below. */
+const contentVersionForTest = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 const LEGACY_LABEL_CONFIG = {
   labels: {
@@ -763,6 +804,58 @@ test("createAligningStub #216: proposal receipt lands only after reconciled gove
   state.close();
 });
 
+test("createAligningStub #232 F3 (Codex sol high review of PR #249): crash after the audit comment lands but BEFORE the proposal-created receipt — rerun reconciles via the marker WITHOUT reposting the comment", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  // The #216 deviation this closes: proposal-created was previously written only AFTER every
+  // governance effect including the comment, so a crash strictly between the comment landing and
+  // this receipt would repost the (non-idempotent) comment on a marker-reconcile rerun. Intercept
+  // ONLY the outer `proposal-created` append (never `proposal-comment-posted`, which
+  // applyProposalGovernance appends BEFORE this one, right after the comment itself lands) —
+  // same "intercept one call site" idiom the #216 tests above use for forge calls.
+  const realAppend = state.appendEvent.bind(state);
+  let failReceipt = true;
+  state.appendEvent = (kind: string, payload: unknown) => {
+    if (kind === "proposal-created" && failReceipt) {
+      failReceipt = false;
+      throw new Error("crash after comment, before receipt");
+    }
+    realAppend(kind, payload);
+  };
+  await assert.rejects(
+    () =>
+      createAligningStub({
+        forge,
+        state,
+        cfg,
+        runner: new ScriptedRunner([doneResult("po-align-1", alignResultText([{ title: "planned", body: PLAN_BODY }]))]),
+      }).run({ roundId: 231, phase: "aligning", marker: null }),
+    /crash after comment, before receipt/,
+  );
+  assert.equal(forge.createdIssues.length, 1, "the create + governance (incl. the audit comment) already landed before the crash");
+  const issue = forge.openIssueNumbers[0]!;
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === issue).length, 1);
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 0, "the receipt itself never landed");
+  assert.equal(
+    state.eventsAfterId(0, ["proposal-comment-posted"]).length,
+    1,
+    "but the comment's OWN receipt did — this is what prevents a repost on rerun",
+  );
+
+  const rerun = new ScriptedRunner([failedResult("must-not-run")]);
+  await createAligningStub({ forge, state, cfg, runner: rerun }).run({ roundId: 231, phase: "aligning", marker: null });
+  assert.equal(rerun.calls.length, 0, "the persisted proposal set skips po-align entirely on rerun");
+  assert.equal(forge.createdIssues.length, 1, "no re-create — reconciled via the body marker");
+  assert.equal(
+    forge.issueCommentsPosted.filter(([n]) => n === issue).length,
+    1,
+    "no duplicate comment — the proposal-comment-posted receipt skipped reposting",
+  );
+  assert.equal(state.eventsAfterId(0, ["proposal-created"]).length, 1, "the receipt-less remainder (just this receipt) now completes");
+  state.close();
+});
+
 test("createAligningStub #216: divergent proposal journal records honesty and advances with zero forge writes", async () => {
   const forge = new FakeForge();
   const state = new State(":memory:");
@@ -1136,6 +1229,211 @@ test("createAligningStub #110: a malformed triage block is retried once, then de
   const ev = logged.find(([kind]) => kind === "triage-degraded");
   assert.ok(ev);
   assert.equal((ev![1] as { issue: number }).issue, 90);
+  state.close();
+});
+
+// ── #232: triage write-ahead acceptance, effect receipts, concurrent-edit guard ────────────────
+
+test("createAligningStub #232: crash-rerun resume — a persisted triage-decision-accepted with no terminal receipt resumes effects DIRECTLY, zero new po-triage sessions", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 93, title: "t", labels: [], body: "no plan yet" }];
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  // Simulate a PRIOR (crashed) attempt this round that already validated a po-triage session's
+  // output and durably persisted the write-ahead decision — but crashed before ANY effect (body
+  // write, comment, receipts) landed.
+  const draftedBody = "no plan yet\n## Verification\n- run npm test";
+  const expectedHash = contentVersionForTest("no plan yet");
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 22,
+    issue: 93,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:93",
+    attempt: 1,
+    body: draftedBody,
+    expected_hash: expectedHash,
+  });
+  // Only an align-pass script step: if a po-triage session were (wrongly) dispatched, the
+  // ScriptedRunner would repeat this same "done, declares nothing" step for it too, so any
+  // triage dispatch would be silently absorbed rather than crashing — the roleId assertion below
+  // is what actually proves no po-triage session ran.
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  const { marker } = await stub.run({ roundId: 22, phase: "aligning", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align"],
+    "zero po-triage sessions — the persisted decision resumed directly",
+  );
+  assert.deepEqual(forge.updateIssueBodyCalls, [[93, draftedBody]]);
+  assert.ok(forge.issueCommentsPosted.some(([n]) => n === 93));
+  assert.equal(marker, alignMarker(22));
+  state.close();
+});
+
+test("createAligningStub #232: crash-rerun resume — a triage-body-committed receipt (crash after the body write, before the comment) skips the guarded write outright, completes only the receipt-less remainder, no duplicate write", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 94, title: "t", labels: [], body: "no plan yet" }];
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const draftedBody = "no plan yet\n## Verification\n- run npm test";
+  const expectedHash = contentVersionForTest("no plan yet");
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 23,
+    issue: 94,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:94",
+    attempt: 1,
+    body: draftedBody,
+    expected_hash: expectedHash,
+  });
+  state.appendEvent("triage-body-committed", {
+    round_id: 23,
+    issue: 94,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:94",
+    attempt: 1,
+  });
+  // The prior (crashed) attempt's body write already landed on the live issue before it crashed.
+  forge.issueBodies[94] = draftedBody;
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 23, phase: "aligning", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align"],
+    "zero po-triage sessions",
+  );
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "no duplicate write — the body-committed receipt skipped the guard entirely");
+  assert.ok(
+    forge.issueCommentsPosted.some(([n]) => n === 94),
+    "the receipt-less remainder (the comment) still completes",
+  );
+  state.close();
+});
+
+test("createAligningStub #232 gate② F1 (Codex sol high review of PR #249): crash after the body write lands but BEFORE the body-committed receipt — with REAL selector semantics (the issue no longer needs triage) the journal still discovers it by number, completes the remainder, zero new sessions", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 95, title: "t", labels: [], body: "no plan yet" }];
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const draftedBody = "no plan yet\n## Verification\n- run npm test";
+  const expectedHash = contentVersionForTest("no plan yet");
+  // Write-ahead decision persisted by a PRIOR (crashed) attempt.
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 24,
+    issue: 95,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:95",
+    attempt: 1,
+    body: draftedBody,
+    expected_hash: expectedHash,
+  });
+  // The body write itself landed on GitHub — but the crash happened strictly BEFORE the
+  // triage-body-committed receipt was ever appended (no receipt of any kind exists for #95).
+  forge.issueBodies[95] = draftedBody;
+
+  // Sanity check proving the bug this test targets: the FIXED (live-body-aware) selector no
+  // longer surfaces #95 as a candidate at all, since its live body already has a plan — exactly
+  // the condition that made the OLD "iterate triageCandidates only" recovery loop unreachable.
+  const freshCandidates = await forge.getIssuesNeedingPlanTriage();
+  assert.ok(
+    !freshCandidates.some((i) => i.number === 95),
+    "sanity: the fixed selector excludes an issue whose live body already has a plan",
+  );
+
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 24, phase: "aligning", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align"],
+    "zero po-triage sessions — recovered from the journal BY NUMBER, never rediscovered via the selector",
+  );
+  assert.equal(
+    forge.updateIssueBodyCalls.length,
+    0,
+    "no duplicate write — updateIssueBodyIfUnchanged's current===newBody short-circuit applies since the write already landed",
+  );
+  assert.ok(
+    forge.issueCommentsPosted.some(([n]) => n === 95),
+    "the receipt-less remainder (comment + both receipts) still completes",
+  );
+  const events = state.eventsAfterId(0, ["triage-body-committed", "triage-effects-committed"]);
+  assert.ok(
+    events.some((e) => e.kind === "triage-body-committed" && (e.payload as { issue: number }).issue === 95),
+    "the missing body-committed receipt is backfilled",
+  );
+  assert.ok(
+    events.some((e) => e.kind === "triage-effects-committed" && (e.payload as { issue: number }).issue === 95),
+    "the decision reaches its terminal receipt",
+  );
+  state.close();
+});
+
+test("createAligningStub #232: concurrent-edit guard — a live body change since the session read it REFUSES the write, keeps the old body, records triage-stale-hash-skipped, degrades open", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 92, title: "t", labels: [], body: "original body, no plan" }];
+  const cfg = mkCfg();
+  // #232: getIssuesNeedingPlanTriage now reflects LIVE body content (the F1 fixture fix above),
+  // so the concurrent edit must land AFTER the candidate fetch (which is what expected_hash is
+  // derived from) but BEFORE the guard's re-read — i.e. "during" the po-triage session itself,
+  // exactly where a real concurrent edit would race a real (seconds-to-minutes) session.
+  const runner = {
+    calls: [] as RoleSessionOpts[],
+    async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
+      this.calls.push(opts);
+      if (opts.roleId === "po-triage") {
+        forge.issueBodies[92] = "a human edited this issue concurrently";
+        return doneResult("po-triage-92", triageResultText(92, "## Verification\n- x"));
+      }
+      return doneResult("po-align-1", alignResultText([]));
+    },
+  };
+  const state = new State(":memory:");
+  const logged = tapEvents(state);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  const { marker } = await stub.run({ roundId: 21, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the write is refused — old body kept");
+  assert.equal(forge.issueBodies[92], "a human edited this issue concurrently");
+  assert.ok(!forge.issueCommentsPosted.some(([n]) => n === 92), "no success comment for a refused write");
+  const ev = logged.find(([kind]) => kind === "triage-stale-hash-skipped");
+  assert.ok(ev);
+  assert.equal((ev![1] as { issue: number; round_id: number }).issue, 92);
+  assert.equal((ev![1] as { round_id: number }).round_id, 21);
+  assert.equal(marker, alignMarker(21), "degrades open — the round is never wedged");
+  state.close();
+});
+
+test("createAligningStub #232: a triage-decision-accepted append failure aborts the write entirely (fail-closed) — no updateIssueBody call, a triage-decision-lost honesty event + tick-error recorded, round not wedged", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 91, title: "t", labels: [], body: "no plan" }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-91", triageResultText(91, "## Verification\n- x")),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapAndPoisonEvents(state, "triage-decision-accepted");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  const { marker } = await stub.run({ roundId: 20, phase: "aligning", marker: null });
+  assert.equal(marker, alignMarker(20), "round not wedged");
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "no write — the decision never durably landed");
+  assert.ok(!forge.issueCommentsPosted.some(([n]) => n === 91));
+  assert.ok(
+    logged.some(([kind]) => kind === "triage-decision-lost"),
+    "a durable honesty event records the loss",
+  );
+  assert.ok(logged.some(([kind]) => kind === "tick-error"));
   state.close();
 });
 
@@ -1688,6 +1986,43 @@ test("runPoolSelection (#233 AC1 mirror): the opt-in SESSION path (roles.po.pool
     { round_id: 4, issues: [1] },
     "the event records the session's validated (proper subset) selection, not the full candidate set",
   );
+});
+
+test("runPoolSelection #232: a pool-selected append failure aborts label effects entirely (fail-closed) — no addLabel calls, a durable pool-selection-decision-lost honesty event + tick-error, round never wedged (empty return)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // deterministic default path
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  const state = new State(":memory:");
+  const logged = tapAndPoisonEvents(state, "pool-selected");
+  const runner = new ScriptedRunner([]);
+  const target = await runPoolSelection({ forge, cfg, state, runner, roundId: 9 });
+  assert.equal(runner.calls.length, 0, "still no session on the deterministic default path");
+  assert.equal(forge.addLabelCalls.length, 0, "no label effects — the decision never durably landed (#232 fail-closed)");
+  assert.deepEqual(
+    target.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "the target is still computed/returned — only the LABEL EFFECTS are skipped",
+  );
+  assert.ok(
+    logged.some(([kind]) => kind === "pool-selection-decision-lost"),
+    "a durable honesty event records the loss",
+  );
+  assert.ok(logged.some(([kind]) => kind === "tick-error"));
+  state.close();
+});
+
+test("runPoolSelection #232: a pool-selected append failure on the SESSION path also aborts label effects — no addLabel calls even though the session validated a real subset", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const logged = tapAndPoisonEvents(state, "pool-selected");
+  await runPoolSelection({ forge, cfg, state, runner, roundId: 10 });
+  assert.equal(forge.addLabelCalls.length, 0, "the validated session selection is never labelled — the decision write failed");
+  assert.ok(logged.some(([kind]) => kind === "pool-selection-decision-lost"));
+  assert.ok(logged.some(([kind]) => kind === "tick-error"));
+  state.close();
 });
 
 test("runPoolSelection #231: the session path records an input-manifest row for the pool-candidates channel; the deterministic default path does not (no session, nothing to record)", async () => {

@@ -217,11 +217,21 @@ const NO_ISSUE: Issue = { number: 0, title: "", labels: [] };
 // pair per candidate issue), pool-candidates (po-pool). Architect-side / round-context channels
 // (round-defaults.ts's `lastMerged`, architect.ts's own goal/architecture-chapter read and
 // candidate-issue "fetched details", doctrine, the round directive) are NOT instrumented here —
-// they belong to modules a PARALLEL PR (#236) is actively rewiring, and #232 (the follow-up that
-// makes the manifest load-bearing, not just a record) already owns wiring those in and linking
-// manifest rows to the decisions they informed. Expanding this table's coverage into those files
-// now would conflict with #236's in-flight rewrite for no decision-quality benefit (this PR's
-// manifest is deliberately non-load-bearing — see recordInputManifest's own doc comment).
+// they belong to modules a PARALLEL PR (#236) is actively rewiring; expanding this table's
+// coverage into those files now would conflict with #236's in-flight rewrite for no
+// decision-quality benefit, so it is left for a later follow-up.
+//
+// #232 (shipped): the manifest table ITSELF stays record-only (recordInputManifest's own doc
+// comment) — #232 did not make appendInputManifest a gate. What #232 DID land is the linkage
+// this comment used to only promise: `align.ts`'s triage decision/receipt events
+// (`triage-decision-accepted`, `triage-body-committed`, `triage-comment-posted`,
+// `triage-effects-committed`, `triage-stale-hash-skipped`) each carry the SAME (phase, role,
+// session, attempt) identity tuple as this manifest — literally the same `attempt` number a
+// dispatch's own recordInputManifest calls used, not a parallel/derived one — so a manifest row
+// and the decision/receipts it informed are joinable by that key with no FK needed. See the
+// "#232: triage write-ahead acceptance" section's own module doc, further down this file, for
+// why that link is load-bearing rather than decorative (a receipt for the WRONG attempt must
+// never be mistaken for the current decision's own — gate② finding F2 on PR #249).
 const INPUT_MANIFEST_PHASE = "aligning";
 const INPUT_MANIFEST_ROLE = "po";
 
@@ -314,17 +324,31 @@ const ProposalCreatedEventSchema = z
   .object({ round_id: z.number().int().positive(), proposalId: z.string().min(1), issue: z.number().int().positive() })
   .passthrough();
 const ProposalSkippedEventSchema = z.object({ round_id: z.number().int().positive(), proposalId: z.string().min(1) }).passthrough();
+// #232 F3: a NON-terminal receipt (a proposal can be terminal — `proposal-created`/
+// `proposal-skipped` — without ever reaching this branch, e.g. a collision-skipped proposal).
+// Distinct from the terminal events above: this one exists solely so a crash strictly BETWEEN
+// `addIssueComment` landing and the (only-then-appended) `proposal-created` receipt is
+// distinguishable, on a marker-reconcile rerun, from "never commented" — comments are NOT
+// idempotent (unlike the label writes alongside them), so re-running applyProposalGovernance
+// blind on every reconcile would repost it. See applyProposalGovernance's own doc comment.
+const ProposalCommentPostedEventSchema = z.object({ round_id: z.number().int().positive(), proposalId: z.string().min(1) }).passthrough();
 
 /** Read this round's persist-first proposal journal. Malformed or divergent durable records
  *  fail closed: guessing would risk recreating issues. */
 function proposalProgress(
   state: State,
   roundId: number,
-): { proposals: PersistedProposal[] | null; terminalIds: Set<string>; createdIssues: Map<string, number> } {
-  const events = state.eventsAfterId(0, ["proposal-set-persisted", "proposal-created", "proposal-skipped"]);
+): {
+  proposals: PersistedProposal[] | null;
+  terminalIds: Set<string>;
+  createdIssues: Map<string, number>;
+  commentedIds: Set<string>;
+} {
+  const events = state.eventsAfterId(0, ["proposal-set-persisted", "proposal-created", "proposal-skipped", "proposal-comment-posted"]);
   let proposals: PersistedProposal[] | null = null;
   const terminalIds = new Set<string>();
   const createdIssues = new Map<string, number>();
+  const commentedIds = new Set<string>();
   for (const event of events) {
     const payloadRound =
       typeof event.payload === "object" && event.payload !== null && "round_id" in event.payload
@@ -336,6 +360,12 @@ function proposalProgress(
       if (!parsed.success) throw new Error(`malformed persisted proposal set for round ${roundId}`);
       if (proposals != null) throw new Error(`multiple persisted proposal sets for round ${roundId}`);
       proposals = parsed.data.proposals;
+      continue;
+    }
+    if (event.kind === "proposal-comment-posted") {
+      const parsed = ProposalCommentPostedEventSchema.safeParse(event.payload);
+      if (!parsed.success) throw new Error(`malformed proposal-comment-posted record for round ${roundId}`);
+      commentedIds.add(parsed.data.proposalId);
       continue;
     }
     const parsedCreated = event.kind === "proposal-created" ? ProposalCreatedEventSchema.safeParse(event.payload) : null;
@@ -362,7 +392,7 @@ function proposalProgress(
       if (!ids.has(id)) throw new Error(`unknown terminal proposal ${id} for round ${roundId}`);
     }
   }
-  return { proposals, terminalIds, createdIssues };
+  return { proposals, terminalIds, createdIssues, commentedIds };
 }
 
 /** Parse + schema-validate a po-align session's structured output. Deliberately does NOT
@@ -451,6 +481,245 @@ function triageDegradeReason(result: RoleSessionResult, expectedIssue: number): 
   return v.ok ? "po-triage output valid" : `po-triage produced invalid structured output twice: ${v.reason}`;
 }
 
+// ── #232: triage write-ahead acceptance + effect receipts + concurrent-edit guard ──────────────
+//
+// Prior to #232, a validated triage draft went straight from `validateTriageOutput` to
+// `forge.updateIssueBody` with no durable record of the ACCEPTED decision in between, and no
+// check that the issue body the session read is still the body actually sitting on GitHub. Two
+// gaps this section closes, following the SAME paradigms this file already uses elsewhere
+// (never new side-path machinery, per #232's PM ruling):
+//
+//  1. Write-ahead acceptance (the #212 pool-selected / #216 proposal-journal pattern, applied to
+//     triage): the instant a triage session's output validates, the engine durably records the
+//     ACCEPTED decision — `triage-decision-accepted` {round_id, issue, phase, role, session,
+//     attempt, body, expected_hash} — BEFORE calling forge.updateIssueBody. A crash-rerun of this
+//     exact phase (marker still null) that reaches the SAME decision again finds it (triageProgress
+//     below) and executes it directly — no second po-triage session, exactly the align-creation
+//     phase's persisted-proposals replay one section up. `phase`/`role`/`session`/`attempt` are the
+//     SAME identity tuple (and the SAME `attempt` number) as that dispatch's own input-manifest
+//     rows (#231) — the link #231's own module doc pointed at this issue for (gate② finding F2 on
+//     PR #249: this is the actual linkage, not just bookkeeping — see the attempt-matching note on
+//     TriageProgress below for why it is load-bearing, not decorative).
+//  2. Concurrent-edit guard (updateIssueBodyIfUnchanged below): the write carries `expected_hash`
+//     — a content hash of the issue BODY the session actually read (captured at candidate-fetch
+//     time, before the session ran) — and re-reads the LIVE body immediately before writing. A
+//     mismatch means a human (or another process) edited the issue while the session was
+//     running; the write is REFUSED (human amendment wins, the old body is kept), a
+//     `triage-stale-hash-skipped` honesty event is recorded, and the candidate is left for a
+//     FRESH read next round rather than blindly overwritten.
+//
+// Effect receipts: two, mirroring the two writes an accepted triage decision performs.
+// `triage-body-committed` lands right after the guarded body write succeeds — a resumed decision
+// that already has this receipt skips straight to the comment/no-comment step, so a crash between
+// the body write and the comment never re-issues the (already-applied) body write. The terminal
+// `triage-effects-committed` lands after that final step (comment posted, or the no-plan-after-
+// draft degrade recorded) — its presence (alongside `triage-stale-hash-skipped`, also terminal)
+// is what triageProgress's `terminalAttempts` map uses to skip an issue entirely on a later
+// crash-rerun within the SAME round. Same accepted, documented tradeoff as the align-creation
+// governance comment above (applyProposalGovernance) used to carry for its own comment step
+// before #232 F3 closed that gap too: a receipt-guarded step never reposts once its own receipt
+// lands.
+//
+// #232 gate② F1 (Codex sol high review of PR #249): the recovery loop's CANDIDATE SET cannot be
+// `getIssuesNeedingPlanTriage()` alone — that selector EXCLUDES any issue whose body already
+// contains a plan section (forge.ts), which is exactly what a landed-but-unreceipted body write
+// produces. A decision stuck between "body committed" and "effects committed" (or even "decision
+// accepted" and "body committed") would otherwise be invisible to a rerun's candidate scan
+// forever, leaving it non-terminal with no path to ever complete. THE FIX (see createAligningStub
+// below): the recovery set is `getIssuesNeedingPlanTriage()` UNION every non-terminal decision
+// still in `triageProgress.decisions` — a journal-resumed issue is processed by NUMBER alone, its
+// stored decision (body + expected_hash + attempt) is everything the resume path needs, and
+// `updateIssueBodyIfUnchanged`'s own `current === newBody` short-circuit (above) correctly
+// no-ops the body write when it already landed.
+//
+// #232 gate② F2 (same review): a malformed/unreadable `triage-decision-accepted` record is
+// treated as absent (triageProgress, same low-stakes stance as always) — which means a FRESH
+// session dispatch for that issue produces a NEW decision at a NEW attempt number. Without
+// attempt-scoping, a SURVIVING VALID receipt from the stale/unreadable prior attempt could then
+// falsely short-circuit the NEW decision's own effects (skip the guarded write, post a success
+// comment for a body that was never actually written) — a receipt is only ever a valid resume
+// signal for the EXACT decision attempt that produced it. Every decision/receipt event below now
+// carries `attempt`, and TriageProgress's maps are attempt-scoped so a stale receipt for a
+// DIFFERENT attempt than the currently-resumed (or freshly re-dispatched) decision is simply
+// invisible to it — `nextInputManifestAttempt` (the same monotonic MAX+1 counter #231's input-
+// manifest rows already use) guarantees a fresh dispatch always mints a brand-new attempt number
+// no prior receipt could ever have been stamped with.
+//
+// Decision persistence itself is LOAD-BEARING (#232's core ask, same "record, not decorative"
+// stance the pool-selected fix above applies): a failed `triage-decision-accepted` append aborts
+// this issue's effect phase — no forge write happens for it this pass — with a `triage-decision-
+// lost` honesty event and a `tick-error`, both best-effort (#243 F3: a second failure while
+// reporting the first must never cascade). The loop then moves on to the NEXT candidate rather
+// than aborting the whole triage pass — a single issue's bookkeeping failure must not sink every
+// other candidate's work this round (unlike applyPoolLabels' ALL-writes-failed throw, which is a
+// genuinely total-failure case; this is a per-issue one).
+
+const TriageDecisionEventSchema = z
+  .object({
+    round_id: z.number().int().positive(),
+    issue: z.number().int().positive(),
+    phase: z.string().min(1),
+    role: z.string().min(1),
+    session: z.string().min(1),
+    attempt: z.number().int().positive(),
+    body: z.string(),
+    expected_hash: z.string(),
+  })
+  .passthrough();
+const TriageTerminalEventSchema = z
+  .object({
+    round_id: z.number().int().positive(),
+    issue: z.number().int().positive(),
+    attempt: z.number().int().positive(),
+  })
+  .passthrough();
+
+interface TriageProgress {
+  /** Accepted-but-not-yet-(fully)-terminal decisions for THIS round, by issue number — a
+   *  crash-rerun resumes effects from here without dispatching another session. Each decision
+   *  carries its own `attempt` (the same number as that dispatch's input-manifest rows), which
+   *  every terminal/receipt lookup below must match — see this section's module doc (F2). */
+  decisions: Map<number, { body: string; expectedHash: string; attempt: number }>;
+  /** issue -> the ATTEMPT of its terminal event (`triage-effects-committed` or
+   *  `triage-stale-hash-skipped`) for THIS round, if any. A decision is fully resolved only when
+   *  `terminalAttempts.get(issue) === decisions.get(issue).attempt` — a terminal event for a
+   *  DIFFERENT (stale/superseded) attempt must never short-circuit the current one (F2). */
+  terminalAttempts: Map<number, number>;
+  /** issue -> the ATTEMPT of its `triage-body-committed` receipt for THIS round, if any. Same
+   *  attempt-matching discipline as `terminalAttempts` — only relevant when it equals the
+   *  CURRENT decision's own attempt. */
+  bodyCommittedAttempts: Map<number, number>;
+  /** issue -> the ATTEMPT of its `triage-comment-posted` receipt for THIS round, if any (#232
+   *  F3 symmetry: `addIssueComment` is not idempotent, same as align-creation's audit comment —
+   *  a crash strictly between the comment landing and `triage-effects-committed` must not
+   *  repost it on a later crash-rerun of this SAME attempt). Same attempt-matching discipline. */
+  commentPostedAttempts: Map<number, number>;
+}
+
+/** Read this round's triage decision/receipt journal (same "scan from event id 0, filter by
+ *  round_id in the payload" shape as proposalProgress/readPersistedPoolSelection above). A
+ *  malformed record is treated as absent — logged, never thrown: unlike align-creation's
+ *  proposalProgress (where a corrupt journal risks a double-create), triage is idempotent and
+ *  low-stakes (drafting a plan again merely costs a session) — a single corrupt row must not
+ *  sink the whole aligning phase over a pre-Ready bookkeeping detail. Chronological (ORDER BY
+ *  id) scan, last-matching-event-per-issue wins for every map — same idiom as
+ *  readPersistedPoolSelection's last-wins replay target. */
+function triageProgress(state: State, roundId: number, log?: (message: string) => void): TriageProgress {
+  const warn = log ?? console.error;
+  const events = state.eventsAfterId(0, [
+    "triage-decision-accepted",
+    "triage-body-committed",
+    "triage-comment-posted",
+    "triage-effects-committed",
+    "triage-stale-hash-skipped",
+  ]);
+  const decisions = new Map<number, { body: string; expectedHash: string; attempt: number }>();
+  const terminalAttempts = new Map<number, number>();
+  const bodyCommittedAttempts = new Map<number, number>();
+  const commentPostedAttempts = new Map<number, number>();
+  for (const event of events) {
+    const payloadRound =
+      typeof event.payload === "object" && event.payload !== null && "round_id" in event.payload
+        ? (event.payload as { round_id?: unknown }).round_id
+        : undefined;
+    if (payloadRound !== roundId) continue;
+    if (event.kind === "triage-decision-accepted") {
+      const parsed = TriageDecisionEventSchema.safeParse(event.payload);
+      if (!parsed.success) {
+        warn(`[sapwood:po] round ${roundId}: malformed triage-decision-accepted record — treating as absent`);
+        continue;
+      }
+      decisions.set(parsed.data.issue, { body: parsed.data.body, expectedHash: parsed.data.expected_hash, attempt: parsed.data.attempt });
+      continue;
+    }
+    const parsed = TriageTerminalEventSchema.safeParse(event.payload);
+    if (!parsed.success) {
+      warn(`[sapwood:po] round ${roundId}: malformed ${event.kind} record — treating as absent`);
+      continue;
+    }
+    if (event.kind === "triage-body-committed") bodyCommittedAttempts.set(parsed.data.issue, parsed.data.attempt);
+    else if (event.kind === "triage-comment-posted") commentPostedAttempts.set(parsed.data.issue, parsed.data.attempt);
+    else terminalAttempts.set(parsed.data.issue, parsed.data.attempt); // triage-effects-committed | triage-stale-hash-skipped
+  }
+  return { decisions, terminalAttempts, bodyCommittedAttempts, commentPostedAttempts };
+}
+
+/** Write-ahead persist ONE issue's accepted triage decision, BEFORE any forge effect (#232).
+ *  `attempt` MUST be the same number already derived for that dispatch's input-manifest rows
+ *  (#231/#232 F2 linkage) — every receipt this decision later earns carries the SAME attempt, so
+ *  a stale receipt from a different (superseded/unreadable) attempt can never be mistaken for
+ *  this one's (see this section's module doc). Returns whether the write landed. On failure: a
+ *  `triage-decision-lost` honesty event + a `tick-error` (each independently best-effort, #243
+ *  F3) and `false` — the caller MUST NOT perform the body write / comment for this issue this
+ *  pass; the candidate is untouched, so it naturally re-matches getIssuesNeedingPlanTriage on a
+ *  later attempt. */
+function persistTriageDecision(
+  state: State,
+  roundId: number,
+  issue: number,
+  attempt: number,
+  body: string,
+  expectedHash: string,
+  log?: (message: string) => void,
+): boolean {
+  const warn = log ?? console.error;
+  try {
+    state.appendEvent("triage-decision-accepted", {
+      round_id: roundId,
+      issue,
+      phase: INPUT_MANIFEST_PHASE,
+      role: INPUT_MANIFEST_ROLE,
+      session: `po-triage:${issue}`,
+      attempt,
+      body,
+      expected_hash: expectedHash,
+    });
+    return true;
+  } catch (e) {
+    const reason = String(e);
+    warn(
+      `[sapwood:po] round ${roundId}: failed to persist the triage decision for #${issue} — write is SKIPPED this pass (fail-closed, #232): ${reason}`,
+    );
+    try {
+      state.appendEvent("triage-decision-lost", { round_id: roundId, issue, attempt, reason });
+    } catch {
+      /* best-effort honesty event — the tick-error below still records the failure */
+    }
+    try {
+      state.appendEvent("tick-error", { error: `round ${roundId}: triage-decision-accepted append failed for #${issue}: ${reason}` });
+    } catch {
+      /* best-effort */
+    }
+    return false;
+  }
+}
+
+type BodyWriteGuardResult = { applied: true } | { applied: false; actualHash: string };
+
+/** The #232 concurrent-edit guard: re-reads the LIVE issue body immediately before writing and
+ *  compares its hash to `expectedHash` (the hash of the body the session actually read, captured
+ *  at candidate-fetch time). Match -> the write proceeds. Mismatch -> REFUSED, `actualHash`
+ *  returned for the caller's honesty event — the old body is kept, human amendment wins.
+ *
+ *  Resume-safe by construction: if `current === newBody` (this exact write already landed on an
+ *  earlier, crashed attempt at the SAME accepted decision), it is treated as already-applied
+ *  WITHOUT comparing hashes or re-issuing the write — a body matching what we're about to write
+ *  is indistinguishable from "we already wrote it," and re-checking against the (now-stale)
+ *  ORIGINAL expected hash would misread our own prior success as a concurrent edit. */
+async function updateIssueBodyIfUnchanged(
+  forge: IForge,
+  issue: number,
+  newBody: string,
+  expectedHash: string,
+): Promise<BodyWriteGuardResult> {
+  const current = await forge.getIssueBody(issue);
+  if (current === newBody) return { applied: true };
+  const actualHash = contentVersion(current);
+  if (actualHash !== expectedHash) return { applied: false, actualHash };
+  await forge.updateIssueBody(issue, newBody);
+  return { applied: true };
+}
+
 // ── #212/#233: round-pool selection ─────────────────────────────────────────────────────────
 //
 // The engine ALWAYS computes the CANDIDATE set deterministically (Ready, milestone-scoped by
@@ -474,13 +743,20 @@ function triageDegradeReason(result: RoleSessionResult, expectedIssue: number): 
 // removeLabel/addLabel containment invariant holds structurally, the same "engine performs
 // every write itself" stance as align/triage above). Invalid-twice or a failed session degrades
 // OPEN to the full deterministic candidate set — never an empty pool, never a wedged round.
-// Either way (`poolSelection` true or false), the engine ATTEMPTS to write the durable
-// `pool-selected` event — it records what was actually acted on, not what could be recomputed,
-// which is what makes a crash-rerun of this exact phase replay-safe when the write lands.
-// persistPoolSelection's write is best-effort today, not fail-closed (see its own doc comment):
-// an append failure is logged and reconciliation proceeds regardless, on every path, exactly as
-// before #233. Making the write load-bearing (fail closed, or otherwise guaranteed) is scoped
-// to #232, not this change.
+// Either way (`poolSelection` true or false), the engine WRITES the durable `pool-selected`
+// event — it records what was actually acted on, not what could be recomputed, which is what
+// makes a crash-rerun of this exact phase replay-safe when the write lands.
+// #232: persistPoolSelection's write is now LOAD-BEARING (fail-closed), not best-effort — an
+// append failure ABORTS this pass's label effects entirely (reconcilePoolLabels is never
+// called), because a label write with no matching durable record is exactly the "decorative
+// record at the moment it's load-bearing" hazard #232 exists to close: GitHub's live label
+// state would silently become the only truth, and a crash right after would leave nothing to
+// replay from. On failure the engine records BOTH a `pool-selection-decision-lost` honesty
+// event and a `tick-error` (each independently best-effort — a SECOND failure while reporting
+// the first must never cascade into an unhandled throw, the #243 F3 lesson) and returns without
+// touching labels; the round is never wedged — this phase's marker still advances normally
+// (same "degrade open, low stakes, next round retries fresh" stance as po-degraded/
+// triage-degraded elsewhere in this file), it just skips this round's pool-label update.
 //
 // #212 gate② r2 (replacing r1's "adopt existing" heuristic, found unsalvageable in review):
 // labels alone cannot tell a SAME-ROUND crash rerun apart from a PRIOR-round residual — a
@@ -547,16 +823,44 @@ function readPersistedPoolSelection(state: State, roundId: number): number[] | n
  *  record runPoolSelection's replay-first check (readPersistedPoolSelection above) reads back
  *  on a crash-rerun. Written at most once per round by construction: this is only ever called
  *  from runPoolSelection's "no persisted record found yet" branch, never from the replay
- *  branch. Best-effort: a write failure here is logged, never thrown — GitHub's live label
- *  state (reconciled immediately after this call returns) remains the actual source of truth;
- *  losing the durable record only costs a future crash-rerun the replay optimization (it
- *  recomputes, and — on the session path — pays for a fresh session), never correctness:
- *  reconcile still converges labels to whatever target that rerun lands on. */
-function persistPoolSelection(state: State, roundId: number, target: readonly Issue[], log?: (message: string) => void): void {
+ *  branch.
+ *
+ *  #232: LOAD-BEARING, not best-effort — returns whether the write actually landed, and the
+ *  caller (runPoolSelection) MUST skip reconcilePoolLabels entirely when it returns false. A
+ *  label write with no matching durable record is exactly the hazard #232 closes: GitHub's live
+ *  label state would become the only truth, and a crash right after would leave nothing for the
+ *  next attempt to replay — the same double-write/double-session risk the whole `pool-selected`
+ *  event exists to prevent (see this section's module doc). On failure, records a dedicated
+ *  `pool-selection-decision-lost` honesty event AND a `tick-error` — each wrapped in its OWN
+ *  try/catch (the #243 F3 lesson: a second failure while reporting the first must never cascade
+ *  into an unhandled throw that escapes this contained boundary) — then returns false. The round
+ *  is never wedged: the caller still returns normally and the aligning phase's marker still
+ *  advances (degrade open, same low-stakes "next round retries fresh" stance as po-degraded/
+ *  triage-degraded elsewhere in this file) — only this round's pool-label update is skipped. */
+function persistPoolSelection(state: State, roundId: number, target: readonly Issue[], log?: (message: string) => void): boolean {
+  const warn = log ?? console.error;
   try {
     state.appendEvent("pool-selected", { round_id: roundId, issues: target.map((i) => i.number) });
+    return true;
   } catch (e) {
-    (log ?? console.error)(`[sapwood:pool] round ${roundId}: failed to persist the pool-selection record: ${String(e)}`);
+    const reason = String(e);
+    warn(
+      `[sapwood:pool] round ${roundId}: failed to persist the pool-selection record — label reconcile is SKIPPED ` +
+        `this pass (fail-closed, #232): ${reason}`,
+    );
+    try {
+      state.appendEvent("pool-selection-decision-lost", { round_id: roundId, reason });
+    } catch {
+      /* best-effort honesty event — the tick-error below still records the failure */
+    }
+    try {
+      state.appendEvent("tick-error", {
+        error: `round ${roundId}: pool-selected append failed — pool label reconcile skipped this pass: ${reason}`,
+      });
+    } catch {
+      /* best-effort — the pool-selection-decision-lost event above (if it landed) is the durable record */
+    }
+    return false;
   }
 }
 
@@ -811,17 +1115,16 @@ export interface PoolSelectionRunDeps extends PoolSelectionDeps {
  *     outage).
  *
  *  Once the target is known (replayed OR freshly computed), a fresh computation is persisted
- *  (persistPoolSelection, before any label write) and EVERY path converges through the same
- *  `reconcilePoolLabels` call — add where the target lacks the label, remove it from any other
- *  open issue that has it. Reconcile is what heals residuals; the event (when it lands) is what
- *  makes reruns replay instead of recompute; neither alone would be. persistPoolSelection is
- *  ATTEMPTED on EVERY path, including the deterministic default — it records what was actually
- *  acted on, not what could be recomputed. That write is best-effort, not fail-closed, today
- *  (see persistPoolSelection's own doc comment): an append failure is logged and reconcile still
- *  runs against the freshly-computed target, so a crash immediately after a failed write forfeits
- *  only the replay optimization on the next rerun (it recomputes, and on the session path pays
- *  for a fresh session), never correctness. Making this write load-bearing is scoped to #232,
- *  not this change. */
+ *  (persistPoolSelection, before any label write) and — ONLY if that write lands — every path
+ *  converges through the same `reconcilePoolLabels` call: add where the target lacks the label,
+ *  remove it from any other open issue that has it. Reconcile is what heals residuals; the event
+ *  (when it lands) is what makes reruns replay instead of recompute; neither alone would be.
+ *  persistPoolSelection is ATTEMPTED on EVERY freshly-computed path (never the replay branch,
+ *  which has nothing new to persist) — it records what was actually acted on, not what could be
+ *  recomputed. #232: that write is now LOAD-BEARING — an append failure SKIPS reconcile entirely
+ *  for this pass (persistPoolSelection's own doc comment covers the honesty-event/tick-error
+ *  containment) rather than proceeding to label GitHub with no durable record behind it; the next
+ *  round's own runPoolSelection call retries fresh (nothing persisted this round to replay). */
 export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issue[]> {
   const { forge, cfg } = deps;
   const log = deps.log ?? console.error;
@@ -834,6 +1137,10 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
     persisted = null;
   }
 
+  // #232: whether THIS invocation's fresh decision (if any) actually landed durably — gates
+  // reconcile below. true by default for the replay branch: it persists nothing new, so there is
+  // no fresh write whose failure could strand a label effect.
+  let decisionPersisted = true;
   let target: Issue[];
   if (persisted != null) {
     const targetSet = new Set(persisted);
@@ -862,7 +1169,7 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       log(`[sapwood:pool] round-pool selection: Ready read failed — pool left unchanged this round: ${String(e)}`);
       return [];
     }
-    persistPoolSelection(deps.state, deps.roundId, candidates, log);
+    decisionPersisted = persistPoolSelection(deps.state, deps.roundId, candidates, log);
     target = candidates;
   } else {
     let candidates: Issue[];
@@ -873,7 +1180,7 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       return [];
     }
     if (candidates.length === 0) {
-      persistPoolSelection(deps.state, deps.roundId, candidates, log);
+      decisionPersisted = persistPoolSelection(deps.state, deps.roundId, candidates, log);
       target = candidates;
     } else {
       const now = deps.now ?? ((): Date => new Date());
@@ -964,11 +1271,19 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       // unions — so even if this exact window fires twice in a row, the FINAL attempt's
       // selection is what the open backlog's labels converge to; a duplicate session only ever
       // costs money, never a wrong pool.
-      persistPoolSelection(deps.state, deps.roundId, target, log);
+      decisionPersisted = persistPoolSelection(deps.state, deps.roundId, target, log);
     }
   }
 
-  await reconcilePoolLabels(forge, cfg, target, log, { state: deps.state, roundId: deps.roundId });
+  // #232: the decision write is load-bearing — a failed append skips reconcile entirely rather
+  // than labeling GitHub against a decision that was never durably recorded (see
+  // persistPoolSelection's own doc comment for the honesty-event/tick-error containment already
+  // performed at the failure site above).
+  if (decisionPersisted) {
+    await reconcilePoolLabels(forge, cfg, target, log, { state: deps.state, roundId: deps.roundId });
+  } else {
+    log(`[sapwood:pool] round ${deps.roundId}: skipping label reconcile — the pool-selection decision failed to persist this pass`);
+  }
   return target;
 }
 
@@ -1250,7 +1565,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         const reconciled = knownOpenIssues.find((issue) => issue.body?.includes(marker));
         if (reconciled) {
           const hasPlan = extractVerificationPlan(body) != null;
-          await applyProposalGovernance(reconciled.number, hasPlan);
+          await applyProposalGovernance(reconciled.number, hasPlan, id, priorProgress.commentedIds.has(id));
           deps.state.appendEvent("proposal-created", { round_id: roundId, proposalId: id, issue: reconciled.number, reconciled: true });
           terminalIds.add(id);
           alignSummaryCreated.push({ issue: reconciled.number, title, hasPlan });
@@ -1273,7 +1588,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         const issueNumber = await deps.forge.createIssue(title, markedBody);
         knownOpenIssues.push({ number: issueNumber, title, labels: [], body: markedBody });
         const hasPlan = extractVerificationPlan(body) != null;
-        await applyProposalGovernance(issueNumber, hasPlan);
+        await applyProposalGovernance(issueNumber, hasPlan, id, priorProgress.commentedIds.has(id));
         // A receipt means both creation AND its load-bearing governance writes completed.
         // A crash before this append is reconciled by the body marker on the next run.
         deps.state.appendEvent("proposal-created", { round_id: roundId, proposalId: id, issue: issueNumber });
@@ -1281,159 +1596,334 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         alignSummaryCreated.push({ issue: issueNumber, title, hasPlan });
       }
 
-      async function applyProposalGovernance(issueNumber: number, hasPlan: boolean): Promise<void> {
-        // Labels are idempotent and load-bearing. On the rare marker-reconcile path the audit
-        // comment may be duplicated; that is accepted in preference to leaving governance
-        // incomplete after an accepted-create/lost-receipt crash.
+      // #232 F3 (Codex sol high review of PR #249): the ORIGINAL shape here — one receipt
+      // (`proposal-created`) appended only AFTER every governance write, including the audit
+      // comment — has the same "receipt too coarse" gap #232 fixed for triage: labels are
+      // idempotent (safe to always redo, unlike the comment) but `addIssueComment` is NOT — a
+      // crash strictly BETWEEN the comment landing and `proposal-created` being appended means a
+      // marker-reconcile rerun (the `reconciled` branch above) would call this function AGAIN and
+      // repost a duplicate comment. `alreadyCommented` (from priorProgress.commentedIds, read
+      // ONCE at the top of this phase call, same "journal read before the loop runs" shape as
+      // triageJournal) is what makes the comment step itself resume-safe: skip it entirely when a
+      // `proposal-comment-posted` receipt already exists for this proposal, so only the
+      // receipt-less remainder (here: none — labels are always safely re-applied) ever repeats.
+      async function applyProposalGovernance(
+        issueNumber: number,
+        hasPlan: boolean,
+        thisProposalId: string,
+        alreadyCommented: boolean,
+      ): Promise<void> {
+        // Labels are idempotent and load-bearing — always safe to re-apply on any rerun,
+        // regardless of `alreadyCommented`.
         await deps.forge.addLabel(issueNumber, l.originAgent);
+        if (!hasPlan) await deps.forge.addLabel(issueNumber, l.needsHuman);
+        if (alreadyCommented) return; // the receipt-less remainder is empty — nothing left to do
         const note = hasPlan
           ? `Created by sapwood's round ${roundId} PO alignment pass (goal decomposition).`
           : `Created by sapwood's round ${roundId} PO alignment pass, but with no verification ` +
             `plan detected — applying \`${l.needsHuman}\` so it is never dispatched ` +
             `planless. A human (or a future triage pass) needs to supply one.`;
-        if (!hasPlan) await deps.forge.addLabel(issueNumber, l.needsHuman);
         await deps.forge.addIssueComment(issueNumber, `${note}\n\n${mark}`);
+        try {
+          deps.state.appendEvent("proposal-comment-posted", { round_id: roundId, proposalId: thisProposalId });
+        } catch {
+          // Best-effort receipt: if THIS append itself fails, a later rerun (before
+          // `proposal-created` lands) will repost the comment once more — the same accepted
+          // rare-duplicate tradeoff the pre-#232 code already carried for every crash window,
+          // just narrowed here to "this specific append also failed" instead of "any crash after
+          // the comment at all."
+        }
       }
 
       // ── Triage pass: existing plan-less issues get a plan drafted directly into the body.
       // Marker-idempotent at the round-ledger granularity above; ALSO naturally idempotent at
       // the per-issue level, since a successfully drafted issue now carries a plan section and
-      // so no longer matches getIssuesNeedingPlanTriage's candidate query on any later run. ──
+      // so no longer matches getIssuesNeedingPlanTriage's candidate query on any later run.
+      // #232: additionally write-ahead/receipted/concurrency-guarded — see this file's own
+      // "#232: triage write-ahead acceptance" section doc comment above for the full design. ──
       const triageCandidates = await deps.forge.getIssuesNeedingPlanTriage();
-      for (const issue of triageCandidates) {
-        // #231: this triage session's own input-manifest rows. `session` is scoped to THIS
-        // issue so a crash-rerun's re-triage of the same still-planless issue is its own
-        // distinguishable attempt, independent of every other candidate this loop processes.
-        // ONE attempt number covers BOTH channels this dispatch actually consumes (#231 gate②
-        // F2/F4 — same "derive once per dispatch, share across its channel rows" shape as
-        // po-align above):
-        //  - "issue-body": the po.md triage prompt renders {{issue.number}}/{{issue.title}}/
-        //    {{issue.labels}}/{{issue.body}} (see po.md's triage section) — the version hash
-        //    covers that FULL rendered context, not body alone, so a title/label edit with an
-        //    unchanged body still shows up as a version change (#231 gate② F2).
-        //  - "backlog-digest": the triage prompt ALSO substitutes {{backlog.digest}} (po.md's
-        //    shared template) — recording the SAME backlogDigest object's real ok/counts/
-        //    truncated flags here (not an assumed ok:true) closes the incoherence a failed
-        //    backlog read previously left: a triage session that actually saw the failure
-        //    placeholder must not have its only manifest row claim ok:true (#231 gate② F2).
-        const triageAttempt = deps.state.nextInputManifestAttempt(
-          roundId,
-          INPUT_MANIFEST_PHASE,
-          INPUT_MANIFEST_ROLE,
-          `po-triage:${issue.number}`,
-        );
-        recordInputManifest(
-          deps.state,
-          {
-            round_id: roundId,
-            phase: INPUT_MANIFEST_PHASE,
-            role: INPUT_MANIFEST_ROLE,
-            session: `po-triage:${issue.number}`,
-            attempt: triageAttempt,
-            channel: "issue-body",
-            ok: true,
-            version: contentVersion(
-              JSON.stringify({ number: issue.number, title: issue.title, labels: issue.labels, body: issue.body ?? "" }),
-            ),
-            total: 1,
-            rendered: 1,
-            omitted: 0,
-            truncated: false,
-          },
-          deps.log,
-        );
-        recordInputManifest(
-          deps.state,
-          {
-            round_id: roundId,
-            phase: INPUT_MANIFEST_PHASE,
-            role: INPUT_MANIFEST_ROLE,
-            session: `po-triage:${issue.number}`,
-            attempt: triageAttempt,
-            channel: "backlog-digest",
-            ok: backlogDigest.ok,
-            total: backlogDigest.total,
-            rendered: backlogDigest.rendered,
-            omitted: backlogDigest.omitted,
-            truncated: backlogDigest.truncated,
-            version: backlogDigest.ok ? contentVersion(backlogDigest.text) : null,
-            detail: backlogDigest.ok ? null : (backlogDigest.reason ?? "unknown"),
-          },
-          deps.log,
-        );
-        const triagePrompt = renderRolePrompt(template, issue, deps.cfg, {
-          "po.mode": "triage",
-          "round.milestone": deps.cfg.round.milestone ?? "",
-          "plan.md": "",
-          "round.directive": directive,
-          "backlog.digest": backlogDigest.text,
-        });
-        const triageResult = await runSessionWithRetry({
-          runner: deps.runner,
-          state: deps.state,
-          session: {
-            roleId: "po-triage",
-            prompt: triagePrompt,
-            model: role.model,
-            effort: role.effort,
-            fallbackModel: role.fallbackModel,
-            allowedTools: PO_ALLOWED_TOOLS,
-            disallowedTools: PO_DISALLOWED_TOOLS,
-          },
-          issue: issue.number,
-          now,
-          ...(deps.log !== undefined ? { log: deps.log } : {}),
-          degradeEvent: "triage-degraded",
-          degradePayload: (result) => ({
-            round_id: roundId,
+      const candidatesByNumber = new Map(triageCandidates.map((issue) => [issue.number, issue]));
+      // #232: this round's own decision/receipt journal, read ONCE before the loop — a
+      // crash-rerun of this exact phase (marker still null) consults it per candidate below
+      // instead of blindly re-dispatching a session for an issue whose decision already landed.
+      const triageJournal = triageProgress(deps.state, roundId, deps.log);
+      // #232 gate② F1: the RECOVERY set is candidates UNION every non-terminal decision from the
+      // journal — getIssuesNeedingPlanTriage() alone would silently drop an issue whose body
+      // write already landed (it now HAS a plan section, so the real selector excludes it) but
+      // whose receipt(s) never did, leaving that decision permanently unterminated. A number that
+      // only exists in the journal (not in candidatesByNumber) is processed below purely by
+      // number — its stored decision (body + expected_hash + attempt) is everything the resume
+      // path needs; no `Issue` object is required for it.
+      const recoveryOnlyNumbers = [...triageJournal.decisions.keys()].filter((n) => !candidatesByNumber.has(n));
+      const triageWorkNumbers = [...triageCandidates.map((issue) => issue.number), ...recoveryOnlyNumbers];
+      for (const number of triageWorkNumbers) {
+        const resumed = triageJournal.decisions.get(number);
+        let validated: TriageValidation;
+        let expectedHash: string;
+        let attempt: number;
+        let bodyAlreadyCommitted: boolean;
+
+        if (resumed) {
+          // #232 gate② F2: a terminal event only resolves THIS decision when its attempt
+          // matches — a terminal event recorded for a DIFFERENT (stale/superseded) attempt must
+          // never short-circuit the current one (see this section's module doc above).
+          if (triageJournal.terminalAttempts.get(number) === resumed.attempt) continue;
+          // #232: RESUME — an accepted decision exists from an earlier attempt this round with
+          // no terminal receipt (crash between decision-persist and effect-commit). The durable
+          // decision IS what executes now — no session, no re-validation, no re-render.
+          validated = { ok: true, issue: number, body: resumed.body };
+          expectedHash = resumed.expectedHash;
+          attempt = resumed.attempt;
+          bodyAlreadyCommitted = triageJournal.bodyCommittedAttempts.get(number) === attempt;
+        } else {
+          // No readable decision for this number — either genuinely fresh, or #232 gate② F2's
+          // malformed/unreadable-record case (treated as absent). Either way this dispatches a
+          // BRAND NEW session/attempt, and any receipt that might exist for a stale attempt is
+          // never consulted below (bodyAlreadyCommitted starts false; the attempt-matching check
+          // above is what keeps a stale receipt from a prior attempt out of this decision's way).
+          const issue = candidatesByNumber.get(number);
+          if (!issue) continue; // unreachable by construction — every non-resumed number came from triageCandidates
+          // #231: this triage session's own input-manifest rows. `session` is scoped to THIS
+          // issue so a crash-rerun's re-triage of the same still-planless issue is its own
+          // distinguishable attempt, independent of every other candidate this loop processes.
+          // ONE attempt number covers BOTH channels this dispatch actually consumes (#231 gate②
+          // F2/F4 — same "derive once per dispatch, share across its channel rows" shape as
+          // po-align above), and ALSO becomes this decision's own identity (#232 gate② F2 — the
+          // SAME number links the accepted-decision event and both its receipts back to this
+          // exact input-manifest attempt):
+          //  - "issue-body": the po.md triage prompt renders {{issue.number}}/{{issue.title}}/
+          //    {{issue.labels}}/{{issue.body}} (see po.md's triage section) — the version hash
+          //    covers that FULL rendered context, not body alone, so a title/label edit with an
+          //    unchanged body still shows up as a version change (#231 gate② F2).
+          //  - "backlog-digest": the triage prompt ALSO substitutes {{backlog.digest}} (po.md's
+          //    shared template) — recording the SAME backlogDigest object's real ok/counts/
+          //    truncated flags here (not an assumed ok:true) closes the incoherence a failed
+          //    backlog read previously left: a triage session that actually saw the failure
+          //    placeholder must not have its only manifest row claim ok:true (#231 gate② F2).
+          const triageAttempt = deps.state.nextInputManifestAttempt(
+            roundId,
+            INPUT_MANIFEST_PHASE,
+            INPUT_MANIFEST_ROLE,
+            `po-triage:${number}`,
+          );
+          recordInputManifest(
+            deps.state,
+            {
+              round_id: roundId,
+              phase: INPUT_MANIFEST_PHASE,
+              role: INPUT_MANIFEST_ROLE,
+              session: `po-triage:${number}`,
+              attempt: triageAttempt,
+              channel: "issue-body",
+              ok: true,
+              version: contentVersion(
+                JSON.stringify({ number: issue.number, title: issue.title, labels: issue.labels, body: issue.body ?? "" }),
+              ),
+              total: 1,
+              rendered: 1,
+              omitted: 0,
+              truncated: false,
+            },
+            deps.log,
+          );
+          recordInputManifest(
+            deps.state,
+            {
+              round_id: roundId,
+              phase: INPUT_MANIFEST_PHASE,
+              role: INPUT_MANIFEST_ROLE,
+              session: `po-triage:${number}`,
+              attempt: triageAttempt,
+              channel: "backlog-digest",
+              ok: backlogDigest.ok,
+              total: backlogDigest.total,
+              rendered: backlogDigest.rendered,
+              omitted: backlogDigest.omitted,
+              truncated: backlogDigest.truncated,
+              version: backlogDigest.ok ? contentVersion(backlogDigest.text) : null,
+              detail: backlogDigest.ok ? null : (backlogDigest.reason ?? "unknown"),
+            },
+            deps.log,
+          );
+          const triagePrompt = renderRolePrompt(template, issue, deps.cfg, {
+            "po.mode": "triage",
+            "round.milestone": deps.cfg.round.milestone ?? "",
+            "plan.md": "",
+            "round.directive": directive,
+            "backlog.digest": backlogDigest.text,
+          });
+          const triageResult = await runSessionWithRetry({
+            runner: deps.runner,
+            state: deps.state,
+            session: {
+              roleId: "po-triage",
+              prompt: triagePrompt,
+              model: role.model,
+              effort: role.effort,
+              fallbackModel: role.fallbackModel,
+              allowedTools: PO_ALLOWED_TOOLS,
+              disallowedTools: PO_DISALLOWED_TOOLS,
+            },
             issue: issue.number,
-            outcome: result.outcome,
-            session: result.name,
-            reason: triageDegradeReason(result, issue.number),
-          }),
-          degradeMessage: (result) =>
-            `[sapwood:po] round ${roundId}: po-triage session failed twice (${result.outcome}) for issue ` +
-            `#${issue.number} — proceeding (pre-Ready, low stakes; the next round retries naturally): ` +
-            `${triageDegradeReason(result, issue.number)}`,
-          isValid: (result) => validateTriageOutput(result.resultText ?? "", issue.number).ok,
-        });
-        const validated: TriageValidation =
-          triageResult.outcome === "done"
-            ? validateTriageOutput(triageResult.resultText ?? "", issue.number)
-            : { ok: false, reason: `po-triage session failed twice (${triageResult.outcome})` };
+            now,
+            ...(deps.log !== undefined ? { log: deps.log } : {}),
+            degradeEvent: "triage-degraded",
+            degradePayload: (result) => ({
+              round_id: roundId,
+              issue: issue.number,
+              outcome: result.outcome,
+              session: result.name,
+              reason: triageDegradeReason(result, issue.number),
+            }),
+            degradeMessage: (result) =>
+              `[sapwood:po] round ${roundId}: po-triage session failed twice (${result.outcome}) for issue ` +
+              `#${issue.number} — proceeding (pre-Ready, low stakes; the next round retries naturally): ` +
+              `${triageDegradeReason(result, issue.number)}`,
+            isValid: (result) => validateTriageOutput(result.resultText ?? "", issue.number).ok,
+          });
+          validated =
+            triageResult.outcome === "done"
+              ? validateTriageOutput(triageResult.resultText ?? "", issue.number)
+              : { ok: false, reason: `po-triage session failed twice (${triageResult.outcome})` };
+          // #232: the concurrent-edit guard's precondition — the hash of the BODY this session
+          // actually read (captured HERE, at candidate-fetch/prompt-render content, before the
+          // write ever happens), not re-derived later when the live body may already differ.
+          expectedHash = contentVersion(issue.body ?? "");
+          attempt = triageAttempt;
+          bodyAlreadyCommitted = false; // a brand-new attempt can never already have a receipt
+        }
 
         if (!validated.ok) {
           // Malformed-twice/failed-twice already went through runSessionWithRetry's own
           // isValid-driven retry+degrade above (triage-degraded fired there) — nothing further
           // to do: no write, no success comment, the candidate re-matches next round.
-          alignSummaryTriaged.push({ issue: issue.number, drafted: false });
+          alignSummaryTriaged.push({ issue: number, drafted: false });
           continue;
         }
-        // The write is EARNED by validated output, never by the session's exit code alone —
-        // same "schema-valid is not the same as truthful" stance issue #110 requires, applied
-        // to the write itself rather than just the comment below.
-        await deps.forge.updateIssueBody(issue.number, validated.body);
+
+        // #232: write-ahead acceptance — the validated decision is durably recorded BEFORE any
+        // forge effect. Skipped on the resume path (`resumed` already IS that durable record).
+        if (!resumed) {
+          const persisted = persistTriageDecision(deps.state, roundId, number, attempt, validated.body, expectedHash, deps.log);
+          if (!persisted) {
+            // Fail-closed: the decision itself never landed durably, so no effect may start for
+            // it this pass (persistTriageDecision already recorded the honesty event + tick-
+            // error). The round is not wedged — this candidate simply re-matches next round.
+            alignSummaryTriaged.push({ issue: number, drafted: false });
+            continue;
+          }
+        }
+
+        // #232: guarded, resume-safe body write (updateIssueBodyIfUnchanged's own doc comment
+        // covers the resume-safety and stale-hash-refusal contracts). The write is EARNED by
+        // validated output, never by the session's exit code alone — same "schema-valid is not
+        // the same as truthful" stance issue #110 requires, applied to the write itself rather
+        // than just the comment below. Skipped entirely when a `triage-body-committed` receipt
+        // for THIS EXACT attempt already exists — the write already landed; re-running the guard
+        // would just re-read the (now matching) live body for no benefit.
+        if (!bodyAlreadyCommitted) {
+          const guard = await updateIssueBodyIfUnchanged(deps.forge, number, validated.body, expectedHash);
+          if (!guard.applied) {
+            // Concurrent edit detected: refuse the write, keep the old body, record a durable
+            // honesty event (terminal for this round — see triageProgress's `terminalAttempts`
+            // map), and degrade open. The candidate's body is untouched, so a FRESH round-start
+            // read (a new triage session against the NOW-current body) can retry it, never a
+            // blind overwrite.
+            try {
+              deps.state.appendEvent("triage-stale-hash-skipped", {
+                round_id: roundId,
+                issue: number,
+                phase: INPUT_MANIFEST_PHASE,
+                role: INPUT_MANIFEST_ROLE,
+                session: `po-triage:${number}`,
+                attempt,
+                expected_hash: expectedHash,
+                actual_hash: guard.actualHash,
+              });
+            } catch {
+              /* best-effort honesty event — the log line below still lands */
+            }
+            (deps.log ?? console.error)(
+              `[sapwood:po] round ${roundId}: triage write refused for #${number} — the issue body changed since ` +
+                `the session read it (concurrent edit); the old body is kept, retry next round from a fresh read`,
+            );
+            alignSummaryTriaged.push({ issue: number, drafted: false });
+            continue;
+          }
+          // #232: body-write receipt — so a crash strictly BETWEEN this write and the comment
+          // below is distinguishable, on a later crash-rerun this same round, from "never wrote"
+          // without relying on updateIssueBodyIfUnchanged's own content-equality check alone.
+          try {
+            deps.state.appendEvent("triage-body-committed", {
+              round_id: roundId,
+              issue: number,
+              phase: INPUT_MANIFEST_PHASE,
+              role: INPUT_MANIFEST_ROLE,
+              session: `po-triage:${number}`,
+              attempt,
+            });
+          } catch {
+            /* best-effort — updateIssueBodyIfUnchanged's own content-equality check still makes a
+               re-run's write idempotent even without this receipt */
+          }
+        }
+
         const planLanded = extractVerificationPlan(validated.body) != null;
-        alignSummaryTriaged.push({ issue: issue.number, drafted: planLanded });
+        alignSummaryTriaged.push({ issue: number, drafted: planLanded });
         if (planLanded) {
-          await deps.forge.addIssueComment(
-            issue.number,
-            `PO triage pass (round ${roundId}) drafted a plan into this issue's body.\n\n${mark}`,
-          );
+          // #232 F3 symmetry: `addIssueComment` is not idempotent — skip re-posting when a
+          // `triage-comment-posted` receipt for THIS EXACT attempt already exists (a crash
+          // strictly between the comment landing and `triage-effects-committed` below, on a
+          // later crash-rerun this same round).
+          if (triageJournal.commentPostedAttempts.get(number) !== attempt) {
+            await deps.forge.addIssueComment(number, `PO triage pass (round ${roundId}) drafted a plan into this issue's body.\n\n${mark}`);
+            try {
+              deps.state.appendEvent("triage-comment-posted", {
+                round_id: roundId,
+                issue: number,
+                phase: INPUT_MANIFEST_PHASE,
+                role: INPUT_MANIFEST_ROLE,
+                session: `po-triage:${number}`,
+                attempt,
+              });
+            } catch {
+              // Best-effort: if THIS append itself fails, a later crash-rerun (before
+              // triage-effects-committed lands) may repost the comment once more — the narrowed
+              // "this specific append also failed" tradeoff, same shape as
+              // applyProposalGovernance's own proposal-comment-posted append above.
+            }
+          }
         } else {
           // A schema-VALID draft that still left the body planless is its own degradation shape
           // (distinct from a malformed/failed session, which already degraded above) — the
           // pre-#110 "done but still planless" outcome, preserved: no success comment (it would
           // be a false audit-trail entry), a durable event, the candidate re-matches next round.
           try {
-            deps.state.appendEvent("triage-degraded", { round_id: roundId, issue: issue.number, outcome: "no-plan-after-draft" });
+            deps.state.appendEvent("triage-degraded", { round_id: roundId, issue: number, outcome: "no-plan-after-draft" });
           } catch {
             /* state write failed — the console line below still lands */
           }
           (deps.log ?? console.error)(
-            `[sapwood:po] round ${roundId}: triage left issue #${issue.number} still planless — ` +
+            `[sapwood:po] round ${roundId}: triage left issue #${number} still planless — ` +
               `no success comment posted; the candidate re-matches next round`,
           );
+        }
+        // #232: terminal receipt — this issue's decision is now fully resolved for THIS round
+        // (comment posted-or-skipped-via-receipt, or explicitly degraded above). Best-effort:
+        // losing it only costs a LATER crash-rerun this round the chance to skip straight past
+        // this issue (it would redo the resume-safe guard/write and comment steps, both of which
+        // are themselves receipt-guarded no-ops by this point).
+        try {
+          deps.state.appendEvent("triage-effects-committed", {
+            round_id: roundId,
+            issue: number,
+            phase: INPUT_MANIFEST_PHASE,
+            role: INPUT_MANIFEST_ROLE,
+            session: `po-triage:${number}`,
+            attempt,
+          });
+        } catch {
+          /* best-effort receipt — see the comment above */
         }
       }
 
