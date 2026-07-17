@@ -1406,14 +1406,18 @@ test("selectRoundPool: a Ready read failure degrades to an empty pool (logged, n
   assert.ok(logged.some((l) => l.includes("simulated forge outage")));
 });
 
-// ── #212 gate① F1: runPoolSelection — the PO's OWN pool-selection session ──────────────────────
+// ── #212/#233 gate① F1: runPoolSelection — the PO's OWN, now OPT-IN, pool-selection session ────
 
 /** A po-pool session's structured output: the selected issue numbers only, no BODY block. */
 const poolResultText = (selected: number[]): string => sapwoodResult({ selected });
 
-test("runPoolSelection: roles.po.enabled — a fake runner's selection is validated and the engine applies labels to EXACTLY that subset, never the full candidate set", async () => {
+test("runPoolSelection: roles.po.poolSelection=true — a fake runner's selection is validated and the engine applies labels to EXACTLY that subset, never the full candidate set", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1.5 } }); // cap = 3
+  const cfg = mkCfg({
+    roles: { po: { poolSelection: true } },
+    lanes: { max: 3, roundDispatchCap: 2 },
+    round: { poolFactor: 1.5 },
+  }); // cap = 3
   forge.ready = [1, 2, 3, 4, 5].map((n) => mkReady(n, 3));
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1, 3]))]);
   const state = new State(":memory:");
@@ -1440,7 +1444,7 @@ test("runPoolSelection: roles.po.enabled — a fake runner's selection is valida
 
 test("runPoolSelection: an out-of-bounds selection (an issue number outside the candidate list) is invalid, retried once, then degrades OPEN to the full deterministic candidate set", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
   forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(999, 3)]; // #999 past the cap, never a candidate
   const badSelection = poolResultText([1, 999]); // #999 is not in the candidate list
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", badSelection), doneResult("role-po-pool-2", badSelection)]);
@@ -1464,7 +1468,7 @@ test("runPoolSelection: an out-of-bounds selection (an issue number outside the 
 
 test("runPoolSelection: an over-cap selection (more issues than the candidate list itself) is invalid the same way", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
   forge.ready = [mkReady(1, 3), mkReady(2, 3)];
   // Candidates are exactly [1, 2] (cap 2) — a session claiming BOTH plus a duplicate exceeds
   // what schema+bound validation allows (len > cap after a would-be dedupe is still invalid;
@@ -1481,18 +1485,54 @@ test("runPoolSelection: an over-cap selection (more issues than the candidate li
   );
 });
 
-test("runPoolSelection: roles.po.enabled=false -> the deterministic path directly, no session dispatched at all", async () => {
+test("runPoolSelection: default config (roles.po.poolSelection unset -> false) -> the deterministic path directly, no session dispatched at all, even with roles.po.enabled left at its true default (#233)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  assert.equal(cfg.roles.po.poolSelection, false, "sanity: the #233 default");
+  assert.equal(cfg.roles.po.enabled, true, "sanity: align/triage stay on by default — irrelevant to pool selection now");
+  forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 0, "poolSelection is off by default — no session, not even an attempt");
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+    "the full deterministic top-cap candidate set — the #233 default MAIN path, not a fallback",
+  );
+});
+
+test("runPoolSelection: roles.po.enabled=false -> pool selection is UNAFFECTED — still the deterministic path (poolSelection defaults false too)", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { po: { enabled: false } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
   forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
   const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
-  assert.equal(runner.calls.length, 0, "the PO role is disabled — no session, not even an attempt");
+  assert.equal(runner.calls.length, 0, "poolSelection defaults false regardless of roles.po.enabled — no session");
   assert.deepEqual(
     selected.map((i) => i.number).sort((a, b) => a - b),
     [1, 2],
-    "the full deterministic top-cap candidate set — the documented AC7 fallback",
+    "the full deterministic top-cap candidate set",
+  );
+});
+
+test("runPoolSelection: roles.po.enabled=false AND roles.po.poolSelection=true -> the session STILL runs (#233 decoupling — pool selection no longer depends on roles.po.enabled at all)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({
+    roles: { po: { enabled: false, poolSelection: true } },
+    lanes: { max: 3, roundDispatchCap: 2 },
+    round: { poolFactor: 1 },
+  });
+  forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 1, "poolSelection=true dispatches a session even with align/triage (roles.po.enabled) off");
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+    "the session's validated (proper subset) selection, not the full candidate set",
   );
 });
 
@@ -1504,6 +1544,17 @@ test("runPoolSelection: zero Ready candidates -> no session dispatched (nothing 
   const state = new State(":memory:");
   const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
   assert.equal(runner.calls.length, 0);
+  assert.deepEqual(selected, []);
+});
+
+test("runPoolSelection: roles.po.poolSelection=true with zero Ready candidates -> still no session dispatched (nothing to choose from), empty selection", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } } });
+  forge.ready = [];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 0, "zero candidates short-circuits before a session would ever be dispatched");
   assert.deepEqual(selected, []);
 });
 
@@ -1555,9 +1606,9 @@ test("runPoolSelection (gate② r2): crash window — the event is persisted but
   );
 });
 
-test("runPoolSelection (gate② r2): residual healing (session path) — an open issue carrying a STALE pool label that is NOT part of this round's target has it removed during selection", async () => {
+test("runPoolSelection (gate② r2): residual healing (session path, roles.po.poolSelection=true) — an open issue carrying a STALE pool label that is NOT part of this round's target has it removed during selection", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } }); // cap = 1
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } }); // cap = 1
   forge.ready = [mkReady(1, 3)];
   forge.backlogIssues = [
     { number: 1, title: "candidate", labels: [] },
@@ -1566,6 +1617,7 @@ test("runPoolSelection (gate② r2): residual healing (session path) — an open
   const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
   const state = new State(":memory:");
   const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 1 });
+  assert.equal(runner.calls.length, 1, "poolSelection=true actually exercises the session path this test is named for");
   assert.deepEqual(
     selected.map((i) => i.number),
     [1],
@@ -1573,7 +1625,7 @@ test("runPoolSelection (gate② r2): residual healing (session path) — an open
   assert.deepEqual(forge.removeLabelCalls, [[99, cfg.labels.roundPool]], "the stray residual's label was removed, never left dangling");
 });
 
-test("runPoolSelection (gate② r2): residual healing on the DISABLED path too — roles.po.enabled=false still clears a stray pool label from a non-candidate open issue", async () => {
+test("runPoolSelection (gate② r2): residual healing on the DEFAULT deterministic path too — roles.po.poolSelection=false (independent of roles.po.enabled) still clears a stray pool label from a non-candidate open issue", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({ roles: { po: { enabled: false } }, lanes: { max: 3, roundDispatchCap: 1 }, round: { poolFactor: 1 } });
   forge.ready = [mkReady(1, 3)];
@@ -1588,7 +1640,7 @@ test("runPoolSelection (gate② r2): residual healing on the DISABLED path too �
     selected.map((i) => i.number),
     [1],
   );
-  assert.equal(runner.calls.length, 0, "the PO role is disabled — no session, ever");
+  assert.equal(runner.calls.length, 0, "poolSelection defaults false — no session, ever, regardless of roles.po.enabled");
   assert.deepEqual(forge.removeLabelCalls, [[99, cfg.labels.roundPool]]);
 });
 
@@ -1666,7 +1718,7 @@ test("runPoolSelection (gate② r3 finding 3): two pool-selected events for the 
 
 test("runPoolSelection (gate② r3 finding 3): the LAST pool-selected event for this round is malformed — treated as absent (fresh compute), never a throw; growth stops at one extra append", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
   forge.ready = [mkReady(5, 3)];
   const state = new State(":memory:");
   state.appendEvent("pool-selected", { round_id: 1, issues: [9] }); // an earlier, well-formed event

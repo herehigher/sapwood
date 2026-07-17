@@ -169,9 +169,23 @@ reviewer:
 #                        # no-ops every round. WARNING: with the PO off, plan-less issues are
 #                        # never triaged into gate⓪ — they need a verification plan from a
 #                        # human/external process instead. #212: round-pool selection is the
-#                        # ONE exception — it still runs every round (deterministically,
-#                        # engine-computed, no session) even with this false, since the
-#                        # selection bound must not depend on an optional role.
+#                        # ONE exception — it still runs every round (deterministically by
+#                        # default, or via the poolSelection session below) regardless of this
+#                        # flag, since the selection bound must not depend on an optional role.
+#     poolSelection: false # #233: opt-in experiment, DECOUPLED from `enabled` above. Default
+#                        # false = the round-pool is the deterministic top-cap Ready set every
+#                        # round (poolFactor below), no session spawned. `true` restores the
+#                        # #212 session (poolPromptFile) that picks a SUBSET of the engine's
+#                        # candidate digest. Benchmark finding: controlled testing across model
+#                        # tiers showed this session selects EVERY candidate at every tier — a
+#                        # bare title/number digest gives it no evidentiary basis to narrow the
+#                        # reservoir, so it just pays for a session to reproduce the same
+#                        # deterministic fallback. `poolFactor` deliberately over-selects to
+#                        # absorb architect/gate⓪ attrition AFTER selection; a session that DOES
+#                        # narrow the reservoir pre-gates risks underfilling the round instead.
+#                        # If you re-run this experiment, isolate worktree/code reads for that
+#                        # run — production sessions may read the repo, but that is an
+#                        # uncontrolled signal for THIS experiment (titles/numbers only).
 #   planReviewer:
 #     # promptFile: prompts/my-plan-reviewer.md
 #     #                   #74-style override; relative paths resolve against THIS config file's
