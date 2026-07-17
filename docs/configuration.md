@@ -476,6 +476,12 @@ decision no shipped config touches yet — no built-in role reads this config in
 (the proxy module exists, wired, and tested; consumer adoption is later, separately
 tracked work).
 
+**Honest state:** `enabled: true` is currently *inert* on its own — no engine startup
+path constructs a proxy server or reads this flag yet. `peripheral.ts`'s `RoleRunner`
+only mints a proxy when a caller explicitly supplies a `proxy` opt, and nothing does in
+this PR. Consumer adoption + the shadow-server startup wiring are tracked as follow-up
+work (feeds [#244](https://github.com/herehigher/sapwood/issues/244)).
+
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Master switch — off means RoleRunner never mints a proxy server for a session. |

@@ -736,20 +736,32 @@ export class GithubForge implements IForge {
       "-F",
       `cap=${cap}`,
     ]);
-    return parseIssueRelations(out, cap);
+    // #234 F2 (PR #252 review, P1, Codex #1): pass this forge's OWN owner/repo as the
+    // filter — see parseIssueRelations' doc for why a foreign-repo related node must never
+    // reach a session (a cross-referencing issue/PR from a DIFFERENT repo the engine's token
+    // can read would otherwise leak that repo's title/labels through this channel).
+    return parseIssueRelations(out, cap, `${this.cfg.board.owner}/${this.repo()}`);
   }
 
   async searchIssues(query: string, cap: number): Promise<IssueSearchResult[]> {
+    // #234 F1 (PR #252 review, P1, reproduced live): `query` is CALLER-CONTROLLED (a role
+    // session's tool argument) and `gh`'s pflag parser treats ANY `--`-prefixed argv token as a
+    // flag regardless of its position in the array — a query of `--repo=other/repo` silently
+    // escaped the forced repo scope (`--repo` is repeatable; the later, attacker-supplied value
+    // won). Every FLAG must precede the query, and the query itself must follow a bare `--`
+    // terminator so pflag treats it as a positional argument no matter what it starts with —
+    // this is the actual scope enforcement, not merely an argument-ordering nicety.
     const out = await this.gh([
       "search",
       "issues",
-      query,
       "--repo",
       `${this.cfg.board.owner}/${this.repo()}`,
       "--json",
       "number,title,state,labels,updatedAt",
       "--limit",
       String(cap),
+      "--",
+      query,
     ]);
     return parseSearchIssues(out);
   }
@@ -1375,13 +1387,19 @@ export function parseIssueMeta(json: string): IssueMeta {
  *  never silently dropped. `timelineItems` covers both directions GitHub tracks natively:
  *  CROSS_REFERENCED_EVENT (another issue/PR's body/comment mentioned this one) and
  *  CONNECTED_EVENT (an explicit "linked issue" connection, distinct from the closing-PR case
- *  above). */
+ *  above). `repository { nameWithOwner }` on every related node (#234 F2, PR #252 review, P1,
+ *  Codex #1 — verified live, herehigher/sapwood#217): a cross-reference can legitimately
+ *  originate from a DIFFERENT repository the engine's `gh` token happens to be able to read
+ *  (any repo the operator has access to) — without this field, parseIssueRelations has no way
+ *  to tell a same-repo relation from a foreign one, and that foreign repo's issue/PR title +
+ *  labels would leak to a credential-free session through this channel (and, via issue_details'
+ *  default view, even further). This field is the filter's ONLY input; see parseIssueRelations. */
 export const ISSUE_RELATIONS_QUERY = `
 query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
   repository(owner: $owner, name: $repo) {
     issue(number: $number) {
       closedByPullRequestsReferences(first: $cap, includeClosedPrs: true) {
-        nodes { number title state labels(first: 20) { nodes { name } } }
+        nodes { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
       }
       timelineItems(first: $cap, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
         nodes {
@@ -1389,15 +1407,15 @@ query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
           ... on CrossReferencedEvent {
             source {
               __typename
-              ... on Issue { number title state labels(first: 20) { nodes { name } } }
-              ... on PullRequest { number title state labels(first: 20) { nodes { name } } }
+              ... on Issue { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
+              ... on PullRequest { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
             }
           }
           ... on ConnectedEvent {
             subject {
               __typename
-              ... on Issue { number title state labels(first: 20) { nodes { name } } }
-              ... on PullRequest { number title state labels(first: 20) { nodes { name } } }
+              ... on Issue { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
+              ... on PullRequest { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
             }
           }
         }
@@ -1406,36 +1424,47 @@ query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
   }
 }`;
 
-/** Pure parse of the ISSUE_RELATIONS_QUERY response. Malformed/missing fields degrade to empty
- *  connections — never a throw (same tolerance as every other GraphQL parser in this file); a
- *  genuinely failed gh call still throws upstream of this (JSON.parse on non-JSON stderr text). */
-export function parseIssueRelations(json: string, cap: number): IssueRelations {
+/** Pure parse of the ISSUE_RELATIONS_QUERY response. `expectedRepoFullName` (`owner/repo`) is
+ *  REQUIRED and enforced: any related node (linked PR OR cross-reference/connection, whichever
+ *  shape) whose `repository.nameWithOwner` does not match it — including a node with NO
+ *  repository field at all, a malformed/partial response — is DROPPED, never returned (#234 F2,
+ *  PR #252 review, P1, Codex #1: fail-closed on ambiguity, same stance as this file's other
+ *  scope-boundary parsers, e.g. selectReadyIssues' own repo filter). Malformed/missing fields
+ *  beyond that degrade to empty connections — never a throw (same tolerance as every other
+ *  GraphQL parser in this file); a genuinely failed gh call still throws upstream of this
+ *  (JSON.parse on non-JSON stderr text). */
+export function parseIssueRelations(json: string, cap: number, expectedRepoFullName: string): IssueRelations {
   type LabelNode = { labels?: { nodes?: { name: string }[] } };
-  type RefNode = { __typename?: string; number?: number; title?: string; state?: string } & LabelNode;
+  type RepoNode = { repository?: { nameWithOwner?: string } };
+  type RefNode = { __typename?: string; number?: number; title?: string; state?: string } & LabelNode & RepoNode;
   type TimelineNode = { __typename?: string; source?: RefNode; subject?: RefNode };
   const labelsOf = (n: LabelNode): string[] => (n.labels?.nodes ?? []).map((l) => l.name);
+  const sameRepo = (n: RepoNode): boolean => n.repository?.nameWithOwner === expectedRepoFullName;
   const d = JSON.parse(json) as {
     data?: {
       repository?: {
         issue?: {
-          closedByPullRequestsReferences?: { nodes?: ({ number: number; title: string; state: string } & LabelNode)[] };
+          closedByPullRequestsReferences?: { nodes?: ({ number: number; title: string; state: string } & LabelNode & RepoNode)[] };
           timelineItems?: { nodes?: TimelineNode[] };
         };
       };
     };
   };
   const issue = d.data?.repository?.issue;
-  const linkedPRs: RelatedRef[] = (issue?.closedByPullRequestsReferences?.nodes ?? []).map((n) => ({
+  const rawLinkedPRs = issue?.closedByPullRequestsReferences?.nodes ?? [];
+  const linkedPRs: RelatedRef[] = rawLinkedPRs.filter(sameRepo).map((n) => ({
     number: n.number,
     title: n.title,
     state: n.state,
     labels: labelsOf(n),
     kind: "pr" as const,
   }));
+  const rawTimelineNodes = issue?.timelineItems?.nodes ?? [];
   const crossReferences: RelatedRef[] = [];
-  for (const n of issue?.timelineItems?.nodes ?? []) {
+  for (const n of rawTimelineNodes) {
     const ref = n.source ?? n.subject;
     if (!ref || ref.number == null) continue;
+    if (!sameRepo(ref)) continue; // #234 F2: a foreign-repo cross-reference is never surfaced
     crossReferences.push({
       number: ref.number,
       title: ref.title ?? "",
@@ -1444,7 +1473,11 @@ export function parseIssueRelations(json: string, cap: number): IssueRelations {
       kind: ref.__typename === "PullRequest" ? "pr" : "issue",
     });
   }
-  return { linkedPRs, crossReferences, truncated: linkedPRs.length >= cap || crossReferences.length >= cap };
+  // Truncation is judged against the RAW (pre-filter) node counts — GraphQL's `first: cap`
+  // hitting the cap means more items MAY exist beyond the fetched window, regardless of how
+  // many of the fetched ones were then dropped as foreign-repo (#234 F2): under-reporting
+  // truncation because a filter shrank the visible count would be the wrong fail direction.
+  return { linkedPRs, crossReferences, truncated: rawLinkedPRs.length >= cap || rawTimelineNodes.length >= cap };
 }
 
 /** Pure parse of `gh search issues ... --json number,title,state,labels,updatedAt`. */

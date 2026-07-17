@@ -1344,6 +1344,38 @@ test("run: a proxy mint FAILURE is non-fatal — the session still runs to compl
   }
 });
 
+test("run: #234 F5 (PR #252 review, P1, Codex #6) — a SPAWN FAILURE after a successful proxy mint still tears the proxy down (no leaked listener/token) via the try/finally wrapping every outcome, not just success/timeout", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    // A nonexistent claude binary path -> spawnClaudeSession's onError fires -> run() throws
+    // "role session spawn failed" BEFORE ever reaching the (old, now-removed) inline teardown
+    // block that used to sit after exitPromise resolved.
+    const runner = mkRunner(dir, join(dir, "does-not-exist-claude"));
+    const { calls, handle } = fakeProxyHandle();
+    await assert.rejects(
+      () =>
+        runner.run({
+          roleId: "architect",
+          prompt: "p",
+          model: "sonnet",
+          effort: "medium",
+          fallbackModel: "sonnet",
+          proxy: {
+            mint: async () => {
+              calls.minted++;
+              return handle as unknown as Awaited<ReturnType<NonNullable<Parameters<typeof runner.run>[0]["proxy"]>["mint"]>>;
+            },
+          },
+        }),
+      /spawn failed/i,
+    );
+    assert.equal(calls.minted, 1);
+    assert.equal(calls.stopped, 1, "the proxy is torn down even though run() THREW rather than returned");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: #218 regression, extended to a proxy-attached session — the spawn env stays forge/git credential-free, and the proxy's bearer token travels ONLY via --mcp-config, never the env", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   const poisoned = {

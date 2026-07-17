@@ -426,7 +426,12 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // budget are recorded per call (not just the schema version) so a later cap/config change never
   // makes an old row's enforcement ambiguous. `response_json`/`content_hash` are NULL until the
   // fetch step lands — an 'intent'-only row with a NULL response is exactly the shape a crash
-  // between intent-persist and fetch leaves behind, and is expected, not corrupt.
+  // between intent-persist and fetch leaves behind, and is expected, not corrupt. `response_bytes`
+  // (#234 F4, PR #252 review, P1, Codex #4) is the caller-computed `Buffer.byteLength` (UTF-8) of
+  // `response_json` at persist time — stored explicitly rather than derived via SQLite's own
+  // `LENGTH()`, which counts TEXT-storage-class values in CHARACTERS, not bytes; a multibyte
+  // (e.g. emoji-bearing) response would otherwise under-count against `proxy.budget.
+  // maxBytesPerSession`, silently admitting more actual bytes than configured.
   //
   // `forge_proxy_bundles` is a SEPARATE, independently keyed table (own primary key: the content
   // hash) — a frozen evidence bundle (default view + exact responses) persisted once per accepted
@@ -459,6 +464,7 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         counts_json             TEXT,
         truncated               INTEGER NOT NULL DEFAULT 0,
         response_json           TEXT,
+        response_bytes          INTEGER,
         content_hash            TEXT,
         error                   TEXT,
         timed_out               INTEGER NOT NULL DEFAULT 0,
@@ -815,6 +821,9 @@ export interface ForgeProxyJournalRow {
   countsCanonical: string | null;
   truncated: boolean;
   responseCanonical: string | null;
+  /** UTF-8 byte length of `responseCanonical` (#234 F4) — null until the response is persisted,
+   *  same null-until-fetched convention as `responseCanonical`/`contentHash`. */
+  responseBytes: number | null;
   contentHash: string | null;
   error: string | null;
   timedOut: boolean;
@@ -1792,17 +1801,21 @@ export class State {
   /** Write-ahead step 2 (success path): persist the canonical response + hash. The proxy server
    *  MUST deliver nothing to the session until this call returns — a throw here (disk full,
    *  corrupt DB handle, ...) must reach the caller as a typed tool error, never a silently
-   *  undelivered-but-unrecorded response (issue #234's Journal contract). */
+   *  undelivered-but-unrecorded response (issue #234's Journal contract). `response_bytes` is
+   *  computed HERE, from `Buffer.byteLength` (UTF-8) — the one place this column's value is ever
+   *  derived, so it can never disagree with itself across call sites (#234 F4, PR #252 review). */
   recordForgeProxyJournalResponse(id: number, r: ForgeProxyJournalResponse): void {
     this.db
       .prepare(
         `UPDATE forge_proxy_journal SET
-           status = 'fetched', response_json = ?, content_hash = ?, upstream_ids_json = ?,
-           upstream_updated_at = ?, counts_json = ?, truncated = ?, fetched_at = ?
+           status = 'fetched', response_json = ?, response_bytes = ?, content_hash = ?,
+           upstream_ids_json = ?, upstream_updated_at = ?, counts_json = ?, truncated = ?,
+           fetched_at = ?
          WHERE id = ?`,
       )
       .run(
         r.responseCanonical,
+        Buffer.byteLength(r.responseCanonical, "utf8"),
         r.contentHash,
         r.upstreamIds ?? null,
         r.upstreamUpdatedAt ?? null,
@@ -1853,16 +1866,26 @@ export class State {
    *  budget-exhaustion check meters against this (issue #234's Budget: "meter call count +
    *  response bytes against the round ledger machinery" — this table IS that ledger for the
    *  proxy, same SUM-over-a-durable-table shape as spend_ledger's dailySpendUsd/roundSpendSince).
-   *  Counts only 'fetched'/'delivered' rows (a call that errored or is still mid-flight consumed
-   *  no response bytes and — for 'error' — still counts toward the CALL budget, since the
-   *  upstream request was actually made; an 'intent'-only row from a crash mid-call is NOT
-   *  counted, since neither a call nor bytes were confirmed to have completed). */
+   *
+   *  CALLS count EVERY row regardless of status, including 'intent' (#234 F3, PR #252 review,
+   *  P1, Codex #2 — reserve-on-intent): journal.ts's runJournaledCall computes remaining budget,
+   *  the next seq, and appendForgeProxyJournalIntent in one synchronous stretch with no `await`
+   *  between them, so counting 'intent' here closes the concurrent-calls race a
+   *  fetched/delivered/error-only count left open (two overlapping tools/call requests could
+   *  otherwise both read the same pre-fetch remaining-calls value and both be admitted). A
+   *  crashed-before-fetch intent then conservatively consumes one slot forever for that session
+   *  attempt — the safe, fail-toward-under-serving direction, not a bug.
+   *
+   *  BYTES sum `response_bytes` (#234 F4 — explicit UTF-8 byte length, NOT `LENGTH(response_json)`,
+   *  which SQLite counts in characters and would under-count a multibyte response) for
+   *  'fetched'/'delivered' rows only — an 'error'/'intent' row has no persisted response to
+   *  count bytes for. */
   forgeProxyUsage(identity: ForgeProxyIdentity): { calls: number; bytes: number } {
     const row = this.db
       .prepare(
         `SELECT
-           COUNT(*) FILTER (WHERE status IN ('fetched', 'delivered', 'error')) AS calls,
-           COALESCE(SUM(LENGTH(response_json)) FILTER (WHERE status IN ('fetched', 'delivered')), 0) AS bytes
+           COUNT(*) AS calls,
+           COALESCE(SUM(response_bytes) FILTER (WHERE status IN ('fetched', 'delivered')), 0) AS bytes
          FROM forge_proxy_journal
          WHERE round_id = ? AND phase = ? AND role = ? AND session = ? AND attempt = ?`,
       )
@@ -1949,6 +1972,7 @@ interface RawForgeProxyJournalRow {
   counts_json: string | null;
   truncated: number;
   response_json: string | null;
+  response_bytes: number | null;
   content_hash: string | null;
   error: string | null;
   timed_out: number;
@@ -1975,6 +1999,7 @@ function mapForgeProxyJournalRow(r: RawForgeProxyJournalRow): ForgeProxyJournalR
     countsCanonical: r.counts_json,
     truncated: r.truncated === 1,
     responseCanonical: r.response_json,
+    responseBytes: r.response_bytes,
     contentHash: r.content_hash,
     error: r.error,
     timedOut: r.timed_out === 1,

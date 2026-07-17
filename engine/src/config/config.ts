@@ -456,6 +456,12 @@ const Roles = z
 // result must never be applied. Caps/budget are the user-tunable-in-config values this repo's
 // convention requires for any size/cost bound (never hardcoded — see e.g. worker.budgetUsdSoft's
 // own doc).
+//
+// HONEST STATE (PR #252 review): `enabled: true` is currently INERT on its own — no engine
+// startup path constructs a proxy server or reads this flag yet (RoleRunner only mints one when
+// a caller explicitly supplies a `proxy` opt, and nothing does in this PR). Flipping this flag
+// alone changes no runtime behavior; consumer adoption + the shadow-server startup wiring are
+// tracked as follow-up work (feeds #244).
 const ProxyConfig = z
   .object({
     enabled: z.boolean().default(false),

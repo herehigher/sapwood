@@ -1284,13 +1284,17 @@ test("getIssueMeta: scoped to owner/repo, requests the right --json fields", asy
   assert.ok(seen[0]!.some((a) => a === "number,title,state,labels,updatedAt,milestone"));
 });
 
-// Real response shape (verified live, 2026-07-17, herehigher/sapwood#217 via gh api graphql),
-// with labels added per the query this module actually sends.
+// Real response shape (verified live, 2026-07-17, herehigher/sapwood#217 via gh api graphql,
+// re-verified with repository{nameWithOwner} added for #234 F2), with labels + repository added
+// per the query this module actually sends.
+const OWN_REPO = "herehigher/sapwood";
 const RELATIONS_JSON = JSON.stringify({
   data: {
     repository: {
       issue: {
-        closedByPullRequestsReferences: { nodes: [{ number: 220, title: "fix", state: "MERGED", labels: { nodes: [] } }] },
+        closedByPullRequestsReferences: {
+          nodes: [{ number: 220, title: "fix", state: "MERGED", repository: { nameWithOwner: OWN_REPO }, labels: { nodes: [] } }],
+        },
         timelineItems: {
           nodes: [
             {
@@ -1300,16 +1304,31 @@ const RELATIONS_JSON = JSON.stringify({
                 number: 219,
                 title: "security model",
                 state: "CLOSED",
+                repository: { nameWithOwner: OWN_REPO },
                 labels: { nodes: [{ name: "type:docs" }] },
               },
             },
             {
               __typename: "CrossReferencedEvent",
-              source: { __typename: "PullRequest", number: 220, title: "fix", state: "MERGED", labels: { nodes: [] } },
+              source: {
+                __typename: "PullRequest",
+                number: 220,
+                title: "fix",
+                state: "MERGED",
+                repository: { nameWithOwner: OWN_REPO },
+                labels: { nodes: [] },
+              },
             },
             {
               __typename: "ConnectedEvent",
-              subject: { __typename: "Issue", number: 238, title: "doctrine", state: "OPEN", labels: { nodes: [{ name: "type:docs" }] } },
+              subject: {
+                __typename: "Issue",
+                number: 238,
+                title: "doctrine",
+                state: "OPEN",
+                repository: { nameWithOwner: OWN_REPO },
+                labels: { nodes: [{ name: "type:docs" }] },
+              },
             },
           ],
         },
@@ -1319,7 +1338,7 @@ const RELATIONS_JSON = JSON.stringify({
 });
 
 test("parseIssueRelations: parses linked PRs + cross-references/connections (both source and subject shapes), with labels", () => {
-  const r = parseIssueRelations(RELATIONS_JSON, 10);
+  const r = parseIssueRelations(RELATIONS_JSON, 10, OWN_REPO);
   assert.deepEqual(r.linkedPRs, [{ number: 220, title: "fix", state: "MERGED", labels: [], kind: "pr" }]);
   assert.equal(r.crossReferences.length, 3);
   assert.deepEqual(r.crossReferences[0], { number: 219, title: "security model", state: "CLOSED", labels: ["type:docs"], kind: "issue" });
@@ -1334,8 +1353,8 @@ test("parseIssueRelations: hitting the cap exactly on either connection sets tru
         issue: {
           closedByPullRequestsReferences: {
             nodes: [
-              { number: 1, title: "a", state: "OPEN", labels: { nodes: [] } },
-              { number: 2, title: "b", state: "OPEN", labels: { nodes: [] } },
+              { number: 1, title: "a", state: "OPEN", repository: { nameWithOwner: OWN_REPO }, labels: { nodes: [] } },
+              { number: 2, title: "b", state: "OPEN", repository: { nameWithOwner: OWN_REPO }, labels: { nodes: [] } },
             ],
           },
           timelineItems: { nodes: [] },
@@ -1343,11 +1362,134 @@ test("parseIssueRelations: hitting the cap exactly on either connection sets tru
       },
     },
   });
-  assert.equal(parseIssueRelations(cap2, 2).truncated, true);
+  assert.equal(parseIssueRelations(cap2, 2, OWN_REPO).truncated, true);
 });
 
 test("parseIssueRelations: malformed/missing fields degrade to empty connections, never throw", () => {
-  assert.deepEqual(parseIssueRelations(JSON.stringify({ data: {} }), 10), { linkedPRs: [], crossReferences: [], truncated: false });
+  assert.deepEqual(parseIssueRelations(JSON.stringify({ data: {} }), 10, OWN_REPO), {
+    linkedPRs: [],
+    crossReferences: [],
+    truncated: false,
+  });
+});
+
+// ── #234 F2 (PR #252 review, P1, Codex #1): foreign-repo relations must never be disclosed ───
+
+test("parseIssueRelations: a linked PR from a FOREIGN repo (repository.nameWithOwner mismatch) is dropped, never returned", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        issue: {
+          closedByPullRequestsReferences: {
+            nodes: [
+              {
+                number: 99,
+                title: "a foreign fix",
+                state: "MERGED",
+                repository: { nameWithOwner: "someone-else/private-repo" },
+                labels: { nodes: [] },
+              },
+              { number: 220, title: "our fix", state: "MERGED", repository: { nameWithOwner: OWN_REPO }, labels: { nodes: [] } },
+            ],
+          },
+          timelineItems: { nodes: [] },
+        },
+      },
+    },
+  });
+  const r = parseIssueRelations(json, 10, OWN_REPO);
+  assert.deepEqual(r.linkedPRs, [{ number: 220, title: "our fix", state: "MERGED", labels: [], kind: "pr" }]);
+  assert.ok(!r.linkedPRs.some((p) => p.number === 99), "the foreign-repo PR's title/labels must never leak through this channel");
+});
+
+test("parseIssueRelations: a foreign-repo cross-reference (both an Issue source and a PullRequest source shape) is dropped, never returned", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        issue: {
+          closedByPullRequestsReferences: { nodes: [] },
+          timelineItems: {
+            nodes: [
+              {
+                __typename: "CrossReferencedEvent",
+                source: {
+                  __typename: "Issue",
+                  number: 1,
+                  title: "a private repo's secret issue title",
+                  state: "OPEN",
+                  repository: { nameWithOwner: "someone-else/private-repo" },
+                  labels: { nodes: [{ name: "confidential" }] },
+                },
+              },
+              {
+                __typename: "CrossReferencedEvent",
+                source: {
+                  __typename: "PullRequest",
+                  number: 2,
+                  title: "a private repo's secret PR title",
+                  state: "OPEN",
+                  repository: { nameWithOwner: "someone-else/private-repo" },
+                  labels: { nodes: [] },
+                },
+              },
+              {
+                __typename: "ConnectedEvent",
+                subject: {
+                  __typename: "Issue",
+                  number: 219,
+                  title: "our own issue",
+                  state: "CLOSED",
+                  repository: { nameWithOwner: OWN_REPO },
+                  labels: { nodes: [] },
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  const r = parseIssueRelations(json, 10, OWN_REPO);
+  assert.deepEqual(r.crossReferences, [{ number: 219, title: "our own issue", state: "CLOSED", labels: [], kind: "issue" }]);
+  assert.ok(
+    !r.crossReferences.some((c) => c.number === 1 || c.number === 2),
+    "neither the foreign issue nor the foreign PR's title/labels may leak through this channel",
+  );
+});
+
+test("parseIssueRelations: a node with NO repository field at all is treated as foreign (fail-closed, never assumed same-repo)", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        issue: {
+          closedByPullRequestsReferences: { nodes: [{ number: 1, title: "no repo field", state: "OPEN", labels: { nodes: [] } }] },
+          timelineItems: { nodes: [] },
+        },
+      },
+    },
+  });
+  assert.deepEqual(parseIssueRelations(json, 10, OWN_REPO).linkedPRs, []);
+});
+
+test("parseIssueRelations: truncation is judged on the RAW (pre-filter) node count, never under-reported because a filter shrank the visible count", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        issue: {
+          closedByPullRequestsReferences: {
+            nodes: [
+              { number: 1, title: "foreign", state: "OPEN", repository: { nameWithOwner: "other/repo" }, labels: { nodes: [] } },
+              { number: 2, title: "foreign too", state: "OPEN", repository: { nameWithOwner: "other/repo" }, labels: { nodes: [] } },
+            ],
+          },
+          timelineItems: { nodes: [] },
+        },
+      },
+    },
+  });
+  const r = parseIssueRelations(json, 2, OWN_REPO);
+  assert.deepEqual(r.linkedPRs, [], "both raw nodes were foreign and filtered out");
+  assert.equal(r.truncated, true, "2 raw nodes hit the cap of 2, so truncation must still be flagged even though 0 survived the filter");
 });
 
 test("getIssueRelations: passes owner/repo/number/cap through the query variables", async () => {
@@ -1367,6 +1509,15 @@ test("getIssueRelations: passes owner/repo/number/cap through the query variable
   assert.ok(args.includes("cap=10"));
 });
 
+test("getIssueRelations: threads THIS forge's own owner/repo (never the caller's) as the foreign-repo filter — a fixture scoped to a DIFFERENT repo returns nothing", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => RELATIONS_JSON; // scoped to herehigher/sapwood
+  const relations = await forge.getIssueRelations(217, 10);
+  assert.deepEqual(relations.linkedPRs, [], "RELATIONS_JSON's nodes belong to a different repo than o/r — none may surface");
+  assert.deepEqual(relations.crossReferences, []);
+});
+
 test("parseSearchIssues: parses gh search issues --json output", () => {
   const json = JSON.stringify([
     { number: 244, title: "extends #234", state: "open", labels: [{ name: "type:feature" }], updatedAt: "2026-07-17T06:43:00Z" },
@@ -1376,7 +1527,7 @@ test("parseSearchIssues: parses gh search issues --json output", () => {
   ]);
 });
 
-test("searchIssues: scopes the query to --repo owner/repo (never caller-controlled) and applies --limit cap", async () => {
+test("searchIssues: scopes the query to --repo owner/repo (never caller-controlled) and applies --limit cap; every flag precedes a `--` terminator, with the query strictly after it", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   const seen: string[][] = [];
@@ -1387,7 +1538,39 @@ test("searchIssues: scopes the query to --repo owner/repo (never caller-controll
   await forge.searchIssues("is:open flaky", 5);
   const args = seen[0]!;
   assert.deepEqual(args.slice(0, 2), ["search", "issues"]);
-  assert.ok(args.includes("is:open flaky"));
   assert.ok(args.includes("--repo") && args.includes("o/r"));
   assert.ok(args.includes("--limit") && args.includes("5"));
+  const termIdx = args.indexOf("--");
+  assert.ok(termIdx !== -1, "a `--` terminator must separate flags from the query");
+  assert.deepEqual(args.slice(termIdx + 1), ["is:open flaky"], "the query is the ONLY token after `--`");
+  assert.ok(!args.slice(0, termIdx).includes("is:open flaky"), "the query never appears before the terminator");
+});
+
+test("searchIssues: an ADVERSARIAL query shaped like a flag (--repo=x/y, --limit=999) lands as a positional token after `--`, never parsed as a flag by gh's pflag (#234 F1, PR #252 review — reproduced live: a caller-controlled --repo token previously escaped the forced repo scope)", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "[]";
+  };
+  const adversarial = "--repo=other-owner/other-repo --owner=someone-else --limit=999";
+  await forge.searchIssues(adversarial, 5);
+  const args = seen[0]!;
+  const termIdx = args.indexOf("--");
+  assert.ok(termIdx !== -1);
+  // Exactly one --repo (ours) and one --limit (ours) appear BEFORE the terminator; the
+  // adversarial query's own --repo/--owner/--limit-shaped text is inert positional data after it.
+  const beforeTerm = args.slice(0, termIdx);
+  assert.deepEqual(
+    beforeTerm.filter((a) => a === "--repo"),
+    ["--repo"],
+  );
+  assert.equal(beforeTerm[beforeTerm.indexOf("--repo") + 1], "o/r", "the forced scope, never the caller's");
+  assert.deepEqual(
+    beforeTerm.filter((a) => a === "--limit"),
+    ["--limit"],
+  );
+  assert.equal(beforeTerm[beforeTerm.indexOf("--limit") + 1], "5", "the server's own cap, never the caller's 999");
+  assert.deepEqual(args.slice(termIdx + 1), [adversarial], "the adversarial text is the query, verbatim, and nothing else");
 });

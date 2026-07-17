@@ -74,6 +74,7 @@ class FakeJournalState {
       countsCanonical: null,
       truncated: false,
       responseCanonical: null,
+      responseBytes: null,
       contentHash: null,
       error: null,
       timedOut: false,
@@ -89,6 +90,9 @@ class FakeJournalState {
     const row = this.rows.find((x) => x.id === id)!;
     row.status = "fetched";
     row.responseCanonical = r.responseCanonical;
+    // #234 F4: same Buffer.byteLength (UTF-8) computation the real State.recordForgeProxyJournalResponse
+    // uses — a fake that used .length (characters) would hide the exact multibyte undercount bug F4 fixed.
+    row.responseBytes = Buffer.byteLength(r.responseCanonical, "utf8");
     row.contentHash = r.contentHash;
     row.upstreamIds = r.upstreamIds ?? null;
     row.upstreamUpdatedAt = r.upstreamUpdatedAt ?? null;
@@ -123,11 +127,11 @@ class FakeJournalState {
   }
 
   forgeProxyUsage(identity: ForgeProxyIdentity): { calls: number; bytes: number } {
+    // #234 F3: EVERY row counts toward `calls` (including 'intent' — reserve-on-intent closes
+    // the concurrent-calls race), matching the real State.forgeProxyUsage's semantics exactly.
     const rows = this.listForgeProxyJournal(identity);
-    const calls = rows.filter((r) => r.status === "fetched" || r.status === "delivered" || r.status === "error").length;
-    const bytes = rows
-      .filter((r) => r.status === "fetched" || r.status === "delivered")
-      .reduce((s, r) => s + (r.responseCanonical?.length ?? 0), 0);
+    const calls = rows.length;
+    const bytes = rows.filter((r) => r.status === "fetched" || r.status === "delivered").reduce((s, r) => s + (r.responseBytes ?? 0), 0);
     return { calls, bytes };
   }
 
@@ -324,6 +328,101 @@ test("runJournaledCall: byte-budget exhaustion mid-session -> explicit budget_ex
   assert.equal(!result.ok && result.error.code, "budget_exhausted");
 });
 
+// ── concurrency (#234 F3, PR #252 review, P1, Codex #2): reservation must survive two calls
+//    racing across the `await fetch()` boundary — proven with a FakeJournalState whose method
+//    calls are synchronous, same as the real node:sqlite-backed State, so calling an async
+//    function twice back-to-back deterministically exercises the race (each call runs
+//    synchronously up to its own first `await`, exactly like the real engine). ─────────────────
+
+test("runJournaledCall: TWO overlapping calls at maxCallsPerSession=1 -- the second is rejected even though the first's fetch is still in-flight when the second reserves (reserve-on-intent closes the race)", async () => {
+  const state = new FakeJournalState();
+  const budget = { maxCallsPerSession: 1, maxBytesPerSession: 1_000_000 };
+  let resolveFirst: ((v: { value: unknown }) => void) | undefined;
+  // Calling this starts A running SYNCHRONOUSLY through remainingBudget -> nextSeq ->
+  // appendForgeProxyJournalIntent (no `await` in that stretch) before suspending at `await
+  // fetch()` below -- so by the time this line returns, A's 'intent' row is already committed.
+  const first = runJournaledCall({
+    state,
+    identity: IDENTITY,
+    tool: "search_issues",
+    args: { query: "a" },
+    caps: CAPS,
+    budget,
+    scope: SCOPE,
+    now,
+    fetch: () =>
+      new Promise((resolve) => {
+        resolveFirst = resolve;
+      }),
+  });
+  assert.equal(state.rows.length, 1, "A's intent row already landed synchronously");
+  // B's OWN reservation check now runs -- it must see A's intent-only row counted against the
+  // call budget (pre-F3, only fetched/delivered/error counted, so B would wrongly be admitted).
+  const second = await runJournaledCall({
+    state,
+    identity: IDENTITY,
+    tool: "search_issues",
+    args: { query: "b" },
+    caps: CAPS,
+    budget,
+    scope: SCOPE,
+    now,
+    fetch: async () => ({ value: { b: 2 } }),
+  });
+  assert.equal(second.ok, false);
+  assert.equal(!second.ok && second.error.code, "budget_exhausted");
+  assert.equal(state.rows.length, 1, "B never got its own intent row -- rejected before persisting one");
+  resolveFirst!({ value: { a: 1 } });
+  const firstResult = await first;
+  assert.equal(firstResult.ok, true, "A itself still completes normally");
+});
+
+test("runJournaledCall: the byte-budget check is a FRESH re-read taken immediately before persist, not the stale pre-fetch snapshot -- a second call that would fit the budget alone but not on top of a concurrently-finalized first call is rejected", async () => {
+  const state = new FakeJournalState();
+  // Sized so exactly one of the two responses fits: `{"v":"b"}` = 9 bytes, `{"v":"aaaaa"}` = 13
+  // bytes: 9 alone fits under 15; 9+13=22 does not. Under the PRE-F3 bug, the second call to
+  // finalize would check its response against a snapshot taken at RESERVATION time (before
+  // either response was persisted), which is `remaining.bytes = 15 - 0 = 15` -- 13 < 15 would
+  // have wrongly ADMITTED it, landing 22 bytes against a 15-byte budget.
+  const budget = { maxCallsPerSession: 10, maxBytesPerSession: 15 };
+  let resolveA: ((v: { value: unknown }) => void) | undefined;
+  const pA = runJournaledCall({
+    state,
+    identity: IDENTITY,
+    tool: "search_issues",
+    args: { query: "a" },
+    caps: CAPS,
+    budget,
+    scope: SCOPE,
+    now,
+    fetch: () =>
+      new Promise((resolve) => {
+        resolveA = resolve;
+      }),
+  });
+  // B's fetch resolves immediately and finalizes FIRST, consuming 9 of the 15-byte budget.
+  const rB = await runJournaledCall({
+    state,
+    identity: IDENTITY,
+    tool: "search_issues",
+    args: { query: "b" },
+    caps: CAPS,
+    budget,
+    scope: SCOPE,
+    now,
+    fetch: async () => ({ value: { v: "b" } }),
+  });
+  assert.equal(rB.ok, true);
+  assert.equal(state.forgeProxyUsage(IDENTITY).bytes, 9);
+  // A's fetch now resolves and it attempts to finalize SECOND -- its own response (13 bytes)
+  // alone would fit under 15, but 9 (B's, already landed) + 13 = 22 must NOT be admitted.
+  resolveA!({ value: { v: "aaaaa" } });
+  const rA = await pA;
+  assert.equal(rA.ok, false);
+  assert.equal(!rA.ok && rA.error.code, "budget_exhausted");
+  assert.equal(state.forgeProxyUsage(IDENTITY).bytes, 9, "A's oversized response was never persisted");
+});
+
 // ── journalIsComplete: the primitive a future final-output-acceptance gate calls ────────────
 
 test("journalIsComplete: true when every fetched/delivered row carries a persisted response", () => {
@@ -345,6 +444,7 @@ test("journalIsComplete: true when every fetched/delivered row carries a persist
       countsCanonical: null,
       truncated: false,
       responseCanonical: "{}",
+      responseBytes: 2,
       contentHash: "h",
       error: null,
       timedOut: false,
@@ -369,6 +469,7 @@ test("journalIsComplete: true when every fetched/delivered row carries a persist
       countsCanonical: null,
       truncated: false,
       responseCanonical: null,
+      responseBytes: null,
       contentHash: null,
       error: "e",
       timedOut: false,
@@ -399,6 +500,7 @@ test("journalIsComplete: false for a delivered row with no persisted response (t
       countsCanonical: null,
       truncated: false,
       responseCanonical: null,
+      responseBytes: null,
       contentHash: null,
       error: null,
       timedOut: false,

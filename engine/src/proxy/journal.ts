@@ -89,6 +89,16 @@ export type JournaledCallResult =
  * fetched value) -> return ok so mcp-server.ts can deliver it. On a fetch failure, the error is
  * sanitized and journaled as an 'error' row (never a silent drop — the intent row already proves
  * the call was attempted).
+ *
+ * CONCURRENCY (#234 F3, PR #252 review, P1, Codex #2): `state` (node:sqlite's `DatabaseSync`) is
+ * synchronous, so the stretch from `remainingBudget` through `appendForgeProxyJournalIntent`
+ * below runs with NO `await` in between — two overlapping `tools/call` requests cannot both
+ * observe the same pre-reservation call count, because whichever one's synchronous block runs
+ * first commits its 'intent' row (now counted toward CALL usage, see State.forgeProxyUsage's doc)
+ * before the other's `remainingBudget` read can execute. The SAME pattern gates BYTES, just later:
+ * the fresh `state.forgeProxyUsage` re-read immediately before `recordForgeProxyJournalResponse`,
+ * with no `await` between them, closes the equivalent race across the `await fetch()` boundary
+ * (where two calls' fetches can genuinely interleave and both attempt to finalize).
  */
 export async function runJournaledCall(input: JournaledCallInput): Promise<JournaledCallResult> {
   const { state, identity, tool, args, caps, budget, scope, now, fetch } = input;
@@ -101,6 +111,9 @@ export async function runJournaledCall(input: JournaledCallInput): Promise<Journ
   const argsCanonical = canonicalJson(args);
   const scopeCanonical = canonicalJson(scope);
   const capsCanonical = canonicalJson(caps);
+  // No `await` between remainingBudget above and appendForgeProxyJournalIntent here — see the
+  // CONCURRENCY note above. This intent row itself now counts toward the NEXT call's `calls`
+  // budget the instant this synchronous block returns.
   const journalId = state.appendForgeProxyJournalIntent({
     identity,
     seq,
@@ -126,7 +139,16 @@ export async function runJournaledCall(input: JournaledCallInput): Promise<Journ
 
   const responseCanonical = canonicalJson(fetched.value);
   const contentHash = sha256Hex(responseCanonical);
-  if (remaining.bytes < Buffer.byteLength(responseCanonical)) {
+  const responseBytes = Buffer.byteLength(responseCanonical, "utf8");
+
+  // #234 F3: a FRESH, synchronous re-read of usage — taken as late as possible, immediately
+  // before the write below with no `await` in between — is the actual byte-budget gate. The
+  // pre-fetch `remaining.bytes` above is now advisory only (recorded on the intent row for
+  // observability); another call's response may have landed on this session attempt during our
+  // OWN `await fetch()` above, so only a re-check taken right at the finalization boundary can
+  // correctly reject a concurrent double-admission.
+  const freshUsage = state.forgeProxyUsage(identity);
+  if (freshUsage.bytes + responseBytes > budget.maxBytesPerSession) {
     state.recordForgeProxyJournalError(journalId, "response exceeds remaining byte budget", false, now().toISOString());
     return {
       ok: false,
@@ -196,7 +218,15 @@ export interface EvidenceBundleInput {
   /** Every exact tool response the session actually used to reach its decision. */
   responses: Array<{ tool: string; args: unknown; response: unknown }>;
   /** A pointer into the decision record this bundle backs — undefined when the caller hasn't
-   *  produced one yet (no consumer does, in this PR; see the module doc). */
+   *  produced one yet (no consumer does, in this PR; see the module doc).
+   *
+   *  #234: deferred — see follow-up (Codex #7, PR #252 review; moves with #244/consumer
+   *  adoption). This is a single, ONE decision per bundle link. A real consumer may find several
+   *  decisions cite the SAME content-addressed bundle (e.g. two attempts independently retrieved
+   *  identical evidence) — a proper many-to-many link (a join table, or an array here) is a
+   *  decision this PR deliberately does not make without a live caller to design it against;
+   *  `recordForgeProxyBundle`'s current ON CONFLICT DO NOTHING means only the FIRST decisionRef
+   *  for a given hash survives today. */
   decisionRef?: string;
 }
 
@@ -212,7 +242,14 @@ export interface PersistedEvidenceBundle {
  *  content -> same hash -> same address, State.recordForgeProxyBundle's ON CONFLICT DO NOTHING).
  *  Writes to `<dataDir>/proxy-bundles/<hash>.json` when a data dir exists; the DB index row is
  *  always recorded regardless (an in-memory State still gets an addressable, hash-keyed record —
- *  `path` is simply null, same null-means-no-directory convention as roundArtifactMdPath). */
+ *  `path` is simply null, same null-means-no-directory convention as roundArtifactMdPath).
+ *
+ *  #234: deferred — see follow-up (Codex #7, PR #252 review; moves with #244/consumer adoption).
+ *  The on-disk write below (`existsSync` then `writeFileSync`) is NOT atomic — a crash between
+ *  the two could leave a partial file at the content address. Left as-is because there is no
+ *  production caller in this PR to observe a torn file, and the DB index row (the actual
+ *  addressable record other code would read) is written separately and correctly; a
+ *  write-to-temp-then-rename would close this but is not worth adding ahead of a real caller. */
 export function persistEvidenceBundle(
   state: Pick<State, "forgeProxyBundleDir" | "recordForgeProxyBundle">,
   input: EvidenceBundleInput,
