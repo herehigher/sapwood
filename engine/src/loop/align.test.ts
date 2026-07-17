@@ -1411,6 +1411,44 @@ test("selectRoundPool: a Ready read failure degrades to an empty pool (logged, n
 /** A po-pool session's structured output: the selected issue numbers only, no BODY block. */
 const poolResultText = (selected: number[]): string => sapwoodResult({ selected });
 
+test("runPoolSelection (#233 AC1): the deterministic DEFAULT path (roles.po.poolSelection=false) still writes the durable pool-selected event, even though no session ran", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2, poolSelection defaults false
+  forge.ready = [mkReady(1, 3), mkReady(2, 3), mkReady(3, 3)];
+  const runner = new ScriptedRunner([]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 3 });
+  assert.equal(runner.calls.length, 0, "no session ran on the deterministic default path");
+  assert.deepEqual(
+    selected.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2],
+  );
+  const events = state.eventsAfterId(0, ["pool-selected"]);
+  assert.equal(events.length, 1, "the durable event is written even though selection was purely deterministic (#233 AC1)");
+  assert.deepEqual(events[0]!.payload, { round_id: 3, issues: [1, 2] }, "the event records exactly what was acted on");
+});
+
+test("runPoolSelection (#233 AC1 mirror): the opt-in SESSION path (roles.po.poolSelection=true) also writes the durable pool-selected event, recording the validated selection", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  const runner = new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]);
+  const state = new State(":memory:");
+  const selected = await runPoolSelection({ forge, cfg, state, runner, roundId: 4 });
+  assert.equal(runner.calls.length, 1);
+  assert.deepEqual(
+    selected.map((i) => i.number),
+    [1],
+  );
+  const events = state.eventsAfterId(0, ["pool-selected"]);
+  assert.equal(events.length, 1, "the durable event is written on the session path too");
+  assert.deepEqual(
+    events[0]!.payload,
+    { round_id: 4, issues: [1] },
+    "the event records the session's validated (proper subset) selection, not the full candidate set",
+  );
+});
+
 test("runPoolSelection: roles.po.poolSelection=true — a fake runner's selection is validated and the engine applies labels to EXACTLY that subset, never the full candidate set", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg({
