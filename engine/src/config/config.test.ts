@@ -623,6 +623,45 @@ test("roles.po.promptFile: a relative path resolves against the config file's di
   }
 });
 
+// ── #233: roles.po.poolSelection — the round-pool selection SESSION's own opt-in switch,
+// decoupled from roles.po.enabled (which only gates align/triage) ──────────────────────────
+
+test("roles.po.poolSelection: defaults to false — the pool-selection session is an opt-in experiment, not the default", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.roles.po.poolSelection, false);
+});
+
+test("roles.po.poolSelection: explicit true is honored", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { poolSelection: true } }");
+  assert.equal(cfg.roles.po.poolSelection, true);
+});
+
+test("roles.po.poolSelection: independent of roles.po.enabled in both directions — neither key defaults or drives the other", () => {
+  // enabled: false, poolSelection left unset -> poolSelection still defaults false on its own,
+  // not because enabled turned it off.
+  const enabledOff = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { enabled: false } }");
+  assert.equal(enabledOff.roles.po.enabled, false);
+  assert.equal(enabledOff.roles.po.poolSelection, false);
+
+  // poolSelection: true, enabled left unset -> enabled still defaults true on its own, not
+  // flipped on by poolSelection.
+  const poolSelectionOn = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { poolSelection: true } }");
+  assert.equal(poolSelectionOn.roles.po.enabled, true);
+  assert.equal(poolSelectionOn.roles.po.poolSelection, true);
+
+  // Both explicit and DIVERGENT — neither key ever silently coerces the other.
+  const divergent = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { enabled: false, poolSelection: true } }");
+  assert.equal(divergent.roles.po.enabled, false);
+  assert.equal(divergent.roles.po.poolSelection, true);
+});
+
+test("roles.po.poolSelection: a non-boolean value is rejected", () => {
+  assert.throws(
+    () => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { poolSelection: "nope" } }'),
+    /poolSelection/,
+  );
+});
+
 // ── #91: roles.harvest / roles.retro (round-close peripheral roles) ────────────────────────
 
 test("roles.harvest: promptFile unset by default, model/effort defaulted (same #74/#88 pattern), strict schema", () => {

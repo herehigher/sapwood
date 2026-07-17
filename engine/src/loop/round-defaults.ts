@@ -173,18 +173,21 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
   // planDrafter has no toggle of its own: it only ever runs from inside the plan_review
   // stub, so roles.planReviewer.enabled is gate⓪'s ONE unit switch.
   //
-  // #212 AC7: the aligning phase's round-pool selection is NEVER gated by roles.po.enabled —
-  // "the selection bound must not depend on an optional role". So, unlike every other role
-  // below, `aligning` is ALWAYS populated: with the PO on, it runs the real alignStub (goal
-  // decomposition + triage) THEN runs the PO's SEPARATE pool-selection session over whatever
-  // Ready looks like afterward (align.ts's runPoolSelection — a real session, gate① F1: NOT a
-  // purely deterministic bound on the enabled path); with the PO off, runPoolSelection itself
-  // skips the session and falls straight through to the same deterministic, engine-computed
-  // selection — the documented AC7 fallback. The rerun-not-resume marker check happens HERE
-  // (not inside alignStub) so a crash mid-selection (after alignStub's own work already
-  // externalized) restarts at THIS phase with a still-null marker and safely redoes only the
-  // (idempotent) selection pass, never re-running alignStub's own internally-idempotent
-  // proposal/triage logic a second time for nothing.
+  // #212 AC7 / #233: the aligning phase's round-pool selection is NEVER gated by
+  // roles.po.enabled — "the selection bound must not depend on an optional role". So, unlike
+  // every other role below, `aligning` is ALWAYS populated: with the PO on, it runs the real
+  // alignStub (goal decomposition + triage) THEN runs pool selection over whatever Ready looks
+  // like afterward (align.ts's runPoolSelection); with the PO off, only alignStub's own work is
+  // skipped — runPoolSelection still runs unconditionally. #233: runPoolSelection's OWN
+  // behavior no longer depends on roles.po.enabled either — it depends on its own switch,
+  // `roles.po.poolSelection` (default false): a title-only pool-selection session is now an
+  // opt-in experiment (controlled testing found it selects every candidate at every tier, so
+  // the deterministic engine-computed selection is the default MAIN path, not a fallback for
+  // roles.po.enabled=false specifically). The rerun-not-resume marker check happens HERE (not
+  // inside alignStub) so a crash mid-selection (after alignStub's own work already externalized)
+  // restarts at THIS phase with a still-null marker and safely redoes only the (idempotent)
+  // selection pass, never re-running alignStub's own internally-idempotent proposal/triage logic
+  // a second time for nothing.
   peripherals.aligning = {
     async run(ctx) {
       if (ctx.marker != null) return { marker: ctx.marker }; // already externalized this round
@@ -261,10 +264,11 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
     .filter(([role]) => !deps.cfg.roles[role].enabled)
     .map(([, phase]) => phase);
   if (disabledPhases.length > 0) {
-    // #212: `aligning` is a partial exception since AC7 — with the PO off it still runs the
-    // deterministic, engine-computed round-pool selection every round (no session); it's the
-    // PO's own decomposition/triage work that no-ops, not the whole phase. Worded separately so
-    // this line stays literally true for every phase it names.
+    // #212/#233: `aligning` is a partial exception since AC7 — with the PO off it still runs
+    // round-pool selection every round (deterministic by default, or the #233 opt-in session if
+    // roles.po.poolSelection: true — either way, independent of this flag); it's the PO's own
+    // decomposition/triage work that no-ops, not the whole phase. Worded separately so this
+    // line stays literally true for every phase it names.
     const noopPhases = disabledPhases.filter((p) => p !== "aligning");
     let line =
       noopPhases.length > 0
@@ -272,8 +276,8 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         : `[sapwood:round] peripheral role(s) disabled by config: ${disabledPhases.join(", ")}`;
     if (disabledPhases.includes("aligning")) {
       line +=
-        `. NOTE: aligning still runs its #212 engine-computed round-pool selection every round with ` +
-        `roles.po.enabled: false (no session) — only the PO's own decomposition/triage passes no-op.`;
+        `. NOTE: aligning still runs its #212 round-pool selection every round with roles.po.enabled: ` +
+        `false (deterministic unless roles.po.poolSelection: true) — only the PO's own decomposition/triage passes no-op.`;
     }
     // #127 gate② F1: disabling gate⓪'s roles silently starves ALL dispatch — forge.ts's
     // dispatchability gate still (correctly, PLAN Decision #8) requires the planApproved label

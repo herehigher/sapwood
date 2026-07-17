@@ -341,23 +341,36 @@ function triageDegradeReason(result: RoleSessionResult, expectedIssue: number): 
   return v.ok ? "po-triage output valid" : `po-triage produced invalid structured output twice: ${v.reason}`;
 }
 
-// ── #212: round-pool selection ──────────────────────────────────────────────────────────────
+// ── #212/#233: round-pool selection ─────────────────────────────────────────────────────────
 //
-// The architecture note ("the PO explicitly selects a round pool") is a real session, not just
-// a bound: with roles.po.enabled, the engine computes the CANDIDATE set deterministically (Ready,
-// milestone-scoped by whatever `forge` already applies — see AlignDeps.forge — ordered
-// prio:0-first then issue-number-ascending, capped at ceil(lanes.roundDispatchCap *
-// round.poolFactor)) and hands it to a dedicated PO session (runPoolSelection below) whose ONLY
-// deliverable is which of those candidate NUMBERS belong in this round's pool — the engine then
-// applies cfg.labels.roundPool to exactly that selection, from validated structured output,
-// never from anything the session could name directly (no label field exists in the schema:
-// the removeLabel/addLabel containment invariant holds structurally, the same "engine performs
+// The engine ALWAYS computes the CANDIDATE set deterministically (Ready, milestone-scoped by
+// whatever `forge` already applies — see AlignDeps.forge — ordered prio:0-first then
+// issue-number-ascending, capped at ceil(lanes.roundDispatchCap * round.poolFactor)). #233:
+// controlled experiments across model tiers found a title-only PO pool-selection SESSION
+// selects EVERY candidate at every tier — it has no evidentiary basis to narrow the reservoir
+// from a bare title/number digest, so it just burns a session per round reproducing this same
+// deterministic set. Worse, `round.poolFactor` exists to absorb architect/gate⓪ attrition
+// AFTER selection; a session that DOES narrow the reservoir pre-gates risks underfilling the
+// round. So the deterministic candidate set is now the MAIN path — this is `selectRoundPool`'s
+// documented behavior AND `runPoolSelection`'s default (roles.po.poolSelection: false).
+//
+// The session (originally "the PO explicitly selects a round pool") is KEPT as an opt-in
+// experiment behind `roles.po.poolSelection: true`, decoupled from `roles.po.enabled` (which
+// only gates align/triage — see round-defaults.ts). When enabled, runPoolSelection hands the
+// candidate set to a dedicated PO session (runPoolSelection below) whose ONLY deliverable is
+// which of those candidate NUMBERS belong in this round's pool — the engine then applies
+// cfg.labels.roundPool to exactly that selection, from validated structured output, never from
+// anything the session could name directly (no label field exists in the schema: the
+// removeLabel/addLabel containment invariant holds structurally, the same "engine performs
 // every write itself" stance as align/triage above). Invalid-twice or a failed session degrades
 // OPEN to the full deterministic candidate set — never an empty pool, never a wedged round.
-// roles.po.enabled=false skips the session entirely and IS that same deterministic path (#212
-// AC7: "the selection bound must not depend on an optional role") — round-defaults.ts calls
-// runPoolSelection unconditionally every round regardless of the PO role's enabled state; only
-// whether it *pays for a session* differs.
+// Either way (`poolSelection` true or false), the engine ATTEMPTS to write the durable
+// `pool-selected` event — it records what was actually acted on, not what could be recomputed,
+// which is what makes a crash-rerun of this exact phase replay-safe when the write lands.
+// persistPoolSelection's write is best-effort today, not fail-closed (see its own doc comment):
+// an append failure is logged and reconciliation proceeds regardless, on every path, exactly as
+// before #233. Making the write load-bearing (fail closed, or otherwise guaranteed) is scoped
+// to #232, not this change.
 //
 // #212 gate② r2 (replacing r1's "adopt existing" heuristic, found unsalvageable in review):
 // labels alone cannot tell a SAME-ROUND crash rerun apart from a PRIOR-round residual — a
@@ -568,13 +581,14 @@ async function reconcilePoolLabels(
 
 /** The deterministic, no-session pool selection: the FULL candidate set (computePoolCandidates),
  *  reconciled unconditionally (reconcilePoolLabels above — adds to every candidate, removes from
- *  every other open issue that's stray-labelled). This is (1) roles.po.enabled=false's
- *  documented AC7 fallback, called directly by runPoolSelection below, and (2) still exported
- *  for direct testing/any caller that wants "the label state made to match top-cap Ready" with
- *  no event bookkeeping of its own. A forge read failure degrades to "pool left as whatever it
- *  already was" (logged, never thrown, no reconcile attempted at all) — the executing phase
- *  simply dispatches into whatever the pool already contains this round. Returns the selected
- *  issues (empty on a read failure) for callers/tests that want to observe the pick. */
+ *  every other open issue that's stray-labelled). #233: this is now the MAIN path — the default
+ *  (roles.po.poolSelection: false) target runPoolSelection below computes, not just a fallback —
+ *  called directly by runPoolSelection, and (2) still exported for direct testing/any caller
+ *  that wants "the label state made to match top-cap Ready" with no event bookkeeping of its
+ *  own. A forge read failure degrades to "pool left as whatever it already was" (logged, never
+ *  thrown, no reconcile attempted at all) — the executing phase simply dispatches into whatever
+ *  the pool already contains this round. Returns the selected issues (empty on a read failure)
+ *  for callers/tests that want to observe the pick. */
 export async function selectRoundPool(deps: PoolSelectionDeps): Promise<Issue[]> {
   const { forge, cfg } = deps;
   const log = deps.log ?? console.error;
@@ -662,20 +676,25 @@ export interface PoolSelectionRunDeps extends PoolSelectionDeps {
 
 /** Orchestrates one round's pool selection end to end (round-defaults.ts's ONE call site,
  *  invoked every round regardless of roles.po.enabled — see this section's own module doc for
- *  the AC7 rationale and the gate② r2 durable-event design). Shape:
+ *  the gate② r2 durable-event design). #233: the session path is now gated by its OWN switch,
+ *  `roles.po.poolSelection`, deliberately independent of `roles.po.enabled` (which only gates
+ *  align/triage — a deployment can run align/triage with the pool session off, or vice versa).
+ *  Shape:
  *
- *  1. REPLAY FIRST, on both the enabled and disabled paths: read this round's persisted
- *     `pool-selected` event (readPersistedPoolSelection). Found -> the target is that event's
- *     issue numbers (mapped back to live Issue objects via a fresh listOpenIssues() read) —
- *     no session, no recompute, straight to reconcile. This is the crash-rerun path: a prior
- *     attempt this round already decided, and replaying is what makes a fresh (possibly
- *     DIFFERENT) PO session on rerun structurally impossible.
- *  2. Not found, roles.po.enabled=false: the target is the deterministic candidate set
- *     (computePoolCandidates) — the documented AC7 fallback, no session ever.
- *  3. Not found, roles.po.enabled=true, zero candidates: nothing to choose from — the target is
- *     simply empty (still persisted + reconciled, so any stale labels get healed).
- *  4. Not found, roles.po.enabled=true, candidates exist: run the po-pool session (same runner
- *     machinery + zero-gh-grant tool scope as align/triage — PO_ALLOWED_TOOLS/
+ *  1. REPLAY FIRST, on every path: read this round's persisted `pool-selected` event
+ *     (readPersistedPoolSelection). Found -> the target is that event's issue numbers (mapped
+ *     back to live Issue objects via a fresh listOpenIssues() read) — no session, no recompute,
+ *     straight to reconcile. This is the crash-rerun path: a prior attempt this round already
+ *     decided, and replaying is what makes a fresh (possibly DIFFERENT) PO session on rerun
+ *     structurally impossible.
+ *  2. Not found, roles.po.poolSelection=false (the default): the target is the deterministic
+ *     candidate set (computePoolCandidates) — the MAIN path now, no session ever. #233:
+ *     controlled experiments found the session selects every candidate at every model tier
+ *     anyway, so this is not merely a degrade fallback — it is the intended default behavior.
+ *  3. Not found, roles.po.poolSelection=true, zero candidates: nothing to choose from — the
+ *     target is simply empty (still persisted + reconciled, so any stale labels get healed).
+ *  4. Not found, roles.po.poolSelection=true, candidates exist: run the po-pool session (same
+ *     runner machinery + zero-gh-grant tool scope as align/triage — PO_ALLOWED_TOOLS/
  *     PO_DISALLOWED_TOOLS, runSessionWithRetry's retry-once-then-degrade), validate its output
  *     against the candidate bound, and the target is either the validated selection (a proper
  *     subset is a real outcome) or — invalid/failed twice — the full candidate set (degrade
@@ -685,8 +704,15 @@ export interface PoolSelectionRunDeps extends PoolSelectionDeps {
  *  Once the target is known (replayed OR freshly computed), a fresh computation is persisted
  *  (persistPoolSelection, before any label write) and EVERY path converges through the same
  *  `reconcilePoolLabels` call — add where the target lacks the label, remove it from any other
- *  open issue that has it. Reconcile is what heals residuals; the event is what makes reruns
- *  safe; neither alone would be. */
+ *  open issue that has it. Reconcile is what heals residuals; the event (when it lands) is what
+ *  makes reruns replay instead of recompute; neither alone would be. persistPoolSelection is
+ *  ATTEMPTED on EVERY path, including the deterministic default — it records what was actually
+ *  acted on, not what could be recomputed. That write is best-effort, not fail-closed, today
+ *  (see persistPoolSelection's own doc comment): an append failure is logged and reconcile still
+ *  runs against the freshly-computed target, so a crash immediately after a failed write forfeits
+ *  only the replay optimization on the next rerun (it recomputes, and on the session path pays
+ *  for a fresh session), never correctness. Making this write load-bearing is scoped to #232,
+ *  not this change. */
 export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issue[]> {
   const { forge, cfg } = deps;
   const log = deps.log ?? console.error;
@@ -717,7 +743,9 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       `[sapwood:pool] round ${deps.roundId}: replaying the persisted selection (${target.length}/${persisted.length} ` +
         `target issue(s) still open) — no session, no recompute.`,
     );
-  } else if (!cfg.roles.po.enabled) {
+  } else if (!cfg.roles.po.poolSelection) {
+    // #233: the deterministic MAIN path — default behavior, not a fallback. Independent of
+    // roles.po.enabled (which only gates align/triage).
     let candidates: Issue[];
     try {
       candidates = await computePoolCandidates(forge, cfg);
