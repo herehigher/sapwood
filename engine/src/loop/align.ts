@@ -35,11 +35,10 @@ import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
-import { capDigest } from "../retro/retro-digest.js";
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
-import type { State } from "../state/state.js";
+import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { issuePriority } from "./conductor.js";
 import { type PeripheralStub, removeRoundPoolLabel } from "./round.js";
@@ -83,47 +82,114 @@ export function defaultPoPromptPath(): string {
 
 const DEFAULT_PLAN_MD_PATH = "docs/PLAN.md";
 
-/** Best-effort docs/PLAN.md loader: the PO's alignment context, substituted into the prompt
- *  (the sandboxed session has no Read tool, same "substitute it in" discipline as
- *  {{issue.body}} elsewhere). Contained — a missing/unreadable/moved doc file never aborts the
- *  round; the alignment session simply proceeds with an empty note, the same fail-toward-more-
- *  work stance as round.ts's other contained reads (e.g. checkFinalMilestone). */
-export function loadPlanMd(path: string = DEFAULT_PLAN_MD_PATH): string {
+/** #231: the goal file's read result, EXPLICIT — never a silent empty string. The PO's
+ *  alignment context is substituted into the prompt (the sandboxed session has no Read tool,
+ *  same "substitute it in" discipline as {{issue.body}} elsewhere); a missing/unreadable/moved
+ *  goal file used to degrade to `""` (this function's pre-#231 behavior), so the align session
+ *  would "decompose" against empty context with no visible sign anything was wrong —
+ *  deterministic blindness, not correctness (see this module's #231 discussion at
+ *  createAligningStub). `ok: false` is now the explicit signal that aborts the align-CREATION
+ *  pass specifically (a durable event + a tick-error, no session spawned, no creations this
+ *  pass) — never the whole phase: triage never reads this file and is unaffected. */
+export type PlanMdRead = { ok: true; content: string } | { ok: false; reason: string };
+
+export function readPlanMd(path: string = DEFAULT_PLAN_MD_PATH): PlanMdRead {
   try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return "";
+    return { ok: true, content: readFileSync(path, "utf8") };
+  } catch (e) {
+    return { ok: false, reason: String(e) };
   }
 }
 
 const NO_OPEN_ISSUES = "(no open issues yet)";
 const BACKLOG_READ_FAILED = "(backlog digest unavailable: open-issue read failed)";
 
-/** Engine-side PO context (#215): deterministic, milestone-scoped here at the digest consumer,
- *  and contained on forge failure. Sorting here (rather than trusting gh's presentation order)
- *  makes crash-rerun assembly byte-identical for the same backlog. Every return path is capped
- *  at the boundary so placeholders cannot accidentally bypass the configured size limit. */
-export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Promise<string> {
-  let uncapped: string;
+/** #231: one truncation-safe pack of whole `lines` into a `maxChars` budget — never slices a
+ *  record mid-line (unlike retro-digest.ts's capDigest, a character-count cut meant for free
+ *  text, not an ascending-numbered list). A record either fits whole or is OMITTED and counted;
+ *  the returned counts/flag are exact regardless of whether anything was actually cut, so a
+ *  caller can always tell "the high-numbered tail is either rendered or counted as omitted,
+ *  never silently gone" (#231 acceptance criterion) — capDigest's old character-count cut over
+ *  an ascending-issue-number list made the tail vanish with no trace, which is exactly the
+ *  invisible hole this function replaces it for. Deterministic: the same `lines`+`maxChars`
+ *  always yields the same prefix, same contract as capDigest, just record-granular instead of
+ *  character-granular. `noun` only changes the truncation marker's wording. */
+export interface BoundedDigest {
+  text: string;
+  total: number;
+  rendered: number;
+  omitted: number;
+  truncated: boolean;
+}
+
+export function packDigestRecords(lines: readonly string[], maxChars: number, emptyText: string, noun = "issue"): BoundedDigest {
+  const total = lines.length;
+  if (total === 0) return { text: emptyText, total: 0, rendered: 0, omitted: 0, truncated: false };
+
+  const rendered: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    const added = (rendered.length > 0 ? 1 : 0) + line.length; // +1 for the join newline
+    if (used + added > maxChars) break;
+    rendered.push(line);
+    used += added;
+  }
+  if (rendered.length === total) {
+    return { text: rendered.join("\n"), total, rendered: total, omitted: 0, truncated: false };
+  }
+
+  const marker = (renderedCount: number): string =>
+    `\n\n[... ${total - renderedCount} more ${noun}(s) omitted — exceeded the ${maxChars}-char cap; ${renderedCount}/${total} rendered ...]`;
+  // Never slices a record: drop whole trailing lines (bounded — at most `rendered.length`
+  // iterations, and these lists are small: backlog/pool candidate counts) until the marker fits
+  // alongside what's kept. Same "the cap is never exceeded either way" contract as capDigest.
+  while (rendered.length > 0) {
+    const body = rendered.join("\n");
+    const m = marker(rendered.length);
+    if (body.length + m.length <= maxChars) {
+      return { text: body + m, total, rendered: rendered.length, omitted: total - rendered.length, truncated: true };
+    }
+    rendered.pop();
+  }
+  // Nothing fits even with zero rendered lines (a pathologically tiny cap) — last-resort hard
+  // truncation of the marker itself, same fallback shape as capDigest's own.
+  const m = marker(0);
+  return { text: m.length <= maxChars ? m : m.slice(0, maxChars), total, rendered: 0, omitted: total, truncated: true };
+}
+
+export interface BacklogDigestResult extends BoundedDigest {
+  /** false iff the underlying open-issue read itself threw — the #231 fail-closed signal
+   *  createAligningStub's creation loop keys off of to SUPPRESS issue creation for this pass
+   *  (never a silent placeholder the align session can't tell apart from "zero open issues"). */
+  ok: boolean;
+  /** Failure reason, present only when `ok` is false. */
+  reason?: string;
+}
+
+/** Engine-side PO context (#215): deterministic, milestone-scoped here at the digest consumer.
+ *  #231: a read failure is no longer swallowed into an indistinguishable placeholder string —
+ *  `ok: false` (+ `reason`) is the explicit, checkable signal createAligningStub's creation loop
+ *  and the durable `backlog-read-failed` honesty event key off of. Truncation never slices a
+ *  mid-record line (packDigestRecords above), so a caller can always tell which issues were
+ *  actually shown to the session vs. merely counted as omitted. */
+export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Promise<BacklogDigestResult> {
+  let issues: Issue[];
   try {
     const allIssues = await forge.listOpenIssues();
-    const issues = filterIssuesByMilestone(allIssues, cfg.round.milestone);
-    if (issues.length === 0) {
-      uncapped = NO_OPEN_ISSUES;
-    } else {
-      const ordered = [...issues].sort((a, b) => a.number - b.number);
-      uncapped = ordered
-        .map((issue) => {
-          const holds = cfg.escalation.humanLabels.filter((label) => labelsInclude(issue.labels, label));
-          const annotation = holds.length > 0 ? ` [hold: ${holds.join(", ")}]` : "";
-          return `- #${issue.number} — ${issue.title}${annotation}`;
-        })
-        .join("\n");
-    }
-  } catch {
-    uncapped = BACKLOG_READ_FAILED;
+    issues = filterIssuesByMilestone(allIssues, cfg.round.milestone);
+  } catch (e) {
+    return { text: BACKLOG_READ_FAILED, ok: false, total: 0, rendered: 0, omitted: 0, truncated: false, reason: String(e) };
   }
-  return capDigest(uncapped, cfg.roles.po.backlogDigestMaxChars);
+  if (issues.length === 0) {
+    return { text: NO_OPEN_ISSUES, ok: true, total: 0, rendered: 0, omitted: 0, truncated: false };
+  }
+  const ordered = [...issues].sort((a, b) => a.number - b.number);
+  const lines = ordered.map((issue) => {
+    const holds = cfg.escalation.humanLabels.filter((label) => labelsInclude(issue.labels, label));
+    const annotation = holds.length > 0 ? ` [hold: ${holds.join(", ")}]` : "";
+    return `- #${issue.number} — ${issue.title}${annotation}`;
+  });
+  return { ...packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES), ok: true };
 }
 
 function filterIssuesByMilestone(issues: Issue[], milestone: string | undefined): Issue[] {
@@ -134,6 +200,50 @@ function filterIssuesByMilestone(issues: Issue[], milestone: string | undefined)
 // (the whole point of that mode is creating NEW ones) — po.md's align section never references
 // {{issue.*}}, so an empty/zero stand-in is never actually substituted into rendered output.
 const NO_ISSUE: Issue = { number: 0, title: "", labels: [] };
+
+// ── #231: input manifest ─────────────────────────────────────────────────────────────────────
+//
+// "What did this decision actually see" — every engine-controlled input channel a PO/pool
+// SESSION was actually given this round gets one durable input_manifest row (state.ts's
+// migration v13->v14), keyed by (round, phase="aligning", role="po", session, attempt). This
+// module dispatches three distinct sessions (po-align, po-triage, po-pool); `session` below is
+// that session's roleId, further scoped to the specific issue for triage (one triage session
+// per candidate issue per round, so "po-triage:123" and "po-triage:456" are independently
+// attempt-tracked). `attempt` is never tracked in-memory here — see State.
+// nextInputManifestAttempt's own doc comment for why the durable table itself is the counter.
+//
+// Coverage TODAY (#231, gate② scoping): every channel align.ts itself dispatches a session
+// with — goal-file + backlog-digest (po-align), issue-body + backlog-digest (po-triage, one
+// pair per candidate issue), pool-candidates (po-pool). Architect-side / round-context channels
+// (round-defaults.ts's `lastMerged`, architect.ts's own goal/architecture-chapter read and
+// candidate-issue "fetched details", doctrine, the round directive) are NOT instrumented here —
+// they belong to modules a PARALLEL PR (#236) is actively rewiring, and #232 (the follow-up that
+// makes the manifest load-bearing, not just a record) already owns wiring those in and linking
+// manifest rows to the decisions they informed. Expanding this table's coverage into those files
+// now would conflict with #236's in-flight rewrite for no decision-quality benefit (this PR's
+// manifest is deliberately non-load-bearing — see recordInputManifest's own doc comment).
+const INPUT_MANIFEST_PHASE = "aligning";
+const INPUT_MANIFEST_ROLE = "po";
+
+/** Short, stable content fingerprint (#231's manifest `version` field) — same truncation
+ *  convention as proposalId's title hash above, just applied to arbitrary input content. */
+function contentVersion(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+/** Best-effort input-manifest write (#231): failing to RECORD what a session's input looked
+ *  like must never block the session itself — the manifest is a record, not a gate (this
+ *  module's own #231 design ruling; see state.ts's schema v13->v14 migration comment). Mirrors
+ *  persistPoolSelection's catch-and-log shape further below in this file. */
+function recordInputManifest(state: State, row: InputManifestRow, log?: (message: string) => void): void {
+  try {
+    state.appendInputManifest(row);
+  } catch (e) {
+    (log ?? console.error)(
+      `[sapwood:po] round ${row.round_id}: failed to record the input-manifest row (session ${row.session}, channel ${row.channel}): ${String(e)}`,
+    );
+  }
+}
 
 // ── #110 PR2: structured-output schemas + validators ────────────────────────────────────────
 //
@@ -612,13 +722,12 @@ export function defaultPoolPromptPath(): string {
  *  any) for every candidate, in the SAME prio/number order the session sees as "already ranked
  *  for you." Deterministic, capped (reuses roles.po.backlogDigestMaxChars — the candidate set is
  *  naturally small, bounded by the pool cap, so this is a safety valve here, not a real budget
- *  most deployments tune). */
-function buildPoolCandidateDigest(candidates: readonly Issue[], cfg: SapwoodConfig): string {
-  const uncapped =
-    candidates.length === 0
-      ? "(no Ready candidates this round)"
-      : candidates.map((issue) => `- #${issue.number} — ${issue.title}`).join("\n");
-  return capDigest(uncapped, cfg.roles.po.backlogDigestMaxChars);
+ *  most deployments tune). #231: whole-record packed (packDigestRecords), the same fix as
+ *  buildBacklogDigest above — a candidate near the cap's tail is rendered or counted as
+ *  omitted, never silently sliced away mid-line. */
+function buildPoolCandidateDigest(candidates: readonly Issue[], cfg: SapwoodConfig): BoundedDigest {
+  const lines = candidates.map((issue) => `- #${issue.number} — ${issue.title}`);
+  return packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, "(no Ready candidates this round)", "candidate issue");
 }
 
 const PoolSelectionMetadataSchema = z.object({ selected: z.array(z.number().int().positive()) }).strict();
@@ -775,8 +884,33 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       // candidate list's own length IS the effective cap (it can be smaller when Ready itself
       // has fewer eligible issues than the configured bound allows).
       const cap = candidates.length;
+      const poolDigest = buildPoolCandidateDigest(candidates, cfg);
+      // #231: input manifest for the pool-candidates channel — recorded ONLY on this real
+      // session-dispatch path (never the replay branch above, nor the deterministic
+      // no-session default: neither reads/shows a candidate digest to any session).
+      recordInputManifest(
+        deps.state,
+        {
+          round_id: deps.roundId,
+          phase: INPUT_MANIFEST_PHASE,
+          role: INPUT_MANIFEST_ROLE,
+          session: "po-pool",
+          attempt: deps.state.nextInputManifestAttempt(deps.roundId, INPUT_MANIFEST_PHASE, INPUT_MANIFEST_ROLE, "po-pool"),
+          channel: "pool-candidates",
+          ok: true,
+          // #231 gate② (Codex sol high F2): hash the RENDERED digest text, not just the
+          // candidate numbers — a title-only edit (candidate set unchanged, wording drifted)
+          // must still show up as a version change, since that's what the session actually saw.
+          version: contentVersion(poolDigest.text),
+          total: poolDigest.total,
+          rendered: poolDigest.rendered,
+          omitted: poolDigest.omitted,
+          truncated: poolDigest.truncated,
+        },
+        log,
+      );
       const prompt = renderRolePrompt(template, NO_ISSUE, cfg, {
-        "pool.digest": buildPoolCandidateDigest(candidates, cfg),
+        "pool.digest": poolDigest.text,
         "pool.cap": String(cap),
       });
       const result = await runSessionWithRetry({
@@ -848,7 +982,7 @@ export interface AlignDeps {
   runner: Pick<RoleRunner, "run">;
   now?: () => Date;
   log?: (message: string) => void;
-  /** Override for loadPlanMd's path — tests inject a fixed string via a temp file. A real
+  /** Override for readPlanMd's path — tests inject a fixed string via a temp file. A real
    *  caller omits this and gets `cfg.goal.file` (#128, promoted out of the #104-era
    *  `roles.architect.planMdPath`): align.ts and architect.ts both read the project's
    *  north-star goal file, so they honor the SAME resolved config value rather than each
@@ -899,6 +1033,24 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // belongs only to the digest; reconciliation/title dedup below must see every open issue.
       // Reuse the same snapshot for triage prompt rendering later in this phase.
       const backlogDigest = await buildBacklogDigest(deps.forge, deps.cfg);
+      if (!backlogDigest.ok) {
+        // #231: a failed open-issue read must SUPPRESS issue creation for this pass (see the
+        // creation loop below, gated on `backlogDigest.ok`) rather than let the align session
+        // create against an invisible/placeholder inventory with no real duplicate detection.
+        // Recorded once per phase invocation, durable and visible regardless of whether a
+        // po-align session even runs this pass (the replay branch below still reads the
+        // backlog fresh, for triage's prompt) — same "record the hole, don't hide it" stance
+        // as the goal-file failure further down.
+        try {
+          deps.state.appendEvent("backlog-read-failed", { round_id: roundId, reason: backlogDigest.reason ?? "unknown" });
+        } catch {
+          /* the log line below still lands even if the durable write fails */
+        }
+        (deps.log ?? console.error)(
+          `[sapwood:po] round ${roundId}: backlog digest read failed — issue creation is suppressed this pass ` +
+            `(triage proceeds unaffected): ${backlogDigest.reason ?? "unknown"}`,
+        );
+      }
 
       // ── Alignment/decomposition pass: at most ONE session, dispatched even with an unscoped
       // fresh round (round.milestone unset) — decomposition still has docs/PLAN.md to work from
@@ -916,44 +1068,132 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         // session, and they do not pay for a fresh session whose output would be discarded.
         alignValidated = { ok: true, issues: persistedProposals.map(({ title, body }) => ({ title, body })) };
       } else {
-        const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
-          "po.mode": "align",
-          "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
-          "plan.md": loadPlanMd(deps.planMdPath ?? deps.cfg.goal.file),
-          "round.directive": directive,
-          "backlog.digest": backlogDigest,
-        });
-        const alignResult = await runSessionWithRetry({
-          runner: deps.runner,
-          state: deps.state,
-          session: {
-            roleId: "po-align",
-            prompt: alignPrompt,
-            model: role.model,
-            effort: role.effort,
-            fallbackModel: role.fallbackModel,
-            allowedTools: PO_ALLOWED_TOOLS,
-            disallowedTools: PO_DISALLOWED_TOOLS,
-          },
-          issue: 0,
-          now,
-          ...(deps.log !== undefined ? { log: deps.log } : {}),
-          degradeEvent: "po-degraded",
-          degradePayload: (result) => ({
-            round_id: roundId,
-            outcome: result.outcome,
-            session: result.name,
-            reason: alignDegradeReason(result),
-          }),
-          degradeMessage: (result) =>
-            `[sapwood:po] round ${roundId}: po-align session failed twice (${result.outcome}) — ` +
-            `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result)}`,
-          isValid: (result) => validateAlignOutput(result.resultText ?? "").ok,
-        });
-        alignValidated =
-          alignResult.outcome === "done"
-            ? validateAlignOutput(alignResult.resultText ?? "")
-            : { ok: false, reason: `po-align session failed twice (${alignResult.outcome})` };
+        const goalFilePath = deps.planMdPath ?? deps.cfg.goal.file;
+        const planRead = readPlanMd(goalFilePath);
+
+        if (!planRead.ok) {
+          // #231: an explicit, fail-closed abort of the align-CREATION pass specifically —
+          // never a silent "" that lets the session decompose against empty context. No
+          // session is spawned (no cost paid for a session working from a false "I read the
+          // goal" premise), no creations happen this pass; triage (below, unconditional) never
+          // reads this file and is unaffected — the round is never wedged, only this one
+          // consuming behavior degrades. The durable goal-file-unreadable event below IS this
+          // failure's honesty record — no input-manifest row is written here (#231 gate② F4:
+          // there is no session attempt to describe; minting one anyway would be a phantom
+          // attempt for a dispatch that never happened).
+          try {
+            deps.state.appendEvent("goal-file-unreadable", { round_id: roundId, path: goalFilePath, reason: planRead.reason });
+          } catch (e) {
+            // #231 gate② (Codex sol high F3): unguarded, this throw would escape stub.run —
+            // runPeripheral has no catch for a peripheral's own run(), so the phase marker
+            // would never persist and the round would wedge, directly contradicting "the round
+            // is never wedged" above. Contained exactly like the tick-error append below.
+            (deps.log ?? console.error)(
+              `[sapwood:po] round ${roundId}: failed to record the goal-file-unreadable honesty event: ${String(e)}`,
+            );
+          }
+          try {
+            deps.state.appendEvent("tick-error", {
+              error: `round ${roundId}: goal file unreadable at ${goalFilePath}: ${planRead.reason}`,
+            });
+          } catch {
+            /* the goal-file-unreadable append above (or its own log line) already recorded
+               this — a tick-error write failure here only loses the aggregate count */
+          }
+          (deps.log ?? console.error)(
+            `[sapwood:po] round ${roundId}: goal file unreadable at ${goalFilePath} — skipping the align-creation ` +
+              `session this pass (triage still proceeds): ${planRead.reason}`,
+          );
+          alignValidated = { ok: false, reason: `goal file unreadable: ${planRead.reason}` };
+        } else {
+          // #231: this is the ONE place a fresh po-align session attempt happens this phase
+          // call. The attempt number is derived HERE — immediately before the real dispatch,
+          // after the goal-file check has passed (#231 gate② F4) — not earlier: deriving it
+          // before the goal-file check would mint a manifest attempt for a session that never
+          // actually ran whenever that check fails, and a crash between an early derivation and
+          // this point would leave an attempt number no dispatch ever used. Every input channel
+          // THIS session dispatch actually consumes (goal file + backlog digest) shares this
+          // one attempt number, and is provably distinguishable from a prior crash-rerun's
+          // attempt at the SAME round/phase/session with zero in-memory bookkeeping.
+          const attempt = deps.state.nextInputManifestAttempt(roundId, INPUT_MANIFEST_PHASE, INPUT_MANIFEST_ROLE, "po-align");
+          recordInputManifest(
+            deps.state,
+            {
+              round_id: roundId,
+              phase: INPUT_MANIFEST_PHASE,
+              role: INPUT_MANIFEST_ROLE,
+              session: "po-align",
+              attempt,
+              channel: "goal-file",
+              // Only ever written here, on the success path (see above) — a REAL dispatch's
+              // goal-file channel row always records what it actually read.
+              ok: true,
+              total: 1,
+              rendered: 1,
+              omitted: 0,
+              truncated: false,
+              version: contentVersion(planRead.content),
+            },
+            deps.log,
+          );
+          recordInputManifest(
+            deps.state,
+            {
+              round_id: roundId,
+              phase: INPUT_MANIFEST_PHASE,
+              role: INPUT_MANIFEST_ROLE,
+              session: "po-align",
+              attempt,
+              channel: "backlog-digest",
+              ok: backlogDigest.ok,
+              total: backlogDigest.total,
+              rendered: backlogDigest.rendered,
+              omitted: backlogDigest.omitted,
+              truncated: backlogDigest.truncated,
+              version: backlogDigest.ok ? contentVersion(backlogDigest.text) : null,
+              detail: backlogDigest.ok ? null : (backlogDigest.reason ?? "unknown"),
+            },
+            deps.log,
+          );
+          const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
+            "po.mode": "align",
+            "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
+            "plan.md": planRead.content,
+            "round.directive": directive,
+            "backlog.digest": backlogDigest.text,
+          });
+          const alignResult = await runSessionWithRetry({
+            runner: deps.runner,
+            state: deps.state,
+            session: {
+              roleId: "po-align",
+              prompt: alignPrompt,
+              model: role.model,
+              effort: role.effort,
+              fallbackModel: role.fallbackModel,
+              allowedTools: PO_ALLOWED_TOOLS,
+              disallowedTools: PO_DISALLOWED_TOOLS,
+            },
+            issue: 0,
+            now,
+            ...(deps.log !== undefined ? { log: deps.log } : {}),
+            degradeEvent: "po-degraded",
+            degradePayload: (result) => ({
+              round_id: roundId,
+              outcome: result.outcome,
+              session: result.name,
+              reason: alignDegradeReason(result),
+            }),
+            degradeMessage: (result) =>
+              `[sapwood:po] round ${roundId}: po-align session failed twice (${result.outcome}) — ` +
+              `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result)}`,
+            isValid: (result) => validateAlignOutput(result.resultText ?? "").ok,
+          });
+          alignValidated =
+            alignResult.outcome === "done"
+              ? validateAlignOutput(alignResult.resultText ?? "")
+              : { ok: false, reason: `po-align session failed twice (${alignResult.outcome})` };
+        }
       }
       if (persistedProposals == null) {
         if (alignValidated.ok) {
@@ -972,7 +1212,21 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // caller of forge.createIssue, and its (title, body) signature carries no label field, so
       // a created issue structurally cannot carry a dispatch-path label at creation (the
       // pre-#110 poisoned-label post-check this replaces is deleted outright, see module doc).
-      const createdIssues = alignValidated.ok ? (persistedProposals ?? []) : [];
+      // #231: ALSO gated on the backlog digest read having succeeded this pass — a failed read
+      // means there is no reliable duplicate-detection inventory, so creation is suppressed
+      // entirely (zero forge.createIssue calls) regardless of what a session proposed or
+      // whether these proposals came from a fresh session or a same-round replay; the durable
+      // proposal journal is left non-terminal, and the NEXT round's own fresh align pass is
+      // where these effectively retry (see the backlog-read-failed honesty event above).
+      const backlogOk = backlogDigest.ok;
+      const pendingProposalCount = alignValidated.ok ? (persistedProposals ?? []).length : 0;
+      const createdIssues = alignValidated.ok && backlogOk ? (persistedProposals ?? []) : [];
+      if (alignValidated.ok && !backlogOk && pendingProposalCount > 0) {
+        (deps.log ?? console.error)(
+          `[sapwood:po] round ${roundId}: backlog digest unavailable — suppressing creation of ${pendingProposalCount} ` +
+            `validated proposal(s) this pass`,
+        );
+      }
       // #123: the aligning phase's own structured summary — what the PO actually decomposed/
       // triaged this round — collected as the loops run and externalized as ONE `align-summary`
       // event at the end. Consumed by the round artifact (round-artifact.ts) and by the
@@ -1047,12 +1301,72 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // so no longer matches getIssuesNeedingPlanTriage's candidate query on any later run. ──
       const triageCandidates = await deps.forge.getIssuesNeedingPlanTriage();
       for (const issue of triageCandidates) {
+        // #231: this triage session's own input-manifest rows. `session` is scoped to THIS
+        // issue so a crash-rerun's re-triage of the same still-planless issue is its own
+        // distinguishable attempt, independent of every other candidate this loop processes.
+        // ONE attempt number covers BOTH channels this dispatch actually consumes (#231 gate②
+        // F2/F4 — same "derive once per dispatch, share across its channel rows" shape as
+        // po-align above):
+        //  - "issue-body": the po.md triage prompt renders {{issue.number}}/{{issue.title}}/
+        //    {{issue.labels}}/{{issue.body}} (see po.md's triage section) — the version hash
+        //    covers that FULL rendered context, not body alone, so a title/label edit with an
+        //    unchanged body still shows up as a version change (#231 gate② F2).
+        //  - "backlog-digest": the triage prompt ALSO substitutes {{backlog.digest}} (po.md's
+        //    shared template) — recording the SAME backlogDigest object's real ok/counts/
+        //    truncated flags here (not an assumed ok:true) closes the incoherence a failed
+        //    backlog read previously left: a triage session that actually saw the failure
+        //    placeholder must not have its only manifest row claim ok:true (#231 gate② F2).
+        const triageAttempt = deps.state.nextInputManifestAttempt(
+          roundId,
+          INPUT_MANIFEST_PHASE,
+          INPUT_MANIFEST_ROLE,
+          `po-triage:${issue.number}`,
+        );
+        recordInputManifest(
+          deps.state,
+          {
+            round_id: roundId,
+            phase: INPUT_MANIFEST_PHASE,
+            role: INPUT_MANIFEST_ROLE,
+            session: `po-triage:${issue.number}`,
+            attempt: triageAttempt,
+            channel: "issue-body",
+            ok: true,
+            version: contentVersion(
+              JSON.stringify({ number: issue.number, title: issue.title, labels: issue.labels, body: issue.body ?? "" }),
+            ),
+            total: 1,
+            rendered: 1,
+            omitted: 0,
+            truncated: false,
+          },
+          deps.log,
+        );
+        recordInputManifest(
+          deps.state,
+          {
+            round_id: roundId,
+            phase: INPUT_MANIFEST_PHASE,
+            role: INPUT_MANIFEST_ROLE,
+            session: `po-triage:${issue.number}`,
+            attempt: triageAttempt,
+            channel: "backlog-digest",
+            ok: backlogDigest.ok,
+            total: backlogDigest.total,
+            rendered: backlogDigest.rendered,
+            omitted: backlogDigest.omitted,
+            truncated: backlogDigest.truncated,
+            version: backlogDigest.ok ? contentVersion(backlogDigest.text) : null,
+            detail: backlogDigest.ok ? null : (backlogDigest.reason ?? "unknown"),
+          },
+          deps.log,
+        );
         const triagePrompt = renderRolePrompt(template, issue, deps.cfg, {
           "po.mode": "triage",
           "round.milestone": deps.cfg.round.milestone ?? "",
           "plan.md": "",
           "round.directive": directive,
-          "backlog.digest": backlogDigest,
+          "backlog.digest": backlogDigest.text,
         });
         const triageResult = await runSessionWithRetry({
           runner: deps.runner,

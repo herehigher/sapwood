@@ -1257,7 +1257,7 @@ test("park: escalation marker is written to the engine's own data dir; clearing 
 
 // ── #172: REAL v12 -> v13 migration — data survives, resume columns land ──
 
-test("migration v12->v13: a populated v12 DB opens with data intact, resume defaults, user_version 13, and idempotent reopen", () => {
+test("migration v12->v13: a populated v12 DB opens with data intact, resume defaults, user_version SCHEMA_VERSION, and idempotent reopen", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
   try {
     const dbPath = join(dir, "sapwood.sqlite");
@@ -1287,10 +1287,11 @@ test("migration v12->v13: a populated v12 DB opens with data intact, resume defa
     assert.throws(() => raw.prepare("SELECT resume_attempts FROM workers").get());
     raw.close();
 
-    // Open with the CURRENT engine -> migrates 12 -> 13.
+    // Open with the CURRENT engine -> migrates 12 -> SCHEMA_VERSION (13 was current when this
+    // test was written; later migrations, e.g. #231's v13->v14, ride along automatically).
     const s = new State(dbPath);
-    assert.equal(s.userVersion(), 13);
-    assert.equal(SCHEMA_VERSION, 13);
+    assert.ok(SCHEMA_VERSION >= 13);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
     // Pre-existing data survived intact.
     const w = s.getWorker("lane-v12");
     assert.equal(w?.issue, 9);
@@ -1312,7 +1313,7 @@ test("migration v12->v13: a populated v12 DB opens with data intact, resume defa
 
     // Idempotent reopen: no re-migration, same version, same data.
     const s2 = new State(dbPath);
-    assert.equal(s2.userVersion(), 13);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
     assert.equal(s2.getWorker("lane-v12")?.issue, 9);
     assert.equal(s2.getWorker("lane-v12")?.resume_attempts, 0);
     assert.equal(s2.isParked(), false);
@@ -1320,4 +1321,142 @@ test("migration v12->v13: a populated v12 DB opens with data intact, resume defa
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #231: input manifest (migration v13->v14) ───────────────────────────────────────────────
+
+test("migration v13->v14: a populated v13 DB opens with data intact, an empty input_manifest table, user_version SCHEMA_VERSION, and idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    // Build a REAL v13 DB: run the shipped migrations 0..12 exactly as that engine would have.
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 13; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 13");
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, resume_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("lane-v13", 4, "sess-4", "done", "2026-07-16T00:00:00Z", "2026-07-16T01:00:00Z", 2);
+    assert.throws(() => raw.prepare("SELECT * FROM input_manifest").get(), "the table doesn't exist yet at v13");
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 14);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    assert.equal(s.getWorker("lane-v13")?.resume_attempts, 2, "pre-existing data survived intact");
+    assert.deepEqual(s.inputManifestRows(1), [], "the new table exists and starts empty");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("lane-v13")?.resume_attempts, 2);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("input manifest: nextInputManifestAttempt starts at 1 and increments per (round, phase, role, session) tuple only — a different tuple starts fresh at 1", () => {
+  const s = new State(":memory:");
+  assert.equal(s.nextInputManifestAttempt(1, "aligning", "po", "po-align"), 1);
+  s.appendInputManifest({ round_id: 1, phase: "aligning", role: "po", session: "po-align", attempt: 1, channel: "goal-file", ok: true });
+  assert.equal(
+    s.nextInputManifestAttempt(1, "aligning", "po", "po-align"),
+    2,
+    "a second row for the SAME tuple is a distinguishable second attempt",
+  );
+  // A different channel under the SAME (round, phase, role, session, attempt) does not bump
+  // the attempt counter on its own — the CALLER decides one attempt covers several channels.
+  s.appendInputManifest({
+    round_id: 1,
+    phase: "aligning",
+    role: "po",
+    session: "po-align",
+    attempt: 1,
+    channel: "backlog-digest",
+    ok: true,
+  });
+  assert.equal(
+    s.nextInputManifestAttempt(1, "aligning", "po", "po-align"),
+    2,
+    "still 2 — the max attempt used so far, regardless of channel count",
+  );
+  // A different session (e.g. a distinct triage target) starts its own fresh counter.
+  assert.equal(s.nextInputManifestAttempt(1, "aligning", "po", "po-triage:9"), 1);
+  // A different round is also independent.
+  assert.equal(s.nextInputManifestAttempt(2, "aligning", "po", "po-align"), 1);
+  s.close();
+});
+
+test("input manifest: appendInputManifest + inputManifestRows round-trip every field, including null/optional defaults", () => {
+  const s = new State(":memory:");
+  s.appendInputManifest({
+    round_id: 10,
+    phase: "aligning",
+    role: "po",
+    session: "po-align",
+    attempt: 1,
+    channel: "backlog-digest",
+    ok: false,
+    total: 50,
+    rendered: 12,
+    omitted: 38,
+    truncated: true,
+    detail: "open-issue read failed",
+  });
+  s.appendInputManifest({ round_id: 10, phase: "aligning", role: "po", session: "po-align", attempt: 1, channel: "goal-file", ok: true });
+  const rows = s.inputManifestRows(10);
+  assert.equal(rows.length, 2);
+  const backlogRow = rows.find((r) => r.channel === "backlog-digest")!;
+  assert.equal(backlogRow.ok, false);
+  assert.equal(backlogRow.total, 50);
+  assert.equal(backlogRow.rendered, 12);
+  assert.equal(backlogRow.omitted, 38);
+  assert.equal(backlogRow.truncated, true);
+  assert.equal(backlogRow.detail, "open-issue read failed");
+  assert.equal(backlogRow.version, null);
+  const goalRow = rows.find((r) => r.channel === "goal-file")!;
+  assert.equal(goalRow.ok, true);
+  assert.equal(goalRow.total, null);
+  assert.equal(goalRow.truncated, false);
+  assert.equal(goalRow.detail, null);
+  assert.equal(s.inputManifestRows(999).length, 0, "a round with no rows reads back empty, not an error");
+  s.close();
+});
+
+test("input manifest: a crash-rerun's manifest is distinguishable from the original attempt's (#231 acceptance criterion)", () => {
+  const s = new State(":memory:");
+  const attempt1 = s.nextInputManifestAttempt(7, "aligning", "po", "po-align");
+  s.appendInputManifest({
+    round_id: 7,
+    phase: "aligning",
+    role: "po",
+    session: "po-align",
+    attempt: attempt1,
+    channel: "goal-file",
+    ok: false,
+  });
+  // The engine crashes and restarts; the SAME phase/session is dispatched again this round.
+  const attempt2 = s.nextInputManifestAttempt(7, "aligning", "po", "po-align");
+  assert.equal(attempt2, attempt1 + 1);
+  s.appendInputManifest({
+    round_id: 7,
+    phase: "aligning",
+    role: "po",
+    session: "po-align",
+    attempt: attempt2,
+    channel: "goal-file",
+    ok: true,
+  });
+  const rows = s.inputManifestRows(7);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(
+    rows.map((r) => [r.attempt, r.ok]),
+    [
+      [1, false],
+      [2, true],
+    ],
+    "the two attempts are independently distinguishable rows, not an overwrite",
+  );
+  s.close();
 });

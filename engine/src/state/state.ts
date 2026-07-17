@@ -333,6 +333,53 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE workers ADD COLUMN resume_capped INTEGER NOT NULL DEFAULT 0;
     `);
   },
+  // 13 -> 14: input manifest (#231) — the "what did this decision actually see" record for
+  // every engine-controlled input channel a peripheral SESSION was actually given (goal file,
+  // backlog digest, pool candidates, ...). One row per (round, phase, role, session, attempt,
+  // channel) — same "one row per dimension" shape as spend_ledger's (lane, model) rows, not a
+  // JSON blob, so a channel's read status/counts/truncation stay independently queryable.
+  // `attempt` is NEVER supplied from a caller's own in-memory counter (lost across a crash) —
+  // it is DERIVED here, from the existing rows for the same (round_id, phase, role, session)
+  // tuple (State.nextInputManifestAttempt, a plain MAX(attempt)+1 read), so a crash-rerun that
+  // reaches the same session-dispatch point again is automatically attempt 2, 3, ... with zero
+  // extra bookkeeping, and its manifest rows are provably DISTINGUISHABLE from the original
+  // attempt's (#231 acceptance criterion). A RECORD only (#231 design ruling): nothing in this
+  // codebase gates a session or a phase on what this table holds — State.appendInputManifest is
+  // a plain write a caller wraps best-effort (align.ts's recordInputManifest), the same "record,
+  // not gate" contract as round_artifacts. `ok=0` + `detail` covers a failed read (goal file
+  // unreadable, backlog read failed); `total/rendered/omitted/truncated` cover a bounded
+  // digest's pack (align.ts's packDigestRecords) — null/0 for a channel with no meaningful count
+  // (e.g. a single-file read). `version` is a short content hash (align.ts's contentVersion) so
+  // two successful attempts can still be told apart.
+  //
+  // #231 gate② (Codex sol high F5): `CHECK (attempt > 0)` and a UNIQUE index on the full
+  // dimension key make a caller bug (a zero/negative attempt, or two rows for the exact same
+  // (round, phase, role, session, attempt, channel)) surface as a thrown SQLite constraint
+  // violation instead of silently coexisting as duplicate/nonsensical rows — appendInputManifest
+  // is a single-writer-serial write (same assumption the rest of this file already documents for
+  // e.g. `rounds`), so no further concurrency modeling belongs here.
+  (db) => {
+    db.exec(`
+      CREATE TABLE input_manifest (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id  INTEGER NOT NULL,
+        phase     TEXT NOT NULL,
+        role      TEXT NOT NULL,
+        session   TEXT NOT NULL,
+        attempt   INTEGER NOT NULL CHECK (attempt > 0),
+        channel   TEXT NOT NULL,
+        ok        INTEGER NOT NULL,
+        version   TEXT,
+        total     INTEGER,
+        rendered  INTEGER,
+        omitted   INTEGER,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        detail    TEXT,
+        ts        TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX input_manifest_dim ON input_manifest (round_id, phase, role, session, attempt, channel);
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -516,6 +563,37 @@ export interface RoundRow {
    *  boundaries. 0 on rows predating the v9->v10 migration (long closed, never rebuilt). */
   start_event_id?: number;
   start_spend_id?: number;
+}
+
+/** #231: one engine-controlled input channel's read record for one peripheral session attempt —
+ *  see the schema v13->v14 migration comment for the full table-shape rationale. `attempt` is
+ *  populated by the CALLER from State.nextInputManifestAttempt (itself derived from durable
+ *  state, never an in-memory counter) — appendInputManifest never computes it on its own, so
+ *  several channel rows from the SAME session dispatch share the SAME attempt number: state.ts
+ *  deliberately does not auto-increment per row, since that would make every channel of one
+ *  session read as its own "attempt", which is wrong — the whole point is one attempt per
+ *  session dispatch, covering however many input channels that dispatch consumed. */
+export interface InputManifestRow {
+  round_id: number;
+  phase: string;
+  role: string;
+  session: string;
+  attempt: number;
+  channel: string;
+  /** false iff the underlying read for this channel failed (see `detail` for why). */
+  ok: boolean;
+  /** Short content hash/version of what was actually read — lets two `ok: true` attempts be
+   *  told apart even when neither failed. Absent when there's nothing meaningful to hash (a
+   *  failed read, or a channel with no content of its own). */
+  version?: string | null;
+  /** Bounded-digest pack counts (align.ts's packDigestRecords) — null for a channel that isn't
+   *  a multi-record digest (e.g. a single-file read uses total=1/rendered=1|0/omitted=0|1). */
+  total?: number | null;
+  rendered?: number | null;
+  omitted?: number | null;
+  truncated?: boolean;
+  /** Free-text detail — a failure reason on `ok: false`, otherwise unset. */
+  detail?: string | null;
 }
 
 /** A durably-persisted recovery-path board mutation still awaiting success or escalation
@@ -1315,5 +1393,90 @@ export class State {
    *  in-memory State (tests), same convention as killSwitchPath/pausePath above. */
   roundArtifactMdPath(roundId: number): string | null {
     return this.dataDir ? join(this.dataDir, "rounds", `round-${roundId}.md`) : null;
+  }
+
+  // ── Input manifest (#231) ───────────────────────────────────────────────────────────────
+
+  /** The next attempt number for (round_id, phase, role, session) — MAX(attempt)+1, or 1 when
+   *  no row exists yet for that tuple. Pure read; callers compute this ONCE per session
+   *  dispatch and pass the SAME number to every appendInputManifest call for that dispatch's
+   *  channels (see InputManifestRow's own doc comment for why one call per channel must not
+   *  each derive their own attempt). A crash-rerun that reaches the same dispatch point again
+   *  reads a higher number automatically — the durable table itself is the counter, nothing to
+   *  lose on restart. */
+  nextInputManifestAttempt(roundId: number, phase: string, role: string, session: string): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(MAX(attempt), 0) AS m FROM input_manifest WHERE round_id = ? AND phase = ? AND role = ? AND session = ?")
+      .get(roundId, phase, role, session) as { m: number };
+    return row.m + 1;
+  }
+
+  /** Append one input-manifest row (#231). A plain write — RECORD, not a gate (see the schema
+   *  v13->v14 migration comment): callers (align.ts's recordInputManifest) wrap this
+   *  best-effort, the same "a write failure here must never block the session it's describing"
+   *  contract as every other observability-only append in this file. */
+  appendInputManifest(row: InputManifestRow, now?: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO input_manifest
+           (round_id, phase, role, session, attempt, channel, ok, version, total, rendered, omitted, truncated, detail, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.round_id,
+        row.phase,
+        row.role,
+        row.session,
+        row.attempt,
+        row.channel,
+        row.ok ? 1 : 0,
+        row.version ?? null,
+        row.total ?? null,
+        row.rendered ?? null,
+        row.omitted ?? null,
+        row.truncated ? 1 : 0,
+        row.detail ?? null,
+        now ?? new Date().toISOString(),
+      );
+  }
+
+  /** Every input-manifest row for one round, oldest first — test/inspection reader. Not
+   *  consulted by any engine decision today (see the schema v13->v14 migration comment: the
+   *  manifest is a record, not a gate). */
+  inputManifestRows(roundId: number): (InputManifestRow & { id: number; ts: string })[] {
+    const rows = this.db.prepare("SELECT * FROM input_manifest WHERE round_id = ? ORDER BY id").all(roundId) as Array<{
+      id: number;
+      round_id: number;
+      phase: string;
+      role: string;
+      session: string;
+      attempt: number;
+      channel: string;
+      ok: number;
+      version: string | null;
+      total: number | null;
+      rendered: number | null;
+      omitted: number | null;
+      truncated: number;
+      detail: string | null;
+      ts: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      round_id: r.round_id,
+      phase: r.phase,
+      role: r.role,
+      session: r.session,
+      attempt: r.attempt,
+      channel: r.channel,
+      ok: r.ok === 1,
+      version: r.version,
+      total: r.total,
+      rendered: r.rendered,
+      omitted: r.omitted,
+      truncated: r.truncated === 1,
+      detail: r.detail,
+      ts: r.ts,
+    }));
   }
 }
