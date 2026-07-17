@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
+import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
 import {
   assembleContextManifest,
@@ -123,6 +124,19 @@ export interface RoleSessionOpts {
    *  absolute) is refused with a stderr line and reads as absent (scratchText undefined),
    *  never a file read outside the root. */
   scratchFile?: string;
+  /** #234: optional read-only forge MCP proxy attached to this session. When present,
+   *  RoleRunner.run() mints a fresh per-session server+token via `mint` (keyed by this exact
+   *  session's generated lane name), widens the effective `--allowedTools` with the proxy's
+   *  fixed `mcp__forge__*` tool names, injects the resulting inline `--mcp-config`, and
+   *  revokes/tears down the handle once the session exits — in EVERY outcome (done/failed/
+   *  timeout), before the worktree is deleted. A mint failure is non-fatal (logged, session
+   *  proceeds without the proxy attached) — an optional capability's setup failure must never
+   *  wedge a role session that would otherwise run fine unaugmented. peripheralSessionEnv's
+   *  credential-stripping is unaffected either way: the proxy's bearer token travels via the
+   *  `--mcp-config` header, never the spawn env — the proxy is the session's only forge reach. */
+  proxy?: {
+    mint: (session: { role: string; session: string }) => Promise<ForgeProxyHandle>;
+  };
 }
 
 export interface RoleSessionResult {
@@ -348,187 +362,226 @@ export class RoleRunner {
     // Same inline-JSON (never a file) guard wiring as worker.ts's dispatch(), for the same
     // reason: a settings FILE would be an on-disk target the session could try to mutate.
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
-    const args = claudeArgs({
-      prompt: opts.prompt,
-      model: opts.model,
-      effort: opts.effort,
-      fallbackModel: opts.fallbackModel,
-      worktree: name,
-      name,
-      sessionId,
-      settings: settingsJson,
-      allowedTools: opts.allowedTools ?? ROLE_ALLOWED_TOOLS,
-      disallowedTools: opts.disallowedTools ?? ROLE_DISALLOWED_TOOLS,
-      // NB: no addDir — same as worker.ts's dispatch(): a role session must never see engine
-      // state (sentinels, the sqlite db) via --add-dir.
-    });
-    const startedMs = this.now().getTime();
-    const session = spawnClaudeSession(this.bin, args, {
-      jsonlFd,
-      env: peripheralSessionEnv(guardMode),
-    });
-
-    // Register the exit listener BEFORE any await — same rationale as worker.ts's dispatch():
-    // Node does not replay `exit` to late listeners, so a very fast exit must already be caught.
-    let timedOut = false;
-    const exitPromise = new Promise<number | null>((resolve) => {
-      session.onExit((code) => resolve(code));
-    });
-
-    let spawnErr: unknown;
-    await new Promise<void>((resolve) => {
-      session.onSpawn(() => resolve());
-      session.onError((e) => {
-        spawnErr = e;
-        resolve();
+    // #234: mint the read-only forge MCP proxy BEFORE building argv — the resulting tool names
+    // widen allowedTools and the mcp-config is an inline argv value, so both must be known before
+    // claudeArgs runs. Non-fatal on failure (see RoleSessionOpts.proxy's doc): the session simply
+    // runs without the proxy attached, never a wedged/aborted role session over an optional
+    // capability's own setup failure.
+    let proxyHandle: ForgeProxyHandle | undefined;
+    if (opts.proxy) {
+      try {
+        proxyHandle = await opts.proxy.mint({ role: opts.roleId, session: name });
+      } catch (e) {
+        (this.deps.log ?? console.error)(`[sapwood:forge-proxy] session ${name}: mint failed (non-fatal, proxy unattached): ${String(e)}`);
+      }
+    }
+    // #234 F5 (PR #252 review, P1, Codex #6): EVERYTHING from here on is wrapped in try/finally
+    // so the proxy is torn down (token revoked, listener closed) no matter HOW this method exits
+    // past a successful mint — including the spawn-error throw a few lines down, and any future
+    // exception this method might grow. Before this fix, a spawn failure threw BEFORE the
+    // (then-inline) teardown block ever ran, leaking the HTTP listener + a live, never-revoked
+    // bearer token for the engine's remaining lifetime.
+    try {
+      const baseAllowedTools = opts.allowedTools ?? ROLE_ALLOWED_TOOLS;
+      const allowedTools = proxyHandle
+        ? [baseAllowedTools, ...proxyHandle.toolNames].filter((s) => s.length > 0).join(",")
+        : baseAllowedTools;
+      const args = claudeArgs({
+        prompt: opts.prompt,
+        model: opts.model,
+        effort: opts.effort,
+        fallbackModel: opts.fallbackModel,
+        worktree: name,
+        name,
+        sessionId,
+        settings: settingsJson,
+        allowedTools,
+        disallowedTools: opts.disallowedTools ?? ROLE_DISALLOWED_TOOLS,
+        ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
+        // NB: no addDir — same as worker.ts's dispatch(): a role session must never see engine
+        // state (sentinels, the sqlite db) via --add-dir.
       });
-    });
-    if (spawnErr) {
+      const startedMs = this.now().getTime();
+      const session = spawnClaudeSession(this.bin, args, {
+        jsonlFd,
+        env: peripheralSessionEnv(guardMode),
+      });
+
+      // Register the exit listener BEFORE any await — same rationale as worker.ts's dispatch():
+      // Node does not replay `exit` to late listeners, so a very fast exit must already be caught.
+      let timedOut = false;
+      const exitPromise = new Promise<number | null>((resolve) => {
+        session.onExit((code) => resolve(code));
+      });
+
+      let spawnErr: unknown;
+      await new Promise<void>((resolve) => {
+        session.onSpawn(() => resolve());
+        session.onError((e) => {
+          spawnErr = e;
+          resolve();
+        });
+      });
+      if (spawnErr) {
+        try {
+          closeSync(jsonlFd);
+        } catch {
+          /* noop */
+        }
+        this.removeIfExists(jsonlPath);
+        throw new Error(`role session spawn failed (${this.bin}): ${String(spawnErr)}`);
+      }
+      session.onError(() => {
+        /* post-spawn error: exitPromise's `exit` still resolves this */
+      });
+
+      this.writeJsonAtomic(this.path(name, "running.json"), {
+        name,
+        role_id: opts.roleId,
+        session_id: sessionId,
+        wrapper_pid: session.pid,
+        started_at: new Date(startedMs).toISOString(),
+      });
+
+      // #236 (Codex F1, anchor corrected in R1): capture the FILESYSTEM-derived half of the
+      // context manifest (CLAUDE.md-family sources, worktree HEAD, guard hook content) as early as
+      // this engine can possibly observe it — right after spawn confirmation, BEFORE waiting out
+      // the session. Anchored to the session's OWN init line (worker.ts's hasSessionInitLine),
+      // polled from its still-growing jsonl — NOT a bounded wait for the worktree DIRECTORY to
+      // exist (the original design): directory existence does not imply checkout-complete, and a
+      // focused-suite run caught that race live (CLAUDE.md recorded absent once, flaky). The init
+      // line is the CLI's own signal that context loading (worktree provisioning included) is
+      // done — the model has not yet taken a turn, so this is exactly the "what the session saw"
+      // moment. This matters most for a write-capable session (retro): capturing at TEARDOWN (the
+      // pre-#236-fix behavior) would record "what the session left behind" (its own proposal
+      // commit, a possibly-edited CLAUDE.md) — not what it started with. If the init line is never
+      // observed within the bound, capture proceeds anyway (best-effort, never blocks the
+      // session) — `captureBasis` on the resulting manifest names which case fired, never silently
+      // presenting a timeout-fallback capture as equally reliable.
+      const worktreePath = join(this.worktreeRoot, name);
+      const initObserved = await waitForInitLine(jsonlPath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
+      const captureBasis: PreSpawnManifestCapture["captureBasis"] = initObserved ? "init-observed" : "timeout-fallback";
+      const worktreeAppeared = existsSync(worktreePath);
+      const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared, captureBasis);
+
+      // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
+      // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
+      // mid-run): past worker.timeoutSec, kill the tree; the exit handler above still resolves
+      // exitPromise (with whatever code the kill produces), so run() always returns normally.
+      const hb = setInterval(() => {
+        const elapsedSec = (this.now().getTime() - startedMs) / 1000;
+        if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
+          timedOut = true;
+          clearInterval(hb);
+          void this.killTree(session);
+        }
+      }, this.hbMs);
+
+      const exitCode = await exitPromise;
+      clearInterval(hb);
       try {
         closeSync(jsonlFd);
       } catch {
-        /* noop */
+        /* already closed */
       }
-      this.removeIfExists(jsonlPath);
-      throw new Error(`role session spawn failed (${this.bin}): ${String(spawnErr)}`);
-    }
-    session.onError(() => {
-      /* post-spawn error: exitPromise's `exit` still resolves this */
-    });
 
-    this.writeJsonAtomic(this.path(name, "running.json"), {
-      name,
-      role_id: opts.roleId,
-      session_id: sessionId,
-      wrapper_pid: session.pid,
-      started_at: new Date(startedMs).toISOString(),
-    });
+      const jsonl = this.readJsonl(jsonlPath);
+      const costUsd = parseCostUsd(jsonl);
+      const modelUsage = parseModelUsage(jsonl);
+      // #110 PR1: the structured-output READ side — same jsonl scan parseCostUsd/parseModelUsage
+      // already do, so this costs nothing extra to compute even for roles that don't consume it.
+      const resultText = parseResultText(jsonl);
+      const outcome: "done" | "failed" | "timeout" = timedOut ? "timeout" : exitCode === 0 ? "done" : "failed";
+      const sentinelTag = outcome === "timeout" ? "failed" : outcome;
+      this.writeJsonAtomic(this.path(name, `${sentinelTag}.json`), {
+        name,
+        role_id: opts.roleId,
+        session_id: sessionId,
+        exit_code: exitCode,
+        total_cost_usd: costUsd,
+        model_usage: modelUsage,
+        ended_at: this.now().toISOString(),
+        timed_out: timedOut,
+      });
+      this.removeIfExists(this.path(name, "running.json"));
 
-    // #236 (Codex F1, anchor corrected in R1): capture the FILESYSTEM-derived half of the
-    // context manifest (CLAUDE.md-family sources, worktree HEAD, guard hook content) as early as
-    // this engine can possibly observe it — right after spawn confirmation, BEFORE waiting out
-    // the session. Anchored to the session's OWN init line (worker.ts's hasSessionInitLine),
-    // polled from its still-growing jsonl — NOT a bounded wait for the worktree DIRECTORY to
-    // exist (the original design): directory existence does not imply checkout-complete, and a
-    // focused-suite run caught that race live (CLAUDE.md recorded absent once, flaky). The init
-    // line is the CLI's own signal that context loading (worktree provisioning included) is
-    // done — the model has not yet taken a turn, so this is exactly the "what the session saw"
-    // moment. This matters most for a write-capable session (retro): capturing at TEARDOWN (the
-    // pre-#236-fix behavior) would record "what the session left behind" (its own proposal
-    // commit, a possibly-edited CLAUDE.md) — not what it started with. If the init line is never
-    // observed within the bound, capture proceeds anyway (best-effort, never blocks the
-    // session) — `captureBasis` on the resulting manifest names which case fired, never silently
-    // presenting a timeout-fallback capture as equally reliable.
-    const worktreePath = join(this.worktreeRoot, name);
-    const initObserved = await waitForInitLine(jsonlPath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
-    const captureBasis: PreSpawnManifestCapture["captureBasis"] = initObserved ? "init-observed" : "timeout-fallback";
-    const worktreeAppeared = existsSync(worktreePath);
-    const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared, captureBasis);
-
-    // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
-    // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
-    // mid-run): past worker.timeoutSec, kill the tree; the exit handler above still resolves
-    // exitPromise (with whatever code the kill produces), so run() always returns normally.
-    const hb = setInterval(() => {
-      const elapsedSec = (this.now().getTime() - startedMs) / 1000;
-      if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
-        timedOut = true;
-        clearInterval(hb);
-        void this.killTree(session);
+      // #111 PR-B: read the caller-requested scratch file BEFORE the worktree deletion below —
+      // the deliverable would otherwise be destroyed with the worktree. Absent/unreadable reads
+      // as undefined (never a throw): the caller's own validator owns deciding what that means.
+      //
+      // PATH CONTAINMENT (Codex review round 1, PR #119): the API's contract is "a path INSIDE
+      // the session's worktree" — enforced here, in the API itself, not left to callers. A bare
+      // join() would let a `../..`-shaped or absolute scratchFile normalize OUTSIDE the worktree
+      // and read arbitrary engine files into scratchText. Today's only caller passes a fixed
+      // constant (retro.ts's RETRO_SCRATCH_FILE), but the invariant must hold regardless of who
+      // calls tomorrow: resolve both sides and require the target to sit strictly UNDER the
+      // worktree root. A violating path reads as absent (scratchText undefined — the caller's
+      // fail-closed validator path) plus one stderr line naming it — never a read outside root.
+      let scratchText: string | undefined;
+      if (opts.scratchFile !== undefined) {
+        const root = resolve(this.worktreeRoot, name);
+        const target = resolve(root, opts.scratchFile);
+        if (!target.startsWith(root + sep)) {
+          (this.deps.log ?? console.error)(
+            `[sapwood:role] session ${name}: scratchFile ${JSON.stringify(opts.scratchFile)} resolves ` +
+              `outside the session worktree (${target}) — refusing to read it; scratchText stays undefined`,
+          );
+        } else {
+          try {
+            scratchText = readFileSync(target, "utf8");
+          } catch {
+            /* absent */
+          }
+        }
       }
-    }, this.hbMs);
 
-    const exitCode = await exitPromise;
-    clearInterval(hb);
-    try {
-      closeSync(jsonlFd);
-    } catch {
-      /* already closed */
-    }
+      // #236: assemble the POST-EXIT half of the manifest (the session's own self-report — model/
+      // cliVersion/tools/mcpTools — plus the auto-memory source, whose path is only knowable from
+      // that same self-report) and combine it with the pre-spawn capture above. Never lets
+      // manifest gathering fail the session — every read inside is individually tolerant, and the
+      // whole block is still guarded here as defense-in-depth.
+      let contextManifest: ContextManifest | undefined;
+      try {
+        contextManifest = this.assembleManifest(name, opts, jsonl, settingsJson, preSpawn);
+      } catch (e) {
+        (this.deps.log ?? console.error)(`[sapwood:context-manifest] session ${name}: failed to assemble (non-fatal): ${String(e)}`);
+      }
 
-    const jsonl = this.readJsonl(jsonlPath);
-    const costUsd = parseCostUsd(jsonl);
-    const modelUsage = parseModelUsage(jsonl);
-    // #110 PR1: the structured-output READ side — same jsonl scan parseCostUsd/parseModelUsage
-    // already do, so this costs nothing extra to compute even for roles that don't consume it.
-    const resultText = parseResultText(jsonl);
-    const outcome: "done" | "failed" | "timeout" = timedOut ? "timeout" : exitCode === 0 ? "done" : "failed";
-    const sentinelTag = outcome === "timeout" ? "failed" : outcome;
-    this.writeJsonAtomic(this.path(name, `${sentinelTag}.json`), {
-      name,
-      role_id: opts.roleId,
-      session_id: sessionId,
-      exit_code: exitCode,
-      total_cost_usd: costUsd,
-      model_usage: modelUsage,
-      ended_at: this.now().toISOString(),
-      timed_out: timedOut,
-    });
-    this.removeIfExists(this.path(name, "running.json"));
+      // Always delete the worktree — see the module doc: a role session never writes code
+      // (allowedTools scoping + the unchanged guard hook both block it), so unlike worker.ts's
+      // dirty-vs-clean retention there is no WIP that could ever need preserving here. Retro's
+      // one worktree deliverable (the scratch file) was already captured above; its actual code
+      // proposal lives on its PUSHED BRANCH, never in the worktree.
+      try {
+        rmSync(join(this.worktreeRoot, name), { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
 
-    // #111 PR-B: read the caller-requested scratch file BEFORE the worktree deletion below —
-    // the deliverable would otherwise be destroyed with the worktree. Absent/unreadable reads
-    // as undefined (never a throw): the caller's own validator owns deciding what that means.
-    //
-    // PATH CONTAINMENT (Codex review round 1, PR #119): the API's contract is "a path INSIDE
-    // the session's worktree" — enforced here, in the API itself, not left to callers. A bare
-    // join() would let a `../..`-shaped or absolute scratchFile normalize OUTSIDE the worktree
-    // and read arbitrary engine files into scratchText. Today's only caller passes a fixed
-    // constant (retro.ts's RETRO_SCRATCH_FILE), but the invariant must hold regardless of who
-    // calls tomorrow: resolve both sides and require the target to sit strictly UNDER the
-    // worktree root. A violating path reads as absent (scratchText undefined — the caller's
-    // fail-closed validator path) plus one stderr line naming it — never a read outside root.
-    let scratchText: string | undefined;
-    if (opts.scratchFile !== undefined) {
-      const root = resolve(this.worktreeRoot, name);
-      const target = resolve(root, opts.scratchFile);
-      if (!target.startsWith(root + sep)) {
-        (this.deps.log ?? console.error)(
-          `[sapwood:role] session ${name}: scratchFile ${JSON.stringify(opts.scratchFile)} resolves ` +
-            `outside the session worktree (${target}) — refusing to read it; scratchText stays undefined`,
-        );
-      } else {
+      return {
+        outcome,
+        costUsd,
+        modelUsage,
+        exitCode,
+        name,
+        resultText,
+        ...(scratchText !== undefined ? { scratchText } : {}),
+        ...(contextManifest !== undefined ? { contextManifest } : {}),
+      };
+    } finally {
+      // #234 F5: revoke + tear down the proxy in EVERY outcome this try block can exit
+      // through — normal return, the spawn-error throw above, or any future exception — never
+      // only the happy path. A teardown failure is logged, never propagated: the session's own
+      // result (or the spawn error already being thrown) is never masked by the proxy's own
+      // cleanup failing.
+      if (proxyHandle) {
         try {
-          scratchText = readFileSync(target, "utf8");
-        } catch {
-          /* absent */
+          await proxyHandle.stop();
+        } catch (e) {
+          (this.deps.log ?? console.error)(`[sapwood:forge-proxy] session ${name}: teardown failed (non-fatal): ${String(e)}`);
         }
       }
     }
-
-    // #236: assemble the POST-EXIT half of the manifest (the session's own self-report — model/
-    // cliVersion/tools/mcpTools — plus the auto-memory source, whose path is only knowable from
-    // that same self-report) and combine it with the pre-spawn capture above. Never lets
-    // manifest gathering fail the session — every read inside is individually tolerant, and the
-    // whole block is still guarded here as defense-in-depth.
-    let contextManifest: ContextManifest | undefined;
-    try {
-      contextManifest = this.assembleManifest(name, opts, jsonl, settingsJson, preSpawn);
-    } catch (e) {
-      (this.deps.log ?? console.error)(`[sapwood:context-manifest] session ${name}: failed to assemble (non-fatal): ${String(e)}`);
-    }
-
-    // Always delete the worktree — see the module doc: a role session never writes code
-    // (allowedTools scoping + the unchanged guard hook both block it), so unlike worker.ts's
-    // dirty-vs-clean retention there is no WIP that could ever need preserving here. Retro's
-    // one worktree deliverable (the scratch file) was already captured above; its actual code
-    // proposal lives on its PUSHED BRANCH, never in the worktree.
-    try {
-      rmSync(join(this.worktreeRoot, name), { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
-
-    return {
-      outcome,
-      costUsd,
-      modelUsage,
-      exitCode,
-      name,
-      resultText,
-      ...(scratchText !== undefined ? { scratchText } : {}),
-      ...(contextManifest !== undefined ? { contextManifest } : {}),
-    };
   }
 
   /** #236 (Codex F1/F2/F3, R1/R2 residual fixes): the FILESYSTEM-derived half of the context

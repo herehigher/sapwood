@@ -442,6 +442,57 @@ const Roles = z
   })
   .strict();
 
+// #234: engine-hosted read-only forge MCP proxy for role sessions (supersedes #217's two-pass
+// needsDetails protocol). Ships OFF by default, and shadow-mode-first when it IS enabled — issue
+// #234's Rollout: "shadow mode first, config-gated... any effect path requires an explicit flag
+// flip." `enabled` gates whether RoleRunner mints a proxy server for a session at all (no
+// consumer flips it to true / passes a `proxy` opt in THIS PR — see #234's scope ruling: proxy-
+// consumer wiring is later, separately-flagged work; `enabled` exists now so the first real
+// consumer has a config surface to read rather than needing a further migration). `shadow` is a
+// SEPARATE flag from `enabled` (not "off vs on has two speeds") — a future consumer reads BOTH:
+// enabled gates whether the proxy exists for a session at all; shadow (default true) gates
+// whether that session's own OUTPUT is allowed to cause any effect (forge write, label change,
+// merge decision, ...) — shadow=true means calls + journals are fully live, but the session's
+// result must never be applied. Caps/budget are the user-tunable-in-config values this repo's
+// convention requires for any size/cost bound (never hardcoded — see e.g. worker.budgetUsdSoft's
+// own doc).
+//
+// HONEST STATE (PR #252 review): `enabled: true` is currently INERT on its own — no engine
+// startup path constructs a proxy server or reads this flag yet (RoleRunner only mints one when
+// a caller explicitly supplies a `proxy` opt, and nothing does in this PR). Flipping this flag
+// alone changes no runtime behavior; consumer adoption + the shadow-server startup wiring are
+// tracked as follow-up work (feeds #244).
+const ProxyConfig = z
+  .object({
+    enabled: z.boolean().default(false),
+    shadow: z.boolean().default(true),
+    caps: z
+      .object({
+        maxIssuesPerCall: z.number().int().positive().default(10),
+        defaultCommentsPerIssue: z.number().int().positive().default(20),
+        maxCommentsPerCall: z.number().int().positive().default(100),
+        maxRelationsPerIssue: z.number().int().positive().default(20),
+        maxSearchResults: z.number().int().positive().default(20),
+        // issue #234's default-view contract: "Full comment stream is opt-in config." false
+        // (default) -> issue_details' default view caps at defaultCommentsPerIssue; true -> it
+        // caps at the wider maxCommentsPerCall instead (still bounded, never truly unbounded).
+        fullCommentStreamOptIn: z.boolean().default(false),
+      })
+      .strict()
+      .default({}),
+    budget: z
+      .object({
+        maxCallsPerSession: z.number().int().positive().default(30),
+        maxBytesPerSession: z.number().int().positive().default(2_000_000),
+      })
+      .strict()
+      .default({}),
+    // Hard per-call ceiling (a hung upstream `gh` call must never wedge a session waiting on the
+    // proxy forever) — independent of worker.timeoutSec, which bounds the WHOLE session.
+    timeoutMs: z.number().int().positive().default(30_000),
+  })
+  .strict();
+
 const Guard = z
   .object({
     // PreToolUse guard enforcement. HARD (default) = fail-closed deny — the producer≠merger /
@@ -747,6 +798,7 @@ const ConfigSchemaRaw = z
     merge: Merge.default({}),
     labels: Labels.default({}),
     roles: Roles.default({}),
+    proxy: ProxyConfig.default({}),
     envFailure: EnvFailure.default({}),
     escalation: z
       .object({ humanLabels: z.array(z.string()).optional() })

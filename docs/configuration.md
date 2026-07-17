@@ -452,6 +452,50 @@ local git (branch/checkout/add/commit/push/diff/status/log, for its own worktree
 Every `enabled: false` above is logged **once**, at the point `createDefaultPeripherals`
 builds the peripherals map (engine startup) — never re-logged per round or per tick.
 
+## `proxy`
+
+**#234: engine-hosted, read-only forge MCP proxy for role sessions** (supersedes #217's
+two-pass `needsDetails` protocol, adjudicated 2026-07-17: a mediation system that denies
+an information request and still demands a definitive judgment is a shackle — explicit
+denial with first-class abstention is a guardrail). Credentials never leave the engine
+process: a role session gets a fixed, strictly-schema-validated tool algebra
+(`issue_details`, `issue_comments`, `issue_relations`, `search_issues`) served over a
+minimal hand-rolled streamable-HTTP MCP server bound to `127.0.0.1` on an ephemeral
+port, authenticated by a random bearer token minted per session and revoked at
+teardown — never a file on disk, never an environment variable (the #218 credential-free
+spawn env is unaffected). Every call is journaled write-ahead (persist intent → fetch+cap
+→ persist canonical response+hash → deliver) before the session ever sees a result,
+metered against a per-session call/byte budget, and — once accepted — bundled
+content-addressed as frozen evidence for later audit/replay.
+
+**Ships OFF, and shadow-mode-first when enabled.** `enabled: false` (default) — no proxy
+is ever started; the whole feature is inert. `enabled: true, shadow: true` (the default
+once enabled) — calls and journal rows are fully live, but no consumer may act on a
+session's output. Flipping a role from shadow to live-effect is a *separate*, per-role
+decision no shipped config touches yet — no built-in role reads this config in this PR
+(the proxy module exists, wired, and tested; consumer adoption is later, separately
+tracked work).
+
+**Honest state:** `enabled: true` is currently *inert* on its own — no engine startup
+path constructs a proxy server or reads this flag yet. `peripheral.ts`'s `RoleRunner`
+only mints a proxy when a caller explicitly supplies a `proxy` opt, and nothing does in
+this PR. Consumer adoption + the shadow-server startup wiring are tracked as follow-up
+work (feeds [#244](https://github.com/herehigher/sapwood/issues/244)).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Master switch — off means RoleRunner never mints a proxy server for a session. |
+| `shadow` | `true` | Session output may not cause any effect while true — a future consumer's own gate, not enforced by the proxy itself (which only ever performs reads). |
+| `caps.maxIssuesPerCall` | `10` | `issue_details`: max issue numbers per call. A caller-requested batch above this cap is **rejected** (typed error), never silently truncated. |
+| `caps.defaultCommentsPerIssue` | `20` | `issue_details`' default view: how many of an issue's **most recent** comments to include (fail-toward-inclusion — the newest comments are the ones most likely to carry an amendment to a stale body). Bounded, not rejected: `comments_complete`/counts/an omitted-range name the cut. |
+| `caps.maxCommentsPerCall` | `100` | `issue_comments`: max `lastN` a caller may request explicitly. Also the default view's cap when `fullCommentStreamOptIn` is true. |
+| `caps.maxRelationsPerIssue` | `20` | `issue_relations`: cap on each of linked-PRs and cross-references (GraphQL `first: cap` on each connection independently). |
+| `caps.maxSearchResults` | `20` | `search_issues`: max matches returned. |
+| `caps.fullCommentStreamOptIn` | `false` | `true` widens `issue_details`' default comment cap to `maxCommentsPerCall` instead of `defaultCommentsPerIssue` — still bounded, never truly unbounded. |
+| `budget.maxCallsPerSession` | `30` | Hard ceiling on tool calls per session attempt, metered from the journal itself (no separate counter). Exhaustion returns an explicit `budget_exhausted` tool result, never a transport error — a session can still emit `unresolvedContext` and abstain. |
+| `budget.maxBytesPerSession` | `2000000` | Same, for cumulative response bytes. |
+| `timeoutMs` | `30000` | Hard per-call ceiling — a hung upstream `gh` read must never wedge a session waiting on the proxy forever. Independent of `worker.timeoutSec`, which bounds the whole session. |
+
 ## `guard`
 
 | Key | Default | Meaning |

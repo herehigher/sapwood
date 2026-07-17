@@ -242,6 +242,19 @@ export class RoundScopedForge implements IForge {
     const issues = await this.inner.getIssuesNeedingPlanTriage();
     return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
   }
+
+  // #234: plain passthroughs — the forge MCP proxy's read surface has no round/pool scoping
+  // concept of its own (a session addresses issues by number, already validated by its own
+  // schema/scope enforcement in proxy/tools.ts).
+  getIssueMeta(issue: number) {
+    return this.inner.getIssueMeta(issue);
+  }
+  getIssueRelations(issue: number, cap: number) {
+    return this.inner.getIssueRelations(issue, cap);
+  }
+  searchIssues(query: string, cap: number) {
+    return this.inner.searchIssues(query, cap);
+  }
 }
 
 /** #212: wraps an IForge so getReadyIssues() only returns issues carrying the round-pool label
@@ -347,6 +360,17 @@ export class PoolScopedForge implements IForge {
   }
   getIssuesNeedingPlanTriage() {
     return this.inner.getIssuesNeedingPlanTriage();
+  }
+
+  // #234: plain passthroughs — see RoundScopedForge's identical note above.
+  getIssueMeta(issue: number) {
+    return this.inner.getIssueMeta(issue);
+  }
+  getIssueRelations(issue: number, cap: number) {
+    return this.inner.getIssueRelations(issue, cap);
+  }
+  searchIssues(query: string, cap: number) {
+    return this.inner.searchIssues(query, cap);
   }
 }
 

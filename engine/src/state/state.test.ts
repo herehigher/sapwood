@@ -1522,3 +1522,195 @@ test("listContextManifestsForRound: two attempts of the same phase are independe
   assert.deepEqual(s.listContextManifestsForRound(9), []);
   s.close();
 });
+
+// ── #234: forge MCP proxy journal + frozen evidence bundles (migration 15->16) ─────────────
+
+test("migration v15->v16: a populated v15 DB opens with data intact, empty forge_proxy_journal/forge_proxy_bundles tables, user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 15; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 15");
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, resume_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("lane-v15", 4, "sess-4", "done", "2026-07-16T00:00:00Z", "2026-07-16T01:00:00Z", 2);
+    assert.throws(() => raw.prepare("SELECT * FROM forge_proxy_journal").get(), "the table doesn't exist yet at v15");
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 16);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    assert.equal(s.getWorker("lane-v15")?.resume_attempts, 2, "pre-existing data survived intact");
+    const identity = { roundId: 1, phase: "architecting", role: "architect", session: "s", attempt: 1 };
+    assert.deepEqual(s.listForgeProxyJournal(identity), [], "the new table exists and starts empty");
+    assert.equal(s.getForgeProxyBundle("nonexistent"), undefined);
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("lane-v15")?.resume_attempts, 2);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("forge proxy journal: nextForgeProxySeq starts at 1 and increments per (round, phase, role, session, attempt) tuple only", () => {
+  const s = mem();
+  const identity = { roundId: 1, phase: "architecting", role: "architect", session: "role-architect-abc", attempt: 1 };
+  assert.equal(s.nextForgeProxySeq(identity), 1);
+  s.appendForgeProxyJournalIntent({
+    identity,
+    seq: 1,
+    tool: "issue_details",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-17T00:00:00Z",
+  });
+  assert.equal(s.nextForgeProxySeq(identity), 2, "a second row for the SAME tuple continues the sequence");
+  assert.equal(s.nextForgeProxySeq({ ...identity, attempt: 2 }), 1, "a different attempt starts fresh at 1");
+  s.close();
+});
+
+test("forge proxy journal: write-ahead round trip — intent -> recordForgeProxyJournalResponse -> markForgeProxyJournalDelivered", () => {
+  const s = mem();
+  const identity = { roundId: 1, phase: "architecting", role: "architect", session: "role-architect-abc", attempt: 1 };
+  const id = s.appendForgeProxyJournalIntent({
+    identity,
+    seq: 1,
+    tool: "issue_details",
+    proxyVersion: "1",
+    argsCanonical: '{"numbers":[1]}',
+    scopeCanonical: '{"owner":"o","repo":"r"}',
+    capsCanonical: "{}",
+    budgetRemainingCalls: 9,
+    budgetRemainingBytes: 999_000,
+    requestedAt: "2026-07-17T00:00:00Z",
+  });
+  let row = s.getForgeProxyJournalRow(id)!;
+  assert.equal(row.status, "intent");
+  assert.equal(row.responseCanonical, null);
+
+  s.recordForgeProxyJournalResponse(id, {
+    responseCanonical: '{"number":1}',
+    contentHash: "abc123",
+    truncated: false,
+    fetchedAt: "2026-07-17T00:00:01Z",
+    countsCanonical: '{"returned":1}',
+  });
+  row = s.getForgeProxyJournalRow(id)!;
+  assert.equal(row.status, "fetched");
+  assert.equal(row.responseCanonical, '{"number":1}');
+  assert.equal(row.contentHash, "abc123");
+
+  s.markForgeProxyJournalDelivered(id, "2026-07-17T00:00:02Z");
+  row = s.getForgeProxyJournalRow(id)!;
+  assert.equal(row.status, "delivered");
+  assert.equal(row.deliveredAt, "2026-07-17T00:00:02Z");
+  s.close();
+});
+
+test("forge proxy journal: recordForgeProxyJournalError records a sanitized error + timed_out flag", () => {
+  const s = mem();
+  const identity = { roundId: 1, phase: "architecting", role: "architect", session: "role-architect-abc", attempt: 1 };
+  const id = s.appendForgeProxyJournalIntent({
+    identity,
+    seq: 1,
+    tool: "search_issues",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: null,
+    budgetRemainingBytes: null,
+    requestedAt: "2026-07-17T00:00:00Z",
+  });
+  s.recordForgeProxyJournalError(id, "upstream timed out", true, "2026-07-17T00:00:05Z");
+  const row = s.getForgeProxyJournalRow(id)!;
+  assert.equal(row.status, "error");
+  assert.equal(row.error, "upstream timed out");
+  assert.equal(row.timedOut, true);
+  s.close();
+});
+
+test("forgeProxyUsage: sums call count + response bytes for 'fetched'/'delivered'/'error' rows, scoped to the exact identity tuple", () => {
+  const s = mem();
+  const identity = { roundId: 1, phase: "architecting", role: "architect", session: "role-architect-abc", attempt: 1 };
+  const id1 = s.appendForgeProxyJournalIntent({
+    identity,
+    seq: 1,
+    tool: "t",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: null,
+    budgetRemainingBytes: null,
+    requestedAt: "t",
+  });
+  s.recordForgeProxyJournalResponse(id1, { responseCanonical: "0123456789", contentHash: "h", truncated: false, fetchedAt: "t" });
+  const id2 = s.appendForgeProxyJournalIntent({
+    identity,
+    seq: 2,
+    tool: "t",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: null,
+    budgetRemainingBytes: null,
+    requestedAt: "t",
+  });
+  s.recordForgeProxyJournalError(id2, "boom", false, "t");
+  // A different attempt's rows must not bleed into this identity's usage.
+  const otherId = s.appendForgeProxyJournalIntent({
+    identity: { ...identity, attempt: 2 },
+    seq: 1,
+    tool: "t",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: null,
+    budgetRemainingBytes: null,
+    requestedAt: "t",
+  });
+  s.recordForgeProxyJournalResponse(otherId, { responseCanonical: "should not count", contentHash: "h", truncated: false, fetchedAt: "t" });
+
+  const usage = s.forgeProxyUsage(identity);
+  assert.equal(usage.calls, 2, "fetched + error rows both count toward the call budget");
+  assert.equal(usage.bytes, 10, "only fetched/delivered rows' response bytes count");
+  s.close();
+});
+
+test("forge proxy bundles: forgeProxyBundleDir null for in-memory State, recordForgeProxyBundle/getForgeProxyBundle round-trip by content hash", () => {
+  const s = mem();
+  assert.equal(s.forgeProxyBundleDir(), null);
+  const row = {
+    hash: "deadbeef",
+    identity: { roundId: 1, phase: "architecting", role: "architect", session: "role-architect-abc" },
+    decisionRef: "architect-contradiction-1",
+    byteSize: 42,
+    path: null,
+    createdAt: "2026-07-17T00:00:00Z",
+  };
+  s.recordForgeProxyBundle(row);
+  assert.deepEqual(s.getForgeProxyBundle("deadbeef"), row);
+  assert.equal(s.getForgeProxyBundle("nonexistent"), undefined);
+  s.close();
+});
+
+test("forge proxy bundles: recordForgeProxyBundle is idempotent on hash — a second write with a DIFFERENT decisionRef does not overwrite the first", () => {
+  const s = mem();
+  const base = { hash: "h1", identity: { roundId: 1, phase: "p", role: "r", session: "s" }, byteSize: 1, path: null, createdAt: "t1" };
+  s.recordForgeProxyBundle({ ...base, decisionRef: "first" });
+  s.recordForgeProxyBundle({ ...base, decisionRef: "second", createdAt: "t2" });
+  assert.equal(s.getForgeProxyBundle("h1")?.decisionRef, "first");
+  s.close();
+});

@@ -332,6 +332,31 @@ reviewer:
 #                              # setting this at/below the floor fails EVERY probe with
 #                              # "Exceeded USD budget" and keeps the engine parked.
 
+# #234: engine-hosted, read-only forge MCP proxy for role sessions (supersedes #217). Ships OFF
+# (enabled: false) and, once enabled, shadow-mode-first (shadow: true — calls + journals are
+# fully live, but no consumer may act on a session's output; no shipped role reads this config in
+# this PR, see #234's scope ruling). Credentials never leave the engine process: a session gets a
+# fixed tool set (issue_details/issue_comments/issue_relations/search_issues) over a
+# bearer-token-authenticated local HTTP server, minted per session, revoked at teardown.
+# proxy:
+#   enabled: false
+#   shadow: true
+#   caps:
+#     maxIssuesPerCall: 10        # issue_details: over-cap requests are REJECTED, never truncated
+#     defaultCommentsPerIssue: 20 # issue_details' default view: most-recent-N comments (fail
+#                                 # toward inclusion of the comments most likely to carry an
+#                                 # amendment to a stale body)
+#     maxCommentsPerCall: 100     # issue_comments: max lastN a caller may request explicitly
+#     maxRelationsPerIssue: 20    # issue_relations: cap per connection (linked PRs, cross-refs)
+#     maxSearchResults: 20        # search_issues: max matches returned
+#     fullCommentStreamOptIn: false # true widens the default view's comment cap to
+#                                    # maxCommentsPerCall instead of defaultCommentsPerIssue
+#   budget:
+#     maxCallsPerSession: 30      # exhaustion -> explicit budget_exhausted tool result, never a
+#                                 # transport error; the session can still abstain
+#     maxBytesPerSession: 2000000
+#   timeoutMs: 30000              # hard per-call ceiling, independent of worker.timeoutSec
+
 # escalation omitted: humanLabels derives from the default labels.prefix.
 
 coverage:

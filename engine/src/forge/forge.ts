@@ -223,6 +223,66 @@ export interface IForge {
    *  the time gate⓪ sees it. needs-human/blocked/verify:n/a issues are excluded — settled
    *  state, not a drafting target (same exclusion stance as needsPlanReview). */
   getIssuesNeedingPlanTriage(): Promise<Issue[]>;
+  /** #234: one issue's core metadata (title/state/labels/updatedAt/milestone) — the forge MCP
+   *  proxy's `issue_details` tool composes this with getIssueBody/getIssueComments/
+   *  getIssueRelations into the default view. Read-only; a nonexistent issue number propagates
+   *  gh's own error (fail-closed, same stance as every other single-issue read in this file). */
+  getIssueMeta(issue: number): Promise<IssueMeta>;
+  /** #234: an issue's relations — PRs that close it (`closedByPullRequestsReferences`) plus
+   *  incoming cross-references/connections from its timeline (issues/PRs that mention or link
+   *  this one) — the forge MCP proxy's `issue_relations` tool. Each connection is capped
+   *  server-side (GraphQL `first: cap`) — the proxy's own tool-level cap is layered on top of,
+   *  never wider than, this. Outgoing mentions (this issue's body/comments referencing another
+   *  #N) are NOT fetched here — GitHub's GraphQL schema has no such reverse index; the proxy
+   *  layer derives those from the body/comment text it already reads for `issue_details`.
+   *  Verified against the live GitHub GraphQL schema (2026-07-17, herehigher/sapwood#217: both
+   *  `closedByPullRequestsReferences(includeClosedPrs: true)` and
+   *  `timelineItems(itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT])` return the expected
+   *  shape). */
+  getIssueRelations(issue: number, cap: number): Promise<IssueRelations>;
+  /** #234: `gh search issues` scoped to this forge's own repo (never caller-controlled — the
+   *  query is opaque GitHub search syntax, this forge always adds `--repo owner/repo` itself) —
+   *  the proxy's `search_issues` tool. Capped server-side (`--limit cap`). */
+  searchIssues(query: string, cap: number): Promise<IssueSearchResult[]>;
+}
+
+/** #234: one issue's core metadata — see IForge.getIssueMeta's doc. */
+export interface IssueMeta {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED";
+  labels: string[];
+  updatedAt: string;
+  milestone?: string;
+}
+
+/** #234: one related issue/PR reference — see IForge.getIssueRelations' doc. `state` is passed
+ *  through verbatim from GitHub (OPEN/CLOSED for an issue, OPEN/CLOSED/MERGED for a PR). */
+export interface RelatedRef {
+  number: number;
+  title: string;
+  state: string;
+  labels: string[];
+  kind: "issue" | "pr";
+}
+
+/** #234: an issue's relations — see IForge.getIssueRelations' doc. `truncated` is true when
+ *  either connection returned exactly `cap` entries — GraphQL's `first: cap` gives no total
+ *  count, so hitting the cap exactly is the only honest truncation signal available (fail
+ *  toward flagging a possible truncation rather than silently under-reporting one). */
+export interface IssueRelations {
+  linkedPRs: RelatedRef[];
+  crossReferences: RelatedRef[];
+  truncated: boolean;
+}
+
+/** #234: one `gh search issues` match — see IForge.searchIssues' doc. */
+export interface IssueSearchResult {
+  number: number;
+  title: string;
+  state: string;
+  labels: string[];
+  updatedAt: string;
 }
 
 export class GithubForge implements IForge {
@@ -646,6 +706,64 @@ export class GithubForge implements IForge {
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     const project = await this.fetchProject();
     return selectPlanTriageCandidates(project, this.cfg);
+  }
+
+  async getIssueMeta(issue: number): Promise<IssueMeta> {
+    const out = await this.gh([
+      "issue",
+      "view",
+      String(issue),
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--json",
+      "number,title,state,labels,updatedAt,milestone",
+    ]);
+    return parseIssueMeta(out);
+  }
+
+  async getIssueRelations(issue: number, cap: number): Promise<IssueRelations> {
+    const out = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${ISSUE_RELATIONS_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `number=${issue}`,
+      "-F",
+      `cap=${cap}`,
+    ]);
+    // #234 F2 (PR #252 review, P1, Codex #1): pass this forge's OWN owner/repo as the
+    // filter — see parseIssueRelations' doc for why a foreign-repo related node must never
+    // reach a session (a cross-referencing issue/PR from a DIFFERENT repo the engine's token
+    // can read would otherwise leak that repo's title/labels through this channel).
+    return parseIssueRelations(out, cap, `${this.cfg.board.owner}/${this.repo()}`);
+  }
+
+  async searchIssues(query: string, cap: number): Promise<IssueSearchResult[]> {
+    // #234 F1 (PR #252 review, P1, reproduced live): `query` is CALLER-CONTROLLED (a role
+    // session's tool argument) and `gh`'s pflag parser treats ANY `--`-prefixed argv token as a
+    // flag regardless of its position in the array — a query of `--repo=other/repo` silently
+    // escaped the forced repo scope (`--repo` is repeatable; the later, attacker-supplied value
+    // won). Every FLAG must precede the query, and the query itself must follow a bare `--`
+    // terminator so pflag treats it as a positional argument no matter what it starts with —
+    // this is the actual scope enforcement, not merely an argument-ordering nicety.
+    const out = await this.gh([
+      "search",
+      "issues",
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--json",
+      "number,title,state,labels,updatedAt",
+      "--limit",
+      String(cap),
+      "--",
+      query,
+    ]);
+    return parseSearchIssues(out);
   }
 
   private repo(): string {
@@ -1236,4 +1354,146 @@ export function assemblePRReviewData(
     comments: parsePRComments(commentsJson),
     unresolvedThreads,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #234: forge MCP proxy read surface — pure parsers for the 3 new IForge methods above. Same
+// impure-gh-call/pure-parse split as everywhere else in this file.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Pure parse of `gh issue view --json number,title,state,labels,updatedAt,milestone`. */
+export function parseIssueMeta(json: string): IssueMeta {
+  const d = JSON.parse(json) as {
+    number: number;
+    title: string;
+    state: string;
+    labels?: { name: string }[];
+    updatedAt: string;
+    milestone: { title: string } | null;
+  };
+  return {
+    number: d.number,
+    title: d.title,
+    state: d.state === "CLOSED" ? "CLOSED" : "OPEN",
+    labels: (d.labels ?? []).map((l) => l.name),
+    updatedAt: d.updatedAt,
+    ...(d.milestone ? { milestone: d.milestone.title } : {}),
+  };
+}
+
+/** The relations query (#234) — verified against the live GitHub GraphQL schema, see
+ *  IForge.getIssueRelations' doc. `includeClosedPrs: true` on closedByPullRequestsReferences:
+ *  a PR that closed this issue and was later itself closed/merged is still a real relation,
+ *  never silently dropped. `timelineItems` covers both directions GitHub tracks natively:
+ *  CROSS_REFERENCED_EVENT (another issue/PR's body/comment mentioned this one) and
+ *  CONNECTED_EVENT (an explicit "linked issue" connection, distinct from the closing-PR case
+ *  above). `repository { nameWithOwner }` on every related node (#234 F2, PR #252 review, P1,
+ *  Codex #1 — verified live, herehigher/sapwood#217): a cross-reference can legitimately
+ *  originate from a DIFFERENT repository the engine's `gh` token happens to be able to read
+ *  (any repo the operator has access to) — without this field, parseIssueRelations has no way
+ *  to tell a same-repo relation from a foreign one, and that foreign repo's issue/PR title +
+ *  labels would leak to a credential-free session through this channel (and, via issue_details'
+ *  default view, even further). This field is the filter's ONLY input; see parseIssueRelations. */
+export const ISSUE_RELATIONS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      closedByPullRequestsReferences(first: $cap, includeClosedPrs: true) {
+        nodes { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
+      }
+      timelineItems(first: $cap, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+        nodes {
+          __typename
+          ... on CrossReferencedEvent {
+            source {
+              __typename
+              ... on Issue { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
+              ... on PullRequest { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
+            }
+          }
+          ... on ConnectedEvent {
+            subject {
+              __typename
+              ... on Issue { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
+              ... on PullRequest { number title state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** Pure parse of the ISSUE_RELATIONS_QUERY response. `expectedRepoFullName` (`owner/repo`) is
+ *  REQUIRED and enforced: any related node (linked PR OR cross-reference/connection, whichever
+ *  shape) whose `repository.nameWithOwner` does not match it — including a node with NO
+ *  repository field at all, a malformed/partial response — is DROPPED, never returned (#234 F2,
+ *  PR #252 review, P1, Codex #1: fail-closed on ambiguity, same stance as this file's other
+ *  scope-boundary parsers, e.g. selectReadyIssues' own repo filter). The comparison is
+ *  CASE-INSENSITIVE (#234 F2b, PR #252 review round 2, P2, Codex): GitHub's own casing for
+ *  `nameWithOwner` need not match whatever casing an operator happened to type into
+ *  `board.owner`/`board.repo` in config — a naive exact-match would silently drop EVERY
+ *  same-repo relation whenever the two disagree only in case, an availability regression, not a
+ *  security fix (the fail-closed stance is about WHICH repo, not letter case). Malformed/missing
+ *  fields beyond that degrade to empty connections — never a throw (same tolerance as every
+ *  other GraphQL parser in this file); a genuinely failed gh call still throws upstream of this
+ *  (JSON.parse on non-JSON stderr text). */
+export function parseIssueRelations(json: string, cap: number, expectedRepoFullName: string): IssueRelations {
+  type LabelNode = { labels?: { nodes?: { name: string }[] } };
+  type RepoNode = { repository?: { nameWithOwner?: string } };
+  type RefNode = { __typename?: string; number?: number; title?: string; state?: string } & LabelNode & RepoNode;
+  type TimelineNode = { __typename?: string; source?: RefNode; subject?: RefNode };
+  const labelsOf = (n: LabelNode): string[] => (n.labels?.nodes ?? []).map((l) => l.name);
+  const expectedRepoLower = expectedRepoFullName.toLowerCase();
+  const sameRepo = (n: RepoNode): boolean => n.repository?.nameWithOwner?.toLowerCase() === expectedRepoLower;
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        issue?: {
+          closedByPullRequestsReferences?: { nodes?: ({ number: number; title: string; state: string } & LabelNode & RepoNode)[] };
+          timelineItems?: { nodes?: TimelineNode[] };
+        };
+      };
+    };
+  };
+  const issue = d.data?.repository?.issue;
+  const rawLinkedPRs = issue?.closedByPullRequestsReferences?.nodes ?? [];
+  const linkedPRs: RelatedRef[] = rawLinkedPRs.filter(sameRepo).map((n) => ({
+    number: n.number,
+    title: n.title,
+    state: n.state,
+    labels: labelsOf(n),
+    kind: "pr" as const,
+  }));
+  const rawTimelineNodes = issue?.timelineItems?.nodes ?? [];
+  const crossReferences: RelatedRef[] = [];
+  for (const n of rawTimelineNodes) {
+    const ref = n.source ?? n.subject;
+    if (!ref || ref.number == null) continue;
+    if (!sameRepo(ref)) continue; // #234 F2: a foreign-repo cross-reference is never surfaced
+    crossReferences.push({
+      number: ref.number,
+      title: ref.title ?? "",
+      state: ref.state ?? "",
+      labels: labelsOf(ref),
+      kind: ref.__typename === "PullRequest" ? "pr" : "issue",
+    });
+  }
+  // Truncation is judged against the RAW (pre-filter) node counts — GraphQL's `first: cap`
+  // hitting the cap means more items MAY exist beyond the fetched window, regardless of how
+  // many of the fetched ones were then dropped as foreign-repo (#234 F2): under-reporting
+  // truncation because a filter shrank the visible count would be the wrong fail direction.
+  return { linkedPRs, crossReferences, truncated: rawLinkedPRs.length >= cap || rawTimelineNodes.length >= cap };
+}
+
+/** Pure parse of `gh search issues ... --json number,title,state,labels,updatedAt`. */
+export function parseSearchIssues(json: string): IssueSearchResult[] {
+  const parsed = JSON.parse(json) as { number: number; title: string; state: string; labels?: { name: string }[]; updatedAt: string }[];
+  return parsed.map((i) => ({
+    number: i.number,
+    title: i.title,
+    state: i.state,
+    labels: (i.labels ?? []).map((l) => l.name),
+    updatedAt: i.updatedAt,
+  }));
 }
