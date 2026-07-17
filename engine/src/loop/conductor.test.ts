@@ -1503,7 +1503,17 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
   const dbPath = join(dir, "sapwood.sqlite");
   const bin = join(dir, "claude-stub");
   const termMarker = join(dir, "term-received");
-  writeFileSync(bin, `#!/usr/bin/env bash\ntrap 'touch "${termMarker}" ; exit 0' TERM\nsleep 30\n`, { mode: 0o755 });
+  const trapReadyMarker = join(dir, "trap-ready");
+  // #229: the marker is touched AFTER the trap is installed, so the test can wait on a
+  // deterministic ready-sentinel instead of a fixed sleep — under load, bash may not get
+  // scheduled in time to install the trap before a fixed-duration sleep elapses, so the
+  // later SIGTERM would hit the shell's default (trap-less) handling and the process would
+  // die WITHOUT running the trap, silently starving termMarker below (issue #229).
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env bash\ntrap 'touch "${termMarker}" ; exit 0' TERM\ntouch "${trapReadyMarker}"\nsleep 30\n`,
+    { mode: 0o755 },
+  );
   const cfg = mkCfg({ guard: { mode: "soft" }, worker: { heartbeatStaleSecs: 1, timeoutSec: 30 } });
   const forge = new FakeForge();
   const st = new State(dbPath);
@@ -1512,7 +1522,11 @@ test("#169 fake-runner integration: persisted alive+stale lane gets SIGTERM, pro
   let s2: WorkerSupervisor | undefined;
   try {
     const { name, sessionId } = await s1.dispatch(issue, "lane-169-integration");
-    await sleep(500); // let bash install its TERM trap before simulating the restart
+    // #229: deterministic handshake instead of a blind sleep — poll (bounded) for the stub's
+    // ready-sentinel so the TERM trap is provably installed before anything simulates the
+    // restart and later sends SIGTERM. A fixed sleep raced bash's own scheduling under load.
+    for (let i = 0; i < 400 && !existsSync(trapReadyMarker); i++) await sleep(20);
+    assert.ok(existsSync(trapReadyMarker), "fake-runner stub never signaled its TERM trap was installed");
     st.upsertWorker({
       name,
       issue: issue.number,
