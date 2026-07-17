@@ -585,18 +585,32 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         // #213: apply pool verdicts. `pass` is implicit (unlisted -> zero writes, per the
         // metadata schema's own doc comment) — this loop only ever sees `drop`/`needs-human`.
         //
-        // Crash-rerun guard (mirrors #232's write-ahead-before-forge-effect stance, scoped down
-        // to what THIS feature actually needs): the label writes below (removeRoundPoolLabel/
-        // addLabel) are naturally idempotent — GitHub no-ops a repeat add/remove — but
-        // addIssueComment is NOT: a crash strictly between this coarse phase's writes landing and
-        // round.ts persisting the returned marker would otherwise rerun this WHOLE session and
-        // re-post every reason comment. A per-issue receipt (`architect-verdict-applied`),
-        // recorded BEFORE the write it guards, closes that gap: a rerun that finds the receipt
-        // already there skips the write entirely (labels AND comment alike) rather than risk a
-        // duplicate comment — the accepted trade-off is a vanishingly narrow crash window between
-        // the receipt landing and the write actually happening, where the write is silently
-        // skipped rather than duplicated, same "never a duplicate, accept a bounded miss"
-        // philosophy #232's own receipts document.
+        // Per-verdict write ORDER (Codex review round 2, P1 — reordered from an earlier
+        // receipt-first draft): (1) the LABEL write (removeRoundPoolLabel / addLabel), (2) the
+        // `architect-verdict-applied` receipt, (3) the reason comment. This ordering is load-
+        // bearing, not cosmetic:
+        //   - The label write is the ACTUAL governance effect (a dropped issue leaving the pool;
+        //     a needs-human hold landing) and is naturally IDEMPOTENT — GitHub no-ops a repeat
+        //     add/remove — so it is always safe to retry on a crash-rerun. It must therefore
+        //     happen BEFORE the receipt: a receipt recorded first (the earlier draft's order)
+        //     would let a crash between the receipt and the label write PERMANENTLY lose the
+        //     label effect — the rerun sees the receipt and skips the issue outright, so a
+        //     "dropped" issue silently stays pooled and gets dispatched anyway, or a
+        //     "needs-human" hold never lands. That failure mode is worse than the one this
+        //     receipt exists to prevent.
+        //   - The receipt now attests "the label effect has landed" — recorded immediately after
+        //     the label write succeeds, before the comment.
+        //   - The comment is the ONLY genuinely non-idempotent write here (a repeat post creates
+        //     a SECOND comment) and is placed last, still guarded by the same receipt: a rerun
+        //     that finds the receipt skips straight past this issue, so the comment is never
+        //     reposted.
+        // Crash-window accounting under this order: before/at the label write -> no receipt was
+        // recorded -> a rerun redoes the whole verdict from scratch (the label write is
+        // idempotent, so this is harmless, and the comment could not have landed yet either).
+        // After the receipt but before the comment -> the reason comment is lost for that pass
+        // (bounded, cosmetic — the load-bearing label effect already landed) — an accepted
+        // trade-off, same "never a duplicate, accept a bounded miss" philosophy #232's own
+        // receipts document elsewhere in this codebase.
         const alreadyApplied = new Set(
           deps.state
             .eventsAfterId(0, ["architect-verdict-applied"])
@@ -605,18 +619,15 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         );
         for (const v of validated.verdicts) {
           if (alreadyApplied.has(v.issue)) continue; // already applied this round — crash-rerun replay
-          deps.state.appendEvent("architect-verdict-applied", { round_id: roundId, issue: v.issue, verdict: v.verdict });
-          // #232-pattern failure containment: the receipt above is write-AHEAD (recorded before
-          // the forge effect, the ONLY ordering that makes the crash-rerun guard above actually
-          // prevent a duplicate comment — see this loop's own doc comment). That means a
-          // TRANSIENT forge failure here (not a crash — a real thrown error, e.g. one flaky
-          // removeLabel call) must never propagate: an uncaught throw would abort every
-          // REMAINING verdict in this loop, throw the whole advisory phase, AND — because the
-          // receipt already landed — a rerun would skip re-attempting this exact issue forever,
-          // losing the verdict with zero durable trace. Contained per-issue, mirroring
-          // align.ts's persistTriageDecision: on failure, record a PAIRED `architect-verdict-lost`
-          // honesty event (round_id, issue, verdict, reason) + a log line, then CONTINUE — one
-          // lost verdict must not wedge the phase or silently drop every verdict after it.
+          // Failure containment (#232-pattern, unchanged in spirit from the receipt reorder
+          // above): a TRANSIENT forge failure here (not a crash — a real thrown error, e.g. one
+          // flaky removeLabel call) must never propagate — an uncaught throw would abort every
+          // REMAINING verdict in this loop and throw the whole advisory phase. Contained
+          // per-issue, mirroring align.ts's persistTriageDecision: on failure, record a PAIRED
+          // `architect-verdict-lost` honesty event (round_id, issue, verdict, reason) + a log
+          // line, then CONTINUE. A transient LABEL-write failure now (post-reorder) leaves NO
+          // receipt behind — an IMPROVEMENT over the pre-reorder shape: a future phase rerun this
+          // round will retry this exact verdict instead of having it silently swallowed forever.
           try {
             if (v.verdict === "drop") {
               // #147/#212 containment: the ONLY sanctioned way to remove the pool label — fails
@@ -627,12 +638,14 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
               // needs-human: ADD the label — #147 semantics, only a human ever removes it.
               await deps.forge.addLabel(v.issue, deps.cfg.labels.needsHuman);
             }
+            // The load-bearing label effect landed — NOW the receipt attests to it.
+            deps.state.appendEvent("architect-verdict-applied", { round_id: roundId, issue: v.issue, verdict: v.verdict });
             await deps.forge.addIssueComment(v.issue, v.reason);
           } catch (e) {
             const reason = String(e);
             (deps.log ?? console.error)(
               `[sapwood:architect] round ${roundId}: verdict application failed for #${v.issue} (${v.verdict}) — ` +
-                `LOST this pass (the receipt already landed, so a rerun will not retry it): ${reason}`,
+                `LOST this pass: ${reason}`,
             );
             try {
               deps.state.appendEvent("architect-verdict-lost", { round_id: roundId, issue: v.issue, verdict: v.verdict, reason });

@@ -1322,11 +1322,13 @@ test("createArchitectStub #213 P2 fix: a transient forge failure on ONE verdict'
   const { marker } = await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
   // The phase completed normally — one lost verdict never wedges it or aborts the rest.
   assert.equal(marker, architectMarker(1));
-  // #55's write failed — no comment landed for it, but the receipt still landed (write-ahead,
-  // unconditionally, BEFORE the attempted write) and a PAIRED honesty event records the loss.
+  // #55's LABEL write is what failed — no comment landed for it either, AND (Codex review round
+  // 2, P1: the receipt is recorded AFTER the label write succeeds, not before) no receipt landed
+  // for #55 — a future rerun this round would retry this exact verdict from scratch instead of
+  // silently skipping it forever. A PAIRED honesty event still records the loss for this pass.
   assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 0);
   const applied55 = state.eventsAfterId(0, ["architect-verdict-applied"]).filter((e) => (e.payload as { issue: number }).issue === 55);
-  assert.equal(applied55.length, 1, "the write-ahead receipt still lands even though the write itself failed");
+  assert.equal(applied55.length, 0, "no receipt landed for #55 — the label write (the load-bearing effect) never succeeded");
   const lost = state.eventsAfterId(0, ["architect-verdict-lost"]);
   assert.equal(lost.length, 1);
   const lostPayload = lost[0]!.payload as { round_id: number; issue: number; verdict: string; reason: string };
@@ -1337,5 +1339,42 @@ test("createArchitectStub #213 P2 fix: a transient forge failure on ONE verdict'
   // #56's verdict — AFTER the failing one in the loop — is still applied in full.
   assert.deepEqual(forge.labelsAdded, [[56, cfg.labels.needsHuman]]);
   assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 56 && body.includes("needs a human's call")));
+  state.close();
+});
+
+test("createArchitectStub #213 P1 fix (Codex review round 2): a TRANSIENT label-write failure leaves NO receipt — a later phase pass (same round, marker still null) retries that exact verdict from scratch and succeeds, rather than the verdict being silently lost forever", async () => {
+  const cfg = mkCfg();
+  let removeLabelCalls = 0;
+  class FlakyOnceForge extends FakeForge {
+    override async removeLabel(n: number, l: string): Promise<void> {
+      removeLabelCalls++;
+      if (n === 55 && removeLabelCalls === 1) throw new Error("simulated one-off transient failure");
+      return super.removeLabel(n, l);
+    }
+  }
+  const forge = new FlakyOnceForge();
+  forge.planReviewCandidates = [{ number: 1, title: "candidate", labels: [] }];
+  const poolIssues: Issue[] = [{ number: 55, title: "t", labels: [cfg.labels.roundPool] }];
+  const text = architectResult("Design note.", [], [{ issue: 55, verdict: "drop", reason: "conflicts with another task." }]);
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }, { result: doneResult("architect-2", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const stub = createArchitectStub(deps);
+  // First pass: the label write throws -> no receipt, an architect-verdict-lost event instead.
+  await stub.run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(state.eventsAfterId(0, ["architect-verdict-applied"]).length, 0, "no receipt after a failed label write");
+  assert.equal(state.eventsAfterId(0, ["architect-verdict-lost"]).length, 1);
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 0);
+  // Second pass, same round, marker still null (the crash-rerun contract): NO receipt exists, so
+  // this verdict is retried from scratch — the label write now succeeds, the receipt lands, and
+  // the reason comment is posted exactly once.
+  await stub.run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(forge.labelsRemoved.filter(([n]) => n === 55).length, 1, "the retried label write succeeded");
+  assert.equal(state.eventsAfterId(0, ["architect-verdict-applied"]).length, 1, "the receipt now lands on the retry");
+  assert.equal(
+    forge.issueCommentsPosted.filter(([n]) => n === 55).length,
+    1,
+    "the reason comment is posted exactly once, on the successful retry",
+  );
   state.close();
 });

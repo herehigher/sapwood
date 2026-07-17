@@ -260,10 +260,24 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
           const ready = await forge.getReadyIssues();
           poolIssues = ready.filter((i) => labelsInclude(i.labels, deps.cfg.labels.roundPool));
         } catch (e) {
+          const reason = `pool-member read failed: ${String(e)}`;
           (deps.log ?? console.error)(
-            `[sapwood:architect] round ${ctx.roundId}: pool-member read failed — batch review proceeds with an ` +
-              `empty pool this pass: ${String(e)}`,
+            `[sapwood:architect] round ${ctx.roundId}: ${reason} — batch review proceeds with an empty pool this pass`,
           );
+          // #213 Codex review round 2, finding 3: a read failure here degrades the SAME way a
+          // genuinely-empty pool does (candidates only, if any) — but with a REAL, non-empty
+          // pool sitting on GitHub, that means dispatch proceeds completely unreviewed with only
+          // an ephemeral log line as evidence, never the durable `architect-review-degraded`
+          // event architect.ts's own degrade paths always pair with a skip. Record the SAME
+          // honesty event here too, so this failure mode is durably observable exactly like
+          // every other reason the pool ends up unfiltered. Best-effort (mirrors
+          // runSessionWithRetry's own degrade-append stance): the log line above is the fallback
+          // record if this append itself fails.
+          try {
+            deps.state.appendEvent("architect-review-degraded", { round_id: ctx.roundId, reason });
+          } catch {
+            /* best-effort honesty event — the log line above already recorded the failure */
+          }
         }
         architectDeps.poolIssues = poolIssues;
         return architectStub.run(ctx);

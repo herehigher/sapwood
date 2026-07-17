@@ -843,6 +843,28 @@ test("architecting stub (#213): a pool-member forge read failure degrades to an 
   state.close();
 });
 
+test("architecting stub (#213 Codex review round 2, finding 3): a pool-member forge read failure ALSO records a durable `architect-review-degraded` honesty event (round_id + reason) — not just an ephemeral log line, so a real non-empty pool sitting unreviewed on GitHub is observable, not silent", async () => {
+  const state = new State(":memory:");
+  class FailReadyForge extends FakeForge {
+    override async getReadyIssues(): Promise<Issue[]> {
+      throw new Error("simulated forge failure");
+    }
+  }
+  const forge = new FailReadyForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const round = state.startRound("2026-07-17T00:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const events = state.eventsAfterId(0, ["architect-review-degraded"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { round_id: number; reason: string };
+  assert.equal(payload.round_id, round.round_id);
+  assert.match(payload.reason, /pool-member read failed/);
+  state.close();
+});
+
 test("createDefaultPeripherals (#213 / #127): roles.architect.enabled=false -> the architecting phase is OMITTED entirely, same as before #213 — no architect-review-degraded event, no session, no spam", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
