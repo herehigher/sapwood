@@ -1288,7 +1288,10 @@ test("migration v12->v13: a populated v12 DB opens with data intact, resume defa
     raw.close();
 
     // Open with the CURRENT engine -> migrates 12 -> SCHEMA_VERSION (13 was current when this
-    // test was written; later migrations, e.g. #231's v13->v14, ride along automatically).
+    // test was written; later migrations, e.g. #231's v13->v14 input_manifest and #236's
+    // v14->v15 context_manifests, ride along automatically and never touch the v12 rows this
+    // test populated — asserting against SCHEMA_VERSION here keeps this test meaningful without
+    // hardcoding a version number that a later migration would immediately stale-date).
     const s = new State(dbPath);
     assert.ok(SCHEMA_VERSION >= 13);
     assert.equal(s.userVersion(), SCHEMA_VERSION);
@@ -1458,5 +1461,64 @@ test("input manifest: a crash-rerun's manifest is distinguishable from the origi
     ],
     "the two attempts are independently distinguishable rows, not an overwrite",
   );
+  s.close();
+});
+
+// ── #236: ambient session context manifests (context_manifests, migration 14->15) ──────────
+
+test("recordContextManifest/getContextManifest: round-trips one attempt's manifest exactly, undefined for a key never recorded", () => {
+  const s = mem();
+  const key = { roundId: 7, phase: "harvesting", role: "harvest", session: "role-harvest-abc123", attempt: 1 };
+  assert.equal(s.getContextManifest(key), undefined);
+  s.recordContextManifest(key, JSON.stringify({ sources: [], model: "sonnet" }), "2026-07-17T00:00:00Z");
+  const row = s.getContextManifest(key);
+  assert.equal(row?.recordedAt, "2026-07-17T00:00:00Z");
+  assert.deepEqual(JSON.parse(row?.json ?? "{}"), { sources: [], model: "sonnet" });
+  // A different key (even same round/phase/role, different session/attempt) is independent.
+  assert.equal(s.getContextManifest({ ...key, attempt: 2 }), undefined);
+  assert.equal(s.getContextManifest({ ...key, session: "role-harvest-def456" }), undefined);
+  s.close();
+});
+
+test("recordContextManifest: re-recording the SAME (round, phase, role, session, attempt) key upserts — never a duplicate row (crash-rerun idempotence)", () => {
+  const s = mem();
+  const key = { roundId: 7, phase: "harvesting", role: "harvest", session: "role-harvest-abc123", attempt: 1 };
+  s.recordContextManifest(key, JSON.stringify({ model: "sonnet" }), "2026-07-17T00:00:00Z");
+  s.recordContextManifest(key, JSON.stringify({ model: "opus" }), "2026-07-17T00:05:00Z");
+  const row = s.getContextManifest(key);
+  assert.equal(row?.recordedAt, "2026-07-17T00:05:00Z");
+  assert.deepEqual(JSON.parse(row?.json ?? "{}"), { model: "opus" });
+  assert.equal(s.listContextManifestsForRound(7).length, 1, "upsert, not a second row");
+  s.close();
+});
+
+test("listContextManifestsForRound: two attempts of the same phase are independently reconstructable, insertion order, scoped to the round", () => {
+  const s = mem();
+  s.recordContextManifest(
+    { roundId: 7, phase: "harvesting", role: "harvest", session: "role-harvest-attempt1", attempt: 1 },
+    JSON.stringify({ worktree: { dirty: false } }),
+    "2026-07-17T00:00:00Z",
+  );
+  s.recordContextManifest(
+    { roundId: 7, phase: "harvesting", role: "harvest", session: "role-harvest-attempt2", attempt: 2 },
+    JSON.stringify({ worktree: { dirty: true } }),
+    "2026-07-17T00:01:00Z",
+  );
+  // A different round's manifest must never bleed into round 7's read.
+  s.recordContextManifest(
+    { roundId: 8, phase: "harvesting", role: "harvest", session: "role-harvest-other-round", attempt: 1 },
+    JSON.stringify({}),
+    "2026-07-17T00:02:00Z",
+  );
+  const rows = s.listContextManifestsForRound(7);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.attempt, 1);
+  assert.equal(rows[0]?.session, "role-harvest-attempt1");
+  assert.deepEqual(JSON.parse(rows[0]?.json ?? "{}"), { worktree: { dirty: false } });
+  assert.equal(rows[1]?.attempt, 2);
+  assert.equal(rows[1]?.session, "role-harvest-attempt2");
+  assert.deepEqual(JSON.parse(rows[1]?.json ?? "{}"), { worktree: { dirty: true } });
+  assert.equal(s.listContextManifestsForRound(8).length, 1);
+  assert.deepEqual(s.listContextManifestsForRound(9), []);
   s.close();
 });

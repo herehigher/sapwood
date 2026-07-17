@@ -414,6 +414,59 @@ input-side hardening when untrusted-repo support is actually scheduled, as its o
 milestone-level threat-model decision rather than a standing constraint on trusted-
 repo capabilities.
 
+**Ambient repo context — record, don't seal (locked 2026-07-16/17, issue #236).**
+Every session — worker or peripheral — runs `claude -p` inside a real repo worktree
+and therefore legitimately absorbs that worktree's `CLAUDE.md`, the user's global
+`CLAUDE.md`/auto-memory, and the CLI's other dynamic system-prompt sections, same as
+any interactive session would (an earlier `config.ts` comment claiming peripheral
+sessions got "no repo context beyond what's substituted into the prompt" was already
+inaccurate and is now corrected). Applying the capability/context decision rule
+above: sealing this channel would be a *content*-side intervention, and the trust
+boundary stays action-side — sealing it was considered and rejected (owner ruling,
+Codex concurring after challenge). The obligation is honesty and diagnosability, not
+isolation: recorded for all **non-align** peripheral phases today — harvest, architect,
+plan-review, retro; `align.ts`'s three sessions wire in via
+[#232](https://github.com/herehigher/sapwood/issues/232) — every such session attempt
+assembles a **context manifest** (`roles/context-manifest.ts`, persisted in the state
+DB's `context_manifests` table) recording every source among a deliberately BOUNDED,
+ENUMERATED set of standard CLAUDE.md-family paths — `<worktree>/CLAUDE.md`,
+`CLAUDE.local.md`, `.claude/CLAUDE.md`, every `*.md` RECURSIVELY under
+`.claude/rules/`, and the user-global `CLAUDE.md` (honoring `CLAUDE_CONFIG_DIR` when
+set) — never Claude Code's full resolution graph (`@import` directives,
+ancestor-directory files, managed policy are NAMED in the manifest's own
+`knownUnprobed`, not chased; `probedPaths` lists exactly what WAS checked). Every
+present source is captured CONTENT-ADDRESSED inline, even a worktree-rooted,
+git-tracked one (a resolved `gitCommit` survives only as ADVISORY metadata, never a
+recoverability guarantee — a write-capable session could have modified/untracked it
+before its own commit; codex review round 1 proved the original hash-only
+"git-recoverable" design untrustworthy for exactly that case). The filesystem-derived
+half (sources, worktree HEAD, hook content) is captured as early as the engine can
+observe it — anchored to the session's OWN stream-json init line (polled from its
+still-growing jsonl), NEVER at session teardown, and NEVER a bounded wait for the
+worktree directory to merely exist (an earlier version of this fix used that anchor;
+a focused-suite run caught the resulting race live — directory existence does not
+imply checkout-complete). A `captureBasis` field (`"init-observed"` vs.
+`"timeout-fallback"`) names which anchor actually fired, so a session that never
+reported an init line in time is never silently treated as equally reliable — while
+the model/CLI/tool-inventory/MCP half is the session's own stream-json self-report,
+read post-exit (with an explicit `modelSource` discriminator — never a silent
+substitution). The worktree's resolved HEAD uses a pure-filesystem, NAMESPACE-AWARE
+git-plumbing read matching git's actual layout: every `refs/*` is shared (resolved
+from the common store only, never a stale worktree-local shadow) EXCEPT the three
+genuinely per-worktree namespaces (`refs/bisect`, `refs/rewritten`, `refs/worktree`),
+which resolve worktree-local only (an earlier version of this fix inverted that
+default, treating only heads/tags/remotes as shared; this engine structurally never
+execs `git` outside the two pinned subprocess call sites, #69). Rows are keyed by
+`(round, phase, role, session, attempt)` — the same tuple the separately developed
+input-manifest work (#231) will eventually join on; the two ship independently by
+design. Isolation remains the correct tool, but only for **benchmark** runs (a clean
+throwaway directory with explicit `--system-prompt`/`--add-dir`/`--mcp-config`
+injection — `--bare` is MANDATORY in that recipe, not optional, since only it makes
+passed flags the sole inputs) — never production, since `--bare` also disables hooks
+and the guard hook is the actual safety boundary. See
+[`security.md`](security.md#ambient-repo-context-record-dont-seal-236) for the full
+model and the isolation recipe.
+
 The committee's keystone finding remains: 0day's guard was built for a *trusted* model
 on a *private* repo. v1 stays in that deployment context, **but we build the seams so
 public-repo hardening is additive, not a rewrite.** v1 requirements:

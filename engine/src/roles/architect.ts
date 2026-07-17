@@ -406,6 +406,10 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         issue: 0, // round-scoped, not tied to any single issue (spend_ledger's documented sentinel)
         now: deps.now ?? (() => new Date()),
         ...(deps.log !== undefined ? { log: deps.log } : {}),
+        // #236: record this phase's ambient-context manifest for EVERY attempt — same round-level
+        // shape as `issue: 0` above. See peripheral.ts's RetriedSession.contextManifest doc for
+        // the (round, phase, role, session, attempt) key this writes under.
+        contextManifest: { roundId, phase: "architecting", record: (key, json, at) => deps.state.recordContextManifest(key, json, at) },
         degradeEvent: "architect-degraded",
         degradePayload: (r) => ({
           round_id: roundId,

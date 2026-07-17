@@ -1,12 +1,14 @@
 // peripheral.test.ts (#87): the role runner — a stub `claude` binary (zero token, same
 // integration style as worker.test.ts) drives the real spawn/sentinel/timeout/cost-parse path.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import type { ContextManifest } from "./context-manifest.js";
 import {
   PLAN_DRAFTER_DISALLOWED_TOOLS,
   PO_ALLOWED_TOOLS,
@@ -56,6 +58,12 @@ const mkRunner = (dir: string, claudeBin: string, over: Partial<RoleRunnerDeps> 
     claudeBin,
     heartbeatMs: 50,
     guardHookPath: mkHook(dir),
+    // #236: most tests here never create a worktree at all (their stub `claude` binary just
+    // echoes stream-json lines) — a short bounded wait keeps the suite fast while still
+    // exercising the real pre-spawn-capture code path. Tests that DO create a worktree do so via
+    // `mkdir -p` in bash, which resolves on the first poll well inside this window.
+    preSpawnCaptureTimeoutMs: 150,
+    preSpawnCapturePollMs: 10,
     ...over,
   });
 
@@ -128,6 +136,247 @@ exit 0
   }
 });
 
+// ── #236: ambient-context manifest assembly, wired through the REAL RoleRunner.run() path ────
+
+test("run: assembles a context manifest from the real environment — repo CLAUDE.md family (incl. .claude/CLAUDE.md + NESTED rules/**/*.md) + auto-memory MEMORY.md snapshotted, model/CLI version/tools/mcp from the session's own init report, captureBasis init-observed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  const memDir = join(dir, "memory");
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+wt=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
+  prev="$arg"
+done
+mkdir -p "${worktreeRoot}/$wt/.claude/rules/sub"
+printf '# fixture repo conventions\\n' > "${worktreeRoot}/$wt/CLAUDE.md"
+printf -- '# fixture .claude/CLAUDE.md\\n' > "${worktreeRoot}/$wt/.claude/CLAUDE.md"
+printf -- '- rule one\\n' > "${worktreeRoot}/$wt/.claude/rules/one.md"
+printf -- '- nested rule\\n' > "${worktreeRoot}/$wt/.claude/rules/sub/nested.md"
+mkdir -p "${memDir}"
+printf -- '- fixture memory entry\\n' > "${memDir}/MEMORY.md"
+echo '{"type":"system","subtype":"init","model":"claude-stub-model","claude_code_version":"9.9.9","tools":["Read","Write"],"mcp_servers":[{"name":"codegraph","status":"pending"}],"memory_paths":{"auto":"${memDir}/"}}'
+echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"claude-stub-model","usage":{"input_tokens":3,"output_tokens":7}}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const prompt = "assemble manifest test";
+    const result = await runner.run({ roleId: "test-role", prompt, model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(result.outcome, "done");
+    const manifest = result.contextManifest;
+    assert.ok(manifest, "a REAL RoleRunner.run() result always carries a context manifest");
+
+    assert.equal(manifest!.model, "claude-stub-model", "prefers the session's OWN reported model over the requested one");
+    assert.equal(manifest!.modelSource, "session-init", "the model came from the session's own init report");
+    assert.equal(manifest!.cliVersion, "9.9.9");
+    assert.ok(manifest!.toolInventoryHash && manifest!.toolInventoryHash.length === 64);
+    assert.equal(manifest!.promptTemplateVersion, createHash("sha256").update(prompt, "utf8").digest("hex"));
+    assert.deepEqual(manifest!.mcpTools, ["codegraph:pending"]);
+    assert.ok(manifest!.settingsHash.length === 64);
+    assert.ok(manifest!.hookHash && manifest!.hookHash.length === 64, "the guard hook file's content is hashed");
+
+    // Codex R1: the capture anchored to the session's own init line, not a filesystem race.
+    assert.equal(manifest!.captureBasis, "init-observed");
+
+    const repoClaudeMd = manifest!.sources.find((s) => s.label === "repo CLAUDE.md");
+    assert.equal(repoClaudeMd?.kind, "snapshot");
+    assert.equal((repoClaudeMd as { content: string }).content, "# fixture repo conventions\n");
+    assert.equal((repoClaudeMd as { gitCommit?: string }).gitCommit, undefined, "no real .git in this stub worktree -> unresolvable HEAD");
+
+    // Codex F2a: CLAUDE.local.md is probed (absent here).
+    assert.deepEqual(
+      manifest!.sources.find((s) => s.label === "repo CLAUDE.local.md"),
+      { kind: "absent", label: "repo CLAUDE.local.md", path: join(worktreeRoot, result.name, "CLAUDE.local.md"), reason: "absent" },
+    );
+
+    // Codex R2a: <worktree>/.claude/CLAUDE.md is now probed (an officially documented layer the
+    // original F2 fix missed).
+    const dotClaudeClaudeMd = manifest!.sources.find((s) => s.label === "repo .claude/CLAUDE.md");
+    assert.equal(dotClaudeClaudeMd?.kind, "snapshot");
+    assert.equal((dotClaudeClaudeMd as { content: string }).content, "# fixture .claude/CLAUDE.md\n");
+
+    // Codex R2b: the rules scan is now RECURSIVE — both the direct child and the nested file
+    // under sub/ are captured, not just direct children.
+    const rule = manifest!.sources.find((s) => s.label === "repo .claude/rules/one.md");
+    assert.equal(rule?.kind, "snapshot");
+    assert.equal((rule as { content: string }).content, "- rule one\n");
+    const nestedRule = manifest!.sources.find((s) => s.label === "repo .claude/rules/sub/nested.md");
+    assert.equal(nestedRule?.kind, "snapshot", "nested rule files are found — the scan is recursive");
+    assert.equal((nestedRule as { content: string }).content, "- nested rule\n");
+
+    const memoryMd = manifest!.sources.find((s) => s.label === "auto-memory MEMORY.md");
+    assert.equal(memoryMd?.kind, "snapshot");
+    assert.equal((memoryMd as { content: string }).content, "- fixture memory entry\n");
+
+    // The user-global CLAUDE.md's presence/content depends on the machine running the test, so
+    // only its PRESENCE in the source list (not its content) is asserted — kept hermetic.
+    assert.ok(manifest!.sources.some((s) => s.label === "user-global CLAUDE.md"));
+
+    // Codex F2b: probedPaths/knownUnprobed make the manifest's own coverage claim explicit.
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, "CLAUDE.md")));
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, "CLAUDE.local.md")));
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, ".claude", "CLAUDE.md")));
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, ".claude", "rules", "**", "*.md")));
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, ".claude", "rules", "one.md")));
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, ".claude", "rules", "sub", "nested.md")));
+    assert.ok(manifest!.knownUnprobed.length > 0);
+
+    // Codex F1: the manifest states its own two-phase capture timing.
+    assert.ok(manifest!.capturedPreSpawn.length > 0 && manifest!.capturedPostExit.length > 0);
+    assert.ok(manifest!.capturedPreSpawn <= manifest!.capturedPostExit, "filesystem data is captured before the session's self-report");
+
+    assert.deepEqual(manifest!.worktree, {
+      path: join(worktreeRoot, result.name),
+      head: null,
+      headResolution: "unresolved",
+      dirty: false,
+      dirtyBasis: "structural-no-write-tools",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: CLAUDE_CONFIG_DIR, when set, is the effective user-global config dir instead of ~/.claude (Codex R2c)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const configDir = mkdtempSync(join(tmpdir(), "sapwood-claude-config-"));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    writeFileSync(join(configDir, "CLAUDE.md"), "# relocated user-global CLAUDE.md\n");
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const bin = mkStub(dir, FAST_STUB); // no worktree needed for this assertion
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 500, preSpawnCapturePollMs: 10 });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const manifest = result.contextManifest;
+    assert.ok(manifest);
+    const userGlobal = manifest!.sources.find((s) => s.label === "user-global CLAUDE.md");
+    assert.equal(userGlobal?.kind, "snapshot");
+    assert.equal((userGlobal as { content: string }).content, "# relocated user-global CLAUDE.md\n");
+    assert.equal((userGlobal as { path: string }).path, join(configDir, "CLAUDE.md"));
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test("run: a stub that emits no init line and never creates a worktree still assembles a manifest (captureBasis 'timeout-fallback', honest nulls/empties/'worktree-missing', never a throw)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB); // no init line, no worktree ever created
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const manifest = result.contextManifest;
+    assert.ok(manifest);
+    // Codex R1: no init line ever appeared within the bound -> the honest fallback basis, never
+    // silently presented as equally reliable as a real init-anchored capture.
+    assert.equal(manifest!.captureBasis, "timeout-fallback");
+    assert.equal(manifest!.model, "sonnet", "falls back to the requested model when the session reports none");
+    assert.equal(manifest!.modelSource, "requested-fallback");
+    assert.equal(manifest!.cliVersion, null);
+    assert.equal(manifest!.toolInventoryHash, null);
+    assert.deepEqual(manifest!.mcpTools, []);
+    assert.equal(manifest!.worktree.head, null);
+    // Codex F5d: a worktree that never appeared at all gets its OWN distinct basis, never a
+    // plain "clean" or "dirty-because-write-capable" guess.
+    assert.equal(manifest!.worktree.dirty, true);
+    assert.equal(manifest!.worktree.dirtyBasis, "worktree-missing");
+    assert.deepEqual(
+      manifest!.sources.find((s) => s.label === "repo CLAUDE.md"),
+      { kind: "absent", label: "repo CLAUDE.md", path: join(dir, "worktrees", result.name, "CLAUDE.md"), reason: "absent" },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: a session with a NON-EMPTY allowedTools grant (e.g. retro) records worktree.dirty conservatively — never a false 'definitely clean'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    // This stub DOES create its worktree (unlike FAST_STUB) so the "worktree-missing" basis
+    // from the test above doesn't mask the write-capable-tools basis this test is about.
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+wt=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
+  prev="$arg"
+done
+mkdir -p "${worktreeRoot}/$wt"
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"result","subtype":"success","total_cost_usd":0.0005}'
+exit 0
+`,
+    );
+    // The init line (emitted right after the worktree is created, same script) anchors the
+    // capture deterministically — no race, no need for a large timeout, but kept generous
+    // anyway since the point of this test is the dirty/dirtyBasis derivation, not timing.
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const result = await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: "Read,Write,Bash(git *)",
+    });
+    const manifest = result.contextManifest;
+    assert.ok(manifest);
+    assert.equal(manifest!.captureBasis, "init-observed");
+    assert.equal(manifest!.worktree.dirty, true, "a write-capable session's worktree can never be assumed clean");
+    assert.equal(manifest!.worktree.dirtyBasis, "unknown-write-capable-session");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: the init-line anchor is not fooled by the worktree DIRECTORY appearing before CLAUDE.md is written (Codex R1 deflake — the exact race a directory-existence anchor would have lost)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    // Deliberately reproduces the pre-fix race window: the worktree directory exists for a
+    // moment with NO CLAUDE.md in it (a directory-existence poll could sample exactly here and
+    // record CLAUDE.md as absent), and only afterward is CLAUDE.md written and the init line
+    // emitted. The init-line anchor must never capture before that write completes.
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+wt=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
+  prev="$arg"
+done
+mkdir -p "${worktreeRoot}/$wt"
+sleep 0.2
+printf '# written after a delay\\n' > "${worktreeRoot}/$wt/CLAUDE.md"
+echo '{"type":"system","subtype":"init","model":"claude-stub-model"}'
+echo '{"type":"result","subtype":"success","total_cost_usd":0.0005}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const result = await runner.run({ roleId: "test-role", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const manifest = result.contextManifest;
+    assert.ok(manifest);
+    assert.equal(manifest!.captureBasis, "init-observed");
+    const repoClaudeMd = manifest!.sources.find((s) => s.label === "repo CLAUDE.md");
+    assert.equal(repoClaudeMd?.kind, "snapshot", "CLAUDE.md must be captured, never raced as absent");
+    assert.equal((repoClaudeMd as { content: string }).content, "# written after a delay\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: non-zero exit -> outcome failed, .failed sentinel", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
@@ -157,6 +406,8 @@ test("run: wall-clock timeout kills the tree -> outcome timeout, tagged as a .fa
       claudeBin: bin,
       heartbeatMs: 100,
       guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
     });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "timeout");
@@ -222,6 +473,8 @@ test("run: guard hook missing in hard mode -> throws, refuses to spawn an unguar
       worktreeRoot: join(dir, "worktrees"),
       claudeBin: bin,
       guardHookPath: join(dir, "nonexistent-hook.js"),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
     });
     await assert.rejects(
       () => runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" }),
@@ -243,6 +496,8 @@ test("run: soft guard mode tolerates a missing hook (no fail-closed refusal)", a
       worktreeRoot: join(dir, "worktrees"),
       claudeBin: bin,
       guardHookPath: join(dir, "nonexistent-hook.js"),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
     });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
@@ -496,6 +751,8 @@ exit 0
       claudeBin: bin,
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
     });
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.ok(!existsSync(join(worktreeRoot, result.name)), "worktree removed unconditionally after run()");
@@ -535,6 +792,8 @@ exit 0
       claudeBin: bin,
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
     });
     const result = await runner.run({
       roleId: "retro",
@@ -591,6 +850,8 @@ test("run: a ../-escaping scratchFile is refused — the outside file is NOT rea
       claudeBin: bin,
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
     });
     const result = await runner.run({
       roleId: "retro",
@@ -776,6 +1037,122 @@ test("runSessionWithRetry: isValid OMITTED — behavior is byte-identical to tod
   assert.equal(failRunner.calls.length, 2);
   assert.equal(failState.events.length, 1);
   assert.equal(failState.events[0]![0], "test-degraded");
+});
+
+// ── #236: runSessionWithRetry's OPTIONAL context-manifest recording — round/phase key prefix
+//    supplied by the caller, role/session/attempt filled in here. Omitted -> zero behavior
+//    change (every test above never sets it and never touches `record`). ──
+
+interface RecordedManifest {
+  key: { roundId: number; phase: string; role: string; session: string; attempt: number };
+  json: string;
+  at: string;
+}
+
+/** A structurally-valid ContextManifest whose `model` field doubles as a distinguishing tag —
+ *  so a test can assert two attempts' recorded json payloads actually differ (ambient drift). */
+const mkManifest = (tag: string): ContextManifest => ({
+  sources: [],
+  probedPaths: [],
+  knownUnprobed: "imports, ancestor dirs, managed policy",
+  capturedPreSpawn: "2026-07-17T00:00:00Z",
+  capturedPostExit: "2026-07-17T00:00:01Z",
+  captureBasis: "init-observed",
+  model: tag,
+  modelSource: "requested-fallback",
+  cliBin: "claude",
+  cliVersion: null,
+  toolInventoryHash: null,
+  promptTemplateVersion: null,
+  mcpTools: [],
+  worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
+  settingsHash: "hash",
+  hookHash: null,
+  recordedAt: "2026-07-17T00:00:01Z",
+});
+
+const mkManifestResult = (manifestTag: string, over: Partial<RoleSessionResult> = {}): RoleSessionResult =>
+  mkResult({ contextManifest: mkManifest(manifestTag), ...over });
+
+test("runSessionWithRetry + contextManifest: BOTH attempts are recorded independently — two attempts of one phase are reconstructable, ambient drift visible", async () => {
+  const runner = new FakeRunner([mkManifestResult("attempt-1", { name: "role-x-1" }), mkManifestResult("attempt-2", { name: "role-x-2" })]);
+  const state = new FakeState();
+  const recorded: RecordedManifest[] = [];
+  const opts: RetriedSession = {
+    ...mkOpts(runner, state, () => false), // always invalid -> forces exactly 2 attempts
+    contextManifest: { roundId: 42, phase: "harvesting", record: (key, json, at) => recorded.push({ key, json, at }) },
+  };
+  await runSessionWithRetry(opts);
+  assert.equal(runner.calls.length, 2);
+  assert.equal(recorded.length, 2, "every attempt is recorded, not just the last one");
+
+  assert.equal(recorded[0]!.key.roundId, 42);
+  assert.equal(recorded[0]!.key.phase, "harvesting");
+  assert.equal(recorded[0]!.key.role, "test-role", "role comes from session.roleId");
+  assert.equal(recorded[0]!.key.session, "role-x-1", "session comes from THAT attempt's own result name");
+  assert.equal(recorded[0]!.key.attempt, 1);
+
+  assert.equal(recorded[1]!.key.session, "role-x-2");
+  assert.equal(recorded[1]!.key.attempt, 2);
+
+  // Independently reconstructable: each row's json is that attempt's OWN manifest, not a shared
+  // reference — ambient drift between attempt 1 and attempt 2 is visible in the two payloads.
+  assert.notEqual(recorded[0]!.json, recorded[1]!.json);
+  assert.match(recorded[0]!.json, /attempt-1/);
+  assert.match(recorded[1]!.json, /attempt-2/);
+});
+
+test("runSessionWithRetry + contextManifest: a first attempt that succeeds immediately still records exactly one manifest", async () => {
+  const runner = new FakeRunner([mkManifestResult("only-attempt")]);
+  const state = new FakeState();
+  const recorded: RecordedManifest[] = [];
+  const opts: RetriedSession = {
+    ...mkOpts(runner, state, () => true),
+    contextManifest: { roundId: 1, phase: "aligning", record: (key, json, at) => recorded.push({ key, json, at }) },
+  };
+  await runSessionWithRetry(opts);
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]!.key.attempt, 1);
+});
+
+test("runSessionWithRetry + contextManifest: omitted -> record is never called (zero behavior change)", async () => {
+  const runner = new FakeRunner([mkManifestResult("x")]);
+  const state = new FakeState();
+  await runSessionWithRetry(mkOpts(runner, state, () => true));
+  // No `contextManifest` field on opts at all — nothing to assert beyond "this doesn't throw
+  // and behaves like every other isValid test above" (already covered by mkOpts' shape).
+  assert.equal(runner.calls.length, 1);
+});
+
+test("runSessionWithRetry + contextManifest: the runner's result carries NO manifest (e.g. a bare test fake) -> record is never called", async () => {
+  const runner = new FakeRunner([mkResult()]); // no contextManifest field at all
+  const state = new FakeState();
+  const recorded: RecordedManifest[] = [];
+  const opts: RetriedSession = {
+    ...mkOpts(runner, state, () => true),
+    contextManifest: { roundId: 1, phase: "aligning", record: (key, json, at) => recorded.push({ key, json, at }) },
+  };
+  await runSessionWithRetry(opts);
+  assert.equal(recorded.length, 0);
+});
+
+test("runSessionWithRetry + contextManifest: a THROWING record() is non-fatal — never propagates, never blocks retry/degrade", async () => {
+  const runner = new FakeRunner([mkManifestResult("a"), mkManifestResult("b")]);
+  const state = new FakeState();
+  const opts: RetriedSession = {
+    ...mkOpts(runner, state, () => false),
+    contextManifest: {
+      roundId: 1,
+      phase: "aligning",
+      record: () => {
+        throw new Error("db write failed");
+      },
+    },
+  };
+  const result = await runSessionWithRetry(opts); // must resolve normally
+  assert.equal(runner.calls.length, 2);
+  assert.equal(state.events.length, 1, "the normal degrade path still fires — a manifest-write failure never wedges it");
+  assert.equal(result.outcome, "done");
 });
 
 // ── #110 PR5: acceptance-criteria tests (issue #110's verification plan: "an integration test

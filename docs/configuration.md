@@ -382,6 +382,43 @@ silent no-op, never a wedged round. `retro` is the one exception: a worker-class
 session with `Read` + local git only (proposals land exclusively as PRs, never a
 direct write) — see [`security.md`](security.md) for the full model.
 
+**Ambient repo context is received by design, and recorded, not sealed (#236).** Every
+role session above still runs `claude -p` inside a real repo worktree, so it
+legitimately absorbs that worktree's `CLAUDE.md`, the user's global `CLAUDE.md`/
+auto-memory, and the CLI's other dynamic system-prompt sections — same as any
+interactive session would. This is intentional: the trust boundary here is
+action-side (what a session can *do* — the empty tool allowlist above, the
+credential-stripped spawn env, [#219](https://github.com/herehigher/sapwood/issues/219)),
+never content-side (what it can *read*), and repo conventions living in `CLAUDE.md`
+are exactly what a role session should absorb. Sealing this channel (a clean,
+`--bare`-style directory with no ambient `CLAUDE.md`) is reserved for **benchmark**
+runs only — see [`security.md`](security.md#ambient-repo-context-record-dont-seal-236)
+for the full rationale, the isolation recipe (which MUST use `--bare`), and why that
+recipe is never acceptable for production dispatch (`--bare` also disables hooks, and
+the guard hook must stay live). Recorded for all **non-align** peripheral phases
+today — harvest, architect, plan-review, retro; `align.ts`'s three sessions wire in
+via [#232](https://github.com/herehigher/sapwood/issues/232) — every session attempt
+assembles a **context manifest**: every source among a deliberately bounded,
+ENUMERATED set of standard CLAUDE.md-family paths (see the manifest's own
+`probedPaths`; never Claude Code's full resolution graph — imports, ancestor-directory
+files, and managed policy are named, not chased, in `knownUnprobed`), each one
+content-addressed inline regardless of whether it's git-tracked (a worktree-resolved
+`gitCommit` survives only as ADVISORY metadata, never a recoverability guarantee — a
+write-capable session could still have modified it), the model/CLI/tool-inventory/
+prompt actually used (with an explicit `modelSource` discriminator — never a silent
+substitution), MCP server availability, the worktree's resolved HEAD, and the
+settings/guard-hook hashes — so two attempts of the same phase are independently
+diffable rather than assumed comparable. The probed sources include
+`<worktree>/CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, every `*.md`
+recursively under `.claude/rules/`, and the user-global `CLAUDE.md` (honoring
+`CLAUDE_CONFIG_DIR` when set, else `~/.claude`). The filesystem-derived half is
+captured as early as the engine can observe it — anchored to the session's own
+stream-json init line, never a bounded wait for the worktree directory to merely
+exist (that anchor raced a real checkout once) and never at session teardown —
+precisely so a write-capable session's own edits can never be mistaken for what it
+started with; a `captureBasis` field on the manifest names whether that anchor
+actually fired or the capture fell back to its bound.
+
 **`retro` holds no `gh` grant at all (#111).** Reads: its prompt is seeded with an
 engine-built round-scoped digest — PR descriptions + diffs + review signals for every
 PR the round touched, comments/labels for every escalated issue, and the round's

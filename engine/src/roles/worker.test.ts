@@ -33,6 +33,7 @@ import {
   parseCostUsd,
   parseModelUsage,
   parseResultText,
+  parseSessionInit,
   probeLlmPing,
   renderPromptTemplate,
   shellSingleQuote,
@@ -108,6 +109,63 @@ test('parseResultText: non-string `result` field -> "" (never throws)', () => {
 
 test('parseResultText: empty input -> ""', () => {
   assert.equal(parseResultText(""), "");
+});
+
+// ── #236: parseSessionInit — the session's own report of its ambient environment, parsed from
+//    stream-json's `{"type":"system","subtype":"init",...}` line. Same tolerance-test shapes as
+//    parseCostUsd/parseResultText. Field names/shape verified against a real Claude Code CLI
+//    2.1.212 probe session (see context-manifest.ts's module doc). ──
+test("parseSessionInit: a real-shaped init line yields model/cliVersion/tools/mcpServers/memoryPathAuto", () => {
+  const initLine = JSON.stringify({
+    type: "system",
+    subtype: "init",
+    cwd: "/some/worktree",
+    model: "claude-haiku-4-5-20251001",
+    claude_code_version: "2.1.212",
+    tools: ["Read", "Bash"],
+    mcp_servers: [
+      { name: "codegraph", status: "pending" },
+      { name: "github", status: "disabled" },
+    ],
+    memory_paths: { auto: "/Users/x/.claude/projects/repo/memory/" },
+  });
+  const jsonl = [initLine, `{"type":"assistant","message":{}}`, `{"type":"result","subtype":"success","total_cost_usd":0.01}`].join("\n");
+  const info = parseSessionInit(jsonl);
+  assert.equal(info.model, "claude-haiku-4-5-20251001");
+  assert.equal(info.cliVersion, "2.1.212");
+  assert.deepEqual(info.tools, ["Read", "Bash"]);
+  assert.deepEqual(info.mcpServers, [
+    { name: "codegraph", status: "pending" },
+    { name: "github", status: "disabled" },
+  ]);
+  assert.equal(info.memoryPathAuto, "/Users/x/.claude/projects/repo/memory/");
+});
+
+test("parseSessionInit: no init line, garbage lines, or empty input -> honest empty defaults, never throws", () => {
+  const empty = { model: null, cliVersion: null, tools: [], mcpServers: [], memoryPathAuto: null };
+  assert.deepEqual(parseSessionInit(""), empty);
+  assert.deepEqual(parseSessionInit(`garbage{{{\n{"type":"assistant","message":{}}`), empty);
+  assert.deepEqual(parseSessionInit(`{"type":"system","subtype":"hook_started"}`), empty);
+});
+
+test("parseSessionInit: only the FIRST init line is used; malformed tools/mcp_servers/memory_paths shapes degrade to defaults instead of throwing", () => {
+  const first = JSON.stringify({
+    type: "system",
+    subtype: "init",
+    model: "first-model",
+    tools: "not-an-array",
+    mcp_servers: [{ status: "pending" }],
+  });
+  const second = JSON.stringify({ type: "system", subtype: "init", model: "second-model" });
+  const info = parseSessionInit(`${first}\n${second}`);
+  assert.equal(info.model, "first-model", "the FIRST init line wins");
+  assert.deepEqual(info.tools, [], "non-array tools degrades to []");
+  assert.deepEqual(
+    info.mcpServers,
+    [{ name: "unknown", status: "pending" }],
+    "a server entry missing `name` degrades, never dropped silently",
+  );
+  assert.equal(info.memoryPathAuto, null);
 });
 
 // ── #47: per-model token usage capture (parseModelUsage) ──

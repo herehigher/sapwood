@@ -19,6 +19,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { LaneProbe, Supervisor } from "../loop/conductor.js";
 import { type PeripheralPhase, type PeripheralStub, type RoundDeps, runRounds } from "../loop/round.js";
+import type { ContextManifest } from "../roles/context-manifest.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { State } from "../state/state.js";
 import {
@@ -71,6 +72,32 @@ const timeoutResult = (name: string): RoleSessionResult => ({
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...over });
+
+/** A structurally-valid ContextManifest for #236 persistence tests — `model` doubles as a tag so
+ *  the persisted json is trivially distinguishable from another fixture's. Retro is the one role
+ *  that legitimately holds write-capable tools, so its OWN dirtyBasis ("unknown-write-capable-
+ *  session") is used here rather than the issues-only default — this fixture is not asserting
+ *  RoleRunner.run()'s real derivation (peripheral.test.ts covers that), just standing in for
+ *  "some real manifest object" at the state-persistence layer. */
+const mkFakeManifest = (tag: string): ContextManifest => ({
+  sources: [],
+  probedPaths: [],
+  knownUnprobed: "imports, ancestor dirs, managed policy",
+  capturedPreSpawn: "2026-07-17T00:00:00Z",
+  capturedPostExit: "2026-07-17T00:00:01Z",
+  captureBasis: "init-observed",
+  model: tag,
+  modelSource: "requested-fallback",
+  cliBin: "claude",
+  cliVersion: null,
+  toolInventoryHash: null,
+  promptTemplateVersion: null,
+  mcpTools: [],
+  worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "unknown-write-capable-session" },
+  settingsHash: "hash",
+  hookHash: null,
+  recordedAt: "2026-07-17T00:00:01Z",
+});
 
 // ── Write-scope: "proposals appear as branches/PRs only" ────────────────────────────────────
 
@@ -140,6 +167,24 @@ test("createRetroStub: every dispatched session carries RETRO_ALLOWED_TOOLS/RETR
   assert.equal(call.disallowedTools, RETRO_DISALLOWED_TOOLS);
   // #111 PR-B: the engine (not the session) chooses where the PR-proposal scratch file lives.
   assert.equal(call.scratchFile, RETRO_SCRATCH_FILE);
+  state.close();
+});
+
+test("createRetroStub (#236): a done session's context manifest is persisted, keyed by (round, 'retro', 'retro', session name, attempt 1)", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const manifest = mkFakeManifest("retro-attempt");
+  const runner = new ScriptedRunner({ ...doneResult("role-retro-1"), contextManifest: manifest });
+  const deps: RetroDeps = { state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  const stub = createRetroStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+  const rows = state.listContextManifestsForRound(round.round_id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.phase, "retro");
+  assert.equal(rows[0]?.role, "retro");
+  assert.equal(rows[0]?.session, "role-retro-1");
+  assert.equal(rows[0]?.attempt, 1);
+  assert.deepEqual(JSON.parse(rows[0]?.json ?? "{}"), manifest);
   state.close();
 });
 
