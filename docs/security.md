@@ -150,25 +150,65 @@ actually saw, so ambient drift between retries (a `CLAUDE.md` edited between att
 and attempt 2, a dirty worktree, a config change) never makes two attempts of the same
 phase look comparable when they weren't.
 
-**The context manifest.** Every peripheral role session attempt (`RoleRunner.run()` in
-`peripheral.ts`) assembles a manifest right before its worktree is deleted — role
-sessions hold no write-capable tool grant at all (see above), so the worktree is
-provably unchanged from spawn time, making this equivalent to capturing "at spawn"
-without racing the CLI's own worktree-creation step. It records:
+**Wired for all non-align peripheral phases today** — harvest, architect, plan-review
+(both the reviewer and drafter sessions), and retro; `align.ts`'s three sessions wire
+in via [#232](https://github.com/herehigher/sapwood/issues/232), which already edits
+that file to link decisions to their manifests.
 
-- every effective `CLAUDE.md`/policy source it found: **git-recoverable** ones (the
-  worktree's own `CLAUDE.md`, pinned to the worktree's resolved HEAD commit) as
-  path + commit + hash only; **mutable** ones (the user's global `CLAUDE.md`, the
-  auto-memory file the session's own init report named) as a full **content-addressed
-  snapshot** — the actual content, not a bare hash of something that could later
-  change or disappear;
-- the model/CLI version/tool-schema/prompt actually used — read from the session's
-  *own* stream-json init report where possible (`roles/worker.ts`'s
-  `parseSessionInit`), so a fallback-model switch or a CLI upgrade mid-fleet is
-  visible rather than assumed to match the request;
+**The context manifest.** Every wired role session attempt (`RoleRunner.run()` in
+`peripheral.ts`) assembles a manifest in TWO PHASES, each with its own recorded
+timestamp (`capturedPreSpawn` / `capturedPostExit`) so the manifest states its own
+timing rather than leaving it implicit:
+
+- **Pre-spawn (filesystem-derived half):** captured as early as this engine can
+  possibly observe it — a bounded wait for the CLI's own worktree provisioning right
+  after spawn confirmation, **never at session teardown**. This matters most for
+  `retro`, the one role that holds write-capable tools: capturing at teardown (the
+  original design) would have recorded "what the session left behind" — its own
+  proposal commit, a possibly-edited `CLAUDE.md` — not what it started with. This is
+  a known, documented limitation, not a perfect guarantee: it still races the model's
+  very first turn in principle (closing that fully would mean tailing the live
+  stream-json for the init line, not attempted); for the many role sessions with zero
+  write-capable tools the race is moot (nothing exists that could mutate the worktree
+  at any point), and for `retro` it is far tighter than teardown-time capture was.
+- **Post-exit (self-report half):** the session's own stream-json init report — model/
+  CLI version/tool inventory/MCP servers — plus the auto-memory source, whose path is
+  only knowable from that same report. These don't drift with worktree edits (the
+  init event fires once, near stream start), so reading them at exit costs nothing
+  extra and needs no earlier synchronization.
+
+It records:
+
+- **a deliberately bounded, ENUMERATED set of standard sources** — never Claude Code's
+  full `CLAUDE.md` resolution graph (`@import` directives, ancestor-directory files
+  above the worktree root, any managed/enterprise policy layer are named in the
+  manifest's own `knownUnprobed` field, not chased). The manifest's `probedPaths`
+  field lists exactly what WAS checked: `<worktree>/CLAUDE.md`,
+  `<worktree>/CLAUDE.local.md`, every `*.md` under `<worktree>/.claude/rules/` (if
+  present), and the user-global `~/.claude/CLAUDE.md`;
+- **every present source captured CONTENT-ADDRESSED inline, with no exceptions** —
+  even a worktree-rooted, git-tracked file. An earlier design gave git-trackable
+  sources a hash-only "recoverable from git history" shape; that was deleted after
+  review because it isn't trustworthy for a write-capable session (`retro`): the file
+  could be modified, added, removed, or untracked before `retro`'s own commit, so
+  `path + commit` would not reliably reproduce the captured content via `git show`.
+  A resolved `gitCommit` survives only as **ADVISORY metadata** on the snapshot — "the
+  worktree's HEAD at capture time" — never a recoverability claim. Absence is recorded
+  too, distinguishing a confirmed-nonexistent file (`"absent"`) from any OTHER read
+  failure (`"unreadable"` — permissions, a directory where a file was expected, ...) —
+  the latter is a genuine blind spot that must never masquerade as "this layer
+  legitimately doesn't exist";
+- the model/CLI version/tool-inventory-hash/prompt actually used — read from the
+  session's *own* stream-json init report where possible (`roles/worker.ts`'s
+  `parseSessionInit`), with an explicit `modelSource` field (`"session-init"` vs.
+  `"requested-fallback"`) so a fallback-model switch, a CLI upgrade mid-fleet, or a
+  session that crashed before ever reporting in is visible rather than silently
+  assumed to match the request. (The tool-inventory hash is named for what it is: a
+  hash of the session's reported tool NAMES, not a schema-version string the CLI
+  doesn't emit.)
 - MCP server availability (name + live connection status, from the same init report);
-- the worktree's resolved git HEAD (via a pure-filesystem read of git's own plumbing
-  files — see below — never a `git status` call); and
+- the worktree's resolved git HEAD (via a **namespace-aware** pure-filesystem read of
+  git's own plumbing files — see below — never a `git status` call); and
 - hashes of the `--settings` JSON and the guard hook file, so a hook/config change
   between attempts is also detectable.
 
@@ -184,9 +224,19 @@ test (`worker.test.ts`, #69) that also bans passing a `cwd` to any subprocess, s
 engine cannot exec git *in a worker worktree* even accidentally. The context manifest
 honors that boundary: a worktree's HEAD commit is recovered by reading git's own
 plumbing files directly (`.git`'s `gitdir:` pointer, `HEAD`, loose/packed refs) —
-pure filesystem, no subprocess — and "dirty" is recorded as a **structural**
-guarantee (role sessions hold no write-capable tool, so their worktree cannot become
-dirty by their own action) rather than a measured `git status`.
+pure filesystem, no subprocess. The lookup is **namespace-aware**: shared refs
+(`refs/heads/*`, `refs/tags/*`, `refs/remotes/*`) resolve from the repo-wide common
+store only — a stale or shadowing worktree-local file under the same path (left over
+from an older git version, a manual edit, a corrupted worktree) must never be
+consulted, let alone win; genuinely per-worktree refs (`refs/bisect/*`,
+`refs/rewritten/*`) resolve worktree-local only. `dirty` is derived, never measured,
+from three distinct, honestly-labeled bases: `"structural-no-write-tools"` (the
+session's tool grant is empty — the common case — so `dirty: false` is a structural
+guarantee); `"unknown-write-capable-session"` (a non-empty grant, e.g. `retro` — the
+engine cannot rule out a write, so `dirty: true` conservatively, never a false
+"definitely clean"); and `"worktree-missing"` (the worktree never appeared on disk at
+all within the bounded wait — a distinct fact from either of the above, not folded
+into a guess).
 
 ### Benchmark isolation recipe (evals only — never production)
 
@@ -195,23 +245,32 @@ a controlled eval where ambient repo/user state must NOT leak into the compariso
 that case only, run `claude -p` against a **clean, throwaway directory** with explicit,
 full prompt injection instead of ambient discovery:
 
+- **`--bare` is MANDATORY, not optional.** Per Claude Code's own docs, `--bare` is the
+  *only* mode where the flags you pass become the SOLE inputs — without it, `~/.claude`
+  and the current-directory config still load underneath whatever you pass
+  (`--settings` is *additive* to the ambient settings layers, not a replacement; an
+  `--mcp-config` can still retain ambient MCP servers rather than fully overriding
+  them). Skipping `--bare` and hand-picking a few explicit flags does **not** achieve
+  isolation — it just adds explicit context on top of the same ambient channel this
+  page otherwise documents as intentionally open. `--bare` skips hooks, LSP, plugin
+  sync, attribution, auto-memory, background prefetches, keychain reads, and
+  `CLAUDE.md` auto-discovery in one flag, and sets `CLAUDE_CODE_SIMPLE=1`.
 - a fresh, empty working directory (no repo `CLAUDE.md`, no prior session state);
 - `--system-prompt` / `--system-prompt-file` and `--append-system-prompt[-file]` to
-  supply exactly the context the eval wants the model to have, explicitly;
+  supply exactly the context the eval wants the model to have, explicitly (`--bare`'s
+  own doc names these as the intended way to inject context under it);
 - `--add-dir` only for the specific paths the eval needs;
-- `--mcp-config` (or omit MCP entirely) and `--settings` to pin the exact tool/MCP
-  surface, rather than inheriting whatever's ambient on the runner machine;
+- `--mcp-config` (fully replacing, not augmenting, the MCP surface) or omit MCP
+  entirely, plus `--settings`, to pin the exact tool/MCP surface rather than
+  inheriting whatever's ambient on the runner machine;
 - `--agents`/`--plugin-dir` pinned or omitted, same rationale.
 
-**`--bare` is the CLI's own shorthand for most of the above** (skips hooks, LSP,
-plugin sync, attribution, auto-memory, background prefetches, keychain reads, and
-`CLAUDE.md` auto-discovery in one flag) and is a reasonable starting point for a
-benchmark harness. **It is not acceptable for production dispatch under any
-configuration**: `--bare` disables hooks, and the fail-closed guard hook
-(`guard.ts`) is the actual producer≠reviewer≠merger safety boundary this whole page
-describes — running without it is running unguarded, full stop, regardless of how
-convenient the isolation is for reproducibility. Benchmark runs are a separate,
-offline, human-supervised activity; they never feed sapwood's own dispatch loop.
+**It is not acceptable for production dispatch under any configuration**: `--bare`
+disables hooks, and the fail-closed guard hook (`guard.ts`) is the actual
+producer≠reviewer≠merger safety boundary this whole page describes — running without
+it is running unguarded, full stop, regardless of how convenient the isolation is for
+reproducibility. Benchmark runs are a separate, offline, human-supervised activity;
+they never feed sapwood's own dispatch loop.
 
 ## Human-merge-only paths
 

@@ -393,15 +393,25 @@ never content-side (what it can *read*), and repo conventions living in `CLAUDE.
 are exactly what a role session should absorb. Sealing this channel (a clean,
 `--bare`-style directory with no ambient `CLAUDE.md`) is reserved for **benchmark**
 runs only — see [`security.md`](security.md#ambient-repo-context-record-dont-seal-236)
-for the full rationale, the isolation recipe, and why `--bare` is never acceptable for
-production dispatch (it also disables hooks, and the guard hook must stay live). Every
-peripheral session attempt records a **context manifest** — every effective
-`CLAUDE.md`/policy source it saw (git-recoverable ones as path+commit+hash, mutable
-ones like the user's global `CLAUDE.md` as a full content-addressed snapshot, never a
-bare hash of content that could later change), the model/CLI/tool-schema/prompt
-actually used, MCP server availability, the worktree's resolved HEAD, and the
+for the full rationale, the isolation recipe (which MUST use `--bare`), and why that
+recipe is never acceptable for production dispatch (`--bare` also disables hooks, and
+the guard hook must stay live). Recorded for all **non-align** peripheral phases
+today — harvest, architect, plan-review, retro; `align.ts`'s three sessions wire in
+via [#232](https://github.com/herehigher/sapwood/issues/232) — every session attempt
+assembles a **context manifest**: every source among a deliberately bounded,
+ENUMERATED set of standard CLAUDE.md-family paths (see the manifest's own
+`probedPaths`; never Claude Code's full resolution graph — imports, ancestor-directory
+files, and managed policy are named, not chased, in `knownUnprobed`), each one
+content-addressed inline regardless of whether it's git-tracked (a worktree-resolved
+`gitCommit` survives only as ADVISORY metadata, never a recoverability guarantee — a
+write-capable session could still have modified it), the model/CLI/tool-inventory/
+prompt actually used (with an explicit `modelSource` discriminator — never a silent
+substitution), MCP server availability, the worktree's resolved HEAD, and the
 settings/guard-hook hashes — so two attempts of the same phase are independently
-diffable rather than assumed comparable.
+diffable rather than assumed comparable. The filesystem-derived half is captured as
+early as the engine can observe it (right after the CLI provisions the worktree, not
+at session teardown) precisely so a write-capable session's own edits can never be
+mistaken for what it started with.
 
 **`retro` holds no `gh` grant at all (#111).** Reads: its prompt is seeded with an
 engine-built round-scoped digest — PR descriptions + diffs + review signals for every

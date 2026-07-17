@@ -243,9 +243,11 @@ const Labels = z
 // CLI's other dynamic system-prompt sections, same as any interactive session would. The trust
 // boundary here is action-side (#219: what a session can DO), never content-side (what it can
 // READ) — sealing this channel would contradict that locked boundary. The obligation is
-// honesty/diagnosability, not isolation: every session attempt's effective context is recorded
-// (peripheral.ts's context-manifest assembly, state.ts's context_manifests table), never
-// silently varying between retries. See docs/security.md ("Ambient repo context") and
+// honesty/diagnosability, not isolation: a session attempt's effective context is recorded
+// (peripheral.ts's context-manifest assembly, state.ts's context_manifests table) for every
+// non-align peripheral phase TODAY (harvest, architect, plan-review, retro) — align.ts's three
+// sessions wire in via #232, never silently varying between retries once they do. See
+// docs/security.md ("Ambient repo context") and
 // docs/configuration.md for the channel and its rationale; docs/security.md also documents the
 // clean-directory `--bare`-style isolation recipe for BENCHMARK runs only (never production —
 // `--bare` disables hooks, so the guard can't ship with it).

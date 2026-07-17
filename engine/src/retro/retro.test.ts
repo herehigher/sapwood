@@ -81,16 +81,21 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
  *  "some real manifest object" at the state-persistence layer. */
 const mkFakeManifest = (tag: string): ContextManifest => ({
   sources: [],
+  probedPaths: [],
+  knownUnprobed: "imports, ancestor dirs, managed policy",
+  capturedPreSpawn: "2026-07-17T00:00:00Z",
+  capturedPostExit: "2026-07-17T00:00:01Z",
   model: tag,
+  modelSource: "requested-fallback",
   cliBin: "claude",
   cliVersion: null,
-  toolSchemaVersion: null,
+  toolInventoryHash: null,
   promptTemplateVersion: null,
   mcpTools: [],
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "unknown-write-capable-session" },
   settingsHash: "hash",
   hookHash: null,
-  recordedAt: "2026-07-17T00:00:00Z",
+  recordedAt: "2026-07-17T00:00:01Z",
 });
 
 // ── Write-scope: "proposals appear as branches/PRs only" ────────────────────────────────────

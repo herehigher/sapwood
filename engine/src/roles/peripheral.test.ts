@@ -58,6 +58,12 @@ const mkRunner = (dir: string, claudeBin: string, over: Partial<RoleRunnerDeps> 
     claudeBin,
     heartbeatMs: 50,
     guardHookPath: mkHook(dir),
+    // #236: most tests here never create a worktree at all (their stub `claude` binary just
+    // echoes stream-json lines) — a short bounded wait keeps the suite fast while still
+    // exercising the real pre-spawn-capture code path. Tests that DO create a worktree do so via
+    // `mkdir -p` in bash, which resolves on the first poll well inside this window.
+    preSpawnCaptureTimeoutMs: 150,
+    preSpawnCapturePollMs: 10,
     ...over,
   });
 
@@ -132,7 +138,7 @@ exit 0
 
 // ── #236: ambient-context manifest assembly, wired through the REAL RoleRunner.run() path ────
 
-test("run: assembles a context manifest from the real environment — repo CLAUDE.md + auto-memory MEMORY.md snapshotted, model/CLI version/tools/mcp from the session's own init report", async () => {
+test("run: assembles a context manifest from the real environment — repo CLAUDE.md + rules/*.md + auto-memory MEMORY.md snapshotted, model/CLI version/tools/mcp from the session's own init report", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   const worktreeRoot = join(dir, "worktrees");
   const memDir = join(dir, "memory");
@@ -146,8 +152,9 @@ for arg in "$@"; do
   if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
   prev="$arg"
 done
-mkdir -p "${worktreeRoot}/$wt"
+mkdir -p "${worktreeRoot}/$wt/.claude/rules"
 printf '# fixture repo conventions\\n' > "${worktreeRoot}/$wt/CLAUDE.md"
+printf -- '- rule one\\n' > "${worktreeRoot}/$wt/.claude/rules/one.md"
 mkdir -p "${memDir}"
 printf -- '- fixture memory entry\\n' > "${memDir}/MEMORY.md"
 echo '{"type":"system","subtype":"init","model":"claude-stub-model","claude_code_version":"9.9.9","tools":["Read","Write"],"mcp_servers":[{"name":"codegraph","status":"pending"}],"memory_paths":{"auto":"${memDir}/"}}'
@@ -155,7 +162,11 @@ echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"clau
 exit 0
 `,
     );
-    const runner = mkRunner(dir, bin);
+    // A generous pre-spawn-capture window (unlike mkRunner's fast default): this test's stub
+    // genuinely creates the worktree, and a cold subprocess spawn (first `claude` launch in a
+    // fresh process, disk I/O for the tmpdir, ...) can exceed the suite-wide fast-fail default
+    // on a loaded machine — this test cares about correctness of the capture, not raced timing.
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
     const prompt = "assemble manifest test";
     const result = await runner.run({ roleId: "test-role", prompt, model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
@@ -163,20 +174,27 @@ exit 0
     assert.ok(manifest, "a REAL RoleRunner.run() result always carries a context manifest");
 
     assert.equal(manifest!.model, "claude-stub-model", "prefers the session's OWN reported model over the requested one");
+    assert.equal(manifest!.modelSource, "session-init", "the model came from the session's own init report");
     assert.equal(manifest!.cliVersion, "9.9.9");
-    assert.ok(manifest!.toolSchemaVersion && manifest!.toolSchemaVersion.length === 64);
+    assert.ok(manifest!.toolInventoryHash && manifest!.toolInventoryHash.length === 64);
     assert.equal(manifest!.promptTemplateVersion, createHash("sha256").update(prompt, "utf8").digest("hex"));
     assert.deepEqual(manifest!.mcpTools, ["codegraph:pending"]);
     assert.ok(manifest!.settingsHash.length === 64);
     assert.ok(manifest!.hookHash && manifest!.hookHash.length === 64, "the guard hook file's content is hashed");
 
     const repoClaudeMd = manifest!.sources.find((s) => s.label === "repo CLAUDE.md");
-    assert.equal(
-      repoClaudeMd?.kind,
-      "snapshot",
-      "no real .git in this stub worktree -> unresolvable HEAD -> classified as a mutable snapshot",
-    );
+    assert.equal(repoClaudeMd?.kind, "snapshot");
     assert.equal((repoClaudeMd as { content: string }).content, "# fixture repo conventions\n");
+    assert.equal((repoClaudeMd as { gitCommit?: string }).gitCommit, undefined, "no real .git in this stub worktree -> unresolvable HEAD");
+
+    // Codex F2a: CLAUDE.local.md is probed (absent here) and .claude/rules/*.md is enumerated.
+    assert.deepEqual(
+      manifest!.sources.find((s) => s.label === "repo CLAUDE.local.md"),
+      { kind: "absent", label: "repo CLAUDE.local.md", path: join(worktreeRoot, result.name, "CLAUDE.local.md"), reason: "absent" },
+    );
+    const rule = manifest!.sources.find((s) => s.label === "repo .claude/rules/one.md");
+    assert.equal(rule?.kind, "snapshot");
+    assert.equal((rule as { content: string }).content, "- rule one\n");
 
     const memoryMd = manifest!.sources.find((s) => s.label === "auto-memory MEMORY.md");
     assert.equal(memoryMd?.kind, "snapshot");
@@ -185,6 +203,17 @@ exit 0
     // The user-global CLAUDE.md's presence/content depends on the machine running the test, so
     // only its PRESENCE in the source list (not its content) is asserted — kept hermetic.
     assert.ok(manifest!.sources.some((s) => s.label === "user-global CLAUDE.md"));
+
+    // Codex F2b: probedPaths/knownUnprobed make the manifest's own coverage claim explicit.
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, "CLAUDE.md")));
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, "CLAUDE.local.md")));
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, ".claude", "rules", "*.md")));
+    assert.ok(manifest!.probedPaths.includes(join(worktreeRoot, result.name, ".claude", "rules", "one.md")));
+    assert.ok(manifest!.knownUnprobed.length > 0);
+
+    // Codex F1: the manifest states its own two-phase capture timing.
+    assert.ok(manifest!.capturedPreSpawn.length > 0 && manifest!.capturedPostExit.length > 0);
+    assert.ok(manifest!.capturedPreSpawn <= manifest!.capturedPostExit, "filesystem data is captured before the session's self-report");
 
     assert.deepEqual(manifest!.worktree, {
       path: join(worktreeRoot, result.name),
@@ -198,7 +227,7 @@ exit 0
   }
 });
 
-test("run: a stub that emits no init line still assembles a manifest (honest nulls/empties, never a throw)", async () => {
+test("run: a stub that emits no init line and never creates a worktree still assembles a manifest (honest nulls/empties/'worktree-missing', never a throw)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(dir, FAST_STUB); // no init line, no worktree ever created
@@ -207,13 +236,18 @@ test("run: a stub that emits no init line still assembles a manifest (honest nul
     const manifest = result.contextManifest;
     assert.ok(manifest);
     assert.equal(manifest!.model, "sonnet", "falls back to the requested model when the session reports none");
+    assert.equal(manifest!.modelSource, "requested-fallback");
     assert.equal(manifest!.cliVersion, null);
-    assert.equal(manifest!.toolSchemaVersion, null);
+    assert.equal(manifest!.toolInventoryHash, null);
     assert.deepEqual(manifest!.mcpTools, []);
     assert.equal(manifest!.worktree.head, null);
+    // Codex F5d: a worktree that never appeared at all gets its OWN distinct basis, never a
+    // plain "clean" or "dirty-because-write-capable" guess.
+    assert.equal(manifest!.worktree.dirty, true);
+    assert.equal(manifest!.worktree.dirtyBasis, "worktree-missing");
     assert.deepEqual(
       manifest!.sources.find((s) => s.label === "repo CLAUDE.md"),
-      { kind: "absent", label: "repo CLAUDE.md", path: join(dir, "worktrees", result.name, "CLAUDE.md") },
+      { kind: "absent", label: "repo CLAUDE.md", path: join(dir, "worktrees", result.name, "CLAUDE.md"), reason: "absent" },
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -222,9 +256,28 @@ test("run: a stub that emits no init line still assembles a manifest (honest nul
 
 test("run: a session with a NON-EMPTY allowedTools grant (e.g. retro) records worktree.dirty conservatively — never a false 'definitely clean'", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
   try {
-    const bin = mkStub(dir, FAST_STUB);
-    const runner = mkRunner(dir, bin);
+    // This stub DOES create its worktree (unlike FAST_STUB) so the "worktree-missing" basis
+    // from the test above doesn't mask the write-capable-tools basis this test is about.
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+wt=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
+  prev="$arg"
+done
+mkdir -p "${worktreeRoot}/$wt"
+echo '{"type":"result","subtype":"success","total_cost_usd":0.0005}'
+exit 0
+`,
+    );
+    // Same generous window as the manifest-assembly test above — this stub genuinely creates
+    // the worktree, and the point of this test is the dirty/dirtyBasis derivation, not racing
+    // a cold spawn against a fast-fail default.
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
     const result = await runner.run({
       roleId: "retro",
       prompt: "p",
@@ -906,16 +959,21 @@ interface RecordedManifest {
  *  so a test can assert two attempts' recorded json payloads actually differ (ambient drift). */
 const mkManifest = (tag: string): ContextManifest => ({
   sources: [],
+  probedPaths: [],
+  knownUnprobed: "imports, ancestor dirs, managed policy",
+  capturedPreSpawn: "2026-07-17T00:00:00Z",
+  capturedPostExit: "2026-07-17T00:00:01Z",
   model: tag,
+  modelSource: "requested-fallback",
   cliBin: "claude",
   cliVersion: null,
-  toolSchemaVersion: null,
+  toolInventoryHash: null,
   promptTemplateVersion: null,
   mcpTools: [],
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsHash: "hash",
   hookHash: null,
-  recordedAt: "2026-07-17T00:00:00Z",
+  recordedAt: "2026-07-17T00:00:01Z",
 });
 
 const mkManifestResult = (manifestTag: string, over: Partial<RoleSessionResult> = {}): RoleSessionResult =>

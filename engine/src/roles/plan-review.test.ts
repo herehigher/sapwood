@@ -199,16 +199,21 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
  *  the persisted json is trivially distinguishable from another fixture's. */
 const mkFakeManifest = (tag: string): ContextManifest => ({
   sources: [],
+  probedPaths: [],
+  knownUnprobed: "imports, ancestor dirs, managed policy",
+  capturedPreSpawn: "2026-07-17T00:00:00Z",
+  capturedPostExit: "2026-07-17T00:00:01Z",
   model: tag,
+  modelSource: "requested-fallback",
   cliBin: "claude",
   cliVersion: null,
-  toolSchemaVersion: null,
+  toolInventoryHash: null,
   promptTemplateVersion: null,
   mcpTools: [],
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsHash: "hash",
   hookHash: null,
-  recordedAt: "2026-07-17T00:00:00Z",
+  recordedAt: "2026-07-17T00:00:01Z",
 });
 
 /** The MOST RECENT comment posted on an issue — a cycle that bounces (posts a brief) before

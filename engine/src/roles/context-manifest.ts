@@ -10,11 +10,14 @@
 // session SHOULD absorb.
 //
 // So the obligation here is HONESTY and DIAGNOSABILITY, not isolation: every session ATTEMPT
-// records exactly what it actually saw, so ambient drift between retries (a CLAUDE.md edited
-// between attempt 1 and attempt 2, a dirty worktree, a config change) never makes two attempts
-// of the same phase look like apples-to-apples when they weren't. Isolation remains correct —
+// records what it actually saw AMONG A DELIBERATELY BOUNDED, ENUMERATED SET OF STANDARD SOURCES
+// (see `probedPaths`/`knownUnprobed` below) — this module does NOT reimplement Claude Code's full
+// CLAUDE.md resolution graph (imports, ancestor-directory files, managed/enterprise policy). The
+// manifest names its own blind spots rather than silently pretending to be exhaustive. Ambient
+// drift between retries (a CLAUDE.md edited between attempt 1 and attempt 2, a dirty worktree, a
+// config change) is what this exists to make visible, never to hide. Isolation remains correct —
 // but only for BENCHMARK runs, documented as a separate recipe in docs/security.md, never wired
-// into production dispatch (it needs `--bare`-style flags that also disable the guard hook).
+// into production dispatch (it needs `--bare`, which also disables the guard hook).
 //
 // This module is PURE (assembleContextManifest touches no filesystem/subprocess — every input
 // is data the caller already gathered) so the "fixture env in, manifest out" shape the #236
@@ -37,43 +40,43 @@ import { isAbsolute, join, resolve } from "node:path";
 
 // ── Manifest shape ─────────────────────────────────────────────────────────────────────────
 
-export type ContextSourceKind = "git" | "snapshot" | "absent";
+export type ContextSourceKind = "snapshot" | "absent";
 
-/** A CLAUDE.md/policy file whose content is recoverable from git history: path + commit is
- *  enough to reproduce it later (`git show <commit>:<path>`, run by a human/tool OUTSIDE this
- *  engine's own no-git-exec boundary), so the content itself is never duplicated into the
- *  manifest — only its hash, to detect drift. */
-export interface GitRecoverableSource {
-  kind: "git";
-  label: string;
-  path: string;
-  commit: string;
-  hash: string;
-}
-
-/** A MUTABLE ambient source (e.g. the user's global `~/.claude/CLAUDE.md` or an auto-memory
- *  file) — edited out-of-band, with no commit to pin content recovery to. Content-addressed: the
- *  ACTUAL content is captured inline, never a bare hash of content that could later change or
- *  disappear (the #236 acceptance criterion: "mutable ambient sources are content-addressed
- *  snapshots, not bare hashes of now-lost content"). */
+/** Codex review round 1 (F3): a source is ALWAYS content-addressed inline, even one that lives
+ *  inside the worktree's own git history — a separate "git-recoverable, hash-only" kind (this
+ *  module's original design) was DELETED because it isn't actually trustworthy for a
+ *  write-capable session (retro): the file could be modified/added/removed before retro's own
+ *  commit, untracked, or symlinked, making `path + commit` NOT reproduce this exact content via
+ *  `git show`. `gitCommit` survives as OPTIONAL, ADVISORY metadata only — "the worktree's
+ *  resolved HEAD at capture time", never a recoverability guarantee. */
 export interface SnapshotSource {
   kind: "snapshot";
   label: string;
   path: string;
   hash: string;
   content: string;
+  /** ADVISORY ONLY (Codex F3): the worktree's resolved HEAD commit at capture time, present only
+   *  for sources living inside a worktree whose HEAD this module could resolve. NOT a claim that
+   *  `git show <gitCommit>:<path>` reproduces `content` — the actual bytes are captured above
+   *  precisely because that claim cannot be trusted for a write-capable session. */
+  gitCommit?: string;
 }
 
-/** A source path that's effective in principle but was absent on disk at manifest time —
- *  recorded rather than silently dropped, so "this session saw fewer CLAUDE.md layers than
- *  usual" is itself a visible, diffable fact. */
+/** A source path that's effective in principle but wasn't captured — recorded rather than
+ *  silently dropped, so "this session saw fewer CLAUDE.md layers than usual" is itself a
+ *  visible, diffable fact. */
 export interface AbsentSource {
   kind: "absent";
   label: string;
   path: string;
+  /** Codex F5b: an ENOENT (confirmed nonexistent) must never be conflated with any OTHER read
+   *  failure (permission denied, path is a directory, a transient I/O error, ...) — the latter
+   *  is a genuine blind spot ("we don't know what's there"), not "this layer legitimately
+   *  doesn't exist". Defaults to `"absent"` only for callers/fixtures that don't distinguish. */
+  reason: "absent" | "unreadable";
 }
 
-export type ContextSource = GitRecoverableSource | SnapshotSource | AbsentSource;
+export type ContextSource = SnapshotSource | AbsentSource;
 
 export interface WorktreeGitState {
   path: string;
@@ -94,25 +97,62 @@ export interface WorktreeGitState {
    *    clean vs. dirty without a live git-status read it structurally never performs, so `dirty`
    *    is recorded conservatively as `true` — an honest "cannot rule out," never a false
    *    "definitely clean" carried over from the empty-allowlist case it doesn't apply to.
+   *  - `"worktree-missing"` (Codex F5d): the worktree path did not exist at capture time at all —
+   *    a distinct, more specific fact than "unknown", so `dirty: true` here reads as "we could
+   *    not even confirm the worktree existed", never conflated with the write-capable-but-present
+   *    case above.
    *  - `"measured"` — reserved for a FUTURE real measurement mechanism; unused today (no call
    *    site sets it) but kept in the union so a later implementation has a value to report
    *    without redefining this field's shape. */
-  dirtyBasis: "structural-no-write-tools" | "unknown-write-capable-session" | "measured";
+  dirtyBasis: "structural-no-write-tools" | "unknown-write-capable-session" | "worktree-missing" | "measured";
 }
 
 export interface ContextManifest {
   sources: ContextSource[];
+  /** Codex F2b: every concrete path (or glob-style pattern, for a directory scan) this manifest
+   *  actually checked for content — present or not. The affirmative complement to
+   *  `knownUnprobed`: together they make this manifest's coverage claim precise instead of
+   *  implicit ("every effective source" would be a lie; "these exact paths" is not). */
+  probedPaths: string[];
+  /** Codex F2b: a short, human-readable note naming the CLAUDE.md-resolution layers this module
+   *  deliberately does NOT enumerate (Claude Code's `@import` directives inside a probed file,
+   *  ancestor-directory CLAUDE.md files above the worktree root, and any managed/enterprise
+   *  policy layer) — never silently omitted, always named. See this module's header doc for why
+   *  chasing the full resolution graph is out of scope. */
+  knownUnprobed: string;
+  /** Codex F1: when the FILESYSTEM-derived half of this manifest (sources, worktree HEAD, hook
+   *  content) was captured — as early as this engine can observe (a bounded wait for the CLI's
+   *  own worktree provisioning right after spawn confirmation), never at session teardown. For a
+   *  write-capable session (retro), teardown-time capture would record "what the session left
+   *  behind" (e.g. its own proposal commit) rather than "what it saw" — this timestamp makes
+   *  that distinction auditable instead of implicit. */
+  capturedPreSpawn: string;
+  /** Codex F1: when the session'S OWN SELF-REPORT half (model/cliVersion/tools/mcpTools, plus
+   *  the auto-memory source — its path is only knowable from this same self-report) was
+   *  captured. Always at/after session exit: these values don't drift with worktree edits (the
+   *  init event fires once, near stream start, before this manifest could possibly read it) and
+   *  reading them at exit costs nothing extra (the same jsonl scan every other post-exit field
+   *  already performs). */
+  capturedPostExit: string;
   /** The model the session actually ran under (may differ from the requested model on a
    *  fallback-model switch) — prefer the session's OWN report over the request when available. */
   model: string;
+  /** Codex F5a: which of the two possible sources `model` came from — never silently
+   *  substituted. `"session-init"`: the session's own stream-json init report named a model.
+   *  `"requested-fallback"`: the init report carried none (e.g. a stub with no init line, or a
+   *  crashed-before-init session), so this falls back to the model the ENGINE requested — which
+   *  may not be what actually ran. */
+  modelSource: "session-init" | "requested-fallback";
   cliBin: string;
   cliVersion: string | null;
-  /** No CLI-exposed schema-version string exists (verified against Claude Code 2.1.212's
-   *  stream-json init event) — this is a content hash of the session's OWN reported tool-name
-   *  inventory (worker.ts's parseSessionInit `tools`), a faithful proxy: identical hash ==
-   *  identical tool schema surface, without fabricating a version string the CLI doesn't emit. */
-  toolSchemaVersion: string | null;
-  /** Same proxy rationale as toolSchemaVersion: sapwood has no separate prompt-template-version
+  /** Codex F5c (renamed from `toolSchemaVersion`): a content hash of the session's OWN reported
+   *  tool-NAME inventory (worker.ts's parseSessionInit `tools`) — it hashes NAMES, never a tool
+   *  schema (no CLI-exposed schema-version string exists; verified against Claude Code 2.1.212's
+   *  stream-json init event). Identical hash == identical tool-name set available to the
+   *  session; it is not evidence the underlying tool SCHEMAS (parameter shapes, descriptions)
+   *  are unchanged. */
+  toolInventoryHash: string | null;
+  /** Same proxy rationale as toolInventoryHash: sapwood has no separate prompt-template-version
    *  registry today, so this is a content hash of the FULLY RENDERED prompt actually sent —
    *  arguably more precise than a template version number (it also captures per-round
    *  substitutions), and honestly documented as such rather than a fabricated version string. */
@@ -140,22 +180,31 @@ export interface ContextManifest {
 export interface RawContextSource {
   label: string;
   path: string;
-  /** Present file content, or null when the path didn't exist at manifest time. */
+  /** Present file content, or null when the path wasn't captured at manifest time (see
+   *  `reason` below for why). */
   content: string | null;
-  /** Set when this source is git-tracked and recoverable at this commit — the caller decides
-   *  recoverability (typically: "lives inside the session's own worktree, at its resolved
-   *  HEAD"); this function only encodes the resulting shape (GitRecoverableSource vs.
-   *  SnapshotSource). Omitted -> always a SnapshotSource (content captured inline), even if the
-   *  path happens to live inside some OTHER git repo the caller didn't pin a commit for. */
+  /** Required in spirit whenever `content` is null (Codex F5b) — defaults to `"absent"` when
+   *  omitted so existing fixtures that don't distinguish keep compiling. `"absent"`: confirmed
+   *  nonexistent (ENOENT). `"unreadable"`: some OTHER read failure (permissions, a directory
+   *  where a file was expected, ...) — a genuine blind spot that must never masquerade as "this
+   *  layer legitimately doesn't exist". */
+  reason?: "absent" | "unreadable";
+  /** ADVISORY ONLY (Codex F3) — see SnapshotSource.gitCommit's doc. Omitted -> the resulting
+   *  SnapshotSource carries no `gitCommit` field at all. */
   gitCommit?: string;
 }
 
 export interface ContextManifestEnv {
   sources: RawContextSource[];
+  probedPaths: string[];
+  knownUnprobed: string;
+  capturedPreSpawn: string;
+  capturedPostExit: string;
   model: string;
+  modelSource: "session-init" | "requested-fallback";
   cliBin: string;
   cliVersion?: string | null;
-  toolSchemaTools?: string[];
+  toolInventoryTools?: string[];
   promptTemplateSource?: string | null;
   /** `"<name>:<status>"` pairs or bare names — assemble() sorts, never re-derives status. */
   mcpTools: string[];
@@ -177,24 +226,28 @@ function hashList(items: readonly string[]): string {
   return sha256(JSON.stringify([...items].sort()));
 }
 
-/** Pure: classify + hash every source, hash settings/hook/tool-schema, sort mcpTools. Zero
+/** Pure: classify + hash every source, hash settings/hook/tool-inventory, sort mcpTools. Zero
  *  filesystem or subprocess access — every input is data the caller already gathered. Never
  *  throws (the manifest is diagnostic; a malformed input degrades to a null/empty field, never
  *  an exception that could abort session teardown). */
 export function assembleContextManifest(env: ContextManifestEnv): ContextManifest {
   const sources: ContextSource[] = env.sources.map((s) => {
-    if (s.content === null) return { kind: "absent", label: s.label, path: s.path };
+    if (s.content === null) return { kind: "absent", label: s.label, path: s.path, reason: s.reason ?? "absent" };
     const hash = sha256(s.content);
-    if (s.gitCommit) return { kind: "git", label: s.label, path: s.path, commit: s.gitCommit, hash };
-    return { kind: "snapshot", label: s.label, path: s.path, hash, content: s.content };
+    return { kind: "snapshot", label: s.label, path: s.path, hash, content: s.content, ...(s.gitCommit ? { gitCommit: s.gitCommit } : {}) };
   });
-  const tools = env.toolSchemaTools ?? [];
+  const tools = env.toolInventoryTools ?? [];
   return {
     sources,
+    probedPaths: [...env.probedPaths],
+    knownUnprobed: env.knownUnprobed,
+    capturedPreSpawn: env.capturedPreSpawn,
+    capturedPostExit: env.capturedPostExit,
     model: env.model,
+    modelSource: env.modelSource,
     cliBin: env.cliBin,
     cliVersion: env.cliVersion ?? null,
-    toolSchemaVersion: tools.length > 0 ? hashList(tools) : null,
+    toolInventoryHash: tools.length > 0 ? hashList(tools) : null,
     promptTemplateVersion: env.promptTemplateSource ? sha256(env.promptTemplateSource) : null,
     mcpTools: [...env.mcpTools].sort(),
     worktree: env.worktree,
@@ -216,15 +269,42 @@ function tryReadTrim(path: string): string | null {
   }
 }
 
-/** #236: read a source file's content for the manifest — tolerant, never throws. Absence (ENOENT
- *  or any other read failure) reads as null, which assembleContextManifest turns into an
- *  AbsentSource rather than dropping the source entirely. */
-export function readAmbientSourceContent(path: string): string | null {
+export interface AmbientReadResult {
+  content: string | null;
+  /** Present (and meaningful) only when `content` is null — see RawContextSource.reason's doc. */
+  reason?: "absent" | "unreadable";
+}
+
+/** #236 (Codex F5b): read a source file's content for the manifest — tolerant, never throws.
+ *  Distinguishes ENOENT ("absent" — confirmed nonexistent) from any OTHER read failure
+ *  ("unreadable" — permissions, a directory, a transient I/O error, ...): the latter is a real
+ *  blind spot and must never be silently reported as "this layer legitimately doesn't exist". */
+export function readAmbientSource(path: string): AmbientReadResult {
   try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return null;
+    return { content: readFileSync(path, "utf8") };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException | undefined)?.code;
+    return { content: null, reason: code === "ENOENT" ? "absent" : "unreadable" };
   }
+}
+
+/** Backward-compatible convenience wrapper over readAmbientSource for callers that only need the
+ *  content (not the absent/unreadable distinction) — content only, tolerant, never throws. */
+export function readAmbientSourceContent(path: string): string | null {
+  return readAmbientSource(path).content;
+}
+
+/** Shared git ref namespaces (Codex F4): branches, tags, and remote-tracking refs live in the
+ *  REPOSITORY-WIDE common store (`commondir`), never per-worktree — `git worktree add` does not
+ *  create worktree-local copies of these, but a STALE worktree-local file under one of these
+ *  prefixes (e.g. left over from an older git version, a manual edit, or a corrupted worktree)
+ *  would silently SHADOW the real ref if looked up worktree-local-first. Per-worktree refs
+ *  (`refs/bisect/*`, `refs/rewritten/*`, ...) are the opposite: genuinely local to one worktree,
+ *  never in the common store. */
+const SHARED_REF_NAMESPACES = ["refs/heads/", "refs/tags/", "refs/remotes/"];
+
+function isSharedNamespaceRef(ref: string): boolean {
+  return SHARED_REF_NAMESPACES.some((ns) => ref.startsWith(ns));
 }
 
 /** Resolve `worktreePath`'s current HEAD commit via PURE FILESYSTEM reads of git's own plumbing
@@ -233,11 +313,16 @@ export function readAmbientSourceContent(path: string): string | null {
  *  worker.test.ts's #69 grep-invariant test). Handles the linked-worktree `.git` FILE form
  *  `git worktree add` always produces (a `gitdir:` pointer) — never a plain `.git` DIRECTORY,
  *  which resolves to null here (this function is only meant to run against an actual linked
- *  worktree). Resolves a detached HEAD directly, or a symbolic ref via a loose ref file
- *  (worktree-local, then the shared common dir) falling back to `packed-refs`. Never throws:
- *  any missing/unexpected git-internals shape (a git version this wasn't tested against, a
- *  ref this doesn't know how to resolve) is an HONEST "couldn't determine" (null), never a
- *  guess and never a crash. */
+ *  worktree). Resolves a detached HEAD directly, or a symbolic ref.
+ *
+ *  NAMESPACE-AWARE lookup (Codex F4, empirically proven wrong before this fix): a ref under a
+ *  SHARED namespace (`refs/heads/*`, `refs/tags/*`, `refs/remotes/*`) is resolved ONLY from the
+ *  shared common dir (loose file, then `packed-refs`) — NEVER from a worktree-local file under
+ *  the same path, which — if present at all — is either stale or belongs to a different concept
+ *  entirely and must not be allowed to shadow the real ref. A ref OUTSIDE those namespaces
+ *  (genuinely per-worktree, e.g. `refs/bisect/*`) is resolved worktree-local only. Never throws:
+ *  any missing/unexpected git-internals shape (a git version this wasn't tested against, a ref
+ *  this doesn't know how to resolve) is an HONEST "couldn't determine" (null), never a guess. */
 export function resolveWorktreeHead(worktreePath: string): string | null {
   try {
     const dotGitContent = tryReadTrim(join(worktreePath, ".git"));
@@ -252,19 +337,23 @@ export function resolveWorktreeHead(worktreePath: string): string | null {
     const ref = refMatch[1]!;
     const commonDirRaw = tryReadTrim(join(gitDir, "commondir"));
     const commonDir = commonDirRaw ? (isAbsolute(commonDirRaw) ? commonDirRaw : resolve(gitDir, commonDirRaw)) : gitDir;
-    for (const candidate of [join(gitDir, ref), join(commonDir, ref)]) {
-      const sha = tryReadTrim(candidate);
-      if (sha && HEX40.test(sha)) return sha.toLowerCase();
-    }
-    const packed = tryReadTrim(join(commonDir, "packed-refs"));
-    if (packed) {
-      for (const line of packed.split("\n")) {
-        const t = line.trim();
-        if (!t || t.startsWith("#") || t.startsWith("^")) continue;
-        const parts = t.split(/\s+/);
-        const sha = parts[0];
-        const packedRef = parts[1];
-        if (packedRef === ref && sha && HEX40.test(sha)) return sha.toLowerCase();
+    const shared = isSharedNamespaceRef(ref);
+    // Shared-namespace refs resolve from the common store ONLY — a worktree-local file under
+    // the same path (stale or otherwise) must never be consulted, let alone win (Codex F4).
+    const looseCandidate = shared ? join(commonDir, ref) : join(gitDir, ref);
+    const sha = tryReadTrim(looseCandidate);
+    if (sha && HEX40.test(sha)) return sha.toLowerCase();
+    if (shared) {
+      const packed = tryReadTrim(join(commonDir, "packed-refs"));
+      if (packed) {
+        for (const line of packed.split("\n")) {
+          const t = line.trim();
+          if (!t || t.startsWith("#") || t.startsWith("^")) continue;
+          const parts = t.split(/\s+/);
+          const packedSha = parts[0];
+          const packedRef = parts[1];
+          if (packedRef === ref && packedSha && HEX40.test(packedSha)) return packedSha.toLowerCase();
+        }
       }
     }
     return null;

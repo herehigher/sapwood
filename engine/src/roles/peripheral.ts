@@ -13,13 +13,20 @@
 // dirty-worktree retention (a role session never writes code — allowedTools scoping AND the
 // unchanged guard hook both block it — so its worktree is always safe to delete afterward).
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
-import { assembleContextManifest, type ContextManifest, readAmbientSourceContent, resolveWorktreeHead } from "./context-manifest.js";
+import {
+  assembleContextManifest,
+  type ContextManifest,
+  type RawContextSource,
+  readAmbientSource,
+  resolveWorktreeHead,
+  type WorktreeGitState,
+} from "./context-manifest.js";
 import {
   claudeArgs,
   discoverClaudeBin,
@@ -167,9 +174,70 @@ export interface RoleRunnerDeps {
   guardHookPath?: string;
   heartbeatMs?: number;
   now?: () => Date;
+  /** #236 (Codex F1): bounded wait for the CLI's own worktree provisioning right after spawn
+   *  confirmation, before capturing the filesystem-derived half of the context manifest — see
+   *  RoleRunner.run()'s doc for why this is the earliest observable point (the CLI creates the
+   *  worktree as part of ITS OWN startup; nothing before spawn confirmation could ever see it).
+   *  Default 3000ms/25ms poll — generous for production (worktree creation is normally
+   *  sub-second), overridden much lower in tests that never create a worktree at all. */
+  preSpawnCaptureTimeoutMs?: number;
+  preSpawnCapturePollMs?: number;
 }
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "jsonl"];
+
+/** #236: the FILESYSTEM-derived half of one session attempt's context manifest, captured by
+ *  RoleRunner.capturePreSpawnManifestData right after spawn confirmation — see that method's
+ *  doc. Combined with the POST-EXIT self-report half in RoleRunner.assembleManifest. */
+interface PreSpawnManifestCapture {
+  sources: RawContextSource[];
+  probedPaths: string[];
+  head: string | null;
+  /** False when the bounded wait in run() never observed the worktree on disk at all — a
+   *  distinct fact from "worktree present but every source happened to be absent" (Codex F5d). */
+  worktreeAppeared: boolean;
+  hookContent: string | null;
+  capturedAt: string;
+}
+
+/** Codex F2b: the fixed, honest note every manifest carries naming what this module deliberately
+ *  does NOT enumerate — see context-manifest.ts's module doc and ContextManifest.knownUnprobed's
+ *  own doc for the full rationale. A single shared constant (not per-call prose) keeps this
+ *  claim consistent across every manifest this engine ever writes. */
+const KNOWN_UNPROBED_NOTE =
+  "Deliberately NOT enumerated: @import directives inside any probed file, ancestor-directory " +
+  "CLAUDE.md files above the worktree root, and any managed/enterprise policy layer — this " +
+  "engine records the standard sources it can cheaply probe (see probedPaths), not Claude " +
+  "Code's full CLAUDE.md resolution graph.";
+
+/** Sorted `*.md` file names directly under `dirPath` — tolerant of a missing/unreadable
+ *  directory (returns `[]`, never throws). Used for the `.claude/rules/` scan (Codex F2a). */
+function listMarkdownFileNames(dirPath: string): string[] {
+  try {
+    return readdirSync(dirPath, { withFileTypes: true })
+      .filter((d) => d.isFile() && d.name.endsWith(".md"))
+      .map((d) => d.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/** Bounded poll for `path` to exist on disk — the synchronization primitive #236's pre-spawn
+ *  manifest capture uses (see RoleRunner.run()'s call site doc for why a poll is necessary at
+ *  all: the CLI provisions the worktree as part of its own startup, with no other observable
+ *  signal available to this engine). Resolves `true` the instant the path appears, or `false`
+ *  once `timeoutMs` elapses without it ever appearing — never throws, never waits longer than
+ *  the bound. */
+async function waitForPath(path: string, timeoutMs: number, pollMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await sleep(Math.min(pollMs, remaining));
+  }
+  return true;
+}
 
 /** Build a peripheral session environment without forge credentials or git credential
  *  injection vectors. This is deliberately a denylist rather than a small allowlist: the
@@ -205,6 +273,8 @@ export class RoleRunner {
   private readonly bin: string;
   private readonly hbMs: number;
   private readonly guardHookPath: string;
+  private readonly preSpawnCaptureTimeoutMs: number;
+  private readonly preSpawnCapturePollMs: number;
 
   constructor(private readonly deps: RoleRunnerDeps) {
     this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "roles");
@@ -212,6 +282,8 @@ export class RoleRunner {
     this.bin = deps.claudeBin ?? discoverClaudeBin(process.env);
     this.hbMs = deps.heartbeatMs ?? 30_000;
     this.guardHookPath = deps.guardHookPath ?? fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url));
+    this.preSpawnCaptureTimeoutMs = deps.preSpawnCaptureTimeoutMs ?? 3000;
+    this.preSpawnCapturePollMs = deps.preSpawnCapturePollMs ?? 25;
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -302,6 +374,23 @@ export class RoleRunner {
       started_at: new Date(startedMs).toISOString(),
     });
 
+    // #236 (Codex F1): capture the FILESYSTEM-derived half of the context manifest (CLAUDE.md-
+    // family sources, worktree HEAD, guard hook content) as early as this engine can possibly
+    // observe it — right after spawn confirmation, BEFORE waiting out the session. There is no
+    // earlier point: `claude --worktree <name>` provisions the worktree as part of ITS OWN
+    // startup, so nothing before spawn confirmation could ever see it. This matters most for a
+    // write-capable session (retro): capturing at TEARDOWN (the pre-fix behavior) would record
+    // "what the session left behind" (its own proposal commit, a possibly-edited CLAUDE.md) —
+    // not "what it saw". Bounded wait for the worktree to appear on disk (worktreeAppeared
+    // below); a KNOWN, DOCUMENTED limitation, not silently pretended away: this still races the
+    // model's very first turn in principle (closing that fully would mean tailing the live
+    // jsonl for the init line, not attempted here) — but for the many role sessions with zero
+    // write-capable tools that race is moot (nothing exists that could mutate the worktree at
+    // any point), and for retro it is far tighter than teardown-time capture ever was.
+    const worktreePath = join(this.worktreeRoot, name);
+    const worktreeAppeared = await waitForPath(worktreePath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
+    const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared);
+
     // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
     // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
     // mid-run): past worker.timeoutSec, kill the tree; the exit handler above still resolves
@@ -373,16 +462,14 @@ export class RoleRunner {
       }
     }
 
-    // #236: gather the ambient-context manifest BEFORE the worktree deletion below — same
-    // "capture before teardown" timing as the scratch-file read above. Role sessions hold no
-    // write-capable tool grant, so the worktree is unchanged from spawn time: capturing here
-    // (once the CLI has definitely created it) is equivalent to capturing "at spawn" for this
-    // session class, without racing the CLI's own worktree-creation step. Never lets manifest
-    // gathering fail the session — every read inside is individually tolerant, and the whole
-    // block is still guarded here as defense-in-depth.
+    // #236: assemble the POST-EXIT half of the manifest (the session's own self-report — model/
+    // cliVersion/tools/mcpTools — plus the auto-memory source, whose path is only knowable from
+    // that same self-report) and combine it with the pre-spawn capture above. Never lets
+    // manifest gathering fail the session — every read inside is individually tolerant, and the
+    // whole block is still guarded here as defense-in-depth.
     let contextManifest: ContextManifest | undefined;
     try {
-      contextManifest = this.gatherContextManifest(name, opts, jsonl, settingsJson);
+      contextManifest = this.assembleManifest(name, opts, jsonl, settingsJson, preSpawn);
     } catch (e) {
       (this.deps.log ?? console.error)(`[sapwood:context-manifest] session ${name}: failed to assemble (non-fatal): ${String(e)}`);
     }
@@ -410,61 +497,116 @@ export class RoleRunner {
     };
   }
 
-  /** #236: assemble one session's ambient-context manifest from real environment data — the
-   *  session's own stream-json init report (worker.ts's parseSessionInit), the worktree's
-   *  CLAUDE.md + resolved git HEAD, the user-global CLAUDE.md, and the auto-memory file the
-   *  session's own init report named. Every read is individually tolerant (absence -> an
-   *  AbsentSource, never a throw); assembleContextManifest itself is pure and never throws. */
-  private gatherContextManifest(name: string, opts: RoleSessionOpts, jsonl: string, settingsJson: string): ContextManifest {
-    const init = parseSessionInit(jsonl);
-    const worktreePath = join(this.worktreeRoot, name);
+  /** #236 (Codex F1/F2/F3): the FILESYSTEM-derived half of the context manifest — read as early
+   *  as feasible (see run()'s call site doc). Probes a deliberately bounded, ENUMERATED set of
+   *  standard CLAUDE.md-family sources (F2 ruling — never the full resolution graph):
+   *  `<worktree>/CLAUDE.md`, `<worktree>/CLAUDE.local.md`, every `*.md` under
+   *  `<worktree>/.claude/rules/` (if that directory exists), and the user-global
+   *  `~/.claude/CLAUDE.md`. Every source is captured INLINE (F3 — content-addressed, never a
+   *  bare git-commit pointer, even for worktree-rooted files: a write-capable session could
+   *  still modify/add/remove/untrack one before its own commit, so `gitCommit` here is ADVISORY
+   *  metadata only, never a recoverability claim). `worktreeAppeared` false means the bounded
+   *  wait in run() never observed the worktree on disk at all — every source therefore reads as
+   *  absent for a real reason (there was nothing to read), which the caller folds into a
+   *  `"worktree-missing"` dirtyBasis rather than a plain "clean" or "dirty" guess. */
+  private capturePreSpawnManifestData(worktreePath: string, worktreeAppeared: boolean): PreSpawnManifestCapture {
+    const capturedAt = this.now().toISOString();
+    const probedPaths: string[] = [];
+    const sources: RawContextSource[] = [];
     const head = resolveWorktreeHead(worktreePath);
-    const repoClaudeMdPath = join(worktreePath, "CLAUDE.md");
-    const userClaudeMdPath = join(homedir(), ".claude", "CLAUDE.md");
-    const sources = [
-      {
-        label: "repo CLAUDE.md",
-        path: repoClaudeMdPath,
-        content: readAmbientSourceContent(repoClaudeMdPath),
-        ...(head ? { gitCommit: head } : {}),
-      },
-      // Mutable — edited out-of-band by the user, no commit to pin recovery to.
-      { label: "user-global CLAUDE.md", path: userClaudeMdPath, content: readAmbientSourceContent(userClaudeMdPath) },
-      ...(init.memoryPathAuto
-        ? [
-            {
-              label: "auto-memory MEMORY.md",
-              path: join(init.memoryPathAuto, "MEMORY.md"),
-              content: readAmbientSourceContent(join(init.memoryPathAuto, "MEMORY.md")),
-            },
-          ]
-        : []),
-    ];
+
+    const addSource = (label: string, path: string): void => {
+      probedPaths.push(path);
+      const r = readAmbientSource(path);
+      sources.push({
+        label,
+        path,
+        content: r.content,
+        ...(r.reason !== undefined ? { reason: r.reason } : {}),
+        ...(r.content !== null && head ? { gitCommit: head } : {}),
+      });
+    };
+
+    addSource("repo CLAUDE.md", join(worktreePath, "CLAUDE.md"));
+    addSource("repo CLAUDE.local.md", join(worktreePath, "CLAUDE.local.md"));
+
+    const rulesDirPath = join(worktreePath, ".claude", "rules");
+    probedPaths.push(join(rulesDirPath, "*.md")); // recorded even if the directory is absent
+    for (const fileName of listMarkdownFileNames(rulesDirPath)) {
+      addSource(`repo .claude/rules/${fileName}`, join(rulesDirPath, fileName));
+    }
+
+    // Mutable, global, path known upfront (no worktree dependency at all) — never git-pinned.
+    addSource("user-global CLAUDE.md", join(homedir(), ".claude", "CLAUDE.md"));
+
+    const hookRead = readAmbientSource(this.guardHookPath);
+
+    return { sources, probedPaths, head, worktreeAppeared, hookContent: hookRead.content, capturedAt };
+  }
+
+  /** #236: the POST-EXIT half — the session's own stream-json self-report (worker.ts's
+   *  parseSessionInit) plus the auto-memory source (its path is only knowable from that same
+   *  report) — combined with the pre-spawn capture into the final manifest. */
+  private assembleManifest(
+    name: string,
+    opts: RoleSessionOpts,
+    jsonl: string,
+    settingsJson: string,
+    pre: PreSpawnManifestCapture,
+  ): ContextManifest {
+    const init = parseSessionInit(jsonl);
+    const capturedPostExit = this.now().toISOString();
+
+    const sources = [...pre.sources];
+    const probedPaths = [...pre.probedPaths];
+    if (init.memoryPathAuto) {
+      const memoryPath = join(init.memoryPathAuto, "MEMORY.md");
+      probedPaths.push(memoryPath);
+      const memRead = readAmbientSource(memoryPath);
+      sources.push({
+        label: "auto-memory MEMORY.md",
+        path: memoryPath,
+        content: memRead.content,
+        ...(memRead.reason !== undefined ? { reason: memRead.reason } : {}),
+      });
+    }
+
     // See WorktreeGitState.dirtyBasis's doc: an EMPTY effective tool grant (every issues-only
     // role) is a structural "cannot have been dirtied" guarantee; a NON-EMPTY one (today: only
     // `retro`, which holds Write + local git) means the engine cannot rule out a write without a
     // live `git status` it structurally never performs — record that conservatively as dirty,
-    // never a false "definitely clean" borrowed from the empty-allowlist case.
+    // never a false "definitely clean" borrowed from the empty-allowlist case. A worktree that
+    // never appeared at all (Codex F5d) gets its OWN distinct basis, never folded into either.
+    const worktreePath = join(this.worktreeRoot, name);
     const effectiveAllowedTools = opts.allowedTools ?? ROLE_ALLOWED_TOOLS;
     const hasWriteCapableTools = effectiveAllowedTools.trim().length > 0;
+    const worktree: WorktreeGitState = !pre.worktreeAppeared
+      ? { path: worktreePath, head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "worktree-missing" }
+      : {
+          path: worktreePath,
+          head: pre.head,
+          headResolution: pre.head ? "resolved" : "unresolved",
+          dirty: hasWriteCapableTools,
+          dirtyBasis: hasWriteCapableTools ? "unknown-write-capable-session" : "structural-no-write-tools",
+        };
+
     return assembleContextManifest({
       sources,
+      probedPaths,
+      knownUnprobed: KNOWN_UNPROBED_NOTE,
+      capturedPreSpawn: pre.capturedAt,
+      capturedPostExit,
       model: init.model ?? opts.model,
+      modelSource: init.model ? "session-init" : "requested-fallback",
       cliBin: this.bin,
       cliVersion: init.cliVersion,
-      toolSchemaTools: init.tools,
+      toolInventoryTools: init.tools,
       promptTemplateSource: opts.prompt,
       mcpTools: init.mcpServers.map((s) => `${s.name}:${s.status}`),
-      worktree: {
-        path: worktreePath,
-        head,
-        headResolution: head ? "resolved" : "unresolved",
-        dirty: hasWriteCapableTools,
-        dirtyBasis: hasWriteCapableTools ? "unknown-write-capable-session" : "structural-no-write-tools",
-      },
+      worktree,
       settingsJson,
-      hookContent: readAmbientSourceContent(this.guardHookPath),
-      recordedAt: this.now().toISOString(),
+      hookContent: pre.hookContent,
+      recordedAt: capturedPostExit,
     });
   }
 

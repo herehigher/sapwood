@@ -11,17 +11,22 @@ import { assembleContextManifest, type ContextManifestEnv, resolveWorktreeHead }
 
 const baseEnv = (over: Partial<ContextManifestEnv> = {}): ContextManifestEnv => ({
   sources: [],
+  probedPaths: [],
+  knownUnprobed: "imports, ancestor dirs, managed policy",
+  capturedPreSpawn: "2026-07-17T00:00:00Z",
+  capturedPostExit: "2026-07-17T00:00:01Z",
   model: "sonnet",
+  modelSource: "requested-fallback",
   cliBin: "claude",
   mcpTools: [],
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsJson: "{}",
   hookContent: null,
-  recordedAt: "2026-07-17T00:00:00Z",
+  recordedAt: "2026-07-17T00:00:01Z",
   ...over,
 });
 
-test("assembleContextManifest: a fixture env with two CLAUDE.md sources (one git-recoverable, one mutable) and a dirty worktree — all fields present, mutable source content-addressed as a snapshot", () => {
+test("assembleContextManifest: a fixture env with two CLAUDE.md sources (one worktree-rooted with an advisory gitCommit, one mutable) and a dirty worktree — all fields present, EVERY present source content-addressed inline (Codex F3)", () => {
   const manifest = assembleContextManifest(
     baseEnv({
       sources: [
@@ -34,11 +39,11 @@ test("assembleContextManifest: a fixture env with two CLAUDE.md sources (one git
   assert.equal(manifest.sources.length, 2);
 
   const repo = manifest.sources[0]!;
-  assert.equal(repo.kind, "git");
+  assert.equal(repo.kind, "snapshot", "Codex F3: even a worktree-rooted, git-pinned source is captured inline, never hash-only");
   assert.equal(repo.label, "repo CLAUDE.md");
-  assert.equal((repo as { commit: string }).commit, "a".repeat(40));
+  assert.equal((repo as { content: string }).content, "# repo conventions");
   assert.ok((repo as { hash: string }).hash.length === 64, "sha256 hex digest");
-  assert.equal((repo as { content?: string }).content, undefined, "git-recoverable sources never duplicate content");
+  assert.equal((repo as { gitCommit?: string }).gitCommit, "a".repeat(40), "gitCommit survives as ADVISORY metadata only");
 
   const user = manifest.sources[1]!;
   assert.equal(user.kind, "snapshot");
@@ -47,6 +52,7 @@ test("assembleContextManifest: a fixture env with two CLAUDE.md sources (one git
     "# user prefs",
     "mutable source content is CAPTURED, not just a hash of now-possibly-lost content",
   );
+  assert.equal((user as { gitCommit?: string }).gitCommit, undefined, "no gitCommit was supplied for this source");
   assert.ok((user as { hash: string }).hash.length === 64);
 
   assert.deepEqual(manifest.worktree, {
@@ -56,26 +62,54 @@ test("assembleContextManifest: a fixture env with two CLAUDE.md sources (one git
     dirty: true,
     dirtyBasis: "measured",
   });
-  assert.equal(manifest.recordedAt, "2026-07-17T00:00:00Z");
+  assert.equal(manifest.recordedAt, "2026-07-17T00:00:01Z");
 });
 
-test("assembleContextManifest: an absent source (path effective but missing on disk) is recorded, not dropped", () => {
+test("assembleContextManifest: an absent source (path effective but missing on disk) is recorded, not dropped — reason defaults to 'absent' when the caller omits it", () => {
   const manifest = assembleContextManifest(
     baseEnv({ sources: [{ label: "auto-memory MEMORY.md", path: "/mem/MEMORY.md", content: null }] }),
   );
-  assert.deepEqual(manifest.sources, [{ kind: "absent", label: "auto-memory MEMORY.md", path: "/mem/MEMORY.md" }]);
+  assert.deepEqual(manifest.sources, [{ kind: "absent", label: "auto-memory MEMORY.md", path: "/mem/MEMORY.md", reason: "absent" }]);
 });
 
-test("assembleContextManifest: toolSchemaVersion/promptTemplateVersion are content hashes — present when input is non-empty, null otherwise, order-independent for tools", () => {
-  const withTools = assembleContextManifest(baseEnv({ toolSchemaTools: ["Read", "Write"], promptTemplateSource: "do the thing" }));
-  assert.ok(withTools.toolSchemaVersion && withTools.toolSchemaVersion.length === 64);
+test("assembleContextManifest (Codex F5b): 'unreadable' is preserved distinctly from 'absent' — a permissions/read failure must never masquerade as 'this layer legitimately doesn't exist'", () => {
+  const manifest = assembleContextManifest(
+    baseEnv({ sources: [{ label: "repo CLAUDE.md", path: "/wt/CLAUDE.md", content: null, reason: "unreadable" }] }),
+  );
+  assert.deepEqual(manifest.sources, [{ kind: "absent", label: "repo CLAUDE.md", path: "/wt/CLAUDE.md", reason: "unreadable" }]);
+});
+
+test("assembleContextManifest (Codex F2b): probedPaths/knownUnprobed pass through verbatim, defensively copied", () => {
+  const paths = ["/wt/CLAUDE.md", "/wt/CLAUDE.local.md"];
+  const manifest = assembleContextManifest(baseEnv({ probedPaths: paths, knownUnprobed: "imports, ancestor dirs, managed policy" }));
+  assert.deepEqual(manifest.probedPaths, paths);
+  assert.notEqual(manifest.probedPaths, paths, "defensive copy, not the same array reference");
+  assert.equal(manifest.knownUnprobed, "imports, ancestor dirs, managed policy");
+});
+
+test("assembleContextManifest (Codex F1): capturedPreSpawn/capturedPostExit pass through independently — the manifest states its own two-phase timing", () => {
+  const manifest = assembleContextManifest(baseEnv({ capturedPreSpawn: "2026-07-17T00:00:00Z", capturedPostExit: "2026-07-17T00:05:00Z" }));
+  assert.equal(manifest.capturedPreSpawn, "2026-07-17T00:00:00Z");
+  assert.equal(manifest.capturedPostExit, "2026-07-17T00:05:00Z");
+});
+
+test("assembleContextManifest (Codex F5a): modelSource is never silently inferred — passes through exactly what the caller supplied", () => {
+  const fromInit = assembleContextManifest(baseEnv({ model: "claude-haiku", modelSource: "session-init" }));
+  assert.equal(fromInit.modelSource, "session-init");
+  const fromFallback = assembleContextManifest(baseEnv({ model: "sonnet", modelSource: "requested-fallback" }));
+  assert.equal(fromFallback.modelSource, "requested-fallback");
+});
+
+test("assembleContextManifest (Codex F5c): toolInventoryHash/promptTemplateVersion are content hashes — present when input is non-empty, null otherwise, order-independent for tools", () => {
+  const withTools = assembleContextManifest(baseEnv({ toolInventoryTools: ["Read", "Write"], promptTemplateSource: "do the thing" }));
+  assert.ok(withTools.toolInventoryHash && withTools.toolInventoryHash.length === 64);
   assert.ok(withTools.promptTemplateVersion && withTools.promptTemplateVersion.length === 64);
 
-  const reordered = assembleContextManifest(baseEnv({ toolSchemaTools: ["Write", "Read"] }));
-  assert.equal(reordered.toolSchemaVersion, withTools.toolSchemaVersion, "tool list hashing is order-independent");
+  const reordered = assembleContextManifest(baseEnv({ toolInventoryTools: ["Write", "Read"] }));
+  assert.equal(reordered.toolInventoryHash, withTools.toolInventoryHash, "tool list hashing is order-independent");
 
   const noTools = assembleContextManifest(baseEnv());
-  assert.equal(noTools.toolSchemaVersion, null);
+  assert.equal(noTools.toolInventoryHash, null);
   assert.equal(noTools.promptTemplateVersion, null);
 });
 
@@ -124,6 +158,54 @@ test("resolveWorktreeHead: a linked worktree with a symbolic-ref HEAD resolves v
     writeFileSync(join(mainGitDir, "refs", "heads", "main"), `${sha}\n`);
     writeFileSync(join(wtGitDir, "HEAD"), "ref: refs/heads/main\n");
     writeFileSync(join(wtGitDir, "commondir"), "../..\n"); // wt1's gitdir -> ../.. -> mainGitDir
+    writeFileSync(join(worktreeDir, ".git"), `gitdir: ${wtGitDir}\n`);
+
+    assert.equal(resolveWorktreeHead(worktreeDir), sha);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorktreeHead (Codex F4 regression — empirically proven wrong before this fix): a STALE worktree-local refs/heads file must NOT shadow the real ref in the shared common store", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-ctxmanifest-"));
+  try {
+    const mainGitDir = join(dir, "main", ".git");
+    const worktreeDir = join(dir, "wt1");
+    const wtGitDir = join(mainGitDir, "worktrees", "wt1");
+    mkdirSync(join(mainGitDir, "refs", "heads"), { recursive: true });
+    // A stale/shadowing per-worktree copy of the SAME ref path — this is the exact shape the
+    // pre-fix implementation's "worktree-local first" lookup order got wrong: `refs/heads/*` is
+    // a SHARED namespace, so this file must never even be consulted, let alone win.
+    mkdirSync(join(wtGitDir, "refs", "heads"), { recursive: true });
+    mkdirSync(worktreeDir, { recursive: true });
+    const realSha = "e".repeat(40);
+    const staleSha = "f".repeat(40);
+    writeFileSync(join(mainGitDir, "refs", "heads", "main"), `${realSha}\n`);
+    writeFileSync(join(wtGitDir, "refs", "heads", "main"), `${staleSha}\n`); // the shadow
+    writeFileSync(join(wtGitDir, "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(wtGitDir, "commondir"), "../..\n");
+    writeFileSync(join(worktreeDir, ".git"), `gitdir: ${wtGitDir}\n`);
+
+    const resolved = resolveWorktreeHead(worktreeDir);
+    assert.equal(resolved, realSha, "the shared common store's ref wins — the worktree-local shadow is never consulted");
+    assert.notEqual(resolved, staleSha);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorktreeHead (Codex F4): a per-worktree ref namespace (refs/bisect/*) resolves worktree-local, never from the common dir", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-ctxmanifest-"));
+  try {
+    const mainGitDir = join(dir, "main", ".git");
+    const worktreeDir = join(dir, "wt1");
+    const wtGitDir = join(mainGitDir, "worktrees", "wt1");
+    mkdirSync(join(wtGitDir, "refs", "bisect"), { recursive: true });
+    mkdirSync(worktreeDir, { recursive: true });
+    const sha = "1".repeat(40);
+    writeFileSync(join(wtGitDir, "refs", "bisect", "bad"), `${sha}\n`);
+    writeFileSync(join(wtGitDir, "HEAD"), "ref: refs/bisect/bad\n");
+    writeFileSync(join(wtGitDir, "commondir"), "../..\n");
     writeFileSync(join(worktreeDir, ".git"), `gitdir: ${wtGitDir}\n`);
 
     assert.equal(resolveWorktreeHead(worktreeDir), sha);

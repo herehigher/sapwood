@@ -424,23 +424,38 @@ inaccurate and is now corrected). Applying the capability/context decision rule
 above: sealing this channel would be a *content*-side intervention, and the trust
 boundary stays action-side — sealing it was considered and rejected (owner ruling,
 Codex concurring after challenge). The obligation is honesty and diagnosability, not
-isolation: every peripheral session attempt now assembles a **context manifest**
-(`roles/context-manifest.ts`, persisted in the state DB's `context_manifests` table)
-recording every effective `CLAUDE.md`/policy source it saw — git-recoverable ones as
-path+commit+hash, MUTABLE ones (the user's global `CLAUDE.md`, auto-memory) as a full
-content-addressed snapshot, never a bare hash of content that could later change — plus
-the model/CLI/tool-schema actually used (read from the session's own stream-json init
-report where possible), MCP server availability, the worktree's resolved HEAD (via a
-pure-filesystem git-plumbing read — this engine structurally never execs `git` outside
-the two pinned subprocess call sites, #69), and settings/guard-hook hashes. Rows are
-keyed by `(round, phase, role, session, attempt)` — the same tuple the separately
-developed input-manifest work (#231) will eventually join on; the two ship
-independently by design. Isolation remains the correct tool, but only for **benchmark**
-runs (a clean throwaway directory with explicit `--system-prompt`/`--add-dir`/
-`--mcp-config` injection, `--bare` as a convenient starting shorthand) — never
-production, since `--bare` also disables hooks and the guard hook is the actual safety
-boundary. See [`security.md`](security.md#ambient-repo-context-record-dont-seal-236)
-for the full model and the isolation recipe.
+isolation: recorded for all **non-align** peripheral phases today — harvest, architect,
+plan-review, retro; `align.ts`'s three sessions wire in via
+[#232](https://github.com/herehigher/sapwood/issues/232) — every such session attempt
+assembles a **context manifest** (`roles/context-manifest.ts`, persisted in the state
+DB's `context_manifests` table) recording every source among a deliberately BOUNDED,
+ENUMERATED set of standard CLAUDE.md-family paths — never Claude Code's full
+resolution graph (`@import` directives, ancestor-directory files, managed policy are
+NAMED in the manifest's own `knownUnprobed`, not chased; `probedPaths` lists exactly
+what WAS checked). Every present source is captured CONTENT-ADDRESSED inline, even a
+worktree-rooted, git-tracked one (a resolved `gitCommit` survives only as ADVISORY
+metadata, never a recoverability guarantee — a write-capable session could have
+modified/untracked it before its own commit; codex review round 1 proved the original
+hash-only "git-recoverable" design untrustworthy for exactly that case). The
+filesystem-derived half (sources, worktree HEAD, hook content) is captured as early as
+the engine can observe it — a bounded wait for the CLI's own worktree provisioning
+right after spawn confirmation, NEVER at session teardown (a write-capable session's
+own edits must never be mistaken for what it started with) — while the model/CLI/
+tool-inventory/MCP half is the session's own stream-json self-report, read post-exit
+(with an explicit `modelSource` discriminator — never a silent substitution). The
+worktree's resolved HEAD uses a pure-filesystem, NAMESPACE-AWARE git-plumbing read
+(shared refs — branches/tags/remotes — resolve from the common store only, never a
+stale worktree-local shadow; this engine structurally never execs `git` outside the
+two pinned subprocess call sites, #69). Rows are keyed by
+`(round, phase, role, session, attempt)` — the same tuple the separately developed
+input-manifest work (#231) will eventually join on; the two ship independently by
+design. Isolation remains the correct tool, but only for **benchmark** runs (a clean
+throwaway directory with explicit `--system-prompt`/`--add-dir`/`--mcp-config`
+injection — `--bare` is MANDATORY in that recipe, not optional, since only it makes
+passed flags the sole inputs) — never production, since `--bare` also disables hooks
+and the guard hook is the actual safety boundary. See
+[`security.md`](security.md#ambient-repo-context-record-dont-seal-236) for the full
+model and the isolation recipe.
 
 The committee's keystone finding remains: 0day's guard was built for a *trusted* model
 on a *private* repo. v1 stays in that deployment context, **but we build the seams so
