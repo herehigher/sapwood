@@ -364,9 +364,13 @@ function triageDegradeReason(result: RoleSessionResult, expectedIssue: number): 
 // removeLabel/addLabel containment invariant holds structurally, the same "engine performs
 // every write itself" stance as align/triage above). Invalid-twice or a failed session degrades
 // OPEN to the full deterministic candidate set — never an empty pool, never a wedged round.
-// Either way (`poolSelection` true or false), the durable `pool-selected` event is written —
-// it records what was actually acted on, not what could be recomputed, and is what makes a
-// crash-rerun of this exact phase replay-safe regardless of which path decided the target.
+// Either way (`poolSelection` true or false), the engine ATTEMPTS to write the durable
+// `pool-selected` event — it records what was actually acted on, not what could be recomputed,
+// which is what makes a crash-rerun of this exact phase replay-safe when the write lands.
+// persistPoolSelection's write is best-effort today, not fail-closed (see its own doc comment):
+// an append failure is logged and reconciliation proceeds regardless, on every path, exactly as
+// before #233. Making the write load-bearing (fail closed, or otherwise guaranteed) is scoped
+// to #232, not this change.
 //
 // #212 gate② r2 (replacing r1's "adopt existing" heuristic, found unsalvageable in review):
 // labels alone cannot tell a SAME-ROUND crash rerun apart from a PRIOR-round residual — a
@@ -700,11 +704,15 @@ export interface PoolSelectionRunDeps extends PoolSelectionDeps {
  *  Once the target is known (replayed OR freshly computed), a fresh computation is persisted
  *  (persistPoolSelection, before any label write) and EVERY path converges through the same
  *  `reconcilePoolLabels` call — add where the target lacks the label, remove it from any other
- *  open issue that has it. Reconcile is what heals residuals; the event is what makes reruns
- *  safe; neither alone would be. The `pool-selected` event is written on EVERY path, including
- *  the deterministic default — it records what was actually acted on, not what could be
- *  recomputed, so a crash-rerun always has something durable to replay regardless of which
- *  path decided the target. */
+ *  open issue that has it. Reconcile is what heals residuals; the event (when it lands) is what
+ *  makes reruns replay instead of recompute; neither alone would be. persistPoolSelection is
+ *  ATTEMPTED on EVERY path, including the deterministic default — it records what was actually
+ *  acted on, not what could be recomputed. That write is best-effort, not fail-closed, today
+ *  (see persistPoolSelection's own doc comment): an append failure is logged and reconcile still
+ *  runs against the freshly-computed target, so a crash immediately after a failed write forfeits
+ *  only the replay optimization on the next rerun (it recomputes, and on the session path pays
+ *  for a fresh session), never correctness. Making this write load-bearing is scoped to #232,
+ *  not this change. */
 export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issue[]> {
   const { forge, cfg } = deps;
   const log = deps.log ?? console.error;

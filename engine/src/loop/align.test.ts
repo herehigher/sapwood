@@ -1596,9 +1596,13 @@ test("runPoolSelection: roles.po.poolSelection=true with zero Ready candidates -
   assert.deepEqual(selected, []);
 });
 
-test("runPoolSelection (gate② r2): replay path — a persisted pool-selected event is replayed verbatim, no session dispatched, no adopt-existing heuristic involved", async () => {
+test("runPoolSelection (gate② r2): replay path — a persisted pool-selected event is replayed verbatim, no session dispatched even though roles.po.poolSelection=true, no adopt-existing heuristic involved", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  // Codex review (P2): with poolSelection left at its #233 default (false), "no session
+  // dispatched" is trivially true regardless of replay — it would pass even if replay were
+  // broken. poolSelection: true here is what makes this test actually PROVE replay suppresses
+  // an OPTED-IN session, not just the deterministic default's own already-no-session behavior.
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
   // Ready still shows fresh candidates as the backlog stands NOW — but a durable pool-selected
   // event from a PRIOR (crashed) attempt this round already recorded a decision. Replay must
   // win over a fresh session: a fresh session's own selection could differ (LLM nondeterminism)
@@ -1615,14 +1619,17 @@ test("runPoolSelection (gate② r2): replay path — a persisted pool-selected e
     [9],
     "the event's target, never a fresh selection over current Ready",
   );
-  assert.equal(runner.calls.length, 0, "no session dispatched — the persisted event was replayed");
+  assert.equal(runner.calls.length, 0, "no session dispatched — the persisted event was replayed, suppressing the opted-in session");
   assert.deepEqual(forge.addLabelCalls, [], "already labelled — reconcile's idempotent add-skip, no redundant write");
   assert.deepEqual(forge.removeLabelCalls, [], "nothing else carries the pool label — nothing to heal here");
 });
 
-test("runPoolSelection (gate② r2): crash window — the event is persisted but ZERO labels landed before the crash (right after the event write); rerun reconciles the FULL target, still no session", async () => {
+test("runPoolSelection (gate② r2): crash window — the event is persisted but ZERO labels landed before the crash (right after the event write); rerun reconciles the FULL target, still no session even though roles.po.poolSelection=true", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 3 }, round: { poolFactor: 1 } });
+  // Same Codex P2 rationale as the replay-path test above: poolSelection: true so "still no
+  // session" actually demonstrates replay winning over an opted-in session, not just the
+  // deterministic default's own vacuous absence of one.
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 3 }, round: { poolFactor: 1 } });
   forge.ready = [];
   forge.backlogIssues = [
     { number: 9, title: "target, not yet labelled", labels: [] },
@@ -1636,7 +1643,11 @@ test("runPoolSelection (gate② r2): crash window — the event is persisted but
     selected.map((i) => i.number).sort((a, b) => a - b),
     [9, 10],
   );
-  assert.equal(runner.calls.length, 0, "no session — the crash-window rerun replays the persisted target");
+  assert.equal(
+    runner.calls.length,
+    0,
+    "no session — the crash-window rerun replays the persisted target, suppressing the opted-in session",
+  );
   assert.deepEqual(
     forge.addLabelCalls.map(([n]) => n).sort((a, b) => a - b),
     [9, 10],
@@ -1733,9 +1744,12 @@ test("runPoolSelection (gate② r3 finding 1): a listOpenIssues read failure dur
   assert.deepEqual(incomplete![1], { round_id: 1, read_failed: true });
 });
 
-test("runPoolSelection (gate② r3 finding 3): two pool-selected events for the same round — the LAST one wins, replayed verbatim, no session", async () => {
+test("runPoolSelection (gate② r3 finding 3): two pool-selected events for the same round — the LAST one wins, replayed verbatim, no session even though roles.po.poolSelection=true", async () => {
   const forge = new FakeForge();
-  const cfg = mkCfg({ lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  // Codex P2: poolSelection: true, same rationale as the replay-path/crash-window tests above —
+  // otherwise "no session" is trivially true under the #233 default and proves nothing about
+  // replay actually suppressing an opted-in session.
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
   forge.ready = [];
   forge.backlogIssues = [
     { number: 1, title: "first event's target (stale)", labels: [] },
@@ -1751,7 +1765,7 @@ test("runPoolSelection (gate② r3 finding 3): two pool-selected events for the 
     [2],
     "the LAST event's target, not the first",
   );
-  assert.equal(runner.calls.length, 0, "no session — replay wins over recompute");
+  assert.equal(runner.calls.length, 0, "no session — replay wins over recompute, suppressing the opted-in session");
 });
 
 test("runPoolSelection (gate② r3 finding 3): the LAST pool-selected event for this round is malformed — treated as absent (fresh compute), never a throw; growth stops at one extra append", async () => {
