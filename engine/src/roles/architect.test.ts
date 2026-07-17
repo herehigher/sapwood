@@ -1292,3 +1292,50 @@ test("createArchitectStub #213: prompt template ships {{round.pool}} and {{label
   assert.ok(template.includes("{{round.pool}}"));
   assert.ok(template.includes("{{labels.needsHuman}}"));
 });
+
+test("createArchitectStub #213 P2 fix: a transient forge failure on ONE verdict's write is CONTAINED — an `architect-verdict-lost` honesty event lands for it, the REMAINING verdict is still applied, and the phase completes (returns its marker, never throws)", async () => {
+  const cfg = mkCfg();
+  class FlakyRemoveLabelForge extends FakeForge {
+    override async removeLabel(n: number, l: string): Promise<void> {
+      if (n === 55) throw new Error("simulated transient forge failure (e.g. a one-off 500)");
+      return super.removeLabel(n, l);
+    }
+  }
+  const forge = new FlakyRemoveLabelForge();
+  // A separate candidate anchor keeps the design-note comment off the pool members under test.
+  forge.planReviewCandidates = [{ number: 1, title: "candidate", labels: [] }];
+  const poolIssues: Issue[] = [
+    { number: 55, title: "drop target (forge write fails)", labels: [cfg.labels.roundPool] },
+    { number: 56, title: "needs-human target (succeeds)", labels: [cfg.labels.roundPool] },
+  ];
+  const text = architectResult(
+    "Design note.",
+    [],
+    [
+      { issue: 55, verdict: "drop", reason: "should be dropped, but its forge write will fail." },
+      { issue: 56, verdict: "needs-human", reason: "needs a human's call." },
+    ],
+  );
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const { marker } = await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  // The phase completed normally — one lost verdict never wedges it or aborts the rest.
+  assert.equal(marker, architectMarker(1));
+  // #55's write failed — no comment landed for it, but the receipt still landed (write-ahead,
+  // unconditionally, BEFORE the attempted write) and a PAIRED honesty event records the loss.
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 0);
+  const applied55 = state.eventsAfterId(0, ["architect-verdict-applied"]).filter((e) => (e.payload as { issue: number }).issue === 55);
+  assert.equal(applied55.length, 1, "the write-ahead receipt still lands even though the write itself failed");
+  const lost = state.eventsAfterId(0, ["architect-verdict-lost"]);
+  assert.equal(lost.length, 1);
+  const lostPayload = lost[0]!.payload as { round_id: number; issue: number; verdict: string; reason: string };
+  assert.equal(lostPayload.round_id, 1);
+  assert.equal(lostPayload.issue, 55);
+  assert.equal(lostPayload.verdict, "drop");
+  assert.ok(/simulated transient forge failure/.test(lostPayload.reason));
+  // #56's verdict — AFTER the failing one in the loop — is still applied in full.
+  assert.deepEqual(forge.labelsAdded, [[56, cfg.labels.needsHuman]]);
+  assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 56 && body.includes("needs a human's call")));
+  state.close();
+});

@@ -419,6 +419,29 @@ precisely so a write-capable session's own edits can never be mistaken for what 
 started with; a `captureBasis` field on the manifest names whether that anchor
 actually fired or the capture fell back to its bound.
 
+**`architect` also batch-reviews the round pool (#213).** Alongside its original,
+unchanged drift-review mission (cross-issue consistency + contradiction flags over the
+candidate issues still awaiting gate⓪ — see `architect.lastMergedMaxChars` below), the
+SAME single session is additionally shown this round's actual **pool** (#212's
+`labels.roundPool` members — issues already gate⓪-approved and queued for this round's
+dispatch, a set disjoint from the drift-review candidates in normal operation) and
+returns a per-issue **verdict** for each one: `pass` (the default — say nothing), `drop`
+(the engine removes `labels.roundPool` via the one sanctioned label-removal path and
+posts the session's reasoned comment — the issue returns to plain Ready, re-selectable
+in a later round), or `needs-human` (the engine applies `labels.needsHuman` + the
+reasoned comment — only a human ever clears it, #147). As with every other structured
+verdict in this loop, the mapping from verdict kind to label is fixed, engine-side
+logic — the session's output schema carries no label field at all. Same **degrade-open**
+stance as the rest of this role: an invalid/failed session (after one retry) never gates
+dispatch — the pool simply proceeds **unfiltered** (no verdict applied to anything), and
+the skip is recorded as a DISTINCT, dedicated honesty event (`architect-review-degraded`,
+carrying the round id + a reason), separate from the pre-existing `architect-degraded`
+(which still covers the underlying session-level retry exhaustion, drift-review note
+included). A per-issue write-ahead receipt guards against a crash-rerun re-posting the
+same reason comment twice; a transient forge failure on one verdict's write is
+contained per-issue (an `architect-verdict-lost` honesty event, the remaining verdicts
+still applied) rather than aborting the whole pass.
+
 **`retro` holds no `gh` grant at all (#111).** Reads: its prompt is seeded with an
 engine-built round-scoped digest — PR descriptions + diffs + review signals for every
 PR the round touched, comments/labels for every escalated issue, and the round's
@@ -437,6 +460,7 @@ local git (branch/checkout/add/commit/push/diff/status/log, for its own worktree
 | `planReviewer.maxDraftCycles` | `2` | gate⓪ self-heal bound (#77 Amendment 2): max draft→re-review cycles per issue when the reviewer requests a plan draft (a scoped, issues-only drafting session — never a worker lane, never an implementation). Exhausted → the loop applies `needs-human` with the attempt trail. Positive integer only — `0` would turn every draft request into an instant `needs-human`. |
 | `harvest.artifactMaxChars` | `20000` | #123: cap, in characters, on the round-artifact markdown block substituted into harvest's prompt as `{{round.artifact}}` (see [`round-artifact.md`](round-artifact.md)). Deterministic truncation, same contract as `retro.digestMaxChars` below. A safety valve — the artifact is naturally small (bounded by the round's own dispatch cap). |
 | `architect.lastMergedMaxChars` | `10000` | #132: cap, in characters, on the previous round's merged-PR outcomes substituted into the architect's prompt as `{{round.lastMerged}}` — read from the persisted round artifact (`round_artifacts`, see [`round-artifact.md`](round-artifact.md)), never a live forge read. Numbers-only content (issue/PR/worker, no titles or files-touched — not persisted in the ledger), so the default is smaller than either sibling cap above. Same deterministic-truncation, marked-cut contract. |
+| `architect.poolDigestMaxChars` | `20000` | #213: cap, in characters, on this round's pool digest substituted into the architect's prompt as `{{round.pool}}` — number/title/body for every `labels.roundPool` member, engine-assembled at architect-invocation time from a live forge read (never cached across a crash-rerun). Full issue bodies (like `candidates.summary`, not the numbers-only shape of `lastMergedMaxChars` above), so the default matches `po.backlogDigestMaxChars`'s size profile rather than `lastMergedMaxChars`'s smaller one. Same deterministic-truncation, marked-cut contract (`capDigest`). |
 | `retro.promptFile` | unset | Override the retro/self-evolution peripheral's prompt (same `#74` pattern). Unset uses the engine's shipped `prompts/retro.md`. |
 | `retro.everyNRounds` | `1` | Retro cadence (#104): `1` runs every round; `N > 1` skips every round whose id isn't a multiple of `N` (the phase still closes, marker still set — never wedges the round). |
 | `retro.digestMaxChars` | `60000` | Hard cap, in characters, on the engine-built round-scoped read digest (#111 PR-A) substituted into retro's prompt as `{{round.digest}}` — PR diffs + review signals for every PR the round touched, comments/labels for every escalated issue, and the round's commit history. Oversize digests are truncated **deterministically** (same prefix every time for the same content+cap) and the cut is marked in the digest text itself, never silently dropped. |

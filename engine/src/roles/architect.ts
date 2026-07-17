@@ -606,16 +606,40 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         for (const v of validated.verdicts) {
           if (alreadyApplied.has(v.issue)) continue; // already applied this round — crash-rerun replay
           deps.state.appendEvent("architect-verdict-applied", { round_id: roundId, issue: v.issue, verdict: v.verdict });
-          if (v.verdict === "drop") {
-            // #147/#212 containment: the ONLY sanctioned way to remove the pool label — fails
-            // closed for any other label, so a schema/typo mistake can never reach a different
-            // one via this call site.
-            await removeRoundPoolLabel(deps.forge, deps.cfg, v.issue, deps.cfg.labels.roundPool);
-          } else {
-            // needs-human: ADD the label — #147 semantics, only a human ever removes it.
-            await deps.forge.addLabel(v.issue, deps.cfg.labels.needsHuman);
+          // #232-pattern failure containment: the receipt above is write-AHEAD (recorded before
+          // the forge effect, the ONLY ordering that makes the crash-rerun guard above actually
+          // prevent a duplicate comment — see this loop's own doc comment). That means a
+          // TRANSIENT forge failure here (not a crash — a real thrown error, e.g. one flaky
+          // removeLabel call) must never propagate: an uncaught throw would abort every
+          // REMAINING verdict in this loop, throw the whole advisory phase, AND — because the
+          // receipt already landed — a rerun would skip re-attempting this exact issue forever,
+          // losing the verdict with zero durable trace. Contained per-issue, mirroring
+          // align.ts's persistTriageDecision: on failure, record a PAIRED `architect-verdict-lost`
+          // honesty event (round_id, issue, verdict, reason) + a log line, then CONTINUE — one
+          // lost verdict must not wedge the phase or silently drop every verdict after it.
+          try {
+            if (v.verdict === "drop") {
+              // #147/#212 containment: the ONLY sanctioned way to remove the pool label — fails
+              // closed for any other label, so a schema/typo mistake can never reach a different
+              // one via this call site.
+              await removeRoundPoolLabel(deps.forge, deps.cfg, v.issue, deps.cfg.labels.roundPool);
+            } else {
+              // needs-human: ADD the label — #147 semantics, only a human ever removes it.
+              await deps.forge.addLabel(v.issue, deps.cfg.labels.needsHuman);
+            }
+            await deps.forge.addIssueComment(v.issue, v.reason);
+          } catch (e) {
+            const reason = String(e);
+            (deps.log ?? console.error)(
+              `[sapwood:architect] round ${roundId}: verdict application failed for #${v.issue} (${v.verdict}) — ` +
+                `LOST this pass (the receipt already landed, so a rerun will not retry it): ${reason}`,
+            );
+            try {
+              deps.state.appendEvent("architect-verdict-lost", { round_id: roundId, issue: v.issue, verdict: v.verdict, reason });
+            } catch {
+              /* best-effort honesty event — the log line above is the fallback record */
+            }
           }
-          await deps.forge.addIssueComment(v.issue, v.reason);
         }
       } else if (poolIssues.length > 0) {
         // #213 AC4 — degrade OPEN: an invalid/failed session (after runSessionWithRetry's retry)
