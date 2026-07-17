@@ -20,6 +20,7 @@ import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge
 import { extractVerificationPlan } from "../forge/forge.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import type { ContextManifest } from "./context-manifest.js";
 import { PLAN_DRAFTER_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
 import {
   createPlanReviewStub,
@@ -194,6 +195,22 @@ const LEGACY_LABEL_CONFIG = {
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...LEGACY_LABEL_CONFIG, ...over });
 
+/** A structurally-valid ContextManifest for #236 persistence tests — `model` doubles as a tag so
+ *  the persisted json is trivially distinguishable from another fixture's. */
+const mkFakeManifest = (tag: string): ContextManifest => ({
+  sources: [],
+  model: tag,
+  cliBin: "claude",
+  cliVersion: null,
+  toolSchemaVersion: null,
+  promptTemplateVersion: null,
+  mcpTools: [],
+  worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
+  settingsHash: "hash",
+  hookHash: null,
+  recordedAt: "2026-07-17T00:00:00Z",
+});
+
 /** The MOST RECENT comment posted on an issue — a cycle that bounces (posts a brief) before
  *  eventually escalating (posts a SECOND, distinct comment) has more than one, and the
  *  escalation-specific assertions below care about the last one, not whichever happens first. */
@@ -332,6 +349,43 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
   assert.ok(posted.includes("missing acceptance criteria"));
   // ...but never reads comments back — the freshness-snapshot machinery this replaced is gone.
   assert.equal(forge.getIssueCommentsCallCount, 0);
+  state.close();
+});
+
+test("createPlanReviewStub (#236): both the reviewer AND the drafter session's context manifests are persisted, keyed by (round, 'plan_review', role, session, attempt 1)", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 12, title: "t", labels: [] }];
+  forge.issueBodies[12] = NO_PLAN_BODY;
+  const reviewerManifest0 = mkFakeManifest("reviewer-attempt-0");
+  const drafterManifest = mkFakeManifest("drafter-attempt");
+  const reviewerManifest1 = mkFakeManifest("reviewer-attempt-1");
+  const runner = new ScriptedRunner([
+    {
+      result: {
+        ...doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 12 }, "missing acceptance criteria")),
+        contextManifest: reviewerManifest0,
+      },
+    },
+    { result: { ...doneResult("drafter-0", sapwoodResult({ issue: 12 }, PLAN_BODY)), contextManifest: drafterManifest } },
+    { result: { ...doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 12 })), contextManifest: reviewerManifest1 } },
+  ]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg: mkCfg(), runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 7, phase: "plan_review", marker: null });
+  const rows = state.listContextManifestsForRound(7);
+  assert.equal(rows.length, 3, "reviewer-0, drafter-0, and reviewer-1 each record one manifest");
+  assert.deepEqual(
+    rows.map((r) => [r.role, r.session, r.attempt, r.phase]),
+    [
+      ["plan-reviewer", "reviewer-0", 1, "plan_review"],
+      ["plan-drafter", "drafter-0", 1, "plan_review"],
+      ["plan-reviewer", "reviewer-1", 1, "plan_review"],
+    ],
+  );
+  assert.deepEqual(JSON.parse(rows[0]?.json ?? "{}"), reviewerManifest0);
+  assert.deepEqual(JSON.parse(rows[1]?.json ?? "{}"), drafterManifest);
+  assert.deepEqual(JSON.parse(rows[2]?.json ?? "{}"), reviewerManifest1);
   state.close();
 });
 

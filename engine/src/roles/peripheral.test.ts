@@ -220,6 +220,28 @@ test("run: a stub that emits no init line still assembles a manifest (honest nul
   }
 });
 
+test("run: a session with a NON-EMPTY allowedTools grant (e.g. retro) records worktree.dirty conservatively — never a false 'definitely clean'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: "Read,Write,Bash(git *)",
+    });
+    const manifest = result.contextManifest;
+    assert.ok(manifest);
+    assert.equal(manifest!.worktree.dirty, true, "a write-capable session's worktree can never be assumed clean");
+    assert.equal(manifest!.worktree.dirtyBasis, "unknown-write-capable-session");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: non-zero exit -> outcome failed, .failed sentinel", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {

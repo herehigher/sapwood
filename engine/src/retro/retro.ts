@@ -300,6 +300,11 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
         issue: 0, // round-level spend, no single associated issue — same 0 sentinel as harvest.ts
         now: deps.now ?? (() => new Date()),
         ...(deps.log !== undefined ? { log: deps.log } : {}),
+        // #236: record this phase's ambient-context manifest for EVERY attempt. `retro` is the
+        // one role session that holds write-capable tools (Write + local git), so its recorded
+        // worktree.dirty is honestly conservative ("unknown-write-capable-session"), never
+        // assumed clean — see WorktreeGitState.dirtyBasis's doc.
+        contextManifest: { roundId, phase: "retro", record: (key, json, at) => deps.state.recordContextManifest(key, json, at) },
         degradeEvent: "retro-degraded",
         degradePayload: (result) => ({
           round_id: roundId,

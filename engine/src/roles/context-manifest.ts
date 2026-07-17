@@ -83,15 +83,21 @@ export interface WorktreeGitState {
   head: string | null;
   headResolution: "resolved" | "unresolved";
   dirty: boolean;
-  /** How `dirty` was determined. Peripheral role sessions carry no write-capable tool grant at
-   *  all (ROLE_ALLOWED_TOOLS is empty; Write/Edit/MultiEdit are explicitly denied — see
-   *  peripheral.ts) and each gets a FRESH worktree, so "not dirty" is a STRUCTURAL guarantee
-   *  derived from the session's own tool grants — never a measured `git status` call (this
-   *  engine never execs `git` outside worker.ts's claude-launch spawn / gh.ts's `gh` calls; see
-   *  this module's header doc). A future session class that legitimately holds write tools would
-   *  need a different derivation — recorded here explicitly so that assumption is never silently
-   *  carried into a context it no longer holds. */
-  dirtyBasis: "structural-no-write-tools" | "measured";
+  /** How `dirty` was determined — never a measured `git status` call (this engine execs `git`
+   *  nowhere outside worker.ts's claude-launch spawn / gh.ts's `gh` calls; see this module's
+   *  header doc), so every value here is a DERIVATION, not a live read:
+   *  - `"structural-no-write-tools"` — the session's effective tool grant is EMPTY (most
+   *    peripheral roles: ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS carry no Write/Edit/Bash at all)
+   *    and it gets a FRESH worktree, so `dirty: false` is a structural guarantee, not a guess.
+   *  - `"unknown-write-capable-session"` — the session's tool grant is NON-EMPTY (today: only
+   *    `retro`, which holds `Write`/local `git` for its own worktree). The engine cannot prove
+   *    clean vs. dirty without a live git-status read it structurally never performs, so `dirty`
+   *    is recorded conservatively as `true` — an honest "cannot rule out," never a false
+   *    "definitely clean" carried over from the empty-allowlist case it doesn't apply to.
+   *  - `"measured"` — reserved for a FUTURE real measurement mechanism; unused today (no call
+   *    site sets it) but kept in the union so a later implementation has a value to report
+   *    without redefining this field's shape. */
+  dirtyBasis: "structural-no-write-tools" | "unknown-write-capable-session" | "measured";
 }
 
 export interface ContextManifest {

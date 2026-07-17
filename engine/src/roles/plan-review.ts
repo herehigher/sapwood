@@ -331,6 +331,10 @@ async function reviewOneIssue(
       issue: issue.number,
       now,
       ...(deps.log !== undefined ? { log: deps.log } : {}),
+      // #236: record this phase's ambient-context manifest for EVERY attempt. See
+      // peripheral.ts's RetriedSession.contextManifest doc for the (round, phase, role,
+      // session, attempt) key this writes under.
+      contextManifest: { roundId, phase: "plan_review", record: (key, json, at) => deps.state.recordContextManifest(key, json, at) },
       degradeEvent: "plan-review-escalated",
       degradePayload: (result) => ({
         round_id: roundId,
@@ -408,6 +412,8 @@ async function reviewOneIssue(
       issue: issue.number,
       now,
       ...(deps.log !== undefined ? { log: deps.log } : {}),
+      // #236: same record-every-attempt wiring as the reviewer session above.
+      contextManifest: { roundId, phase: "plan_review", record: (key, json, at) => deps.state.recordContextManifest(key, json, at) },
       degradeEvent: "plan-review-escalated",
       degradePayload: (result) => ({
         round_id: roundId,

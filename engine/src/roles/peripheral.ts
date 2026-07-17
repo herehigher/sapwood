@@ -141,11 +141,13 @@ export interface RoleSessionResult {
   scratchText?: string;
   /** #236: this attempt's ambient-context manifest — every effective CLAUDE.md/policy source,
    *  model/CLI/tool-schema/prompt-template info, MCP availability, worktree HEAD, and settings/
-   *  hook hashes, gathered right before the worktree is deleted below (role sessions hold no
-   *  write-capable tool, so the worktree is unchanged from spawn time — see WorktreeGitState's
-   *  `dirtyBasis` doc). Always present on a REAL RoleRunner.run() result; optional here only so
-   *  existing test fakes (which construct a RoleSessionResult literal directly, never through
-   *  RoleRunner.run()) keep compiling without updating every literal — same convention
+   *  hook hashes, gathered right before the worktree is deleted below. Most role sessions hold
+   *  no write-capable tool grant at all, so their worktree is provably unchanged from spawn time
+   *  (capturing here is equivalent to "at spawn"); `retro` is the one exception (Write + local
+   *  git) — see WorktreeGitState's `dirtyBasis` doc for how that case is honestly represented
+   *  rather than assumed clean. Always present on a REAL RoleRunner.run() result; optional here
+   *  only so existing test fakes (which construct a RoleSessionResult literal directly, never
+   *  through RoleRunner.run()) keep compiling without updating every literal — same convention
    *  resultText/scratchText already use. */
   contextManifest?: ContextManifest;
 }
@@ -438,6 +440,13 @@ export class RoleRunner {
           ]
         : []),
     ];
+    // See WorktreeGitState.dirtyBasis's doc: an EMPTY effective tool grant (every issues-only
+    // role) is a structural "cannot have been dirtied" guarantee; a NON-EMPTY one (today: only
+    // `retro`, which holds Write + local git) means the engine cannot rule out a write without a
+    // live `git status` it structurally never performs — record that conservatively as dirty,
+    // never a false "definitely clean" borrowed from the empty-allowlist case.
+    const effectiveAllowedTools = opts.allowedTools ?? ROLE_ALLOWED_TOOLS;
+    const hasWriteCapableTools = effectiveAllowedTools.trim().length > 0;
     return assembleContextManifest({
       sources,
       model: init.model ?? opts.model,
@@ -450,10 +459,8 @@ export class RoleRunner {
         path: worktreePath,
         head,
         headResolution: head ? "resolved" : "unresolved",
-        // See WorktreeGitState.dirtyBasis's doc: role sessions carry no write-capable tool, so
-        // this is a structural guarantee, never a measured `git status` call.
-        dirty: false,
-        dirtyBasis: "structural-no-write-tools",
+        dirty: hasWriteCapableTools,
+        dirtyBasis: hasWriteCapableTools ? "unknown-write-capable-session" : "structural-no-write-tools",
       },
       settingsJson,
       hookContent: readAmbientSourceContent(this.guardHookPath),
