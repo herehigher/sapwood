@@ -123,10 +123,31 @@ test("validateToolArgs: search_issues rejects a query containing an org: or user
   }
 });
 
-test("validateToolArgs: search_issues still ACCEPTS a benign query using in-scope qualifiers (is:/label:/free text)", () => {
+// #234 F1b tightening (PR #252 review round 3): the original `(^|\s)` anchor only caught a
+// qualifier preceded by start-of-string or whitespace — a qualifier preceded by ANY other
+// non-word character (parens, commas, ...) slipped through unrejected. Verified live: all three
+// of these PASSED validation under the old regex. The `\b` word-boundary anchor closes this —
+// regression-pins the previously-passing bypass strings so they can never slip through again.
+test("validateToolArgs: search_issues rejects a repo:/org:/user: qualifier preceded by a non-whitespace, non-word character (parens, commas) — the previously-passing bypass", () => {
+  for (const query of ["(repo:cli/cli OR foo)", "foo,repo:x/y", "bar(org:evil)"]) {
+    const r = validateToolArgs(TOOL_SEARCH_ISSUES, { query }, CAPS);
+    assert.equal(r.ok, false, `expected rejection for query: ${query}`);
+    assert.equal(!r.ok && r.error.code, "invalid_args", `expected invalid_args for query: ${query}`);
+  }
+});
+
+test("validateToolArgs: search_issues does NOT false-reject a word that merely ENDS in repo/org/user (myrepo:, superuser:) — \\b does not match mid-word", () => {
+  for (const query of ["myrepo:foo", "superuser:bar"]) {
+    const r = validateToolArgs(TOOL_SEARCH_ISSUES, { query }, CAPS);
+    assert.equal(r.ok, true, `expected ${query} to pass — no word boundary precedes the repo/user substring`);
+  }
+});
+
+test("validateToolArgs: search_issues still ACCEPTS a benign query using in-scope qualifiers (is:/label:/free text), including free text that legitimately says 'author:' with no boundary issue", () => {
   const r = validateToolArgs(TOOL_SEARCH_ISSUES, { query: "is:open label:bug flaky" }, CAPS);
   assert.equal(r.ok, true);
   assert.equal(r.ok && (r.value as { query: string }).query, "is:open label:bug flaky");
+  assert.equal(validateToolArgs(TOOL_SEARCH_ISSUES, { query: "author:someone flaky" }, CAPS).ok, true);
 });
 
 // ── sanitizeUpstreamError: nothing token-bearing in any error surface ───────────────────────

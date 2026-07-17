@@ -63,22 +63,34 @@ export const IssueDetailsArgs = z.object({ numbers: z.array(z.number().int().pos
 export const IssueCommentsArgs = z.object({ number: z.number().int().positive(), lastN: z.number().int().positive().optional() }).strict();
 export const IssueRelationsArgs = z.object({ number: z.number().int().positive() }).strict();
 
-/** #234 F1b (PR #252 review round 2, P1, defense-in-depth): a `repo:`/`org:`/`user:` qualifier
- *  INSIDE the GitHub search query text is a SECOND scope-redirection surface, entirely separate
- *  from the argv-flag-injection vector the `--` terminator (searchIssues, forge.ts) already
- *  closes — GitHub's search query LANGUAGE has its own scope qualifiers, independent of how the
- *  query string reaches `gh` as an argv token. An embedded `repo:` empirically combines with the
- *  forced `--repo` (GitHub ANDs them, observed to return no/same-repo-only results) rather than
- *  overriding it — but a credential-mediating proxy's scope boundary must never rest on an
- *  implicit, unspecified combination behavior of the far side's query language; it must be
- *  provable at THIS boundary. The repository is already forced server-side, so a session has no
- *  legitimate reason to pass any of these three qualifiers — reject before the query ever reaches
- *  `gh`. Every OTHER qualifier (`is:`, `in:`, `label:`, `state:`, `author:`, date ranges, free
- *  text) filters WITHIN the forced scope and stays allowed. Word-boundary anchored (`(^|\s)`) so
- *  a legitimate mention inside free text (rare, but e.g. "cannot find repo:xyz in error output")
- *  is still caught — false positives here are the safe direction (an over-broad reject, never an
- *  under-broad one), and there is no realistic query that legitimately NEEDS these three tokens. */
-const SCOPE_QUALIFIER_RE = /(^|\s)(repo|org|user):/i;
+/** #234 F1b (PR #252 review round 2, P1, defense-in-depth; tightened round 3 after a live-
+ *  verified bypass): a `repo:`/`org:`/`user:` qualifier INSIDE the GitHub search query text is a
+ *  SECOND scope-redirection surface, entirely separate from the argv-flag-injection vector the
+ *  `--` terminator (searchIssues, forge.ts) already closes — GitHub's search query LANGUAGE has
+ *  its own scope qualifiers, independent of how the query string reaches `gh` as an argv token.
+ *  An embedded `repo:` empirically combines with the forced `--repo` (GitHub ANDs them, observed
+ *  to return no/same-repo-only results) rather than overriding it — but a credential-mediating
+ *  proxy's scope boundary must never rest on an implicit, unspecified combination behavior of the
+ *  far side's query language; it must be provable at THIS boundary. The repository is already
+ *  forced server-side, so a session has no legitimate reason to pass any of these three
+ *  qualifiers — reject before the query ever reaches `gh`, UNCONDITIONALLY, wherever the token
+ *  appears in the string. Every OTHER qualifier (`is:`, `in:`, `label:`, `state:`, `author:`,
+ *  date ranges, free text — including free text that happens to mention "repo" as an ordinary
+ *  word, e.g. "cannot find the repo in error output", which contains no `repo:` token at all)
+ *  filters WITHIN the forced scope and stays allowed.
+ *
+ *  ANCHOR: a plain `\b` word boundary — NOT `(^|\s)` (the original, insufficiently strict form).
+ *  `(^|\s)` only anchored on start-of-string-or-whitespace, so a qualifier preceded by ANY other
+ *  non-word character slipped through unrejected — verified live: `"(repo:cli/cli OR foo)"`,
+ *  `"foo,repo:x/y"`, and `"bar(org:evil)"` all PASSED validation under the old regex (no leak
+ *  resulted, since the forced `--repo` still ANDs, but a provable boundary must not have a
+ *  demonstrable hole regardless). `\b` matches at ANY word/non-word transition — `(`, `,`, space,
+ *  start-of-string — so all three now correctly REJECT. `\b` still will NOT match mid-word: a
+ *  token that merely ENDS in one of these three words (`myrepo:`, `superuser:`) has no
+ *  word-boundary immediately before the `repo`/`user` substring (the preceding character is
+ *  itself a word character), so those legitimately pass — this is a deliberate, verified property
+ *  of `\b`, not a hole. */
+const SCOPE_QUALIFIER_RE = /\b(repo|org|user):/i;
 
 export const SearchIssuesArgs = z
   .object({ query: z.string().min(1) })
