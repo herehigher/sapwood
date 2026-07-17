@@ -212,11 +212,16 @@ const NO_ISSUE: Issue = { number: 0, title: "", labels: [] };
 // attempt-tracked). `attempt` is never tracked in-memory here — see State.
 // nextInputManifestAttempt's own doc comment for why the durable table itself is the counter.
 //
-// Coverage in THIS PR: goal-file + backlog-digest (po-align), issue-body (po-triage),
-// pool-candidates (po-pool) — every input channel align.ts itself reads. Two more channels the
-// issue names (`lastMerged`, architect's "fetched details") belong to OTHER peripherals
-// (round-defaults.ts / harvest.ts / architect.ts) outside this module's own dispatch sites and
-// are deliberately left uninstrumented here — see this PR's description for that scope call.
+// Coverage TODAY (#231, gate② scoping): every channel align.ts itself dispatches a session
+// with — goal-file + backlog-digest (po-align), issue-body + backlog-digest (po-triage, one
+// pair per candidate issue), pool-candidates (po-pool). Architect-side / round-context channels
+// (round-defaults.ts's `lastMerged`, architect.ts's own goal/architecture-chapter read and
+// candidate-issue "fetched details", doctrine, the round directive) are NOT instrumented here —
+// they belong to modules a PARALLEL PR (#236) is actively rewiring, and #232 (the follow-up that
+// makes the manifest load-bearing, not just a record) already owns wiring those in and linking
+// manifest rows to the decisions they informed. Expanding this table's coverage into those files
+// now would conflict with #236's in-flight rewrite for no decision-quality benefit (this PR's
+// manifest is deliberately non-load-bearing — see recordInputManifest's own doc comment).
 const INPUT_MANIFEST_PHASE = "aligning";
 const INPUT_MANIFEST_ROLE = "po";
 
@@ -893,7 +898,10 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
           attempt: deps.state.nextInputManifestAttempt(deps.roundId, INPUT_MANIFEST_PHASE, INPUT_MANIFEST_ROLE, "po-pool"),
           channel: "pool-candidates",
           ok: true,
-          version: contentVersion(candidateNumbers.join(",")),
+          // #231 gate② (Codex sol high F2): hash the RENDERED digest text, not just the
+          // candidate numbers — a title-only edit (candidate set unchanged, wording drifted)
+          // must still show up as a version change, since that's what the session actually saw.
+          version: contentVersion(poolDigest.text),
           total: poolDigest.total,
           rendered: poolDigest.rendered,
           omitted: poolDigest.omitted,
@@ -1060,52 +1068,8 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         // session, and they do not pay for a fresh session whose output would be discarded.
         alignValidated = { ok: true, issues: persistedProposals.map(({ title, body }) => ({ title, body })) };
       } else {
-        // #231: this is the ONE place a fresh po-align session attempt happens this phase call
-        // — the input-manifest attempt number (state-derived, see State.
-        // nextInputManifestAttempt's own doc comment) covers every input channel this session
-        // dispatch actually consumes, and is provably distinguishable from a prior crash-rerun's
-        // attempt at the SAME round/phase/session with zero in-memory bookkeeping.
-        const attempt = deps.state.nextInputManifestAttempt(roundId, INPUT_MANIFEST_PHASE, INPUT_MANIFEST_ROLE, "po-align");
         const goalFilePath = deps.planMdPath ?? deps.cfg.goal.file;
         const planRead = readPlanMd(goalFilePath);
-        recordInputManifest(
-          deps.state,
-          {
-            round_id: roundId,
-            phase: INPUT_MANIFEST_PHASE,
-            role: INPUT_MANIFEST_ROLE,
-            session: "po-align",
-            attempt,
-            channel: "goal-file",
-            ok: planRead.ok,
-            total: 1,
-            rendered: planRead.ok ? 1 : 0,
-            omitted: planRead.ok ? 0 : 1,
-            truncated: false,
-            version: planRead.ok ? contentVersion(planRead.content) : null,
-            detail: planRead.ok ? null : planRead.reason,
-          },
-          deps.log,
-        );
-        recordInputManifest(
-          deps.state,
-          {
-            round_id: roundId,
-            phase: INPUT_MANIFEST_PHASE,
-            role: INPUT_MANIFEST_ROLE,
-            session: "po-align",
-            attempt,
-            channel: "backlog-digest",
-            ok: backlogDigest.ok,
-            total: backlogDigest.total,
-            rendered: backlogDigest.rendered,
-            omitted: backlogDigest.omitted,
-            truncated: backlogDigest.truncated,
-            version: backlogDigest.ok ? contentVersion(backlogDigest.text) : null,
-            detail: backlogDigest.ok ? null : (backlogDigest.reason ?? "unknown"),
-          },
-          deps.log,
-        );
 
         if (!planRead.ok) {
           // #231: an explicit, fail-closed abort of the align-CREATION pass specifically —
@@ -1113,15 +1077,28 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           // session is spawned (no cost paid for a session working from a false "I read the
           // goal" premise), no creations happen this pass; triage (below, unconditional) never
           // reads this file and is unaffected — the round is never wedged, only this one
-          // consuming behavior degrades.
-          deps.state.appendEvent("goal-file-unreadable", { round_id: roundId, path: goalFilePath, reason: planRead.reason });
+          // consuming behavior degrades. The durable goal-file-unreadable event below IS this
+          // failure's honesty record — no input-manifest row is written here (#231 gate② F4:
+          // there is no session attempt to describe; minting one anyway would be a phantom
+          // attempt for a dispatch that never happened).
+          try {
+            deps.state.appendEvent("goal-file-unreadable", { round_id: roundId, path: goalFilePath, reason: planRead.reason });
+          } catch (e) {
+            // #231 gate② (Codex sol high F3): unguarded, this throw would escape stub.run —
+            // runPeripheral has no catch for a peripheral's own run(), so the phase marker
+            // would never persist and the round would wedge, directly contradicting "the round
+            // is never wedged" above. Contained exactly like the tick-error append below.
+            (deps.log ?? console.error)(
+              `[sapwood:po] round ${roundId}: failed to record the goal-file-unreadable honesty event: ${String(e)}`,
+            );
+          }
           try {
             deps.state.appendEvent("tick-error", {
               error: `round ${roundId}: goal file unreadable at ${goalFilePath}: ${planRead.reason}`,
             });
           } catch {
-            /* the durable goal-file-unreadable event above already recorded this — a tick-error
-               write failure here only loses the aggregate count, not the honesty record */
+            /* the goal-file-unreadable append above (or its own log line) already recorded
+               this — a tick-error write failure here only loses the aggregate count */
           }
           (deps.log ?? console.error)(
             `[sapwood:po] round ${roundId}: goal file unreadable at ${goalFilePath} — skipping the align-creation ` +
@@ -1129,6 +1106,55 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           );
           alignValidated = { ok: false, reason: `goal file unreadable: ${planRead.reason}` };
         } else {
+          // #231: this is the ONE place a fresh po-align session attempt happens this phase
+          // call. The attempt number is derived HERE — immediately before the real dispatch,
+          // after the goal-file check has passed (#231 gate② F4) — not earlier: deriving it
+          // before the goal-file check would mint a manifest attempt for a session that never
+          // actually ran whenever that check fails, and a crash between an early derivation and
+          // this point would leave an attempt number no dispatch ever used. Every input channel
+          // THIS session dispatch actually consumes (goal file + backlog digest) shares this
+          // one attempt number, and is provably distinguishable from a prior crash-rerun's
+          // attempt at the SAME round/phase/session with zero in-memory bookkeeping.
+          const attempt = deps.state.nextInputManifestAttempt(roundId, INPUT_MANIFEST_PHASE, INPUT_MANIFEST_ROLE, "po-align");
+          recordInputManifest(
+            deps.state,
+            {
+              round_id: roundId,
+              phase: INPUT_MANIFEST_PHASE,
+              role: INPUT_MANIFEST_ROLE,
+              session: "po-align",
+              attempt,
+              channel: "goal-file",
+              // Only ever written here, on the success path (see above) — a REAL dispatch's
+              // goal-file channel row always records what it actually read.
+              ok: true,
+              total: 1,
+              rendered: 1,
+              omitted: 0,
+              truncated: false,
+              version: contentVersion(planRead.content),
+            },
+            deps.log,
+          );
+          recordInputManifest(
+            deps.state,
+            {
+              round_id: roundId,
+              phase: INPUT_MANIFEST_PHASE,
+              role: INPUT_MANIFEST_ROLE,
+              session: "po-align",
+              attempt,
+              channel: "backlog-digest",
+              ok: backlogDigest.ok,
+              total: backlogDigest.total,
+              rendered: backlogDigest.rendered,
+              omitted: backlogDigest.omitted,
+              truncated: backlogDigest.truncated,
+              version: backlogDigest.ok ? contentVersion(backlogDigest.text) : null,
+              detail: backlogDigest.ok ? null : (backlogDigest.reason ?? "unknown"),
+            },
+            deps.log,
+          );
           const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
             "po.mode": "align",
             "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
@@ -1275,12 +1301,27 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // so no longer matches getIssuesNeedingPlanTriage's candidate query on any later run. ──
       const triageCandidates = await deps.forge.getIssuesNeedingPlanTriage();
       for (const issue of triageCandidates) {
-        // #231: the triage session's own input-manifest row (channel "issue-body") — the ONE
-        // input this mode consumes beyond the fixed template (round.directive/backlog.digest
-        // are shared context, already accounted for under po-align's own manifest rows above).
-        // `session` is scoped to THIS issue so a crash-rerun's re-triage of the same still-
-        // planless issue is its own distinguishable attempt, independent of every other
-        // candidate this loop processes.
+        // #231: this triage session's own input-manifest rows. `session` is scoped to THIS
+        // issue so a crash-rerun's re-triage of the same still-planless issue is its own
+        // distinguishable attempt, independent of every other candidate this loop processes.
+        // ONE attempt number covers BOTH channels this dispatch actually consumes (#231 gate②
+        // F2/F4 — same "derive once per dispatch, share across its channel rows" shape as
+        // po-align above):
+        //  - "issue-body": the po.md triage prompt renders {{issue.number}}/{{issue.title}}/
+        //    {{issue.labels}}/{{issue.body}} (see po.md's triage section) — the version hash
+        //    covers that FULL rendered context, not body alone, so a title/label edit with an
+        //    unchanged body still shows up as a version change (#231 gate② F2).
+        //  - "backlog-digest": the triage prompt ALSO substitutes {{backlog.digest}} (po.md's
+        //    shared template) — recording the SAME backlogDigest object's real ok/counts/
+        //    truncated flags here (not an assumed ok:true) closes the incoherence a failed
+        //    backlog read previously left: a triage session that actually saw the failure
+        //    placeholder must not have its only manifest row claim ok:true (#231 gate② F2).
+        const triageAttempt = deps.state.nextInputManifestAttempt(
+          roundId,
+          INPUT_MANIFEST_PHASE,
+          INPUT_MANIFEST_ROLE,
+          `po-triage:${issue.number}`,
+        );
         recordInputManifest(
           deps.state,
           {
@@ -1288,14 +1329,35 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             phase: INPUT_MANIFEST_PHASE,
             role: INPUT_MANIFEST_ROLE,
             session: `po-triage:${issue.number}`,
-            attempt: deps.state.nextInputManifestAttempt(roundId, INPUT_MANIFEST_PHASE, INPUT_MANIFEST_ROLE, `po-triage:${issue.number}`),
+            attempt: triageAttempt,
             channel: "issue-body",
             ok: true,
-            version: contentVersion(issue.body ?? ""),
+            version: contentVersion(
+              JSON.stringify({ number: issue.number, title: issue.title, labels: issue.labels, body: issue.body ?? "" }),
+            ),
             total: 1,
             rendered: 1,
             omitted: 0,
             truncated: false,
+          },
+          deps.log,
+        );
+        recordInputManifest(
+          deps.state,
+          {
+            round_id: roundId,
+            phase: INPUT_MANIFEST_PHASE,
+            role: INPUT_MANIFEST_ROLE,
+            session: `po-triage:${issue.number}`,
+            attempt: triageAttempt,
+            channel: "backlog-digest",
+            ok: backlogDigest.ok,
+            total: backlogDigest.total,
+            rendered: backlogDigest.rendered,
+            omitted: backlogDigest.omitted,
+            truncated: backlogDigest.truncated,
+            version: backlogDigest.ok ? contentVersion(backlogDigest.text) : null,
+            detail: backlogDigest.ok ? null : (backlogDigest.reason ?? "unknown"),
           },
           deps.log,
         );

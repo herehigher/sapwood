@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { type EngineOverrides, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
@@ -25,6 +25,7 @@ import type { PeripheralPhase } from "./round.js";
 const DEFAULT_TEST_GOAL_DIR = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-goal-"));
 const DEFAULT_TEST_GOAL_FILE = join(DEFAULT_TEST_GOAL_DIR, "PLAN.md");
 writeFileSync(DEFAULT_TEST_GOAL_FILE, "# Test goal\nHarmless default content for tests that don't care about plan.md.\n");
+after(() => rmSync(DEFAULT_TEST_GOAL_DIR, { recursive: true, force: true }));
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({

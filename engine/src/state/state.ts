@@ -351,6 +351,13 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // digest's pack (align.ts's packDigestRecords) — null/0 for a channel with no meaningful count
   // (e.g. a single-file read). `version` is a short content hash (align.ts's contentVersion) so
   // two successful attempts can still be told apart.
+  //
+  // #231 gate② (Codex sol high F5): `CHECK (attempt > 0)` and a UNIQUE index on the full
+  // dimension key make a caller bug (a zero/negative attempt, or two rows for the exact same
+  // (round, phase, role, session, attempt, channel)) surface as a thrown SQLite constraint
+  // violation instead of silently coexisting as duplicate/nonsensical rows — appendInputManifest
+  // is a single-writer-serial write (same assumption the rest of this file already documents for
+  // e.g. `rounds`), so no further concurrency modeling belongs here.
   (db) => {
     db.exec(`
       CREATE TABLE input_manifest (
@@ -359,7 +366,7 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         phase     TEXT NOT NULL,
         role      TEXT NOT NULL,
         session   TEXT NOT NULL,
-        attempt   INTEGER NOT NULL,
+        attempt   INTEGER NOT NULL CHECK (attempt > 0),
         channel   TEXT NOT NULL,
         ok        INTEGER NOT NULL,
         version   TEXT,
@@ -370,6 +377,7 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         detail    TEXT,
         ts        TEXT NOT NULL
       );
+      CREATE UNIQUE INDEX input_manifest_dim ON input_manifest (round_id, phase, role, session, attempt, channel);
     `);
   },
 ];

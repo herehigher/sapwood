@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
@@ -237,13 +237,14 @@ const LEGACY_LABEL_CONFIG = {
 // failure (no session, no creations) rather than the pre-#231 silent "". Every test in this
 // file that doesn't care about goal-file content still needs a REAL, readable default so the
 // dozens of pre-existing align/pool-selection tests below keep exercising a normal session
-// dispatch — a single shared fixture file here (never cleaned up; it's a harmless OS temp file)
-// keeps that a one-line change instead of touching every call site. Tests that specifically
-// exercise the #231 goal-file-missing path override `goal.file` (or `deps.planMdPath`) to a
-// path that does NOT exist.
+// dispatch — a single shared fixture file here keeps that a one-line change instead of touching
+// every call site (cleaned up in `after` below, not left behind on disk). Tests that
+// specifically exercise the #231 goal-file-missing path override `goal.file` (or
+// `deps.planMdPath`) to a path that does NOT exist.
 const DEFAULT_TEST_GOAL_DIR = mkdtempSync(join(tmpdir(), "sapwood-align-goal-"));
 const DEFAULT_TEST_GOAL_FILE = join(DEFAULT_TEST_GOAL_DIR, "PLAN.md");
 writeFileSync(DEFAULT_TEST_GOAL_FILE, "# Test goal\nHarmless default content for tests that don't care about plan.md.\n");
+after(() => rmSync(DEFAULT_TEST_GOAL_DIR, { recursive: true, force: true }));
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({
@@ -391,12 +392,20 @@ test("createAligningStub #231: a missing goal file is an EXPLICIT align-creation
     assert.equal(forge.updateIssueBodyCalls.length, 1);
     assert.equal(forge.updateIssueBodyCalls[0]![0], 9);
 
+    // #231 gate② F4: the goal-file failure's honesty record IS the durable event above — no
+    // po-align input-manifest row is written at all (there is no real session dispatch to
+    // describe; minting one anyway would be a phantom attempt). Triage's OWN manifest rows
+    // (a different session) are unaffected and still land normally.
     const manifest = state.inputManifestRows(7);
-    const goalRow = manifest.find((r) => r.channel === "goal-file");
-    assert.ok(goalRow);
-    assert.equal(goalRow!.ok, false);
-    assert.equal(goalRow!.session, "po-align");
-    assert.equal(goalRow!.attempt, 1);
+    assert.equal(
+      manifest.some((r) => r.session === "po-align"),
+      false,
+      "no po-align manifest rows at all — no session ever dispatched",
+    );
+    const triageIssueBodyRow = manifest.find((r) => r.channel === "issue-body");
+    assert.ok(triageIssueBodyRow && triageIssueBodyRow.session === "po-triage:9" && triageIssueBodyRow.ok);
+    const triageBacklogRow = manifest.find((r) => r.channel === "backlog-digest" && r.session === "po-triage:9");
+    assert.ok(triageBacklogRow?.ok, "the backlog read itself succeeded in this test — only the goal file failed");
     state.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -455,16 +464,67 @@ test("createAligningStub #231: input-manifest rows record what a normal po-align
 
   const manifest = state.inputManifestRows(3);
   const goalRow = manifest.find((r) => r.channel === "goal-file");
-  const backlogRow = manifest.find((r) => r.channel === "backlog-digest");
+  const alignBacklogRow = manifest.find((r) => r.channel === "backlog-digest" && r.session === "po-align");
   const issueBodyRow = manifest.find((r) => r.channel === "issue-body");
+  // #231 gate② F2: the triage session ALSO renders {{backlog.digest}} — it gets its OWN
+  // backlog-digest row (same real ok/counts), distinct from po-align's.
+  const triageBacklogRow = manifest.find((r) => r.channel === "backlog-digest" && r.session === "po-triage:9");
   assert.ok(goalRow?.ok && goalRow.session === "po-align" && goalRow.attempt === 1 && goalRow.phase === "aligning");
-  assert.ok(backlogRow?.ok && backlogRow.session === "po-align" && backlogRow.attempt === 1);
+  assert.ok(alignBacklogRow?.ok && alignBacklogRow.attempt === 1);
   assert.ok(issueBodyRow?.ok && issueBodyRow.session === "po-triage:9" && issueBodyRow.attempt === 1);
+  assert.ok(triageBacklogRow?.ok && triageBacklogRow.attempt === issueBodyRow!.attempt, "shares the triage session's own attempt number");
+  assert.equal(manifest.length, 4, "goal-file + po-align's backlog-digest + issue-body + triage's own backlog-digest");
   assert.equal(
     manifest.every((r) => r.role === "po"),
     true,
   );
   state.close();
+});
+
+test("createAligningStub #231 gate② F2: a backlog read failure is reflected TRUTHFULLY in the triage session's OWN backlog-digest manifest row (ok:false), never inherited as ok:true", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [], body: NO_PLAN_BODY }];
+  forge.listOpenIssues = async () => {
+    throw new Error("simulated backlog outage");
+  };
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
+  ]);
+  const state = new State(":memory:");
+  await createAligningStub({ forge, state, cfg, runner }).run({ roundId: 6, phase: "aligning", marker: null });
+  const manifest = state.inputManifestRows(6);
+  const triageBacklogRow = manifest.find((r) => r.channel === "backlog-digest" && r.session === "po-triage:9");
+  assert.ok(triageBacklogRow);
+  assert.equal(triageBacklogRow!.ok, false);
+  assert.equal(triageBacklogRow!.detail, "Error: simulated backlog outage");
+  state.close();
+});
+
+test("createAligningStub #231 gate② F2: the triage issue-body manifest version hashes the FULL rendered context (number/title/labels/body), not body alone — a title-only edit changes it", async () => {
+  const mkStub = (title: string): AlignDeps => {
+    const forge = new FakeForge();
+    forge.planTriageCandidates = [{ number: 9, title, labels: ["needs-human"], body: NO_PLAN_BODY }];
+    return {
+      forge,
+      state: new State(":memory:"),
+      cfg: mkCfg(),
+      runner: new ScriptedRunner([doneResult("po-triage-1", triageResultText(9, PLAN_BODY))]),
+    };
+  };
+  const depsA = mkStub("Original title");
+  await createAligningStub(depsA).run({ roundId: 1, phase: "aligning", marker: null });
+  const versionA = depsA.state.inputManifestRows(1).find((r) => r.channel === "issue-body")!.version;
+  depsA.state.close();
+
+  const depsB = mkStub("A completely different title"); // SAME body/labels, different title
+  await createAligningStub(depsB).run({ roundId: 1, phase: "aligning", marker: null });
+  const versionB = depsB.state.inputManifestRows(1).find((r) => r.channel === "issue-body")!.version;
+  depsB.state.close();
+
+  assert.ok(versionA && versionB);
+  assert.notEqual(versionA, versionB, "a title-only edit with the SAME body must still change the recorded version");
 });
 
 test("createAligningStub: a declared issue WITHOUT a plan section is escalated needs-human, never left silently planless", async () => {
@@ -1656,6 +1716,39 @@ test("runPoolSelection #231: the session path records an input-manifest row for 
   await runPoolSelection({ forge: forge2, cfg: mkCfg(), state: state2, runner: new ScriptedRunner([]), roundId: 5 });
   assert.equal(state2.inputManifestRows(5).length, 0);
   state2.close();
+});
+
+test("runPoolSelection #231 gate② F2: the pool-candidates manifest version hashes the RENDERED digest text, not just candidate numbers — a title-only edit (same numbers) changes it", async () => {
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } }); // cap = 2
+
+  const forgeA = new FakeForge();
+  forgeA.ready = [{ number: 1, title: "Original title", labels: ["sapwood:prio:3"] }];
+  const stateA = new State(":memory:");
+  await runPoolSelection({
+    forge: forgeA,
+    cfg,
+    state: stateA,
+    runner: new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]),
+    roundId: 1,
+  });
+  const versionA = stateA.inputManifestRows(1).find((r) => r.channel === "pool-candidates")!.version;
+  stateA.close();
+
+  const forgeB = new FakeForge();
+  forgeB.ready = [{ number: 1, title: "A completely different title", labels: ["sapwood:prio:3"] }]; // SAME candidate number, different title
+  const stateB = new State(":memory:");
+  await runPoolSelection({
+    forge: forgeB,
+    cfg,
+    state: stateB,
+    runner: new ScriptedRunner([doneResult("role-po-pool-1", poolResultText([1]))]),
+    roundId: 1,
+  });
+  const versionB = stateB.inputManifestRows(1).find((r) => r.channel === "pool-candidates")!.version;
+  stateB.close();
+
+  assert.ok(versionA && versionB);
+  assert.notEqual(versionA, versionB, "title drift with the SAME candidate number must still change the recorded version");
 });
 
 test("runPoolSelection: roles.po.poolSelection=true — a fake runner's selection is validated and the engine applies labels to EXACTLY that subset, never the full candidate set", async () => {

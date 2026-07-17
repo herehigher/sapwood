@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
@@ -26,6 +26,7 @@ import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMerg
 const DEFAULT_TEST_GOAL_DIR = mkdtempSync(join(tmpdir(), "sapwood-round-defaults-goal-"));
 const DEFAULT_TEST_GOAL_FILE = join(DEFAULT_TEST_GOAL_DIR, "PLAN.md");
 writeFileSync(DEFAULT_TEST_GOAL_FILE, "# Test goal\nHarmless default content for tests that don't care about plan.md.\n");
+after(() => rmSync(DEFAULT_TEST_GOAL_DIR, { recursive: true, force: true }));
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({
