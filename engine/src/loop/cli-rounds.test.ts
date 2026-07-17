@@ -79,6 +79,9 @@ class FakeForge implements IForge {
   async getReadyIssues(): Promise<Issue[]> {
     return [];
   }
+  async getPoolEligibleIssues(): Promise<Issue[]> {
+    return [];
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(issue: number, status: Parameters<IForge["setBoardStatus"]>[1]): Promise<void> {
     this.boardCalls.push(`set-${issue}-${status}`);

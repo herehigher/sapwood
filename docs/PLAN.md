@@ -983,6 +983,36 @@ doc-gate path / human merge). Enforcement is fail-closed in code, never a prompt
 without `needs-human` passes via the doc-gate path; `needs-human`/`blocked` never
 dispatch.
 
+**gate⓪ is scoped to the round pool, with a freshness re-confirm at every pool entry
+(locked 2026-07-17, issue #214) — `plan:approved` semantic shift.** Pre-#214, the
+plan-reviewer swept *every* Ready-lane issue still awaiting gate⓪ each round — with a
+large backlog, one phase could burn dozens of sessions on issues that wouldn't dispatch
+for rounds. Post-#214, the plan-reviewer's candidate set is the round pool itself
+(`labels.roundPool` members, read live at phase start — the phase runs after
+`architecting` in the round sequence, so a `drop` verdict's label removal has already
+landed), split into four classes: an unadjudicated pool member gets the unchanged
+full draft→re-review cycle; a pool member whose `plan:approved` was granted in a
+**prior** round gets a single lightweight **confirm** session ("does this plan still
+hold against current `main`?") — zero forge writes on confirm, or its brief feeds the
+SAME draft→re-review machinery (same cap, same escalation) on invalidate; a pool
+member approved **this round** (detected from the round's own event window, #123 — a
+`plan-approved` event for that issue after the round's `start_event_id`) is skipped
+outright, no session at all; a `verify:n/a` pool member is untouched. A confirm
+session invalid/failed twice is this feature's one fail-closed gate (unlike the
+architect's degrade-open batch review) — `needs-human` with the attempt trail, never a
+silently-trusted stale plan. **The practical effect: `plan:approved` is no longer
+"approved forever" — it means approved when granted, re-endorsed at every round-pool
+entry before dispatch.** Making this possible without deadlocking required widening the
+pool's own *candidate* source (not the review split above): pool candidacy is now Ready
+lane minus `needsHuman`/`blocked` (gate⓪-passed issues *and* issues still awaiting
+their first review) rather than gate⓪-passed issues alone — otherwise an unapproved
+issue could never enter the pool, never get reviewed, and so never dispatch. Dispatch
+itself is unaffected: the executing phase's pool-scoped forge wrapper still requires
+gate⓪-passed (`getReadyIssues`), so a pool member without `plan:approved` still cannot
+be dispatched merely for having entered the pool. Non-pool Ready issues get zero gate⓪
+attention regardless of approval state — their staleness is irrelevant until they
+actually enter a pool.
+
 **Bounce self-heals — an active plan-draft dispatch, never a stall.** A bounced plan
 does not park the issue until the next round (that would stall against the autonomy
 principle below): the reviewer's bounce comment — what's missing or wrong,

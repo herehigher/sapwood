@@ -250,15 +250,22 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         // run would, not a stale snapshot threaded from an earlier phase). By the time architecting
         // runs, the aligning phase has ALREADY run to completion THIS round (round.ts's phase
         // sequence, same single-threaded await chain) and reconciled the pool label to match its
-        // own selection (align.ts's reconcilePoolLabels) — so filtering the live
-        // Ready-and-dispatchable set by the pool label here IS this round's pool, with no second,
-        // separate pool concept needed. A read failure degrades to an EMPTY pool (never a thrown
+        // own selection (align.ts's reconcilePoolLabels) — so filtering the live pool-eligible set
+        // (#214: widened past gate⓪-dispatchable, see below) by the pool label here IS this
+        // round's pool, with no second, separate pool concept needed. A read failure degrades to
+        // an EMPTY pool (never a thrown
         // phase) — the architect's own #213 degrade-open contract then simply has nothing to
         // batch-review this pass, the same shape a legitimately empty pool already has.
+        // #214: reads the WIDENED pool-eligible set (forge.getPoolEligibleIssues), not
+        // getReadyIssues — after gate⓪'s own #214 pool-scoping, an unapproved pool member is a
+        // real, live pool member that must still show up in the architect's batch-review digest;
+        // filtering the narrower gate⓪-passed-only getReadyIssues here would make it invisible to
+        // the architect even though plan-review.ts is about to (or already did) review it this
+        // same round. Same live-read-at-invocation-time contract as before (#213) — unchanged.
         let poolIssues: Issue[] = [];
         try {
-          const ready = await forge.getReadyIssues();
-          poolIssues = ready.filter((i) => labelsInclude(i.labels, deps.cfg.labels.roundPool));
+          const eligible = await forge.getPoolEligibleIssues();
+          poolIssues = eligible.filter((i) => labelsInclude(i.labels, deps.cfg.labels.roundPool));
         } catch (e) {
           const reason = `pool-member read failed: ${String(e)}`;
           (deps.log ?? console.error)(

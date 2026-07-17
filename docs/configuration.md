@@ -359,9 +359,9 @@ both sets of explicit pins—before restart.
 | `blocked` | `sapwood:blocked` | Held out of the main dispatch lane. |
 | `reserve` | `sapwood:reserve` | Not part of the main dispatch lane. |
 | `verifyNa` | `sapwood:verify:n/a` | Marks an issue as inherently unverifiable by tests — skips the verification-plan gate and routes through the doc-gate path instead. |
-| `planApproved` | `sapwood:plan:approved` | gate⓪ (#88): required, together with a genuine verification-plan section, for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. See [`security.md`](security.md#plan-approved). |
+| `planApproved` | `sapwood:plan:approved` | gate⓪ (#88): required, together with a genuine verification-plan section, for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. **#214 semantic shift:** this label is no longer "approved forever" — it means *approved when granted, re-endorsed at every round-pool entry before dispatch*. A pool member carrying it from a PRIOR round gets a lightweight confirm pass (see `planReviewer.confirmPromptFile` below) checking the plan still holds against current `main` before that approval is trusted again; the label itself is never removed by that pass either way. See [`security.md`](security.md#plan-approved). |
 | `originAgent` | `sapwood:origin:agent` | Provenance stamp applied by the PO/align orchestrator to agent-created issues. See [`security.md`](security.md#origin-agent). |
-| `roundPool` | `sapwood:round:pool` | #212: round-pool membership. Applied by the aligning phase's pool-selection pass to up to `ceil(lanes.roundDispatchCap × round.poolFactor)` Ready issues each round; the executing phase dispatches pool members only. Must not equal any other resolved workflow label or `escalation.humanLabels` entry — config load rejects the collision (see the note below). Cleared from **every** open issue that still carries it at round close, with no exemption (engine-only removal, see the note below). |
+| `roundPool` | `sapwood:round:pool` | #212: round-pool membership. Applied by the aligning phase's pool-selection pass to up to `ceil(lanes.roundDispatchCap × round.poolFactor)` **pool-eligible** issues each round — #214 widened that candidate source past `getReadyIssues` (gate⓪-passed only) to Ready-lane-minus-holds (gate⓪-passed *or* still-awaiting-review), so an unapproved issue can still be selected, reviewed, and approved without ever having been gate⓪-passed first. gate⓪ itself is now scoped to this SAME label (#214) — see the plan-reviewer note above. The executing phase still dispatches gate⓪-passed pool members only. Must not equal any other resolved workflow label or `escalation.humanLabels` entry — config load rejects the collision (see the note below). Cleared from **every** open issue that still carries it at round close, with no exemption (engine-only removal, see the note below). |
 
 **`removeLabel` is pinned to `labels.roundPool` only (#212).** This is the first `IForge` write that *removes* a label, and label removal is otherwise reserved for an explicit human act — [#147](https://github.com/herehigher/sapwood/issues/147)'s gated reentry reads a human clearing `needs-human`/`blocked` as the very signal that authorizes reclaiming a lane, and gate⓪ treats `plan:approved`/`verify:n/a` presence as a human-trusted adjudication. The engine routes every `removeLabel` call through one guarded helper (`round.ts`'s `removeRoundPoolLabel`) that throws for any label other than the resolved `labels.roundPool` — no session-reachable output schema can ever drive it. Two callers use it, both engine-only, never session-driven: `align.ts`'s pool-selection reconcile pass (clears a stray pool label from any open issue outside this round's selected target, at selection time) and round close (clears the pool label from every open issue that still carries it, no exemptions). Config load additionally rejects `labels.roundPool` aliasing any other protected label, so this removal path can never be pointed at `needs-human`/`blocked`/`plan:approved`/`verify:n/a` even by misconfiguration.
 
@@ -442,6 +442,40 @@ same reason comment twice; a transient forge failure on one verdict's write is
 contained per-issue (an `architect-verdict-lost` honesty event, the remaining verdicts
 still applied) rather than aborting the whole pass.
 
+**gate⓪ is scoped to the round pool, with a freshness re-confirm at every pool entry
+(#214).** Before #214, the plan-reviewer swept **every** Ready-lane issue still awaiting
+gate⓪ each round — with a large backlog, one phase could burn dozens of sessions on
+issues that wouldn't dispatch for rounds, serially, while workers waited. Now the
+plan-reviewer's candidate set is the round pool itself (`labels.roundPool` members, read
+live by label at phase-start — the phase runs strictly after `architecting` in the round
+sequence, so a `drop` verdict's label removal has already landed), split into four
+classes: **(1)** a pool member with no `plan:approved` yet gets the full,
+unchanged draft→re-review cycle; **(2)** a pool member whose `plan:approved` was granted
+in a **prior** round gets a single, lightweight **confirm** session — "does this plan
+still hold against current `main`?" — that makes **zero forge writes** on confirm, or
+hands its brief straight into the SAME draft→re-review machinery on invalidate (same
+`maxDraftCycles` cap, same escalation); **(3)** a pool member approved **this round**
+(detected from the round's own event window, #123 — a `plan-approved` event for that
+issue with an id after the round's `start_event_id`) is skipped outright, no session at
+all — selection→review→dispatch all happening in one round makes re-reviewing a
+just-granted approval pure waste; **(4)** a `verify:n/a` pool member is untouched, same
+doc-gate path as before. A confirm session that fails or produces invalid output TWICE
+is the one **fail-closed** gate in this whole feature (unlike the architect's
+degrade-open batch review above) — it escalates `needs-human` with the attempt trail,
+never silently lets a possibly-stale plan through. `plan:approved` is never removed by
+the confirm path either way (a crash mid-confirm just means a rerun re-confirms — no
+marker of its own needed). Non-pool Ready issues get zero gate⓪ attention of any kind
+regardless of their approval state — that is the entire point of scoping to the pool.
+Widening the pool's own CANDIDATE source (not the confirm/review split above) is what
+makes this possible without deadlocking: an unapproved issue must still be reachable by
+pool selection (`align.ts`'s `computePoolCandidates`, `round.poolFactor` above) or it
+could never be reviewed, approved, or dispatched at all — so pool candidacy is Ready lane
+minus `needsHuman`/`blocked` (gate⓪-passed issues **and** issues still awaiting their
+first review), one selector reading one project fetch. Dispatch itself is unaffected:
+the executing phase's own `PoolScopedForge` still requires gate⓪-passed
+(`getReadyIssues`), so a pool member without `plan:approved` still cannot be dispatched
+merely for having entered the pool.
+
 **`retro` holds no `gh` grant at all (#111).** Reads: its prompt is seeded with an
 engine-built round-scoped digest — PR descriptions + diffs + review signals for every
 PR the round touched, comments/labels for every escalated issue, and the round's
@@ -456,6 +490,7 @@ local git (branch/checkout/add/commit/push/diff/status/log, for its own worktree
 | Key | Default | Meaning |
 |---|---|---|
 | `planReviewer.promptFile` | unset | Override the gate⓪ plan-reviewer's prompt (same `#74` pattern as `worker.promptFile`: a relative path resolves against the config file's own directory, not the CLI's cwd). Unset uses the engine's shipped `prompts/plan-reviewer.md`. |
+| `planReviewer.confirmPromptFile` | unset | #214: override the gate⓪ **freshness re-confirm** prompt — the lightweight, single-question pass a round-pool member with a PRIOR-round `plan:approved` gets at every pool entry ("does this plan still hold against current `main`?"), distinct from the full plan-reviewer prompt above. Same `#74` pattern: a relative path resolves against the config file's own directory. Unset uses the engine's shipped `prompts/plan-reviewer-confirm.md`. Shares `planReviewer`'s `model`/`effort`/`fallbackModel` — only the prompt differs. |
 | `*.fallbackModel` | `sonnet` | Every role session accepts `fallbackModel`. It supplies Claude's `--fallback-model`; set literal `"none"` to omit it and fail loud instead of silently downgrading quality. See [#168](https://github.com/herehigher/sapwood/issues/168) for the environment-failure path. |
 | `planReviewer.maxDraftCycles` | `2` | gate⓪ self-heal bound (#77 Amendment 2): max draft→re-review cycles per issue when the reviewer requests a plan draft (a scoped, issues-only drafting session — never a worker lane, never an implementation). Exhausted → the loop applies `needs-human` with the attempt trail. Positive integer only — `0` would turn every draft request into an instant `needs-human`. |
 | `harvest.artifactMaxChars` | `20000` | #123: cap, in characters, on the round-artifact markdown block substituted into harvest's prompt as `{{round.artifact}}` (see [`round-artifact.md`](round-artifact.md)). Deterministic truncation, same contract as `retro.digestMaxChars` below. A safety valve — the artifact is naturally small (bounded by the round's own dispatch cap). |

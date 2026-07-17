@@ -271,6 +271,16 @@ const Roles = z
       // `prompts/plan-reviewer.md`; a relative path resolves against the CONFIG FILE's own
       // directory (see loadConfig below), not the CLI's cwd.
       promptFile: z.string().optional(),
+      // #214: the LIGHTWEIGHT freshness re-confirm prompt — a pool member carrying plan:approved
+      // from a PRIOR round gets this one-question pass ("does this plan still hold against
+      // current main?") instead of a full plan-reviewer pass, every time it re-enters the round
+      // pool (gate⓪ scoped to the pool, #214). Same #74 promptFile pattern as promptFile above:
+      // unset -> the engine's shipped `prompts/plan-reviewer-confirm.md`; a relative path
+      // resolves against the CONFIG FILE's directory (see loadConfig below). Deliberately its own
+      // key rather than reusing promptFile — the two prompts ask structurally different
+      // questions (full quality review vs. a single confirm/invalidate judgment) and a deployment
+      // may want to tune them independently.
+      confirmPromptFile: z.string().optional(),
       // #77 Amendment 2 (gate⓪ self-heal): max draft→re-review cycles per issue before the
       // loop gives up and applies needs-human with the attempt trail (Decision #9's
       // degrade-to-human) — the bound that keeps the self-heal path from livelocking.
@@ -1007,6 +1017,10 @@ export function loadConfig(path?: string): SapwoodConfig {
   // #88/#87: same relative-to-config-file resolution for the plan-reviewer prompt.
   if (cfg.roles.planReviewer.promptFile !== undefined && !isAbsolute(cfg.roles.planReviewer.promptFile)) {
     cfg.roles.planReviewer.promptFile = resolve(dirname(file), cfg.roles.planReviewer.promptFile);
+  }
+  // #214: same rule for the plan-reviewer's freshness re-confirm prompt.
+  if (cfg.roles.planReviewer.confirmPromptFile !== undefined && !isAbsolute(cfg.roles.planReviewer.confirmPromptFile)) {
+    cfg.roles.planReviewer.confirmPromptFile = resolve(dirname(file), cfg.roles.planReviewer.confirmPromptFile);
   }
   // #87: same rule for the plan-drafter prompt.
   if (cfg.roles.planDrafter.promptFile !== undefined && !isAbsolute(cfg.roles.planDrafter.promptFile)) {

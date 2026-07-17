@@ -55,6 +55,13 @@ class FakeForge implements IForge {
   async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }
+  // #214: aliases the same `ready` backing array — this file's pool-digest/pool-selection tests
+  // use `ready` (+ cfg.labels.roundPool on the fixture issues) as the widened pool-eligible set
+  // too; none of them are testing gate⓪'s narrower-vs-wider distinction specifically (that's
+  // plan-review.test.ts's job).
+  async getPoolEligibleIssues(): Promise<Issue[]> {
+    return this.ready;
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
   async addLabel(n: number, l: string): Promise<void> {
@@ -418,15 +425,18 @@ test("architecting stub (#167): the architect prompt carries this repo's review-
 test("createDefaultPeripherals (#109 gate② P2): with round.milestone set, the peripherals' forge is milestone-scoped — plan review and PO triage never touch issues outside the round's milestone", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
-  forge.planReviewCandidates = [
-    { number: 5, title: "in-scope review candidate", labels: [], milestone: "M-X" },
-    { number: 6, title: "out-of-scope review candidate", labels: [] },
+  const cfg = mkCfg({ round: { milestone: "M-X" } });
+  // #214: plan_review's candidate set is the round pool (roundPool-labelled, pool-eligible),
+  // not the raw getIssuesNeedingPlanReview sweep — both fixture issues are unadjudicated pool
+  // members, one in-scope and one not, proving the milestone scope still applies post-#214.
+  forge.ready = [
+    { number: 5, title: "in-scope review candidate", labels: [cfg.labels.roundPool], milestone: "M-X" },
+    { number: 6, title: "out-of-scope review candidate", labels: [cfg.labels.roundPool] },
   ];
   forge.planTriageCandidates = [
     { number: 7, title: "in-scope triage candidate", labels: [], milestone: "M-X" },
     { number: 8, title: "out-of-scope triage candidate", labels: [] },
   ];
-  const cfg = mkCfg({ round: { milestone: "M-X" } });
   const runner = new ScriptedRunner(forge, cfg);
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
 
@@ -449,8 +459,12 @@ test("createDefaultPeripherals (#109 gate② P2): with round.milestone set, the 
 test("runRounds integration: wired with createDefaultPeripherals's output, a default round dispatches all five real role sessions — no noop remains in the shipped default map", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 5, title: "candidate", labels: [] }];
   const cfg = mkCfg();
+  // #214: plan_review's candidate set is the round pool now — pre-label the fixture with
+  // cfg.labels.roundPool (this test isn't exercising pool-selection's OWN label-write mechanics,
+  // just proving every phase dispatches a real session) so it's visible to createPlanReviewStub
+  // once aligning's pool selection runs (a no-op add — the label is already there).
+  forge.ready = [{ number: 5, title: "candidate", labels: [cfg.labels.roundPool] }];
   const runner = new ScriptedRunner(forge, cfg);
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
 
@@ -671,8 +685,9 @@ test("createDefaultPeripherals (#127 gate② F1): disabled roles are logged exac
 test("runRounds integration (#127): a disabled role spawns no session for its phase, and the round still closes — the phase no-ops via round.ts's existing noopPeripheralStub default, no round.ts change", async () => {
   const state = new State(":memory:");
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 5, title: "candidate", labels: [] }];
   const cfg = mkCfg({ roles: { retro: { enabled: false } } });
+  // #214: pre-labelled round-pool member, see the other runRounds integration test's own comment.
+  forge.ready = [{ number: 5, title: "candidate", labels: [cfg.labels.roundPool] }];
   const runner = new ScriptedRunner(forge, cfg);
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
 
@@ -824,7 +839,7 @@ test("architecting stub (#213): {{round.pool}} is deterministically capped at cf
 test("architecting stub (#213): a pool-member forge read failure degrades to an EMPTY pool (the explicit placeholder), never a thrown phase", async () => {
   const state = new State(":memory:");
   class FailReadyForge extends FakeForge {
-    override async getReadyIssues(): Promise<Issue[]> {
+    override async getPoolEligibleIssues(): Promise<Issue[]> {
       throw new Error("simulated forge failure");
     }
   }
@@ -846,7 +861,7 @@ test("architecting stub (#213): a pool-member forge read failure degrades to an 
 test("architecting stub (#213 Codex review round 2, finding 3): a pool-member forge read failure ALSO records a durable `architect-review-degraded` honesty event (round_id + reason) — not just an ephemeral log line, so a real non-empty pool sitting unreviewed on GitHub is observable, not silent", async () => {
   const state = new State(":memory:");
   class FailReadyForge extends FakeForge {
-    override async getReadyIssues(): Promise<Issue[]> {
+    override async getPoolEligibleIssues(): Promise<Issue[]> {
       throw new Error("simulated forge failure");
     }
   }

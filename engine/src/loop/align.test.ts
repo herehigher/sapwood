@@ -66,6 +66,14 @@ class FakeForge implements IForge {
   async getReadyIssues(): Promise<Issue[]> {
     return this.ready;
   }
+  // #214: this file's own tests are about POOL SELECTION mechanics (capacity/priority/reconcile/
+  // crash-rerun), never about gate⓪'s narrower-vs-wider distinction — so the pool-eligible read
+  // aliases the SAME `ready` backing array by default. Tests that specifically need the two to
+  // diverge (or to fail independently) override this method directly, same pattern as the
+  // getReadyIssues override below.
+  async getPoolEligibleIssues(): Promise<Issue[]> {
+    return this.ready;
+  }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     this.boardStatusCalls.push([n, s]);
@@ -1931,11 +1939,11 @@ test("selectRoundPool: idempotent — an already-pool-labelled issue is not re-l
   assert.deepEqual(forge.addLabelCalls, [[2, cfg.labels.roundPool]], "issue #1 was already labelled — no redundant write");
 });
 
-test("selectRoundPool: a Ready read failure degrades to an empty pool (logged, never thrown)", async () => {
+test("selectRoundPool: a pool-eligible read failure degrades to an empty pool (logged, never thrown)", async () => {
   const cfg = mkCfg();
   const logged: string[] = [];
   const forge = new (class extends FakeForge {
-    override async getReadyIssues(): Promise<Issue[]> {
+    override async getPoolEligibleIssues(): Promise<Issue[]> {
       throw new Error("simulated forge outage");
     }
   })();
