@@ -120,12 +120,12 @@ export interface ContextManifest {
    *  policy layer) — never silently omitted, always named. See this module's header doc for why
    *  chasing the full resolution graph is out of scope. */
   knownUnprobed: string;
-  /** Codex F1: when the FILESYSTEM-derived half of this manifest (sources, worktree HEAD, hook
-   *  content) was captured — as early as this engine can observe (a bounded wait for the CLI's
-   *  own worktree provisioning right after spawn confirmation), never at session teardown. For a
-   *  write-capable session (retro), teardown-time capture would record "what the session left
-   *  behind" (e.g. its own proposal commit) rather than "what it saw" — this timestamp makes
-   *  that distinction auditable instead of implicit. */
+  /** Codex F1 (anchor corrected in R1): when the FILESYSTEM-derived half of this manifest
+   *  (sources, worktree HEAD, hook content) was captured — as early as this engine can observe
+   *  it (anchored to the session's OWN init line, polled from its jsonl — see `captureBasis`),
+   *  never at session teardown. For a write-capable session (retro), teardown-time capture would
+   *  record "what the session left behind" (e.g. its own proposal commit) rather than "what it
+   *  saw" — this timestamp makes that distinction auditable instead of implicit. */
   capturedPreSpawn: string;
   /** Codex F1: when the session'S OWN SELF-REPORT half (model/cliVersion/tools/mcpTools, plus
    *  the auto-memory source — its path is only knowable from this same self-report) was
@@ -134,6 +134,15 @@ export interface ContextManifest {
    *  reading them at exit costs nothing extra (the same jsonl scan every other post-exit field
    *  already performs). */
   capturedPostExit: string;
+  /** Codex F1 (R1): which anchor produced `capturedPreSpawn` — never silently assumed reliable.
+   *  `"init-observed"`: the session's own `{"type":"system","subtype":"init"}` line was seen in
+   *  its jsonl before the bound expired — the CLI had finished loading context (worktree
+   *  provisioning included) and the model had not yet taken a turn, i.e. exactly "what the
+   *  session saw". `"timeout-fallback"`: the bound expired with no init line ever observed (a
+   *  hung/crashed-before-init session, or a CLI slower than the configured bound) — the
+   *  filesystem-derived half was still captured (best-effort, never blocks the session), but
+   *  its reliability is weaker and this field says so rather than hiding the ambiguity. */
+  captureBasis: "init-observed" | "timeout-fallback";
   /** The model the session actually ran under (may differ from the requested model on a
    *  fallback-model switch) — prefer the session's OWN report over the request when available. */
   model: string;
@@ -200,6 +209,7 @@ export interface ContextManifestEnv {
   knownUnprobed: string;
   capturedPreSpawn: string;
   capturedPostExit: string;
+  captureBasis: "init-observed" | "timeout-fallback";
   model: string;
   modelSource: "session-init" | "requested-fallback";
   cliBin: string;
@@ -243,6 +253,7 @@ export function assembleContextManifest(env: ContextManifestEnv): ContextManifes
     knownUnprobed: env.knownUnprobed,
     capturedPreSpawn: env.capturedPreSpawn,
     capturedPostExit: env.capturedPostExit,
+    captureBasis: env.captureBasis,
     model: env.model,
     modelSource: env.modelSource,
     cliBin: env.cliBin,
@@ -294,17 +305,21 @@ export function readAmbientSourceContent(path: string): string | null {
   return readAmbientSource(path).content;
 }
 
-/** Shared git ref namespaces (Codex F4): branches, tags, and remote-tracking refs live in the
- *  REPOSITORY-WIDE common store (`commondir`), never per-worktree — `git worktree add` does not
- *  create worktree-local copies of these, but a STALE worktree-local file under one of these
- *  prefixes (e.g. left over from an older git version, a manual edit, or a corrupted worktree)
- *  would silently SHADOW the real ref if looked up worktree-local-first. Per-worktree refs
- *  (`refs/bisect/*`, `refs/rewritten/*`, ...) are the opposite: genuinely local to one worktree,
- *  never in the common store. */
-const SHARED_REF_NAMESPACES = ["refs/heads/", "refs/tags/", "refs/remotes/"];
+/** Worktree-LOCAL git ref namespaces (Codex F4 residual, R3 — direction corrected from the
+ *  original fix): per git's own repository-layout docs, once a worktree has a `commondir`,
+ *  EVERY `refs/*` ref is SHARED (lives in the common store) EXCEPT these three prefixes, which
+ *  are genuinely per-worktree and never appear in the common store at all:
+ *  `refs/bisect/*` (an in-progress `git bisect`), `refs/rewritten/*` (`git rebase --update-refs`
+ *  scratch state), and `refs/worktree/*` (explicitly worktree-scoped refs). The ORIGINAL version
+ *  of this fix inverted the model — treating only `refs/heads/tags/remotes` as shared and
+ *  everything else as worktree-local — which got common cases right by coincidence but would
+ *  have mis-resolved any other shared namespace (e.g. `refs/notes/*`, a custom `refs/*`
+ *  convention) from a stale worktree-local shadow. The default is now "shared unless in this
+ *  small enumerated local set", matching git's actual layout. */
+const WORKTREE_LOCAL_REF_NAMESPACES = ["refs/bisect/", "refs/rewritten/", "refs/worktree/"];
 
-function isSharedNamespaceRef(ref: string): boolean {
-  return SHARED_REF_NAMESPACES.some((ns) => ref.startsWith(ns));
+function isWorktreeLocalRef(ref: string): boolean {
+  return WORKTREE_LOCAL_REF_NAMESPACES.some((ns) => ref.startsWith(ns));
 }
 
 /** Resolve `worktreePath`'s current HEAD commit via PURE FILESYSTEM reads of git's own plumbing
@@ -315,14 +330,15 @@ function isSharedNamespaceRef(ref: string): boolean {
  *  which resolves to null here (this function is only meant to run against an actual linked
  *  worktree). Resolves a detached HEAD directly, or a symbolic ref.
  *
- *  NAMESPACE-AWARE lookup (Codex F4, empirically proven wrong before this fix): a ref under a
- *  SHARED namespace (`refs/heads/*`, `refs/tags/*`, `refs/remotes/*`) is resolved ONLY from the
- *  shared common dir (loose file, then `packed-refs`) — NEVER from a worktree-local file under
- *  the same path, which — if present at all — is either stale or belongs to a different concept
- *  entirely and must not be allowed to shadow the real ref. A ref OUTSIDE those namespaces
- *  (genuinely per-worktree, e.g. `refs/bisect/*`) is resolved worktree-local only. Never throws:
- *  any missing/unexpected git-internals shape (a git version this wasn't tested against, a ref
- *  this doesn't know how to resolve) is an HONEST "couldn't determine" (null), never a guess. */
+ *  NAMESPACE-AWARE lookup (Codex F4, corrected direction in R3): a ref under one of the small,
+ *  ENUMERATED worktree-local namespaces (`refs/bisect/*`, `refs/rewritten/*`,
+ *  `refs/worktree/*`) is resolved worktree-local only. EVERY OTHER `refs/*` ref (branches, tags,
+ *  remote-tracking, notes, or any custom namespace) is SHARED — resolved ONLY from the common
+ *  dir (loose file, then `packed-refs`), NEVER from a worktree-local file under the same path,
+ *  which — if present at all — is either stale or belongs to a different concept entirely and
+ *  must not be allowed to shadow the real ref. Never throws: any missing/unexpected
+ *  git-internals shape (a git version this wasn't tested against, a ref this doesn't know how
+ *  to resolve) is an HONEST "couldn't determine" (null), never a guess. */
 export function resolveWorktreeHead(worktreePath: string): string | null {
   try {
     const dotGitContent = tryReadTrim(join(worktreePath, ".git"));
@@ -337,13 +353,14 @@ export function resolveWorktreeHead(worktreePath: string): string | null {
     const ref = refMatch[1]!;
     const commonDirRaw = tryReadTrim(join(gitDir, "commondir"));
     const commonDir = commonDirRaw ? (isAbsolute(commonDirRaw) ? commonDirRaw : resolve(gitDir, commonDirRaw)) : gitDir;
-    const shared = isSharedNamespaceRef(ref);
-    // Shared-namespace refs resolve from the common store ONLY — a worktree-local file under
-    // the same path (stale or otherwise) must never be consulted, let alone win (Codex F4).
-    const looseCandidate = shared ? join(commonDir, ref) : join(gitDir, ref);
+    const worktreeLocal = isWorktreeLocalRef(ref);
+    // Shared refs (the default — everything except the small worktree-local set above) resolve
+    // from the common store ONLY — a worktree-local file under the same path (stale or
+    // otherwise) must never be consulted, let alone win (Codex F4).
+    const looseCandidate = worktreeLocal ? join(gitDir, ref) : join(commonDir, ref);
     const sha = tryReadTrim(looseCandidate);
     if (sha && HEX40.test(sha)) return sha.toLowerCase();
-    if (shared) {
+    if (!worktreeLocal) {
       const packed = tryReadTrim(join(commonDir, "packed-refs"));
       if (packed) {
         for (const line of packed.split("\n")) {

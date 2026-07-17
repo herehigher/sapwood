@@ -15,6 +15,7 @@ const baseEnv = (over: Partial<ContextManifestEnv> = {}): ContextManifestEnv => 
   knownUnprobed: "imports, ancestor dirs, managed policy",
   capturedPreSpawn: "2026-07-17T00:00:00Z",
   capturedPostExit: "2026-07-17T00:00:01Z",
+  captureBasis: "init-observed",
   model: "sonnet",
   modelSource: "requested-fallback",
   cliBin: "claude",
@@ -24,6 +25,13 @@ const baseEnv = (over: Partial<ContextManifestEnv> = {}): ContextManifestEnv => 
   hookContent: null,
   recordedAt: "2026-07-17T00:00:01Z",
   ...over,
+});
+
+test("assembleContextManifest (Codex F1, R1): captureBasis passes through verbatim — never silently assumed reliable", () => {
+  const observed = assembleContextManifest(baseEnv({ captureBasis: "init-observed" }));
+  assert.equal(observed.captureBasis, "init-observed");
+  const fallback = assembleContextManifest(baseEnv({ captureBasis: "timeout-fallback" }));
+  assert.equal(fallback.captureBasis, "timeout-fallback");
 });
 
 test("assembleContextManifest: a fixture env with two CLAUDE.md sources (one worktree-rooted with an advisory gitCommit, one mutable) and a dirty worktree — all fields present, EVERY present source content-addressed inline (Codex F3)", () => {
@@ -188,6 +196,35 @@ test("resolveWorktreeHead (Codex F4 regression — empirically proven wrong befo
 
     const resolved = resolveWorktreeHead(worktreeDir);
     assert.equal(resolved, realSha, "the shared common store's ref wins — the worktree-local shadow is never consulted");
+    assert.notEqual(resolved, staleSha);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveWorktreeHead (Codex F4 residual, R3 — direction was inverted): a shared namespace OTHER than heads/tags/remotes (refs/notes/*) resolves from the common store too, ignoring a worktree-local shadow", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-ctxmanifest-"));
+  try {
+    const mainGitDir = join(dir, "main", ".git");
+    const worktreeDir = join(dir, "wt1");
+    const wtGitDir = join(mainGitDir, "worktrees", "wt1");
+    mkdirSync(join(mainGitDir, "refs", "notes"), { recursive: true });
+    // The ORIGINAL (wrong-direction) fix treated `refs/notes/*` as worktree-local by default
+    // (only heads/tags/remotes were shared) — so this worktree-local shadow would have won.
+    // Under the corrected model, `refs/notes/*` is shared (not in the small local set), so this
+    // file must never even be consulted.
+    mkdirSync(join(wtGitDir, "refs", "notes"), { recursive: true });
+    mkdirSync(worktreeDir, { recursive: true });
+    const realSha = "a".repeat(40);
+    const staleSha = "b".repeat(40);
+    writeFileSync(join(mainGitDir, "refs", "notes", "x"), `${realSha}\n`);
+    writeFileSync(join(wtGitDir, "refs", "notes", "x"), `${staleSha}\n`); // the shadow
+    writeFileSync(join(wtGitDir, "HEAD"), "ref: refs/notes/x\n");
+    writeFileSync(join(wtGitDir, "commondir"), "../..\n");
+    writeFileSync(join(worktreeDir, ".git"), `gitdir: ${wtGitDir}\n`);
+
+    const resolved = resolveWorktreeHead(worktreeDir);
+    assert.equal(resolved, realSha, "the shared common store's ref wins for a non-heads/tags/remotes namespace too");
     assert.notEqual(resolved, staleSha);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -161,16 +161,23 @@ timestamp (`capturedPreSpawn` / `capturedPostExit`) so the manifest states its o
 timing rather than leaving it implicit:
 
 - **Pre-spawn (filesystem-derived half):** captured as early as this engine can
-  possibly observe it — a bounded wait for the CLI's own worktree provisioning right
-  after spawn confirmation, **never at session teardown**. This matters most for
-  `retro`, the one role that holds write-capable tools: capturing at teardown (the
-  original design) would have recorded "what the session left behind" — its own
-  proposal commit, a possibly-edited `CLAUDE.md` — not what it started with. This is
-  a known, documented limitation, not a perfect guarantee: it still races the model's
-  very first turn in principle (closing that fully would mean tailing the live
-  stream-json for the init line, not attempted); for the many role sessions with zero
-  write-capable tools the race is moot (nothing exists that could mutate the worktree
-  at any point), and for `retro` it is far tighter than teardown-time capture was.
+  possibly observe it — anchored to the session's OWN `{"type":"system","subtype":
+  "init"}` stream-json line (polled from its still-growing jsonl file,
+  `worker.ts`'s `hasSessionInitLine`), **never at session teardown**. The init line
+  is the CLI's own signal that it finished loading context (worktree provisioning
+  included) and is about to hand control to the model — the exact "what the session
+  saw" instant. This matters most for `retro`, the one role that holds write-capable
+  tools: capturing at teardown (the original design) would have recorded "what the
+  session left behind" — its own proposal commit, a possibly-edited `CLAUDE.md` —
+  not what it started with. An EARLIER version of this fix anchored to a bounded wait
+  for the worktree DIRECTORY to exist instead of the init line; a focused-suite run
+  caught that race live (directory existence does not imply checkout-complete —
+  `CLAUDE.md` was recorded absent once, flaky), which is why the anchor is the
+  session's own content signal, not a filesystem race. If the init line is never
+  observed within the bound (a hung or crashed-before-init session), capture still
+  proceeds — best-effort, never blocking — and the manifest's `captureBasis` field
+  (`"init-observed"` vs. `"timeout-fallback"`) names which case fired, so a
+  lower-confidence capture is never silently presented as equally reliable.
 - **Post-exit (self-report half):** the session's own stream-json init report — model/
   CLI version/tool inventory/MCP servers — plus the auto-memory source, whose path is
   only knowable from that same report. These don't drift with worktree edits (the
@@ -184,8 +191,11 @@ It records:
   above the worktree root, any managed/enterprise policy layer are named in the
   manifest's own `knownUnprobed` field, not chased). The manifest's `probedPaths`
   field lists exactly what WAS checked: `<worktree>/CLAUDE.md`,
-  `<worktree>/CLAUDE.local.md`, every `*.md` under `<worktree>/.claude/rules/` (if
-  present), and the user-global `~/.claude/CLAUDE.md`;
+  `<worktree>/CLAUDE.local.md`, `<worktree>/.claude/CLAUDE.md`, every `*.md`
+  RECURSIVELY under `<worktree>/.claude/rules/` (if present — nested subdirectories
+  included, not just direct children), and the user-global `CLAUDE.md` — from
+  `$CLAUDE_CONFIG_DIR/CLAUDE.md` when that environment variable is set (honoring an
+  operator's relocated config dir), else `~/.claude/CLAUDE.md`;
 - **every present source captured CONTENT-ADDRESSED inline, with no exceptions** —
   even a worktree-rooted, git-tracked file. An earlier design gave git-trackable
   sources a hash-only "recoverable from git history" shape; that was deleted after
@@ -224,12 +234,18 @@ test (`worker.test.ts`, #69) that also bans passing a `cwd` to any subprocess, s
 engine cannot exec git *in a worker worktree* even accidentally. The context manifest
 honors that boundary: a worktree's HEAD commit is recovered by reading git's own
 plumbing files directly (`.git`'s `gitdir:` pointer, `HEAD`, loose/packed refs) —
-pure filesystem, no subprocess. The lookup is **namespace-aware**: shared refs
-(`refs/heads/*`, `refs/tags/*`, `refs/remotes/*`) resolve from the repo-wide common
-store only — a stale or shadowing worktree-local file under the same path (left over
-from an older git version, a manual edit, a corrupted worktree) must never be
-consulted, let alone win; genuinely per-worktree refs (`refs/bisect/*`,
-`refs/rewritten/*`) resolve worktree-local only. `dirty` is derived, never measured,
+pure filesystem, no subprocess. The lookup is **namespace-aware**, matching git's own
+repository-layout model: once a worktree has a `commondir`, EVERY `refs/*` ref is
+SHARED (resolved from the repo-wide common store only — a stale or shadowing
+worktree-local file under the same path, left over from an older git version, a
+manual edit, or a corrupted worktree, must never be consulted, let alone win) EXCEPT
+three genuinely per-worktree namespaces, resolved worktree-local only:
+`refs/bisect/*` (an in-progress `git bisect`), `refs/rewritten/*` (`git rebase
+--update-refs` scratch state), and `refs/worktree/*`. (An earlier version of this fix
+inverted the model — treating only `refs/heads/tags/remotes` as shared — which got
+common cases right by coincidence but would have mis-resolved any other shared
+namespace, e.g. `refs/notes/*`, from a stale worktree-local shadow.) `dirty` is
+derived, never measured,
 from three distinct, honestly-labeled bases: `"structural-no-write-tools"` (the
 session's tool grant is empty — the common case — so `dirty: false` is a structural
 guarantee); `"unknown-write-capable-session"` (a non-empty grant, e.g. `retro` — the

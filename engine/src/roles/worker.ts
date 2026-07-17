@@ -162,6 +162,26 @@ export function parseSessionInit(jsonl: string): SessionInitInfo {
   return empty; // no init line found — honest empty, never a thrown error
 }
 
+/** #236 (Codex F1 residual, R1): a cheap presence check for the SAME init line parseSessionInit
+ *  looks for — used to POLL a still-growing jsonl file (peripheral.ts's context-manifest
+ *  capture) without paying the full parse-and-build cost on every poll tick. The init line is
+ *  the CLI's own signal that it finished loading its context (CLAUDE.md layers, MCP servers,
+ *  tool schema) and is about to hand control to the model — i.e. exactly the "what the session
+ *  saw" moment, and (as a side effect) proof the worktree provisioning this same startup did is
+ *  complete. Same tolerance as every other parser here: a partial/garbage line is skipped, never
+ *  thrown. */
+export function hasSessionInitLine(jsonl: string): boolean {
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      const obj = JSON.parse(t) as { type?: string; subtype?: string };
+      if (obj.type === "system" && obj.subtype === "init") return true;
+    } catch {}
+  }
+  return false;
+}
+
 /** Per-model token usage from the last stream-json result line (#47). Mirrors parseCostUsd's
  *  tolerance exactly: a missing result line, a malformed `usage`/`modelUsage`, or a garbage
  *  line never throws — it just yields zeros. Cost accounting (parseCostUsd) must keep working

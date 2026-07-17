@@ -181,6 +181,7 @@ const mkFakeManifest = (tag: string): ContextManifest => ({
   knownUnprobed: "imports, ancestor dirs, managed policy",
   capturedPreSpawn: "2026-07-17T00:00:00Z",
   capturedPostExit: "2026-07-17T00:00:01Z",
+  captureBasis: "init-observed",
   model: tag,
   modelSource: "requested-fallback",
   cliBin: "claude",

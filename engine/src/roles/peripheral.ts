@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
@@ -31,6 +31,7 @@ import {
   claudeArgs,
   discoverClaudeBin,
   guardSettings,
+  hasSessionInitLine,
   parseCostUsd,
   parseModelUsage,
   parseResultText,
@@ -174,12 +175,17 @@ export interface RoleRunnerDeps {
   guardHookPath?: string;
   heartbeatMs?: number;
   now?: () => Date;
-  /** #236 (Codex F1): bounded wait for the CLI's own worktree provisioning right after spawn
-   *  confirmation, before capturing the filesystem-derived half of the context manifest — see
-   *  RoleRunner.run()'s doc for why this is the earliest observable point (the CLI creates the
-   *  worktree as part of ITS OWN startup; nothing before spawn confirmation could ever see it).
-   *  Default 3000ms/25ms poll — generous for production (worktree creation is normally
-   *  sub-second), overridden much lower in tests that never create a worktree at all. */
+  /** #236 (Codex F1, corrected in R1): bounded poll of the session's OWN stream-json jsonl file
+   *  for its `{"type":"system","subtype":"init"}` line, before capturing the filesystem-derived
+   *  half of the context manifest. The init line is the CLI's own signal that it finished
+   *  loading context (CLAUDE.md layers, MCP servers, tool schema) — the exact "what the session
+   *  saw" moment, and (as a side effect) proof the worktree provisioning that same startup did
+   *  is complete. This REPLACES the original design (a bounded wait for the worktree DIRECTORY
+   *  to exist), which a focused-suite run caught racing: directory existence does not imply
+   *  checkout-complete, so a fast poll could observe an empty/partial worktree and record
+   *  `CLAUDE.md` as absent when it was actually still being written. Default 100ms poll / 30s
+   *  bound (generous — production worktree+context-load is normally well under a second),
+   *  overridden lower in tests that don't care about the timeout-fallback path itself. */
   preSpawnCaptureTimeoutMs?: number;
   preSpawnCapturePollMs?: number;
 }
@@ -187,17 +193,30 @@ export interface RoleRunnerDeps {
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "jsonl"];
 
 /** #236: the FILESYSTEM-derived half of one session attempt's context manifest, captured by
- *  RoleRunner.capturePreSpawnManifestData right after spawn confirmation — see that method's
- *  doc. Combined with the POST-EXIT self-report half in RoleRunner.assembleManifest. */
+ *  RoleRunner.capturePreSpawnManifestData right after the init-line anchor fires (or the bound
+ *  times out) — see that method's doc. Combined with the POST-EXIT self-report half in
+ *  RoleRunner.assembleManifest. */
 interface PreSpawnManifestCapture {
   sources: RawContextSource[];
   probedPaths: string[];
   head: string | null;
-  /** False when the bounded wait in run() never observed the worktree on disk at all — a
-   *  distinct fact from "worktree present but every source happened to be absent" (Codex F5d). */
+  /** False when the init-line-anchored capture ran but the worktree still didn't exist on disk
+   *  at that instant — a distinct fact from "worktree present but every source happened to be
+   *  absent" (Codex F5d). Independent of `captureBasis` below: a timeout-fallback capture can
+   *  still find a worktree that eventually appeared just after the bound expired, and (in
+   *  principle, for a very slow/broken CLI) an init-observed capture could still race a
+   *  not-yet-flushed worktree — this is a direct `existsSync` check at capture time, not an
+   *  inference from which basis fired. */
   worktreeAppeared: boolean;
   hookContent: string | null;
   capturedAt: string;
+  /** Codex F1 (R1): which anchor actually fired — never silently assumed. `"init-observed"`:
+   *  the session's own init line was seen in its jsonl before the bound expired (the honest,
+   *  intended case). `"timeout-fallback"`: the bound expired with no init line ever observed
+   *  (a hung/crashed-before-init session, or a CLI slower than the configured bound) — capture
+   *  still proceeds (best-effort, never blocks the session), but the manifest names the
+   *  ambiguity rather than silently presenting it as equally reliable. */
+  captureBasis: "init-observed" | "timeout-fallback";
 }
 
 /** Codex F2b: the fixed, honest note every manifest carries naming what this module deliberately
@@ -210,33 +229,44 @@ const KNOWN_UNPROBED_NOTE =
   "engine records the standard sources it can cheaply probe (see probedPaths), not Claude " +
   "Code's full CLAUDE.md resolution graph.";
 
-/** Sorted `*.md` file names directly under `dirPath` — tolerant of a missing/unreadable
- *  directory (returns `[]`, never throws). Used for the `.claude/rules/` scan (Codex F2a). */
+/** Sorted `*.md` file names under `dirPath`, RECURSIVELY (Codex F2 residual, R2b — the original
+ *  scan took only direct children, missing e.g. `.claude/rules/sub/nested.md`) — tolerant of a
+ *  missing/unreadable directory (returns `[]`, never throws). Each entry is a path RELATIVE to
+ *  `dirPath` (so a nested file reads as `"sub/nested.md"`, joinable back onto `dirPath` by the
+ *  caller) — used for the `.claude/rules/` scan. Node's `recursive: true` readdir option
+ *  requires Node 20.17+/22.2+; this engine's floor is Node >=24 (root `package.json`), so it's
+ *  always available. */
 function listMarkdownFileNames(dirPath: string): string[] {
   try {
-    return readdirSync(dirPath, { withFileTypes: true })
+    return readdirSync(dirPath, { withFileTypes: true, recursive: true })
       .filter((d) => d.isFile() && d.name.endsWith(".md"))
-      .map((d) => d.name)
+      .map((d) => relative(dirPath, join((d.parentPath as string | undefined) ?? dirPath, d.name)))
       .sort();
   } catch {
     return [];
   }
 }
 
-/** Bounded poll for `path` to exist on disk — the synchronization primitive #236's pre-spawn
- *  manifest capture uses (see RoleRunner.run()'s call site doc for why a poll is necessary at
- *  all: the CLI provisions the worktree as part of its own startup, with no other observable
- *  signal available to this engine). Resolves `true` the instant the path appears, or `false`
- *  once `timeoutMs` elapses without it ever appearing — never throws, never waits longer than
- *  the bound. */
-async function waitForPath(path: string, timeoutMs: number, pollMs: number): Promise<boolean> {
+/** Bounded poll of `jsonlPath` for the session's own init line — the synchronization primitive
+ *  #236's pre-spawn manifest capture uses (Codex F1, R1). Resolves `true` the instant the line
+ *  is observed, or `false` once `timeoutMs` elapses without it ever appearing (a hung/crashed-
+ *  before-init session) — never throws, never waits longer than the bound. Reads the file fresh
+ *  on every poll tick (the same tolerant, still-growing-file reader every other jsonl consumer
+ *  in this codebase uses); a file that doesn't exist yet reads as `""`, not an error. */
+async function waitForInitLine(jsonlPath: string, timeoutMs: number, pollMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path)) {
+  for (;;) {
+    let content = "";
+    try {
+      content = readFileSync(jsonlPath, "utf8");
+    } catch {
+      /* not created / not flushed yet — keep polling */
+    }
+    if (hasSessionInitLine(content)) return true;
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await sleep(Math.min(pollMs, remaining));
   }
-  return true;
 }
 
 /** Build a peripheral session environment without forge credentials or git credential
@@ -282,8 +312,8 @@ export class RoleRunner {
     this.bin = deps.claudeBin ?? discoverClaudeBin(process.env);
     this.hbMs = deps.heartbeatMs ?? 30_000;
     this.guardHookPath = deps.guardHookPath ?? fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url));
-    this.preSpawnCaptureTimeoutMs = deps.preSpawnCaptureTimeoutMs ?? 3000;
-    this.preSpawnCapturePollMs = deps.preSpawnCapturePollMs ?? 25;
+    this.preSpawnCaptureTimeoutMs = deps.preSpawnCaptureTimeoutMs ?? 30_000;
+    this.preSpawnCapturePollMs = deps.preSpawnCapturePollMs ?? 100;
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -374,22 +404,26 @@ export class RoleRunner {
       started_at: new Date(startedMs).toISOString(),
     });
 
-    // #236 (Codex F1): capture the FILESYSTEM-derived half of the context manifest (CLAUDE.md-
-    // family sources, worktree HEAD, guard hook content) as early as this engine can possibly
-    // observe it — right after spawn confirmation, BEFORE waiting out the session. There is no
-    // earlier point: `claude --worktree <name>` provisions the worktree as part of ITS OWN
-    // startup, so nothing before spawn confirmation could ever see it. This matters most for a
-    // write-capable session (retro): capturing at TEARDOWN (the pre-fix behavior) would record
-    // "what the session left behind" (its own proposal commit, a possibly-edited CLAUDE.md) —
-    // not "what it saw". Bounded wait for the worktree to appear on disk (worktreeAppeared
-    // below); a KNOWN, DOCUMENTED limitation, not silently pretended away: this still races the
-    // model's very first turn in principle (closing that fully would mean tailing the live
-    // jsonl for the init line, not attempted here) — but for the many role sessions with zero
-    // write-capable tools that race is moot (nothing exists that could mutate the worktree at
-    // any point), and for retro it is far tighter than teardown-time capture ever was.
+    // #236 (Codex F1, anchor corrected in R1): capture the FILESYSTEM-derived half of the
+    // context manifest (CLAUDE.md-family sources, worktree HEAD, guard hook content) as early as
+    // this engine can possibly observe it — right after spawn confirmation, BEFORE waiting out
+    // the session. Anchored to the session's OWN init line (worker.ts's hasSessionInitLine),
+    // polled from its still-growing jsonl — NOT a bounded wait for the worktree DIRECTORY to
+    // exist (the original design): directory existence does not imply checkout-complete, and a
+    // focused-suite run caught that race live (CLAUDE.md recorded absent once, flaky). The init
+    // line is the CLI's own signal that context loading (worktree provisioning included) is
+    // done — the model has not yet taken a turn, so this is exactly the "what the session saw"
+    // moment. This matters most for a write-capable session (retro): capturing at TEARDOWN (the
+    // pre-#236-fix behavior) would record "what the session left behind" (its own proposal
+    // commit, a possibly-edited CLAUDE.md) — not what it started with. If the init line is never
+    // observed within the bound, capture proceeds anyway (best-effort, never blocks the
+    // session) — `captureBasis` on the resulting manifest names which case fired, never silently
+    // presenting a timeout-fallback capture as equally reliable.
     const worktreePath = join(this.worktreeRoot, name);
-    const worktreeAppeared = await waitForPath(worktreePath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
-    const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared);
+    const initObserved = await waitForInitLine(jsonlPath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
+    const captureBasis: PreSpawnManifestCapture["captureBasis"] = initObserved ? "init-observed" : "timeout-fallback";
+    const worktreeAppeared = existsSync(worktreePath);
+    const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared, captureBasis);
 
     // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
     // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
@@ -497,19 +531,27 @@ export class RoleRunner {
     };
   }
 
-  /** #236 (Codex F1/F2/F3): the FILESYSTEM-derived half of the context manifest — read as early
-   *  as feasible (see run()'s call site doc). Probes a deliberately bounded, ENUMERATED set of
-   *  standard CLAUDE.md-family sources (F2 ruling — never the full resolution graph):
-   *  `<worktree>/CLAUDE.md`, `<worktree>/CLAUDE.local.md`, every `*.md` under
-   *  `<worktree>/.claude/rules/` (if that directory exists), and the user-global
-   *  `~/.claude/CLAUDE.md`. Every source is captured INLINE (F3 — content-addressed, never a
-   *  bare git-commit pointer, even for worktree-rooted files: a write-capable session could
-   *  still modify/add/remove/untrack one before its own commit, so `gitCommit` here is ADVISORY
-   *  metadata only, never a recoverability claim). `worktreeAppeared` false means the bounded
-   *  wait in run() never observed the worktree on disk at all — every source therefore reads as
-   *  absent for a real reason (there was nothing to read), which the caller folds into a
-   *  `"worktree-missing"` dirtyBasis rather than a plain "clean" or "dirty" guess. */
-  private capturePreSpawnManifestData(worktreePath: string, worktreeAppeared: boolean): PreSpawnManifestCapture {
+  /** #236 (Codex F1/F2/F3, R1/R2 residual fixes): the FILESYSTEM-derived half of the context
+   *  manifest — read once the init-line anchor fires (see run()'s call site doc). Probes a
+   *  deliberately bounded, ENUMERATED set of standard CLAUDE.md-family sources (F2 ruling —
+   *  never the full resolution graph): `<worktree>/CLAUDE.md`, `<worktree>/CLAUDE.local.md`,
+   *  `<worktree>/.claude/CLAUDE.md` (Codex R2a — an officially documented layer the original F2
+   *  fix missed), every `*.md` RECURSIVELY under `<worktree>/.claude/rules/` (Codex R2b — the
+   *  original scan took only direct children), and the user-global CLAUDE.md — from
+   *  `$CLAUDE_CONFIG_DIR/CLAUDE.md` when that env var is set, else `~/.claude/CLAUDE.md` (Codex
+   *  R2c — the original hardcoded `homedir()` unconditionally, which is simply wrong when the
+   *  operator has relocated Claude Code's config dir). Every source is captured INLINE (F3 —
+   *  content-addressed, never a bare git-commit pointer, even for worktree-rooted files: a
+   *  write-capable session could still modify/add/remove/untrack one before its own commit, so
+   *  `gitCommit` here is ADVISORY metadata only, never a recoverability claim). `worktreeAppeared`
+   *  false means the worktree still wasn't on disk at the moment of capture — every source
+   *  therefore reads as absent for a real reason (there was nothing to read), which the caller
+   *  folds into a `"worktree-missing"` dirtyBasis rather than a plain "clean" or "dirty" guess. */
+  private capturePreSpawnManifestData(
+    worktreePath: string,
+    worktreeAppeared: boolean,
+    captureBasis: PreSpawnManifestCapture["captureBasis"],
+  ): PreSpawnManifestCapture {
     const capturedAt = this.now().toISOString();
     const probedPaths: string[] = [];
     const sources: RawContextSource[] = [];
@@ -529,19 +571,24 @@ export class RoleRunner {
 
     addSource("repo CLAUDE.md", join(worktreePath, "CLAUDE.md"));
     addSource("repo CLAUDE.local.md", join(worktreePath, "CLAUDE.local.md"));
+    addSource("repo .claude/CLAUDE.md", join(worktreePath, ".claude", "CLAUDE.md"));
 
     const rulesDirPath = join(worktreePath, ".claude", "rules");
-    probedPaths.push(join(rulesDirPath, "*.md")); // recorded even if the directory is absent
+    probedPaths.push(join(rulesDirPath, "**", "*.md")); // recorded even if the directory is absent
     for (const fileName of listMarkdownFileNames(rulesDirPath)) {
       addSource(`repo .claude/rules/${fileName}`, join(rulesDirPath, fileName));
     }
 
-    // Mutable, global, path known upfront (no worktree dependency at all) — never git-pinned.
-    addSource("user-global CLAUDE.md", join(homedir(), ".claude", "CLAUDE.md"));
+    // Mutable, global — path known upfront (no worktree dependency at all), never git-pinned.
+    // CLAUDE_CONFIG_DIR (Codex R2c), when set, IS the effective user-global config directory —
+    // honoring it here is the difference between probing the real ambient source and a path
+    // that's simply wrong on any machine that relocated it.
+    const userConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
+    addSource("user-global CLAUDE.md", join(userConfigDir, "CLAUDE.md"));
 
     const hookRead = readAmbientSource(this.guardHookPath);
 
-    return { sources, probedPaths, head, worktreeAppeared, hookContent: hookRead.content, capturedAt };
+    return { sources, probedPaths, head, worktreeAppeared, hookContent: hookRead.content, capturedAt, captureBasis };
   }
 
   /** #236: the POST-EXIT half — the session's own stream-json self-report (worker.ts's
@@ -596,6 +643,7 @@ export class RoleRunner {
       knownUnprobed: KNOWN_UNPROBED_NOTE,
       capturedPreSpawn: pre.capturedAt,
       capturedPostExit,
+      captureBasis: pre.captureBasis,
       model: init.model ?? opts.model,
       modelSource: init.model ? "session-init" : "requested-fallback",
       cliBin: this.bin,

@@ -408,10 +408,16 @@ write-capable session could still have modified it), the model/CLI/tool-inventor
 prompt actually used (with an explicit `modelSource` discriminator — never a silent
 substitution), MCP server availability, the worktree's resolved HEAD, and the
 settings/guard-hook hashes — so two attempts of the same phase are independently
-diffable rather than assumed comparable. The filesystem-derived half is captured as
-early as the engine can observe it (right after the CLI provisions the worktree, not
-at session teardown) precisely so a write-capable session's own edits can never be
-mistaken for what it started with.
+diffable rather than assumed comparable. The probed sources include
+`<worktree>/CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, every `*.md`
+recursively under `.claude/rules/`, and the user-global `CLAUDE.md` (honoring
+`CLAUDE_CONFIG_DIR` when set, else `~/.claude`). The filesystem-derived half is
+captured as early as the engine can observe it — anchored to the session's own
+stream-json init line, never a bounded wait for the worktree directory to merely
+exist (that anchor raced a real checkout once) and never at session teardown —
+precisely so a write-capable session's own edits can never be mistaken for what it
+started with; a `captureBasis` field on the manifest names whether that anchor
+actually fired or the capture fell back to its bound.
 
 **`retro` holds no `gh` grant at all (#111).** Reads: its prompt is seeded with an
 engine-built round-scoped digest — PR descriptions + diffs + review signals for every
