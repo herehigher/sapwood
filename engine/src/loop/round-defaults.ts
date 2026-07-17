@@ -15,7 +15,8 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
-import type { IForge } from "../forge/forge.js";
+import type { IForge, Issue } from "../forge/forge.js";
+import { labelsInclude } from "../forge/labels.js";
 import { createRetroStub } from "../retro/retro.js";
 import { capDigest } from "../retro/retro-digest.js";
 import { type ArchitectDeps, createArchitectStub, NO_PRIOR_ROUND_YET } from "../roles/architect.js";
@@ -242,6 +243,43 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         // alignedGoals/lastMerged above, so a crash-rerun that resumes directly at architecting
         // re-assembles identically and the load logic stays in doctrine.ts, not duplicated here.
         architectDeps.doctrine = loadDoctrine(deps.cfg.doctrine.file, deps.cfg.doctrine.maxChars);
+        // #213: this round's ACTUAL pool (cfg.labels.roundPool members) — computed HERE, at
+        // architect-invocation time, from a LIVE forge read, same "compute at read, never a
+        // same-process handoff" stance as alignedGoals/lastMerged/doctrine above (a crash-rerun
+        // that resumes directly at architecting must see the same live label state a from-scratch
+        // run would, not a stale snapshot threaded from an earlier phase). By the time architecting
+        // runs, the aligning phase has ALREADY run to completion THIS round (round.ts's phase
+        // sequence, same single-threaded await chain) and reconciled the pool label to match its
+        // own selection (align.ts's reconcilePoolLabels) — so filtering the live
+        // Ready-and-dispatchable set by the pool label here IS this round's pool, with no second,
+        // separate pool concept needed. A read failure degrades to an EMPTY pool (never a thrown
+        // phase) — the architect's own #213 degrade-open contract then simply has nothing to
+        // batch-review this pass, the same shape a legitimately empty pool already has.
+        let poolIssues: Issue[] = [];
+        try {
+          const ready = await forge.getReadyIssues();
+          poolIssues = ready.filter((i) => labelsInclude(i.labels, deps.cfg.labels.roundPool));
+        } catch (e) {
+          const reason = `pool-member read failed: ${String(e)}`;
+          (deps.log ?? console.error)(
+            `[sapwood:architect] round ${ctx.roundId}: ${reason} — batch review proceeds with an empty pool this pass`,
+          );
+          // #213 Codex review round 2, finding 3: a read failure here degrades the SAME way a
+          // genuinely-empty pool does (candidates only, if any) — but with a REAL, non-empty
+          // pool sitting on GitHub, that means dispatch proceeds completely unreviewed with only
+          // an ephemeral log line as evidence, never the durable `architect-review-degraded`
+          // event architect.ts's own degrade paths always pair with a skip. Record the SAME
+          // honesty event here too, so this failure mode is durably observable exactly like
+          // every other reason the pool ends up unfiltered. Best-effort (mirrors
+          // runSessionWithRetry's own degrade-append stance): the log line above is the fallback
+          // record if this append itself fails.
+          try {
+            deps.state.appendEvent("architect-review-degraded", { round_id: ctx.roundId, reason });
+          } catch {
+            /* best-effort honesty event — the log line above already recorded the failure */
+          }
+        }
+        architectDeps.poolIssues = poolIssues;
         return architectStub.run(ctx);
       },
     };

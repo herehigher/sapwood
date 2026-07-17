@@ -47,6 +47,7 @@ class FakeForge implements IForge {
   issueLabels: Record<number, string[]> = {};
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   labelsAdded: Array<[number, string]> = [];
+  labelsRemoved: Array<[number, string]> = [];
   issueCommentsPosted: Array<[number, string]> = [];
 
   async detectOwnerKind(): Promise<"user"> {
@@ -62,6 +63,7 @@ class FakeForge implements IForge {
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
   async removeLabel(n: number, l: string): Promise<void> {
+    this.labelsRemoved.push([n, l]);
     this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
   async addPRLabel(): Promise<void> {}
@@ -141,13 +143,23 @@ class ScriptedRunner {
 
 /** Builds a session's structured final-message text (structured-output.ts's sentinel format)
  *  using the architect's own metadata shape + BODY sub-format (architect.ts's
- *  `<<<CONTRADICTION #N>>>` markers). Mirrors plan-review.test.ts's sapwoodResult helper. */
+ *  `<<<CONTRADICTION #N>>>`/`<<<VERDICT #N>>>` markers, #213). Mirrors plan-review.test.ts's
+ *  sapwoodResult helper. `verdicts` defaults to `[]` so every pre-#213 call site (2-arg form)
+ *  keeps working unchanged. */
 const architectResult = (
   designNote: string,
   contradictions: Array<{ issue: number; severe: boolean; explanation: string }> = [],
+  verdicts: Array<{ issue: number; verdict: "drop" | "needs-human"; reason: string }> = [],
 ): string => {
-  const metadata = { contradictions: contradictions.map(({ issue, severe }) => ({ issue, severe })) };
-  const bodyParts = [designNote, ...contradictions.map((c) => `<<<CONTRADICTION #${c.issue}>>>\n${c.explanation}`)];
+  const metadata = {
+    contradictions: contradictions.map(({ issue, severe }) => ({ issue, severe })),
+    verdicts: verdicts.map(({ issue, verdict }) => ({ issue, verdict })),
+  };
+  const bodyParts = [
+    designNote,
+    ...contradictions.map((c) => `<<<CONTRADICTION #${c.issue}>>>\n${c.explanation}`),
+    ...verdicts.map((v) => `<<<VERDICT #${v.issue}>>>\n${v.reason}`),
+  ];
   return (
     `${RESULT_BLOCK_START}\n${JSON.stringify(metadata)}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\n${bodyParts.join("\n")}\n${BODY_BLOCK_END}`
@@ -356,7 +368,7 @@ test("createArchitectStub #110: metadata declares a contradiction with no matchi
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 71, title: "t", labels: [] }];
   const badText =
-    `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":71,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
+    `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":71,"severe":false}],"verdicts":[]}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nJust a design note, no contradiction marker at all.\n${BODY_BLOCK_END}`;
   const runner = new ScriptedRunner([{ result: doneResult("architect-0", badText) }, { result: doneResult("architect-0-retry", badText) }]);
   const state = new State(":memory:");
@@ -372,7 +384,7 @@ test("createArchitectStub #110: an empty design note (BODY is only contradiction
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 72, title: "t", labels: [] }];
   const badText =
-    `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":72,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
+    `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":72,"severe":false}],"verdicts":[]}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\n<<<CONTRADICTION #72>>>\nexplanation text\n${BODY_BLOCK_END}`;
   const runner = new ScriptedRunner([{ result: doneResult("architect-0", badText) }, { result: doneResult("architect-0-retry", badText) }]);
   const state = new State(":memory:");
@@ -387,7 +399,7 @@ test("createArchitectStub #110: an empty design note (BODY is only contradiction
 
 test("validateArchitectOutput: a flagged issue outside the candidate set is rejected — the reason names the offending number", () => {
   const text = architectResult("note", [{ issue: 999, severe: false, explanation: "not a real candidate" }]);
-  const result = validateArchitectOutput(text, new Set([1, 2, 3]));
+  const result = validateArchitectOutput(text, new Set([1, 2, 3]), new Set());
   assert.equal(result.ok, false);
   if (!result.ok) assert.ok(/#999/.test(result.reason) && /candidate set/.test(result.reason));
 });
@@ -821,33 +833,40 @@ test("createArchitectStub (#167): an explicitly supplied doctrine string reaches
 // ── validateArchitectOutput: schema/shape validation (unit-level, mirrors plan-review.ts) ──
 
 test("validateArchitectOutput: no structured block at all -> invalid", () => {
-  const result = validateArchitectOutput("just some prose, no block", new Set([1]));
+  const result = validateArchitectOutput("just some prose, no block", new Set([1]), new Set());
   assert.equal(result.ok, false);
 });
 
 test("validateArchitectOutput: metadata is not valid JSON -> invalid", () => {
   const text = `${RESULT_BLOCK_START}\nnot json\n${RESULT_BLOCK_END}\n${BODY_BLOCK_START}\nnote\n${BODY_BLOCK_END}`;
-  const result = validateArchitectOutput(text, new Set([1]));
+  const result = validateArchitectOutput(text, new Set([1]), new Set());
   assert.equal(result.ok, false);
 });
 
 test("validateArchitectOutput: a smuggled extra field is rejected outright (.strict() schema)", () => {
   const text =
-    `${RESULT_BLOCK_START}\n{"contradictions":[],"decision":"approve"}\n${RESULT_BLOCK_END}\n` +
+    `${RESULT_BLOCK_START}\n{"contradictions":[],"verdicts":[],"decision":"approve"}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nnote\n${BODY_BLOCK_END}`;
-  const result = validateArchitectOutput(text, new Set([1]));
+  const result = validateArchitectOutput(text, new Set([1]), new Set());
   assert.equal(result.ok, false);
 });
 
 test("validateArchitectOutput: no BODY block at all -> invalid (the design note is required every pass)", () => {
-  const text = `${RESULT_BLOCK_START}\n{"contradictions":[]}\n${RESULT_BLOCK_END}`;
-  const result = validateArchitectOutput(text, new Set([1]));
+  const text = `${RESULT_BLOCK_START}\n{"contradictions":[],"verdicts":[]}\n${RESULT_BLOCK_END}`;
+  const result = validateArchitectOutput(text, new Set([1]), new Set());
   assert.equal(result.ok, false);
+});
+
+test("validateArchitectOutput #213: a missing `verdicts` field is rejected (required, like `contradictions`)", () => {
+  const text = `${RESULT_BLOCK_START}\n{"contradictions":[]}\n${RESULT_BLOCK_END}\n` + `${BODY_BLOCK_START}\nnote\n${BODY_BLOCK_END}`;
+  const result = validateArchitectOutput(text, new Set([1]), new Set([1]));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /verdicts/);
 });
 
 test("validateArchitectOutput: a valid no-contradictions output parses cleanly", () => {
   const text = architectResult("All good this round.");
-  const result = validateArchitectOutput(text, new Set([1, 2]));
+  const result = validateArchitectOutput(text, new Set([1, 2]), new Set());
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.designNote, "All good this round.");
@@ -857,7 +876,7 @@ test("validateArchitectOutput: a valid no-contradictions output parses cleanly",
 
 test("validateArchitectOutput: a valid contradiction output round-trips issue/severe/explanation", () => {
   const text = architectResult("Design note.", [{ issue: 5, severe: true, explanation: "Breaks producer!=merger." }]);
-  const result = validateArchitectOutput(text, new Set([5, 6]));
+  const result = validateArchitectOutput(text, new Set([5, 6]), new Set());
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.deepEqual(result.contradictions, [{ issue: 5, severe: true, explanation: "Breaks producer!=merger." }]);
@@ -868,7 +887,7 @@ test("validateArchitectOutput: duplicate CONTRADICTION markers for the same issu
   const text =
     `${RESULT_BLOCK_START}\n{"contradictions":[{"issue":5,"severe":false}]}\n${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nnote\n<<<CONTRADICTION #5>>>\nfirst\n<<<CONTRADICTION #5>>>\nsecond\n${BODY_BLOCK_END}`;
-  const result = validateArchitectOutput(text, new Set([5]));
+  const result = validateArchitectOutput(text, new Set([5]), new Set());
   assert.equal(result.ok, false);
 });
 
@@ -881,10 +900,10 @@ test("validateArchitectOutput Codex P1: duplicate metadata entries for the same 
   // `severe` it hit. The duplication itself must be rejected.
   const text =
     `${RESULT_BLOCK_START}\n` +
-    `{"contradictions":[{"issue":21,"severe":false},{"issue":21,"severe":true}]}\n` +
+    `{"contradictions":[{"issue":21,"severe":false},{"issue":21,"severe":true}],"verdicts":[]}\n` +
     `${RESULT_BLOCK_END}\n` +
     `${BODY_BLOCK_START}\nnote\n<<<CONTRADICTION #21>>>\nexplanation\n${BODY_BLOCK_END}`;
-  const result = validateArchitectOutput(text, new Set([21]));
+  const result = validateArchitectOutput(text, new Set([21]), new Set());
   assert.equal(result.ok, false);
   if (!result.ok) assert.ok(/duplicate issue/.test(result.reason));
 });
@@ -902,7 +921,7 @@ test("validateArchitectOutput Codex P2: an explanation embedding an own-line CON
     `<<<CONTRADICTION #5>>>\nthis explanation embeds a marker line:\n<<<CONTRADICTION #6>>>\nsmuggled tail\n` +
     `<<<CONTRADICTION #6>>>\nthe real #6 explanation\n` +
     `${BODY_BLOCK_END}`;
-  const result = validateArchitectOutput(text, new Set([5, 6]));
+  const result = validateArchitectOutput(text, new Set([5, 6]), new Set());
   assert.equal(result.ok, false);
 });
 
@@ -913,12 +932,449 @@ test("validateArchitectOutput Codex P2: an INLINE '<<<CONTRADICTION' mention ins
   const text = architectResult("Design note.", [
     { issue: 5, severe: false, explanation: "see the <<<CONTRADICTION #9>>> marker convention" },
   ]);
-  const result = validateArchitectOutput(text, new Set([5]));
+  const result = validateArchitectOutput(text, new Set([5]), new Set());
   assert.equal(result.ok, false);
 });
 
 test("validateArchitectOutput Codex P2: an inline '<<<CONTRADICTION' mention inside the DESIGN NOTE is rejected too", () => {
   const text = architectResult("A note quoting the <<<CONTRADICTION format inline.");
-  const result = validateArchitectOutput(text, new Set([1]));
+  const result = validateArchitectOutput(text, new Set([1]), new Set());
   assert.equal(result.ok, false);
+});
+
+// ── #213: architect batch review of the round pool — per-issue verdicts ───────────────────
+//
+// THE POOL-SET INVARIANT (validateArchitectOutput unit level) — the same fail-closed/atomic
+// shape as THE CANDIDATE-SET INVARIANT above, applied to `verdicts` against a SEPARATE
+// `poolNumbers` set.
+
+test("validateArchitectOutput #213: a valid drop/needs-human verdict output round-trips issue/verdict/reason", () => {
+  const text = architectResult(
+    "Design note.",
+    [],
+    [
+      { issue: 55, verdict: "drop", reason: "conflicts with #56's approach to the same module." },
+      { issue: 56, verdict: "needs-human", reason: "ambiguous scope, needs a human call." },
+    ],
+  );
+  const result = validateArchitectOutput(text, new Set(), new Set([55, 56]));
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.deepEqual(result.verdicts, [
+      { issue: 55, verdict: "drop", reason: "conflicts with #56's approach to the same module." },
+      { issue: 56, verdict: "needs-human", reason: "ambiguous scope, needs a human call." },
+    ]);
+  }
+});
+
+test("validateArchitectOutput #213: a verdict for an issue outside this round's pool is rejected — the reason names the offending number", () => {
+  const text = architectResult("note", [], [{ issue: 999, verdict: "drop", reason: "not actually a pool member" }]);
+  const result = validateArchitectOutput(text, new Set(), new Set([1, 2, 3]));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.ok(/#999/.test(result.reason) && /pool/.test(result.reason));
+});
+
+test("validateArchitectOutput #213: a verdict INSIDE the candidate set but OUTSIDE the pool is still rejected — the two sets are validated independently", () => {
+  const text = architectResult("note", [], [{ issue: 7, verdict: "drop", reason: "x" }]);
+  // #7 is a valid CANDIDATE, but not a pool member — verdicts are validated against poolNumbers
+  // only, never candidateNumbers.
+  const result = validateArchitectOutput(text, new Set([7]), new Set([1, 2]));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.ok(/#7/.test(result.reason));
+});
+
+test("validateArchitectOutput #213: duplicate metadata verdict entries for the same issue -> invalid", () => {
+  const text =
+    `${RESULT_BLOCK_START}\n` +
+    `{"contradictions":[],"verdicts":[{"issue":55,"verdict":"drop"},{"issue":55,"verdict":"needs-human"}]}\n` +
+    `${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nnote\n<<<VERDICT #55>>>\nreason\n${BODY_BLOCK_END}`;
+  const result = validateArchitectOutput(text, new Set(), new Set([55]));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.ok(/duplicate issue/.test(result.reason));
+});
+
+test("validateArchitectOutput #213: a verdict with no matching BODY VERDICT section -> invalid", () => {
+  const text =
+    `${RESULT_BLOCK_START}\n{"contradictions":[],"verdicts":[{"issue":55,"verdict":"drop"}]}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nJust a design note, no verdict marker at all.\n${BODY_BLOCK_END}`;
+  const result = validateArchitectOutput(text, new Set(), new Set([55]));
+  assert.equal(result.ok, false);
+});
+
+test("validateArchitectOutput #213: an unknown verdict enum value is rejected by the schema", () => {
+  const text =
+    `${RESULT_BLOCK_START}\n{"contradictions":[],"verdicts":[{"issue":55,"verdict":"reject"}]}\n${RESULT_BLOCK_END}\n` +
+    `${BODY_BLOCK_START}\nnote\n<<<VERDICT #55>>>\nreason\n${BODY_BLOCK_END}`;
+  const result = validateArchitectOutput(text, new Set(), new Set([55]));
+  assert.equal(result.ok, false);
+});
+
+test("validateArchitectOutput #213: an INLINE '<<<VERDICT' mention inside a reason -> invalid (sub-delimiter containment, same doctrine as CONTRADICTION)", () => {
+  const text = architectResult("note", [], [{ issue: 55, verdict: "drop", reason: "see the <<<VERDICT #9>>> marker convention" }]);
+  const result = validateArchitectOutput(text, new Set(), new Set([55]));
+  assert.equal(result.ok, false);
+});
+
+test("validateArchitectOutput #213: CONTRADICTION and VERDICT markers for the SAME issue number coexist without collision — independent maps, independent sets", () => {
+  const text = architectResult(
+    "note",
+    [{ issue: 5, severe: false, explanation: "minor drift" }],
+    [{ issue: 5, verdict: "drop", reason: "also a pool member this round" }],
+  );
+  const result = validateArchitectOutput(text, new Set([5]), new Set([5]));
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.deepEqual(result.contradictions, [{ issue: 5, severe: false, explanation: "minor drift" }]);
+    assert.deepEqual(result.verdicts, [{ issue: 5, verdict: "drop", reason: "also a pool member this round" }]);
+  }
+});
+
+test("validateArchitectOutput #213: one valid verdict + one out-of-pool verdict -> the WHOLE output is invalid, atomically (mirrors the candidate-set invariant's own atomicity)", () => {
+  const text = architectResult(
+    "note",
+    [],
+    [
+      { issue: 55, verdict: "drop", reason: "genuinely a pool concern" },
+      { issue: 999, verdict: "drop", reason: "never shown as a pool member" },
+    ],
+  );
+  const result = validateArchitectOutput(text, new Set(), new Set([55]));
+  assert.equal(result.ok, false);
+});
+
+// ── #213: createArchitectStub — verdict application, containment, degrade-open, crash-rerun ─
+
+test("createArchitectStub #213: `drop` removes exactly cfg.labels.roundPool from that pool member and posts a reasoned comment; nothing else is touched", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const poolIssues: Issue[] = [{ number: 55, title: "conflicting task", labels: [cfg.labels.roundPool] }];
+  const text = architectResult(
+    "Design note.",
+    [],
+    [{ issue: 55, verdict: "drop", reason: "mutually conflicts with another pool member." }],
+  );
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  assert.deepEqual(forge.labelsRemoved, [[55, cfg.labels.roundPool]]);
+  assert.equal(forge.labelsAdded.length, 0, "drop never adds a label — only removes the pool label");
+  assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 55 && body.includes("mutually conflicts")));
+  state.close();
+});
+
+test("createArchitectStub #213: `needs-human` ADDS cfg.labels.needsHuman and posts a reasoned comment — never removes the pool label", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const poolIssues: Issue[] = [{ number: 56, title: "ambiguous task", labels: [cfg.labels.roundPool] }];
+  const text = architectResult("Design note.", [], [{ issue: 56, verdict: "needs-human", reason: "scope is genuinely ambiguous." }]);
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  assert.deepEqual(forge.labelsAdded, [[56, cfg.labels.needsHuman]]);
+  assert.equal(forge.labelsRemoved.length, 0, "needs-human never removes the pool label");
+  assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 56 && body.includes("genuinely ambiguous")));
+  state.close();
+});
+
+test("createArchitectStub #213: `pass` (an unlisted pool member) triggers ZERO writes for that issue", async () => {
+  const forge = new FakeForge();
+  // A separate candidate anchor keeps the (unrelated, pre-existing) design-note comment off the
+  // pool members under test, so the assertions below cleanly isolate verdict-driven writes.
+  forge.planReviewCandidates = [{ number: 1, title: "candidate", labels: [] }];
+  const cfg = mkCfg();
+  const poolIssues: Issue[] = [
+    { number: 60, title: "fine task", labels: [cfg.labels.roundPool] },
+    { number: 61, title: "also fine", labels: [cfg.labels.roundPool] },
+  ];
+  const text = architectResult("Design note.", [], []); // no verdicts at all -> every pool member passes
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(forge.labelsRemoved.length, 0);
+  assert.equal(forge.labelsAdded.length, 0);
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 60 || n === 61).length, 0);
+  state.close();
+});
+
+test("createArchitectStub #213: verdict schema carries NO label field — the mapping from verdict kind to label is fixed, engine-side logic (drop -> roundPool removal, needs-human -> needsHuman addition), unreachable from session output", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ labels: { needsHuman: "custom-needs-human", roundPool: "custom-round-pool" } });
+  const poolIssues: Issue[] = [
+    { number: 70, title: "a", labels: [cfg.labels.roundPool] },
+    { number: 71, title: "b", labels: [cfg.labels.roundPool] },
+  ];
+  const text = architectResult(
+    "note",
+    [],
+    [
+      { issue: 70, verdict: "drop", reason: "x" },
+      { issue: 71, verdict: "needs-human", reason: "y" },
+    ],
+  );
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  // The CONFIGURED custom label names are what actually got applied — proof the mapping is
+  // engine-side config-driven, not something the session's JSON could ever have named.
+  assert.deepEqual(forge.labelsRemoved, [[70, "custom-round-pool"]]);
+  assert.deepEqual(forge.labelsAdded, [[71, "custom-needs-human"]]);
+  state.close();
+});
+
+test("createArchitectStub #213: candidates EMPTY but pool NON-EMPTY still runs the session — the pre-#213 short-circuit only checked candidates, which would have silently skipped batch review on an all-approved round", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = []; // nothing awaiting gate⓪ this round
+  const cfg = mkCfg();
+  const poolIssues: Issue[] = [{ number: 80, title: "already approved", labels: [cfg.labels.roundPool] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("Design note.")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(runner.calls.length, 1, "the session ran despite zero candidates");
+  // With zero candidates, the lowest-numbered POOL member is the design-note anchor fallback.
+  assert.ok(forge.issueCommentsPosted.some(([n]) => n === 80));
+  state.close();
+});
+
+test("createArchitectStub #213: candidates AND pool BOTH empty -> the early return is unchanged (no session, marker set)", async () => {
+  const forge = new FakeForge();
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  const { marker } = await createArchitectStub(deps).run({ roundId: 5, phase: "architecting", marker: null });
+  assert.equal(runner.calls.length, 0);
+  assert.equal(marker, architectMarker(5));
+  state.close();
+});
+
+test("createArchitectStub #213: exactly ONE session runs regardless of pool size, and every pool member's number/title/body reaches the prompt", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const poolIssues: Issue[] = [
+    { number: 90, title: "pool task A", labels: [cfg.labels.roundPool], body: "body A" },
+    { number: 91, title: "pool task B", labels: [cfg.labels.roundPool], body: "body B" },
+    { number: 92, title: "pool task C", labels: [cfg.labels.roundPool], body: "body C" },
+  ];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(runner.calls.length, 1);
+  for (const i of poolIssues) {
+    assert.ok(runner.calls[0]!.prompt.includes(`#${i.number}`));
+    assert.ok(runner.calls[0]!.prompt.includes(i.title));
+    assert.ok(runner.calls[0]!.prompt.includes(i.body!));
+  }
+  state.close();
+});
+
+test("createArchitectStub #213: an omitted deps.poolIssues renders the explicit empty-pool placeholder, never a blank substitution", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" }; // no poolIssues
+  await createArchitectStub(deps).run({ roundId: 6, phase: "architecting", marker: null });
+  assert.match(runner.calls[0]!.prompt, /pool is empty/);
+});
+
+test("createArchitectStub #213: degrade OPEN — an invalid session (twice) with a NON-EMPTY pool leaves every pool member untouched (no label/comment writes) and fires the DISTINCT `architect-review-degraded` event (round_id + reason), separate from `architect-degraded`", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const poolIssues: Issue[] = [{ number: 55, title: "t", labels: [cfg.labels.roundPool] }];
+  const runner = new ScriptedRunner([
+    { result: doneResult("architect-0", "just prose, no structured block at all") },
+    { result: doneResult("architect-0-retry", "still no structured block") },
+  ]);
+  const state = new State(":memory:");
+  const logged: Array<[string, unknown]> = [];
+  const realAppend = state.appendEvent.bind(state);
+  state.appendEvent = (kind: string, payload: unknown) => {
+    logged.push([kind, payload]);
+    realAppend(kind, payload);
+  };
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const { marker } = await createArchitectStub(deps).run({ roundId: 8, phase: "architecting", marker: null });
+  assert.equal(marker, architectMarker(8), "the round is never wedged");
+  assert.equal(forge.labelsRemoved.length, 0);
+  assert.equal(forge.labelsAdded.length, 0);
+  assert.equal(forge.issueCommentsPosted.length, 0, "the pool proceeds completely unfiltered — zero verdict writes");
+  assert.ok(
+    logged.some(([kind]) => kind === "architect-degraded"),
+    "the pre-existing session-degrade event still fires",
+  );
+  const reviewDegraded = logged.find(([kind]) => kind === "architect-review-degraded");
+  assert.ok(reviewDegraded, "a DISTINCT architect-review-degraded event fires — pool filtering was skipped");
+  const payload = reviewDegraded![1] as { round_id: number; reason: string };
+  assert.equal(payload.round_id, 8);
+  assert.ok(payload.reason.length > 0);
+  state.close();
+});
+
+test("createArchitectStub #213: degrade with an EMPTY pool never fires `architect-review-degraded` — nothing was skipped that would have mattered", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 61, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([{ result: failedResult("architect-0") }, { result: failedResult("architect-0-retry") }]);
+  const state = new State(":memory:");
+  const logged: Array<[string, unknown]> = [];
+  const realAppend = state.appendEvent.bind(state);
+  state.appendEvent = (kind: string, payload: unknown) => {
+    logged.push([kind, payload]);
+    realAppend(kind, payload);
+  };
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" }; // no poolIssues -> empty
+  await createArchitectStub(deps).run({ roundId: 8, phase: "architecting", marker: null });
+  assert.ok(logged.some(([kind]) => kind === "architect-degraded"));
+  assert.ok(!logged.some(([kind]) => kind === "architect-review-degraded"), "vacuous with an empty pool — never fired");
+  state.close();
+});
+
+test("createArchitectStub #213: a FIRST-attempt success that still fails validation (never retried a second TIME by runSessionWithRetry's own hook, since isValid already forced a retry) still fires architect-review-degraded once the FINAL attempt is invalid", async () => {
+  // Distinguishes this from runSessionWithRetry's OWN degradeEvent, which only fires on a
+  // SECOND invalid/failed attempt — architect-review-degraded is computed independently, right
+  // here in createArchitectStub, from the FINAL attempt's own validity (matching the existing
+  // "first-attempt success must still be validated" comment already in this module for
+  // contradictions).
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const poolIssues: Issue[] = [{ number: 55, title: "t", labels: [cfg.labels.roundPool] }];
+  const badText = "no structured block, ever";
+  const runner = new ScriptedRunner([{ result: doneResult("architect-0", badText) }, { result: doneResult("architect-0-retry", badText) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 9, phase: "architecting", marker: null });
+  const ev = state.eventsAfterId(0, ["architect-review-degraded"]);
+  assert.equal(ev.length, 1);
+  state.close();
+});
+
+test("createArchitectStub #213 crash-rerun guard: two consecutive runs of the phase with marker:null (simulating a crash between this round's writes landing and round.ts persisting the returned marker) never re-posts the SAME issue's reason comment twice", async () => {
+  const forge = new FakeForge();
+  // A separate candidate anchor keeps the (unrelated, pre-existing, unprotected) design-note
+  // comment off issue #55, so the counts below isolate the verdict-write receipt guard alone.
+  forge.planReviewCandidates = [{ number: 1, title: "candidate", labels: [] }];
+  const cfg = mkCfg();
+  const poolIssues: Issue[] = [{ number: 55, title: "t", labels: [cfg.labels.roundPool] }];
+  const text = architectResult("Design note.", [], [{ issue: 55, verdict: "drop", reason: "conflicts with another task." }]);
+  const runner = new ScriptedRunner([
+    { result: doneResult("architect-1", text) },
+    { result: doneResult("architect-2", text) }, // a FRESH session on the "rerun" — same verdict
+  ]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const stub = createArchitectStub(deps);
+  // First "attempt" — writes land, but (simulating the crash) the marker is never persisted
+  // anywhere durable this test can see (round.ts's own persistence is outside this stub).
+  await stub.run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 1);
+  assert.equal(forge.labelsRemoved.filter(([n]) => n === 55).length, 1);
+  // Second "attempt" — same round, marker STILL null (the crash-rerun contract every peripheral
+  // relies on): a FRESH session runs again, but the per-issue receipt from the first attempt
+  // guards the write — no duplicate comment, no duplicate label removal.
+  await stub.run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(
+    runner.calls.length,
+    2,
+    "a second session DOES run (round.ts's own marker gate is what's missing in this crash window, not this stub's)",
+  );
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 1, "the reason comment was NEVER reposted");
+  assert.equal(forge.labelsRemoved.filter(([n]) => n === 55).length, 1, "the label removal was not reapplied a second time");
+  state.close();
+});
+
+test("createArchitectStub #213: prompt template ships {{round.pool}} and {{labels.needsHuman}} placeholders", () => {
+  const template = loadRolePromptTemplate(undefined, defaultArchitectPromptPath());
+  assert.ok(template.includes("{{round.pool}}"));
+  assert.ok(template.includes("{{labels.needsHuman}}"));
+});
+
+test("createArchitectStub #213 P2 fix: a transient forge failure on ONE verdict's write is CONTAINED — an `architect-verdict-lost` honesty event lands for it, the REMAINING verdict is still applied, and the phase completes (returns its marker, never throws)", async () => {
+  const cfg = mkCfg();
+  class FlakyRemoveLabelForge extends FakeForge {
+    override async removeLabel(n: number, l: string): Promise<void> {
+      if (n === 55) throw new Error("simulated transient forge failure (e.g. a one-off 500)");
+      return super.removeLabel(n, l);
+    }
+  }
+  const forge = new FlakyRemoveLabelForge();
+  // A separate candidate anchor keeps the design-note comment off the pool members under test.
+  forge.planReviewCandidates = [{ number: 1, title: "candidate", labels: [] }];
+  const poolIssues: Issue[] = [
+    { number: 55, title: "drop target (forge write fails)", labels: [cfg.labels.roundPool] },
+    { number: 56, title: "needs-human target (succeeds)", labels: [cfg.labels.roundPool] },
+  ];
+  const text = architectResult(
+    "Design note.",
+    [],
+    [
+      { issue: 55, verdict: "drop", reason: "should be dropped, but its forge write will fail." },
+      { issue: 56, verdict: "needs-human", reason: "needs a human's call." },
+    ],
+  );
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const { marker } = await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  // The phase completed normally — one lost verdict never wedges it or aborts the rest.
+  assert.equal(marker, architectMarker(1));
+  // #55's LABEL write is what failed — no comment landed for it either, AND (Codex review round
+  // 2, P1: the receipt is recorded AFTER the label write succeeds, not before) no receipt landed
+  // for #55 — a future rerun this round would retry this exact verdict from scratch instead of
+  // silently skipping it forever. A PAIRED honesty event still records the loss for this pass.
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 0);
+  const applied55 = state.eventsAfterId(0, ["architect-verdict-applied"]).filter((e) => (e.payload as { issue: number }).issue === 55);
+  assert.equal(applied55.length, 0, "no receipt landed for #55 — the label write (the load-bearing effect) never succeeded");
+  const lost = state.eventsAfterId(0, ["architect-verdict-lost"]);
+  assert.equal(lost.length, 1);
+  const lostPayload = lost[0]!.payload as { round_id: number; issue: number; verdict: string; reason: string };
+  assert.equal(lostPayload.round_id, 1);
+  assert.equal(lostPayload.issue, 55);
+  assert.equal(lostPayload.verdict, "drop");
+  assert.ok(/simulated transient forge failure/.test(lostPayload.reason));
+  // #56's verdict — AFTER the failing one in the loop — is still applied in full.
+  assert.deepEqual(forge.labelsAdded, [[56, cfg.labels.needsHuman]]);
+  assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 56 && body.includes("needs a human's call")));
+  state.close();
+});
+
+test("createArchitectStub #213 P1 fix (Codex review round 2): a TRANSIENT label-write failure leaves NO receipt — a later phase pass (same round, marker still null) retries that exact verdict from scratch and succeeds, rather than the verdict being silently lost forever", async () => {
+  const cfg = mkCfg();
+  let removeLabelCalls = 0;
+  class FlakyOnceForge extends FakeForge {
+    override async removeLabel(n: number, l: string): Promise<void> {
+      removeLabelCalls++;
+      if (n === 55 && removeLabelCalls === 1) throw new Error("simulated one-off transient failure");
+      return super.removeLabel(n, l);
+    }
+  }
+  const forge = new FlakyOnceForge();
+  forge.planReviewCandidates = [{ number: 1, title: "candidate", labels: [] }];
+  const poolIssues: Issue[] = [{ number: 55, title: "t", labels: [cfg.labels.roundPool] }];
+  const text = architectResult("Design note.", [], [{ issue: 55, verdict: "drop", reason: "conflicts with another task." }]);
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }, { result: doneResult("architect-2", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  const stub = createArchitectStub(deps);
+  // First pass: the label write throws -> no receipt, an architect-verdict-lost event instead.
+  await stub.run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(state.eventsAfterId(0, ["architect-verdict-applied"]).length, 0, "no receipt after a failed label write");
+  assert.equal(state.eventsAfterId(0, ["architect-verdict-lost"]).length, 1);
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 0);
+  // Second pass, same round, marker still null (the crash-rerun contract): NO receipt exists, so
+  // this verdict is retried from scratch — the label write now succeeds, the receipt lands, and
+  // the reason comment is posted exactly once.
+  await stub.run({ roundId: 1, phase: "architecting", marker: null });
+  assert.equal(forge.labelsRemoved.filter(([n]) => n === 55).length, 1, "the retried label write succeeded");
+  assert.equal(state.eventsAfterId(0, ["architect-verdict-applied"]).length, 1, "the receipt now lands on the retry");
+  assert.equal(
+    forge.issueCommentsPosted.filter(([n]) => n === 55).length,
+    1,
+    "the reason comment is posted exactly once, on the successful retry",
+  );
+  state.close();
 });

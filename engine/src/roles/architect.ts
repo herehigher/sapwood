@@ -34,6 +34,17 @@
 // idempotence. Unlike plan-review's per-issue draft->re-review loop, the architect's whole point
 // is a CROSS-issue pass — one session sees every candidate at once, not one session per issue —
 // so there is no per-issue looping here at all.
+//
+// #213: ADDITIVE to all of the above — a SECOND, independent batch under review in the SAME
+// session/prompt/output: this round's ACTUAL pool (#212's cfg.labels.roundPool members, disjoint
+// in normal operation from the drift-review `candidates` above — see ArchitectDeps.poolIssues's
+// doc comment), each getting a per-issue VERDICT (pass/drop/needs-human) instead of a
+// contradiction flag. THE POOL-SET INVARIANT mirrors the candidate-set invariant exactly (its own
+// authoritative set, its own fail-closed/atomic check in validateArchitectOutput) — a verdict for
+// an issue never shown as a pool member is rejected the same way an out-of-candidate-set
+// contradiction is. Degrade policy is DELIBERATELY looser than the candidate-set path's: an
+// invalid/failed session lets the pool proceed UNFILTERED (never a gate, always advisory) — see
+// createArchitectStub's `architect-review-degraded` handling.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,7 +53,8 @@ import type { SapwoodConfig } from "../config/config.js";
 import { resolveRoundDirective } from "../config/directive.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import type { PeripheralStub } from "../loop/round.js";
+import { type PeripheralStub, removeRoundPoolLabel } from "../loop/round.js";
+import { capDigest } from "../retro/retro-digest.js";
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { extractMarkdownSections } from "../util/markdown.js";
@@ -92,6 +104,19 @@ export interface ArchitectDeps {
    *  through `ArchitectDeps` rather than loaded directly here so the load logic lives in exactly
    *  one place (doctrine.ts), shared with worker.ts's own injection, never duplicated. */
   doctrine?: string;
+  /** #213: this round's ROUND-POOL members (#212's cfg.labels.roundPool-labeled, dispatchable
+   *  issues) — the batch-review target for the per-issue verdict mechanism (pass/drop/
+   *  needs-human), DISTINCT from `candidates` below (this stub's own `getIssuesNeedingPlanReview`
+   *  read, the pre-existing cross-issue-contradiction target): a pool member has ALREADY cleared
+   *  gate⓪ (it carries plan:approved or verify:n/a) and is queued for THIS round's dispatch,
+   *  while a candidate has NOT yet been gate⓪-reviewed — the two sets are disjoint in normal
+   *  operation. Threaded the same way `lastMerged`/`doctrine` are: a real caller
+   *  (round-defaults.ts's createDefaultPeripherals) computes this at architect-invocation time
+   *  from a LIVE forge read (never cached across a crash-rerun) and assigns it before calling
+   *  this stub; a caller that omits it (every direct unit test in this file, and any consumer
+   *  that hasn't wired round-defaults.ts) gets an empty pool — same "nothing to batch-review"
+   *  shape as a round whose pool genuinely selected zero issues, never a fabricated one. */
+  poolIssues?: Issue[];
 }
 
 /** #132: the explicit placeholder used both when there IS no possible prior round (round 1) and
@@ -121,6 +146,17 @@ export function defaultArchitectPromptPath(): string {
 const NO_ALIGNED_GOALS_YET =
   "(No PO/goal-alignment peripheral output is available yet — #89 has not shipped. Proceed " +
   "using only the architecture chapter and this round's candidate issues below.)";
+
+/** #213: the explicit placeholder for an empty round pool (deps.poolIssues omitted, or the round
+ *  genuinely selected zero issues into its pool) — never an empty substitution. Same "explicit
+ *  placeholder, never blank" convention as NO_ALIGNED_GOALS_YET/NO_PRIOR_ROUND_YET/NO_DOCTRINE. */
+export const NO_POOL_MEMBERS = "(This round's pool is empty — there is nothing to batch-review this pass.)";
+
+/** #213: the explicit placeholder for zero drift-review candidates — reachable for the first
+ *  time now that the phase runs whenever EITHER `candidates` OR `poolIssues` is non-empty (see
+ *  createArchitectStub's early-return), so an all-approved round (every Ready issue already past
+ *  gate⓪) can legitimately have zero candidates while still having pool members to batch-review. */
+export const NO_CANDIDATES = "(No candidate issues are awaiting gate⓪ review this round.)";
 
 /** Extract PLAN.md's "## Architecture" chapter (case-insensitive heading match) — same
  *  heading-to-next-heading-of-equal-or-shallower-level slicing forge.ts's
@@ -190,14 +226,33 @@ const ArchitectContradictionSchema = z
   })
   .strict();
 
-const ArchitectMetadataSchema = z
+// #213: the per-pool-member verdict entry — deliberately carries NO label field (the issue's
+// own "label-removal containment" acceptance criterion, mirroring #212: label choice is
+// engine-side, unreachable from ANY session output). "pass" is never listed here at all — an
+// unlisted pool member IS a pass, the same "silence means no flag" convention `contradictions`
+// already uses for un-flagged candidates.
+const ArchitectVerdictSchema = z
   .object({
-    contradictions: z.array(ArchitectContradictionSchema),
+    issue: z.number().int().positive(),
+    verdict: z.enum(["drop", "needs-human"]),
   })
   .strict();
 
-const CONTRADICTION_MARKER_RE = /^<<<CONTRADICTION #(\d+)>>>[ \t]*$/gm;
+const ArchitectMetadataSchema = z
+  .object({
+    contradictions: z.array(ArchitectContradictionSchema),
+    verdicts: z.array(ArchitectVerdictSchema),
+  })
+  .strict();
+
+// #213: a SECOND own-line sub-delimiter, alongside CONTRADICTION — same BODY block, same
+// containment doctrine, distinguished by kind so a contradiction explanation and a verdict
+// reason can never be mixed up even if the SAME issue number happens to appear in both arrays
+// (disjoint in normal operation — a pool member has already cleared gate⓪, a contradiction
+// candidate hasn't — but nothing here assumes that invariant holds).
+const MARKER_RE = /^<<<(CONTRADICTION|VERDICT) #(\d+)>>>[ \t]*$/gm;
 const CONTRADICTION_MARKER_SUBSTRING = "<<<CONTRADICTION";
+const VERDICT_MARKER_SUBSTRING = "<<<VERDICT";
 
 /** Split the BODY block's raw text into the round design note (everything before the first
  *  marker) and a per-issue explanation map (everything between consecutive markers). null on any
@@ -217,32 +272,46 @@ const CONTRADICTION_MARKER_SUBSTRING = "<<<CONTRADICTION";
  *  also has a real section — the residual case, an embedded own-line marker for a section that
  *  never otherwise exists, is structurally indistinguishable from a valid output and is
  *  bounded by the candidate-set + metadata-match checks in validateArchitectOutput.) */
-function parseArchitectBody(body: string): { designNote: string; sections: Map<number, string> } | null {
-  const markers: Array<{ issue: number; index: number; end: number }> = [];
-  CONTRADICTION_MARKER_RE.lastIndex = 0;
+interface ParsedArchitectBody {
+  designNote: string;
+  /** `<<<CONTRADICTION #N>>>` sections, keyed by issue. */
+  contradictionSections: Map<number, string>;
+  /** #213: `<<<VERDICT #N>>>` sections, keyed by issue — a SEPARATE map, so a duplicate check
+   *  against one kind never collides with a legitimate section of the other kind for the same
+   *  issue number. */
+  verdictSections: Map<number, string>;
+}
+
+function parseArchitectBody(body: string): ParsedArchitectBody | null {
+  const markers: Array<{ kind: "CONTRADICTION" | "VERDICT"; issue: number; index: number; end: number }> = [];
+  MARKER_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   // biome-ignore lint/suspicious/noAssignInExpressions: standard RegExp.exec iteration retains each match for its offsets.
-  while ((m = CONTRADICTION_MARKER_RE.exec(body)) !== null) {
-    markers.push({ issue: Number(m[1]), index: m.index, end: m.index + m[0].length });
+  while ((m = MARKER_RE.exec(body)) !== null) {
+    markers.push({ kind: m[1] as "CONTRADICTION" | "VERDICT", issue: Number(m[2]), index: m.index, end: m.index + m[0].length });
   }
   const designNote = (markers.length > 0 ? body.slice(0, markers[0]!.index) : body).trim();
   if (designNote === "") return null; // the design note is required every pass — see module doc
-  const sections = new Map<number, string>();
+  const contradictionSections = new Map<number, string>();
+  const verdictSections = new Map<number, string>();
   for (let i = 0; i < markers.length; i++) {
     const marker = markers[i]!;
     const sectionEnd = i + 1 < markers.length ? markers[i + 1]!.index : body.length;
     const text = body.slice(marker.end, sectionEnd).trim();
-    if (text === "") return null; // a flagged issue with no explanation text — malformed
-    if (sections.has(marker.issue)) return null; // duplicate marker for the same issue — ambiguous
+    if (text === "") return null; // a flagged issue with no explanation/reason text — malformed
+    const sections = marker.kind === "CONTRADICTION" ? contradictionSections : verdictSections;
+    if (sections.has(marker.issue)) return null; // duplicate marker (same kind, same issue) — ambiguous
     sections.set(marker.issue, text);
   }
-  // Sub-delimiter containment (Codex round 1, P2 — see the doc comment above): any REMAINING
-  // occurrence of the marker substring after the split consumed every own-line marker is an
-  // inline/quoted mention — ambiguous by construction, fail closed.
-  if ([designNote, ...sections.values()].some((t) => t.includes(CONTRADICTION_MARKER_SUBSTRING))) {
+  // Sub-delimiter containment (Codex round 1, P2 — see the doc comment above), extended to BOTH
+  // marker kinds (#213): any REMAINING occurrence of either marker substring after the split
+  // consumed every own-line marker is an inline/quoted mention — ambiguous by construction, fail
+  // closed.
+  const allText = [designNote, ...contradictionSections.values(), ...verdictSections.values()];
+  if (allText.some((t) => t.includes(CONTRADICTION_MARKER_SUBSTRING) || t.includes(VERDICT_MARKER_SUBSTRING))) {
     return null;
   }
-  return { designNote, sections };
+  return { designNote, contradictionSections, verdictSections };
 }
 
 export interface ArchitectContradiction {
@@ -251,19 +320,37 @@ export interface ArchitectContradiction {
   explanation: string;
 }
 
+/** #213: one pool member's batch-review outcome. Only `"drop"`/`"needs-human"` ever appear here
+ *  — a "pass" is the absence of an entry (see the metadata schema's own doc comment). No label
+ *  field: which label the engine applies for each `verdict` kind is a fixed, session-unreachable
+ *  mapping in createArchitectStub (the containment acceptance criterion). */
+export interface ArchitectVerdict {
+  issue: number;
+  verdict: "drop" | "needs-human";
+  reason: string;
+}
+
 export type ArchitectValidation =
-  | { ok: true; designNote: string; contradictions: ArchitectContradiction[] }
+  | { ok: true; designNote: string; contradictions: ArchitectContradiction[]; verdicts: ArchitectVerdict[] }
   | { ok: false; reason: string };
 
 /** Parse + schema-validate + candidate-set-validate an architect session's structured output.
  *  `candidateNumbers` is the round's candidate pool — the EXACT set the session's prompt showed
  *  it (issue #110's Design section: "the engine must validate every flagged issue number against
  *  the round's candidate set... FAIL-CLOSED: any number outside the set invalidates the whole
- *  output"). This function is the single point that enforces that: it runs every check to
- *  completion and returns ok:false the moment any one fails, so a caller NEVER sees a partial
- *  `ok: true` result to selectively apply — createArchitectStub only ever writes anything after
- *  this returns ok:true for the WHOLE output. */
-export function validateArchitectOutput(text: string, candidateNumbers: ReadonlySet<number>): ArchitectValidation {
+ *  output"). `poolNumbers` is #213's ANALOGOUS authoritative set for `verdicts` — this round's
+ *  ACTUAL pool membership, independent of `candidateNumbers` (the two sets are disjoint in normal
+ *  operation, see ArchitectDeps.poolIssues's doc comment, but each metadata array is validated
+ *  against its OWN set regardless). This function is the single point that enforces BOTH
+ *  invariants: it runs every check to completion and returns ok:false the moment any one fails,
+ *  so a caller NEVER sees a partial `ok: true` result to selectively apply —
+ *  createArchitectStub only ever writes anything (contradictions OR verdicts) after this returns
+ *  ok:true for the WHOLE output, atomically. */
+export function validateArchitectOutput(
+  text: string,
+  candidateNumbers: ReadonlySet<number>,
+  poolNumbers: ReadonlySet<number>,
+): ArchitectValidation {
   const block = parseStructuredBlock(text);
   if (!block) return { ok: false, reason: "no structured output block found (missing or truncated sentinel)" };
   let metadata: unknown;
@@ -281,7 +368,7 @@ export function validateArchitectOutput(text: string, candidateNumbers: Readonly
   }
   const parsedBody = parseArchitectBody(block.body);
   if (!parsedBody) {
-    return { ok: false, reason: "BODY block is malformed — empty design note, an empty/duplicate contradiction section" };
+    return { ok: false, reason: "BODY block is malformed — empty design note, an empty/duplicate/unmatched section" };
   }
   const metaIssues = new Set(parsed.data.contradictions.map((c) => c.issue));
   // Codex round 1, P1: duplicate metadata entries for the same issue would otherwise fail OPEN —
@@ -291,7 +378,7 @@ export function validateArchitectOutput(text: string, candidateNumbers: Readonly
   if (metaIssues.size !== parsed.data.contradictions.length) {
     return { ok: false, reason: "duplicate issue in metadata contradictions" };
   }
-  const bodyIssues = new Set(parsedBody.sections.keys());
+  const bodyIssues = new Set(parsedBody.contradictionSections.keys());
   if (metaIssues.size !== bodyIssues.size || [...metaIssues].some((n) => !bodyIssues.has(n))) {
     return { ok: false, reason: "structured output metadata contradictions don't match the BODY block's sections" };
   }
@@ -304,25 +391,58 @@ export function validateArchitectOutput(text: string, candidateNumbers: Readonly
       reason: `flagged issue number(s) outside this round's candidate set: ${outOfSet.map((c) => `#${c.issue}`).join(", ")}`,
     };
   }
+
+  // #213: THE POOL-SET INVARIANT — same shape as the candidate-set invariant above, applied to
+  // `verdicts` against `poolNumbers` instead of `candidates` against `candidateNumbers`. A
+  // session verdict for an issue that was never actually shown as a pool member is exactly the
+  // same class of untrusted-output hazard the candidate-set invariant already guards against.
+  const metaVerdictIssues = new Set(parsed.data.verdicts.map((v) => v.issue));
+  if (metaVerdictIssues.size !== parsed.data.verdicts.length) {
+    return { ok: false, reason: "duplicate issue in metadata verdicts" };
+  }
+  const verdictBodyIssues = new Set(parsedBody.verdictSections.keys());
+  if (metaVerdictIssues.size !== verdictBodyIssues.size || [...metaVerdictIssues].some((n) => !verdictBodyIssues.has(n))) {
+    return { ok: false, reason: "structured output metadata verdicts don't match the BODY block's sections" };
+  }
+  const outOfPool = parsed.data.verdicts.filter((v) => !poolNumbers.has(v.issue));
+  if (outOfPool.length > 0) {
+    return {
+      ok: false,
+      reason: `verdict issue number(s) outside this round's pool: ${outOfPool.map((v) => `#${v.issue}`).join(", ")}`,
+    };
+  }
+
   const contradictions: ArchitectContradiction[] = parsed.data.contradictions.map((c) => ({
     issue: c.issue,
     severe: c.severe,
-    explanation: parsedBody.sections.get(c.issue)!,
+    explanation: parsedBody.contradictionSections.get(c.issue)!,
   }));
-  return { ok: true, designNote: parsedBody.designNote, contradictions };
+  const verdicts: ArchitectVerdict[] = parsed.data.verdicts.map((v) => ({
+    issue: v.issue,
+    verdict: v.verdict,
+    reason: parsedBody.verdictSections.get(v.issue)!,
+  }));
+  return { ok: true, designNote: parsedBody.designNote, contradictions, verdicts };
 }
 
 function describeZodError(error: z.ZodError): string {
   return error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
 }
 
-/** The reason string attached to the `architect-degraded` event / stderr line when a session
- *  degrades (runSessionWithRetry's SECOND attempt still isn't usable) — a session-level failure
- *  (crashed/timed out) is distinguished from a session that exited clean but produced output
- *  that never validated, same split plan-review.ts's reviewerDegradeReason makes. */
-function architectDegradeReason(result: RoleSessionResult, candidateNumbers: ReadonlySet<number>): string {
+/** The reason string attached to the `architect-degraded` / `architect-review-degraded` events
+ *  (and their stderr lines) when a session degrades (runSessionWithRetry's SECOND attempt still
+ *  isn't usable) — a session-level failure (crashed/timed out) is distinguished from a session
+ *  that exited clean but produced output that never validated, same split plan-review.ts's
+ *  reviewerDegradeReason makes. Shared by BOTH degrade events (#213: architect-review-degraded is
+ *  a DISTINCT event from architect-degraded, but the same underlying attempt/validation produces
+ *  both, so the reason text is computed once, here, and reused). */
+function architectDegradeReason(
+  result: RoleSessionResult,
+  candidateNumbers: ReadonlySet<number>,
+  poolNumbers: ReadonlySet<number>,
+): string {
   if (result.outcome !== "done") return `architect session failed twice (${result.outcome})`;
-  const v = validateArchitectOutput(result.resultText ?? "", candidateNumbers);
+  const v = validateArchitectOutput(result.resultText ?? "", candidateNumbers, poolNumbers);
   return v.ok ? "architect output valid" : `architect produced invalid structured output twice: ${v.reason}`;
 }
 
@@ -353,7 +473,18 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // number for a DETERMINISTIC round-design-note anchor (see below) — getIssuesNeedingPlanReview
       // makes no ordering guarantee of its own.
       const candidates = [...(await deps.forge.getIssuesNeedingPlanReview())].sort((a, b) => a.number - b.number);
-      if (candidates.length === 0) return { marker: architectMarker(roundId) };
+      // #213: this round's ACTUAL pool (cfg.labels.roundPool members) — a SEPARATE, disjoint-in-
+      // normal-operation set from `candidates` above (see ArchitectDeps.poolIssues's doc
+      // comment). Threaded by round-defaults.ts, computed at invocation time from a live forge
+      // read; an omitted/empty deps.poolIssues means "nothing to batch-review", never a fabricated
+      // pool. Sorted for the same determinism reason as `candidates`.
+      const poolIssues = [...(deps.poolIssues ?? [])].sort((a, b) => a.number - b.number);
+      // #213: run the session whenever there is EITHER a drift-review candidate OR a pool member
+      // to batch-review — the pre-#213 short-circuit only checked `candidates`, which would have
+      // silently skipped the ENTIRE pool-verdict feature on any round where every Ready issue was
+      // already gate⓪-approved (candidates empty, pool non-empty is the COMMON case in a healthy
+      // pipeline: candidates and pool members are disjoint by dispatch-approval state).
+      if (candidates.length === 0 && poolIssues.length === 0) return { marker: architectMarker(roundId) };
 
       const template = loadRolePromptTemplate(deps.cfg.roles.architect.promptFile, defaultArchitectPromptPath());
       // #128: deps.planMdPath is a TEST override only now — a real caller omits it and gets
@@ -365,12 +496,22 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // comment surface this role can write to — its writes are issue comment/label edit only);
       // the lowest-numbered candidate is an arbitrary but deterministic, reproducible anchor —
       // chosen and applied by the ENGINE, never the session (the session has no gh grant to act
-      // on a choice of its own here anyway).
-      const anchor = candidates[0]!;
+      // on a choice of its own here anyway). #213: candidates and pool members are disjoint sets,
+      // so with zero candidates (an all-approved round) the lowest-numbered POOL member is the
+      // fallback anchor instead — the early-return above guarantees at least one of the two is
+      // non-empty, so this is never undefined.
+      const anchor = candidates[0] ?? poolIssues[0]!;
       const marker_ = architectMarker(roundId);
       // THE CANDIDATE-SET INVARIANT's authoritative set: exactly what this round's prompt showed
       // the session, nothing else — see validateArchitectOutput's module doc.
       const candidateNumbers = new Set(candidates.map((c) => c.number));
+      // #213: THE POOL-SET INVARIANT's authoritative set — the ANALOGOUS "exactly what the
+      // prompt showed as pool members" set, for verdicts.
+      const poolNumbers = new Set(poolIssues.map((i) => i.number));
+      const poolDigest =
+        poolIssues.length === 0
+          ? NO_POOL_MEMBERS
+          : capDigest(poolIssues.map(formatCandidate).join("\n\n---\n\n"), deps.cfg.roles.architect.poolDigestMaxChars);
 
       const prompt = renderArchitectPrompt(template, {
         "round.id": String(roundId),
@@ -380,8 +521,10 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "round.lastMerged": deps.lastMerged ?? NO_PRIOR_ROUND_YET,
         "round.doctrine": deps.doctrine ?? NO_DOCTRINE,
         "plan.architectureChapter": architectureChapter,
-        "candidates.summary": candidates.map(formatCandidate).join("\n\n---\n\n"),
+        "candidates.summary": candidates.length === 0 ? NO_CANDIDATES : candidates.map(formatCandidate).join("\n\n---\n\n"),
+        "round.pool": poolDigest,
         "labels.blocked": deps.cfg.labels.blocked,
+        "labels.needsHuman": deps.cfg.labels.needsHuman,
         "round.directive": directive,
       });
 
@@ -415,12 +558,12 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
           round_id: roundId,
           outcome: r.outcome,
           session: r.name,
-          reason: architectDegradeReason(r, candidateNumbers),
+          reason: architectDegradeReason(r, candidateNumbers, poolNumbers),
         }),
         degradeMessage: (r) =>
-          `[sapwood:architect] round ${roundId}: ${architectDegradeReason(r, candidateNumbers)} — ` +
+          `[sapwood:architect] round ${roundId}: ${architectDegradeReason(r, candidateNumbers, poolNumbers)} — ` +
           `proceeding WITHOUT a round design note (advisory phase, round not wedged)`,
-        isValid: (r) => validateArchitectOutput(r.resultText ?? "", candidateNumbers).ok,
+        isValid: (r) => validateArchitectOutput(r.resultText ?? "", candidateNumbers, poolNumbers).ok,
       });
 
       // The final attempt's own validity decides whether anything is written — NOT just whether
@@ -429,18 +572,105 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // never validates, runSessionWithRetry has already durably recorded the degradation above
       // (on its second attempt) — there is nothing further for this phase to do; it proceeds
       // with no note, the same advisory-degrade outcome an outright session failure produces.
-      if (result.outcome === "done") {
-        const validated = validateArchitectOutput(result.resultText ?? "", candidateNumbers);
-        if (validated.ok) {
-          // Writes are applied ATOMICALLY only after the WHOLE output validated — see
-          // validateArchitectOutput's module doc: a run with one valid and one out-of-set flag
-          // never reaches here at all (validated.ok is false for the ENTIRE output in that case).
-          await deps.forge.addIssueComment(anchor.number, `${validated.designNote}\n\n${marker_}`);
-          for (const c of validated.contradictions) {
-            await deps.forge.addIssueComment(c.issue, c.explanation);
-            if (c.severe) await deps.forge.addLabel(c.issue, deps.cfg.labels.blocked);
+      const validated = result.outcome === "done" ? validateArchitectOutput(result.resultText ?? "", candidateNumbers, poolNumbers) : null;
+      if (validated?.ok) {
+        // Writes are applied ATOMICALLY only after the WHOLE output validated — see
+        // validateArchitectOutput's module doc: a run with one valid and one out-of-set flag
+        // never reaches here at all (validated.ok is false for the ENTIRE output in that case).
+        await deps.forge.addIssueComment(anchor.number, `${validated.designNote}\n\n${marker_}`);
+        for (const c of validated.contradictions) {
+          await deps.forge.addIssueComment(c.issue, c.explanation);
+          if (c.severe) await deps.forge.addLabel(c.issue, deps.cfg.labels.blocked);
+        }
+        // #213: apply pool verdicts. `pass` is implicit (unlisted -> zero writes, per the
+        // metadata schema's own doc comment) — this loop only ever sees `drop`/`needs-human`.
+        //
+        // Per-verdict write ORDER (Codex review round 2, P1 — reordered from an earlier
+        // receipt-first draft): (1) the LABEL write (removeRoundPoolLabel / addLabel), (2) the
+        // `architect-verdict-applied` receipt, (3) the reason comment. This ordering is load-
+        // bearing, not cosmetic:
+        //   - The label write is the ACTUAL governance effect (a dropped issue leaving the pool;
+        //     a needs-human hold landing) and is naturally IDEMPOTENT — GitHub no-ops a repeat
+        //     add/remove — so it is always safe to retry on a crash-rerun. It must therefore
+        //     happen BEFORE the receipt: a receipt recorded first (the earlier draft's order)
+        //     would let a crash between the receipt and the label write PERMANENTLY lose the
+        //     label effect — the rerun sees the receipt and skips the issue outright, so a
+        //     "dropped" issue silently stays pooled and gets dispatched anyway, or a
+        //     "needs-human" hold never lands. That failure mode is worse than the one this
+        //     receipt exists to prevent.
+        //   - The receipt now attests "the label effect has landed" — recorded immediately after
+        //     the label write succeeds, before the comment.
+        //   - The comment is the ONLY genuinely non-idempotent write here (a repeat post creates
+        //     a SECOND comment) and is placed last, still guarded by the same receipt: a rerun
+        //     that finds the receipt skips straight past this issue, so the comment is never
+        //     reposted.
+        // Crash-window accounting under this order: before/at the label write -> no receipt was
+        // recorded -> a rerun redoes the whole verdict from scratch (the label write is
+        // idempotent, so this is harmless, and the comment could not have landed yet either).
+        // After the receipt but before the comment -> the reason comment is lost for that pass
+        // (bounded, cosmetic — the load-bearing label effect already landed) — an accepted
+        // trade-off, same "never a duplicate, accept a bounded miss" philosophy #232's own
+        // receipts document elsewhere in this codebase.
+        const alreadyApplied = new Set(
+          deps.state
+            .eventsAfterId(0, ["architect-verdict-applied"])
+            .filter((e) => (e.payload as { round_id?: unknown }).round_id === roundId)
+            .map((e) => (e.payload as { issue: number }).issue),
+        );
+        for (const v of validated.verdicts) {
+          if (alreadyApplied.has(v.issue)) continue; // already applied this round — crash-rerun replay
+          // Failure containment (#232-pattern, unchanged in spirit from the receipt reorder
+          // above): a TRANSIENT forge failure here (not a crash — a real thrown error, e.g. one
+          // flaky removeLabel call) must never propagate — an uncaught throw would abort every
+          // REMAINING verdict in this loop and throw the whole advisory phase. Contained
+          // per-issue, mirroring align.ts's persistTriageDecision: on failure, record a PAIRED
+          // `architect-verdict-lost` honesty event (round_id, issue, verdict, reason) + a log
+          // line, then CONTINUE. A transient LABEL-write failure now (post-reorder) leaves NO
+          // receipt behind — an IMPROVEMENT over the pre-reorder shape: a future phase rerun this
+          // round will retry this exact verdict instead of having it silently swallowed forever.
+          try {
+            if (v.verdict === "drop") {
+              // #147/#212 containment: the ONLY sanctioned way to remove the pool label — fails
+              // closed for any other label, so a schema/typo mistake can never reach a different
+              // one via this call site.
+              await removeRoundPoolLabel(deps.forge, deps.cfg, v.issue, deps.cfg.labels.roundPool);
+            } else {
+              // needs-human: ADD the label — #147 semantics, only a human ever removes it.
+              await deps.forge.addLabel(v.issue, deps.cfg.labels.needsHuman);
+            }
+            // The load-bearing label effect landed — NOW the receipt attests to it.
+            deps.state.appendEvent("architect-verdict-applied", { round_id: roundId, issue: v.issue, verdict: v.verdict });
+            await deps.forge.addIssueComment(v.issue, v.reason);
+          } catch (e) {
+            const reason = String(e);
+            (deps.log ?? console.error)(
+              `[sapwood:architect] round ${roundId}: verdict application failed for #${v.issue} (${v.verdict}) — ` +
+                `LOST this pass: ${reason}`,
+            );
+            try {
+              deps.state.appendEvent("architect-verdict-lost", { round_id: roundId, issue: v.issue, verdict: v.verdict, reason });
+            } catch {
+              /* best-effort honesty event — the log line above is the fallback record */
+            }
           }
         }
+      } else if (poolIssues.length > 0) {
+        // #213 AC4 — degrade OPEN: an invalid/failed session (after runSessionWithRetry's retry)
+        // never filters the pool — every pool member simply proceeds UNFILTERED (no verdict is
+        // ever applied without a validated session output), and the skip is made OBSERVABLE via
+        // its OWN honesty event, DISTINCT from `architect-degraded` above (that one already fired
+        // when this was a second-attempt session failure; this one specifically records "pool
+        // filtering was skipped", independent of whether the underlying cause was a session
+        // failure or an invalid-output validation failure — including a first-attempt success
+        // that still failed to validate, a case runSessionWithRetry's OWN degrade hook never
+        // sees). Gated on a non-empty pool: with nothing to batch-review, "filtering was skipped"
+        // would be a vacuous, valueless event.
+        const reason = architectDegradeReason(result, candidateNumbers, poolNumbers);
+        deps.state.appendEvent("architect-review-degraded", { round_id: roundId, reason });
+        (deps.log ?? console.error)(
+          `[sapwood:architect] round ${roundId}: pool review degraded — this round's pool proceeds UNFILTERED ` +
+            `(advisory, never blocks dispatch): ${reason}`,
+        );
       }
 
       return { marker: marker_ };

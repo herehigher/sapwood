@@ -745,3 +745,133 @@ test("runRounds integration: KILL_SWITCH blocks every real peripheral — none o
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #213: architect batch review of the round pool — round-defaults wiring ─────────────────
+
+test("architecting stub (#213): only cfg.labels.roundPool-labeled, dispatchable (getReadyIssues) issues reach {{round.pool}} — a non-pool Ready issue is excluded even though it's dispatchable", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }]; // keeps the phase from short-circuiting for unrelated reasons
+  forge.ready = [
+    { number: 40, title: "pool member A", labels: [cfg.labels.roundPool], body: "body of pool member A" },
+    { number: 41, title: "NOT a pool member", labels: [], body: "body of a dispatchable-but-unpooled issue" },
+  ];
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const round = state.startRound("2026-07-17T00:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const architectCall = runner.calls.find((c) => c.roleId === "architect");
+  assert.ok(architectCall, "the architect session was dispatched");
+  assert.ok(architectCall!.prompt.includes("pool member A"));
+  assert.ok(architectCall!.prompt.includes("body of pool member A"));
+  assert.ok(!architectCall!.prompt.includes("NOT a pool member"), "a dispatchable issue lacking the pool label is not pool context");
+  state.close();
+});
+
+test("architecting stub (#213): the pool is computed FRESH at every invocation (live forge read, never cached across calls) — a later call sees the CURRENT label state, not a stale snapshot from an earlier one", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  forge.ready = [{ number: 50, title: "first-round pool member", labels: [cfg.labels.roundPool] }];
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const round1 = state.startRound("2026-07-17T00:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round1.round_id, phase: "architecting", marker: null });
+  const firstCall = runner.calls.find((c) => c.roleId === "architect")!;
+  assert.ok(firstCall.prompt.includes("first-round pool member"));
+
+  // Simulate the NEXT round selecting a completely different pool (the live label state changed
+  // between invocations) — the SAME factory-built stub must reflect it, proving the pool isn't
+  // threaded once at factory-construction time. (The scripted runner's un-validating output makes
+  // runSessionWithRetry retry once per invocation — filtering by prompt CONTENT rather than a
+  // fixed index sidesteps having to count attempts.)
+  const callsBeforeRound2 = runner.calls.filter((c) => c.roleId === "architect").length;
+  forge.ready = [{ number: 51, title: "second-round pool member", labels: [cfg.labels.roundPool] }];
+  const round2 = state.startRound("2026-07-17T01:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round2.round_id, phase: "architecting", marker: null });
+  const round2Calls = runner.calls.filter((c) => c.roleId === "architect").slice(callsBeforeRound2);
+  assert.ok(round2Calls.length > 0, "round 2 dispatched at least one architect session");
+  assert.ok(round2Calls.every((c) => c.prompt.includes("second-round pool member")));
+  assert.ok(
+    round2Calls.every((c) => !c.prompt.includes("first-round pool member")),
+    "the stale first round's pool member does not leak into round 2's calls",
+  );
+  state.close();
+});
+
+test("architecting stub (#213): {{round.pool}} is deterministically capped at cfg.roles.architect.poolDigestMaxChars, the SAME capDigest-marked-truncation contract as {{round.lastMerged}}", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { architect: { poolDigestMaxChars: 200 } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  forge.ready = Array.from({ length: 50 }, (_, i) => ({
+    number: 100 + i,
+    title: `pool member ${i}`,
+    labels: [cfg.labels.roundPool],
+    body: "x".repeat(50),
+  }));
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const round = state.startRound("2026-07-17T00:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const architectCall = runner.calls.find((c) => c.roleId === "architect")!;
+  assert.match(architectCall.prompt, /truncated/i, "the oversize pool digest is deterministically, markedly truncated");
+  state.close();
+});
+
+test("architecting stub (#213): a pool-member forge read failure degrades to an EMPTY pool (the explicit placeholder), never a thrown phase", async () => {
+  const state = new State(":memory:");
+  class FailReadyForge extends FakeForge {
+    override async getReadyIssues(): Promise<Issue[]> {
+      throw new Error("simulated forge failure");
+    }
+  }
+  const forge = new FailReadyForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  const logged: string[] = [];
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, log: (line) => logged.push(line) });
+  const round = state.startRound("2026-07-17T00:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const architectCall = runner.calls.find((c) => c.roleId === "architect")!;
+  assert.ok(architectCall, "the phase never throws — the architect session still ran");
+  assert.match(architectCall.prompt, /pool is empty/);
+  assert.ok(logged.some((l) => /pool-member read failed/.test(l)));
+  state.close();
+});
+
+test("architecting stub (#213 Codex review round 2, finding 3): a pool-member forge read failure ALSO records a durable `architect-review-degraded` honesty event (round_id + reason) — not just an ephemeral log line, so a real non-empty pool sitting unreviewed on GitHub is observable, not silent", async () => {
+  const state = new State(":memory:");
+  class FailReadyForge extends FakeForge {
+    override async getReadyIssues(): Promise<Issue[]> {
+      throw new Error("simulated forge failure");
+    }
+  }
+  const forge = new FailReadyForge();
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner(forge, cfg);
+  forge.planReviewCandidates = [{ number: 5, title: "pending design", labels: [] }];
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const round = state.startRound("2026-07-17T00:00:00.000Z");
+  await peripherals.architecting!.run({ roundId: round.round_id, phase: "architecting", marker: null });
+  const events = state.eventsAfterId(0, ["architect-review-degraded"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { round_id: number; reason: string };
+  assert.equal(payload.round_id, round.round_id);
+  assert.match(payload.reason, /pool-member read failed/);
+  state.close();
+});
+
+test("createDefaultPeripherals (#213 / #127): roles.architect.enabled=false -> the architecting phase is OMITTED entirely, same as before #213 — no architect-review-degraded event, no session, no spam", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { architect: { enabled: false } } });
+  forge.ready = [{ number: 40, title: "pool member", labels: [cfg.labels.roundPool] }];
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  assert.equal(peripherals.architecting, undefined, "the phase is omitted, not a degraded no-op");
+  state.close();
+});

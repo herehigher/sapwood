@@ -206,7 +206,9 @@ reviewer:
 #     model: sonnet
 #     effort: medium
 #   architect: # #90: round design/review between goal alignment and dispatch — issues-only
-#     #          writes (comments a round design note; flags contradicting issues).
+#     #          writes (comments a round design note; flags contradicting issues); #213:
+#     #          ALSO batch-reviews this round's actual pool (labels.roundPool members),
+#     #          returning a pass/drop/needs-human verdict per pool member (see below).
 #     # promptFile: prompts/my-architect.md
 #     #                   Unset = the engine's shipped prompts/architect.md.
 #     model: sonnet
@@ -216,6 +218,16 @@ reviewer:
 #                        # accepted for back-compat: if only this key is set, it wins (one
 #                        # deprecation line logged at config load); if goal.file is ALSO set and
 #                        # disagrees, config load is a hard error naming both keys.
+#     lastMergedMaxChars: 10000 # #132: cap on the {{round.lastMerged}} text substituted into the
+#                               # architect prompt (the previous round's merged-PR outcomes, read
+#                               # from the persisted round artifact, never a live forge read).
+#                               # Numbers-only content, so smaller than the sibling caps below.
+#     poolDigestMaxChars: 20000 # #213: cap on the {{round.pool}} text substituted into the
+#                               # architect prompt — number/title/body for every labels.roundPool
+#                               # member, engine-assembled at invocation time from a live forge
+#                               # read. Full issue bodies (like candidates.summary), so sized like
+#                               # po.backlogDigestMaxChars below rather than lastMergedMaxChars
+#                               # above. Same deterministic-truncation, marked-cut contract.
 #     enabled: true      # #127: false -> the architecting phase no-ops every round
 #   harvest: # #91: round-close summary — comments round context onto this round's
 #     #        needs-human issues. Issue-comment writes only (no labels, no body edits).
