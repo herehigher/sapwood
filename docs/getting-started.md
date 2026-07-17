@@ -162,7 +162,7 @@ Code session opened in the target repo:
     flight (running workers, PRs moving through the review/merge gate) keeps going
     normally. `--resume` lifts it.
 
-  See [`security.md`](security.md#human-controls) for the full semantics, including how
+  See [`security.md`](security.md#two-tier-human-controls) for the full semantics, including how
   pause interacts with `--until-idle`.
 
 ## Writing a `Ready` issue
@@ -192,7 +192,7 @@ As of gate⓪ (#88), a plan being present isn't enough on its own either: the co
 `getReadyIssues` will dispatch an issue without `labels.verifyNa` — it
 means the plan-reviewer peripheral judged the acceptance criteria and verification plan
 actually executable, not just present. See
-[`security.md`](security.md#plan-approved) for the full gate. The default rounds driver
+[`security.md`](security.md#the-planapproved-label-and-gate-88) for the full gate. The default rounds driver
 runs the plan-reviewer peripheral each round and applies it automatically when it approves
 a plan; `sapwood init` provisions the label like `sapwood:verify:n/a` and
 `sapwood:origin:agent` above.
@@ -200,7 +200,7 @@ a plan; `sapwood init` provisions the label like `sapwood:verify:n/a` and
 Any issue a human didn't personally author — including one an agent role opens on your
 behalf — should carry the configured `labels.originAgent` label (`sapwood:origin:agent` by
 default); see
-[`security.md`](security.md#origin-agent) for why.
+[`security.md`](security.md#the-originagent-label-convention) for why.
 
 ## Next steps
 

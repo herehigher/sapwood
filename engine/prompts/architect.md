@@ -7,8 +7,9 @@ independent missions every pass:
    any worker touches them: cross-issue consistency, interface boundaries, risks — and flagging
    any candidate whose planned approach contradicts the architecture this project has already
    locked in.
-2. A BATCH REVIEW of this round's actual POOL (the bounded set of issues already approved and
-   about to be dispatched THIS round) — one session over the whole pool catches mutually-
+2. A BATCH REVIEW of this round's actual POOL (the bounded set of issues selected to be dispatched
+   THIS round, once each clears gate⓪ — a pool member may still be AWAITING that gate⓪ review, not
+   necessarily already approved, #214) — one session over the whole pool catches mutually-
    conflicting tasks, tasks that contradict the locked architecture direction, and tasks that
    should be merged/split, BEFORE any worker is paid to build them. Every pool member gets a
    verdict: `pass` (say nothing — the default), `drop` (send it back to plain Ready, re-selectable
@@ -16,8 +17,13 @@ independent missions every pass:
    before this proceeds — a reasoned comment explains what). See "This round's pool" and
    "Structured output" below for the exact mechanics.
 
-Candidates and pool members are normally DISJOINT sets (a candidate hasn't cleared gate⓪ yet; a
-pool member already has) — you may see one, both, or neither non-empty in a given pass.
+Candidates and pool members MAY OVERLAP (#214): the pool's own candidate source is Ready lane
+minus needs-human/blocked, which includes issues still awaiting their first gate⓪ plan review
+— so a pool member that hasn't cleared gate⓪ yet legitimately appears in BOTH lists at once, a
+candidate for your design-pass note AND a pool member requiring its own verdict below. Don't
+assume the lists are disjoint or that appearing in one exempts an issue from the other — you may
+see one, both, or neither list non-empty in a given pass, and an issue in both lists still gets
+full, independent treatment from each section.
 
 ## You have no GitHub write access at all
 
@@ -110,11 +116,16 @@ isn't a candidate here.
 
 ## This round's pool
 
-This is the SEPARATE set your batch-review verdicts apply to — this round's actual, bounded
-dispatch pool (#212), already past gate⓪. Every issue number you give a `drop`/`needs-human`
-verdict MUST be one of these — the engine independently checks this and rejects your ENTIRE
-output, atomically, if even one verdict names an issue that isn't a pool member here. Do NOT
-give a verdict to a candidate issue from the section above; they are different lists.
+This is the set your batch-review verdicts apply to — this round's actual, bounded dispatch pool
+(#212). Every issue number you give a `drop`/`needs-human` verdict MUST be one of these — the
+engine independently checks this and rejects your ENTIRE output, atomically, if even one verdict
+names an issue that isn't a pool member here. EVERY pool member below is eligible for a verdict —
+including one that ALSO appears in the candidate-issues list above (a pool member still awaiting
+its first gate⓪ plan review, #214): give it a verdict if warranted regardless of whether it also
+appears above. The rule is which list each OUTPUT KIND validates against, not that the lists are
+mutually exclusive: a contradiction flag must name a candidate-issues number, a verdict must name
+a pool-issues number — naming the wrong kind of number for a given output (not an issue's mere
+presence in both lists) is what gets rejected.
 
 <pool-issues>
 {{round.pool}}

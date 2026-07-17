@@ -467,6 +467,15 @@ an outright session crash. The shipped default prompt lives at
 `engine/prompts/plan-reviewer.md` (`roles.planReviewer.promptFile` overrides it — same
 `#74` pattern as `worker.promptFile`).
 
+**`plan:approved` is re-endorsed, not permanent (#214).** The plan-reviewer's candidate
+sweep above is now scoped to the round pool rather than the whole Ready lane, and a
+prior round's `plan:approved` is re-checked — a lightweight, zero-forge-write-on-confirm
+session — every time that issue re-enters a pool, before its approval is trusted for
+dispatch again; a session that can't confirm or fails escalates `needs-human` the same
+way an initial review does. The label itself is never removed by that check either way.
+See [`docs/PLAN.md`](PLAN.md#v02-north-star-the-round-orchestrator) (the "gate⓪ is scoped
+to the round pool..." locked decision, issue #214) for the full detail.
+
 ## See also
 
 - [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `cost`,
