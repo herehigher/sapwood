@@ -382,6 +382,27 @@ silent no-op, never a wedged round. `retro` is the one exception: a worker-class
 session with `Read` + local git only (proposals land exclusively as PRs, never a
 direct write) — see [`security.md`](security.md) for the full model.
 
+**Ambient repo context is received by design, and recorded, not sealed (#236).** Every
+role session above still runs `claude -p` inside a real repo worktree, so it
+legitimately absorbs that worktree's `CLAUDE.md`, the user's global `CLAUDE.md`/
+auto-memory, and the CLI's other dynamic system-prompt sections — same as any
+interactive session would. This is intentional: the trust boundary here is
+action-side (what a session can *do* — the empty tool allowlist above, the
+credential-stripped spawn env, [#219](https://github.com/herehigher/sapwood/issues/219)),
+never content-side (what it can *read*), and repo conventions living in `CLAUDE.md`
+are exactly what a role session should absorb. Sealing this channel (a clean,
+`--bare`-style directory with no ambient `CLAUDE.md`) is reserved for **benchmark**
+runs only — see [`security.md`](security.md#ambient-repo-context-record-dont-seal-236)
+for the full rationale, the isolation recipe, and why `--bare` is never acceptable for
+production dispatch (it also disables hooks, and the guard hook must stay live). Every
+peripheral session attempt records a **context manifest** — every effective
+`CLAUDE.md`/policy source it saw (git-recoverable ones as path+commit+hash, mutable
+ones like the user's global `CLAUDE.md` as a full content-addressed snapshot, never a
+bare hash of content that could later change), the model/CLI/tool-schema/prompt
+actually used, MCP server availability, the worktree's resolved HEAD, and the
+settings/guard-hook hashes — so two attempts of the same phase are independently
+diffable rather than assumed comparable.
+
 **`retro` holds no `gh` grant at all (#111).** Reads: its prompt is seeded with an
 engine-built round-scoped digest — PR descriptions + diffs + review signals for every
 PR the round touched, comments/labels for every escalated issue, and the round's

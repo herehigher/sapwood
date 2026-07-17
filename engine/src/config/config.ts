@@ -236,7 +236,19 @@ const Labels = z
   .strict();
 
 // #87: peripheral role sessions (plan-reviewer, plan-drafter, ...) are cheap, issues-only,
-// text-judgment tasks — no code, no repo context beyond what's substituted into the prompt.
+// text-judgment tasks — no code, no forge credentials, no `gh`/git write capability (#110's
+// empty ROLE_ALLOWED_TOOLS + #218's credential-stripped spawn env). #236 (locked ruling,
+// 2026-07-17): they DO receive ambient repo context by design — `claude -p` in a repo worktree
+// legitimately absorbs that worktree's CLAUDE.md, the user's global CLAUDE.md/memory, and the
+// CLI's other dynamic system-prompt sections, same as any interactive session would. The trust
+// boundary here is action-side (#219: what a session can DO), never content-side (what it can
+// READ) — sealing this channel would contradict that locked boundary. The obligation is
+// honesty/diagnosability, not isolation: every session attempt's effective context is recorded
+// (peripheral.ts's context-manifest assembly, state.ts's context_manifests table), never
+// silently varying between retries. See docs/security.md ("Ambient repo context") and
+// docs/configuration.md for the channel and its rationale; docs/security.md also documents the
+// clean-directory `--bare`-style isolation recipe for BENCHMARK runs only (never production —
+// `--bare` disables hooks, so the guard can't ship with it).
 // Default to a lighter model/effort than worker.model/effort (which does real implementation
 // work); still fully YAML-tunable per role, same as every other user-facing knob here.
 const RoleSession = z

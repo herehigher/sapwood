@@ -127,6 +127,92 @@ The dangerous verbs `guard.ts` already blocks category-C are unchanged, and retr
 old `gh` deny patterns are kept byte-identical as regression trip-wires — the same
 stance the issues-only roles took after #110.
 
+## Ambient repo context: record, don't seal (#236)
+
+Every session above — worker or peripheral — spawns `claude -p` **inside a real repo
+worktree**. That means it legitimately absorbs the target repo's `CLAUDE.md`, the
+user's global `CLAUDE.md`/auto-memory, and the CLI's other dynamic system-prompt
+sections, exactly like any interactive session would. An earlier internal note claimed
+peripheral role sessions got "no repo context beyond what's substituted into the
+prompt" — that was never accurate once sessions ran in a real worktree, and the claim
+is now corrected at its source (`config.ts`'s `RoleSession` schema comment).
+
+**Owner ruling (2026-07-17), Codex concurring after challenge: this channel stays
+open in production.** Sealing it — running with no ambient `CLAUDE.md` at all — would
+move the trust boundary to the *content* side, contradicting the locked boundary
+this page already states above and in [PLAN.md](PLAN.md#security--trust-model-trusted-first-designed-toward-public):
+the boundary is what a session can **do** (the empty tool allowlist, #110; the
+credential-stripped spawn env, #218), never what it can **read**. Repo conventions
+living in `CLAUDE.md` are exactly what a role session *should* absorb — the same
+reason a human contributor reads it too. The obligation this channel creates is
+**honesty and diagnosability, not isolation**: record what each session attempt
+actually saw, so ambient drift between retries (a `CLAUDE.md` edited between attempt 1
+and attempt 2, a dirty worktree, a config change) never makes two attempts of the same
+phase look comparable when they weren't.
+
+**The context manifest.** Every peripheral role session attempt (`RoleRunner.run()` in
+`peripheral.ts`) assembles a manifest right before its worktree is deleted — role
+sessions hold no write-capable tool grant at all (see above), so the worktree is
+provably unchanged from spawn time, making this equivalent to capturing "at spawn"
+without racing the CLI's own worktree-creation step. It records:
+
+- every effective `CLAUDE.md`/policy source it found: **git-recoverable** ones (the
+  worktree's own `CLAUDE.md`, pinned to the worktree's resolved HEAD commit) as
+  path + commit + hash only; **mutable** ones (the user's global `CLAUDE.md`, the
+  auto-memory file the session's own init report named) as a full **content-addressed
+  snapshot** — the actual content, not a bare hash of something that could later
+  change or disappear;
+- the model/CLI version/tool-schema/prompt actually used — read from the session's
+  *own* stream-json init report where possible (`roles/worker.ts`'s
+  `parseSessionInit`), so a fallback-model switch or a CLI upgrade mid-fleet is
+  visible rather than assumed to match the request;
+- MCP server availability (name + live connection status, from the same init report);
+- the worktree's resolved git HEAD (via a pure-filesystem read of git's own plumbing
+  files — see below — never a `git status` call); and
+- hashes of the `--settings` JSON and the guard hook file, so a hook/config change
+  between attempts is also detectable.
+
+Manifests persist in the state DB's `context_manifests` table, keyed by
+`(round, phase, role, session, attempt)` — the same tuple issue #231's separately
+developed input manifest will eventually join on. That linkage is deliberately **not**
+built here: this table is self-contained (its own migration, its own `State` methods),
+so the two features merge independently regardless of order.
+
+**Why no live `git status`.** This engine structurally never execs `git` outside
+worker.ts's `claude` CLI launch and `gh.ts`'s `gh` calls — pinned by a grep-invariant
+test (`worker.test.ts`, #69) that also bans passing a `cwd` to any subprocess, so the
+engine cannot exec git *in a worker worktree* even accidentally. The context manifest
+honors that boundary: a worktree's HEAD commit is recovered by reading git's own
+plumbing files directly (`.git`'s `gitdir:` pointer, `HEAD`, loose/packed refs) —
+pure filesystem, no subprocess — and "dirty" is recorded as a **structural**
+guarantee (role sessions hold no write-capable tool, so their worktree cannot become
+dirty by their own action) rather than a measured `git status`.
+
+### Benchmark isolation recipe (evals only — never production)
+
+Isolation is the *correct* tool for one use case: comparing models/prompts/configs in
+a controlled eval where ambient repo/user state must NOT leak into the comparison. For
+that case only, run `claude -p` against a **clean, throwaway directory** with explicit,
+full prompt injection instead of ambient discovery:
+
+- a fresh, empty working directory (no repo `CLAUDE.md`, no prior session state);
+- `--system-prompt` / `--system-prompt-file` and `--append-system-prompt[-file]` to
+  supply exactly the context the eval wants the model to have, explicitly;
+- `--add-dir` only for the specific paths the eval needs;
+- `--mcp-config` (or omit MCP entirely) and `--settings` to pin the exact tool/MCP
+  surface, rather than inheriting whatever's ambient on the runner machine;
+- `--agents`/`--plugin-dir` pinned or omitted, same rationale.
+
+**`--bare` is the CLI's own shorthand for most of the above** (skips hooks, LSP,
+plugin sync, attribution, auto-memory, background prefetches, keychain reads, and
+`CLAUDE.md` auto-discovery in one flag) and is a reasonable starting point for a
+benchmark harness. **It is not acceptable for production dispatch under any
+configuration**: `--bare` disables hooks, and the fail-closed guard hook
+(`guard.ts`) is the actual producer≠reviewer≠merger safety boundary this whole page
+describes — running without it is running unguarded, full stop, regardless of how
+convenient the isolation is for reproducibility. Benchmark runs are a separate,
+offline, human-supervised activity; they never feed sapwood's own dispatch loop.
+
 ## Human-merge-only paths
 
 Some files are structurally off-limits to an autonomous worker because changing them

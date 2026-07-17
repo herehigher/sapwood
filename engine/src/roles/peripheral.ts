@@ -14,10 +14,12 @@
 // unchanged guard hook both block it — so its worktree is always safe to delete afterward).
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
-import type { ModelUsageEntry, State } from "../state/state.js";
+import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
+import { assembleContextManifest, type ContextManifest, readAmbientSourceContent, resolveWorktreeHead } from "./context-manifest.js";
 import {
   claudeArgs,
   discoverClaudeBin,
@@ -25,6 +27,7 @@ import {
   parseCostUsd,
   parseModelUsage,
   parseResultText,
+  parseSessionInit,
   type SpawnedSession,
   spawnClaudeSession,
 } from "./worker.js";
@@ -136,6 +139,15 @@ export interface RoleSessionResult {
    *  missing file means (retro.ts treats it as an invalid attempt: fail closed, retry once,
    *  then the degrade path — never a silently skipped deliverable). */
   scratchText?: string;
+  /** #236: this attempt's ambient-context manifest — every effective CLAUDE.md/policy source,
+   *  model/CLI/tool-schema/prompt-template info, MCP availability, worktree HEAD, and settings/
+   *  hook hashes, gathered right before the worktree is deleted below (role sessions hold no
+   *  write-capable tool, so the worktree is unchanged from spawn time — see WorktreeGitState's
+   *  `dirtyBasis` doc). Always present on a REAL RoleRunner.run() result; optional here only so
+   *  existing test fakes (which construct a RoleSessionResult literal directly, never through
+   *  RoleRunner.run()) keep compiling without updating every literal — same convention
+   *  resultText/scratchText already use. */
+  contextManifest?: ContextManifest;
 }
 
 export interface RoleRunnerDeps {
@@ -359,6 +371,20 @@ export class RoleRunner {
       }
     }
 
+    // #236: gather the ambient-context manifest BEFORE the worktree deletion below — same
+    // "capture before teardown" timing as the scratch-file read above. Role sessions hold no
+    // write-capable tool grant, so the worktree is unchanged from spawn time: capturing here
+    // (once the CLI has definitely created it) is equivalent to capturing "at spawn" for this
+    // session class, without racing the CLI's own worktree-creation step. Never lets manifest
+    // gathering fail the session — every read inside is individually tolerant, and the whole
+    // block is still guarded here as defense-in-depth.
+    let contextManifest: ContextManifest | undefined;
+    try {
+      contextManifest = this.gatherContextManifest(name, opts, jsonl, settingsJson);
+    } catch (e) {
+      (this.deps.log ?? console.error)(`[sapwood:context-manifest] session ${name}: failed to assemble (non-fatal): ${String(e)}`);
+    }
+
     // Always delete the worktree — see the module doc: a role session never writes code
     // (allowedTools scoping + the unchanged guard hook both block it), so unlike worker.ts's
     // dirty-vs-clean retention there is no WIP that could ever need preserving here. Retro's
@@ -378,7 +404,61 @@ export class RoleRunner {
       name,
       resultText,
       ...(scratchText !== undefined ? { scratchText } : {}),
+      ...(contextManifest !== undefined ? { contextManifest } : {}),
     };
+  }
+
+  /** #236: assemble one session's ambient-context manifest from real environment data — the
+   *  session's own stream-json init report (worker.ts's parseSessionInit), the worktree's
+   *  CLAUDE.md + resolved git HEAD, the user-global CLAUDE.md, and the auto-memory file the
+   *  session's own init report named. Every read is individually tolerant (absence -> an
+   *  AbsentSource, never a throw); assembleContextManifest itself is pure and never throws. */
+  private gatherContextManifest(name: string, opts: RoleSessionOpts, jsonl: string, settingsJson: string): ContextManifest {
+    const init = parseSessionInit(jsonl);
+    const worktreePath = join(this.worktreeRoot, name);
+    const head = resolveWorktreeHead(worktreePath);
+    const repoClaudeMdPath = join(worktreePath, "CLAUDE.md");
+    const userClaudeMdPath = join(homedir(), ".claude", "CLAUDE.md");
+    const sources = [
+      {
+        label: "repo CLAUDE.md",
+        path: repoClaudeMdPath,
+        content: readAmbientSourceContent(repoClaudeMdPath),
+        ...(head ? { gitCommit: head } : {}),
+      },
+      // Mutable — edited out-of-band by the user, no commit to pin recovery to.
+      { label: "user-global CLAUDE.md", path: userClaudeMdPath, content: readAmbientSourceContent(userClaudeMdPath) },
+      ...(init.memoryPathAuto
+        ? [
+            {
+              label: "auto-memory MEMORY.md",
+              path: join(init.memoryPathAuto, "MEMORY.md"),
+              content: readAmbientSourceContent(join(init.memoryPathAuto, "MEMORY.md")),
+            },
+          ]
+        : []),
+    ];
+    return assembleContextManifest({
+      sources,
+      model: init.model ?? opts.model,
+      cliBin: this.bin,
+      cliVersion: init.cliVersion,
+      toolSchemaTools: init.tools,
+      promptTemplateSource: opts.prompt,
+      mcpTools: init.mcpServers.map((s) => `${s.name}:${s.status}`),
+      worktree: {
+        path: worktreePath,
+        head,
+        headResolution: head ? "resolved" : "unresolved",
+        // See WorktreeGitState.dirtyBasis's doc: role sessions carry no write-capable tool, so
+        // this is a structural guarantee, never a measured `git status` call.
+        dirty: false,
+        dirtyBasis: "structural-no-write-tools",
+      },
+      settingsJson,
+      hookContent: readAmbientSourceContent(this.guardHookPath),
+      recordedAt: this.now().toISOString(),
+    });
   }
 
   private async killTree(session: SpawnedSession): Promise<void> {
@@ -459,6 +539,27 @@ export interface RetriedSession {
    *  twice -> degrade path, never a wedged round". Omitted -> today's behavior is
    *  byte-identical: only `outcome` decides done vs. not-done. */
   isValid?: (result: RoleSessionResult) => boolean;
+  /** #236: OPTIONAL context-manifest recording — round/phase key prefix plus the persist
+   *  callback. Kept as a SEPARATE field rather than widening `state` above's Pick type, so
+   *  every existing caller/test fake (typed against `Pick<State,"recordSpend"|"appendEvent">`)
+   *  is UNCHANGED — omitted here means no manifest is recorded, zero behavior change. When
+   *  supplied, EVERY attempt (not just the final one) is persisted — that's the whole point:
+   *  two attempts of one phase must be independently reconstructable, and ambient drift between
+   *  them (a CLAUDE.md edited mid-retry, a dirty worktree) is exactly what would otherwise be
+   *  lost. `role`/`session`/`attempt` are filled in by runSessionWithRetry itself (role from
+   *  `session.roleId`, session from each attempt's own result name, attempt from the 1-or-2
+   *  retry ordinal) — the caller supplies only the round/phase half of the key. See
+   *  context-manifest.ts's module doc for the (round, phase, role, session, attempt) tuple
+   *  #231's separately-developed input manifest joins on later; this module never depends on
+   *  that work. */
+  contextManifest?: {
+    roundId: number;
+    phase: string;
+    /** Typically `state.recordContextManifest.bind(state)` — kept as a plain function (not a
+     *  `Pick<State,...>` object) so a caller can wrap it (e.g. to no-op in a test) without
+     *  needing a second fake-state shape. */
+    record: (key: ContextManifestKey, json: string, recordedAt: string) => void;
+  };
 }
 
 /** Run one role session; on a non-"done" outcome (or, when `isValid` is supplied, a "done"
@@ -470,9 +571,27 @@ export interface RetriedSession {
  *  helper only owns the retry-and-degrade mechanics, never the phase's own business logic). */
 export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSessionResult> {
   const iso = (): string => opts.now().toISOString();
-  const attempt = async (): Promise<RoleSessionResult> => {
+  const attempt = async (n: number): Promise<RoleSessionResult> => {
     const result = await opts.runner.run(opts.session);
     opts.state.recordSpend(result.name, opts.issue, result.costUsd, iso(), result.modelUsage);
+    // #236: persist THIS attempt's context manifest, if the caller opted in and the runner
+    // produced one (a fake runner in tests typically won't — RoleSessionResult.contextManifest
+    // is optional exactly for that reason, see its own doc). Contained: a persist failure is
+    // logged, never propagated — recording ambient context must never itself wedge a round.
+    if (opts.contextManifest && result.contextManifest) {
+      try {
+        const key: ContextManifestKey = {
+          roundId: opts.contextManifest.roundId,
+          phase: opts.contextManifest.phase,
+          role: opts.session.roleId,
+          session: result.name,
+          attempt: n,
+        };
+        opts.contextManifest.record(key, JSON.stringify(result.contextManifest), iso());
+      } catch (e) {
+        (opts.log ?? console.error)(`[sapwood:context-manifest] ${result.name} attempt ${n}: failed to persist (non-fatal): ${String(e)}`);
+      }
+    }
     return result;
   };
   // isValid omitted -> isDone reduces to the original `outcome === "done"` check exactly.
@@ -487,9 +606,9 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
       return false;
     }
   };
-  let result = await attempt();
+  let result = await attempt(1);
   if (!isDone(result)) {
-    result = await attempt();
+    result = await attempt(2);
     if (!isDone(result)) {
       try {
         opts.state.appendEvent(opts.degradeEvent, opts.degradePayload(result));

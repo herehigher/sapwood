@@ -271,6 +271,11 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
           issue: 0,
           now: deps.now ?? (() => new Date()),
           ...(deps.log !== undefined ? { log: deps.log } : {}),
+          // #236: record this phase's ambient-context manifest for EVERY attempt (round-scoped,
+          // no single associated issue — same round-level shape as `issue: 0` above). See
+          // peripheral.ts's RetriedSession.contextManifest doc for the (round, phase, role,
+          // session, attempt) key this writes under.
+          contextManifest: { roundId, phase: "harvesting", record: (key, json, at) => deps.state.recordContextManifest(key, json, at) },
           degradeEvent: "harvest-degraded",
           // Payload shape preserved EXACTLY (pre-#110): {round_id, outcome, session, attempts}.
           // `outcome` is the SESSION's own outcome (RoleSessionResult.outcome) — a "done" session

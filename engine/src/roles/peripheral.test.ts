@@ -1,12 +1,14 @@
 // peripheral.test.ts (#87): the role runner — a stub `claude` binary (zero token, same
 // integration style as worker.test.ts) drives the real spawn/sentinel/timeout/cost-parse path.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import type { ContextManifest } from "./context-manifest.js";
 import {
   PLAN_DRAFTER_DISALLOWED_TOOLS,
   PO_ALLOWED_TOOLS,
@@ -124,6 +126,96 @@ exit 0
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #236: ambient-context manifest assembly, wired through the REAL RoleRunner.run() path ────
+
+test("run: assembles a context manifest from the real environment — repo CLAUDE.md + auto-memory MEMORY.md snapshotted, model/CLI version/tools/mcp from the session's own init report", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  const memDir = join(dir, "memory");
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+wt=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
+  prev="$arg"
+done
+mkdir -p "${worktreeRoot}/$wt"
+printf '# fixture repo conventions\\n' > "${worktreeRoot}/$wt/CLAUDE.md"
+mkdir -p "${memDir}"
+printf -- '- fixture memory entry\\n' > "${memDir}/MEMORY.md"
+echo '{"type":"system","subtype":"init","model":"claude-stub-model","claude_code_version":"9.9.9","tools":["Read","Write"],"mcp_servers":[{"name":"codegraph","status":"pending"}],"memory_paths":{"auto":"${memDir}/"}}'
+echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"claude-stub-model","usage":{"input_tokens":3,"output_tokens":7}}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin);
+    const prompt = "assemble manifest test";
+    const result = await runner.run({ roleId: "test-role", prompt, model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(result.outcome, "done");
+    const manifest = result.contextManifest;
+    assert.ok(manifest, "a REAL RoleRunner.run() result always carries a context manifest");
+
+    assert.equal(manifest!.model, "claude-stub-model", "prefers the session's OWN reported model over the requested one");
+    assert.equal(manifest!.cliVersion, "9.9.9");
+    assert.ok(manifest!.toolSchemaVersion && manifest!.toolSchemaVersion.length === 64);
+    assert.equal(manifest!.promptTemplateVersion, createHash("sha256").update(prompt, "utf8").digest("hex"));
+    assert.deepEqual(manifest!.mcpTools, ["codegraph:pending"]);
+    assert.ok(manifest!.settingsHash.length === 64);
+    assert.ok(manifest!.hookHash && manifest!.hookHash.length === 64, "the guard hook file's content is hashed");
+
+    const repoClaudeMd = manifest!.sources.find((s) => s.label === "repo CLAUDE.md");
+    assert.equal(
+      repoClaudeMd?.kind,
+      "snapshot",
+      "no real .git in this stub worktree -> unresolvable HEAD -> classified as a mutable snapshot",
+    );
+    assert.equal((repoClaudeMd as { content: string }).content, "# fixture repo conventions\n");
+
+    const memoryMd = manifest!.sources.find((s) => s.label === "auto-memory MEMORY.md");
+    assert.equal(memoryMd?.kind, "snapshot");
+    assert.equal((memoryMd as { content: string }).content, "- fixture memory entry\n");
+
+    // The user-global CLAUDE.md's presence/content depends on the machine running the test, so
+    // only its PRESENCE in the source list (not its content) is asserted — kept hermetic.
+    assert.ok(manifest!.sources.some((s) => s.label === "user-global CLAUDE.md"));
+
+    assert.deepEqual(manifest!.worktree, {
+      path: join(worktreeRoot, result.name),
+      head: null,
+      headResolution: "unresolved",
+      dirty: false,
+      dirtyBasis: "structural-no-write-tools",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: a stub that emits no init line still assembles a manifest (honest nulls/empties, never a throw)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB); // no init line, no worktree ever created
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const manifest = result.contextManifest;
+    assert.ok(manifest);
+    assert.equal(manifest!.model, "sonnet", "falls back to the requested model when the session reports none");
+    assert.equal(manifest!.cliVersion, null);
+    assert.equal(manifest!.toolSchemaVersion, null);
+    assert.deepEqual(manifest!.mcpTools, []);
+    assert.equal(manifest!.worktree.head, null);
+    assert.deepEqual(
+      manifest!.sources.find((s) => s.label === "repo CLAUDE.md"),
+      { kind: "absent", label: "repo CLAUDE.md", path: join(dir, "worktrees", result.name, "CLAUDE.md") },
+    );
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -776,6 +868,116 @@ test("runSessionWithRetry: isValid OMITTED — behavior is byte-identical to tod
   assert.equal(failRunner.calls.length, 2);
   assert.equal(failState.events.length, 1);
   assert.equal(failState.events[0]![0], "test-degraded");
+});
+
+// ── #236: runSessionWithRetry's OPTIONAL context-manifest recording — round/phase key prefix
+//    supplied by the caller, role/session/attempt filled in here. Omitted -> zero behavior
+//    change (every test above never sets it and never touches `record`). ──
+
+interface RecordedManifest {
+  key: { roundId: number; phase: string; role: string; session: string; attempt: number };
+  json: string;
+  at: string;
+}
+
+/** A structurally-valid ContextManifest whose `model` field doubles as a distinguishing tag —
+ *  so a test can assert two attempts' recorded json payloads actually differ (ambient drift). */
+const mkManifest = (tag: string): ContextManifest => ({
+  sources: [],
+  model: tag,
+  cliBin: "claude",
+  cliVersion: null,
+  toolSchemaVersion: null,
+  promptTemplateVersion: null,
+  mcpTools: [],
+  worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
+  settingsHash: "hash",
+  hookHash: null,
+  recordedAt: "2026-07-17T00:00:00Z",
+});
+
+const mkManifestResult = (manifestTag: string, over: Partial<RoleSessionResult> = {}): RoleSessionResult =>
+  mkResult({ contextManifest: mkManifest(manifestTag), ...over });
+
+test("runSessionWithRetry + contextManifest: BOTH attempts are recorded independently — two attempts of one phase are reconstructable, ambient drift visible", async () => {
+  const runner = new FakeRunner([mkManifestResult("attempt-1", { name: "role-x-1" }), mkManifestResult("attempt-2", { name: "role-x-2" })]);
+  const state = new FakeState();
+  const recorded: RecordedManifest[] = [];
+  const opts: RetriedSession = {
+    ...mkOpts(runner, state, () => false), // always invalid -> forces exactly 2 attempts
+    contextManifest: { roundId: 42, phase: "harvesting", record: (key, json, at) => recorded.push({ key, json, at }) },
+  };
+  await runSessionWithRetry(opts);
+  assert.equal(runner.calls.length, 2);
+  assert.equal(recorded.length, 2, "every attempt is recorded, not just the last one");
+
+  assert.equal(recorded[0]!.key.roundId, 42);
+  assert.equal(recorded[0]!.key.phase, "harvesting");
+  assert.equal(recorded[0]!.key.role, "test-role", "role comes from session.roleId");
+  assert.equal(recorded[0]!.key.session, "role-x-1", "session comes from THAT attempt's own result name");
+  assert.equal(recorded[0]!.key.attempt, 1);
+
+  assert.equal(recorded[1]!.key.session, "role-x-2");
+  assert.equal(recorded[1]!.key.attempt, 2);
+
+  // Independently reconstructable: each row's json is that attempt's OWN manifest, not a shared
+  // reference — ambient drift between attempt 1 and attempt 2 is visible in the two payloads.
+  assert.notEqual(recorded[0]!.json, recorded[1]!.json);
+  assert.match(recorded[0]!.json, /attempt-1/);
+  assert.match(recorded[1]!.json, /attempt-2/);
+});
+
+test("runSessionWithRetry + contextManifest: a first attempt that succeeds immediately still records exactly one manifest", async () => {
+  const runner = new FakeRunner([mkManifestResult("only-attempt")]);
+  const state = new FakeState();
+  const recorded: RecordedManifest[] = [];
+  const opts: RetriedSession = {
+    ...mkOpts(runner, state, () => true),
+    contextManifest: { roundId: 1, phase: "aligning", record: (key, json, at) => recorded.push({ key, json, at }) },
+  };
+  await runSessionWithRetry(opts);
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]!.key.attempt, 1);
+});
+
+test("runSessionWithRetry + contextManifest: omitted -> record is never called (zero behavior change)", async () => {
+  const runner = new FakeRunner([mkManifestResult("x")]);
+  const state = new FakeState();
+  await runSessionWithRetry(mkOpts(runner, state, () => true));
+  // No `contextManifest` field on opts at all — nothing to assert beyond "this doesn't throw
+  // and behaves like every other isValid test above" (already covered by mkOpts' shape).
+  assert.equal(runner.calls.length, 1);
+});
+
+test("runSessionWithRetry + contextManifest: the runner's result carries NO manifest (e.g. a bare test fake) -> record is never called", async () => {
+  const runner = new FakeRunner([mkResult()]); // no contextManifest field at all
+  const state = new FakeState();
+  const recorded: RecordedManifest[] = [];
+  const opts: RetriedSession = {
+    ...mkOpts(runner, state, () => true),
+    contextManifest: { roundId: 1, phase: "aligning", record: (key, json, at) => recorded.push({ key, json, at }) },
+  };
+  await runSessionWithRetry(opts);
+  assert.equal(recorded.length, 0);
+});
+
+test("runSessionWithRetry + contextManifest: a THROWING record() is non-fatal — never propagates, never blocks retry/degrade", async () => {
+  const runner = new FakeRunner([mkManifestResult("a"), mkManifestResult("b")]);
+  const state = new FakeState();
+  const opts: RetriedSession = {
+    ...mkOpts(runner, state, () => false),
+    contextManifest: {
+      roundId: 1,
+      phase: "aligning",
+      record: () => {
+        throw new Error("db write failed");
+      },
+    },
+  };
+  const result = await runSessionWithRetry(opts); // must resolve normally
+  assert.equal(runner.calls.length, 2);
+  assert.equal(state.events.length, 1, "the normal degrade path still fires — a manifest-write failure never wedges it");
+  assert.equal(result.outcome, "done");
 });
 
 // ── #110 PR5: acceptance-criteria tests (issue #110's verification plan: "an integration test

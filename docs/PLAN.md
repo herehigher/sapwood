@@ -414,6 +414,34 @@ input-side hardening when untrusted-repo support is actually scheduled, as its o
 milestone-level threat-model decision rather than a standing constraint on trusted-
 repo capabilities.
 
+**Ambient repo context — record, don't seal (locked 2026-07-16/17, issue #236).**
+Every session — worker or peripheral — runs `claude -p` inside a real repo worktree
+and therefore legitimately absorbs that worktree's `CLAUDE.md`, the user's global
+`CLAUDE.md`/auto-memory, and the CLI's other dynamic system-prompt sections, same as
+any interactive session would (an earlier `config.ts` comment claiming peripheral
+sessions got "no repo context beyond what's substituted into the prompt" was already
+inaccurate and is now corrected). Applying the capability/context decision rule
+above: sealing this channel would be a *content*-side intervention, and the trust
+boundary stays action-side — sealing it was considered and rejected (owner ruling,
+Codex concurring after challenge). The obligation is honesty and diagnosability, not
+isolation: every peripheral session attempt now assembles a **context manifest**
+(`roles/context-manifest.ts`, persisted in the state DB's `context_manifests` table)
+recording every effective `CLAUDE.md`/policy source it saw — git-recoverable ones as
+path+commit+hash, MUTABLE ones (the user's global `CLAUDE.md`, auto-memory) as a full
+content-addressed snapshot, never a bare hash of content that could later change — plus
+the model/CLI/tool-schema actually used (read from the session's own stream-json init
+report where possible), MCP server availability, the worktree's resolved HEAD (via a
+pure-filesystem git-plumbing read — this engine structurally never execs `git` outside
+the two pinned subprocess call sites, #69), and settings/guard-hook hashes. Rows are
+keyed by `(round, phase, role, session, attempt)` — the same tuple the separately
+developed input-manifest work (#231) will eventually join on; the two ship
+independently by design. Isolation remains the correct tool, but only for **benchmark**
+runs (a clean throwaway directory with explicit `--system-prompt`/`--add-dir`/
+`--mcp-config` injection, `--bare` as a convenient starting shorthand) — never
+production, since `--bare` also disables hooks and the guard hook is the actual safety
+boundary. See [`security.md`](security.md#ambient-repo-context-record-dont-seal-236)
+for the full model and the isolation recipe.
+
 The committee's keystone finding remains: 0day's guard was built for a *trusted* model
 on a *private* repo. v1 stays in that deployment context, **but we build the seams so
 public-repo hardening is additive, not a rewrite.** v1 requirements:
