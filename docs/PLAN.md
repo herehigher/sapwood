@@ -387,6 +387,19 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
 
 ## Security & trust model (trusted-first, designed toward public)
 
+**Positioning statement (locked 2026-07-17 adjudication, issue #238).** sapwood makes
+autonomous development bounded, inspectable, recoverable, and conservatively governed.
+Models receive broad read access within a recorded, metered repository scope; action
+capabilities remain explicitly bounded by role, the guard, engine validation, forge
+controls, and review gates. Humans own why/what at Ready; the engine owns durable
+process and effects; models supply judgment without being treated as deterministic. It
+does not make missing intent or missing evidence deterministic. This statement
+supersedes an earlier draft slogan — "information plane fully open, action plane fully
+mediated, never constrains curiosity" — rejected in review as overclaiming: workers and
+`retro` act directly (not fully mediated), the read proxy is capped (not fully open),
+and budgets bound curiosity (curiosity is constrained). The paragraphs below are the
+honest, load-bearing version this positioning statement summarizes.
+
 **The trust boundary is on the ACTION side, not the content side.** Under the locked
 trusted-repos-first scope, issue and PR content is semi-trusted input, and every model
 session — worker or peripheral — is assumed corruptible by prompt injection,
@@ -409,10 +422,26 @@ input-side prompt-injection hardening neither drives nor vetoes capability or co
 choices. Prompt scope is governed by noise, size, and determinism; capability is
 decided by whether its effects are enforceable at the action boundary. This is why
 the zero-`gh` peripheral design (#110) was decided by enforceability, and the same
-rule governs engine-injected context plus two-pass retrieval (#215, #217). Revisit
-input-side hardening when untrusted-repo support is actually scheduled, as its own
-milestone-level threat-model decision rather than a standing constraint on trusted-
-repo capabilities.
+rule governs engine-injected context plus retrieval design (#215; #217, superseded —
+see the guardrail/shackle criterion immediately below). Revisit input-side hardening
+when untrusted-repo support is actually scheduled, as its own milestone-level
+threat-model decision rather than a standing constraint on trusted-repo capabilities.
+
+**The guardrail/shackle criterion (locked 2026-07-17, issue #238; first applied in
+#234).** A mediation design for role-session information access must never deny a
+request AND still demand a definitive judgment from the same session — that
+combination is a shackle: it manufactures confidence from a session that was denied
+the evidence to earn it. The alternative is a guardrail: explicit denial paired with
+a first-class abstention/escalation path, so a session that cannot get evidence can
+say so instead of guessing. This criterion is why #217's two-pass `needsDetails`
+protocol (request → engine-inject → decide, with no first-class "still can't tell"
+exit once details land) was superseded, pre-implementation, by #234's engine-hosted
+read-only forge MCP proxy: the proxy widens what a session may ask for; it does not
+force a verdict once it has asked. The same 2026-07-17 M8 round cut two further
+mechanism issues from this posture: #213 (one batched architect verdict per
+round-pool member — `pass`/`drop`/`needs-human`, never a forced binary) and #214
+(gate⓪ scoped to the round pool, with a lightweight re-confirm rather than a stale
+approval standing in for a judgment nobody actually re-made).
 
 **Ambient repo context — record, don't seal (locked 2026-07-16/17, issue #236).**
 Every session — worker or peripheral — runs `claude -p` inside a real repo worktree
@@ -467,6 +496,14 @@ passed flags the sole inputs) — never production, since `--bare` also disables
 and the guard hook is the actual safety boundary. See
 [`security.md`](security.md#ambient-repo-context-record-dont-seal-236) for the full
 model and the isolation recipe.
+
+**Honest framing (2026-07-17, issue #238).** This same broad, recorded read access is
+what makes architecture-debt detection possible at all — the architect role (and any
+future audit-shaped role) forms its drift/contradiction judgment from the SAME
+ambient repo/doc access every session already has, not from a separate,
+more-privileged audit grant. sapwood has no standing "audit role" with elevated read
+scope; if one is ever justified, it is an addition to this recorded posture, not
+evidence that today's posture was incomplete.
 
 The committee's keystone finding remains: 0day's guard was built for a *trusted* model
 on a *private* repo. v1 stays in that deployment context, **but we build the seams so
@@ -952,6 +989,14 @@ cursor before exiting; a crash reruns whatever phase was `in_progress`, and the 
 make that idempotent rather than duplicating output. This deliberately never attempts to
 restore a model's mid-conversation state — only its externally-visible artifacts.
 
+**Honest framing (2026-07-17, issue #238).** What a fresh peripheral session
+"remembers" across rounds is never conversational continuity — no session resumes a
+prior chat. It is externalized institutional memory: the goal file, `PLAN.md`, issue
+bodies/labels/comments, and the round ledger's own persisted artifacts, all re-read
+fresh by whichever session runs next. Calling this "LLM context continuity" would
+overclaim a persistence the architecture doesn't have and doesn't need — rerun-not-resume
+is the honest name for it.
+
 **Self-evolution goes through a PR, never a direct write.** When the retrospective role
 proposes a change to a prompt, doc, or config, it opens a PR through the same gate②
 path every other change takes — never a direct write to disk. This is why
@@ -964,6 +1009,24 @@ to open a PR against, rather than an inline prompt with no addressable target.
 `Ready` — the round loop can propose work, but a human still decides what actually
 enters the dispatch queue. The mechanics of that confirmation gate are a v0.2
 implementation detail, cut as its own issue when the milestone opens.
+
+**Ready-as-signature (locked 2026-07-17, issues #237/#238).** Moving an issue to
+`Ready` — whether confirming an `origin:agent` proposal or leaving a human-authored
+issue's why/what untouched — is a human signature: it endorses that issue's why/what
+regardless of who typed the body. Past that point, an agent session's only channel
+for disagreement is dissent, never revision: a role that believes a `Ready` issue's
+premise is wrong may raise a structured concern — designed in #237 (open, not yet
+shipped) as a PO dissent channel: `concerns: [{issue, reason}]`, externalized as an
+idempotent, deduplicated issue comment, adjudicated through the issue's own normal
+lifecycle — an edited why/what changes the concern's hash and re-arms it, a reply or
+silence lets work proceed, closing/pulling from `Ready` withdraws it — but may not
+itself hold up or reject dispatch. This is why the `origin:agent` confirmation gate
+above needs no separate adjudication machinery beyond the ordinary triage path: the
+human act of moving the card IS the endorsement; nothing downstream re-litigates it
+except through #237's channel. **Framed honestly (issue #238): this human
+confirmation step is the product, not a limitation to be automated away** — it is
+the one place autonomy is deliberately bounded by design, matching the positioning
+statement's "humans own why/what at Ready" (Security & trust model, above).
 
 **gate⓪ — the verification-plan quality gate (locked 2026-07-09, amends Decision
 #8).** Decision #8 enforced plan *presence* (dispatch refuses a plan-less issue) and
