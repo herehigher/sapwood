@@ -761,14 +761,18 @@ export interface WorkerDeps {
  *  `process.env` exactly as before #244 (worker.test.ts's own regression pins that workers
  *  LEGITIMATELY need GH_TOKEN, unlike peripheral role sessions) — attaching a proxy alone never
  *  strips that. `credentialFree` is a SEPARATE, independent opt for the one caller shape that
- *  genuinely wants it (a fix-loop leg that reads PR review data via the proxy only and pushes,
- *  if at all, through an ambient git credential helper — the same worker-class posture
- *  retro.ts's session already uses, docs/security.md).
+ *  genuinely wants it (a fix-loop leg that reaches `gh`/git's CREDENTIALED path via the proxy
+ *  ONLY — no ambient GH_TOKEN, no gh-config fallback, no git credential helper — and pushes, if
+ *  at all, through whatever residual channel remains after that; see workerCredentialFreeEnv's
+ *  doc for the honest scope: this is NOT a claim that the proxy is the leg's only reach to
+ *  GitHub in an absolute sense, since arbitrary code under Bash(node/npm) can still read an
+ *  ambient credential store directly off disk — docs/security.md's residuals note). Same
+ *  worker-class posture retro.ts's session already uses for its own git-credential reach.
  *
  *  FAIL-CLOSED POLICY (Codex sol-high PR #260 review, P2): a proxy WITHOUT `credentialFree` is
  *  non-fatal on mint failure (the lane still dispatches, unattached — an optional read-side
  *  capability's setup failure must never block an otherwise-normal run). `credentialFree: true`
- *  is different — a leg dispatched that way has NEITHER ambient forge credentials NOR (if mint
+ *  is different — a leg dispatched that way has NEITHER the gh/git credentialed-tool path NOR (if mint
  *  fails) a working evidence channel, so it must not run silently degraded: mint failure REFUSES
  *  the dispatch outright (see `dispatch()`'s own doc). Either branch records a durable
  *  `proxy-mint-failed` event (via `WorkerDeps.state`, when supplied) before deciding which way
@@ -1028,7 +1032,7 @@ export class WorkerSupervisor implements Supervisor {
           this.removeIfExists(jsonlPath);
           throw new Error(
             `dispatch refused for lane ${laneName}: credentialFree was requested but the forge proxy mint failed — ` +
-              `a leg with neither ambient forge credentials nor a working evidence channel must not run: ${reason}`,
+              `a leg with neither the gh/git credentialed-tool path nor a working evidence channel must not run: ${reason}`,
           );
         }
         this.log(`[sapwood:forge-proxy] lane ${laneName}: mint failed (non-fatal, proxy unattached): ${reason}`);

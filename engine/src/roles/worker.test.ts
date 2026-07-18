@@ -3051,9 +3051,9 @@ test("WORKER_ALLOWED_TOOLS_NO_GH: byte-identical to WORKER_ALLOWED_TOOLS minus B
 });
 
 // #244 (Codex sol-high PR #260 review, P2): fail-closed policy — credentialFree + a failed mint
-// leaves a leg with NEITHER ambient credentials NOR a working evidence channel, so dispatch()
-// must REFUSE outright rather than silently run degraded (distinct from the non-credentialFree
-// mint-failure case above, which stays non-fatal).
+// leaves a leg with NEITHER the gh/git credentialed-tool path (severed by workerCredentialFreeEnv)
+// NOR a working evidence channel, so dispatch() must REFUSE outright rather than silently run
+// degraded (distinct from the non-credentialFree mint-failure case above, which stays non-fatal).
 test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fail-closed) — no lane created, no sentinel written", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
