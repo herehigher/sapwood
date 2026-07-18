@@ -41,18 +41,18 @@ import { parseStructuredBlock } from "../state/structured-output.js";
 import type { PeripheralStub } from "./round.js";
 import { buildRoundArtifact, capRoundArtifactMarkdown, type RoundArtifact, renderRoundArtifactMarkdown } from "./round-artifact.js";
 
-/** Harvest's deny-list: the base denies PLUS all of `gh issue edit` — harvest writes issue
- *  COMMENTS only (see prompts/harvest.md), never a body edit and never a label, so unlike the
- *  plan-reviewer (whose legitimate job includes labels) it gets the edit verb denied entirely.
- *  In particular this pattern-denies self-applying gate-relevant labels (plan:approved /
- *  verify:n/a) or lifting needs-human/blocked — the #101 push-time security review's pitfall
- *  class. Best-effort layer as always (see ROLE_ALLOWED_TOOLS's enforcement doc); the residual
- *  is additionally contained structurally: harvest's briefing targets are exclusively
- *  needs-human issues, and needs-human is an UNCONDITIONAL dispatch blocker (isDispatchable
- *  checks it before any other label), so even a rogue label write there cannot make anything
- *  dispatchable. No authoritative post-check needed for a role with no label capability and no
- *  gate-relevant write path. */
-export const HARVEST_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS + ",Bash(gh issue edit*)";
+/** Harvest's deny-list: harvest writes issue COMMENTS only (see prompts/harvest.md), never a
+ *  body edit and never a label — it gets a distinct named export from the base for the same
+ *  call-site-documentation reason PO_DISALLOWED_TOOLS does (peripheral.ts). Before #235 PR-B
+ *  this carried an EXTRA `Bash(gh issue edit*)` pattern-deny on top of the base, closing the
+ *  self-applying-a-label pitfall class the #101 push-time security review flagged. #235 PR-B's
+ *  blanket Bash deny (ROLE_DISALLOWED_TOOLS) already makes that redundant — no Bash grant
+ *  reaches `gh` to mutate a label with in the first place — so the extra pattern is dropped.
+ *  Residual containment is unchanged and structural either way: harvest's briefing targets are
+ *  exclusively needs-human issues, and needs-human is an UNCONDITIONAL dispatch blocker
+ *  (isDispatchable checks it before any other label), so even a rogue label write there cannot
+ *  make anything dispatchable. */
+export const HARVEST_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS;
 
 export interface HarvestDeps {
   /** #110 PR3: the write surface for every comment the harvest phase posts — the session

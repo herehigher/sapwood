@@ -659,23 +659,29 @@ test("createArchitectStub: the architect session runs under the base issues-only
   await stub.run({ roundId: 4, phase: "architecting", marker: null });
   assert.equal(runner.calls[0]!.roleId, "architect");
   // No disallowedTools override was passed — peripheral.ts's RoleRunner falls back to the base
-  // ROLE_DISALLOWED_TOOLS (no Read/Write/Edit/git/gh-pr/gh-api), same scope every other role
-  // gets; the architect is never granted a docs-file write tool or PR visibility. #110 PR4: the
-  // architect's own prompt no longer instructs it to call `gh` at all, but the allow/deny-list
-  // constants themselves are untouched (PR5's sweep, not this one's).
+  // ROLE_DISALLOWED_TOOLS (Write/Edit/MultiEdit/NotebookEdit/blanket Bash denied — no git, no
+  // gh-pr, no gh-api, no file write), same scope every other role gets; the architect is never
+  // granted a docs-file write tool or PR visibility. #235 PR-B: the architect IS now granted
+  // Read/Grep/Glob (ROLE_ALLOWED_TOOLS, no longer "" — architect is not a special case), scoped
+  // to its own worktree by #235 PR-A's guard containment, but that's an ALLOW-side change; this
+  // assertion is about the (unchanged) deny half.
   assert.equal(runner.calls[0]!.disallowedTools, undefined);
 });
 
-test("ROLE_ALLOWED_TOOLS / ROLE_DISALLOWED_TOOLS: issues-only write scope — #110 PR5: NO Bash grant at all (pure computation), no file write, no git, no PR/API access", () => {
-  assert.equal(ROLE_ALLOWED_TOOLS, "", "#110 PR5: the base issues-only allow-list is empty — no Bash(...) entry of any kind");
+test("ROLE_ALLOWED_TOOLS / ROLE_DISALLOWED_TOOLS: issues-only role scope — #235 PR-B: Read/Grep/Glob allowed (confined to the worktree by PR-A's guard containment), NO Bash grant at all, no file write, no git, no PR/API access", () => {
+  assert.equal(
+    ROLE_ALLOWED_TOOLS,
+    "Read,Grep,Glob",
+    "#235 PR-B: explicit read-only allow — architect is not a special case, every peripheral role gets this",
+  );
   assert.ok(!ROLE_ALLOWED_TOOLS.includes("Bash("));
   assert.ok(!ROLE_ALLOWED_TOOLS.includes("Write"));
   assert.ok(!ROLE_ALLOWED_TOOLS.includes("Edit,"));
-  assert.ok(ROLE_DISALLOWED_TOOLS.includes("Read"));
+  assert.ok(!ROLE_DISALLOWED_TOOLS.includes("Read"), "#235: Read moved from deny to allow");
   assert.ok(ROLE_DISALLOWED_TOOLS.includes("Write"));
-  assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(git *)"));
-  assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh pr *)"));
-  assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh api *)"));
+  assert.ok(ROLE_DISALLOWED_TOOLS.includes("MultiEdit"));
+  assert.ok(ROLE_DISALLOWED_TOOLS.includes("NotebookEdit"));
+  assert.ok(ROLE_DISALLOWED_TOOLS.split(",").includes("Bash"), "#235: a blanket deny, not a Bash(gh pr *)-shaped pattern");
 });
 
 // ── context assembly (architecture chapter, aligned goals, prompt rendering) ───────────────

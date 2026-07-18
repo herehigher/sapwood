@@ -37,6 +37,14 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+// #235 PR-B: a TYPE-ONLY import (see this module's header doc — PURE, no filesystem/subprocess
+// of its own). worker.ts owns parseToolUsage (the jsonl-scan that PRODUCES this shape, the same
+// "read side" home parseModelUsage/ModelUsageEntry already establish for spend); this module
+// only carries the resulting data through assembleContextManifest, same as every other field
+// here.
+import type { ToolUsageEntry } from "./worker.js";
+
+export type { ToolUsageEntry };
 
 // ── Manifest shape ─────────────────────────────────────────────────────────────────────────
 
@@ -89,14 +97,22 @@ export interface WorktreeGitState {
   /** How `dirty` was determined — never a measured `git status` call (this engine execs `git`
    *  nowhere outside worker.ts's claude-launch spawn / gh.ts's `gh` calls; see this module's
    *  header doc), so every value here is a DERIVATION, not a live read:
-   *  - `"structural-no-write-tools"` — the session's effective tool grant is EMPTY (most
-   *    peripheral roles: ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS carry no Write/Edit/Bash at all)
-   *    and it gets a FRESH worktree, so `dirty: false` is a structural guarantee, not a guess.
-   *  - `"unknown-write-capable-session"` — the session's tool grant is NON-EMPTY (today: only
-   *    `retro`, which holds `Write`/local `git` for its own worktree). The engine cannot prove
-   *    clean vs. dirty without a live git-status read it structurally never performs, so `dirty`
-   *    is recorded conservatively as `true` — an honest "cannot rule out," never a false
-   *    "definitely clean" carried over from the empty-allowlist case it doesn't apply to.
+   *  - `"structural-no-write-tools"` — the session's effective tool grant carries NO
+   *    WRITE-CAPABLE tool (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/any `Bash(...)` entry —
+   *    every peripheral role's `ROLE_ALLOWED_TOOLS`/`PO_ALLOWED_TOOLS`/`CONFIRM_ALLOWED_TOOLS`
+   *    grant exactly `Read,Grep,Glob` and nothing else, #235 PR-B) and it gets a FRESH worktree,
+   *    so `dirty: false` is a structural guarantee, not a guess. Before #235 this was phrased as
+   *    "the grant is EMPTY" — that was equivalent back when the base allow-list carried nothing
+   *    at all; #235 makes `Read`/`Grep`/`Glob` (guard-confined to the worktree, see
+   *    `docs/security.md`) the universal peripheral baseline, so "empty" and "no write-capable
+   *    tool" are no longer the same test — `peripheral.ts`'s `hasWriteCapableGrant` is the actual
+   *    check this basis is derived from, not a bare emptiness check.
+   *  - `"unknown-write-capable-session"` — the session's tool grant INCLUDES a write-capable
+   *    tool (today: only `retro`, which holds `Write`/`Grep`/`Glob`/local `git` for its own
+   *    worktree). The engine cannot prove clean vs. dirty without a live git-status read it
+   *    structurally never performs, so `dirty` is recorded conservatively as `true` — an honest
+   *    "cannot rule out," never a false "definitely clean" carried over from the
+   *    no-write-capable-tool case it doesn't apply to.
    *  - `"worktree-missing"` (Codex F5d): the worktree path did not exist at capture time at all —
    *    a distinct, more specific fact than "unknown", so `dirty: true` here reads as "we could
    *    not even confirm the worktree existed", never conflated with the write-capable-but-present
@@ -178,6 +194,22 @@ export interface ContextManifest {
   settingsHash: string;
   /** Hash of the guard hook file's content, or null when unreadable at manifest time. */
   hookHash: string | null;
+  /** #235 PR-B: which tools the session's stream actually INVOKED (name -> call count) —
+   *  distinct from toolInventoryHash above, which only records what tools were AVAILABLE. Empty
+   *  for a session whose jsonl carried no parseable tool_use block (a pure-text session, or one
+   *  that crashed before its first turn). See worker.ts's parseToolUsage for the exact parse. */
+  toolUsage: ToolUsageEntry[];
+  /** #235 PR-B: every distinct path a Read/Grep/Glob/NotebookRead tool_use call named, sorted +
+   *  deduplicated — the read-path half of "what did this session actually use" (item 4 of
+   *  #235's acceptance criteria). An explicit path is recorded exactly as the session supplied
+   *  it, never re-resolved; a PATHLESS Grep/Glob call (which searches — and reads from — the
+   *  session's own cwd) is recorded as the caller-supplied worktree root instead of silently
+   *  dropped (worker.ts's `parseToolUsage`'s `defaultSearchPath`, Codex review PR #257 F2) — see
+   *  that function's doc for the exact substitution. #235 PR-A's guard hook
+   *  (checkReadContainment) is the actual containment enforcement; this field is a diagnostic
+   *  record of what was ASKED for / where it searched, not a re-verification of where it landed.
+   *  Empty when the session made no such call. */
+  readPaths: string[];
   recordedAt: string;
 }
 
@@ -224,6 +256,12 @@ export interface ContextManifestEnv {
    *  must never itself fail a session, so a read failure upstream is passed through as null
    *  rather than this function ever throwing. */
   hookContent: string | null;
+  /** #235 PR-B: pre-parsed from the session's jsonl (worker.ts's parseToolUsage — the same jsonl
+   *  string this manifest's other post-exit fields already scan). Omitted -> both resulting
+   *  manifest fields default to `[]`, so existing fixtures/tests that don't care about this
+   *  addition keep compiling unchanged. */
+  toolUsage?: ToolUsageEntry[];
+  readPaths?: string[];
   recordedAt: string;
 }
 
@@ -264,6 +302,8 @@ export function assembleContextManifest(env: ContextManifestEnv): ContextManifes
     worktree: env.worktree,
     settingsHash: sha256(env.settingsJson),
     hookHash: env.hookContent === null ? null : sha256(env.hookContent),
+    toolUsage: env.toolUsage ?? [],
+    readPaths: env.readPaths ?? [],
     recordedAt: env.recordedAt,
   };
 }

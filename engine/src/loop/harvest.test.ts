@@ -301,9 +301,9 @@ test("createHarvestStub: a needs-human issue this round -> dispatches ONE harves
   state.close();
 });
 
-test("HARVEST_DISALLOWED_TOOLS: keeps every base deny and adds the whole `gh issue edit` verb (no label/body mutation at all) — #110 PR5: harvest's allowedTools carries no Bash grant either, so this is a regression trip-wire, not live enforcement", () => {
-  assert.ok(HARVEST_DISALLOWED_TOOLS.startsWith(ROLE_DISALLOWED_TOOLS), "keeps every base deny");
-  assert.ok(HARVEST_DISALLOWED_TOOLS.includes("Bash(gh issue edit*)"));
+test("HARVEST_DISALLOWED_TOOLS (#235 PR-B): now byte-identical to the base deny list — kept as its own named export for call-site clarity only. Before #235 this carried an EXTRA `Bash(gh issue edit*)` pattern (no label/body mutation at all); now redundant under the blanket Bash deny and dropped", () => {
+  assert.equal(HARVEST_DISALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS);
+  assert.ok(HARVEST_DISALLOWED_TOOLS.split(",").includes("Bash"), "blanket Bash deny already covers `gh issue edit`");
 });
 
 test("createHarvestStub: a failed session is retried once — non-done then done-and-valid means exactly two sessions, no degradation event", async () => {

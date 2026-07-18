@@ -247,6 +247,101 @@ exit 0
   }
 });
 
+test("run (#235 PR-B): a session's Read/Grep tool_use calls land in the manifest's toolUsage/readPaths — the 'what did this session actually use' record, alongside the (unchanged) HEAD/cleanliness capture", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+wt=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
+  prev="$arg"
+done
+mkdir -p "${worktreeRoot}/$wt"
+echo '{"type":"system","subtype":"init","model":"claude-stub-model"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"1","name":"Read","input":{"file_path":"src/foo.ts"}}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"2","name":"Grep","input":{"pattern":"TODO","path":"src"}}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"3","name":"Glob","input":{"pattern":"**/*.ts"}}]}}'
+echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"claude-stub-model"}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(result.outcome, "done");
+    const manifest = result.contextManifest;
+    assert.ok(manifest);
+    assert.deepEqual(manifest!.toolUsage, [
+      { tool: "Read", count: 1 },
+      { tool: "Grep", count: 1 },
+      { tool: "Glob", count: 1 },
+    ]);
+    // #235 PR-B F2 (Codex review): the pathless Glob call still searched (and read from) this
+    // session's own worktree root — RoleRunner threads it through as parseToolUsage's
+    // defaultSearchPath, so it lands in readPaths rather than silently vanishing. Sorted: the
+    // absolute worktree path (leading "/") sorts before the relative "src"/"src/foo.ts" entries.
+    assert.deepEqual(manifest!.readPaths, [join(worktreeRoot, result.name), "src", "src/foo.ts"]);
+    // The read-only Read/Grep/Glob grant (#235 PR-B's universal baseline) must NOT flip
+    // worktree.dirty — that's the hasWriteCapableGrant fix this same PR makes: a non-empty
+    // allow-list is no longer synonymous with "write-capable" now that Read/Grep/Glob is the
+    // default for every issues-only role.
+    assert.equal(manifest!.worktree.dirty, false);
+    assert.equal(manifest!.worktree.dirtyBasis, "structural-no-write-tools");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run (#235 PR-B): hasWriteCapableGrant correctly distinguishes a read-only allow-list from a write-capable one — CONFIRM_ALLOWED_TOOLS (Read,Grep,Glob) stays 'clean', a Write/Bash-bearing override (retro's shape) is conservatively 'dirty'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const worktreeRoot = join(dir, "worktrees");
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+wt=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--worktree" ]; then wt="$arg"; fi
+  prev="$arg"
+done
+mkdir -p "${worktreeRoot}/$wt"
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"result","subtype":"success","total_cost_usd":0}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+
+    const readOnly = await runner.run({
+      roleId: "plan-reviewer-confirm",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: CONFIRM_ALLOWED_TOOLS,
+    });
+    assert.equal(readOnly.contextManifest!.worktree.dirty, false);
+    assert.equal(readOnly.contextManifest!.worktree.dirtyBasis, "structural-no-write-tools");
+
+    const writeCapable = await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: "Read,Write,Edit,Grep,Glob,Bash(git *)",
+    });
+    assert.equal(writeCapable.contextManifest!.worktree.dirty, true);
+    assert.equal(writeCapable.contextManifest!.worktree.dirtyBasis, "unknown-write-capable-session");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: CLAUDE_CONFIG_DIR, when set, is the effective user-global config dir instead of ~/.claude (Codex R2c)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   const configDir = mkdtempSync(join(tmpdir(), "sapwood-claude-config-"));
@@ -511,7 +606,7 @@ test("run: soft guard mode tolerates a missing hook (no fail-closed refusal)", a
   }
 });
 
-test("run: argv scopes the session to NO Bash grant at all (#110 PR5) — pure computation, no code paths, no PR/review/merge capability, no --add-dir", async () => {
+test("run: argv scopes the session to READ-ONLY, no Bash grant at all (#235 PR-B) — Read/Grep/Glob allowed, everything write/exec-shaped cross-source-vetoed, no PR/review/merge capability, no --add-dir", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -523,25 +618,30 @@ test("run: argv scopes the session to NO Bash grant at all (#110 PR5) — pure c
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
     assert.equal(at("--allowedTools"), ROLE_ALLOWED_TOOLS);
-    assert.equal(at("--allowedTools"), "", "#110 PR5: no Bash grant of any kind reaches the argv");
+    assert.equal(
+      at("--allowedTools"),
+      "Read,Grep,Glob",
+      "#235 PR-B: explicit read-only allow, confined to the worktree by PR-A's guard containment",
+    );
     assert.equal(at("--disallowedTools"), ROLE_DISALLOWED_TOOLS);
+    assert.equal(at("--disallowedTools"), "Write,Edit,MultiEdit,NotebookEdit,Bash", "#235 PR-B: blanket Bash deny, not a pattern list");
     assert.equal(at("--fallback-model"), "sonnet");
     assert.ok(!seen.includes("--add-dir"), "never mounts the engine's data dir");
     // No merge/review/PR capability anywhere in the tool-scoping strings (the acceptance
     // criterion: "generated settings for a peripheral session contain no merge/review
     // capability").
-    for (const tools of [ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS]) {
-      assert.ok(!/gh pr merge|gh pr review|gh pr ready/.test(tools) || tools === ROLE_DISALLOWED_TOOLS);
+    assert.ok(!/gh pr merge|gh pr review|gh pr ready/.test(ROLE_ALLOWED_TOOLS + ROLE_DISALLOWED_TOOLS));
+    assert.ok(!ROLE_ALLOWED_TOOLS.includes("Bash("), "#235 PR-B: allowed tools carry NO Bash(...) entry at all");
+    assert.ok(!ROLE_ALLOWED_TOOLS.includes("Write") && !ROLE_ALLOWED_TOOLS.includes("Edit"), "read-only — no write channel");
+    assert.ok(!ROLE_ALLOWED_TOOLS.includes("git"), "allowed tools carry no git/code-execution capability");
+    // #235 PR-B: the deny list is the bare tool name, not a `Bash(...)` pattern — a blanket veto
+    // that subsumes every prior gh-specific pattern deny (#101/#102's --body-file/-F/-l/-p
+    // bypass classes are moot when there is no Bash grant to reach `gh` through at all).
+    assert.ok(ROLE_DISALLOWED_TOOLS.split(",").includes("Bash"), "bare Bash tool name denied, not a pattern");
+    assert.ok(!ROLE_DISALLOWED_TOOLS.includes("Read"), "#235: Read is no longer denied — it moved to the allow list");
+    for (const writeTool of ["Write", "Edit", "MultiEdit", "NotebookEdit"]) {
+      assert.ok(ROLE_DISALLOWED_TOOLS.split(",").includes(writeTool), `${writeTool} explicitly denied as a cross-source veto`);
     }
-    assert.ok(!ROLE_ALLOWED_TOOLS.includes("Bash("), "#110 PR5: allowed tools carry NO Bash(...) entry at all");
-    assert.ok(!ROLE_ALLOWED_TOOLS.includes("gh pr"), "allowed tools carry no PR capability at all");
-    assert.ok(!ROLE_ALLOWED_TOOLS.includes("git"), "allowed tools carry no git/code capability");
-    assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh pr *)"), "PR namespace explicitly disallowed");
-    assert.ok(ROLE_DISALLOWED_TOOLS.includes("Read") && ROLE_DISALLOWED_TOOLS.includes("Write"), "no file access");
-    // #102/#108: the deny-glob lines are kept byte-identical as a regression trip-wire (see
-    // peripheral.ts's doc) — a future PR re-widening the allow-list lands back inside these.
-    assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh issue comment *--body-file*)"));
-    assert.ok(ROLE_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--body-file*)"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -563,35 +663,29 @@ test("run: fallbackModel none omits Claude's fallback flag for a role session", 
   }
 });
 
-test("PLAN_DRAFTER_DISALLOWED_TOOLS: strict superset of the base denies, adding label mutation (plan-author ≠ plan-approver) — kept as a #110 PR5 regression trip-wire, not live enforcement (neither role has any Bash grant to mutate a label with)", () => {
-  assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.startsWith(ROLE_DISALLOWED_TOOLS), "keeps every base deny");
-  assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--add-label*)"));
-  assert.ok(PLAN_DRAFTER_DISALLOWED_TOOLS.includes("Bash(gh issue edit *--remove-label*)"));
-  // The base (reviewer) deny list does not carry this extra denial — a distinction that only
-  // ever mattered when either role had a Bash grant to act on; applying plan:approved/
-  // needs-human is now the engine's job (plan-review.ts), never either session's own.
-  assert.ok(!ROLE_DISALLOWED_TOOLS.includes("--add-label"));
+test("PLAN_DRAFTER_DISALLOWED_TOOLS (#235 PR-B): now byte-identical to the base deny list — kept as its OWN named export purely for call-site documentation clarity, a regression trip-wire in its own right", () => {
+  assert.equal(PLAN_DRAFTER_DISALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS);
+  // Before #235 PR-B this carried EXTRA `Bash(gh issue edit *--add-label/--remove-label*)`
+  // patterns (#77 Amendment 2's plan-author ≠ plan-approver chain) — now redundant under the
+  // blanket Bash deny (no Bash grant reaches `gh` to mutate a label with in the first place) and
+  // dropped; applying plan:approved/needs-human has been the engine's job (plan-review.ts) since
+  // #110, never either session's own.
+  assert.ok(!PLAN_DRAFTER_DISALLOWED_TOOLS.includes("--add-label"));
+  assert.ok(!PLAN_DRAFTER_DISALLOWED_TOOLS.includes("--remove-label"));
 });
 
-test("CONFIRM_ALLOWED_TOOLS/CONFIRM_DISALLOWED_TOOLS (#214 gate② review P1): the SECOND sanctioned allow-list widening in this codebase (after retro.ts's RETRO_ALLOWED_TOOLS) — read-only repo inspection ONLY, no Bash/gh of any kind, deny list keeps every other base denial", () => {
-  assert.equal(CONFIRM_ALLOWED_TOOLS, "Read,Glob,Grep");
+test("CONFIRM_ALLOWED_TOOLS/CONFIRM_DISALLOWED_TOOLS (#235 PR-B): no longer a widening — #214's freshness-confirm read grant is now the UNIVERSAL peripheral baseline, so this pair is byte-identical to the base, kept as its own named export for call-site clarity only", () => {
+  assert.equal(CONFIRM_ALLOWED_TOOLS, ROLE_ALLOWED_TOOLS);
+  assert.equal(CONFIRM_ALLOWED_TOOLS, "Read,Grep,Glob");
   assert.ok(!CONFIRM_ALLOWED_TOOLS.includes("Bash("), "no Bash grant of any kind — no git, no gh, no arbitrary command");
   assert.ok(
     !CONFIRM_ALLOWED_TOOLS.includes("Write") && !CONFIRM_ALLOWED_TOOLS.includes("Edit"),
     "read-only — no write channel to the repo",
   );
-  // The deny list is the base ROLE_DISALLOWED_TOOLS with Read removed and nothing else changed —
-  // Write/Edit/MultiEdit and every Bash(gh ...) denial still apply (deny wins over allow, so
-  // Read must come OUT for CONFIRM_ALLOWED_TOOLS's own Read entry to mean anything).
-  assert.ok(!CONFIRM_DISALLOWED_TOOLS.includes("Read"), "Read removed from the deny list — the whole point of the widening");
-  assert.ok(
-    CONFIRM_DISALLOWED_TOOLS.includes("Write") &&
-      CONFIRM_DISALLOWED_TOOLS.includes("Edit") &&
-      CONFIRM_DISALLOWED_TOOLS.includes("MultiEdit"),
-  );
-  assert.equal(CONFIRM_DISALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS.replace("Read,", ""), "derived from the base deny list, never hand-copied");
-  for (const denyFragment of ROLE_DISALLOWED_TOOLS.split(",").filter((t) => t !== "Read")) {
-    assert.ok(CONFIRM_DISALLOWED_TOOLS.includes(denyFragment), `base denial preserved: ${denyFragment}`);
+  assert.equal(CONFIRM_DISALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS);
+  assert.ok(!CONFIRM_DISALLOWED_TOOLS.split(",").includes("Read"), "Read is not denied — it's the whole point of this role's grant");
+  for (const writeTool of ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]) {
+    assert.ok(CONFIRM_DISALLOWED_TOOLS.split(",").includes(writeTool), `base denial preserved: ${writeTool}`);
   }
 });
 
@@ -627,79 +721,39 @@ test("PO_ALLOWED_TOOLS: #110 PR5 — no Bash grant at all (issue creation is now
   assert.ok(!PO_ALLOWED_TOOLS.includes("git"), "no code/repo capability");
 });
 
-test("PO_DISALLOWED_TOOLS: strict superset of the base denies, closing the `gh issue create` flag holes the new allow opens (file exfil via --body-file, gate⓪ bypass via --label, board writes via --project)", () => {
-  assert.ok(PO_DISALLOWED_TOOLS.startsWith(ROLE_DISALLOWED_TOOLS), "keeps every base deny");
-  // --body-file on create reads ANY file into a (possibly public) issue body — the same
-  // no-repo-read boundary the base list already closes for comment/edit.
-  assert.ok(PO_DISALLOWED_TOOLS.includes("Bash(gh issue create *--body-file*)"));
-  // --label at creation could self-apply plan:approved/verify:n/a (gate⓪ bypass); labels on
-  // PO-created issues are the orchestrator's job (align.ts stamps origin:agent itself).
-  assert.ok(PO_DISALLOWED_TOOLS.includes("Bash(gh issue create *--label*)"));
-  // --project could place the new issue onto a board lane directly (a board write).
-  assert.ok(PO_DISALLOWED_TOOLS.includes("Bash(gh issue create *--project*)"));
+test("PO_DISALLOWED_TOOLS (#235 PR-B): now byte-identical to the base deny list — kept as its own named export for call-site clarity only", () => {
+  assert.equal(PO_DISALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS);
+  // Before #235 PR-B this carried EXTRA `Bash(gh issue create *--body-file/--label/--project*)`
+  // patterns (#101/#102), closing flag holes the OLD (narrower) allow-list opened. Those are now
+  // REDUNDANT — see the next test.
+  assert.ok(!PO_DISALLOWED_TOOLS.includes("--body-file"));
+  assert.ok(!PO_DISALLOWED_TOOLS.includes("--label"));
+  assert.ok(!PO_DISALLOWED_TOOLS.includes("--project"));
 });
 
-// ── #102: gh short-flag alias denies (gate② finding on #101 — `-F`/`-l`/`-p` bypass the
-// long-flag-only `--body-file`/`--label`/`--project` denies) ───────────────────────────────────
-//
-// A local, test-only glob matcher mirrors Claude Code's Bash(...) permission-pattern semantics
-// (`*` = any run of characters, everything else literal) closely enough to assert deny/allow at
-// the ARGV level — not just substring presence in the deny-list string — so these tests actually
-// exercise the precise pattern shapes chosen in peripheral.ts, including the space-boundary
-// precision the module doc calls out (`*-F*` alone would be too greedy).
-function patternMatchesCommand(pattern: string, command: string): boolean {
-  const inner = pattern.replace(/^Bash\(/, "").replace(/\)$/, "");
-  const escaped = inner
-    .split("*")
-    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  return new RegExp(`^${escaped}$`).test(command);
-}
-const anyDenyMatches = (denyList: string, command: string): boolean =>
-  denyList.split(",").some((p) => p.startsWith("Bash(") && patternMatchesCommand(p, command));
+// ── #101/#102 (historical context, now closed STRUCTURALLY, not by pattern): the old
+// `Bash(gh issue create *--body-file*)`-shaped denies (and their `-F`/`-l`/`-p` short-flag
+// counterparts) existed to block flag-shaped bypasses of a `gh` command a role session's
+// allow-list otherwise granted. #235 PR-B removes the Bash grant those bypasses needed to reach
+// `gh` THROUGH at all — the deny list's `Bash` entry below is the BARE tool name, not a pattern,
+// so it matches every possible `gh` invocation (and every other Bash invocation) without needing
+// to enumerate flag shapes. This subsumes the entire #101/#102 bypass class by construction. ──
 
-test("ROLE_DISALLOWED_TOOLS denies `gh issue comment/edit -F` (#102) — both space-separated and pflag-attached forms", () => {
-  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue comment 12 -F /etc/passwd"));
-  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue comment 12 -F/etc/passwd"), "attached form (no space)");
-  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue edit 12 -F /etc/passwd"));
-  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue edit 12 -F/etc/passwd"), "attached form (no space)");
+test("#101/#102 bypass class closed structurally (#235 PR-B): every peripheral role's deny list carries the bare `Bash` tool name — no `Bash(...)` pattern anywhere could leave a gap for a flag-shaped bypass (`-F`/`-l`/`-p`/`--body-file`/`--label`/`--project`) to slip through, because there is no Bash grant to slip through in the first place", () => {
+  for (const [name, denyList] of Object.entries({
+    ROLE_DISALLOWED_TOOLS,
+    PLAN_DRAFTER_DISALLOWED_TOOLS,
+    PO_DISALLOWED_TOOLS,
+    CONFIRM_DISALLOWED_TOOLS,
+  })) {
+    assert.ok(denyList.split(",").includes("Bash"), `${name} carries the blanket Bash deny`);
+  }
+  for (const [name, allowList] of Object.entries({ ROLE_ALLOWED_TOOLS, PO_ALLOWED_TOOLS, CONFIRM_ALLOWED_TOOLS })) {
+    assert.ok(!allowList.includes("Bash("), `${name} grants no Bash(...) entry — nothing for a flag bypass to exploit`);
+  }
 });
 
-test('ROLE_DISALLOWED_TOOLS: legitimate role writes (`gh issue comment/edit --body`) still pass, including bodies that merely CONTAIN the substring "-F" without it being its own argv token', () => {
-  assert.ok(!anyDenyMatches(ROLE_DISALLOWED_TOOLS, `gh issue comment 12 --body "status update"`));
-  assert.ok(!anyDenyMatches(ROLE_DISALLOWED_TOOLS, `gh issue edit 12 --body "status update"`));
-  // "-F" appears in "PR-Foo" but isn't preceded by a space (not its own token) — the space-
-  // boundary pattern shape must not false-deny this the way a bare `*-F*` would.
-  assert.ok(!anyDenyMatches(ROLE_DISALLOWED_TOOLS, `gh issue comment 12 --body "see PR-Foo for context"`));
-});
-
-test("PLAN_DRAFTER_DISALLOWED_TOOLS inherits the base list's -F short-flag denies (#102)", () => {
-  assert.ok(anyDenyMatches(PLAN_DRAFTER_DISALLOWED_TOOLS, "gh issue edit 12 -F /etc/passwd"));
-});
-
-test("#102 gate② regression: FLAG-FIRST argv order is denied too — cobra/pflag accepts flags before positionals, and a `subcommand *` shape (space after the subcommand) would let the literal prefix consume the only space before -F", () => {
-  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue comment -F /etc/passwd 12"));
-  assert.ok(anyDenyMatches(ROLE_DISALLOWED_TOOLS, "gh issue edit -F /etc/passwd 12"));
-  assert.ok(anyDenyMatches(PLAN_DRAFTER_DISALLOWED_TOOLS, "gh issue edit -F /etc/passwd 12"));
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create -F /etc/passwd --title x"));
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create -l bad --title x"));
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create -p Roadmap --title x"));
-});
-
-test("PO_DISALLOWED_TOOLS denies `gh issue create -F/-l/-p` (#102) — both space-separated and pflag-attached forms", () => {
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -F /etc/passwd"));
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -F/etc/passwd"), "attached form");
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -l plan:approved"));
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -lplan:approved"), "attached form");
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -p Roadmap"));
-  assert.ok(anyDenyMatches(PO_DISALLOWED_TOOLS, "gh issue create --title T -pRoadmap"), "attached form");
-});
-
-test("PO_DISALLOWED_TOOLS: legitimate PO write (`gh issue create --title --body` only) still passes", () => {
-  assert.ok(!anyDenyMatches(PO_DISALLOWED_TOOLS, `gh issue create --title "Improve X" --body "Because Y"`));
-});
-
-test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the align/triage session wiring) — #110 PR5: the allow half carries no Bash grant", async () => {
+test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the align/triage session wiring) — #235 PR-B: the allow half carries Read/Grep/Glob and no Bash grant", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -718,14 +772,14 @@ test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], PO_ALLOWED_TOOLS);
-    assert.equal(seen[seen.indexOf("--allowedTools") + 1], "");
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], "Read,Grep,Glob");
     assert.equal(seen[seen.indexOf("--disallowedTools") + 1], PO_DISALLOWED_TOOLS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("run: the confirm session's allowedTools + disallowedTools pair BOTH reach the argv (#214 gate② review P1) — exactly CONFIRM_ALLOWED_TOOLS/CONFIRM_DISALLOWED_TOOLS, the only role session with a non-empty allow-list besides retro", async () => {
+test("run: the confirm session's allowedTools + disallowedTools pair BOTH reach the argv (#214 gate② review P1, #235 PR-B) — exactly CONFIRM_ALLOWED_TOOLS/CONFIRM_DISALLOWED_TOOLS, now identical to every other peripheral role's baseline", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -744,7 +798,7 @@ test("run: the confirm session's allowedTools + disallowedTools pair BOTH reach 
     });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], CONFIRM_ALLOWED_TOOLS);
-    assert.equal(seen[seen.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], "Read,Grep,Glob");
     assert.equal(seen[seen.indexOf("--disallowedTools") + 1], CONFIRM_DISALLOWED_TOOLS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1212,21 +1266,22 @@ test("runSessionWithRetry + contextManifest: a THROWING record() is non-fatal �
 // asserting a role session is spawned with empty Bash grants and a structured-output round-trip
 // works end-to-end") ───────────────────────────────────────────────────────────────────────────
 
-test("#110 acceptance sweep: no issues-only role's allowedTools constant contains a Bash( entry (retro excepted, tracked in #111)", () => {
+test("#110/#235 acceptance sweep: no issues-only role's allowedTools constant contains a Bash( entry, and every one is exactly the read-only Read/Grep/Glob baseline (retro excepted — its own wider RETRO_ALLOWED_TOOLS is asserted separately in retro.test.ts)", () => {
   // Every allow-list-shaped export peripheral.ts/align.ts's roles actually wire into a session —
   // harvest.ts/architect.ts/plan-review.ts's reviewer never override allowedTools at all (see
   // architect.test.ts's/plan-review.test.ts's own "no override passed" assertions), so they fall
-  // back to ROLE_ALLOWED_TOOLS below unconditionally; PO/align+triage is the one role with its
-  // own named export (PO_ALLOWED_TOOLS). retro.ts's RETRO_ALLOWED_TOOLS is DELIBERATELY excluded
-  // — retro is worker-class (Read/git), out of #110's scope, tracked separately in #111.
-  const issuesOnlyAllowedTools: Record<string, string> = { ROLE_ALLOWED_TOOLS, PO_ALLOWED_TOOLS };
+  // back to ROLE_ALLOWED_TOOLS below unconditionally; PO/align+triage/confirm are the roles with
+  // their own named exports (PO_ALLOWED_TOOLS/CONFIRM_ALLOWED_TOOLS). retro.ts's
+  // RETRO_ALLOWED_TOOLS is DELIBERATELY excluded — retro is worker-class (Write/git), out of
+  // this sweep's scope, asserted separately in retro.test.ts.
+  const issuesOnlyAllowedTools: Record<string, string> = { ROLE_ALLOWED_TOOLS, PO_ALLOWED_TOOLS, CONFIRM_ALLOWED_TOOLS };
   for (const [name, tools] of Object.entries(issuesOnlyAllowedTools)) {
     assert.ok(!tools.includes("Bash("), `${name} must carry no Bash(...) allow-list entry, got: ${tools}`);
-    assert.equal(tools, "", `${name} must be the empty string (pure computation, no tool grant at all)`);
+    assert.equal(tools, "Read,Grep,Glob", `${name} must be exactly the read-only baseline (#235 PR-B), no write/exec grant at all`);
   }
 });
 
-test("#110 PR5 final integration: a role session spawns with empty Bash grants, emits a valid structured-output block, the engine's real validator (plan-review.ts) accepts it, and the resulting write reaches the forge", async () => {
+test("#110/#235 final integration: a role session spawns with a read-only (no Bash) grant, emits a valid structured-output block, the engine's real validator (plan-review.ts) accepts it, and the resulting write reaches the forge", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const issueNumber = 42;
@@ -1242,12 +1297,13 @@ test("#110 PR5 final integration: a role session spawns with empty Bash grants, 
     const runner = mkRunner(dir, bin);
 
     // 1. SPAWN: a real plan-reviewer role session under the DEFAULT (no override) allow/deny
-    // pair — the #110 PR5 acceptance criterion itself: no Bash(...) grant reaches the argv.
+    // pair — the #235 PR-B acceptance criterion: read-only Read/Grep/Glob reaches the argv, no
+    // Bash(...) grant anywhere.
     const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     const allowedArgv = seen[seen.indexOf("--allowedTools") + 1];
-    assert.equal(allowedArgv, "", "empty Bash grants reach the argv verbatim");
+    assert.equal(allowedArgv, "Read,Grep,Glob", "the read-only baseline reaches the argv verbatim");
     assert.ok(!(allowedArgv ?? "").includes("Bash("), "acceptance criterion: no Bash(...) entry anywhere in the argv");
 
     // 2. VALIDATE: the engine's REAL validator (plan-review.ts's validateReviewerOutput, not a

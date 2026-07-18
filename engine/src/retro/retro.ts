@@ -64,9 +64,16 @@ import { buildRetroDigest } from "./retro-digest.js";
  *  Same best-effort-pattern-layer caveat as every other allow/deny list in this codebase (see
  *  peripheral.ts's enforcement doc on ROLE_ALLOWED_TOOLS): the REAL boundary is the unchanged
  *  fail-closed guard hook every session gets, never weakened here. This pair only narrows what
- *  the CLI permission layer allows without an interactive prompt. */
+ *  the CLI permission layer allows without an interactive prompt.
+ *
+ *  #235 PR-B: `Grep`/`Glob` added alongside the `Read` this role already carried — the same
+ *  "explicit ALLOW for ALL peripheral roles" ruling peripheral.ts's ROLE_ALLOWED_TOOLS doc
+ *  covers applies here too (retro's job is code-aware BY DESIGN, prompts/retro.md unchanged —
+ *  it already searches/inspects its own worktree before proposing edits; it was simply missing
+ *  two of the three read tools every other role now carries). Confined to this session's own
+ *  ephemeral worktree by #235 PR-A's guard-hook containment, same as every other role. */
 export const RETRO_ALLOWED_TOOLS =
-  "Read,Write,Edit,MultiEdit," +
+  "Read,Write,Edit,MultiEdit,Grep,Glob," +
   "Bash(git branch*),Bash(git checkout*),Bash(git add*),Bash(git commit*),Bash(git push*)," +
   "Bash(git diff*),Bash(git status*),Bash(git log*)";
 
@@ -85,9 +92,14 @@ export const RETRO_ALLOWED_TOOLS =
  *  (including `gh pr create *--body-file*`, #101) is a REGRESSION TRIP-WIRE rather than a live
  *  constraint — same stance as peripheral.ts's ROLE_DISALLOWED_TOOLS after #110 PR5: a future
  *  PR that re-widens the allow-list with a gh entry lands back inside these denies rather than
- *  silently reopening a closed bypass class. Kept byte-identical, deliberately. */
+ *  silently reopening a closed bypass class. Kept byte-identical, deliberately.
+ *
+ *  #235 PR-B: `NotebookEdit` added as the same cross-source veto every issues-only role's deny
+ *  list now carries (`--disallowedTools` overrides ANY source, including a target repo's own
+ *  checked-out `.claude/settings.json`) — retro never needed notebook editing, so closing that
+ *  channel explicitly costs nothing and matches the rest of the matrix. */
 export const RETRO_DISALLOWED_TOOLS =
-  "Bash(git push*main*),Bash(git push*master*)," +
+  "NotebookEdit,Bash(git push*main*),Bash(git push*master*)," +
   "Bash(gh pr merge*),Bash(gh pr review*),Bash(gh pr ready*)," +
   "Bash(gh pr edit*),Bash(gh issue edit*),Bash(gh issue comment*),Bash(gh api*)," +
   "Bash(gh pr create *--body-file*)";

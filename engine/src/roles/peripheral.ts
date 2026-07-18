@@ -37,83 +37,81 @@ import {
   parseModelUsage,
   parseResultText,
   parseSessionInit,
+  parseToolUsage,
   type SpawnedSession,
   spawnClaudeSession,
 } from "./worker.js";
 
-/** #110 PR5: issues-only role sessions (plan-reviewer, plan-drafter, PO/align+triage, harvest,
- *  architect) carry NO Bash grant at all — ROLE_ALLOWED_TOOLS is empty. Each session is pure
- *  computation: its prompt never instructs a `gh` command, its final message ends in a
- *  structured block (structured-output.ts), and the engine (plan-review.ts/align.ts/harvest.ts/
- *  architect.ts) performs every GitHub write itself via IForge from schema-validated output. The
- *  real boundary is simply the absence of any Bash grant — no shell exists for a role session to
- *  reach `gh` through at all, so the #102/#108 quoting/short-flag bypass classes are moot for
- *  these roles.
+/** #235 PR-B (owner ruling 2026-07-17): the allow/deny matrix for EVERY issues-only peripheral
+ *  role (plan-reviewer, plan-drafter, PO/align+triage+pool, harvest, architect) — the ONE place
+ *  this matrix is defined, per-role exports below just naming which pair each session wires
+ *  in. Two prior rulings combine here:
  *
- *  ROLE_DISALLOWED_TOOLS below is KEPT, byte-identical, as a regression trip-wire: a future PR
- *  that re-widens ROLE_ALLOWED_TOOLS with a `Bash(...)` entry lands back inside these denies
- *  rather than silently reopening a bypass class #102/#108 already closed at the pattern layer.
- *  It does no live enforcement today (see peripheral.ts's #99 note that Bash glob patterns were
- *  always best-effort, backstopped by the unchanged fail-closed guard hook). */
-export const ROLE_ALLOWED_TOOLS = "";
-export const ROLE_DISALLOWED_TOOLS =
-  "Read,Write,Edit,MultiEdit,Bash(git *),Bash(gh pr *),Bash(gh api *),Bash(gh issue view*)," +
-  "Bash(gh issue list*),Bash(gh issue close*),Bash(gh issue reopen*),Bash(gh issue transfer*)," +
-  "Bash(gh issue delete*)," +
-  "Bash(gh issue comment *--body-file*),Bash(gh issue edit *--body-file*)," +
-  "Bash(gh issue comment* -F*),Bash(gh issue edit* -F*)";
+ *  - Information channels widen wherever side-effect-free: whether to read is the model's own
+ *    role-scoped judgment (an architect reasoning about a contradiction via an approval protocol
+ *    instead of just reading the code is absurd) — no role needs Read denied on
+ *    separation-of-duties grounds, because reading is not producing/approving/merging. So
+ *    ROLE_ALLOWED_TOOLS now carries `Read,Grep,Glob` for every peripheral role — architect is
+ *    NOT a special case, and neither is any other role in this family.
+ *  - The REAL containment boundary for that read grant is #235 PR-A's guard-hook confinement
+ *    (`checkReadContainment` in guard.ts, keyed off `SAPWOOD_WORKTREE_ROOT` — see
+ *    peripheralSessionEnv below): Read/Grep/Glob resolve to real file content, but ONLY inside
+ *    this session's own ephemeral worktree, host-path and `../`-traversal reads both denied.
+ *    This allow/deny pair is the CLI's own permission layer on top of that — noise reduction,
+ *    same stance every allow/deny list in this file has always taken (worker.ts's own doc), but
+ *    now backed by a real fail-closed mechanism on the read side too, not just the write side.
+ *
+ *  ROLE_DISALLOWED_TOOLS is the cross-source veto half: `--disallowedTools` is a HARD deny that
+ *  wins over allow from ANY source, including a target repo's own checked-out
+ *  `.claude/settings.json` — an authorization surface this engine does not control. `Write`/
+ *  `Edit`/`MultiEdit`/`NotebookEdit` close every write channel; a blanket `Bash` (the bare tool
+ *  name, not a pattern) closes command execution entirely — no `git`, no `gh`, no shell of any
+ *  kind. This SUBSUMES the old per-pattern `Bash(gh ...)` denies (#101/#102's `--body-file`/
+ *  `-F`/`-l`/`-p` bypass classes are moot when there is no Bash grant to bypass THROUGH at all)
+ *  and the plan-drafter's/PO's extra label-mutation denies below — simplified accordingly.
+ *  Read-only git (`git log` etc.) deliberately stays OUT: the blanket Bash deny already covers
+ *  it, and the issue's own scope explicitly excludes adding it as a distinct grant.
+ *
+ *  Kept as regression trip-wires (peripheral.test.ts pins these exact strings, and the derived
+ *  per-role pairs below): a future PR that re-widens either list — an added allow entry, a
+ *  removed deny entry — lands inside a failing test rather than silently reopening either the
+ *  read-containment boundary or the write/exec boundary this pair enforces. */
+export const ROLE_ALLOWED_TOOLS = "Read,Grep,Glob";
+export const ROLE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash";
 
-/** The plan-DRAFTER's stricter deny list (#77 Amendment 2's plan-author ≠ plan-approver chain):
- *  everything above PLUS label mutation, kept as the same regression trip-wire ROLE_DISALLOWED_
- *  TOOLS is (see its doc above) — the drafter has no Bash grant to mutate a label with in the
- *  first place; label discipline is now structural (plan-review.ts never calls forge.addLabel
- *  on the drafter's behalf, see that module's doc). */
-export const PLAN_DRAFTER_DISALLOWED_TOOLS =
-  ROLE_DISALLOWED_TOOLS + ",Bash(gh issue edit *--add-label*),Bash(gh issue edit *--remove-label*)";
+/** The plan-DRAFTER's deny list (#77 Amendment 2's plan-author ≠ plan-approver chain): kept as
+ *  its OWN named export — the same regression-trip-wire stance ROLE_DISALLOWED_TOOLS itself
+ *  documents — even though #235 PR-B's blanket Bash deny above already makes it byte-identical
+ *  to the base. Before #235, this carried extra `Bash(gh issue edit *--add-label/--remove-
+ *  label*)` patterns; those are now REDUNDANT (no Bash grant at all reaches `gh` to mutate a
+ *  label with in the first place) and have been dropped — label discipline is structural
+ *  (plan-review.ts never calls forge.addLabel on the drafter's behalf, see that module's doc),
+ *  not a pattern-layer concern anymore. */
+export const PLAN_DRAFTER_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS;
 
-/** #214 gate② review (P1): the freshness re-confirm session ("does this plan still hold against
- *  current main?") is otherwise BLIND — the base ROLE_ALLOWED_TOOLS carries no Read grant at
- *  all, and ROLE_DISALLOWED_TOOLS explicitly denies `Read`, so a session judging freshness
- *  against the repo's current state (the issue's own live-smoke scenario: a plan referencing a
- *  file since renamed) had no way to actually check. This is the SECOND sanctioned allow-list
- *  widening in this codebase (the first is retro.ts's RETRO_ALLOWED_TOOLS — see
- *  RoleSessionOpts.allowedTools's doc for why a widening is always paired with its own
- *  disallowedTools override, never shipped wide-open) — deliberately the NARROWEST possible
- *  grant for the job: read-only repository INSPECTION, nothing else. No `Bash` of any kind
- *  (so no `git`, no `gh`, no arbitrary command execution), no `Write`/`Edit`/`MultiEdit` (the
- *  confirm session's only output channel is its structured final message, exactly like every
- *  other role in this file — plan-review.ts performs every write). The session reads the
- *  CONDUCTOR'S OWN checkout (the same ephemeral worktree every role session gets) — its
- *  freshness relative to `main` is the conductor's responsibility (the same worktree-provisioning
- *  contract every other role session already relies on), not something this grant controls. The
- *  widening is read-only BY CONSTRUCTION: with no Bash grant there is no shell to reach `gh`
- *  through even if the prompt tried, so #110's zero-write boundary for this role family is
- *  unaffected — this session still cannot write to GitHub OR to the repo. */
-export const CONFIRM_ALLOWED_TOOLS = "Read,Glob,Grep";
+/** #214 gate② review (P1) / #235 PR-B: the freshness re-confirm session ("does this plan still
+ *  hold against current main?") used to need its OWN allow-list widening — before #235, the base
+ *  ROLE_ALLOWED_TOOLS carried no Read grant at all, so this was the SECOND sanctioned widening
+ *  in this codebase (after retro.ts's RETRO_ALLOWED_TOOLS). #235 PR-B makes Read/Grep/Glob the
+ *  UNIVERSAL peripheral-role baseline, so this pair is no longer a widening at all — it is now
+ *  byte-identical to ROLE_ALLOWED_TOOLS/ROLE_DISALLOWED_TOOLS. Kept as its own named export
+ *  anyway (same stance as PO_ALLOWED_TOOLS below): plan-review.ts's confirm callsite still
+ *  documents which pair it wires explicitly, and a future accidental widening of JUST this
+ *  role's grant still lands inside its own regression-trip-wire test. */
+export const CONFIRM_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS;
+export const CONFIRM_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS;
 
-/** The confirm session's deny list — the base ROLE_DISALLOWED_TOOLS with `Read` removed (deny
- *  wins over allow in Claude Code, so `Read` staying denied would make CONFIRM_ALLOWED_TOOLS's
- *  own `Read` entry above meaningless). Derived from ROLE_DISALLOWED_TOOLS by construction
- *  (never hand-copied) so any future change to the base deny list's OTHER entries — the `Write`/
- *  `Edit`/`MultiEdit`/every `Bash(gh ...)` denial this role still needs — propagates here
- *  automatically; the only thing this role's deny list ever needs to differ on is `Read`. */
-export const CONFIRM_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS.replace(/^Read,/, "");
-
-/** #110 PR5: the PO/alignment role also carries no Bash grant — `gh issue create` is performed
- *  by the engine from align.ts's validated structured output, never by the session itself.
- *  PO_ALLOWED_TOOLS is kept as its own export (rather than folded away) so align.ts's callsite
- *  still documents which role-specific allow/deny pair it wires, unchanged in shape from before
- *  #110 even though its value is now identical to the base ROLE_ALLOWED_TOOLS. */
+/** #110 PR5 / #235 PR-B: the PO/alignment role also carries no Bash grant — `gh issue create` is
+ *  performed by the engine from align.ts's validated structured output, never by the session
+ *  itself. PO_ALLOWED_TOOLS/PO_DISALLOWED_TOOLS are kept as their own exports (rather than
+ *  folded away) so align.ts's callsite still documents which role-specific allow/deny pair it
+ *  wires, unchanged in shape from before #110/#235 even though their values are now identical to
+ *  the base ROLE_ALLOWED_TOOLS/ROLE_DISALLOWED_TOOLS. Before #235, PO_DISALLOWED_TOOLS carried
+ *  extra `Bash(gh issue create *--body-file/--label/--project*)` patterns (#101/#102) closing
+ *  flag holes the old (narrower) allow-list opened; those are now REDUNDANT under the blanket
+ *  Bash deny and have been dropped. */
 export const PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS;
-
-/** The PO's matching deny list, kept byte-identical as the same regression trip-wire class as
- *  ROLE_DISALLOWED_TOOLS above (`--body-file`/`--label`/`--project` and their `-F`/`-l`/`-p`
- *  short-flag aliases on `gh issue create`, #101/#102) — the real boundary is PO_ALLOWED_TOOLS
- *  carrying no Bash grant at all, not this pattern layer. */
-export const PO_DISALLOWED_TOOLS =
-  ROLE_DISALLOWED_TOOLS +
-  ",Bash(gh issue create *--body-file*),Bash(gh issue create *--label*),Bash(gh issue create *--project*)," +
-  "Bash(gh issue create* -F*),Bash(gh issue create* -l*),Bash(gh issue create* -p*)";
+export const PO_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS;
 
 export interface RoleSessionOpts {
   /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
@@ -317,9 +315,11 @@ async function waitForInitLine(jsonlPath: string, timeoutMs: number, pollMs: num
  *  also relies on platform-specific runtime variables. Peripheral roles need that runtime
  *  environment, but never need GitHub credentials because they have no forge responsibilities.
  *
- *  Keep this boundary paired with ROLE_ALLOWED_TOOLS's empty allowlist. The empty allowlist is
- *  the primary action boundary; stripping credentials ensures a future tool-widening regression
- *  cannot silently turn an inherited engine credential into forge authority. */
+ *  Keep this boundary paired with ROLE_ALLOWED_TOOLS's zero-write, zero-`Bash` allowlist (#235
+ *  PR-B: `Read,Grep,Glob` only, guard-confined to the worktree — no longer the empty string
+ *  #110 shipped, but still zero forge-reaching capability). That allowlist is the primary
+ *  action boundary; stripping credentials ensures a future tool-widening regression cannot
+ *  silently turn an inherited engine credential into forge authority. */
 function peripheralSessionEnv(guardMode: SapwoodConfig["guard"]["mode"], worktreePath: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -342,6 +342,22 @@ function peripheralSessionEnv(guardMode: SapwoodConfig["guard"]["mode"], worktre
   // scratchFile containment check a few lines below this function's call site.
   env.SAPWOOD_WORKTREE_ROOT = worktreePath;
   return env;
+}
+
+/** #235 PR-B: does this `--allowedTools` string grant any WRITE-capable tool — the exact set
+ *  assembleManifest's worktree.dirty derivation needs to distinguish from a read-only grant
+ *  (Read/Grep/Glob, now the universal peripheral baseline, ROLE_ALLOWED_TOOLS above). Checked as
+ *  discrete comma-separated tokens, not a bare substring test — `Bash(...)` entries carry
+ *  arbitrary suffixes (e.g. retro's `Bash(git branch*)`), so a token is write-capable when it
+ *  IS one of the fixed write-tool names or STARTS WITH `Bash` (any Bash grant is write-capable
+ *  by definition: shell access can always mutate the worktree, regardless of which command
+ *  pattern it's scoped to). */
+function hasWriteCapableGrant(allowedTools: string): boolean {
+  return allowedTools
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+    .some((t) => t === "Write" || t === "Edit" || t === "MultiEdit" || t === "NotebookEdit" || t.startsWith("Bash"));
 }
 
 export class RoleRunner {
@@ -704,24 +720,40 @@ export class RoleRunner {
       });
     }
 
-    // See WorktreeGitState.dirtyBasis's doc: an EMPTY effective tool grant (every issues-only
-    // role) is a structural "cannot have been dirtied" guarantee; a NON-EMPTY one (today: only
-    // `retro`, which holds Write + local git) means the engine cannot rule out a write without a
-    // live `git status` it structurally never performs — record that conservatively as dirty,
-    // never a false "definitely clean" borrowed from the empty-allowlist case. A worktree that
-    // never appeared at all (Codex F5d) gets its OWN distinct basis, never folded into either.
+    // See WorktreeGitState.dirtyBasis's doc: a NO-WRITE-CAPABLE-TOOL effective grant is a
+    // structural "cannot have been dirtied" guarantee; a grant that includes any write-capable
+    // tool (Write/Edit/MultiEdit/NotebookEdit/any Bash(...) entry — today: only `retro`, which
+    // holds Write + local git) means the engine cannot rule out a write without a live `git
+    // status` it structurally never performs — record that conservatively as dirty, never a
+    // false "definitely clean". A worktree that never appeared at all (Codex F5d) gets its OWN
+    // distinct basis, never folded into either.
+    //
+    // #235 PR-B: this used to be a bare "is the allow-list non-empty" check — correct back when
+    // ROLE_ALLOWED_TOOLS was "" (an empty grant WAS the only no-write case). #235 PR-B makes
+    // Read/Grep/Glob the universal peripheral baseline, so the allow-list is now non-empty for
+    // EVERY role while still granting zero write capability — the emptiness check would have
+    // mis-recorded every issues-only role's worktree as conservatively dirty. hasWriteCapableGrant
+    // below checks for an actual write-capable TOKEN instead of mere non-emptiness.
     const worktreePath = join(this.worktreeRoot, name);
     const effectiveAllowedTools = opts.allowedTools ?? ROLE_ALLOWED_TOOLS;
-    const hasWriteCapableTools = effectiveAllowedTools.trim().length > 0;
+    const writeCapable = hasWriteCapableGrant(effectiveAllowedTools);
     const worktree: WorktreeGitState = !pre.worktreeAppeared
       ? { path: worktreePath, head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "worktree-missing" }
       : {
           path: worktreePath,
           head: pre.head,
           headResolution: pre.head ? "resolved" : "unresolved",
-          dirty: hasWriteCapableTools,
-          dirtyBasis: hasWriteCapableTools ? "unknown-write-capable-session" : "structural-no-write-tools",
+          dirty: writeCapable,
+          dirtyBasis: writeCapable ? "unknown-write-capable-session" : "structural-no-write-tools",
         };
+
+    // #235 PR-B: parse tool usage from the SAME jsonl string every other post-exit field above
+    // already scans (worker.ts's parseToolUsage — item 4 of #235's acceptance criteria: which
+    // paths/tools a session actually USED land in the manifest). worktreePath (this session's
+    // own resolved worktree root, already computed above) is passed as defaultSearchPath: a
+    // pathless Grep/Glob call searches exactly this cwd, and Codex review (PR #257 F2) flagged
+    // that omitting it understated what the session actually read.
+    const { toolUsage, readPaths } = parseToolUsage(jsonl, worktreePath);
 
     return assembleContextManifest({
       sources,
@@ -740,6 +772,8 @@ export class RoleRunner {
       worktree,
       settingsJson,
       hookContent: pre.hookContent,
+      toolUsage,
+      readPaths,
       recordedAt: capturedPostExit,
     });
   }

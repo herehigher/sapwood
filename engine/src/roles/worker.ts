@@ -264,6 +264,102 @@ export function parseAssistantUsageDeltas(jsonl: string): ModelUsageEntry[] {
   return out;
 }
 
+/** #235 PR-B: one tool name and how many times the session's stream invoked it — counts EVERY
+ *  `tool_use` block the session emitted, whether Claude Code actually allowed the call or the
+ *  guard hook/CLI denied it (a denied attempt is still evidence worth recording: "this session
+ *  tried to Bash" is itself a diagnosable fact, not something to silently drop because it never
+ *  executed). */
+export interface ToolUsageEntry {
+  tool: string;
+  count: number;
+}
+
+/** #235 PR-B: which repository paths a session's Read/Grep/Glob/NotebookRead tool calls actually
+ *  named — the manifest's "what did this session actually look at" half, alongside
+ *  toolInventoryHash's "what COULD it have used". Mirrors guard.ts's own checkReadContainment
+ *  path resolution exactly (Read/NotebookRead: a required single-file path; Grep/Glob: an
+ *  OPTIONAL search-root path — when explicitly supplied, recorded EXACTLY as the session
+ *  supplied it, absolute-or-relative, never re-resolved). A Grep/Glob call with NO `path`
+ *  doesn't skip the repository — it searches the session's own cwd (the worktree root), and
+ *  Claude Code's own containment resolves it there too (`guard.ts`'s `checkReadContainment`
+ *  falls back to `cwd` for exactly this case) — so `parseToolUsage`'s caller-supplied
+ *  `defaultSearchPath` (the session's worktree root) is recorded for that case instead of
+ *  silently dropping it (Codex review, PR #257 F2: a pathless Grep/Glob still reads and returns
+ *  file contents; omitting it from `readPaths` understated what the session actually used). This
+ *  is a RECORD of what was asked for / where it searched, not a re-check of where it landed —
+ *  #235 PR-A's guard hook is the actual containment enforcement. */
+export interface ToolUsageResult {
+  toolUsage: ToolUsageEntry[];
+  readPaths: string[];
+}
+
+const READ_PATH_FIELD: Record<string, string> = {
+  Read: "file_path",
+  NotebookRead: "notebook_path",
+  Grep: "path",
+  Glob: "path",
+};
+
+/** Grep/Glob search the session's cwd when called with no `path` — Read/NotebookRead have no
+ *  such fallback (a missing `file_path`/`notebook_path` is simply a malformed call, the same
+ *  fail-closed shape `guard.ts`'s own containment check treats it as), so only these two tools
+ *  get `defaultSearchPath` substituted in `parseToolUsage` below. */
+const PATHLESS_SEARCHES_CWD = new Set(["Grep", "Glob"]);
+
+/** #235 PR-B: parse every `tool_use` block from a session's stream-json transcript — the SAME
+ *  jsonl every other parser in this module scans (peripheral.ts's context-manifest assembly
+ *  passes the identical string already read for parseCostUsd/parseModelUsage/parseResultText).
+ *  Same tolerance guarantee as every sibling parser here: a partial/garbage line is skipped,
+ *  never thrown; a malformed/missing `message.content` array yields nothing for that line rather
+ *  than aborting the whole scan. Tool names are counted in FIRST-SEEN order for readability;
+ *  `readPaths` is sorted + deduplicated (see ToolUsageResult's doc for exactly which field each
+ *  read-shaped tool contributes).
+ *
+ *  `defaultSearchPath` (optional, typically the session's resolved worktree root — peripheral.ts
+ *  passes it) is the path recorded for a Grep/Glob call with no explicit `path` field (see
+ *  PATHLESS_SEARCHES_CWD's doc and ToolUsageResult's doc for why this isn't just dropped).
+ *  Omitted -> a pathless Grep/Glob call is still counted in `toolUsage` but contributes no entry
+ *  to `readPaths` (the pre-fix behavior, kept as the default so a caller that doesn't know its
+ *  session's worktree root yet degrades honestly rather than fabricating one). */
+export function parseToolUsage(jsonl: string, defaultSearchPath?: string): ToolUsageResult {
+  const counts = new Map<string, number>();
+  const pathSet = new Set<string>();
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // partial/garbage line — ignore (stream may be mid-write)
+    }
+    if (obj.type !== "assistant") continue;
+    const message = obj.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+      const b = block as Record<string, unknown>;
+      if (b.type !== "tool_use" || typeof b.name !== "string" || b.name.length === 0) continue;
+      const name = b.name;
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+      const pathField = READ_PATH_FIELD[name];
+      if (!pathField) continue;
+      const input = b.input;
+      const rawPath =
+        input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>)[pathField] : undefined;
+      if (typeof rawPath === "string" && rawPath.length > 0) {
+        pathSet.add(rawPath);
+      } else if (PATHLESS_SEARCHES_CWD.has(name) && defaultSearchPath) {
+        pathSet.add(defaultSearchPath);
+      }
+    }
+  }
+  const toolUsage: ToolUsageEntry[] = [...counts.entries()].map(([tool, count]) => ({ tool, count }));
+  return { toolUsage, readPaths: [...pathSet].sort() };
+}
+
 /** CLAUDE_BIN env override, else `claude` on PATH. */
 export function discoverClaudeBin(env: Record<string, string | undefined>): string {
   const b = env.CLAUDE_BIN?.trim();

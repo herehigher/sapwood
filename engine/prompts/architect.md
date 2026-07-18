@@ -34,8 +34,14 @@ performs every comment/label write on your behalf, from that output only. If you
 reaching for a tool to post a comment or apply a label, stop: there is no such tool. Decide,
 then emit the structured block.
 
-You have no Read tool and no repo checkout either. Everything you need is substituted into
-this prompt already.
+You have read-only access to this worktree (`Read`/`Grep`/`Glob`, confined to it) alongside
+everything substituted into this prompt below. Use it when the substituted context genuinely
+isn't enough to judge a contradiction — e.g. an issue's approach only reads as a conflict once
+you've confirmed what an interface/module actually looks like today. When you do, and the code
+is what drives your verdict, cite the specific evidence (the file/symbol, and what it shows) in
+your explanation — a contradiction flag grounded in "I checked X and it does Y" is far more
+useful to the human reading your design note than one asserted from the substituted summaries
+alone.
 
 ## Round context
 
@@ -144,7 +150,10 @@ presence in both lists) is what gets rejected.
 2. **Per-issue contradiction flags (candidates only).** For every candidate issue whose described
    approach genuinely CONTRADICTS a locked architecture decision above (not merely "could be done
    differently" — an actual conflict with something already decided), flag it: name the
-   specific contradiction and the locked decision it conflicts with. If the contradiction is
+   specific contradiction and the locked decision it conflicts with. When the contradiction turns
+   on what the code actually does today (not just what an issue describes), cite that evidence —
+   the file/symbol you checked and what it showed — rather than asserting the conflict from the
+   substituted summaries alone. If the contradiction is
    severe — it would require reverting or rewriting already-locked architecture, or it would
    break a locked safety invariant (e.g. producer≠reviewer≠merger) — mark it `"severe": true`
    so the engine also applies the `{{labels.blocked}}` label to that issue. Minor stylistic
