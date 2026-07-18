@@ -530,6 +530,22 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       CREATE UNIQUE INDEX input_manifest_dim ON input_manifest (round_id, phase, role, session, attempt, channel);
     `);
   },
+  // 17 -> 18: index on events(kind) (#237 round-3 adjudication, 2026-07-19). Every kind-filtered
+  // read (eventsSince/eventsAfterId — `WHERE id > ? AND kind IN (...)`) has always been a SQL
+  // query, never an application-side filter of the whole table — but with no index on `kind`,
+  // SQLite still had to scan every row in `events` to evaluate the `kind IN (...)` predicate.
+  // dissent.ts's reconcileDurableConcerns (#237) made this cost visible: it runs a kind-filtered
+  // scan UNCONDITIONALLY every round, so a healthy long-running engine was paying O(total event
+  // history) per round — O(rounds²) cumulative — for a query that only ever wants a handful of
+  // concern/decision events. A plain index on `kind` alone (not a composite with `id`) is the
+  // cheap, minimal fix: it lets SQLite jump straight to the matching-kind rows instead of
+  // scanning every row to check each one's kind, making every such query proportional to the
+  // number of MATCHING events, not the whole ledger — with zero new bookkeeping/cursor machinery
+  // and no call-site changes required (every existing eventsSince/eventsAfterId call benefits
+  // automatically). CREATE INDEX (not UNIQUE) — `kind` is deliberately repeated across many rows.
+  (db) => {
+    db.exec(`CREATE INDEX events_kind_idx ON events (kind);`);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

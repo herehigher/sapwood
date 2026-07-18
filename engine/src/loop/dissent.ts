@@ -389,25 +389,34 @@ const ConcernReceiptEventSchema = z
   .object({ round_id: z.number().int().positive(), issue: z.number().int().positive(), reason: z.string() })
   .passthrough();
 
+const DECISION_KINDS = ["triage-decision-accepted", "proposal-set-persisted"] as const;
+const RECEIPT_KIND = "concern-posted";
+
 /** #237 round-2 adjudication (finding 1): the DURABLE backstop `postConcerns` alone cannot be —
  *  see the module doc's own "finding 1" note for the exact crash window this closes. Reads every
- *  `triage-decision-accepted`/`proposal-set-persisted` event on the WHOLE ledger (never scoped to
- *  a single round — that scoping is exactly what makes the in-memory path fragile), extracts each
- *  one's embedded `concerns` array, and re-runs `postConcernIfNew` — using THAT DECISION's OWN
- *  `round_id` (#237 finding 2, never the round this sweep happens to run in) — for every concern
- *  that has no matching `concern-posted` receipt yet, keyed by (round_id, issue, reason): the
- *  ONE stable triple both event shapes carry (the hash itself is NOT stable ahead of time — it
- *  depends on the issue's body at whatever moment posting/reconciling actually happens).
+ *  `triage-decision-accepted`/`proposal-set-persisted`/`concern-posted` event on the WHOLE ledger
+ *  (never scoped to a single round — that scoping is exactly what makes the in-memory path
+ *  fragile) in ONE kind-filtered query (#237 round-3 adjudication — collapsed from two separate
+ *  `eventsAfterId` calls, since both read from the SAME table and this codebase's `IN (...)`
+ *  clause already lets one query cover multiple kinds at once), splits them apart by `e.kind`,
+ *  extracts each decision's embedded `concerns` array, and re-runs `postConcernIfNew` — using THAT
+ *  DECISION's OWN `round_id` (#237 finding 2, never the round this sweep happens to run in) — for
+ *  every concern that has no matching `concern-posted` receipt yet, keyed by (round_id, issue,
+ *  reason): the ONE stable triple both event shapes carry (the hash itself is NOT stable ahead of
+ *  time — it depends on the issue's body at whatever moment posting/reconciling actually happens).
  *
  *  Idempotent and safe to call every round, forever: `postConcernIfNew` itself is idempotent (a
  *  live marker match reconciles or no-ops; module doc), and this function's OWN receipt lookup
  *  additionally skips any concern that already has a matching event, so a concern that posted
  *  cleanly the very first time costs this sweep nothing beyond the receipt lookup itself ever
- *  again. A full-ledger scan (not an incremental cursor) is the same "record, not gate" tradeoff
- *  this codebase already accepts elsewhere (e.g. align.ts's own proposalProgress/triageProgress,
- *  which read `state.eventsAfterId(0, ...)` unbounded and filter client-side) — concern volume is
- *  expected to be low (structured objections are rare, not a bulk mechanism), so this is a
- *  deliberate simplicity choice, not an oversight. */
+ *  again. #237 round-3 adjudication: a plain index on `events(kind)` (state.ts's schema v17->v18
+ *  migration) is what keeps this — and every OTHER kind-filtered `eventsSince`/`eventsAfterId`
+ *  call in this codebase — proportional to the number of MATCHING events, not the whole ledger;
+ *  a full-ledger-by-kind scan (not an incremental cursor) is still the same "record, not gate"
+ *  tradeoff this codebase already accepts elsewhere (e.g. align.ts's own proposalProgress/
+ *  triageProgress), now backed by an index rather than a sequential scan — concern volume is
+ *  expected to be low (structured objections are rare, not a bulk mechanism) either way, so no
+ *  cursor/bookkeeping machinery was added on top of the index (PM ruling). */
 export async function reconcileDurableConcerns(
   forge: IForge,
   state: State,
@@ -415,13 +424,17 @@ export async function reconcileDurableConcerns(
   log?: (message: string) => void,
 ): Promise<void> {
   const warn = log ?? console.error;
-  const decisionEvents = state.eventsAfterId(0, ["triage-decision-accepted", "proposal-set-persisted"]);
-  const receiptEvents = state.eventsAfterId(0, ["concern-posted"]);
+  const events = state.eventsAfterId(0, [...DECISION_KINDS, RECEIPT_KIND]);
   const receiptKeys = new Set<string>();
-  for (const e of receiptEvents) {
-    const parsed = ConcernReceiptEventSchema.safeParse(e.payload);
-    if (!parsed.success) continue; // malformed receipt — never thrown, just excluded from the "already delivered" set
-    receiptKeys.add(`${parsed.data.round_id}:${parsed.data.issue}:${parsed.data.reason}`);
+  const decisionEvents: typeof events = [];
+  for (const e of events) {
+    if (e.kind === RECEIPT_KIND) {
+      const parsed = ConcernReceiptEventSchema.safeParse(e.payload);
+      if (!parsed.success) continue; // malformed receipt — never thrown, just excluded from the "already delivered" set
+      receiptKeys.add(`${parsed.data.round_id}:${parsed.data.issue}:${parsed.data.reason}`);
+    } else {
+      decisionEvents.push(e);
+    }
   }
   const pending: Array<{ roundId: number; concern: Concern }> = [];
   for (const e of decisionEvents) {

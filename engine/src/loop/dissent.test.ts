@@ -606,6 +606,25 @@ test("reconcileDurableConcerns: a malformed decision event (no concerns array) a
   state.close();
 });
 
+test("reconcileDurableConcerns #237 round-3 adjudication: reads the ledger with exactly ONE kind-filtered query, not two", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  state.appendEvent("triage-decision-accepted", { round_id: 5, issue: 91, body: "x", concerns: [{ issue: 91, reason: "x" }] });
+  state.appendEvent("concern-posted", { round_id: 5, issue: 91, reason: "x", hash: "already-delivered" });
+  let calls = 0;
+  const realEventsAfterId = state.eventsAfterId.bind(state);
+  state.eventsAfterId = (afterId: number, kinds: string[]) => {
+    calls++;
+    return realEventsAfterId(afterId, kinds);
+  };
+
+  await reconcileDurableConcerns(forge, state, cfg);
+
+  assert.equal(calls, 1, "one collapsed query covering triage-decision-accepted/proposal-set-persisted/concern-posted together");
+  state.close();
+});
+
 test("round-defaults integration (#237 round-2 adjudication, finding 1+2): reconcileDurableConcerns is what round-defaults.ts's aligning wrapper actually calls — sanity import check", () => {
   // Full round.ts/round-defaults.ts integration coverage lives in round-defaults.test.ts; this
   // file only asserts the function this module exports is the one that gets wired there.
