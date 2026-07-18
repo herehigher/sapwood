@@ -2237,6 +2237,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.appendEvent("fix-leg-resume-failed", { worker: w.name, issue: w.issue, error: String(e) });
           throw e;
         }
+        // #245 round-3 fix (B5): requestHandoff FIRST — durable (persists handoff_requested in
+        // running.json) and idempotent, so a crash between this call and the upsert below is
+        // safe: the row stays `handoff` with fixing_handoff=1 and the SAME confirmed intent, so
+        // the next tick re-enters this exact ADOPT branch — resume() re-adopts, requestHandoff
+        // is then a harmless no-op re-signal, and the upsert's resume_attempts bump is still the
+        // first and only successful one. Same convergence argument as B3's reordering.
+        supervisor.requestHandoff(w.name);
         const adoptAttempt = attempts + 1;
         state.upsertWorker({
           ...w,
@@ -2248,7 +2255,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           fixing_handoff: 1,
         });
         state.appendEvent("fix-leg-adopted-drained", { worker: w.name, issue: w.issue, pr, attempt: adoptAttempt });
-        supervisor.requestHandoff(w.name);
         resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: adoptAttempt });
         resumeLanesUsed++;
         continue;

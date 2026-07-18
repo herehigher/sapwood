@@ -4477,6 +4477,55 @@ test("tick RESUME (B2a): a fixing-continuation resume() that resolves to ADOPT (
   st.close();
 });
 
+test("tick RESUME (B5): the B2a ADOPT branch calls requestHandoff BEFORE the upsert — a crash between them (simulated: upsertWorker throws once) never loses the drain request, and the retry never double-counts resume_attempts", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixingHandoff(st, "lane-fix", 5, 50, { fix_rounds: 1 });
+  sup.resumeIntents["lane-fix"] = "confirmed"; // -> resumeDecision always yields ADOPT
+
+  const originalUpsert = st.upsertWorker.bind(st);
+  let crashed = false;
+  st.upsertWorker = (row) => {
+    if (!crashed && row.name === "lane-fix" && row.state === "fixing") {
+      crashed = true;
+      throw new Error("simulated crash between requestHandoff and the upsert");
+    }
+    originalUpsert(row);
+  };
+
+  await assert.rejects(() =>
+    tick({
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg(),
+      fixLegResume: { renderFixPrompt: () => "unused", mintProxy: async () => ({}) as never },
+    }),
+  );
+  assert.ok(crashed, "sanity: the simulated crash actually fired");
+  assert.ok(sup.handoffRequested.includes("lane-fix"), "B5: requestHandoff is durable/idempotent and fired BEFORE the crashed upsert");
+  const midCrash = st.getWorker("lane-fix")!;
+  assert.equal(midCrash.state, "handoff", "still handoff — the crashed upsert never landed");
+  assert.equal(midCrash.fixing_handoff, 1, "unchanged — still the same confirmed-intent shape for the next tick to re-enter");
+  assert.equal(midCrash.resume_attempts ?? 0, 0, "resume_attempts NOT bumped by the crashed attempt");
+
+  // Retry: the row is STILL a fixing-origin handoff with the SAME confirmed intent, so the next
+  // tick's RESUME phase re-enters this exact ADOPT branch from scratch.
+  st.upsertWorker = originalUpsert;
+  await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    fixLegResume: { renderFixPrompt: () => "unused", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "fixing");
+  assert.equal(row.resume_attempts, 1, "exactly ONE bump total across both attempts — never double-counted");
+  st.close();
+});
+
 test("tick kill-switch (B2b): a fixing-origin handoff (fixing_handoff=1) adopted via a confirmed resume intent lands back in `fixing`, never `running` — fix identity preserved through the kill-switch adoption path", async () => {
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
