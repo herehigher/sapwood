@@ -487,6 +487,49 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       );
     `);
   },
+  // 16 -> 17: input_manifest.truncated becomes a genuine THREE-STATE column (#251 gate② review
+  // round 3, Codex delta-verify F1). Migration v13->v14 shipped `truncated INTEGER NOT NULL
+  // DEFAULT 0` — every caller (align.ts's, and later architect.ts's, recordInputManifest) that
+  // simply omitted the field got a silently-coerced `false`, indistinguishable from a caller that
+  // deliberately asserted "not truncated". That is exactly the dishonesty #251's own review
+  // exists to close: architect.ts's four pass-through channels (last-merged/aligned-goals/
+  // doctrine/directive) genuinely don't know whether an UPSTREAM cap already truncated their
+  // text, so "omit the field" must round-trip as unknown/NULL, never as a fabricated `false`.
+  // SQLite has no ALTER-COLUMN-DROP-NOT-NULL; this is the standard rebuild — new table (same
+  // columns, `truncated` now bare `INTEGER`, no NOT NULL/DEFAULT), copy every existing row
+  // verbatim (an old 0/1 value is preserved as-is; only NEW writes can ever produce NULL, so no
+  // historical row needs backfilling), drop the old table, rename, and recreate the unique index
+  // (dropping a table drops its indexes too). No FK relationships touch this table (grep
+  // confirms `input_manifest` is never a REFERENCES target anywhere in this schema), so the
+  // rebuild is a plain data-preserving swap, no foreign_keys pragma dance required.
+  (db) => {
+    db.exec(`
+      CREATE TABLE input_manifest_new (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id  INTEGER NOT NULL,
+        phase     TEXT NOT NULL,
+        role      TEXT NOT NULL,
+        session   TEXT NOT NULL,
+        attempt   INTEGER NOT NULL CHECK (attempt > 0),
+        channel   TEXT NOT NULL,
+        ok        INTEGER NOT NULL,
+        version   TEXT,
+        total     INTEGER,
+        rendered  INTEGER,
+        omitted   INTEGER,
+        truncated INTEGER,
+        detail    TEXT,
+        ts        TEXT NOT NULL
+      );
+      INSERT INTO input_manifest_new
+        (id, round_id, phase, role, session, attempt, channel, ok, version, total, rendered, omitted, truncated, detail, ts)
+      SELECT id, round_id, phase, role, session, attempt, channel, ok, version, total, rendered, omitted, truncated, detail, ts
+      FROM input_manifest;
+      DROP TABLE input_manifest;
+      ALTER TABLE input_manifest_new RENAME TO input_manifest;
+      CREATE UNIQUE INDEX input_manifest_dim ON input_manifest (round_id, phase, role, session, attempt, channel);
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -698,7 +741,15 @@ export interface InputManifestRow {
   total?: number | null;
   rendered?: number | null;
   omitted?: number | null;
-  truncated?: boolean;
+  /** THREE-STATE, not boolean (schema v16->v17, #251 gate② review round 3): `true`/`false` when
+   *  a caller genuinely knows whether ITS OWN cap fired on this channel (e.g. align.ts's
+   *  packDigestRecords, architect.ts's capDigest-backed pool-digest); omitted (persists as SQL
+   *  NULL, read back as `undefined`/`null`) when the caller has no visibility into truncation at
+   *  all — a pass-through channel whose text may already have been capped by a DIFFERENT,
+   *  upstream mechanism this one can't see. Never coerce an omitted value to `false`: that was
+   *  exactly the fabricated-success-claim this three-state shape replaces (a caller that doesn't
+   *  know must not claim it does). */
+  truncated?: boolean | null;
   /** Free-text detail — a failure reason on `ok: false`, otherwise unset. */
   detail?: string | null;
 }
@@ -1628,9 +1679,12 @@ export class State {
   }
 
   /** Append one input-manifest row (#231). A plain write — RECORD, not a gate (see the schema
-   *  v13->v14 migration comment): callers (align.ts's recordInputManifest) wrap this
-   *  best-effort, the same "a write failure here must never block the session it's describing"
-   *  contract as every other observability-only append in this file. */
+   *  v13->v14 migration comment): callers (align.ts's/architect.ts's recordInputManifest) wrap
+   *  this best-effort, the same "a write failure here must never block the session it's
+   *  describing" contract as every other observability-only append in this file. `truncated` is
+   *  THREE-STATE (schema v16->v17): an omitted `row.truncated` (the caller has no idea whether
+   *  this channel was truncated by some upstream mechanism it can't see) persists as SQL NULL,
+   *  never coerced to `false` — only an EXPLICIT `true`/`false` from the caller writes 1/0. */
   appendInputManifest(row: InputManifestRow, now?: string): void {
     this.db
       .prepare(
@@ -1650,7 +1704,7 @@ export class State {
         row.total ?? null,
         row.rendered ?? null,
         row.omitted ?? null,
-        row.truncated ? 1 : 0,
+        row.truncated === undefined || row.truncated === null ? null : row.truncated ? 1 : 0,
         row.detail ?? null,
         now ?? new Date().toISOString(),
       );
@@ -1658,7 +1712,8 @@ export class State {
 
   /** Every input-manifest row for one round, oldest first — test/inspection reader. Not
    *  consulted by any engine decision today (see the schema v13->v14 migration comment: the
-   *  manifest is a record, not a gate). */
+   *  manifest is a record, not a gate). `truncated` round-trips as `null` (never `false`) when
+   *  the writer never supplied it — schema v16->v17's three-state fix. */
   inputManifestRows(roundId: number): (InputManifestRow & { id: number; ts: string })[] {
     const rows = this.db.prepare("SELECT * FROM input_manifest WHERE round_id = ? ORDER BY id").all(roundId) as Array<{
       id: number;
@@ -1673,7 +1728,7 @@ export class State {
       total: number | null;
       rendered: number | null;
       omitted: number | null;
-      truncated: number;
+      truncated: number | null;
       detail: string | null;
       ts: string;
     }>;
@@ -1690,7 +1745,7 @@ export class State {
       total: r.total,
       rendered: r.rendered,
       omitted: r.omitted,
-      truncated: r.truncated === 1,
+      truncated: r.truncated === null ? null : r.truncated === 1,
       detail: r.detail,
       ts: r.ts,
     }));

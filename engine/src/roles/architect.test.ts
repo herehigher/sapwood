@@ -12,12 +12,14 @@
 // to simulate a direct `gh issue comment/edit` side effect. The engine reads `resultText`,
 // validates it (including the candidate-set check), and performs every forge write itself.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import { NO_ROUND_DIRECTIVE } from "../config/directive.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { State } from "../state/state.js";
@@ -271,6 +273,224 @@ test("createArchitectStub (#236): a done session's context manifest is persisted
   assert.equal(rows[0]?.session, "architect-1");
   assert.equal(rows[0]?.attempt, 1);
   assert.deepEqual(JSON.parse(rows[0]?.json ?? "{}"), manifest);
+  state.close();
+});
+
+// ── #251: input-manifest rows for the architect's own engine-controlled channels ───────────
+//
+// #231 scoped input_manifest coverage to align.ts's own dispatched channels, deliberately
+// deferring architect-side channels (its own gate② F1 scoping ruling) since instrumenting them
+// then would have conflicted with #236's parallel rewrite of this exact file. #251 closes that
+// gap: `last-merged`, `aligned-goals`, `doctrine`, `directive`, `candidate-issues`,
+// `architecture-chapter`, and `pool-digest` each get their own row, one attempt per session
+// dispatch. Gate② review round 3 (Codex delta-verify F1): `truncated` is a genuine THREE-STATE
+// column (schema v16->v17) — `true`/`false` for the three channels this module actually reads/
+// caps itself (`candidate-issues`/`architecture-chapter`/`pool-digest`), and `null` (never a
+// coerced `false`) for the four pass-through channels (`last-merged`/`aligned-goals`/`doctrine`/
+// `directive`), since this module has no visibility into whether an upstream cap already
+// truncated them (see architect.ts's own #251 module doc and state.ts's v16->v17 migration
+// comment for why the round-2 draft's `truncated: false` assertion there was dishonest).
+
+const contentVersionForTest = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
+
+test("createArchitectStub #251: a real session dispatch records an input-manifest row for each of the 7 engine-controlled channels, sharing one attempt number", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [
+    { number: 10, title: "a", labels: [] },
+    { number: 11, title: "b", labels: [] },
+  ];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  // The repo's own docs/PLAN.md — same resolution as loadArchitectureChapter's own real-file test
+  // below (engine/src/roles/architect.test.ts -> engine/../docs/PLAN.md) — needed here so the
+  // architecture-chapter channel exercises a genuine ok:true read, not the nonexistent-path
+  // fixture every other test in this file uses.
+  const realPlanPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "PLAN.md");
+  const deps: ArchitectDeps = {
+    forge,
+    state,
+    cfg: mkCfg(),
+    runner,
+    planMdPath: realPlanPath,
+    lastMerged: "Round 8 merged: #100, #101.",
+    alignedGoals: "Decompose the auth module first, then billing.",
+    doctrine: "Doctrine: never smuggle a label via session output.",
+  };
+  await createArchitectStub(deps).run({ roundId: 20, phase: "architecting", marker: null });
+
+  const rows = state.inputManifestRows(20);
+  assert.equal(
+    rows.length,
+    7,
+    "last-merged + aligned-goals + doctrine + directive + candidate-issues + architecture-chapter + pool-digest",
+  );
+  assert.ok(
+    rows.every((r) => r.phase === "architecting" && r.role === "architect" && r.session === "architect" && r.attempt === 1),
+    "all 7 rows share the same (phase, role, session, attempt) identity",
+  );
+
+  // `truncated`'s DB column is a genuine three-state `INTEGER` (schema v16->v17: nullable, no
+  // DEFAULT) — omitting the key from the object literal we WRITE round-trips as `null`, NEVER as
+  // an explicit `false`. This is the regression the round-2 fixture would NOT have caught (it
+  // asserted `false`, which is exactly what the pre-fix coercion bug also produced).
+  const lastMergedRow = rows.find((r) => r.channel === "last-merged");
+  assert.equal(lastMergedRow?.ok, true);
+  assert.equal(lastMergedRow?.version, contentVersionForTest("Round 8 merged: #100, #101."));
+  assert.equal(lastMergedRow?.truncated, null, "omitted, not coerced to false — the pass-through channel has no cap visibility");
+
+  const alignedGoalsRow = rows.find((r) => r.channel === "aligned-goals");
+  assert.equal(alignedGoalsRow?.ok, true);
+  assert.equal(alignedGoalsRow?.version, contentVersionForTest("Decompose the auth module first, then billing."));
+  assert.equal(alignedGoalsRow?.truncated, null);
+
+  const doctrineRow = rows.find((r) => r.channel === "doctrine");
+  assert.equal(doctrineRow?.ok, true);
+  assert.equal(doctrineRow?.version, contentVersionForTest("Doctrine: never smuggle a label via session output."));
+  assert.equal(doctrineRow?.truncated, null);
+
+  const directiveRow = rows.find((r) => r.channel === "directive");
+  assert.equal(directiveRow?.ok, true);
+  assert.equal(
+    directiveRow?.version,
+    contentVersionForTest(NO_ROUND_DIRECTIVE),
+    "no directive file configured -> the explicit placeholder",
+  );
+  assert.equal(directiveRow?.truncated, null);
+
+  const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
+  assert.equal(architectureRow?.ok, true, "a real, readable PLAN.md -> a genuine read success");
+  assert.equal(architectureRow?.version, contentVersionForTest(loadArchitectureChapter(realPlanPath)));
+  assert.equal(architectureRow?.truncated, false, "this module's own read/extract, no length cap applied");
+
+  const candidatesRow = rows.find((r) => r.channel === "candidate-issues");
+  assert.equal(candidatesRow?.ok, true);
+  assert.equal(candidatesRow?.total, 2);
+  assert.equal(candidatesRow?.rendered, 2);
+  assert.equal(candidatesRow?.omitted, 0);
+  assert.equal(candidatesRow?.truncated, false);
+
+  const poolDigestRow = rows.find((r) => r.channel === "pool-digest");
+  assert.equal(poolDigestRow?.ok, true);
+  assert.equal(poolDigestRow?.total, 0, "no pool members threaded in this test");
+  assert.equal(poolDigestRow?.truncated, false);
+  state.close();
+});
+
+test("createArchitectStub #251: a missing/unreadable PLAN.md yields architecture-chapter ok:false + detail, no fabricated version — never a knowingly-false success claim", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  await createArchitectStub(deps).run({ roundId: 23, phase: "architecting", marker: null });
+  const rows = state.inputManifestRows(23);
+  const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
+  assert.equal(architectureRow?.ok, false);
+  assert.equal(architectureRow?.version, null, "no fabricated version for a placeholder standing in for a failed read");
+  assert.ok(architectureRow?.detail?.includes("/nonexistent/PLAN.md"));
+  // Every OTHER channel is unaffected — a genuine read failure on ONE channel never contaminates
+  // the honesty of the others.
+  assert.ok(rows.find((r) => r.channel === "last-merged")?.ok);
+  state.close();
+});
+
+test("createArchitectStub #251: zero drift-review candidates but a NON-EMPTY pool still records the pool-digest channel — the batch-review target that matters most for coverage", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = []; // zero candidates — an all-approved round
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note", [], [])) }]);
+  const state = new State(":memory:");
+  const poolIssues: Issue[] = [
+    { number: 30, title: "pool member A", labels: [] },
+    { number: 31, title: "pool member B", labels: [] },
+  ];
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 24, phase: "architecting", marker: null });
+  const rows = state.inputManifestRows(24);
+  const poolDigestRow = rows.find((r) => r.channel === "pool-digest");
+  assert.ok(poolDigestRow, "pool-digest is recorded even with zero candidates, as long as the pool is non-empty");
+  assert.equal(poolDigestRow!.ok, true);
+  assert.equal(poolDigestRow!.total, 2);
+  assert.equal(poolDigestRow!.rendered, 2);
+  assert.equal(poolDigestRow!.omitted, 0);
+  assert.equal(poolDigestRow!.truncated, false);
+  const candidatesRow = rows.find((r) => r.channel === "candidate-issues");
+  assert.equal(candidatesRow?.total, 0, "candidate-issues is still recorded, just empty — this phase call DID dispatch a session");
+  state.close();
+});
+
+test("createArchitectStub #251: pool-digest truncated:true when capDigest actually cuts the pool text, with an honest total and no fabricated rendered/omitted split", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note", [], [])) }]);
+  const state = new State(":memory:");
+  const poolIssues: Issue[] = [
+    { number: 40, title: "a", labels: [], body: "x".repeat(500) },
+    { number: 41, title: "b", labels: [], body: "y".repeat(500) },
+  ];
+  const deps: ArchitectDeps = {
+    forge,
+    state,
+    cfg: mkCfg({ roles: { architect: { poolDigestMaxChars: 50 } } }),
+    runner,
+    planMdPath: "/nonexistent/PLAN.md",
+    poolIssues,
+  };
+  await createArchitectStub(deps).run({ roundId: 25, phase: "architecting", marker: null });
+  const poolDigestRow = state.inputManifestRows(25).find((r) => r.channel === "pool-digest");
+  assert.equal(poolDigestRow?.ok, true);
+  assert.equal(poolDigestRow?.total, 2, "the real pool size, regardless of how much of it survived the character cap");
+  assert.equal(poolDigestRow?.truncated, true);
+  assert.equal(poolDigestRow?.rendered, null, "capDigest is a character cut — a record-level rendered count is unknowable, never guessed");
+  assert.equal(poolDigestRow?.omitted, null);
+  state.close();
+});
+
+test("createArchitectStub #251: the candidate-issues manifest version changes on a title-only edit (same candidate numbers)", async () => {
+  const mkDeps = (title: string): ArchitectDeps => {
+    const forge = new FakeForge();
+    forge.planReviewCandidates = [{ number: 10, title, labels: [] }];
+    return {
+      forge,
+      state: new State(":memory:"),
+      cfg: mkCfg(),
+      runner: new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]),
+      planMdPath: "/nonexistent/PLAN.md",
+    };
+  };
+  const depsA = mkDeps("Original title");
+  await createArchitectStub(depsA).run({ roundId: 1, phase: "architecting", marker: null });
+  const versionA = depsA.state.inputManifestRows(1).find((r) => r.channel === "candidate-issues")!.version;
+  depsA.state.close();
+
+  const depsB = mkDeps("A completely different title"); // same candidate number, different title
+  await createArchitectStub(depsB).run({ roundId: 1, phase: "architecting", marker: null });
+  const versionB = depsB.state.inputManifestRows(1).find((r) => r.channel === "candidate-issues")!.version;
+  depsB.state.close();
+
+  assert.ok(versionA && versionB);
+  assert.notEqual(versionA, versionB, "title drift with the SAME candidate number must still change the recorded version");
+});
+
+test("createArchitectStub #251: no candidates AND no pool -> no session dispatch -> zero input-manifest rows (the #243 F4 rule)", async () => {
+  const forge = new FakeForge();
+  const runner = new ScriptedRunner([{ result: doneResult("s1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  await createArchitectStub(deps).run({ roundId: 21, phase: "architecting", marker: null });
+  assert.equal(runner.calls.length, 0, "no session dispatched");
+  assert.equal(state.inputManifestRows(21).length, 0, "a phase call that never dispatches a session never mints a phantom attempt");
+  state.close();
+});
+
+test("createArchitectStub #251: already-externalized round (marker present) -> no session, no new input-manifest rows", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("s1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  await createArchitectStub(deps).run({ roundId: 22, phase: "architecting", marker: architectMarker(22) });
+  assert.equal(runner.calls.length, 0);
+  assert.equal(state.inputManifestRows(22).length, 0);
   state.close();
 });
 

@@ -202,10 +202,10 @@ actually saw, so ambient drift between retries (a `CLAUDE.md` edited between att
 and attempt 2, a dirty worktree, a config change) never makes two attempts of the same
 phase look comparable when they weren't.
 
-**Wired for all non-align peripheral phases today** — harvest, architect, plan-review
-(both the reviewer and drafter sessions), and retro; `align.ts`'s three sessions wire
-in via [#232](https://github.com/herehigher/sapwood/issues/232), which already edits
-that file to link decisions to their manifests.
+**Wired for all 9/9 `runSessionWithRetry` peripheral call sites today** — harvest,
+architect, plan-review (the reviewer, drafter, and #214's confirm sessions), retro,
+and (as of [#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s
+three PO sessions (`po-align`, `po-triage`, `po-pool`).
 
 **The context manifest.** Every wired role session attempt (`RoleRunner.run()` in
 `peripheral.ts`) assembles a manifest in TWO PHASES, each with its own recorded

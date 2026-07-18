@@ -1421,7 +1421,9 @@ test("input manifest: appendInputManifest + inputManifestRows round-trip every f
   const goalRow = rows.find((r) => r.channel === "goal-file")!;
   assert.equal(goalRow.ok, true);
   assert.equal(goalRow.total, null);
-  assert.equal(goalRow.truncated, false);
+  // #251 gate② review round 3: an OMITTED truncated round-trips as null, never a fabricated
+  // false (schema v16->v17's three-state fix — see the dedicated #251 test further below).
+  assert.equal(goalRow.truncated, null);
   assert.equal(goalRow.detail, null);
   assert.equal(s.inputManifestRows(999).length, 0, "a round with no rows reads back empty, not an error");
   s.close();
@@ -1461,6 +1463,80 @@ test("input manifest: a crash-rerun's manifest is distinguishable from the origi
     ],
     "the two attempts are independently distinguishable rows, not an overwrite",
   );
+  s.close();
+});
+
+// ── #251 gate② review round 3 (Codex delta-verify F1): input_manifest.truncated is THREE-STATE
+// (migration v16->v17) ──────────────────────────────────────────────────────────────────────
+
+test("migration v16->v17: a populated v16 DB opens with data intact (including pre-migration truncated 0/1 values), user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 16; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 16");
+    raw
+      .prepare(
+        `INSERT INTO input_manifest (round_id, phase, role, session, attempt, channel, ok, truncated, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(1, "aligning", "po", "po-align", 1, "backlog-digest", 1, 1, "2026-07-17T00:00:00Z");
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 17);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    const rows = s.inputManifestRows(1);
+    assert.equal(rows.length, 1, "the pre-migration row survived the table rebuild");
+    assert.equal(rows[0]?.truncated, true, "an EXPLICIT pre-migration 0/1 value is preserved verbatim, not reinterpreted");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.inputManifestRows(1).length, 1);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("input manifest #251: an OMITTED truncated round-trips as null, never a fabricated false — the exact dishonesty the three-state column fixes", () => {
+  const s = new State(":memory:");
+  s.appendInputManifest({
+    round_id: 1,
+    phase: "architecting",
+    role: "architect",
+    session: "architect",
+    attempt: 1,
+    channel: "last-merged",
+    ok: true,
+  });
+  s.appendInputManifest({
+    round_id: 1,
+    phase: "architecting",
+    role: "architect",
+    session: "architect",
+    attempt: 1,
+    channel: "candidate-issues",
+    ok: true,
+    truncated: false,
+  });
+  s.appendInputManifest({
+    round_id: 1,
+    phase: "architecting",
+    role: "architect",
+    session: "architect",
+    attempt: 1,
+    channel: "pool-digest",
+    ok: true,
+    truncated: true,
+  });
+  const rows = s.inputManifestRows(1);
+  assert.equal(rows.find((r) => r.channel === "last-merged")?.truncated, null, "omitted -> null, never coerced to false");
+  assert.equal(rows.find((r) => r.channel === "candidate-issues")?.truncated, false, "an EXPLICIT false is preserved as false, not null");
+  assert.equal(rows.find((r) => r.channel === "pool-digest")?.truncated, true);
   s.close();
 });
 

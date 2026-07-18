@@ -46,6 +46,7 @@
 // contradiction is. Degrade policy is DELIBERATELY looser than the candidate-set path's: an
 // invalid/failed session lets the pool proceed UNFILTERED (never a gate, always advisory) — see
 // createArchitectStub's `architect-review-degraded` handling.
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,7 +57,7 @@ import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { type PeripheralStub, removeRoundPoolLabel } from "../loop/round.js";
 import { capDigest } from "../retro/retro-digest.js";
-import type { State } from "../state/state.js";
+import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
@@ -163,6 +164,82 @@ export const NO_POOL_MEMBERS = "(This round's pool is empty — there is nothing
  *  gate⓪) can legitimately have zero candidates while still having pool members to batch-review. */
 export const NO_CANDIDATES = "(No candidate issues are awaiting gate⓪ review this round.)";
 
+// ── #251: input manifest for the architect's own engine-controlled channels ─────────────────
+//
+// #231 shipped `input_manifest` keyed on (round, phase, role, session, attempt) but scoped its
+// coverage to the channels align.ts itself dispatches a session with (goal-file, backlog-digest,
+// issue-body, pool-candidates) — a deliberate scoping ruling (#231 gate② F1), since instrumenting
+// architect.ts then would have conflicted with #236's parallel rewrite of this exact file. #236
+// has since landed (context-manifest recording, wired at this file's own runSessionWithRetry call
+// below), so this follow-up (#251) closes that gap: every engine-controlled input this module
+// substitutes into the architect prompt gets its own row, one attempt per session dispatch,
+// mirroring align.ts's own `recordInputManifest`/`nextInputManifestAttempt` usage exactly.
+//
+// Architect dispatches exactly ONE session per phase call (no per-issue looping, unlike align.ts's
+// po-triage) — so `role` and `session` are both the fixed string "architect" (matching the
+// session's own roleId), and one attempt number covers every channel row below, derived
+// immediately before the real dispatch (the #243 F4 rule: this stub's early-return above — zero
+// candidates AND zero pool members — means a row is never written for a phase call that never
+// reaches a session dispatch at all).
+//
+// Channels covered — every engine-controlled string substituted into the architect prompt:
+// `last-merged` (deps.lastMerged), `aligned-goals` (deps.alignedGoals), `doctrine`
+// (deps.doctrine), `directive` (this round's resolved directive), `candidate-issues` (the
+// candidates.summary substitution — contradiction-review targets), `architecture-chapter` (the
+// goal/architecture content loadArchitectureChapter produces), and `pool-digest` (the
+// round.pool substitution — #213's batch-review target; a healthy all-approved round can have
+// zero drift-review candidates but a non-empty pool, so this channel matters most for coverage).
+//
+// TWO HONESTY TIERS, not one blanket `ok: true` (gate② review, PR #258 round 2 — the original
+// draft asserted `ok: true`/`truncated: false` uniformly, which was dishonest for the channels
+// this module doesn't actually control):
+//
+//  - `last-merged`/`aligned-goals`/`doctrine`/`directive` are PASS-THROUGH strings: each is either
+//    threaded in from ArchitectDeps (round-defaults.ts/doctrine.ts already collapsed a read
+//    failure to an explicit placeholder before this module ever sees it — see each field's own
+//    ArchitectDeps doc comment) or resolved by resolveRoundDirective (whose own degrade handling
+//    is documented at its call site below). This module never reads or caps any of these four
+//    itself, so it records `ok: true` (this IS what was substituted into the prompt, honestly)
+//    but deliberately OMITS `truncated` rather than asserting `false` — this seam has no way to
+//    know whether an upstream cap (e.g. doctrine.ts's own maxChars, or capDigest inside
+//    resolveRoundDirective) already truncated the text before it arrived here, and a knowingly-
+//    unverifiable `truncated: false` would be exactly the fabricated-success-claim InputManifest-
+//    Row's own contract forbids.
+//  - `candidate-issues`/`architecture-chapter`/`pool-digest` ARE read/capped by this module
+//    itself, so they get the full, honest treatment: `architecture-chapter`'s `ok` reflects
+//    loadArchitectureChapter's ACTUAL read outcome (false + `detail` on a missing/unreadable
+//    PLAN.md — never a fabricated `version` for a placeholder that stands in for a failed read;
+//    a missing "## Architecture" heading in an otherwise-successfully-read file is NOT a read
+//    failure and stays `ok: true`, same distinction align.ts's buildBacklogDigest draws between
+//    "zero issues" and "read threw"). `candidate-issues` has no cap applied at all here, so
+//    `truncated: false` is honestly assertable. `pool-digest` goes through capDigest — a
+//    CHARACTER-count cut, unlike align.ts's packDigestRecords (a whole-RECORD pack) — so this
+//    module can state a genuine pre/post-cap `truncated` flag and the real pool size as `total`,
+//    but cannot honestly claim a record-level `rendered`/`omitted` split capDigest doesn't
+//    preserve.
+const INPUT_MANIFEST_PHASE = "architecting";
+const INPUT_MANIFEST_ROLE = "architect";
+const INPUT_MANIFEST_SESSION = "architect";
+
+/** Short, stable content fingerprint (#231's manifest `version` field) — same convention as
+ *  align.ts's own contentVersion. */
+function contentVersion(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+/** Best-effort input-manifest write (#231/#251): failing to RECORD what a session's input looked
+ *  like must never block the session itself — the manifest is a record, not a gate. Mirrors
+ *  align.ts's own recordInputManifest exactly. */
+function recordInputManifest(state: State, row: InputManifestRow, log?: (message: string) => void): void {
+  try {
+    state.appendInputManifest(row);
+  } catch (e) {
+    (log ?? console.error)(
+      `[sapwood:architect] round ${row.round_id}: failed to record the input-manifest row (session ${row.session}, channel ${row.channel}): ${String(e)}`,
+    );
+  }
+}
+
 /** Extract PLAN.md's "## Architecture" chapter (case-insensitive heading match) — same
  *  heading-to-next-heading-of-equal-or-shallower-level slicing forge.ts's
  *  extractVerificationPlan uses, generalized to an arbitrary heading pattern. null when no such
@@ -172,23 +249,50 @@ export function extractArchitectureChapter(planMd: string): string | null {
   return extractMarkdownSections(planMd, /Architecture\b/)[0] ?? null;
 }
 
-/** Load + extract the architecture chapter from disk. Missing/unreadable file or missing
- *  heading both degrade to an explicit placeholder string (never a throw, never a silent
- *  substitution of the raw file) — architecture review is advisory, so a docs read failure
- *  must not abort the round; the placeholder makes the degradation visible to anyone reading
- *  the architect's rendered prompt/transcript. */
-export function loadArchitectureChapter(path: string): string {
+/** #251 gate② review round 3 (Codex delta-verify F2): ONE read, consumed by BOTH the prompt
+ *  substitution (`loadArchitectureChapter` below, unchanged public signature) and the
+ *  architecture-chapter input-manifest row — a duplicated existsSync/readFileSync check (this
+ *  module's round-2 draft) could disagree with the real read under concurrent file replacement
+ *  (a TOCTOU window: the file could be renamed/deleted between the two independent checks), and
+ *  "the two can never disagree" was accordingly a false claim. `ok`/`detail` reflect the ACTUAL
+ *  read outcome from this single pass (`false` + a reason only for ENOENT/an unreadable file —
+ *  never for a missing "## Architecture" heading in an otherwise-successfully-read file, which
+ *  is a content-shape issue, not a read failure). */
+function loadArchitectureChapterWithStatus(path: string): { chapter: string; ok: boolean; detail: string | null } {
   if (!existsSync(path)) {
-    return `(PLAN.md not found at ${path} — proceeding with no architecture chapter available.)`;
+    return {
+      chapter: `(PLAN.md not found at ${path} — proceeding with no architecture chapter available.)`,
+      ok: false,
+      detail: `PLAN.md not found at ${path}`,
+    };
   }
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch (e) {
-    return `(PLAN.md at ${path} could not be read: ${String(e)} — proceeding with no architecture chapter available.)`;
+    return {
+      chapter: `(PLAN.md at ${path} could not be read: ${String(e)} — proceeding with no architecture chapter available.)`,
+      ok: false,
+      detail: `PLAN.md at ${path} could not be read: ${String(e)}`,
+    };
   }
   const chapter = extractArchitectureChapter(text);
-  return chapter ?? `(No "## Architecture" heading found in ${path} — proceeding with no architecture chapter available.)`;
+  return {
+    chapter: chapter ?? `(No "## Architecture" heading found in ${path} — proceeding with no architecture chapter available.)`,
+    ok: true,
+    detail: null,
+  };
+}
+
+/** Load + extract the architecture chapter from disk. Missing/unreadable file or missing
+ *  heading both degrade to an explicit placeholder string (never a throw, never a silent
+ *  substitution of the raw file) — architecture review is advisory, so a docs read failure
+ *  must not abort the round; the placeholder makes the degradation visible to anyone reading
+ *  the architect's rendered prompt/transcript. Public signature UNCHANGED (delegates to
+ *  loadArchitectureChapterWithStatus above) — several existing call sites/tests already depend
+ *  on this returning a plain string. */
+export function loadArchitectureChapter(path: string): string {
+  return loadArchitectureChapterWithStatus(path).chapter;
 }
 
 /** One candidate issue's block in the substituted prompt: number, title, labels, full body —
@@ -498,7 +602,16 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // cfg.goal.file (config-file-relative resolved, default "docs/PLAN.md"; was a hardcoded
       // <cwd>/docs/PLAN.md, then roles.architect.planMdPath (#104), which broke for any target
       // repo keeping its architecture doc elsewhere).
-      const architectureChapter = loadArchitectureChapter(deps.planMdPath ?? deps.cfg.goal.file);
+      const architecturePath = deps.planMdPath ?? deps.cfg.goal.file;
+      // #251 gate② review round 3 (F2): ONE read (loadArchitectureChapterWithStatus, above),
+      // consumed by both the prompt substitution and the architecture-chapter manifest row below
+      // — a round-2 draft duplicated existsSync/readFileSync in two places, which could disagree
+      // under concurrent file replacement (TOCTOU); a single read can't disagree with itself.
+      const {
+        chapter: architectureChapter,
+        ok: architectureChapterOk,
+        detail: architectureChapterDetail,
+      } = loadArchitectureChapterWithStatus(architecturePath);
       // The round design note needs SOME issue to live on (GitHub has no round/project-level
       // comment surface this role can write to — its writes are issue comment/label edit only);
       // the lowest-numbered candidate is an arbitrary but deterministic, reproducible anchor —
@@ -516,25 +629,119 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // #213: THE POOL-SET INVARIANT's authoritative set — the ANALOGOUS "exactly what the
       // prompt showed as pool members" set, for verdicts.
       const poolNumbers = new Set(poolIssues.map((i) => i.number));
+      // #251: pool-digest is a CHARACTER-count cut (capDigest), unlike align.ts's
+      // packDigestRecords (a whole-RECORD pack) — the pre-cap joined text is kept in its own
+      // variable so the manifest row below can honestly compare pre/post-cap length, rather than
+      // guessing at a record-level truncated flag capDigest doesn't preserve.
+      const poolIssuesJoined = poolIssues.length === 0 ? "" : poolIssues.map(formatCandidate).join("\n\n---\n\n");
       const poolDigest =
-        poolIssues.length === 0
-          ? NO_POOL_MEMBERS
-          : capDigest(poolIssues.map(formatCandidate).join("\n\n---\n\n"), deps.cfg.roles.architect.poolDigestMaxChars);
+        poolIssues.length === 0 ? NO_POOL_MEMBERS : capDigest(poolIssuesJoined, deps.cfg.roles.architect.poolDigestMaxChars);
+      const poolDigestTruncated = poolIssues.length > 0 && poolIssuesJoined.length > deps.cfg.roles.architect.poolDigestMaxChars;
+      const lastMergedText = deps.lastMerged ?? NO_PRIOR_ROUND_YET;
+      const alignedGoalsText = deps.alignedGoals ?? NO_ALIGNED_GOALS_YET;
+      const doctrineText = deps.doctrine ?? NO_DOCTRINE;
+      const candidatesSummaryText = candidates.length === 0 ? NO_CANDIDATES : candidates.map(formatCandidate).join("\n\n---\n\n");
 
       const prompt = renderArchitectPrompt(template, {
         "round.id": String(roundId),
         "round.marker": marker_,
         "round.designNoteIssue": String(anchor.number),
-        "round.alignedGoals": deps.alignedGoals ?? NO_ALIGNED_GOALS_YET,
-        "round.lastMerged": deps.lastMerged ?? NO_PRIOR_ROUND_YET,
-        "round.doctrine": deps.doctrine ?? NO_DOCTRINE,
+        "round.alignedGoals": alignedGoalsText,
+        "round.lastMerged": lastMergedText,
+        "round.doctrine": doctrineText,
         "plan.architectureChapter": architectureChapter,
-        "candidates.summary": candidates.length === 0 ? NO_CANDIDATES : candidates.map(formatCandidate).join("\n\n---\n\n"),
+        "candidates.summary": candidatesSummaryText,
         "round.pool": poolDigest,
         "labels.blocked": deps.cfg.labels.blocked,
         "labels.needsHuman": deps.cfg.labels.needsHuman,
         "round.directive": directive,
       });
+
+      // #251: this session dispatch's input-manifest rows — ONE attempt number, derived
+      // immediately before the real dispatch, shared across every engine-controlled channel this
+      // prompt substitutes (see this file's own #251 module doc, above NO_CANDIDATES). Reached
+      // only when this phase call intends to dispatch a session (the early-return above already
+      // ruled out the zero-candidates-and-zero-pool case) — a crash strictly between this write
+      // and the session actually running is possible and benign, the SAME accepted pre-dispatch
+      // window align.ts's own input-manifest writes carry (a record-only table, never a gate; see
+      // align.ts's own module doc for this exact tradeoff).
+      const architectAttempt = deps.state.nextInputManifestAttempt(
+        roundId,
+        INPUT_MANIFEST_PHASE,
+        INPUT_MANIFEST_ROLE,
+        INPUT_MANIFEST_SESSION,
+      );
+      const architectManifestBase = {
+        round_id: roundId,
+        phase: INPUT_MANIFEST_PHASE,
+        role: INPUT_MANIFEST_ROLE,
+        session: INPUT_MANIFEST_SESSION,
+        attempt: architectAttempt,
+      };
+      // Tier 1 — pass-through strings (see this file's own #251 module doc): `ok: true` (this IS
+      // what was substituted), `total`/`rendered`/`omitted` describe THIS channel's own
+      // single-blob granularity (never a claim about upstream record-packing), and `truncated` is
+      // deliberately OMITTED — this module performs no capping of its own on any of these four.
+      for (const [channel, text] of [
+        ["last-merged", lastMergedText],
+        ["aligned-goals", alignedGoalsText],
+        ["doctrine", doctrineText],
+        ["directive", directive],
+      ] as const) {
+        recordInputManifest(
+          deps.state,
+          { ...architectManifestBase, channel, ok: true, version: contentVersion(text), total: 1, rendered: 1, omitted: 0 },
+          deps.log,
+        );
+      }
+      // Tier 2 — channels this module itself reads/caps, given the full honest treatment.
+      recordInputManifest(
+        deps.state,
+        {
+          ...architectManifestBase,
+          channel: "candidate-issues",
+          ok: true,
+          version: contentVersion(candidatesSummaryText),
+          total: candidates.length,
+          rendered: candidates.length,
+          omitted: 0,
+          truncated: false, // no cap applied to candidates.summary
+        },
+        deps.log,
+      );
+      recordInputManifest(
+        deps.state,
+        {
+          ...architectManifestBase,
+          channel: "architecture-chapter",
+          ok: architectureChapterOk,
+          // No fabricated version for a placeholder standing in for a failed read (InputManifest-
+          // Row's own contract: version is "absent when there's nothing meaningful to hash").
+          version: architectureChapterOk ? contentVersion(architectureChapter) : null,
+          detail: architectureChapterOk ? null : architectureChapterDetail,
+          total: 1,
+          rendered: architectureChapterOk ? 1 : 0,
+          omitted: architectureChapterOk ? 0 : 1,
+          truncated: false, // loadArchitectureChapter extracts a heading section; it never caps by length
+        },
+        deps.log,
+      );
+      recordInputManifest(
+        deps.state,
+        {
+          ...architectManifestBase,
+          channel: "pool-digest",
+          ok: true,
+          version: contentVersion(poolDigest),
+          total: poolIssues.length,
+          // Record-level rendered/omitted are unknowable once capDigest has actually cut the
+          // text (a character cut, not a per-issue drop) — left unset rather than guessed; when
+          // nothing was cut, every pool issue is trivially known to be fully rendered.
+          ...(poolDigestTruncated ? {} : { rendered: poolIssues.length, omitted: 0 }),
+          truncated: poolDigestTruncated,
+        },
+        deps.log,
+      );
 
       const role = deps.cfg.roles.architect;
 
