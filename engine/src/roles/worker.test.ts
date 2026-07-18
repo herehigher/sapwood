@@ -1027,6 +1027,38 @@ test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the 
   }
 });
 
+test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktree path (#235 PR-A) — a resumed leg keeps Read containment too", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const worktreeRoot = join(dir, "worktrees");
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  echo "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "resume-root.seen")}"`,
+        '  echo \'{"type":"result","subtype":"success","total_cost_usd":0.05,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}\'',
+        "  exit 0",
+        "fi",
+        "trap 'exit 0' TERM",
+        "sleep 30",
+        "",
+      ].join("\n"),
+    );
+    const s = sup(dir, bin, false, worktreeRoot);
+    const { name } = await s.dispatch({ number: 4, title: "t", labels: [] });
+    await sleep(600);
+    assert.equal(s.requestHandoff(name), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    await s.resume({ number: 4, title: "t", labels: [] }, name);
+    for (let i = 0; i < 400 && !existsSync(join(dir, "resume-root.seen")); i++) await sleep(20);
+    assert.equal(readFileSync(join(dir, "resume-root.seen"), "utf8").trim(), join(worktreeRoot, name));
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resume: fails closed in hard mode when the guard hook is missing (no unguarded resume)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
@@ -1127,6 +1159,36 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
   } finally {
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #235 PR-A: SAPWOOD_WORKTREE_ROOT reaches the worker's spawn env, resolved to the ABSOLUTE
+// path of THIS lane's worktree — the guard hook reads it to confine Read/Grep/Glob (see
+// guard.ts's checkReadContainment). Set at spawn exactly where SAPWOOD_GUARD_MODE is, both on
+// fresh dispatch() and on resume() (a resumed leg must keep the same containment).
+test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path (#235 PR-A)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const worktreeRoot = join(dir, "worktrees");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "root.seen")}"\nexit 0\n`);
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "hard" } });
+    const s = new WorkerSupervisor({
+      cfg: scfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "root.seen")); i++) await sleep(20);
+    assert.equal(readFileSync(join(dir, "root.seen"), "utf8").trim(), join(worktreeRoot, name));
+    s.dispose();
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

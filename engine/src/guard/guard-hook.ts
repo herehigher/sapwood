@@ -10,7 +10,13 @@ import { fileURLToPath } from "node:url";
 import { type GuardInput, guardDecision } from "./guard.js";
 
 // Tools the guard actually inspects — a malformed tool_input for these fails closed.
-const GUARDED_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit"]);
+// #235 PR-A: Read/Grep/Glob added alongside Write/Edit/MultiEdit — the Phase-0 finding was
+// exactly that these three were ABSENT here, so the guard never saw a Read call at all and
+// couldn't confine it to the session's worktree regardless of any matrix work elsewhere.
+// NotebookRead added in PM review of PR-A: it's a built-in read-family tool (reads an
+// arbitrary `.ipynb` path) that was left out of the first pass — same containment gap,
+// same fix.
+const GUARDED_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit", "Read", "Grep", "Glob", "NotebookRead"]);
 
 export interface DenyOutput {
   hookSpecificOutput: {
@@ -27,8 +33,14 @@ const deny = (reason: string): DenyOutput => ({
 /**
  * Map a parsed hook payload to a deny-output, or null to allow (no intervention).
  * Fail-closed: a non-object payload or a thrown guard error → deny.
+ *
+ * worktreeRoot (#235 PR-A) is this IO layer's read of SAPWOOD_WORKTREE_ROOT, threaded into
+ * the pure guardDecision as a plain argument — guardDecision itself never touches env, same
+ * discipline as cwd already gets. Optional: main() passes process.env.SAPWOOD_WORKTREE_ROOT;
+ * callers/tests that omit it get containment-inactive Read/Grep/Glob (see guard.ts's doc
+ * comment on checkReadContainment for what "unset" is defined to mean).
  */
-export function hookResponse(payload: unknown): DenyOutput | null {
+export function hookResponse(payload: unknown, worktreeRoot?: string): DenyOutput | null {
   if (typeof payload !== "object" || payload === null) {
     return deny("BLOCK [fail-closed] malformed hook payload (not an object)");
   }
@@ -47,7 +59,7 @@ export function hookResponse(payload: unknown): DenyOutput | null {
     const toolInput = (inputIsObject ? rawInput : {}) as GuardInput;
     // biome-ignore lint/complexity/useLiteralKeys: external hook payload keys intentionally use bracket access.
     const cwd = typeof p["cwd"] === "string" ? p["cwd"] : "";
-    const decision = guardDecision(tool, toolInput, cwd);
+    const decision = guardDecision(tool, toolInput, cwd, worktreeRoot);
     return decision.allow ? null : deny(decision.reason);
   } catch (e) {
     return deny(`BLOCK [fail-closed] guard error: ${e instanceof Error ? e.message : String(e)}`);
@@ -79,14 +91,14 @@ export function applyGuardMode(decision: DenyOutput | null, mode: GuardMode): { 
 }
 
 /** Parse hook stdin text and decide. Fail-closed: a JSON parse error → deny. */
-export function responseFromText(text: string): DenyOutput | null {
+export function responseFromText(text: string, worktreeRoot?: string): DenyOutput | null {
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch {
     return deny("BLOCK [fail-closed] unparseable hook input (invalid JSON)");
   }
-  return hookResponse(payload);
+  return hookResponse(payload, worktreeRoot);
 }
 
 async function readStdin(): Promise<string> {
@@ -98,7 +110,8 @@ async function readStdin(): Promise<string> {
 export async function main(): Promise<number> {
   let decision: DenyOutput | null;
   try {
-    decision = responseFromText(await readStdin());
+    // biome-ignore lint/complexity/useLiteralKeys: environment key is intentionally bracket-addressed.
+    decision = responseFromText(await readStdin(), process.env["SAPWOOD_WORKTREE_ROOT"]);
   } catch (e) {
     // Even an stdin read failure fails closed.
     decision = deny(`BLOCK [fail-closed] hook IO error: ${e instanceof Error ? e.message : String(e)}`);

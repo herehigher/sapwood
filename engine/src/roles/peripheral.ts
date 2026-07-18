@@ -320,7 +320,7 @@ async function waitForInitLine(jsonlPath: string, timeoutMs: number, pollMs: num
  *  Keep this boundary paired with ROLE_ALLOWED_TOOLS's empty allowlist. The empty allowlist is
  *  the primary action boundary; stripping credentials ensures a future tool-widening regression
  *  cannot silently turn an inherited engine credential into forge authority. */
-function peripheralSessionEnv(guardMode: SapwoodConfig["guard"]["mode"]): NodeJS.ProcessEnv {
+function peripheralSessionEnv(guardMode: SapwoodConfig["guard"]["mode"], worktreePath: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     const normalized = key.toUpperCase();
@@ -336,6 +336,11 @@ function peripheralSessionEnv(guardMode: SapwoodConfig["guard"]["mode"]): NodeJS
     env[key] = value;
   }
   env.SAPWOOD_GUARD_MODE = guardMode;
+  // #235 PR-A: the ABSOLUTE path of THIS role session's worktree, so the guard hook can
+  // confine Read/Grep/Glob to it (see guard.ts's checkReadContainment). worktreePath is
+  // already resolve()'d by the caller (RoleRunner.run()), the same convention as the
+  // scratchFile containment check a few lines below this function's call site.
+  env.SAPWOOD_WORKTREE_ROOT = worktreePath;
   return env;
 }
 
@@ -432,7 +437,7 @@ export class RoleRunner {
       const startedMs = this.now().getTime();
       const session = spawnClaudeSession(this.bin, args, {
         jsonlFd,
-        env: peripheralSessionEnv(guardMode),
+        env: peripheralSessionEnv(guardMode, resolve(this.worktreeRoot, name)),
       });
 
       // Register the exit listener BEFORE any await — same rationale as worker.ts's dispatch():

@@ -32,7 +32,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
@@ -514,7 +514,13 @@ export function extractFailureText(jsonl: string): string {
 
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
- *  matcher covers exactly the tools the guard inspects.
+ *  matcher covers exactly the tools the guard inspects — Read/Grep/Glob/NotebookRead joined
+ *  Bash/Write/Edit/MultiEdit in #235 PR-A (worktree read-containment; NotebookRead added in
+ *  PM review of the same PR — same read-family gap, same fix). This matcher IS what makes
+ *  Claude Code invoke the hook at all for a given tool: guard.ts/guard-hook.ts's own widened
+ *  GUARDED_TOOLS set is necessary but not sufficient — without the matcher change here too, a
+ *  Read call would never reach the hook process in the first place (Phase-0's exact finding:
+ *  GUARDED_TOOLS never included Read, so "the guard never even saw the call").
  *
  *  FAIL-CLOSED even if `node` can't run the hook (stale dist whose guard-hook.js imports a
  *  missing guard.js, a module-load/syntax error, missing node/PATH): Claude Code treats a
@@ -537,7 +543,7 @@ export function guardSettings(hookPath: string): object {
     // #26 R3 P1). Explicitly re-enabling here overrides that layer.
     disableAllHooks: false,
     hooks: {
-      PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit", hooks: [{ type: "command", command }] }],
+      PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit|Read|Grep|Glob|NotebookRead", hooks: [{ type: "command", command }] }],
     },
   };
 }
@@ -738,10 +744,14 @@ export class WorkerSupervisor implements Supervisor {
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree.
     // SAPWOOD_GUARD_MODE in the spawn env reaches the hook subprocess (inherited from claude)
     // but is NOT worker-writable, so a worker can't flip its own guard hard->soft (#26).
+    // SAPWOOD_WORKTREE_ROOT (#235 PR-A): the ABSOLUTE path of THIS lane's worktree, so the
+    // guard hook can confine Read/Grep/Glob to it (see guard.ts's checkReadContainment).
+    // resolve()'d because this.worktreeRoot may be a relative deps override — the guard
+    // needs an absolute root to compare against Claude Code's absolute tool_input paths.
     const child = spawn(this.bin, args, {
       detached: true,
       stdio: ["ignore", jsonlFd, jsonlFd],
-      env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
+      env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, laneName) },
     });
     // Register the lane + `exit` handler BEFORE any await. Node does not replay `exit` to
     // listeners attached after it fires, so a fast exit (instant completion / the CLI
@@ -925,10 +935,12 @@ export class WorkerSupervisor implements Supervisor {
     }
     let child: ChildProcess;
     try {
+      // SAPWOOD_WORKTREE_ROOT (#235 PR-A): same lane/worktree as the original dispatch — a
+      // resumed leg must keep Read/Grep/Glob confined too, not just the fresh-dispatch path.
       child = spawn(this.bin, args, {
         detached: true,
         stdio: ["ignore", jsonlFd, jsonlFd],
-        env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode },
+        env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name) },
       });
     } catch (e) {
       closeSync(jsonlFd);

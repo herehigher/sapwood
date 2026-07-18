@@ -108,7 +108,7 @@ test("run: peripheral spawn strips forge/git credentials while preserving Claude
     const bin = mkStub(
       dir,
       `#!/usr/bin/env bash
-printf '{"type":"env_check","gh_token":"%s","github_token":"%s","github_enterprise_token":"%s","gh_config_dir":"%s","gh_host":"%s","git_askpass":"%s","git_config_global":"%s","git_config_count":"%s","anthropic_api_key":"%s","guard_mode":"%s"}\\n' "\${GH_TOKEN-unset}" "\${GITHUB_TOKEN-unset}" "\${GITHUB_ENTERPRISE_TOKEN-unset}" "\${GH_CONFIG_DIR-unset}" "\${GH_HOST-unset}" "\${GIT_ASKPASS-unset}" "\${GIT_CONFIG_GLOBAL-unset}" "\${GIT_CONFIG_COUNT-unset}" "\${ANTHROPIC_API_KEY-unset}" "\${SAPWOOD_GUARD_MODE-unset}"
+printf '{"type":"env_check","gh_token":"%s","github_token":"%s","github_enterprise_token":"%s","gh_config_dir":"%s","gh_host":"%s","git_askpass":"%s","git_config_global":"%s","git_config_count":"%s","anthropic_api_key":"%s","guard_mode":"%s","worktree_root":"%s"}\\n' "\${GH_TOKEN-unset}" "\${GITHUB_TOKEN-unset}" "\${GITHUB_ENTERPRISE_TOKEN-unset}" "\${GH_CONFIG_DIR-unset}" "\${GH_HOST-unset}" "\${GIT_ASKPASS-unset}" "\${GIT_CONFIG_GLOBAL-unset}" "\${GIT_CONFIG_COUNT-unset}" "\${ANTHROPIC_API_KEY-unset}" "\${SAPWOOD_GUARD_MODE-unset}" "\${SAPWOOD_WORKTREE_ROOT-unset}"
 echo '{"type":"result","subtype":"success","total_cost_usd":0}'
 exit 0
 `,
@@ -128,6 +128,9 @@ exit 0
       git_config_count: "unset",
       anthropic_api_key: "preserved-anthropic-auth",
       guard_mode: "hard",
+      // #235 PR-A: the resolved absolute worktree path for THIS session, so the guard hook
+      // can confine Read/Grep/Glob to it.
+      worktree_root: join(dir, "worktrees", result.name),
     });
   } finally {
     for (const [key, value] of Object.entries(previous)) {
