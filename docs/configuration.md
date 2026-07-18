@@ -672,6 +672,12 @@ that failed and degraded to local.
 |---|---|---|
 | `humanLabels` | `[sapwood:needs-human, sapwood:blocked]` | When omitted, derives from `labels.prefix`. Any matching label on an issue means "stop autonomy, ask a human" for that issue. An explicit array is used verbatim and must list `labels.needsHuman` case-insensitively so PR and issue holds recognize the same escalation label. |
 
+## `notify`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `mentions` | `[board.owner]` | (#237) Who a PO-dissent concern comment `@`-mentions. A PO/triage session may raise a structured objection (`concerns: [{issue, reason}]`) alongside its normal deliverable; the engine posts it as an idempotent issue comment (never a label, status change, or dispatch effect) `@`-mentioning every entry here. When omitted, derives to the repo owner (`board.owner`). An explicit array is used verbatim, in the given order; entries are `@`-prefixed at render time if not already. |
+
 ## `coverage`
 
 | Key | Default | Meaning |

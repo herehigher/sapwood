@@ -16,6 +16,7 @@ import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js"
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { LaneProbe, Supervisor } from "./conductor.js";
+import { concernHash } from "./dissent.js";
 import { noopPeripheralStub, type RoundDeps, runRounds } from "./round.js";
 import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMergedFromArtifact } from "./round-defaults.js";
@@ -81,6 +82,11 @@ class FakeForge implements IForge {
   async addPRComment(): Promise<void> {}
   async addIssueComment(n: number, body: string): Promise<void> {
     this.issueCommentsPosted.push([n, body]);
+    // #237: mirror align.test.ts/dissent.test.ts's fakes — getIssueComments (below) must reflect
+    // what was actually posted, or dissent.ts's own marker-check-before-post idempotency can
+    // never be observed against this fixture (it would repost forever, never finding its own
+    // prior comment).
+    this.issueComments[n] = [...(this.issueComments[n] ?? []), { login: "sapwood-engine", createdAt: new Date().toISOString(), body }];
   }
   async getIssueBody(): Promise<string> {
     return "";
@@ -138,6 +144,16 @@ class FakeForge implements IForge {
   planTriageCandidates: Issue[] = [];
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;
+  }
+  issueMetaState: Record<number, "OPEN" | "CLOSED"> = {};
+  async getIssueMeta(issue: number) {
+    return {
+      number: issue,
+      title: "",
+      state: this.issueMetaState[issue] ?? ("OPEN" as const),
+      labels: [],
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
   }
 }
 
@@ -647,6 +663,113 @@ test("architecting stub (#127 gate② F3): with roles.po.enabled=false the archi
     /no structured summary was recorded/,
     "never the fallback wording that implies the aligning pass ran",
   );
+  state.close();
+});
+
+test("createDefaultPeripherals #237 finding 5 (2026-07-18 adjudication): the PO-dissent adjudication scan runs even with roles.po.enabled=false — decoupled from the PO's own toggle", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  // A still-open concern from a prior round, posted against an empty body ("" — FakeForge's
+  // getIssueBody default) — seeded directly, no PO session ever ran to produce it.
+  const hash = concernHash("premise seems wrong", "");
+  state.appendEvent("concern-posted", { round_id: 1, issue: 42, reason: "premise seems wrong", hash });
+  forge.issueMetaState[42] = "CLOSED"; // the issue closed since — this is what the scan should detect
+  const cfg = mkCfg({ roles: { po: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+
+  await peripherals.aligning!.run({ roundId: 2, phase: "aligning", marker: null });
+
+  const adjudicated = state.eventsAfterId(0, ["concern-adjudicated"]);
+  assert.equal(adjudicated.length, 1, "the scan ran and adjudicated the concern even though roles.po.enabled is false");
+  assert.deepEqual(adjudicated[0]!.payload, { issue: 42, hash, outcome: "closed" });
+  // Confirms the PO's OWN decomposition/triage session genuinely never ran (roles.po.enabled
+  // gates alignStub.run, not the scan) — same #212 AC7 property the sibling test above checks.
+  assert.ok(!runner.calls.some((c) => c.roleId === "po-align" || c.roleId === "po-triage"));
+  state.close();
+});
+
+test("createDefaultPeripherals #237 round-2 adjudication (2026-07-19, finding 1+2): the REAL terminal-replay path — triage-effects-committed lands but the concern-posted receipt is lost; the NEXT round's unconditional sweep recovers it, attributed to the ORIGINAL round", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  // No `body` set (this fixture's getIssueBody always returns "" — it doesn't track real writes,
+  // unlike align.test.ts's fuller fake) — matches "" so #232's concurrent-edit guard sees no
+  // (spurious) mismatch; this test isn't about that guard, only about the concern-receipt path.
+  forge.planTriageCandidates = [{ number: 91, title: "t", labels: [] }];
+  const cfg = mkCfg();
+
+  // Round 5: drive the REAL po-triage session through createAligningStub/createDefaultPeripherals
+  // (not a hand-seeded shortcut) — its output carries a concern. Poison ONLY the concern-posted
+  // append so the comment lands but its receipt is lost — exactly "crashed strictly between the
+  // comment landing and the event append," the real crash window findings 1/2 are about.
+  const runner = {
+    calls: [] as RoleSessionOpts[],
+    async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
+      this.calls.push(opts);
+      if (opts.roleId === "po-triage") {
+        const resultText =
+          `${RESULT_BLOCK_START}\n${JSON.stringify({ issue: 91, concerns: [{ issue: 91, reason: "this issue's premise seems wrong" }] })}\n${RESULT_BLOCK_END}\n` +
+          `${BODY_BLOCK_START}\n## Verification\n- x\n${BODY_BLOCK_END}`;
+        return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: "po-triage-91", resultText };
+      }
+      const resultText = `${RESULT_BLOCK_START}\n${JSON.stringify({ issues: [] })}\n${RESULT_BLOCK_END}`;
+      return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
+    },
+  };
+  const realAppend = state.appendEvent.bind(state);
+  state.appendEvent = (kind: string, payload: unknown) => {
+    if (kind === "concern-posted") throw new Error("simulated crash: concern-posted append lost");
+    realAppend(kind, payload);
+  };
+  const peripheralsRound5 = createDefaultPeripherals({ forge, state, cfg, runner });
+  await peripheralsRound5.aligning!.run({ roundId: 5, phase: "aligning", marker: null });
+  state.appendEvent = realAppend; // un-poison — the "crash" is over
+
+  // Two comments land on #91: the triage success comment (plan drafted) AND the concern comment
+  // (postConcernIfNew posts before attempting the now-poisoned receipt append).
+  const round5Comments = forge.issueCommentsPosted.filter(([n]) => n === 91);
+  assert.equal(round5Comments.length, 2);
+  assert.ok(
+    round5Comments.some(([, body]) => /this issue's premise seems wrong/.test(body)),
+    "the concern comment landed",
+  );
+  // ...but the durable receipt for it was lost — the real bug this fix closes.
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0, "the receipt never landed (simulated crash)");
+  // And the decision's OWN per-round journal is now TERMINAL — align.ts's own in-memory
+  // re-collection path can never revisit this decision within round 5 again, even on a
+  // same-round crash-rerun (not exercised here — the point is round 5 is simply DONE).
+  assert.ok(state.eventsAfterId(0, ["triage-effects-committed"]).some((e) => (e.payload as { issue: number }).issue === 91));
+
+  // Round 6 (a LATER round, no session dispatch needed for THIS issue — it's not a triage
+  // candidate anymore, its body already has a plan): the unconditional sweep runs regardless.
+  forge.planTriageCandidates = []; // #91 no longer needs triage — the body write already landed
+  const runnerRound6 = {
+    calls: [] as RoleSessionOpts[],
+    async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
+      this.calls.push(opts);
+      const resultText = `${RESULT_BLOCK_START}\n${JSON.stringify({ issues: [] })}\n${RESULT_BLOCK_END}`;
+      return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
+    },
+  };
+  const peripheralsRound6 = createDefaultPeripherals({ forge, state, cfg, runner: runnerRound6 });
+  await peripheralsRound6.aligning!.run({ roundId: 6, phase: "aligning", marker: null });
+
+  assert.equal(
+    forge.issueCommentsPosted.filter(([n]) => n === 91).length,
+    2,
+    "no repost — the live marker was already there, reconciled instead (still just the round-5 pair)",
+  );
+  const receipts = state.eventsAfterId(0, ["concern-posted"]);
+  assert.equal(receipts.length, 1, "round 6's sweep recovered the missing receipt");
+  assert.deepEqual(receipts[0]!.payload, {
+    round_id: 5, // #237 finding 2: the ORIGINAL round, never round 6 (the sweep's own round)
+    issue: 91,
+    reason: "this issue's premise seems wrong",
+    // This fixture's getIssueBody always returns "" (it doesn't persist updateIssueBody's
+    // writes) — the same body value both round 5's post and round 6's reconcile-lookup see.
+    hash: concernHash("this issue's premise seems wrong", ""),
+    reconciled: true,
+  });
   state.close();
 });
 

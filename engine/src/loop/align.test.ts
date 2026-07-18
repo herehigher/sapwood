@@ -98,8 +98,27 @@ class FakeForge implements IForge {
   }
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
+  // #237: per-issue comment store — dissent.ts's postConcernIfNew/scanForAdjudication read this
+  // back via getIssueComments(issue) to check the marker and detect a human reply. Preset an
+  // issue's entry directly in a test that needs to simulate a pre-existing (e.g. human-authored)
+  // comment; addIssueComment below always appends to it too, same as real GitHub would.
+  comments: Record<number, Array<{ login: string; createdAt: string; body: string }>> = {};
   async addIssueComment(n: number, body: string): Promise<void> {
     this.issueCommentsPosted.push([n, body]);
+    this.comments[n] = [...(this.comments[n] ?? []), { login: "sapwood-engine", createdAt: new Date().toISOString(), body }];
+  }
+  async getIssueComments(issue: number) {
+    return this.comments[issue] ?? [];
+  }
+  issueState: Record<number, "OPEN" | "CLOSED"> = {};
+  async getIssueMeta(issue: number) {
+    return {
+      number: issue,
+      title: this.backlogIssues.find((i) => i.number === issue)?.title ?? "",
+      state: this.issueState[issue] ?? ("OPEN" as const),
+      labels: this.issueLabels[issue] ?? [],
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
   }
   async getIssueBody(issue: number): Promise<string> {
     return this.issueBodies[issue] ?? "";
@@ -142,9 +161,6 @@ class FakeForge implements IForge {
   }
   async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
-  }
-  async getIssueComments() {
-    return [];
   }
   async createIssue(title: string, body: string): Promise<number> {
     const n = this.nextIssueNumber++;
@@ -1536,6 +1552,89 @@ test("createAligningStub #232: a triage-decision-accepted append failure aborts 
   state.close();
 });
 
+test("createAligningStub #237 finding 6: a triage concern is DROPPED (never posted) when its accompanying decision fails to persist durably", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 91, title: "t", labels: [], body: "no plan" }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult(
+      "po-triage-91",
+      sapwoodResult({ issue: 91, concerns: [{ issue: 91, reason: "this issue's premise seems wrong" }] }, "## Verification\n- x"),
+    ),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapAndPoisonEvents(state, "triage-decision-accepted");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 20, phase: "aligning", marker: null });
+  assert.ok(
+    logged.some(([kind]) => kind === "triage-decision-lost"),
+    "the decision itself was lost",
+  );
+  assert.equal(forge.comments[91]?.length ?? 0, 0, "the concern that rode along with the lost decision is never posted");
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0);
+  state.close();
+});
+
+test("createAligningStub #237 finding 6: a triage concern is DROPPED when the concurrent-edit guard refuses the body write (stale hash)", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 92, title: "t", labels: [], body: "original body, no plan" }];
+  const cfg = mkCfg();
+  const runner = {
+    calls: [] as RoleSessionOpts[],
+    async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
+      this.calls.push(opts);
+      if (opts.roleId === "po-triage") {
+        forge.issueBodies[92] = "a human edited this issue concurrently";
+        return doneResult(
+          "po-triage-92",
+          sapwoodResult({ issue: 92, concerns: [{ issue: 92, reason: "premise seems wrong" }] }, "## Verification\n- x"),
+        );
+      }
+      return doneResult("po-align-1", alignResultText([]));
+    },
+  };
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 21, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the write is refused");
+  assert.equal(forge.comments[92]?.length ?? 0, 0, "the concern is never posted — its decision's effect was refused");
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0);
+  state.close();
+});
+
+test("createAligningStub #237 finding 6: a RESUMED triage decision's concern IS posted (the decision itself already persisted successfully in an earlier attempt)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  // Simulate a crash-rerun: an accepted decision from an earlier attempt this round, with no
+  // terminal receipt yet — the body write hasn't landed, so this resumes straight to the guard.
+  forge.issueBodies[93] = "no plan";
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 22,
+    issue: 93,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:93",
+    attempt: 1,
+    body: "## Verification\n- x",
+    expected_hash: contentVersionForTest("no plan"),
+    concerns: [{ issue: 93, reason: "recovered concern" }],
+  });
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 22, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1, "the resumed decision's body write lands");
+  // Two comments land on #93: the triage success comment (plan drafted) AND the concern —
+  // the concern IS posted because the resumed decision already durably persisted.
+  assert.equal(forge.comments[93]?.length, 2);
+  assert.ok(forge.comments[93]!.some((c) => /recovered concern/.test(c.body)));
+  state.close();
+});
+
 test("createAligningStub #110 (Codex round 1): a duplicate-title align batch twice -> align's degrade path, NOTHING created (never a double-create)", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
@@ -1657,7 +1756,15 @@ test("buildBacklogDigest: zero issues and a contained read failure are distinct,
   const forge = new FakeForge();
   const cfg = mkCfg();
   const empty = await buildBacklogDigest(forge, cfg);
-  assert.deepEqual(empty, { text: "(no open issues yet)", ok: true, total: 0, rendered: 0, omitted: 0, truncated: false });
+  assert.deepEqual(empty, {
+    text: "(no open issues yet)",
+    ok: true,
+    total: 0,
+    rendered: 0,
+    omitted: 0,
+    truncated: false,
+    renderedIssueNumbers: [],
+  });
   forge.listOpenIssues = async () => {
     throw new Error("forge unavailable");
   };
@@ -2584,4 +2691,136 @@ test("defaultPoolPromptPath resolves to a real, readable shipped file with a sel
   assert.ok(existsSync(path));
   const text = readFileSync(path, "utf8");
   assert.match(text, /selected/);
+});
+
+// ── #237: PO dissent channel — concerns alongside align/triage deliverables ─────────────────
+
+test("validateAlignOutput #237: a concern about an in-view issue validates alongside the normal deliverable", () => {
+  const result = validateAlignOutput(
+    sapwoodResult({ issues: [], concerns: [{ issue: 42, reason: "premise seems wrong" }] }),
+    new Set([42]),
+  );
+  assert.ok(result.ok);
+  if (result.ok) assert.deepEqual(result.concerns, [{ issue: 42, reason: "premise seems wrong" }]);
+});
+
+test("validateAlignOutput #237: a concern naming an issue outside the injected view is invalid output", () => {
+  const result = validateAlignOutput(sapwoodResult({ issues: [], concerns: [{ issue: 999, reason: "x" }] }), new Set([42]));
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /outside this session's injected view/.test(result.reason));
+});
+
+test("validateAlignOutput #237: `inView` omitted skips the bounds check entirely (back-compat for existing call sites)", () => {
+  const result = validateAlignOutput(sapwoodResult({ issues: [], concerns: [{ issue: 999, reason: "x" }] }));
+  assert.ok(result.ok);
+});
+
+test("validateTriageOutput #237: a concern about the target issue itself validates", () => {
+  const result = validateTriageOutput(sapwoodResult({ issue: 1, concerns: [{ issue: 1, reason: "x" }] }, PLAN_BODY), 1, new Set([1]));
+  assert.ok(result.ok);
+  if (result.ok) assert.deepEqual(result.concerns, [{ issue: 1, reason: "x" }]);
+});
+
+test("validateTriageOutput #237: a concern about an issue outside the injected view is invalid output", () => {
+  const result = validateTriageOutput(sapwoodResult({ issue: 1, concerns: [{ issue: 2, reason: "x" }] }, PLAN_BODY), 1, new Set([1]));
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /outside this session's injected view/.test(result.reason));
+});
+
+test("createAligningStub #237: an align-mode concern about an existing backlog issue is posted, mentions notify.mentions, and carries the marker — zero label/status effects", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [{ number: 42, title: "Existing issue", labels: [], body: "original body" }];
+  forge.issueBodies[42] = "original body";
+  const cfg = mkCfg({ notify: { mentions: ["alice"] } });
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", sapwoodResult({ issues: [], concerns: [{ issue: 42, reason: "this contradicts the goal file" }] })),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 1, phase: "aligning", marker: null });
+
+  assert.equal(forge.comments[42]?.length, 1);
+  const body = forge.comments[42]![0]!.body;
+  assert.match(body, /@alice/);
+  assert.match(body, /this contradicts the goal file/);
+  // Zero label/status/dispatch effects from the concern itself (module doc, #237 AC3) — the
+  // concern targets an EXISTING issue no proposal/triage write path ever touches.
+  assert.deepEqual(
+    forge.addLabelCalls.filter(([n]) => n === 42),
+    [],
+  );
+  state.close();
+});
+
+test("createAligningStub #237: a concern naming an issue outside the injected view invalidates the WHOLE session output — retried once, then po-degraded (existing degrade path, no new machinery)", async () => {
+  const forge = new FakeForge(); // empty backlog -> nothing is in view
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", sapwoodResult({ issues: [], concerns: [{ issue: 999, reason: "x" }] })),
+    doneResult("po-align-2", sapwoodResult({ issues: [], concerns: [{ issue: 999, reason: "x" }] })),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapEvents(state);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 1, phase: "aligning", marker: null });
+
+  assert.equal(runner.calls.length, 2, "retried once on invalid output");
+  const degraded = logged.find(([kind]) => kind === "po-degraded");
+  assert.ok(degraded, "the existing po-degraded path fires — no new degrade machinery");
+  assert.equal(Object.keys(forge.comments).length, 0, "no concern posted from invalid output");
+  state.close();
+});
+
+test("createAligningStub #237: the SAME worded concern re-arms after a human edits the concerned issue's why/what (AC5 fixture, via the real stub wiring)", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [{ number: 42, title: "Existing issue", labels: [], body: "original body" }];
+  forge.issueBodies[42] = "original body";
+  const cfg = mkCfg();
+  const concernOutput = sapwoodResult({ issues: [], concerns: [{ issue: 42, reason: "same worded concern" }] });
+  const runner = new ScriptedRunner([doneResult("po-align-1", concernOutput)]);
+  const state = new State(":memory:");
+  const stub1 = createAligningStub({ forge, state, cfg, runner });
+  await stub1.run({ roundId: 1, phase: "aligning", marker: null });
+  assert.equal(forge.comments[42]?.length, 1);
+
+  // A different round raises the EXACT SAME worded concern with NO edit in between — no repost.
+  const runnerSame = new ScriptedRunner([doneResult("po-align-2", concernOutput)]);
+  const stub2 = createAligningStub({ forge, state, cfg, runner: runnerSame });
+  await stub2.run({ roundId: 2, phase: "aligning", marker: null });
+  assert.equal(forge.comments[42]?.length, 1, "no repost — same wording, same (unedited) body");
+
+  // A human edits the issue's why/what.
+  forge.issueBodies[42] = "EDITED body";
+  forge.backlogIssues = [{ number: 42, title: "Existing issue", labels: [], body: "EDITED body" }];
+  const runnerAfterEdit = new ScriptedRunner([doneResult("po-align-3", concernOutput)]);
+  const stub3 = createAligningStub({ forge, state, cfg, runner: runnerAfterEdit });
+  await stub3.run({ roundId: 3, phase: "aligning", marker: null });
+  assert.equal(forge.comments[42]?.length, 2, "the same worded concern re-arms once the issue's body changed");
+  state.close();
+});
+
+test("createAligningStub #237: crash-rerun replay recovers a previously-validated align concern (persisted alongside the proposal set, no session re-dispatched)", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [{ number: 42, title: "Existing issue", labels: [], body: "body" }];
+  forge.issueBodies[42] = "body";
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  // Simulate a round whose proposal set (with a concern) was already persisted by a prior
+  // (crashed) attempt — proposalProgress replays it, no fresh po-align session runs.
+  state.appendEvent("proposal-set-persisted", {
+    round_id: 5,
+    proposals: [],
+    concerns: [{ issue: 42, reason: "recovered concern" }],
+  });
+  const runner = new ScriptedRunner([doneResult("po-align-should-not-run", sapwoodResult({ issues: [] }))]);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 5, phase: "aligning", marker: null });
+
+  assert.equal(runner.calls.length, 0, "no fresh po-align session — the persisted set (and its concerns) replayed directly");
+  assert.equal(forge.comments[42]?.length, 1);
+  assert.match(forge.comments[42]![0]!.body, /recovered concern/);
+  state.close();
 });

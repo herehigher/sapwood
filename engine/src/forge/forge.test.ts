@@ -4,6 +4,7 @@ import { ConfigSchema } from "../config/config.js";
 import {
   assemblePRReviewData,
   countUnresolvedThreads,
+  ENGINE_COMMENT_MARKER,
   extractVerificationPlan,
   fetchAllReviewThreads,
   findItemId,
@@ -1966,4 +1967,39 @@ test("getPRReviewThreads: threads owner/repo/number/commentsCap through the Grap
   assert.ok(args.includes("number=9"));
   assert.ok(args.includes("commentsCap=15"));
   assert.ok(args.includes("after=null"));
+});
+
+// ── #237 finding 2 (2026-07-18 adjudication on PR #262): every issue comment this engine posts
+// is centrally stamped, regardless of whether the call site embeds its own marker ───────────
+
+test("addIssueComment: every posted body is stamped with ENGINE_COMMENT_MARKER at the write boundary, appended AFTER any call-site-specific marker", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "";
+  };
+  await forge.addIssueComment(42, "a plain body with no marker of its own");
+  const bodyIdx = seen[0]!.indexOf("--body");
+  assert.ok(bodyIdx >= 0);
+  const posted = seen[0]![bodyIdx + 1]!;
+  assert.ok(posted.startsWith("a plain body with no marker of its own"));
+  assert.ok(posted.includes(ENGINE_COMMENT_MARKER), "the generic engine stamp is always appended");
+});
+
+test("addIssueComment: a body that ALREADY carries its own specific sapwood marker still gets the generic stamp too — both survive", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return "";
+  };
+  const specificMarker = "<!-- sapwood:concern:42:abc123 -->";
+  await forge.addIssueComment(42, `PO dissent\n\n${specificMarker}`);
+  const bodyIdx = seen[0]!.indexOf("--body");
+  const posted = seen[0]![bodyIdx + 1]!;
+  assert.ok(posted.includes(specificMarker));
+  assert.ok(posted.includes(ENGINE_COMMENT_MARKER));
 });

@@ -1502,6 +1502,44 @@ test("migration v16->v17: a populated v16 DB opens with data intact (including p
   }
 });
 
+// ── #237 round-3 adjudication (2026-07-19): events(kind) index (migration v17->v18) ─────────
+
+test("migration v17->v18: a populated v17 DB opens with data intact, an index on events(kind) exists, user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 17; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 17");
+    raw.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run("2026-07-19T00:00:00Z", "concern-posted", "{}");
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 18);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    assert.equal(s.eventsAfterId(0, ["concern-posted"]).length, 1, "the pre-migration row survived");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.eventsAfterId(0, ["concern-posted"]).length, 1);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration v17->v18: the events(kind) index is actually created and usable by the query planner", () => {
+  const s = new State(":memory:");
+  s.appendEvent("concern-posted", { issue: 1 });
+  const indexRow = (s as unknown as { db: DatabaseSync }).db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events' AND name = 'events_kind_idx'")
+    .get();
+  assert.ok(indexRow, "events_kind_idx exists on the events table");
+  s.close();
+});
+
 test("input manifest #251: an OMITTED truncated round-trips as null, never a fabricated false — the exact dishonesty the three-state column fixes", () => {
   const s = new State(":memory:");
   s.appendInputManifest({

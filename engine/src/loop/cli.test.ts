@@ -824,6 +824,7 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
     parked: [],
   };
   const out = formatStatus(snapshot);
@@ -845,6 +846,7 @@ test("formatStatus: PAUSE active renders distinctly from kill switch, both can b
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
     parked: [],
   };
   const out = formatStatus(snapshot);
@@ -866,6 +868,7 @@ test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", 
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
     parked: [
       {
         source: "llm",
@@ -897,6 +900,7 @@ test("formatStatus: parked + escalated renders the escalation timestamp", () => 
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
     parked: [
       {
         source: "forge",
@@ -927,6 +931,7 @@ test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => 
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
     parked: [],
   };
   assert.match(formatStatus(snapshot), /park: inactive/);
@@ -944,6 +949,7 @@ test("formatStatus renders latest reconcile orphans and omits an absent/healthy 
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
     parked: [],
   };
   assert.doesNotMatch(formatStatus(base), /orphans:/);
@@ -962,6 +968,23 @@ test("formatStatus renders latest reconcile orphans and omits an absent/healthy 
   assert.match(out, /unplaced issue #171/);
   assert.match(out, /open engine PR #200 \(issue #171\)/);
   assert.match(out, /and 3 more/);
+});
+
+test("runStatus #237: reports the count of unadjudicated PO-dissent concerns — posted-without-adjudicated only, DB-only (no live GitHub call)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-concerns-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const state = new State(dbPath);
+  state.appendEvent("concern-posted", { round_id: 1, issue: 42, reason: "premise seems wrong", hash: "abc" });
+  state.appendEvent("concern-posted", { round_id: 1, issue: 7, reason: "contradicts a non-goal", hash: "def" });
+  state.appendEvent("concern-adjudicated", { issue: 7, hash: "def", outcome: "closed" });
+  state.close();
+  try {
+    const result = runStatus(["node", "sapwood", "status", dbPath, "--config", join(dir, "missing.yaml")]);
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /PO-dissent concerns awaiting adjudication: 1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("runStatus sources orphans from the latest reconcile-completed event", () => {
@@ -1003,6 +1026,7 @@ test("formatStatus: a mixed storm renders BOTH episodes (one line per source), c
     dailySpendUsd: 0,
     lanesMax: 3,
     dailyBudgetUsd: 100,
+    unadjudicatedConcerns: 0,
     parked: [
       {
         source: "llm",
