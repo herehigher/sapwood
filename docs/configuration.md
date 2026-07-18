@@ -395,10 +395,11 @@ are exactly what a role session should absorb. Sealing this channel (a clean,
 runs only — see [`security.md`](security.md#ambient-repo-context-record-dont-seal-236)
 for the full rationale, the isolation recipe (which MUST use `--bare`), and why that
 recipe is never acceptable for production dispatch (`--bare` also disables hooks, and
-the guard hook must stay live). Recorded for **all 8/8** `runSessionWithRetry`
-peripheral call sites today — harvest, architect, plan-review (drafter + reviewer),
-retro, and (as of [#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s
-three PO sessions (`po-align`, `po-triage`, `po-pool`) — every session attempt
+the guard hook must stay live). Recorded for **all 9/9** `runSessionWithRetry`
+peripheral call sites today — harvest, architect, plan-review (reviewer, drafter, and
+#214's confirm session), retro, and (as of
+[#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s three PO
+sessions (`po-align`, `po-triage`, `po-pool`) — every session attempt
 assembles a **context manifest**: every source among a deliberately bounded,
 ENUMERATED set of standard CLAUDE.md-family paths (see the manifest's own
 `probedPaths`; never Claude Code's full resolution graph — imports, ancestor-directory

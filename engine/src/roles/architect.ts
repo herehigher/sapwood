@@ -182,18 +182,41 @@ export const NO_CANDIDATES = "(No candidate issues are awaiting gate⓪ review t
 // candidates AND zero pool members — means a row is never written for a phase call that never
 // reaches a session dispatch at all).
 //
-// Channels covered (the exact set #231/#236's own scoping notes named as deferred): `last-merged`
-// (deps.lastMerged), `candidate-issues` (the candidates.summary substitution — contradiction-
-// review targets), `doctrine` (deps.doctrine), `directive` (this round's resolved directive), and
-// `architecture-chapter` (the goal/architecture content loadArchitectureChapter produces). Each of
-// these is a plain string this module renders verbatim into the prompt with no failure mode of its
-// own visible here (a read failure upstream — e.g. a missing PLAN.md, a missing doctrine file —
-// already degraded to an explicit placeholder before reaching this module, per each field's own
-// doc comment above); `ok: true` on every row is honest by that same "what the session actually
-// saw" standard the rest of this table uses — the placeholder text IS what was seen. `round.pool`
-// (the pool-review digest) and `alignedGoals` are deliberately NOT covered here: neither is named
-// in #251's channel list, and expanding scope beyond the issue's own acceptance criteria is not
-// this PR's call to make.
+// Channels covered — every engine-controlled string substituted into the architect prompt:
+// `last-merged` (deps.lastMerged), `aligned-goals` (deps.alignedGoals), `doctrine`
+// (deps.doctrine), `directive` (this round's resolved directive), `candidate-issues` (the
+// candidates.summary substitution — contradiction-review targets), `architecture-chapter` (the
+// goal/architecture content loadArchitectureChapter produces), and `pool-digest` (the
+// round.pool substitution — #213's batch-review target; a healthy all-approved round can have
+// zero drift-review candidates but a non-empty pool, so this channel matters most for coverage).
+//
+// TWO HONESTY TIERS, not one blanket `ok: true` (gate② review, PR #258 round 2 — the original
+// draft asserted `ok: true`/`truncated: false` uniformly, which was dishonest for the channels
+// this module doesn't actually control):
+//
+//  - `last-merged`/`aligned-goals`/`doctrine`/`directive` are PASS-THROUGH strings: each is either
+//    threaded in from ArchitectDeps (round-defaults.ts/doctrine.ts already collapsed a read
+//    failure to an explicit placeholder before this module ever sees it — see each field's own
+//    ArchitectDeps doc comment) or resolved by resolveRoundDirective (whose own degrade handling
+//    is documented at its call site below). This module never reads or caps any of these four
+//    itself, so it records `ok: true` (this IS what was substituted into the prompt, honestly)
+//    but deliberately OMITS `truncated` rather than asserting `false` — this seam has no way to
+//    know whether an upstream cap (e.g. doctrine.ts's own maxChars, or capDigest inside
+//    resolveRoundDirective) already truncated the text before it arrived here, and a knowingly-
+//    unverifiable `truncated: false` would be exactly the fabricated-success-claim InputManifest-
+//    Row's own contract forbids.
+//  - `candidate-issues`/`architecture-chapter`/`pool-digest` ARE read/capped by this module
+//    itself, so they get the full, honest treatment: `architecture-chapter`'s `ok` reflects
+//    loadArchitectureChapter's ACTUAL read outcome (false + `detail` on a missing/unreadable
+//    PLAN.md — never a fabricated `version` for a placeholder that stands in for a failed read;
+//    a missing "## Architecture" heading in an otherwise-successfully-read file is NOT a read
+//    failure and stays `ok: true`, same distinction align.ts's buildBacklogDigest draws between
+//    "zero issues" and "read threw"). `candidate-issues` has no cap applied at all here, so
+//    `truncated: false` is honestly assertable. `pool-digest` goes through capDigest — a
+//    CHARACTER-count cut, unlike align.ts's packDigestRecords (a whole-RECORD pack) — so this
+//    module can state a genuine pre/post-cap `truncated` flag and the real pool size as `total`,
+//    but cannot honestly claim a record-level `rendered`/`omitted` split capDigest doesn't
+//    preserve.
 const INPUT_MANIFEST_PHASE = "architecting";
 const INPUT_MANIFEST_ROLE = "architect";
 const INPUT_MANIFEST_SESSION = "architect";
@@ -552,7 +575,29 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // cfg.goal.file (config-file-relative resolved, default "docs/PLAN.md"; was a hardcoded
       // <cwd>/docs/PLAN.md, then roles.architect.planMdPath (#104), which broke for any target
       // repo keeping its architecture doc elsewhere).
-      const architectureChapter = loadArchitectureChapter(deps.planMdPath ?? deps.cfg.goal.file);
+      const architecturePath = deps.planMdPath ?? deps.cfg.goal.file;
+      const architectureChapter = loadArchitectureChapter(architecturePath);
+      // #251: this module's OWN read-status check for the architecture-chapter manifest channel
+      // below — kept LOCAL (no new ArchitectDeps/round-defaults plumbing, PM ruling on the #258
+      // gate② review) rather than changing loadArchitectureChapter's return shape, which several
+      // existing call sites/tests already depend on as a plain string. Mirrors
+      // loadArchitectureChapter's own existsSync/readFileSync checks exactly, so the two can never
+      // disagree about what "unreadable" means. A missing "## Architecture" heading in an
+      // otherwise-successfully-read file is deliberately NOT treated as a read failure here (see
+      // this file's own #251 module doc, above NO_CANDIDATES).
+      let architectureChapterOk = true;
+      let architectureChapterDetail: string | null = null;
+      if (!existsSync(architecturePath)) {
+        architectureChapterOk = false;
+        architectureChapterDetail = `PLAN.md not found at ${architecturePath}`;
+      } else {
+        try {
+          readFileSync(architecturePath, "utf8");
+        } catch (e) {
+          architectureChapterOk = false;
+          architectureChapterDetail = `PLAN.md at ${architecturePath} could not be read: ${String(e)}`;
+        }
+      }
       // The round design note needs SOME issue to live on (GitHub has no round/project-level
       // comment surface this role can write to — its writes are issue comment/label edit only);
       // the lowest-numbered candidate is an arbitrary but deterministic, reproducible anchor —
@@ -570,11 +615,16 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // #213: THE POOL-SET INVARIANT's authoritative set — the ANALOGOUS "exactly what the
       // prompt showed as pool members" set, for verdicts.
       const poolNumbers = new Set(poolIssues.map((i) => i.number));
+      // #251: pool-digest is a CHARACTER-count cut (capDigest), unlike align.ts's
+      // packDigestRecords (a whole-RECORD pack) — the pre-cap joined text is kept in its own
+      // variable so the manifest row below can honestly compare pre/post-cap length, rather than
+      // guessing at a record-level truncated flag capDigest doesn't preserve.
+      const poolIssuesJoined = poolIssues.length === 0 ? "" : poolIssues.map(formatCandidate).join("\n\n---\n\n");
       const poolDigest =
-        poolIssues.length === 0
-          ? NO_POOL_MEMBERS
-          : capDigest(poolIssues.map(formatCandidate).join("\n\n---\n\n"), deps.cfg.roles.architect.poolDigestMaxChars);
+        poolIssues.length === 0 ? NO_POOL_MEMBERS : capDigest(poolIssuesJoined, deps.cfg.roles.architect.poolDigestMaxChars);
+      const poolDigestTruncated = poolIssues.length > 0 && poolIssuesJoined.length > deps.cfg.roles.architect.poolDigestMaxChars;
       const lastMergedText = deps.lastMerged ?? NO_PRIOR_ROUND_YET;
+      const alignedGoalsText = deps.alignedGoals ?? NO_ALIGNED_GOALS_YET;
       const doctrineText = deps.doctrine ?? NO_DOCTRINE;
       const candidatesSummaryText = candidates.length === 0 ? NO_CANDIDATES : candidates.map(formatCandidate).join("\n\n---\n\n");
 
@@ -582,7 +632,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "round.id": String(roundId),
         "round.marker": marker_,
         "round.designNoteIssue": String(anchor.number),
-        "round.alignedGoals": deps.alignedGoals ?? NO_ALIGNED_GOALS_YET,
+        "round.alignedGoals": alignedGoalsText,
         "round.lastMerged": lastMergedText,
         "round.doctrine": doctrineText,
         "plan.architectureChapter": architectureChapter,
@@ -594,10 +644,13 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       });
 
       // #251: this session dispatch's input-manifest rows — ONE attempt number, derived
-      // immediately before the real dispatch (the early-return above already ruled out a
-      // no-session-runs call, so this point is only ever reached when a session is about to
-      // actually run — the #243 F4 rule), shared across every engine-controlled channel this
-      // prompt substitutes (see this file's own #251 module doc, above NO_CANDIDATES).
+      // immediately before the real dispatch, shared across every engine-controlled channel this
+      // prompt substitutes (see this file's own #251 module doc, above NO_CANDIDATES). Reached
+      // only when this phase call intends to dispatch a session (the early-return above already
+      // ruled out the zero-candidates-and-zero-pool case) — a crash strictly between this write
+      // and the session actually running is possible and benign, the SAME accepted pre-dispatch
+      // window align.ts's own input-manifest writes carry (a record-only table, never a gate; see
+      // align.ts's own module doc for this exact tradeoff).
       const architectAttempt = deps.state.nextInputManifestAttempt(
         roundId,
         INPUT_MANIFEST_PHASE,
@@ -610,33 +663,69 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         role: INPUT_MANIFEST_ROLE,
         session: INPUT_MANIFEST_SESSION,
         attempt: architectAttempt,
-        ok: true as const,
-        total: 1,
-        rendered: 1,
-        omitted: 0,
-        truncated: false,
       };
+      // Tier 1 — pass-through strings (see this file's own #251 module doc): `ok: true` (this IS
+      // what was substituted), `total`/`rendered`/`omitted` describe THIS channel's own
+      // single-blob granularity (never a claim about upstream record-packing), and `truncated` is
+      // deliberately OMITTED — this module performs no capping of its own on any of these four.
+      for (const [channel, text] of [
+        ["last-merged", lastMergedText],
+        ["aligned-goals", alignedGoalsText],
+        ["doctrine", doctrineText],
+        ["directive", directive],
+      ] as const) {
+        recordInputManifest(
+          deps.state,
+          { ...architectManifestBase, channel, ok: true, version: contentVersion(text), total: 1, rendered: 1, omitted: 0 },
+          deps.log,
+        );
+      }
+      // Tier 2 — channels this module itself reads/caps, given the full honest treatment.
       recordInputManifest(
         deps.state,
-        { ...architectManifestBase, channel: "last-merged", version: contentVersion(lastMergedText) },
+        {
+          ...architectManifestBase,
+          channel: "candidate-issues",
+          ok: true,
+          version: contentVersion(candidatesSummaryText),
+          total: candidates.length,
+          rendered: candidates.length,
+          omitted: 0,
+          truncated: false, // no cap applied to candidates.summary
+        },
         deps.log,
       );
       recordInputManifest(
         deps.state,
         {
           ...architectManifestBase,
-          channel: "candidate-issues",
-          version: contentVersion(candidatesSummaryText),
-          total: candidates.length,
-          rendered: candidates.length,
+          channel: "architecture-chapter",
+          ok: architectureChapterOk,
+          // No fabricated version for a placeholder standing in for a failed read (InputManifest-
+          // Row's own contract: version is "absent when there's nothing meaningful to hash").
+          version: architectureChapterOk ? contentVersion(architectureChapter) : null,
+          detail: architectureChapterOk ? null : architectureChapterDetail,
+          total: 1,
+          rendered: architectureChapterOk ? 1 : 0,
+          omitted: architectureChapterOk ? 0 : 1,
+          truncated: false, // loadArchitectureChapter extracts a heading section; it never caps by length
         },
         deps.log,
       );
-      recordInputManifest(deps.state, { ...architectManifestBase, channel: "doctrine", version: contentVersion(doctrineText) }, deps.log);
-      recordInputManifest(deps.state, { ...architectManifestBase, channel: "directive", version: contentVersion(directive) }, deps.log);
       recordInputManifest(
         deps.state,
-        { ...architectManifestBase, channel: "architecture-chapter", version: contentVersion(architectureChapter) },
+        {
+          ...architectManifestBase,
+          channel: "pool-digest",
+          ok: true,
+          version: contentVersion(poolDigest),
+          total: poolIssues.length,
+          // Record-level rendered/omitted are unknowable once capDigest has actually cut the
+          // text (a character cut, not a per-issue drop) — left unset rather than guessed; when
+          // nothing was cut, every pool issue is trivially known to be fully rendered.
+          ...(poolDigestTruncated ? {} : { rendered: poolIssues.length, omitted: 0 }),
+          truncated: poolDigestTruncated,
+        },
         deps.log,
       );
 

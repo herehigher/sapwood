@@ -424,11 +424,11 @@ inaccurate and is now corrected). Applying the capability/context decision rule
 above: sealing this channel would be a *content*-side intervention, and the trust
 boundary stays action-side — sealing it was considered and rejected (owner ruling,
 Codex concurring after challenge). The obligation is honesty and diagnosability, not
-isolation: recorded for **all 8/8** `runSessionWithRetry` peripheral call sites today
-— harvest, architect, plan-review (drafter + reviewer), retro, and (as of
-[#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s three PO
-sessions (`po-align`, `po-triage`, `po-pool`) — every such session attempt
-assembles a **context manifest** (`roles/context-manifest.ts`, persisted in the state
+isolation: recorded for **all 9/9** `runSessionWithRetry` peripheral call sites today
+— harvest, architect, plan-review (reviewer, drafter, and #214's confirm session),
+retro, and (as of [#251](https://github.com/herehigher/sapwood/issues/251))
+`align.ts`'s three PO sessions (`po-align`, `po-triage`, `po-pool`) — every such
+session attempt assembles a **context manifest** (`roles/context-manifest.ts`, persisted in the state
 DB's `context_manifests` table) recording every source among a deliberately BOUNDED,
 ENUMERATED set of standard CLAUDE.md-family paths — `<worktree>/CLAUDE.md`,
 `CLAUDE.local.md`, `.claude/CLAUDE.md`, every `*.md` RECURSIVELY under

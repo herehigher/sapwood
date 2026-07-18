@@ -1247,7 +1247,7 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
         ...(deps.log !== undefined ? { log: deps.log } : {}),
         // #251: record this session's ambient-context manifest for EVERY attempt, same (round,
         // phase, role, session, attempt) key shape as the input-manifest rows above — see
-        // peripheral.ts's RetriedSession.contextManifest doc. Completes the 8/8 wiring #236
+        // peripheral.ts's RetriedSession.contextManifest doc. Completes the 9/9 wiring #236
         // deferred for align.ts's three PO sessions.
         contextManifest: {
           roundId: deps.roundId,
@@ -1513,7 +1513,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             ...(deps.log !== undefined ? { log: deps.log } : {}),
             // #251: record this session's ambient-context manifest for EVERY attempt, same
             // (round, phase, role, session, attempt) key shape as the input-manifest rows above
-            // — see peripheral.ts's RetriedSession.contextManifest doc. Completes the 8/8 wiring
+            // — see peripheral.ts's RetriedSession.contextManifest doc. Completes the 9/9 wiring
             // #236 deferred for align.ts's three PO sessions.
             contextManifest: {
               roundId,
@@ -1797,7 +1797,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             ...(deps.log !== undefined ? { log: deps.log } : {}),
             // #251: record this session's ambient-context manifest for EVERY attempt, same
             // (round, phase, role, session, attempt) key shape as the input-manifest rows above
-            // — see peripheral.ts's RetriedSession.contextManifest doc. Completes the 8/8 wiring
+            // — see peripheral.ts's RetriedSession.contextManifest doc. Completes the 9/9 wiring
             // #236 deferred for align.ts's three PO sessions.
             contextManifest: {
               roundId,
