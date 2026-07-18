@@ -177,6 +177,28 @@ conductor's responsibility, not a property this grant controls. This session's
 decision, like every other role's, is read from its structured output only, applied by
 the engine (`plan-review.ts`), never by a tool call of its own.
 
+### The forge MCP proxy's role x tool matrix (#234, #244)
+
+`RoleRunner` peripheral sessions and worker legs can be attached (config-gated, shadow-mode-first,
+not yet a live consumer wiring — see [`configuration.md`](configuration.md#roles)) to a
+per-session, revocable, read-only forge MCP proxy that returns sanitized forge data verbatim, with
+no gate/verdict logic of its own (fresh-head counting, identity filtering, trigger-pin checks stay
+in `reviewer.ts`/`merge-driver.ts`). Each session's role scopes it to a fixed subset of the tool
+algebra (`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX`), enforced server-side in the proxy itself
+(the CLI's own `--allowedTools` widening is noise reduction only, same stance as every other
+allow/deny pair on this page) — a role absent from the table below is granted **no tool at all**
+(deny-by-default, regression-tested):
+
+| Role | Tools granted |
+| --- | --- |
+| `po-pool` / `po-align` / `po-triage` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
+| `harvest` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
+| `architect` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
+| `plan-reviewer` / `plan-drafter` / `plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
+| `retro` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
+| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks` |
+| *(any other role id)* | none — deny-by-default |
+
 ## Ambient repo context: record, don't seal (#236)
 
 Every session above — worker or peripheral — spawns `claude -p` **inside a real repo

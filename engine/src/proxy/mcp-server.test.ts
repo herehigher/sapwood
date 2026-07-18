@@ -5,10 +5,19 @@
 // and per-call timeouts.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { IssueMeta, IssueRelations, IssueSearchResult, PRComment } from "../forge/forge.js";
+import type {
+  IssueMeta,
+  IssueRelations,
+  IssueSearchResult,
+  PRCheckItem,
+  PRComment,
+  PRDetails,
+  PRReviewItem,
+  ReviewThreadItem,
+} from "../forge/forge.js";
 import { State } from "../state/state.js";
 import { buildMcpConfigJson, type ForgeProxyDeps, type ProxyForge, startForgeProxyServer } from "./mcp-server.js";
-import { FORGE_MCP_SERVER_NAME, TOOL_NAMES } from "./tools.js";
+import { FORGE_MCP_SERVER_NAME, ISSUE_TOOLS, PR_TOOLS, TOOL_NAMES } from "./tools.js";
 
 const CAPS = {
   maxIssuesPerCall: 10,
@@ -17,6 +26,8 @@ const CAPS = {
   maxRelationsPerIssue: 20,
   maxSearchResults: 20,
   fullCommentStreamOptIn: false,
+  maxReviewThreadsPerCall: 20,
+  maxCommentsPerThread: 20,
 };
 
 function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
@@ -24,12 +35,20 @@ function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
   const comments: PRComment[] = [{ login: "a", createdAt: "2026-07-01T00:00:00Z", body: "a comment" }];
   const relations: IssueRelations = { linkedPRs: [], crossReferences: [], truncated: false };
   const results: IssueSearchResult[] = [{ number: 1, title: "an issue", state: "OPEN", labels: [], updatedAt: "2026-07-17T00:00:00Z" }];
+  const prDetails: PRDetails = { number: 1, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" };
+  const reviews: PRReviewItem[] = [{ author: "codex", commitOid: "abc", state: "APPROVED", body: "LGTM" }];
+  const threads: ReviewThreadItem[] = [{ id: "T1", isResolved: false, comments: [] }];
+  const checks: PRCheckItem[] = [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null }];
   return {
     getIssueMeta: async () => meta,
     getIssueBody: async () => "the body",
     getIssueComments: async () => comments,
     getIssueRelations: async () => relations,
     searchIssues: async () => results,
+    getPRDetails: async () => prDetails,
+    getPRReviews: async () => reviews,
+    getPRReviewThreads: async () => threads,
+    getPRChecks: async () => checks,
     ...over,
   };
 }
@@ -157,11 +176,11 @@ test("initialize echoes the client's protocolVersion and reports serverInfo/capa
   });
 });
 
-test("tools/list returns the 4 fixed tools with strict object schemas", async () => {
+test("tools/list returns the 8 fixed tools (4 issue + 4 PR, #244) with strict object schemas", async () => {
   await withServer({}, async (h) => {
     const res = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const json = await res.json();
-    assert.equal(json.result.tools.length, 4);
+    assert.equal(json.result.tools.length, 8);
     assert.deepEqual(json.result.tools.map((t: { name: string }) => t.name).sort(), [...TOOL_NAMES].sort());
   });
 });
@@ -298,4 +317,180 @@ test("tools/call: a hung upstream call is killed by the per-call timeout -> isEr
       assert.equal(rows[0]!.timedOut, true);
     },
   );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #244: PR-facing tools' schema/scope/cap/error matrix over the real HTTP transport — mirrors
+// the #234 issue-tool matrix above exactly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("tools/call: pr_details/pr_reviews/pr_review_threads/pr_checks succeed and journal a 'fetched' row each", async () => {
+  await withServer({}, async (h, state) => {
+    for (const [name, args] of [
+      ["pr_details", { pr: 1 }],
+      ["pr_reviews", { pr: 1 }],
+      ["pr_review_threads", { pr: 1 }],
+      ["pr_checks", { pr: 1 }],
+    ] as const) {
+      const { body } = await callTool(h.url, h.token, name, args);
+      assert.equal(body.result.isError, false, `${name} should succeed`);
+    }
+    const rows = state.listForgeProxyJournal({
+      roundId: 1,
+      phase: "architecting",
+      role: "architect",
+      session: "role-architect-abc",
+      attempt: 1,
+    });
+    assert.equal(rows.length, 4);
+    assert.deepEqual(rows.map((r) => r.tool).sort(), ["pr_checks", "pr_details", "pr_review_threads", "pr_reviews"]);
+    assert.ok(rows.every((r) => r.status === "delivered" && r.responseCanonical && r.contentHash));
+  });
+});
+
+test("tools/call: pr_details malformed args -> isError invalid_args", async () => {
+  await withServer({}, async (h) => {
+    const { body } = await callTool(h.url, h.token, "pr_details", { pr: "nope" });
+    assert.equal(body.result.isError, true);
+    assert.equal(JSON.parse(body.result.content[0].text).code, "invalid_args");
+  });
+});
+
+test("tools/call: pr_details out-of-repo-scope attempt (an extra repo field) -> isError invalid_args", async () => {
+  await withServer({}, async (h) => {
+    const { body } = await callTool(h.url, h.token, "pr_details", { pr: 1, repo: "other/repo" });
+    assert.equal(body.result.isError, true);
+    assert.equal(JSON.parse(body.result.content[0].text).code, "invalid_args");
+  });
+});
+
+test("tools/call: pr_review_threads over-cap lastN -> isError over_cap", async () => {
+  await withServer({ caps: { ...CAPS, maxReviewThreadsPerCall: 1 } }, async (h) => {
+    const { body } = await callTool(h.url, h.token, "pr_review_threads", { pr: 1, lastN: 2 });
+    assert.equal(body.result.isError, true);
+    assert.equal(JSON.parse(body.result.content[0].text).code, "over_cap");
+  });
+});
+
+test("tools/call: pr_review_threads response carries completeness flags — no silent truncation", async () => {
+  const manyThreads: ReviewThreadItem[] = [
+    { id: "T1", isResolved: false, comments: [] },
+    { id: "T2", isResolved: false, comments: [] },
+    { id: "T3", isResolved: false, comments: [] },
+  ];
+  await withServer(
+    { caps: { ...CAPS, maxReviewThreadsPerCall: 2 }, forge: fakeForge({ getPRReviewThreads: async () => manyThreads }) },
+    async (h) => {
+      const { body } = await callTool(h.url, h.token, "pr_review_threads", { pr: 1 });
+      const parsed = JSON.parse(body.result.content[0].text);
+      assert.equal(parsed.complete, false);
+      assert.equal(parsed.total, 3);
+      assert.equal(parsed.returned, 2);
+      assert.deepEqual(parsed.omittedRange, { from: 1, to: 1 });
+    },
+  );
+});
+
+test("tools/call: pr_reviews upstream error is sanitized before reaching the response", async () => {
+  await withServer(
+    {
+      forge: fakeForge({
+        getPRReviews: async () => {
+          throw new Error("gh failed: token ghp_ABCDEFGHIJ0123456789abcdefghij");
+        },
+      }),
+    },
+    async (h) => {
+      const { body } = await callTool(h.url, h.token, "pr_reviews", { pr: 1 });
+      assert.equal(body.result.isError, true);
+      const err = JSON.parse(body.result.content[0].text);
+      assert.equal(err.code, "upstream_error");
+      assert.doesNotMatch(err.message, /ghp_[A-Za-z0-9]{20,}/);
+    },
+  );
+});
+
+// ── #244 role x tool matrix enforcement (deny-by-default) ─────────────────────────────────
+
+test("allowedTools omitted (default) -> every fixed tool callable, tools/list advertises all 8", async () => {
+  await withServer({}, async (h) => {
+    const list = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const listJson = await list.json();
+    assert.equal(listJson.result.tools.length, 8);
+    const { body } = await callTool(h.url, h.token, "pr_details", { pr: 1 });
+    assert.equal(body.result.isError, false);
+  });
+});
+
+test("allowedTools scoped to ISSUE_TOOLS -> a PR tool is role_denied, never even advertised in tools/list", async () => {
+  await withServer({ allowedTools: ISSUE_TOOLS }, async (h) => {
+    const list = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const listJson = await list.json();
+    assert.deepEqual(listJson.result.tools.map((t: { name: string }) => t.name).sort(), [...ISSUE_TOOLS].sort());
+    const { body } = await callTool(h.url, h.token, "pr_details", { pr: 1 });
+    assert.equal(body.result.isError, true);
+    assert.equal(JSON.parse(body.result.content[0].text).code, "role_denied");
+    // An ISSUE tool still works — the restriction is additive, not all-or-nothing.
+    const ok = await callTool(h.url, h.token, "issue_relations", { number: 1 });
+    assert.equal(ok.body.result.isError, false);
+  });
+});
+
+test("allowedTools scoped to PR_TOOLS -> an issue tool is role_denied (the fix-loop worker leg's own scope, #244)", async () => {
+  await withServer({ allowedTools: PR_TOOLS }, async (h) => {
+    const { body } = await callTool(h.url, h.token, "issue_details", { numbers: [1] });
+    assert.equal(body.result.isError, true);
+    assert.equal(JSON.parse(body.result.content[0].text).code, "role_denied");
+    const ok = await callTool(h.url, h.token, "pr_checks", { pr: 1 });
+    assert.equal(ok.body.result.isError, false);
+  });
+});
+
+test("allowedTools = [] (an unlisted role's deny-by-default resolution, proxy/access.ts) -> EVERY tool is role_denied, tools/list is empty", async () => {
+  await withServer({ allowedTools: [] }, async (h) => {
+    const list = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const listJson = await list.json();
+    assert.deepEqual(listJson.result.tools, []);
+    // Schema-valid args per tool — role_denied must be provable independent of arg validity.
+    const validArgsByTool: Record<string, unknown> = {
+      issue_details: { numbers: [1] },
+      issue_comments: { number: 1 },
+      issue_relations: { number: 1 },
+      search_issues: { query: "x" },
+      pr_details: { pr: 1 },
+      pr_reviews: { pr: 1 },
+      pr_review_threads: { pr: 1 },
+      pr_checks: { pr: 1 },
+    };
+    for (const name of TOOL_NAMES) {
+      const { body } = await callTool(h.url, h.token, name, validArgsByTool[name]);
+      assert.equal(body.result.isError, true, `${name} should be denied`);
+      assert.equal(JSON.parse(body.result.content[0].text).code, "role_denied", `${name} should be role_denied`);
+    }
+  });
+});
+
+test("allowedTools scoping also narrows the handle's own toolNames (the --allowedTools CLI widening)", async () => {
+  await withServer({ allowedTools: PR_TOOLS }, async (h) => {
+    assert.deepEqual(h.toolNames.sort(), PR_TOOLS.map((t) => `mcp__forge__${t}`).sort());
+  });
+});
+
+test("a role-denied call never even reserves budget or writes a journal intent row — checked before any budget/journal work", async () => {
+  await withServer({ allowedTools: ISSUE_TOOLS, budget: { maxCallsPerSession: 1, maxBytesPerSession: 1_000_000 } }, async (h, state) => {
+    const denied = await callTool(h.url, h.token, "pr_details", { pr: 1 });
+    assert.equal(JSON.parse(denied.body.result.content[0].text).code, "role_denied");
+    // The budget was never touched by the denied call — a subsequent allowed call still succeeds
+    // (if the denial HAD reserved budget, this would now be budget_exhausted instead).
+    const allowed = await callTool(h.url, h.token, "issue_relations", { number: 1 });
+    assert.equal(allowed.body.result.isError, false);
+    const rows = state.listForgeProxyJournal({
+      roundId: 1,
+      phase: "architecting",
+      role: "architect",
+      session: "role-architect-abc",
+      attempt: 1,
+    });
+    assert.equal(rows.length, 1, "only the ALLOWED call produced a journal row");
+  });
 });

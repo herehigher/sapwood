@@ -4,14 +4,21 @@
 // journal.test.ts for those).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { IssueMeta, IssueRelations, PRComment } from "../forge/forge.js";
+import type { IssueMeta, IssueRelations, PRCheckItem, PRComment, PRDetails, PRReviewItem, ReviewThreadItem } from "../forge/forge.js";
 import {
   canonicalJson,
   capComments,
+  capThreads,
   fetchIssueDetailsView,
   fetchIssueRelationsResponse,
+  fetchPRChecksResponse,
+  fetchPRDetailsResponse,
+  fetchPRReviewsResponse,
+  fetchPRReviewThreadsResponse,
+  ISSUE_TOOLS,
   mcpToolFullName,
   outgoingMentions,
+  PR_TOOLS,
   type ProxyCaps,
   sanitizeUpstreamError,
   TOOL_DEFINITIONS,
@@ -19,6 +26,10 @@ import {
   TOOL_ISSUE_DETAILS,
   TOOL_ISSUE_RELATIONS,
   TOOL_NAMES,
+  TOOL_PR_CHECKS,
+  TOOL_PR_DETAILS,
+  TOOL_PR_REVIEW_THREADS,
+  TOOL_PR_REVIEWS,
   TOOL_SEARCH_ISSUES,
   validateToolArgs,
 } from "./tools.js";
@@ -30,6 +41,8 @@ const CAPS: ProxyCaps = {
   maxRelationsPerIssue: 10,
   maxSearchResults: 10,
   fullCommentStreamOptIn: false,
+  maxReviewThreadsPerCall: 2,
+  maxCommentsPerThread: 10,
 };
 
 // ── tool names / tools/list ─────────────────────────────────────────────────────────────────
@@ -43,10 +56,17 @@ test("TOOL_DEFINITIONS: one entry per fixed tool, in TOOL_NAMES order, each a st
     TOOL_DEFINITIONS.map((t) => t.name),
     TOOL_NAMES,
   );
+  assert.equal(TOOL_DEFINITIONS.length, 8, "4 issue tools (#234) + 4 PR tools (#244)");
   for (const def of TOOL_DEFINITIONS) {
     assert.equal(def.inputSchema.type, "object");
     assert.equal(def.inputSchema.additionalProperties, false);
   }
+});
+
+test("ISSUE_TOOLS / PR_TOOLS: partition TOOL_NAMES exactly, no overlap", () => {
+  assert.deepEqual([...ISSUE_TOOLS].sort(), [TOOL_ISSUE_COMMENTS, TOOL_ISSUE_DETAILS, TOOL_ISSUE_RELATIONS, TOOL_SEARCH_ISSUES].sort());
+  assert.deepEqual([...PR_TOOLS].sort(), [TOOL_PR_CHECKS, TOOL_PR_DETAILS, TOOL_PR_REVIEWS, TOOL_PR_REVIEW_THREADS].sort());
+  assert.deepEqual([...ISSUE_TOOLS, ...PR_TOOLS].sort(), [...TOOL_NAMES].sort());
 });
 
 // ── arg validation: schema / scope / cap / unknown-tool matrix (issue #234 AC) ──────────────
@@ -258,4 +278,123 @@ test("fetchIssueRelationsResponse: combines IForge relations with outgoing menti
   assert.equal(r.number, 1);
   assert.deepEqual(r.linkedPRs, relations.linkedPRs);
   assert.deepEqual(r.outgoingMentions, [5]);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #244: PR-facing tools' arg schema/scope/cap/error matrix — mirrors the #234 issue-tool matrix
+// above exactly (same strict-schema out-of-repo-scope enforcement, same over-cap contract).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("validateToolArgs: pr_details/pr_reviews/pr_checks valid shapes -> ok", () => {
+  assert.equal(validateToolArgs(TOOL_PR_DETAILS, { pr: 1 }, CAPS).ok, true);
+  assert.equal(validateToolArgs(TOOL_PR_REVIEWS, { pr: 1 }, CAPS).ok, true);
+  assert.equal(validateToolArgs(TOOL_PR_CHECKS, { pr: 1 }, CAPS).ok, true);
+});
+
+test("validateToolArgs: pr_review_threads valid with/without lastN -> ok", () => {
+  assert.equal(validateToolArgs(TOOL_PR_REVIEW_THREADS, { pr: 1 }, CAPS).ok, true);
+  assert.equal(validateToolArgs(TOOL_PR_REVIEW_THREADS, { pr: 1, lastN: 2 }, CAPS).ok, true);
+});
+
+test("validateToolArgs: PR tools reject malformed args (wrong shape) -> typed invalid_args error", () => {
+  for (const [tool, args] of [
+    [TOOL_PR_DETAILS, { pr: "not-a-number" }],
+    [TOOL_PR_REVIEWS, {}],
+    [TOOL_PR_REVIEW_THREADS, { pr: 1, lastN: "nope" }],
+    [TOOL_PR_CHECKS, { pr: 0 }], // positive-int required, 0 fails
+  ] as const) {
+    const r = validateToolArgs(tool, args, CAPS);
+    assert.equal(r.ok, false, `expected invalid_args for ${tool}`);
+    assert.equal(!r.ok && r.error.code, "invalid_args", `expected invalid_args for ${tool}`);
+  }
+});
+
+test("validateToolArgs: PR tools reject an out-of-repo-scope attempt (a caller-supplied repo field) — strict schema rejects the unrecognized key", () => {
+  const r = validateToolArgs(TOOL_PR_DETAILS, { pr: 1, repo: "someone-else/other-repo" }, CAPS);
+  assert.equal(r.ok, false);
+  assert.equal(!r.ok && r.error.code, "invalid_args");
+});
+
+test("validateToolArgs: pr_review_threads lastN over maxReviewThreadsPerCall -> REJECTED (typed over_cap error), never silently truncated", () => {
+  const r = validateToolArgs(TOOL_PR_REVIEW_THREADS, { pr: 1, lastN: 3 }, CAPS); // CAPS.maxReviewThreadsPerCall = 2
+  assert.equal(r.ok, false);
+  assert.equal(!r.ok && r.error.code, "over_cap");
+});
+
+test("validateToolArgs: pr_review_threads lastN at exactly the cap -> ok", () => {
+  assert.equal(validateToolArgs(TOOL_PR_REVIEW_THREADS, { pr: 1, lastN: 2 }, CAPS).ok, true);
+});
+
+// ── capThreads: same fail-toward-inclusion completeness contract as capComments ────────────
+
+function thread(id: string): ReviewThreadItem {
+  return { id, isResolved: false, comments: [] };
+}
+
+test("capThreads: total at or under the cap -> complete, nothing omitted", () => {
+  const all = [thread("T1"), thread("T2")];
+  const v = capThreads(all, 5);
+  assert.equal(v.complete, true);
+  assert.equal(v.returned, 2);
+  assert.equal(v.total, 2);
+  assert.equal(v.omittedRange, undefined);
+  assert.deepEqual(v.threads, all);
+});
+
+test("capThreads: over the cap -> keeps the MOST RECENT N (not the oldest), complete false, omitted range names the cut", () => {
+  const all = [thread("oldest"), thread("middle"), thread("newest")];
+  const v = capThreads(all, 1);
+  assert.equal(v.complete, false);
+  assert.equal(v.total, 3);
+  assert.equal(v.returned, 1);
+  assert.deepEqual(v.threads, [all[2]]);
+  assert.deepEqual(v.omittedRange, { from: 1, to: 2 });
+});
+
+// ── fetch* response shaping ─────────────────────────────────────────────────────────────────
+
+test("fetchPRDetailsResponse: passes IForge.getPRDetails through verbatim", async () => {
+  const details: PRDetails = { number: 5, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" };
+  const forge = { getPRDetails: async () => details };
+  assert.deepEqual(await fetchPRDetailsResponse(forge, 5), details);
+});
+
+test("fetchPRReviewsResponse: wraps IForge.getPRReviews with the pr number", async () => {
+  const reviews: PRReviewItem[] = [{ author: "codex", commitOid: "h1", state: "APPROVED", body: "LGTM" }];
+  const forge = { getPRReviews: async () => reviews };
+  const r = await fetchPRReviewsResponse(forge, 5);
+  assert.equal(r.pr, 5);
+  assert.deepEqual(r.reviews, reviews);
+});
+
+test("fetchPRChecksResponse: wraps IForge.getPRChecks with the pr number", async () => {
+  const checks: PRCheckItem[] = [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null }];
+  const forge = { getPRChecks: async () => checks };
+  const r = await fetchPRChecksResponse(forge, 9);
+  assert.equal(r.pr, 9);
+  assert.deepEqual(r.checks, checks);
+});
+
+test("fetchPRReviewThreadsResponse: no lastN -> server default cap (caps.maxReviewThreadsPerCall) applies, completeness flags set", async () => {
+  const all: ReviewThreadItem[] = [thread("T1"), thread("T2"), thread("T3")];
+  const forge = {
+    getPRReviewThreads: async (_pr: number, commentsCap: number) => {
+      assert.equal(commentsCap, CAPS.maxCommentsPerThread);
+      return all;
+    },
+  };
+  const r = await fetchPRReviewThreadsResponse(forge, 5, undefined, CAPS);
+  assert.equal(r.pr, 5);
+  assert.equal(r.total, 3);
+  assert.equal(r.returned, 2); // CAPS.maxReviewThreadsPerCall = 2
+  assert.equal(r.complete, false);
+  assert.deepEqual(r.threads, [all[1], all[2]]);
+});
+
+test("fetchPRReviewThreadsResponse: explicit lastN overrides the server default cap", async () => {
+  const all: ReviewThreadItem[] = [thread("T1"), thread("T2"), thread("T3")];
+  const forge = { getPRReviewThreads: async () => all };
+  const r = await fetchPRReviewThreadsResponse(forge, 5, 1, CAPS);
+  assert.equal(r.returned, 1);
+  assert.deepEqual(r.threads, [all[2]]);
 });

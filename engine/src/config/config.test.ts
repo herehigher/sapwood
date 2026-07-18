@@ -1123,6 +1123,9 @@ test("proxy: defaults are off, shadow, and conservative caps/budget/timeout", ()
   assert.equal(cfg.proxy.caps.maxRelationsPerIssue, 20);
   assert.equal(cfg.proxy.caps.maxSearchResults, 20);
   assert.equal(cfg.proxy.caps.fullCommentStreamOptIn, false);
+  // #244: pr_review_threads' own caps.
+  assert.equal(cfg.proxy.caps.maxReviewThreadsPerCall, 20);
+  assert.equal(cfg.proxy.caps.maxCommentsPerThread, 20);
   assert.equal(cfg.proxy.budget.maxCallsPerSession, 30);
   assert.equal(cfg.proxy.budget.maxBytesPerSession, 2_000_000);
   assert.equal(cfg.proxy.timeoutMs, 30_000);
@@ -1140,4 +1143,13 @@ test("proxy: every key is overridable, and the section remains strict (rejects a
   assert.equal(cfg.proxy.budget.maxCallsPerSession, 5);
   assert.equal(cfg.proxy.timeoutMs, 5000);
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nproxy: { bogusKey: true }\n"));
+});
+
+test("proxy: #244's new caps (maxReviewThreadsPerCall/maxCommentsPerThread) are overridable independently of the #234 caps", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" + "proxy:\n  caps: { maxReviewThreadsPerCall: 5, maxCommentsPerThread: 7 }\n",
+  );
+  assert.equal(cfg.proxy.caps.maxReviewThreadsPerCall, 5);
+  assert.equal(cfg.proxy.caps.maxCommentsPerThread, 7);
+  assert.equal(cfg.proxy.caps.maxIssuesPerCall, 10, "other caps keep their own defaults");
 });

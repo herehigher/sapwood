@@ -263,6 +263,20 @@ export class RoundScopedForge implements IForge {
   searchIssues(query: string, cap: number) {
     return this.inner.searchIssues(query, cap);
   }
+  // #244: same plain-passthrough stance as the #234 block above — the PR-facing proxy tools
+  // have no round/pool scoping concept either (a session addresses a PR by number).
+  getPRDetails(pr: number) {
+    return this.inner.getPRDetails(pr);
+  }
+  getPRReviews(pr: number) {
+    return this.inner.getPRReviews(pr);
+  }
+  getPRReviewThreads(pr: number, commentsCap: number) {
+    return this.inner.getPRReviewThreads(pr, commentsCap);
+  }
+  getPRChecks(pr: number) {
+    return this.inner.getPRChecks(pr);
+  }
 }
 
 /** #212: wraps an IForge so getReadyIssues() only returns issues carrying the round-pool label
@@ -388,6 +402,19 @@ export class PoolScopedForge implements IForge {
   }
   searchIssues(query: string, cap: number) {
     return this.inner.searchIssues(query, cap);
+  }
+  // #244: plain passthroughs — see RoundScopedForge's identical note above.
+  getPRDetails(pr: number) {
+    return this.inner.getPRDetails(pr);
+  }
+  getPRReviews(pr: number) {
+    return this.inner.getPRReviews(pr);
+  }
+  getPRReviewThreads(pr: number, commentsCap: number) {
+    return this.inner.getPRReviewThreads(pr, commentsCap);
+  }
+  getPRChecks(pr: number) {
+    return this.inner.getPRChecks(pr);
   }
 }
 

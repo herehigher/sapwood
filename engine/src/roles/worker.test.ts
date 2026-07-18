@@ -2728,3 +2728,253 @@ function alive(pid: number): boolean {
     return false;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #244: worker-leg forge MCP proxy attachment — mirrors peripheral.ts's RoleRunner mechanism
+// (#234), extended here to WorkerSupervisor.dispatch(). Unattached dispatch (every test above
+// this section) is COMPLETELY UNCHANGED — these tests only cover the NEW opt-in `proxy` param.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function fakeWorkerProxyHandle(over: Partial<{ mcpConfigJson: string; toolNames: string[] }> = {}) {
+  const calls = { minted: 0, stopped: 0 };
+  const handle = {
+    port: 1,
+    token: "proxy-test-token",
+    url: "http://127.0.0.1:1/mcp",
+    mcpConfigJson: JSON.stringify({
+      mcpServers: { forge: { type: "http", url: "http://127.0.0.1:1/mcp", headers: { Authorization: "Bearer proxy-test-token" } } },
+    }),
+    toolNames: ["mcp__forge__pr_details", "mcp__forge__pr_reviews", "mcp__forge__pr_review_threads", "mcp__forge__pr_checks"],
+    ...over,
+    stop: async () => {
+      calls.stopped++;
+    },
+  };
+  return { calls, handle };
+}
+
+test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handle's own tool names, and injects --mcp-config inline JSON", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { calls, handle } = fakeWorkerProxyHandle();
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
+      proxy: {
+        mint: async (session) => {
+          calls.minted++;
+          assert.equal(session.role, "worker");
+          return handle as never;
+        },
+      },
+    });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    assert.match(args, /mcp__forge__pr_details/);
+    assert.match(args, /--mcp-config/);
+    assert.ok(args.includes(JSON.stringify(handle.mcpConfigJson)) === false); // sanity: not double-JSON-encoded
+    const i = args.trim().split("\n").indexOf("--mcp-config");
+    assert.equal(args.trim().split("\n")[i + 1], handle.mcpConfigJson);
+    assert.equal(calls.minted, 1);
+    for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
+    for (let i2 = 0; i2 < 400 && calls.stopped === 0; i2++) await sleep(20);
+    assert.equal(calls.stopped, 1, "the proxy is torn down once the lane's process exits (onExit)");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config flag, --allowedTools unchanged — byte-identical to pre-#244 behavior", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    assert.doesNotMatch(args, /--mcp-config/);
+    assert.doesNotMatch(args, /mcp__forge__/);
+    assert.match(args, /Bash\(gh \*\)/, "the code-producing worker's own default --allowedTools is unchanged");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches and runs, unattached (mirrors peripheral.ts's RoleRunner stance)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
+      proxy: {
+        mint: async () => {
+          throw new Error("mint failed");
+        },
+      },
+    });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)), "lane still completes despite the mint failure");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: a spawn failure with a proxy attached still tears down the minted proxy (never leaks a live listener/token)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: join(dir, "does-not-exist-claude"),
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+    });
+    const { calls, handle } = fakeWorkerProxyHandle();
+    await assert.rejects(
+      () =>
+        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-bad-proxy", {
+          proxy: {
+            mint: async () => {
+              calls.minted++;
+              return handle as never;
+            },
+          },
+        }),
+      /spawn failed/i,
+    );
+    assert.equal(calls.minted, 1);
+    assert.equal(calls.stopped, 1, "the proxy is torn down even though dispatch() THREW rather than returned");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #244 AC: "#218 credential-free regression tests extended to a worker leg with the proxy handle
+// attached (spawn env token-free; proxy is the only forge reach)". Distinct from the ordinary
+// dispatch env test above (line ~1238), which asserts workers LEGITIMATELY keep GH_TOKEN by
+// default — this is the NEW, separately-opted-into shape (WorkerProxyOpts.credentialFree).
+test("dispatch: credentialFree opt strips forge/git credential env vars even for a worker leg — the proxy is the only forge reach, same denylist as peripheral.ts's #218 regression", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const poisoned = {
+    GH_TOKEN: "poison-gh-token",
+    GITHUB_TOKEN: "poison-github-token",
+    GITHUB_ENTERPRISE_TOKEN: "poison-github-enterprise-token",
+    GH_CONFIG_DIR: "/poison/gh-config",
+    GH_HOST: "poison.example",
+    GIT_ASKPASS: "/poison/askpass",
+    GIT_CONFIG_GLOBAL: "/poison/gitconfig",
+    GIT_CONFIG_COUNT: "1",
+    ANTHROPIC_API_KEY: "preserved-anthropic-auth",
+  } as const;
+  const previous = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, poisoned);
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nenv > "${join(dir, "env.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { handle } = fakeWorkerProxyHandle();
+    await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
+      proxy: { mint: async () => handle as never, credentialFree: true },
+    });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "env.seen")); i++) await sleep(20);
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    for (const key of [
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "GITHUB_ENTERPRISE_TOKEN",
+      "GH_CONFIG_DIR",
+      "GH_HOST",
+      "GIT_ASKPASS",
+      "GIT_CONFIG_GLOBAL",
+    ]) {
+      assert.ok(!envText.includes(`${key}=poison`), `${key} leaked into the credential-free worker leg's env`);
+    }
+    assert.ok(envText.includes("ANTHROPIC_API_KEY=preserved-anthropic-auth"), "Claude auth is preserved");
+    assert.ok(!envText.includes("proxy-test-token"), "the proxy's bearer token never reaches the spawn env — --mcp-config only");
+    s.dispose();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheritance — a worker leg legitimately keeps GH_TOKEN unless it explicitly opts into credentialFree", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const previousGhToken = process.env.GH_TOKEN;
+  try {
+    process.env.GH_TOKEN = "worker-forge-token";
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho "$GH_TOKEN" > "${join(dir, "token.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { handle } = fakeWorkerProxyHandle();
+    await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, { proxy: { mint: async () => handle as never } });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "token.seen")); i++) await sleep(20);
+    assert.equal(readFileSync(join(dir, "token.seen"), "utf8").trim(), "worker-forge-token");
+    s.dispose();
+  } finally {
+    if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previousGhToken;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

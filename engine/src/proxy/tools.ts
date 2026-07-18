@@ -9,20 +9,53 @@
 // this module never imports node:child_process and never shells out — only worker.ts (spawn) and
 // forge/gh.ts (execFile) may. Every read here goes through the IForge methods threaded in.
 import { z } from "zod";
-import type { IForge, IssueMeta, IssueRelations, IssueSearchResult, PRComment, RelatedRef } from "../forge/forge.js";
+import type {
+  IForge,
+  IssueMeta,
+  IssueRelations,
+  IssueSearchResult,
+  PRCheckItem,
+  PRComment,
+  PRDetails,
+  PRReviewItem,
+  RelatedRef,
+  ReviewThreadItem,
+} from "../forge/forge.js";
 
-// ── Tool names (fixed algebra v1) ───────────────────────────────────────────────────────────
+// ── Tool names (fixed algebra — v1's 4 issue tools, #234, plus #244's 4 PR tools) ───────────
 
 export const TOOL_ISSUE_DETAILS = "issue_details";
 export const TOOL_ISSUE_COMMENTS = "issue_comments";
 export const TOOL_ISSUE_RELATIONS = "issue_relations";
 export const TOOL_SEARCH_ISSUES = "search_issues";
+/** #244: PR-facing tools — same strict schemas/caps/forced-repo-scope/typed-sanitized-errors/
+ *  completeness-flag contract as the 4 issue tools above (issue #244 AC). */
+export const TOOL_PR_DETAILS = "pr_details";
+export const TOOL_PR_REVIEWS = "pr_reviews";
+export const TOOL_PR_REVIEW_THREADS = "pr_review_threads";
+export const TOOL_PR_CHECKS = "pr_checks";
 
 export const FORGE_MCP_SERVER_NAME = "forge";
 
-/** The v1 fixed tool set, in `tools/list` order. */
-export const TOOL_NAMES = [TOOL_ISSUE_DETAILS, TOOL_ISSUE_COMMENTS, TOOL_ISSUE_RELATIONS, TOOL_SEARCH_ISSUES] as const;
+/** The fixed tool set, in `tools/list` order. */
+export const TOOL_NAMES = [
+  TOOL_ISSUE_DETAILS,
+  TOOL_ISSUE_COMMENTS,
+  TOOL_ISSUE_RELATIONS,
+  TOOL_SEARCH_ISSUES,
+  TOOL_PR_DETAILS,
+  TOOL_PR_REVIEWS,
+  TOOL_PR_REVIEW_THREADS,
+  TOOL_PR_CHECKS,
+] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
+
+/** #244: the 4 original issue-oriented tools — used by proxy/access.ts's role x tool matrix
+ *  (issue-oriented peripheral roles get this subset). */
+export const ISSUE_TOOLS: readonly ToolName[] = [TOOL_ISSUE_DETAILS, TOOL_ISSUE_COMMENTS, TOOL_ISSUE_RELATIONS, TOOL_SEARCH_ISSUES];
+/** #244: the 4 new PR-facing tools — used by proxy/access.ts's role x tool matrix (the fix-loop
+ *  worker leg gets this subset). */
+export const PR_TOOLS: readonly ToolName[] = [TOOL_PR_DETAILS, TOOL_PR_REVIEWS, TOOL_PR_REVIEW_THREADS, TOOL_PR_CHECKS];
 
 /** The `--allowedTools` entries a session needs to actually call these tools — Claude Code's MCP
  *  tool namespace is `mcp__<server>__<tool>` (worker.ts's ClaudeArgsOpts.allowedTools doc). */
@@ -53,6 +86,14 @@ export interface ProxyCaps {
    *  only by the hard safety cap") instead of defaultCommentsPerIssue — issue #234's "Full
    *  comment stream is opt-in config". */
   fullCommentStreamOptIn: boolean;
+  /** #244: pr_review_threads' max `lastN` a caller may request explicitly — an over-cap lastN is
+   *  REJECTED (typed error), same contract as maxCommentsPerCall/issue_comments. Omitting
+   *  lastN falls back to this same cap (mirrors issue_comments' own no-lastN default). */
+  maxReviewThreadsPerCall: number;
+  /** #244: cap passed to IForge.getPRReviewThreads' per-thread comments sub-connection
+   *  (GraphQL `comments(first: commentsCap)`) — bounds a single thread's own comment count,
+   *  independent of maxReviewThreadsPerCall's bound on the NUMBER of threads returned. */
+  maxCommentsPerThread: number;
 }
 
 // ── Arg schemas (strict — an unrecognized key, e.g. a caller-supplied `repo`/`owner`, fails
@@ -100,11 +141,23 @@ export const SearchIssuesArgs = z
     path: ["query"],
   });
 
+/** #244: PR-facing arg schemas — same strict-no-repo-field scoping stance as the issue schemas
+ *  above (the out-of-repo-scope enforcement mechanism: no schema anywhere accepts a repo/owner
+ *  field, so there is no argument shape that could ever ask for a different repo). */
+export const PRDetailsArgs = z.object({ pr: z.number().int().positive() }).strict();
+export const PRReviewsArgs = z.object({ pr: z.number().int().positive() }).strict();
+export const PRReviewThreadsArgs = z.object({ pr: z.number().int().positive(), lastN: z.number().int().positive().optional() }).strict();
+export const PRChecksArgs = z.object({ pr: z.number().int().positive() }).strict();
+
 const ARG_SCHEMAS: Record<ToolName, z.ZodTypeAny> = {
   [TOOL_ISSUE_DETAILS]: IssueDetailsArgs,
   [TOOL_ISSUE_COMMENTS]: IssueCommentsArgs,
   [TOOL_ISSUE_RELATIONS]: IssueRelationsArgs,
   [TOOL_SEARCH_ISSUES]: SearchIssuesArgs,
+  [TOOL_PR_DETAILS]: PRDetailsArgs,
+  [TOOL_PR_REVIEWS]: PRReviewsArgs,
+  [TOOL_PR_REVIEW_THREADS]: PRReviewThreadsArgs,
+  [TOOL_PR_CHECKS]: PRChecksArgs,
 };
 
 /** Hand-written JSON Schema for `tools/list` — kept in sync with the zod schemas above by
@@ -155,11 +208,64 @@ export const TOOL_DEFINITIONS: { name: ToolName; description: string; inputSchem
       additionalProperties: false,
     },
   },
+  {
+    name: TOOL_PR_DETAILS,
+    description: "Fetch a pull request's core metadata (state, draft, labels, mergeable, head commit) in this repository, by number.",
+    inputSchema: {
+      type: "object",
+      properties: { pr: { type: "integer", minimum: 1 } },
+      required: ["pr"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_PR_REVIEWS,
+    description: "Fetch every review on a pull request, verbatim (author, commit, state, body).",
+    inputSchema: {
+      type: "object",
+      properties: { pr: { type: "integer", minimum: 1 } },
+      required: ["pr"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_PR_REVIEW_THREADS,
+    description: "Fetch a pull request's review threads and their comment bodies (optionally bounded to the last N threads).",
+    inputSchema: {
+      type: "object",
+      properties: { pr: { type: "integer", minimum: 1 }, lastN: { type: "integer", minimum: 1 } },
+      required: ["pr"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_PR_CHECKS,
+    description: "Fetch a pull request's raw CI check-suite conclusions.",
+    inputSchema: {
+      type: "object",
+      properties: { pr: { type: "integer", minimum: 1 } },
+      required: ["pr"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 // ── Typed, sanitized tool errors (issue #234 AC: "nothing token-bearing in any error surface") ─
 
-export type ProxyErrorCode = "unknown_tool" | "invalid_args" | "over_cap" | "budget_exhausted" | "upstream_error" | "persist_failed";
+export type ProxyErrorCode =
+  | "unknown_tool"
+  | "invalid_args"
+  | "over_cap"
+  | "budget_exhausted"
+  | "upstream_error"
+  | "persist_failed"
+  /** #244: the tool NAME is a real member of the fixed algebra (validateToolArgs' isToolName
+   *  check passed) but this SESSION's role is not granted it — proxy/access.ts's role x tool
+   *  matrix, enforced server-side in mcp-server.ts's handleToolCall (the REAL boundary; the
+   *  CLI's own --allowedTools widening is noise reduction only, same stance this codebase takes
+   *  everywhere else — see peripheral.ts's ROLE_ALLOWED_TOOLS doc). Distinct from unknown_tool:
+   *  that means "not a tool at all"; this means "a real tool, denied to this role". */
+  | "role_denied";
 
 export interface ProxyToolError {
   code: ProxyErrorCode;
@@ -245,6 +351,11 @@ function checkOverCap(tool: ToolName, args: unknown, caps: ProxyCaps): string | 
     const { lastN } = args as z.infer<typeof IssueCommentsArgs>;
     if (lastN !== undefined && lastN > caps.maxCommentsPerCall) {
       return `requested lastN=${lastN}, exceeds the cap of ${caps.maxCommentsPerCall}`;
+    }
+  } else if (tool === TOOL_PR_REVIEW_THREADS) {
+    const { lastN } = args as z.infer<typeof PRReviewThreadsArgs>;
+    if (lastN !== undefined && lastN > caps.maxReviewThreadsPerCall) {
+      return `requested lastN=${lastN}, exceeds the cap of ${caps.maxReviewThreadsPerCall}`;
     }
   }
   return null;
@@ -368,6 +479,71 @@ export async function fetchSearchIssuesResponse(
 ): Promise<SearchIssuesResponse> {
   const results = await forge.searchIssues(query, caps.maxSearchResults);
   return { query, results, cap: caps.maxSearchResults, truncated: results.length >= caps.maxSearchResults };
+}
+
+// ── #244: PR-facing response shapes + fetch functions (mirrors the issue-tool section above) ──
+
+export interface PRDetailsResponse extends PRDetails {}
+
+export interface PRReviewsResponse {
+  pr: number;
+  reviews: PRReviewItem[];
+}
+
+/** #244: the pr_review_threads completeness contract — same shape/semantics as CommentsView
+ *  (issue #244 AC: "same completeness contract as issue_details"), just over threads instead of
+ *  comments. */
+export interface ThreadsView {
+  threads: ReviewThreadItem[];
+  total: number;
+  returned: number;
+  complete: boolean;
+  omittedRange?: { from: number; to: number };
+}
+
+export interface PRReviewThreadsResponse extends ThreadsView {
+  pr: number;
+}
+
+export interface PRChecksResponse {
+  pr: number;
+  checks: PRCheckItem[];
+}
+
+/** Keep the `cap` MOST RECENT of `all` threads (GraphQL's reviewThreads connection returns
+ *  oldest-created-first, same order countUnresolvedThreads/fetchAllReviewThreads already read) —
+ *  never the oldest `cap`. Same fail-toward-inclusion rationale as capComments: the most recent
+ *  threads are the ones most likely to matter for a session resolving CURRENT review findings. */
+export function capThreads(all: ReviewThreadItem[], cap: number): ThreadsView {
+  const total = all.length;
+  if (total <= cap) return { threads: all, total, returned: total, complete: true };
+  const kept = all.slice(total - cap);
+  return { threads: kept, total, returned: kept.length, complete: false, omittedRange: { from: 1, to: total - cap } };
+}
+
+export async function fetchPRDetailsResponse(forge: Pick<IForge, "getPRDetails">, pr: number): Promise<PRDetailsResponse> {
+  return forge.getPRDetails(pr);
+}
+
+export async function fetchPRReviewsResponse(forge: Pick<IForge, "getPRReviews">, pr: number): Promise<PRReviewsResponse> {
+  const reviews = await forge.getPRReviews(pr);
+  return { pr, reviews };
+}
+
+export async function fetchPRReviewThreadsResponse(
+  forge: Pick<IForge, "getPRReviewThreads">,
+  pr: number,
+  lastN: number | undefined,
+  caps: ProxyCaps,
+): Promise<PRReviewThreadsResponse> {
+  const all = await forge.getPRReviewThreads(pr, caps.maxCommentsPerThread);
+  const cap = lastN ?? caps.maxReviewThreadsPerCall;
+  return { pr, ...capThreads(all, cap) };
+}
+
+export async function fetchPRChecksResponse(forge: Pick<IForge, "getPRChecks">, pr: number): Promise<PRChecksResponse> {
+  const checks = await forge.getPRChecks(pr);
+  return { pr, checks };
 }
 
 // Re-exported so mcp-server.ts/journal.ts never need their own import of RelatedRef just to

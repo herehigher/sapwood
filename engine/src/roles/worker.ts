@@ -39,6 +39,7 @@ import { loadDoctrine } from "../config/doctrine.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
 import type { Issue } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "../loop/conductor.js";
+import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { CategorizedTokenUsage, ModelUsageEntry } from "../state/state.js";
 
 /** A durable resume intent exists, but the engine restarted before spawn confirmation made
@@ -520,6 +521,14 @@ export interface ClaudeArgsOpts {
   mcpConfig?: string;
 }
 
+/** The code-producing worker's own default `--allowedTools`/`--disallowedTools` pair — extracted
+ *  as named exports (#244) so a caller that widens them (e.g. WorkerSupervisor.dispatch's own
+ *  proxy-tool widening, mirroring peripheral.ts's ROLE_ALLOWED_TOOLS pattern) has the base
+ *  string to compose with, rather than re-typing it. Byte-identical to claudeArgs' own prior
+ *  inline defaults — zero behavior change for every caller that doesn't reference these. */
+export const WORKER_ALLOWED_TOOLS = "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)";
+export const WORKER_DISALLOWED_TOOLS = "Bash(gh pr merge*),Bash(gh pr ready*)";
+
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
  *  --max-budget-usd — the per-worker budget is SOFT (monitored + graceful handoff), never a
  *  hard mid-step kill (PLAN.md). The hard ceiling is the conductor's, not the CLI's. */
@@ -541,9 +550,9 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     "auto",
     // Coarse noise-reduction only — the real boundary is the guard hook (#26).
     "--allowedTools",
-    o.allowedTools ?? "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)",
+    o.allowedTools ?? WORKER_ALLOWED_TOOLS,
     "--disallowedTools",
-    o.disallowedTools ?? "Bash(gh pr merge*),Bash(gh pr ready*)",
+    o.disallowedTools ?? WORKER_DISALLOWED_TOOLS,
     ...(o.addDir ? ["--add-dir", o.addDir] : []),
     ...(o.settings ? ["--settings", o.settings] : []),
     ...(o.mcpConfig ? ["--mcp-config", o.mcpConfig] : []),
@@ -724,6 +733,47 @@ export interface WorkerDeps {
   now?: () => Date;
 }
 
+/** #244: an optional, per-session revocable forge MCP proxy handle for a WORKER LEG (the fix-loop
+ *  worker's evidence channel for PR review data — mirrors peripheral.ts's RoleSessionOpts.proxy
+ *  mechanism, extended here to WorkerSupervisor). Omitted -> today's dispatch/resume behavior,
+ *  completely unchanged: an ordinary code-producing lane inherits its forge credentials via
+ *  `process.env` exactly as before #244 (worker.test.ts's own regression pins that workers
+ *  LEGITIMATELY need GH_TOKEN, unlike peripheral role sessions) — attaching a proxy alone never
+ *  strips that. `credentialFree` is a SEPARATE, independent opt for the one caller shape that
+ *  genuinely wants it (a fix-loop leg that reads PR review data via the proxy only and pushes,
+ *  if at all, through an ambient git credential helper — the same worker-class posture
+ *  retro.ts's session already uses, docs/security.md). */
+export interface WorkerProxyOpts {
+  mint: (session: { role: string; session: string }) => Promise<ForgeProxyHandle>;
+  /** When true, the spawn env is credential-stripped (same GH_ / GIT_ denylist as
+   *  peripheral.ts's peripheralSessionEnv — see workerCredentialFreeEnv below) instead of
+   *  inheriting `process.env` verbatim. Omitted/false -> unchanged inheritance. */
+  credentialFree?: boolean;
+}
+
+/** #244: mirrors peripheral.ts's peripheralSessionEnv denylist (GH_ prefixed vars, GITHUB_TOKEN,
+ *  GITHUB_ENTERPRISE_TOKEN, GIT_ASKPASS, GIT_CONFIG_ prefixed vars, case-normalized) — duplicated
+ *  here rather than imported to avoid a worker.ts <-> peripheral.ts circular import (peripheral.ts
+ *  already imports worker.ts's spawn machinery). Only reached when a caller opts into
+ *  WorkerProxyOpts.credentialFree; ordinary dispatch/resume never calls this. */
+function workerCredentialFreeEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    const normalized = key.toUpperCase();
+    if (
+      normalized === "GITHUB_TOKEN" ||
+      normalized === "GITHUB_ENTERPRISE_TOKEN" ||
+      normalized.startsWith("GH_") ||
+      normalized === "GIT_ASKPASS" ||
+      normalized.startsWith("GIT_CONFIG_")
+    ) {
+      continue;
+    }
+    env[key] = value;
+  }
+  return env;
+}
+
 interface Lane {
   child: ChildProcess;
   issue: number;
@@ -748,6 +798,11 @@ interface Lane {
   /** Byte boundary where this leg begins in the append-only jsonl. Result/model parsing must
    *  never reuse a prior leg's terminal result when the current resumed leg has none. */
   jsonlLegOffset: number;
+  /** #244: this lane's forge MCP proxy handle, when dispatch() was called with a `proxy` opt —
+   *  undefined for the (default, unchanged) unattached case. Revoked/torn down in onExit, the
+   *  ONE place a lane's process truly terminates (mirrors peripheral.ts's RoleRunner.run()
+   *  teardown-in-every-outcome stance, adapted to WorkerSupervisor's long-lived-lane shape). */
+  proxyHandle?: ForgeProxyHandle;
 }
 
 export class WorkerSupervisor implements Supervisor {
@@ -796,7 +851,7 @@ export class WorkerSupervisor implements Supervisor {
     (this.deps.log ?? console.error)(message);
   }
 
-  async dispatch(issue: Issue, name?: string): Promise<{ name: string; sessionId: string }> {
+  async dispatch(issue: Issue, name?: string, opts?: { proxy?: WorkerProxyOpts }): Promise<{ name: string; sessionId: string }> {
     const laneName = name ?? `lane-${issue.number}-${randomUUID().slice(0, 8)}`;
     // Refuse name reuse — a stale sentinel under this name means a concurrent/old lane; a
     // second worker would clobber its jsonl/sentinels (0day Codex #4).
@@ -825,6 +880,18 @@ export class WorkerSupervisor implements Supervisor {
     // disable the guard (Codex #26 R4 P1). An argv JSON string has no file to mutate. Scoped to
     // THIS claude -p only (not a plugin-global hook that would hit the human).
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
+    // #244: mint the read-only forge MCP proxy BEFORE building argv — its tool names widen
+    // --allowedTools and its --mcp-config is an inline argv value, both needed before claudeArgs
+    // runs. Non-fatal on failure (same posture as peripheral.ts's RoleRunner): an optional
+    // capability's setup failure must never block an otherwise-normal dispatch.
+    let proxyHandle: ForgeProxyHandle | undefined;
+    if (opts?.proxy) {
+      try {
+        proxyHandle = await opts.proxy.mint({ role: "worker", session: laneName });
+      } catch (e) {
+        this.log(`[sapwood:forge-proxy] lane ${laneName}: mint failed (non-fatal, proxy unattached): ${String(e)}`);
+      }
+    }
     // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
@@ -836,6 +903,11 @@ export class WorkerSupervisor implements Supervisor {
       name: laneName,
       sessionId,
       settings: settingsJson,
+      // #244: widen --allowedTools with the proxy's own (role-scoped) tool names, same pattern
+      // as peripheral.ts's RoleRunner — only when a proxy actually minted; unattached dispatch
+      // (today's default) passes neither flag, byte-identical to pre-#244 behavior.
+      ...(proxyHandle ? { allowedTools: [WORKER_ALLOWED_TOOLS, ...proxyHandle.toolNames].join(",") } : {}),
+      ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
     });
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree.
     // SAPWOOD_GUARD_MODE in the spawn env reaches the hook subprocess (inherited from claude)
@@ -844,10 +916,15 @@ export class WorkerSupervisor implements Supervisor {
     // guard hook can confine Read/Grep/Glob to it (see guard.ts's checkReadContainment).
     // resolve()'d because this.worktreeRoot may be a relative deps override — the guard
     // needs an absolute root to compare against Claude Code's absolute tool_input paths.
+    // #244: baseEnv is credential-stripped ONLY when opts.proxy.credentialFree is explicitly
+    // set — every other caller (today's entire production dispatch path) keeps inheriting
+    // process.env verbatim, unchanged from pre-#244 behavior (worker.test.ts's own regression:
+    // "unlike peripherals, workers legitimately [need GH_TOKEN]").
+    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv() : process.env;
     const child = spawn(this.bin, args, {
       detached: true,
       stdio: ["ignore", jsonlFd, jsonlFd],
-      env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, laneName) },
+      env: { ...baseEnv, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, laneName) },
     });
     // Register the lane + `exit` handler BEFORE any await. Node does not replay `exit` to
     // listeners attached after it fires, so a fast exit (instant completion / the CLI
@@ -867,6 +944,7 @@ export class WorkerSupervisor implements Supervisor {
       estimatedCostUsd: 0,
       estimateBaselineUsd: 0,
       jsonlLegOffset: 0,
+      ...(proxyHandle ? { proxyHandle } : {}),
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -890,6 +968,15 @@ export class WorkerSupervisor implements Supervisor {
         /* noop */
       }
       this.removeIfExists(jsonlPath);
+      // #244: tear down the proxy even though spawn itself failed — the mint above already
+      // started a live listener holding a bearer token; a thrown spawn must never leak it.
+      if (proxyHandle) {
+        try {
+          await proxyHandle.stop();
+        } catch (e) {
+          this.log(`[sapwood:forge-proxy] lane ${laneName}: teardown failed after spawn error (non-fatal): ${String(e)}`);
+        }
+      }
       throw new Error(`worker spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     // Post-spawn error (rare) must not crash the host — route to a failed exit.
@@ -1262,6 +1349,14 @@ export class WorkerSupervisor implements Supervisor {
     const lane = this.lanes.get(name);
     if (!lane) return;
     clearInterval(lane.hb);
+    // #244: revoke + tear down the proxy in EVERY outcome this lane's process can exit through
+    // (done/failed/timeout/reclaimed) — mirrors peripheral.ts's RoleRunner teardown stance,
+    // adapted to WorkerSupervisor's long-lived-lane shape (this is the ONE place a lane's real
+    // process actually terminates). Fire-and-forget: onExit is a synchronous event handler, and
+    // a slow/failed teardown must never delay or fail the lane's own terminal-sentinel write.
+    if (lane.proxyHandle) {
+      lane.proxyHandle.stop().catch((e) => this.log(`[sapwood:forge-proxy] lane ${name}: teardown failed (non-fatal): ${String(e)}`));
+    }
     try {
       closeSync(lane.jsonlFd);
     } catch {

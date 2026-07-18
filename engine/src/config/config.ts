@@ -480,6 +480,16 @@ const Roles = z
 // a caller explicitly supplies a `proxy` opt, and nothing does in this PR). Flipping this flag
 // alone changes no runtime behavior; consumer adoption + the shadow-server startup wiring are
 // tracked as follow-up work (feeds #244).
+//
+// #244 EXTENSION: the tool algebra now also carries 4 PR-facing tools (pr_details/pr_reviews/
+// pr_review_threads/pr_checks — proxy/tools.ts), and the proxy MECHANISM extends to worker legs
+// (worker.ts's WorkerSupervisor, mirroring RoleRunner's `proxy` opt) alongside RoleRunner
+// peripheral sessions — same "ship inert, gate behind an explicit opt" posture: `enabled`/
+// `shadow` still gate nothing on their own until a real dispatch caller passes a `proxy` opt
+// (round-defaults.ts's peripheral wiring and any worker-leg consumer are still separately-flagged
+// follow-up work, same as #234 originally shipped). `caps.maxReviewThreadsPerCall`/
+// `caps.maxCommentsPerThread` are the PR-tool caps' user-tunable knobs, same convention as every
+// other cap in this section.
 const ProxyConfig = z
   .object({
     enabled: z.boolean().default(false),
@@ -495,6 +505,13 @@ const ProxyConfig = z
         // (default) -> issue_details' default view caps at defaultCommentsPerIssue; true -> it
         // caps at the wider maxCommentsPerCall instead (still bounded, never truly unbounded).
         fullCommentStreamOptIn: z.boolean().default(false),
+        // #244: pr_review_threads' analogue of maxCommentsPerCall/defaultCommentsPerIssue —
+        // caps the NUMBER of threads returned (an explicit lastN over this is REJECTED, same
+        // over-cap contract as issue_comments).
+        maxReviewThreadsPerCall: z.number().int().positive().default(20),
+        // #244: caps EACH thread's own comment count (GraphQL comments(first: ...)) —
+        // independent of maxReviewThreadsPerCall's bound on the number of threads.
+        maxCommentsPerThread: z.number().int().positive().default(20),
       })
       .strict()
       .default({}),
