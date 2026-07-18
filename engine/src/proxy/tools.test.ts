@@ -191,6 +191,35 @@ test("sanitizeUpstreamError: non-string input degrades to a placeholder, never t
   assert.doesNotThrow(() => sanitizeUpstreamError({ some: "object" }));
 });
 
+// Round-2 delta review, P2: the userinfo pattern originally required a user:pass PAIR — a bare
+// token userinfo (no colon at all) slipped through. Broadened to redact ANY userinfo shape.
+test("sanitizeUpstreamError: redacts a BARE-TOKEN URL userinfo (no colon) — e.g. a credentialed git remote shaped like https://<token>@host/...", () => {
+  const raw = "fatal: unable to access 'https://ghp_ABCDEFGHIJ0123456789abcdefghij@github.com/owner/repo.git/'";
+  const clean = sanitizeUpstreamError(raw);
+  assert.doesNotMatch(clean, /ghp_[A-Za-z0-9]{20,}/);
+  assert.match(clean, /:\/\/\[redacted\]@github\.com/, "the scheme and host survive, only the userinfo is redacted");
+});
+
+test("sanitizeUpstreamError: redacts a user:pass URL userinfo — e.g. https://user:pass@host/...", () => {
+  const raw = "fatal: unable to access 'https://someuser:some-secret-pass@github.com/owner/repo.git/'";
+  const clean = sanitizeUpstreamError(raw);
+  assert.doesNotMatch(clean, /someuser/);
+  assert.doesNotMatch(clean, /some-secret-pass/);
+  assert.match(clean, /:\/\/\[redacted\]@github\.com/);
+});
+
+test("sanitizeUpstreamError: redacts token/access_token/x-access-token query param VALUES, preserving the key name", () => {
+  for (const [key, url] of [
+    ["token", "https://api.example.com/foo?token=ghp_ABCDEFGHIJ0123456789abcdefghij"],
+    ["access_token", "https://api.example.com/foo?access_token=ghp_ABCDEFGHIJ0123456789abcdefghij"],
+    ["x-access-token", "https://api.example.com/foo?x-access-token=ghp_ABCDEFGHIJ0123456789abcdefghij"],
+  ] as const) {
+    const clean = sanitizeUpstreamError(url);
+    assert.doesNotMatch(clean, /ghp_[A-Za-z0-9]{20,}/, `${key} value should be redacted`);
+    assert.match(clean, new RegExp(`${key}=\\[redacted\\]`, "i"), `${key}= should be preserved verbatim`);
+  }
+});
+
 // ── canonicalization: deterministic key order regardless of input order ────────────────────
 
 test("canonicalJson: identical logical value canonicalizes identically regardless of key order", () => {
@@ -375,16 +404,35 @@ test("capThreads: sorts by first-comment createdAt before capping — an OUT-OF-
   );
 });
 
-test("capThreads: a comment-less thread falls back to connection order — never reordered relative to another comment-less thread, and never assumed to sort before/after a timestamped one incorrectly", () => {
+test("capThreads: a comment-less thread sorts as the NEWEST (fail-toward-inclusion) — ahead of any timestamped thread — while two comment-less threads keep their OWN relative connection order (index tiebreak)", () => {
   const timestamped = thread("timestamped", "2026-01-01T00:00:00Z");
-  const commentLessA = thread("commentless-a"); // no comments -> no sort key
+  const commentLessA = thread("commentless-a"); // no comments -> no sort key -> treated as newest
   const commentLessB = thread("commentless-b");
-  // Connection order: commentLessA, commentLessB, timestamped — the two comment-less threads
-  // must stay in THIS relative order (stable sort, comparator returns 0 for incomparable pairs).
+  // Connection order: commentLessA, commentLessB, timestamped.
   const v = capThreads([commentLessA, commentLessB, timestamped], 3);
   assert.deepEqual(
     v.threads.map((t) => t.id),
-    ["commentless-a", "commentless-b", "timestamped"],
+    ["timestamped", "commentless-a", "commentless-b"],
+  );
+});
+
+// Round-2 delta review, P2: the comparator MUST be transitive. Repro of the bug the original
+// (non-transitive) comparator had: comparator(new, commentless) = 0 and
+// comparator(commentless, old) = 0 do NOT imply comparator(new, old) = 0 — `Array.sort` assumes
+// a consistent total order and could return a result that depends on its own internal algorithm
+// rather than a well-defined answer. Under the broken comparator this repro returned "old" when
+// capped to 1 (wrong on every reading: not the most recent BY TIMESTAMP, and not "the one thread
+// with no visible content yet" either) — the fixed decorate-sort-undecorate comparator must
+// deterministically keep "commentless" (treated as newest, fail-toward-inclusion).
+test("capThreads: comparator transitivity repro — [new, commentless, old] capped to 1 deterministically keeps the comment-less thread (never 'old', the bug's actual failure mode)", () => {
+  const newT = thread("new", "2026-01-03T00:00:00Z");
+  const commentless = thread("commentless");
+  const oldT = thread("old", "2026-01-01T00:00:00Z");
+  const v = capThreads([newT, commentless, oldT], 1);
+  assert.equal(v.returned, 1);
+  assert.deepEqual(
+    v.threads.map((t) => t.id),
+    ["commentless"],
   );
 });
 

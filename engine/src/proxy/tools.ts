@@ -284,25 +284,29 @@ export interface ProxyToolError {
 /** Token-shaped substrings that must never reach a session — GitHub PAT prefixes
  *  (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_), a bearer-scheme header value, any bare 40-char hex
  *  string (a plausible legacy token or SHA that's cheaper to scrub than to risk), a URL's
- *  embedded userinfo (`https://user:pass@host/...` — a credential-bearing git remote URL is a
- *  realistic upstream-error shape), and a token-bearing query parameter (`token=`/
- *  `access_token=`/`x-access-token=`, case-insensitive) (Codex sol-high PR #260 review, P2: the
- *  original 4 patterns didn't cover either shape). Scrubbed from upstream error TEXT ONLY — never
- *  applied to a successful tool response, which never contains credential material in the first
- *  place (IForge never returns one). */
-const TOKEN_PATTERNS: RegExp[] = [
-  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
-  /\bBearer\s+\S+/gi,
-  /\b[0-9a-f]{40}\b/gi,
-  // `scheme://user:pass@` — the userinfo segment of a URL (e.g. a credentialed git remote).
-  // Non-greedy up to the FIRST `@` so a legitimate path/query containing `@` later in the URL
-  // is never over-matched.
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@]+:[^\s/@]+@/gi,
-  // A token-bearing query parameter's VALUE only — the key + `=` are kept so the redaction is
-  // still diagnosable ("a token param was here"), same stance as Bearer's own pattern above
-  // (which keeps the scheme word, scrubs only the value).
-  /\b(token|access_token|x-access-token)=[^&\s]+/gi,
+ *  embedded userinfo (`https://user:pass@host/...` OR `https://ghp_xxx@host/...` — EITHER shape,
+ *  colon or no colon, is a credential-bearing git remote URL, a realistic upstream-error shape),
+ *  and a token-bearing query parameter (`token=`/`access_token=`/`x-access-token=`,
+ *  case-insensitive). Each entry pairs its own `replacement` (rather than a single shared
+ *  "[redacted]" literal) so the userinfo/query-param patterns can preserve their surrounding,
+ *  non-secret structure (`://[redacted]@`, `token=[redacted]`) via `$1`-style backreferences —
+ *  same diagnosability stance as Bearer's own pattern (keeps the scheme word, scrubs only the
+ *  value). Round-2 delta review, P2: the userinfo pattern originally REQUIRED a `user:pass` pair
+ *  (missing a BARE-token userinfo, e.g. `https://ghp_xxx@github.com`, no colon at all) — broadened
+ *  to redact ANY userinfo shape (`://<anything but / or @>@`). Scrubbed from upstream error TEXT
+ *  ONLY — never applied to a successful tool response, which never contains credential material
+ *  in the first place (IForge never returns one). */
+const TOKEN_PATTERNS: { pattern: RegExp; replacement: string }[] = [
+  { pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g, replacement: "[redacted]" },
+  { pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, replacement: "[redacted]" },
+  { pattern: /\bBearer\s+\S+/gi, replacement: "[redacted]" },
+  { pattern: /\b[0-9a-f]{40}\b/gi, replacement: "[redacted]" },
+  // `scheme://<userinfo>@` — ANY userinfo shape (bare token OR user:pass), non-greedy up to the
+  // FIRST `@` so a legitimate path/query containing `@` later in the URL is never over-matched.
+  // `$1` (the captured `://`) is preserved; only the userinfo itself is redacted.
+  { pattern: /(:\/\/)[^\s/@]+@/g, replacement: "$1[redacted]@" },
+  // A token-bearing query parameter — the key name (`$1`) is preserved, only the value redacted.
+  { pattern: /\b(token|access_token|x-access-token)=[^&\s]+/gi, replacement: "$1=[redacted]" },
 ];
 
 /** Scrub anything token-shaped out of raw upstream error text before it can reach a session or a
@@ -310,7 +314,7 @@ const TOKEN_PATTERNS: RegExp[] = [
  *  error text)". Never throws; a non-string input degrades to a fixed placeholder. */
 export function sanitizeUpstreamError(text: unknown): string {
   let s = typeof text === "string" ? text : String(text);
-  for (const re of TOKEN_PATTERNS) s = s.replace(re, "[redacted]");
+  for (const { pattern, replacement } of TOKEN_PATTERNS) s = s.replace(pattern, replacement);
   return s;
 }
 
@@ -558,13 +562,31 @@ export interface PRChecksResponse {
  *  (guaranteed since ES2019/Node's V8), so two comment-less threads (or one comment-less thread
  *  next to one that has comments) never get reordered relative to each other; only threads that
  *  BOTH carry a real timestamp are ever compared and reordered. */
+/** A comment-less thread's sort key — deliberately larger than any real ISO-8601 `createdAt`
+ *  string under lexicographic comparison (`￿`, a Unicode noncharacter no real timestamp
+ *  string contains), so it sorts as the NEWEST thread. Round-2 delta review, P2: the ORIGINAL
+ *  comparator returned 0 (treat-as-equal) whenever EITHER side lacked a key, which is not
+ *  transitive — comparator(new, commentless) = 0 and comparator(commentless, old) = 0 do not
+ *  imply comparator(new, old) = 0, so `Array.prototype.sort` (which assumes a consistent total
+ *  order) could produce a result that depends on its internal algorithm/pivot choices rather
+ *  than a well-defined "most recent N" answer (repro: `[new, commentless, old]` capped to 1
+ *  returned `old` under the broken comparator instead of the intended keep-most-recent
+ *  thread). Assigning an explicit, always-comparable key up front (decorate-sort-undecorate)
+ *  makes every pair comparable and the sort well-defined; a comment-less thread sorting as
+ *  "newest" is a deliberate fail-toward-inclusion choice (same rationale as capComments/
+ *  capThreads' own "keep the most recent N" stance) — a thread with no visible comments yet is
+ *  never the one silently dropped by a bound. */
+const NO_COMMENT_SORT_KEY = "￿";
+
 function sortThreadsChronologically(all: ReviewThreadItem[]): ReviewThreadItem[] {
-  return [...all].sort((a, b) => {
-    const ak = a.comments[0]?.createdAt;
-    const bk = b.comments[0]?.createdAt;
-    if (!ak || !bk) return 0;
-    return ak < bk ? -1 : ak > bk ? 1 : 0;
-  });
+  return all
+    .map((t, i) => ({ t, i, key: t.comments[0]?.createdAt ?? NO_COMMENT_SORT_KEY }))
+    .sort((a, b) => {
+      if (a.key < b.key) return -1;
+      if (a.key > b.key) return 1;
+      return a.i - b.i; // stable tiebreak: original connection order for equal keys
+    })
+    .map((d) => d.t);
 }
 
 /** Keep the `cap` MOST RECENT of `all` threads, by chronological order (sortThreadsChronologically

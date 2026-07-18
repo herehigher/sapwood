@@ -775,27 +775,30 @@ export interface WorkerDeps {
  *  to go. */
 export interface WorkerProxyOpts {
   mint: (session: { role: string; session: string }) => Promise<ForgeProxyHandle>;
-  /** When true, the leg's forge reach is severed down to the proxy ALONE (Codex sol-high PR
-   *  #260 review, P1: env-var stripping alone is insufficient — a Bash-granted worker's `gh`
-   *  falls back to `$HOME/.config/gh`'s stored credentials regardless of `GH_TOKEN`'s absence,
-   *  and git can still reach a credential helper or SSH agent). See `workerCredentialFreeEnv`'s
-   *  doc for the exact env shape this composes, and `dispatch()`'s own doc for the accompanying
-   *  `--allowedTools` narrowing (drops `Bash(gh *)`, keeps git for worktree-local ops). Omitted/
-   *  false -> unchanged inheritance, today's behavior. */
+  /** When true, the `gh`/git CREDENTIALED-TOOL reach is severed (Codex sol-high PR #260 review,
+   *  P1: env-var stripping alone is insufficient — `gh` falls back to `$HOME/.config/gh`'s
+   *  stored credentials regardless of `GH_TOKEN`'s absence, and git can still reach a
+   *  credential helper or SSH agent). See `workerCredentialFreeEnv`'s doc for the exact env
+   *  shape this composes and its HONEST scope (round-2 delta review, P1: this does NOT achieve
+   *  full isolation — a leg that runs arbitrary code under `Bash(node *)`/`Bash(npm *)` still
+   *  has the operator's real `$HOME` and can read an ambient credential store directly off
+   *  disk, bypassing env entirely; a live PoC read `~/.config/gh/hosts.yml` this way). See
+   *  `dispatch()`'s own doc for the accompanying `--allowedTools` narrowing (drops
+   *  `Bash(gh *)`, keeps git for worktree-local ops). Omitted/false -> unchanged inheritance,
+   *  today's behavior. */
   credentialFree?: boolean;
 }
 
-/** #244 (Codex sol-high PR #260 review, P1): a worker leg's forge reach is severed down to the
- *  proxy ALONE — env-VAR stripping (peripheral.ts's peripheralSessionEnv denylist: GH_ prefixed
- *  vars, GITHUB_TOKEN, GITHUB_ENTERPRISE_TOKEN, GIT_ASKPASS, GIT_CONFIG_ prefixed vars,
- *  case-normalized — duplicated here rather than imported, to avoid a worker.ts <-> peripheral.ts
- *  circular import) is NECESSARY but NOT SUFFICIENT on its own for a Bash-granted worker: `gh`
- *  falls back to on-disk stored credentials (`$HOME/.config/gh/hosts.yml`) when no env token is
- *  present, and git can still reach a credential helper, a cached SSH agent, or an interactive
- *  prompt. This function additionally:
+/** #244 (Codex sol-high PR #260 review, P1): severs the `gh`/git CREDENTIALED-TOOL reach — env-VAR
+ *  stripping (peripheral.ts's peripheralSessionEnv denylist: GH_ prefixed vars, GITHUB_TOKEN,
+ *  GITHUB_ENTERPRISE_TOKEN, GIT_ASKPASS, GIT_CONFIG_ prefixed vars, case-normalized — duplicated
+ *  here rather than imported, to avoid a worker.ts <-> peripheral.ts circular import) is NECESSARY
+ *  but NOT SUFFICIENT on its own: `gh` falls back to on-disk stored credentials
+ *  (`$HOME/.config/gh/hosts.yml`) when no env token is present, and git can still reach a
+ *  credential helper, a cached SSH agent, or an interactive prompt. This function additionally:
  *  - points `GH_CONFIG_DIR` at `ghConfigDir` — a FRESH, EMPTY, per-lane scratch directory (the
  *    caller creates it; `gh` reads its stored host/token config from there, never from the real
- *    `$HOME/.config/gh`, so an operator's own logged-in `gh` session is never reachable);
+ *    `$HOME/.config/gh`, so `gh`'s OWN commands can no longer see an operator's logged-in session);
  *  - sets `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` — git's own global/
  *    system config (where a `credential.helper` entry typically lives) is never read;
  *  - sets `GIT_TERMINAL_PROMPT=0` — git fails closed rather than blocking on an interactive
@@ -803,12 +806,26 @@ export interface WorkerProxyOpts {
  *  - drops `SSH_AUTH_SOCK` — an inherited SSH agent socket is a live credential channel git can
  *    use for an `ssh://` remote, independent of any `GIT_CONFIG_*`/`GH_*` variable.
  *
- *  RESIDUAL SURFACE (documented, not closed — see docs/security.md's own residuals note, same
- *  style as #256's Sentinel isolation boundary section): an arbitrary PATH binary the worker's
- *  Bash grant can still invoke may carry its OWN credential store this function does not know
- *  about (a language-specific package-manager token file, a cloud CLI's own config directory,
- *  etc.) — this hardens the two SPECIFIC channels (`gh`, git) this repo's own tooling uses, not
- *  every conceivable credential path a process on this machine could reach. */
+ *  HONEST SCOPE — NOT full isolation (round-2 delta review, P1, honest-scope closure; PM ruling
+ *  2026-07-18, same "document the residual, don't chase it with more machinery" stance as #256's
+ *  Sentinel isolation boundary section): this closes `gh`'s and git's OWN credential-lookup
+ *  paths — it does NOT, and structurally CANNOT, confine what ARBITRARY CODE run under this
+ *  lane's `Bash(node *)`/`Bash(npm *)` grant can read off disk. A fix leg genuinely needs those
+ *  grants to run tests, and it still executes with the operator's REAL `$HOME` — a live PoC
+ *  (`node steal.mjs`) proved a script under that grant can read `~/.config/gh/hosts.yml`
+ *  directly and reach GitHub with the credential it finds there, entirely bypassing every env
+ *  var this function touches. Two things this repo deliberately does NOT attempt here: (1) HOME
+ *  isolation (redirecting `$HOME` would break the `claude` CLI's own config/auth, which this
+ *  lane also needs to run at all) and (2) stripping `Bash(node *)`/`Bash(npm *)` (a fix leg's
+ *  whole job requires running the test suite). The upgrade path for a genuinely closed boundary
+ *  is OS-level sandboxing (a container/chroot/Landlock-style filesystem confinement) or running
+ *  fix legs under a dedicated, narrowly-scoped CI identity whose credential store contains
+ *  nothing worth stealing — neither is implemented by this function. One narrowing worth naming:
+ *  `hosts.yml` is `gh`'s PLAINTEXT-token storage path; on macOS, `gh auth login` by default
+ *  stores the token in the OS keychain instead, which this mechanism (and the PoC) does not
+ *  expose — the concrete risk this note describes is sharpest wherever `gh` ends up with a
+ *  plaintext-on-disk token (Linux, CI images, or an explicit `--insecure-storage` login), not a
+ *  universal property of every `gh` installation. */
 export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -861,6 +878,12 @@ interface Lane {
    *  ONE place a lane's process truly terminates (mirrors peripheral.ts's RoleRunner.run()
    *  teardown-in-every-outcome stance, adapted to WorkerSupervisor's long-lived-lane shape). */
   proxyHandle?: ForgeProxyHandle;
+  /** #244 (Codex sol-high PR #260 review round 2, P2): the fresh, empty, per-lane scratch
+   *  directory `workerCredentialFreeEnv` pointed `GH_CONFIG_DIR` at — undefined unless
+   *  `opts.proxy.credentialFree` was set (dispatch() only creates it in that case). Removed
+   *  (best-effort) in onExit and in the spawn-failure cleanup path, alongside the lane's own
+   *  jsonl/sentinels — never left behind as directory litter under stateDir. */
+  ghConfigDir?: string;
 }
 
 export class WorkerSupervisor implements Supervisor {
@@ -928,6 +951,23 @@ export class WorkerSupervisor implements Supervisor {
     }
   }
 
+  /** #244 (Codex sol-high PR #260 review round 2, P2): best-effort removal of a lane's
+   *  credentialFree GH_CONFIG_DIR scratch directory — undefined `dir` (the common, non-
+   *  credentialFree case) is a no-op. Called from BOTH cleanup paths a lane can exit through
+   *  (onExit and the spawn-failure branch) so the directory is never left behind as litter
+   *  under stateDir regardless of how the lane's run ended. Logged, never thrown — a cleanup
+   *  failure must not mask the lane's own real outcome. */
+  private removeGhConfigDir(dir: string | undefined, laneName: string): void {
+    if (!dir) return;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      this.log(
+        `[sapwood:worker] lane ${laneName}: failed to remove GH_CONFIG_DIR scratch directory (non-fatal): ${sanitizeUpstreamError(e instanceof Error ? e.message : String(e))}`,
+      );
+    }
+  }
+
   async dispatch(issue: Issue, name?: string, opts?: { proxy?: WorkerProxyOpts }): Promise<{ name: string; sessionId: string }> {
     const laneName = name ?? `lane-${issue.number}-${randomUUID().slice(0, 8)}`;
     // Refuse name reuse — a stale sentinel under this name means a concurrent/old lane; a
@@ -964,10 +1004,12 @@ export class WorkerSupervisor implements Supervisor {
     // FAIL-CLOSED POLICY (Codex sol-high PR #260 review, P2): a proxy WITHOUT credentialFree is
     // non-fatal on mint failure — same posture as peripheral.ts's RoleRunner: an optional
     // capability's setup failure must never block an otherwise-normal dispatch. `credentialFree:
-    // true` is different: that leg's WHOLE forge reach is the proxy (its env has no ambient
-    // token, no gh config, no git credential path — see workerCredentialFreeEnv), so a failed
-    // mint there leaves it with NEITHER credentials NOR a working evidence channel — it must not
-    // run silently degraded. Both branches record a durable `proxy-mint-failed` event first
+    // true` is different: that leg's `gh`/git credentialed-tool reach is the proxy (its env has
+    // no ambient token, no gh config, no git credential path — see workerCredentialFreeEnv,
+    // whose doc also states the honest scope: this is NOT full isolation, since arbitrary code
+    // under Bash(node/npm) still runs with the real $HOME), so a failed mint there leaves it
+    // with NEITHER that credentialed path NOR a working evidence channel — it must not run
+    // silently degraded. Both branches record a durable `proxy-mint-failed` event first
     // (when WorkerDeps.state is supplied; contained — a state-write failure never blocks the
     // decision it's merely recording).
     let proxyHandle: ForgeProxyHandle | undefined;
@@ -1061,6 +1103,7 @@ export class WorkerSupervisor implements Supervisor {
       estimateBaselineUsd: 0,
       jsonlLegOffset: 0,
       ...(proxyHandle ? { proxyHandle } : {}),
+      ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -1095,6 +1138,9 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
+      // #244 (Codex sol-high PR #260 review round 2, P2): the per-lane GH_CONFIG_DIR scratch
+      // directory is lane-scoped litter otherwise — clean it up on this path too, not just onExit.
+      this.removeGhConfigDir(lane.ghConfigDir, laneName);
       throw new Error(`worker spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     // Post-spawn error (rare) must not crash the host — route to a failed exit.
@@ -1481,6 +1527,9 @@ export class WorkerSupervisor implements Supervisor {
           ),
         );
     }
+    // #244 (Codex sol-high PR #260 review round 2, P2): same cleanup as the spawn-failure path —
+    // a no-op unless this lane actually got a credentialFree GH_CONFIG_DIR.
+    this.removeGhConfigDir(lane.ghConfigDir, name);
     try {
       closeSync(lane.jsonlFd);
     } catch {

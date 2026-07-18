@@ -206,12 +206,13 @@ its own proxy attachment, belongs to the actual consumer — issue #245's M9 fix
 oversight — do not read anything on this page or in `configuration.md` as implying resumed legs
 are covered.
 
-**`credentialFree` severs a worker leg's forge reach down to the proxy alone** — env-VAR stripping
-by itself is NOT sufficient for a Bash-granted worker: `gh` falls back to on-disk stored
-credentials (`$HOME/.config/gh/hosts.yml`) when no token env var is present, and git can still
-reach a credential helper, a cached SSH agent, or an interactive prompt regardless of which env
-vars are absent. `worker.ts`'s `workerCredentialFreeEnv` (opt-in via `WorkerProxyOpts.
-credentialFree`) additionally:
+**`credentialFree` severs the `gh`/git CREDENTIALED-TOOL reach — not a worker leg's forge reach in
+general.** That distinction matters and is stated precisely here after a round-2 delta review
+(P1) proved the broader claim false: env-VAR stripping by itself is NOT sufficient for a
+Bash-granted worker: `gh` falls back to on-disk stored credentials (`$HOME/.config/gh/hosts.yml`)
+when no token env var is present, and git can still reach a credential helper, a cached SSH agent,
+or an interactive prompt regardless of which env vars are absent. `worker.ts`'s
+`workerCredentialFreeEnv` (opt-in via `WorkerProxyOpts.credentialFree`) additionally:
 
 - points `GH_CONFIG_DIR` at a **fresh, empty, per-lane** scratch directory — `gh`'s own stored
   host/token config is read from there, never from the operator's real `$HOME/.config/gh`;
@@ -227,17 +228,32 @@ credentialFree`) additionally:
 
 A mint failure is non-fatal for an ordinary (non-`credentialFree`) proxy attachment — the lane
 still dispatches, unattached, same posture as `peripheral.ts`'s `RoleRunner`. `credentialFree:
-true` is different: a leg dispatched that way has neither ambient credentials nor (if mint fails)
-a working evidence channel, so `dispatch()` REFUSES outright rather than run silently degraded.
-Either branch records a durable `proxy-mint-failed` state event (lane/role/sanitized reason, via
-`WorkerDeps.state`) before deciding which way to go.
+true` is different: a leg dispatched that way has neither that credentialed-tool path nor (if
+mint fails) a working evidence channel, so `dispatch()` REFUSES outright rather than run silently
+degraded. Either branch records a durable `proxy-mint-failed` state event (lane/role/sanitized
+reason, via `WorkerDeps.state`) before deciding which way to go.
 
-**Residual surface (documented, not closed — same style as the Sentinel isolation boundary
-section below):** an arbitrary PATH binary the worker's `Bash` grant can still invoke may carry its
-OWN credential store this mechanism doesn't know about (a language package manager's token file, a
-cloud CLI's own config directory, etc.). `workerCredentialFreeEnv` hardens the two SPECIFIC
-channels this repo's own tooling actually uses (`gh`, git) — it is not a claim that every
-conceivable credential path on the machine is closed.
+**HONEST SCOPE — this is NOT full isolation (round-2 delta review, P1; PM ruling 2026-07-18, same
+"document the residual, don't chase it with more machinery" stance as the Sentinel isolation
+boundary section below).** `workerCredentialFreeEnv` closes `gh`'s and git's OWN credential-lookup
+paths. It structurally CANNOT confine what arbitrary code run under this lane's
+`Bash(node *)`/`Bash(npm *)` grant can read off disk — a fix leg genuinely needs those grants to
+run its own test suite, and it still executes with the operator's REAL `$HOME`. A live proof-of-
+concept (`node steal.mjs`, a script invoked through exactly that grant) read
+`~/.config/gh/hosts.yml` directly and reached GitHub with the credential found there, bypassing
+every env var `workerCredentialFreeEnv` touches entirely — filesystem access is orthogonal to
+environment-variable redirection, and no amount of env-var scrubbing closes it. Two mitigations
+this repo deliberately does NOT attempt: **HOME isolation** (redirecting `$HOME` would break the
+`claude` CLI's own config/auth, which the lane also needs merely to run) and **stripping
+`Bash(node *)`/`Bash(npm *)`** (a fix leg's whole job requires running tests). The upgrade path
+for a boundary that's actually closed is **OS-level sandboxing** (container/chroot/Landlock-style
+filesystem confinement) or running fix legs under a **dedicated, narrowly-scoped CI identity**
+whose credential store holds nothing worth stealing — neither is implemented here. One narrowing
+worth naming precisely: `hosts.yml` is `gh`'s plaintext-token storage path; on macOS, `gh auth
+login` by default stores the token in the OS **keychain** instead, which neither this mechanism
+nor the PoC exposes — the risk this note describes is sharpest wherever `gh` ends up with a
+plaintext on-disk token (Linux, CI images, an explicit non-keychain login), not a universal
+property of every `gh` installation.
 
 ## Ambient repo context: record, don't seal (#236)
 

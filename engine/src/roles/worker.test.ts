@@ -2890,11 +2890,48 @@ test("dispatch: a spawn failure with a proxy attached still tears down the minte
   }
 });
 
-// #244 AC: "#218 credential-free regression tests extended to a worker leg with the proxy handle
-// attached (spawn env token-free; proxy is the only forge reach)". Distinct from the ordinary
-// dispatch env test above (line ~1238), which asserts workers LEGITIMATELY keep GH_TOKEN by
-// default — this is the NEW, separately-opted-into shape (WorkerProxyOpts.credentialFree).
-test("dispatch: credentialFree opt strips forge/git credential env vars even for a worker leg — the proxy is the only forge reach, same denylist as peripheral.ts's #218 regression", async () => {
+// #244 (Codex sol-high PR #260 review round 2, P2): the credentialFree GH_CONFIG_DIR scratch
+// directory (created BEFORE spawn, once mint has already succeeded) must be cleaned up on the
+// spawn-failure path too — not just onExit — or it leaks as directory litter under stateDir
+// every time a credentialFree leg fails to spawn.
+test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn failed) removes the GH_CONFIG_DIR scratch directory it already created", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: join(dir, "does-not-exist-claude"),
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+    });
+    const { handle } = fakeWorkerProxyHandle();
+    await assert.rejects(
+      () =>
+        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-credfree-spawnfail", {
+          proxy: { mint: async () => handle as never, credentialFree: true },
+        }),
+      /spawn failed/i,
+    );
+    const ghConfigDir = join(dir, "lane-credfree-spawnfail.gh-config-empty");
+    assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must not survive a spawn failure");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #244 AC (issue's own phrasing): "#218 credential-free regression tests extended to a worker
+// leg with the proxy handle attached (spawn env token-free; proxy is the only forge reach)".
+// HONEST SCOPE (round-2 delta review, P1): "only forge reach" holds for the `gh`/git
+// CREDENTIALED-TOOL path this test asserts — it does NOT mean a worker leg's Bash(node/npm)
+// grant can't read an ambient credential store directly off disk (workerCredentialFreeEnv's own
+// doc names that residual explicitly; it is NOT closed here or anywhere in this PR). Distinct
+// from the ordinary dispatch env test above (line ~1238), which asserts workers LEGITIMATELY
+// keep GH_TOKEN by default — this is the NEW, separately-opted-into shape
+// (WorkerProxyOpts.credentialFree).
+test("dispatch: credentialFree opt strips forge/git credential env vars and severs gh/git's own credential-lookup paths for a worker leg — same denylist as peripheral.ts's #218 regression, NOT a claim of full isolation (see workerCredentialFreeEnv's doc)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const poisoned = {
     GH_TOKEN: "poison-gh-token",
@@ -2914,7 +2951,12 @@ test("dispatch: credentialFree opt strips forge/git credential env vars even for
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+      // #244 (Codex sol-high PR #260 review round 2, P2): a brief sleep AFTER writing env.seen,
+      // BEFORE exiting — without it, the process can fully exit (triggering onExit's own
+      // GH_CONFIG_DIR cleanup) before the test ever gets to assert the directory's PRE-cleanup
+      // shape, racing the two concerns (mid-run existence vs. post-exit removal) against each
+      // other. This gives a deterministic window for the former before the latter can happen.
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen")}"\nsleep 1\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
       cfg,
@@ -2926,7 +2968,7 @@ test("dispatch: credentialFree opt strips forge/git credential env vars even for
       guardHookPath: hook,
     });
     const { handle } = fakeWorkerProxyHandle();
-    await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
       proxy: { mint: async () => handle as never, credentialFree: true },
     });
     for (let i = 0; i < 400 && !existsSync(join(dir, "env.seen")); i++) await sleep(20);
@@ -2966,6 +3008,11 @@ test("dispatch: credentialFree opt strips forge/git credential env vars even for
     const allowedTools = args.trim().split("\n")[allowedToolsIdx + 1]!;
     assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "credentialFree must drop Bash(gh *) from the grant");
     assert.match(allowedTools, /Bash\(git \*\)/, "git stays — its own credential path is what's severed, not the tool grant");
+    // #244 (Codex sol-high PR #260 review round 2, P2): the per-lane GH_CONFIG_DIR scratch
+    // directory is cleaned up once the lane exits — never left behind as directory litter.
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
+    assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must be removed once the lane exits (onExit)");
     s.dispose();
   } finally {
     for (const [key, value] of Object.entries(previous)) {
