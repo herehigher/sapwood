@@ -808,6 +808,43 @@ test("runRounds #172: a resumed handoff is charged to roundSpendUsd and trips th
   }
 });
 
+test("runRounds #245 round-2 fix (verifying the A2 adjudication's round.ts:898 claim): a `fixing` lane's own soft-budget handoff (fixingReclaimed, not reclaimed) keeps the executing-phase drain loop alive for a next tick", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep, calls } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-18T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-18T00:01:00.000Z");
+    state.upsertWorker({
+      name: "lane-fix",
+      issue: 245,
+      session_id: "s245",
+      state: "fixing",
+      started_at: "2026-07-18T00:00:30.000Z",
+      ended_at: null,
+      pr: 77,
+    });
+    const sup = new FakeSupervisor();
+    // Probed as a fresh handoff on every call — this lands in tick()'s FIXING RECLAIM phase
+    // (state is `fixing`), producing a `fixingReclaimed` entry, never a `reclaimed` one. Pre-fix,
+    // `recoveryBeatPending` only checked `reclaimed` and the executing-phase loop would `break`
+    // immediately after wave 1 (activeWorkers() drops to 0 the instant the lane hands off).
+    sup.probes["lane-fix"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 1, hasPr: true, prNumber: 77 };
+    const deps = baseDeps({ forge: new FakeForge(), supervisor: sup, state, sleep, cfg: mkCfg() });
+    const stopSafety = boundedStopOnPhase(deps, 2); // harvesting, retro
+    await runRounds(deps);
+    stopSafety();
+
+    // Without the fix, the executing loop breaks straight after wave 1 (recoveryBeatPending
+    // false) and interTickWait/tick 2 never runs — sleep.calls would be empty. With the fix, the
+    // fixingReclaimed handoff keeps the loop alive for (at least) one more tick.
+    assert.ok(calls.length >= 1, "the fixing-origin handoff must earn a next tick before the executing phase drains to idle");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── final stop.* preemption mid-round ───────────────────────────────────────────────────────
 
 test("runRounds stop.afterIssuesMerged: a round already open finishes harvest+retro before the loop refuses to open a NEW round", async () => {

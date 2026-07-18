@@ -240,6 +240,29 @@ test("runDriver --until-idle (#172): a just-reclaimed handoff gets its next RESU
   state.close();
 });
 
+test("runDriver --until-idle (#245 round-2 fix, verifying the A2 adjudication's driver.ts:146 claim): a `fixing` lane's own soft-budget handoff (landing in fixingReclaimed, NOT reclaimed) still earns a next tick before idle exit", async () => {
+  const { sleep, calls } = mkSleepSpy();
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const state = new State(":memory:");
+  state.upsertWorker({ name: "lane-fix", issue: 245, session_id: "s", state: "fixing", started_at: "t", ended_at: null, pr: 77 });
+  // Probed as a fresh handoff — this lands in tick()'s FIXING RECLAIM phase (state is `fixing`),
+  // producing a `fixingReclaimed` entry, never a `reclaimed` one. Pre-fix, isIdle() only checked
+  // `reclaimed` and would have called the driver idle after this ONE tick.
+  sup.probes["lane-fix"] = { done: false, failed: false, handoff: true, hbAge: 1, wrapperAlive: 0, hasPr: true, prNumber: 77 };
+  const deps = baseDeps({ forge, supervisor: sup, state, sleep, stopMode: "until-idle" });
+
+  const result = await runDriver(deps);
+  // Without the fix this would be `{ ticks: 1, ... }` — the handoff earning a next RESUME beat
+  // (tick 2, which finds no fixLegResume dep configured and leaves the row as-is) proves isIdle
+  // saw the fixingReclaimed handoff on tick 1.
+  assert.equal(result.ticks, 2, "the fixing-origin handoff must earn tick 2 before idle exit");
+  assert.equal(result.stoppedBy, "idle");
+  assert.equal(state.getWorker("lane-fix")?.state, "handoff", "left as handoff — no fixLegResume dep wired in this test");
+  assert.deepEqual(calls, [5000]);
+  state.close();
+});
+
 test("runDriver --until-idle: keeps ticking while a dispatched lane is still active", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();

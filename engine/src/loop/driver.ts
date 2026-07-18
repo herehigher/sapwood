@@ -141,9 +141,15 @@ function defaultRegisterSignals(requestStop: () => void): () => void {
  *  `dispatchedAny` is trivially false (the DISPATCH phase never runs), so this reduces to "no
  *  in-flight lanes left", i.e. every lane has finished rather than been killed. */
 function isIdle(deps: DriverDeps, result: TickResult): boolean {
-  const activeLanes = deps.state.activeWorkers().length; // running + driving
+  const activeLanes = deps.state.activeWorkers().length; // running + driving + fixing
   const dispatchedAny = result.dispatched.some((d) => d.kind === "dispatched");
-  const handoffNeedsNextTick = result.reclaimed.some((r) => r.kind === "handoff");
+  // #245 round-2 fix (Codex sol-high review, verifying the A2 finding): a `fixing` lane's own
+  // soft-budget handoff lands in `fixingReclaimed` (a SEPARATE array from the ordinary RECLAIM
+  // phase's `reclaimed`) — checking `reclaimed` alone would miss it and call the driver idle
+  // (stopping --until-idle) with a fix-leg-origin handoff sitting there needing the next tick's
+  // RESUME phase to restore it.
+  const handoffNeedsNextTick =
+    result.reclaimed.some((r) => r.kind === "handoff") || result.fixingReclaimed.some((r) => r.kind === "handoff");
   return activeLanes === 0 && !dispatchedAny && !handoffNeedsNextTick;
 }
 
