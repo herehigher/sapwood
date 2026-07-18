@@ -1015,15 +1015,15 @@ implementation detail, cut as its own issue when the milestone opens.
 issue's why/what untouched — is a human signature: it endorses that issue's why/what
 regardless of who typed the body. Past that point, an agent session's only channel
 for disagreement is dissent, never revision: a role that believes a `Ready` issue's
-premise is wrong may raise a structured concern — designed in #237 (open, not yet
-shipped) as a PO dissent channel: `concerns: [{issue, reason}]`, externalized as an
-idempotent, deduplicated issue comment, adjudicated through the issue's own normal
-lifecycle — an edited why/what changes the concern's hash and re-arms it, a reply or
-silence lets work proceed, closing/pulling from `Ready` withdraws it — but may not
-itself hold up or reject dispatch. This is why the `origin:agent` confirmation gate
-above needs no separate adjudication machinery beyond the ordinary triage path: the
-human act of moving the card IS the endorsement; nothing downstream re-litigates it
-except through #237's channel. **Framed honestly (issue #238): this human
+premise is wrong may raise a structured concern through the **#237 PO dissent
+channel**: `concerns: [{issue, reason}]`, externalized as an idempotent, deduplicated
+issue comment, adjudicated through the issue's own normal lifecycle — an edited
+why/what changes the concern's hash and re-arms it, a reply or silence lets work
+proceed, closing/pulling from `Ready` withdraws it — but may not itself hold up or
+reject dispatch. This is why the `origin:agent` confirmation gate above needs no
+separate adjudication machinery beyond the ordinary triage path: the human act of
+moving the card IS the endorsement; nothing downstream re-litigates it except
+through that channel. **Framed honestly (issue #238): this human
 confirmation step is the product, not a limitation to be automated away** — it is
 the one place autonomy is deliberately bounded by design, matching the positioning
 statement's "humans own why/what at Ready" (Security & trust model, above).
