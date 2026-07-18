@@ -40,7 +40,8 @@ import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pric
 import type { Issue } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "../loop/conductor.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
-import type { CategorizedTokenUsage, ModelUsageEntry } from "../state/state.js";
+import { sanitizeUpstreamError } from "../proxy/tools.js";
+import type { CategorizedTokenUsage, ModelUsageEntry, State } from "../state/state.js";
 
 /** A durable resume intent exists, but the engine restarted before spawn confirmation made
  *  the outcome knowable. Retrying could create a second Claude process in the same worktree. */
@@ -528,6 +529,18 @@ export interface ClaudeArgsOpts {
  *  inline defaults — zero behavior change for every caller that doesn't reference these. */
 export const WORKER_ALLOWED_TOOLS = "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)";
 export const WORKER_DISALLOWED_TOOLS = "Bash(gh pr merge*),Bash(gh pr ready*)";
+/** #244 (Codex sol-high PR #260 review, P1): the credential-free worker leg's own `--allowedTools`
+ *  base — WORKER_ALLOWED_TOOLS with `Bash(gh *)` dropped. Once `workerCredentialFreeEnv` severs
+ *  `gh`'s on-disk/env credential reach, the grant itself should stop offering `gh` at all — a
+ *  session with a `gh` grant it can never authenticate through would just fail loudly instead of
+ *  never trying, and (worse) `gh`'s failure mode on SOME subcommands degrades to anonymous/
+ *  public-only reads rather than a clean error. `Bash(git *)` stays: git's credential path is
+ *  what workerCredentialFreeEnv actually severs (GIT_CONFIG_GLOBAL/SYSTEM=/dev/null,
+ *  GIT_TERMINAL_PROMPT=0, no SSH_AUTH_SOCK), so worktree-local git operations (diff, log, add,
+ *  commit) remain legitimately useful and safe. */
+export const WORKER_ALLOWED_TOOLS_NO_GH = WORKER_ALLOWED_TOOLS.split(",")
+  .filter((t) => t !== "Bash(gh *)")
+  .join(",");
 
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
  *  --max-budget-usd — the per-worker budget is SOFT (monitored + graceful handoff), never a
@@ -731,6 +744,14 @@ export interface WorkerDeps {
   guardHookPath?: string;
   heartbeatMs?: number; // default 30_000
   now?: () => Date;
+  /** #244 (Codex sol-high PR #260 review, P2): the narrow State surface WorkerSupervisor needs
+   *  ONLY to record a durable `proxy-mint-failed` event when a `dispatch()` caller's `proxy.mint`
+   *  throws — kept as a `Pick` (not the whole State class), same convention as every other
+   *  narrow-state-dependency field in this codebase (e.g. peripheral.ts's RetriedSession.state).
+   *  Optional and additive: omitted -> mint-failure observability degrades to the existing
+   *  stderr log line only (today's #244 behavior, unchanged) — never a hard requirement for
+   *  ordinary dispatch, which never even supplies a `proxy` opt. */
+  state?: Pick<State, "appendEvent">;
 }
 
 /** #244: an optional, per-session revocable forge MCP proxy handle for a WORKER LEG (the fix-loop
@@ -742,21 +763,53 @@ export interface WorkerDeps {
  *  strips that. `credentialFree` is a SEPARATE, independent opt for the one caller shape that
  *  genuinely wants it (a fix-loop leg that reads PR review data via the proxy only and pushes,
  *  if at all, through an ambient git credential helper — the same worker-class posture
- *  retro.ts's session already uses, docs/security.md). */
+ *  retro.ts's session already uses, docs/security.md).
+ *
+ *  FAIL-CLOSED POLICY (Codex sol-high PR #260 review, P2): a proxy WITHOUT `credentialFree` is
+ *  non-fatal on mint failure (the lane still dispatches, unattached — an optional read-side
+ *  capability's setup failure must never block an otherwise-normal run). `credentialFree: true`
+ *  is different — a leg dispatched that way has NEITHER ambient forge credentials NOR (if mint
+ *  fails) a working evidence channel, so it must not run silently degraded: mint failure REFUSES
+ *  the dispatch outright (see `dispatch()`'s own doc). Either branch records a durable
+ *  `proxy-mint-failed` event (via `WorkerDeps.state`, when supplied) before deciding which way
+ *  to go. */
 export interface WorkerProxyOpts {
   mint: (session: { role: string; session: string }) => Promise<ForgeProxyHandle>;
-  /** When true, the spawn env is credential-stripped (same GH_ / GIT_ denylist as
-   *  peripheral.ts's peripheralSessionEnv — see workerCredentialFreeEnv below) instead of
-   *  inheriting `process.env` verbatim. Omitted/false -> unchanged inheritance. */
+  /** When true, the leg's forge reach is severed down to the proxy ALONE (Codex sol-high PR
+   *  #260 review, P1: env-var stripping alone is insufficient — a Bash-granted worker's `gh`
+   *  falls back to `$HOME/.config/gh`'s stored credentials regardless of `GH_TOKEN`'s absence,
+   *  and git can still reach a credential helper or SSH agent). See `workerCredentialFreeEnv`'s
+   *  doc for the exact env shape this composes, and `dispatch()`'s own doc for the accompanying
+   *  `--allowedTools` narrowing (drops `Bash(gh *)`, keeps git for worktree-local ops). Omitted/
+   *  false -> unchanged inheritance, today's behavior. */
   credentialFree?: boolean;
 }
 
-/** #244: mirrors peripheral.ts's peripheralSessionEnv denylist (GH_ prefixed vars, GITHUB_TOKEN,
- *  GITHUB_ENTERPRISE_TOKEN, GIT_ASKPASS, GIT_CONFIG_ prefixed vars, case-normalized) — duplicated
- *  here rather than imported to avoid a worker.ts <-> peripheral.ts circular import (peripheral.ts
- *  already imports worker.ts's spawn machinery). Only reached when a caller opts into
- *  WorkerProxyOpts.credentialFree; ordinary dispatch/resume never calls this. */
-function workerCredentialFreeEnv(): NodeJS.ProcessEnv {
+/** #244 (Codex sol-high PR #260 review, P1): a worker leg's forge reach is severed down to the
+ *  proxy ALONE — env-VAR stripping (peripheral.ts's peripheralSessionEnv denylist: GH_ prefixed
+ *  vars, GITHUB_TOKEN, GITHUB_ENTERPRISE_TOKEN, GIT_ASKPASS, GIT_CONFIG_ prefixed vars,
+ *  case-normalized — duplicated here rather than imported, to avoid a worker.ts <-> peripheral.ts
+ *  circular import) is NECESSARY but NOT SUFFICIENT on its own for a Bash-granted worker: `gh`
+ *  falls back to on-disk stored credentials (`$HOME/.config/gh/hosts.yml`) when no env token is
+ *  present, and git can still reach a credential helper, a cached SSH agent, or an interactive
+ *  prompt. This function additionally:
+ *  - points `GH_CONFIG_DIR` at `ghConfigDir` — a FRESH, EMPTY, per-lane scratch directory (the
+ *    caller creates it; `gh` reads its stored host/token config from there, never from the real
+ *    `$HOME/.config/gh`, so an operator's own logged-in `gh` session is never reachable);
+ *  - sets `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` — git's own global/
+ *    system config (where a `credential.helper` entry typically lives) is never read;
+ *  - sets `GIT_TERMINAL_PROMPT=0` — git fails closed rather than blocking on an interactive
+ *    credential prompt if it somehow still reaches an auth wall;
+ *  - drops `SSH_AUTH_SOCK` — an inherited SSH agent socket is a live credential channel git can
+ *    use for an `ssh://` remote, independent of any `GIT_CONFIG_*`/`GH_*` variable.
+ *
+ *  RESIDUAL SURFACE (documented, not closed — see docs/security.md's own residuals note, same
+ *  style as #256's Sentinel isolation boundary section): an arbitrary PATH binary the worker's
+ *  Bash grant can still invoke may carry its OWN credential store this function does not know
+ *  about (a language-specific package-manager token file, a cloud CLI's own config directory,
+ *  etc.) — this hardens the two SPECIFIC channels (`gh`, git) this repo's own tooling uses, not
+ *  every conceivable credential path a process on this machine could reach. */
+export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     const normalized = key.toUpperCase();
@@ -765,12 +818,17 @@ function workerCredentialFreeEnv(): NodeJS.ProcessEnv {
       normalized === "GITHUB_ENTERPRISE_TOKEN" ||
       normalized.startsWith("GH_") ||
       normalized === "GIT_ASKPASS" ||
-      normalized.startsWith("GIT_CONFIG_")
+      normalized.startsWith("GIT_CONFIG_") ||
+      normalized === "SSH_AUTH_SOCK"
     ) {
       continue;
     }
     env[key] = value;
   }
+  env.GH_CONFIG_DIR = ghConfigDir;
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  env.GIT_CONFIG_SYSTEM = "/dev/null";
+  env.GIT_TERMINAL_PROMPT = "0";
   return env;
 }
 
@@ -851,6 +909,25 @@ export class WorkerSupervisor implements Supervisor {
     (this.deps.log ?? console.error)(message);
   }
 
+  /** #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a
+   *  `proxy-mint-failed` state event (lane/role/sanitized reason), so a repeated or systemic mint
+   *  failure is queryable after the fact, not just a transient stderr line. Contained: a
+   *  state-write failure here is logged and otherwise swallowed, never allowed to interfere with
+   *  the caller's own fail-open/fail-closed decision (same "record, don't gate" stance every
+   *  other best-effort appendEvent call in this codebase takes). No-op when WorkerDeps.state
+   *  wasn't supplied (optional, additive — see that field's own doc). `reason` is ALREADY
+   *  sanitized by the caller (sanitizeUpstreamError) before it reaches here. */
+  private recordProxyMintFailed(lane: string, reason: string): void {
+    if (!this.deps.state) return;
+    try {
+      this.deps.state.appendEvent("proxy-mint-failed", { lane, role: "worker", reason });
+    } catch (e) {
+      this.log(
+        `[sapwood:forge-proxy] lane ${lane}: failed to record proxy-mint-failed event (non-fatal): ${sanitizeUpstreamError(e instanceof Error ? e.message : String(e))}`,
+      );
+    }
+  }
+
   async dispatch(issue: Issue, name?: string, opts?: { proxy?: WorkerProxyOpts }): Promise<{ name: string; sessionId: string }> {
     const laneName = name ?? `lane-${issue.number}-${randomUUID().slice(0, 8)}`;
     // Refuse name reuse — a stale sentinel under this name means a concurrent/old lane; a
@@ -882,16 +959,45 @@ export class WorkerSupervisor implements Supervisor {
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     // #244: mint the read-only forge MCP proxy BEFORE building argv — its tool names widen
     // --allowedTools and its --mcp-config is an inline argv value, both needed before claudeArgs
-    // runs. Non-fatal on failure (same posture as peripheral.ts's RoleRunner): an optional
-    // capability's setup failure must never block an otherwise-normal dispatch.
+    // runs.
+    //
+    // FAIL-CLOSED POLICY (Codex sol-high PR #260 review, P2): a proxy WITHOUT credentialFree is
+    // non-fatal on mint failure — same posture as peripheral.ts's RoleRunner: an optional
+    // capability's setup failure must never block an otherwise-normal dispatch. `credentialFree:
+    // true` is different: that leg's WHOLE forge reach is the proxy (its env has no ambient
+    // token, no gh config, no git credential path — see workerCredentialFreeEnv), so a failed
+    // mint there leaves it with NEITHER credentials NOR a working evidence channel — it must not
+    // run silently degraded. Both branches record a durable `proxy-mint-failed` event first
+    // (when WorkerDeps.state is supplied; contained — a state-write failure never blocks the
+    // decision it's merely recording).
     let proxyHandle: ForgeProxyHandle | undefined;
     if (opts?.proxy) {
       try {
         proxyHandle = await opts.proxy.mint({ role: "worker", session: laneName });
       } catch (e) {
-        this.log(`[sapwood:forge-proxy] lane ${laneName}: mint failed (non-fatal, proxy unattached): ${String(e)}`);
+        const reason = sanitizeUpstreamError(e instanceof Error ? e.message : String(e));
+        this.recordProxyMintFailed(laneName, reason);
+        if (opts.proxy.credentialFree) {
+          try {
+            closeSync(jsonlFd);
+          } catch {
+            /* noop */
+          }
+          this.removeIfExists(jsonlPath);
+          throw new Error(
+            `dispatch refused for lane ${laneName}: credentialFree was requested but the forge proxy mint failed — ` +
+              `a leg with neither ambient forge credentials nor a working evidence channel must not run: ${reason}`,
+          );
+        }
+        this.log(`[sapwood:forge-proxy] lane ${laneName}: mint failed (non-fatal, proxy unattached): ${reason}`);
       }
     }
+    // #244 (Codex sol-high PR #260 review, P1): a fresh, empty, per-lane GH_CONFIG_DIR — created
+    // regardless of whether credentialFree ends up true (cheap, and keeps the directory's
+    // lifecycle tied to the lane's own stateDir rather than conditioned on opts). Only actually
+    // pointed at by the spawn env when credentialFree is set (workerCredentialFreeEnv below).
+    const ghConfigDir = this.path(laneName, "gh-config-empty");
+    if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
     // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
@@ -905,8 +1011,16 @@ export class WorkerSupervisor implements Supervisor {
       settings: settingsJson,
       // #244: widen --allowedTools with the proxy's own (role-scoped) tool names, same pattern
       // as peripheral.ts's RoleRunner — only when a proxy actually minted; unattached dispatch
-      // (today's default) passes neither flag, byte-identical to pre-#244 behavior.
-      ...(proxyHandle ? { allowedTools: [WORKER_ALLOWED_TOOLS, ...proxyHandle.toolNames].join(",") } : {}),
+      // (today's default) passes neither flag, byte-identical to pre-#244 behavior. A
+      // credentialFree leg's BASE list drops `Bash(gh *)` (Codex sol-high PR #260 review, P1) —
+      // its env can no longer authenticate `gh` at all, so the grant itself narrows to match.
+      ...(proxyHandle
+        ? {
+            allowedTools: [opts?.proxy?.credentialFree ? WORKER_ALLOWED_TOOLS_NO_GH : WORKER_ALLOWED_TOOLS, ...proxyHandle.toolNames].join(
+              ",",
+            ),
+          }
+        : {}),
       ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
     });
     // detached: child is its own process-group leader -> reclaim can SIGKILL the whole tree.
@@ -916,11 +1030,13 @@ export class WorkerSupervisor implements Supervisor {
     // guard hook can confine Read/Grep/Glob to it (see guard.ts's checkReadContainment).
     // resolve()'d because this.worktreeRoot may be a relative deps override — the guard
     // needs an absolute root to compare against Claude Code's absolute tool_input paths.
-    // #244: baseEnv is credential-stripped ONLY when opts.proxy.credentialFree is explicitly
-    // set — every other caller (today's entire production dispatch path) keeps inheriting
-    // process.env verbatim, unchanged from pre-#244 behavior (worker.test.ts's own regression:
-    // "unlike peripherals, workers legitimately [need GH_TOKEN]").
-    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv() : process.env;
+    // #244: baseEnv is credential-stripped (workerCredentialFreeEnv, #260 review: env vars +
+    // GH_CONFIG_DIR + GIT_CONFIG_GLOBAL/SYSTEM + GIT_TERMINAL_PROMPT + no SSH_AUTH_SOCK) ONLY
+    // when opts.proxy.credentialFree is explicitly set — every other caller (today's entire
+    // production dispatch path) keeps inheriting process.env verbatim, unchanged from pre-#244
+    // behavior (worker.test.ts's own regression: "unlike peripherals, workers legitimately [need
+    // GH_TOKEN]").
+    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : process.env;
     const child = spawn(this.bin, args, {
       detached: true,
       stdio: ["ignore", jsonlFd, jsonlFd],
@@ -974,7 +1090,9 @@ export class WorkerSupervisor implements Supervisor {
         try {
           await proxyHandle.stop();
         } catch (e) {
-          this.log(`[sapwood:forge-proxy] lane ${laneName}: teardown failed after spawn error (non-fatal): ${String(e)}`);
+          this.log(
+            `[sapwood:forge-proxy] lane ${laneName}: teardown failed after spawn error (non-fatal): ${sanitizeUpstreamError(e instanceof Error ? e.message : String(e))}`,
+          );
         }
       }
       throw new Error(`worker spawn failed (${this.bin}): ${String(spawnErr)}`);
@@ -1355,7 +1473,13 @@ export class WorkerSupervisor implements Supervisor {
     // process actually terminates). Fire-and-forget: onExit is a synchronous event handler, and
     // a slow/failed teardown must never delay or fail the lane's own terminal-sentinel write.
     if (lane.proxyHandle) {
-      lane.proxyHandle.stop().catch((e) => this.log(`[sapwood:forge-proxy] lane ${name}: teardown failed (non-fatal): ${String(e)}`));
+      lane.proxyHandle
+        .stop()
+        .catch((e) =>
+          this.log(
+            `[sapwood:forge-proxy] lane ${name}: teardown failed (non-fatal): ${sanitizeUpstreamError(e instanceof Error ? e.message : String(e))}`,
+          ),
+        );
     }
     try {
       closeSync(lane.jsonlFd);

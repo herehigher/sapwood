@@ -28,6 +28,8 @@ const CAPS = {
   fullCommentStreamOptIn: false,
   maxReviewThreadsPerCall: 20,
   maxCommentsPerThread: 20,
+  maxReviewsPerCall: 20,
+  maxChecksPerCall: 20,
 };
 
 function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
@@ -37,7 +39,7 @@ function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
   const results: IssueSearchResult[] = [{ number: 1, title: "an issue", state: "OPEN", labels: [], updatedAt: "2026-07-17T00:00:00Z" }];
   const prDetails: PRDetails = { number: 1, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" };
   const reviews: PRReviewItem[] = [{ author: "codex", commitOid: "abc", state: "APPROVED", body: "LGTM" }];
-  const threads: ReviewThreadItem[] = [{ id: "T1", isResolved: false, comments: [] }];
+  const threads: ReviewThreadItem[] = [{ id: "T1", isResolved: false, comments: [], commentsComplete: true }];
   const checks: PRCheckItem[] = [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null }];
   return {
     getIssueMeta: async () => meta,
@@ -46,9 +48,9 @@ function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
     getIssueRelations: async () => relations,
     searchIssues: async () => results,
     getPRDetails: async () => prDetails,
-    getPRReviews: async () => reviews,
-    getPRReviewThreads: async () => threads,
-    getPRChecks: async () => checks,
+    getPRReviews: async () => ({ reviews, total: reviews.length }),
+    getPRReviewThreads: async () => ({ threads, pageCapped: false }),
+    getPRChecks: async () => ({ checks, total: checks.length }),
     ...over,
   };
 }
@@ -374,21 +376,35 @@ test("tools/call: pr_review_threads over-cap lastN -> isError over_cap", async (
 
 test("tools/call: pr_review_threads response carries completeness flags — no silent truncation", async () => {
   const manyThreads: ReviewThreadItem[] = [
-    { id: "T1", isResolved: false, comments: [] },
-    { id: "T2", isResolved: false, comments: [] },
-    { id: "T3", isResolved: false, comments: [] },
+    { id: "T1", isResolved: false, comments: [], commentsComplete: true },
+    { id: "T2", isResolved: false, comments: [], commentsComplete: true },
+    { id: "T3", isResolved: false, comments: [], commentsComplete: true },
   ];
   await withServer(
-    { caps: { ...CAPS, maxReviewThreadsPerCall: 2 }, forge: fakeForge({ getPRReviewThreads: async () => manyThreads }) },
+    {
+      caps: { ...CAPS, maxReviewThreadsPerCall: 2 },
+      forge: fakeForge({ getPRReviewThreads: async () => ({ threads: manyThreads, pageCapped: false }) }),
+    },
     async (h) => {
       const { body } = await callTool(h.url, h.token, "pr_review_threads", { pr: 1 });
       const parsed = JSON.parse(body.result.content[0].text);
       assert.equal(parsed.complete, false);
       assert.equal(parsed.total, 3);
       assert.equal(parsed.returned, 2);
+      assert.equal(parsed.pageCapped, false);
       assert.deepEqual(parsed.omittedRange, { from: 1, to: 1 });
     },
   );
+});
+
+test("tools/call: pr_review_threads response's complete flag also reflects pageCapped (the underlying fetch's own 50-page safety ceiling), independent of lastN", async () => {
+  const oneThread: ReviewThreadItem[] = [{ id: "T1", isResolved: false, comments: [], commentsComplete: true }];
+  await withServer({ forge: fakeForge({ getPRReviewThreads: async () => ({ threads: oneThread, pageCapped: true }) }) }, async (h) => {
+    const { body } = await callTool(h.url, h.token, "pr_review_threads", { pr: 1 });
+    const parsed = JSON.parse(body.result.content[0].text);
+    assert.equal(parsed.complete, false, "pageCapped alone makes it incomplete, even with returned === total");
+    assert.equal(parsed.pageCapped, true);
+  });
 });
 
 test("tools/call: pr_reviews upstream error is sanitized before reaching the response", async () => {

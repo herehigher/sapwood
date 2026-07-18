@@ -144,7 +144,12 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
 
   const server: Server = createServer((req, res) => {
     void handleRequest(req, res).catch((e) => {
-      log(`[sapwood:forge-proxy] unhandled request error (non-fatal): ${String(e)}`);
+      // #244 (Codex sol-high PR #260 review, P2): every log interpolation of a caught error
+      // routes through sanitizeUpstreamError — this is a bare `log()` line, not a tool-result
+      // error (which already sanitizes via toolError), so it needed its own explicit scrub.
+      log(
+        `[sapwood:forge-proxy] unhandled request error (non-fatal): ${sanitizeUpstreamError(e instanceof Error ? e.message : String(e))}`,
+      );
       try {
         if (!res.headersSent) res.writeHead(500).end();
         else res.end();
@@ -358,20 +363,26 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
     }
     if (tool === TOOL_PR_REVIEWS) {
       const { pr } = args as z.infer<typeof PRReviewsArgs>;
-      const value = await fetchPRReviewsResponse(deps.forge, pr);
-      return { value, upstreamIds: [pr], counts: { returned: value.reviews.length } };
+      const value = await fetchPRReviewsResponse(deps.forge, pr, deps.caps);
+      // #244 (Codex sol-high PR #260 review, P1): same completeness-drives-truncation contract
+      // as issue_comments/pr_review_threads — a capped `reviews(last: cap)` fetch can be
+      // incomplete even with no client-supplied lastN to reject.
+      return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
     }
     if (tool === TOOL_PR_REVIEW_THREADS) {
       const { pr, lastN } = args as z.infer<typeof PRReviewThreadsArgs>;
       const value = await fetchPRReviewThreadsResponse(deps.forge, pr, lastN, deps.caps);
-      // #244: same completeness-drives-truncation contract as issue_comments above.
+      // #244: same completeness-drives-truncation contract as issue_comments above. truncated
+      // also fires on pageCapped (the underlying fetch's own 50-page safety ceiling), which
+      // capThreads/fetchPRReviewThreadsResponse already folds into `complete`.
       return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
     }
     // TOOL_PR_CHECKS — the eighth and last fixed-algebra member (validateToolArgs already
     // rejected anything else as unknown_tool).
     const { pr } = args as z.infer<typeof PRChecksArgs>;
-    const value = await fetchPRChecksResponse(deps.forge, pr);
-    return { value, upstreamIds: [pr], counts: { returned: value.checks.length } };
+    const value = await fetchPRChecksResponse(deps.forge, pr, deps.caps);
+    // #244 (Codex sol-high PR #260 review, P1): same completeness contract as pr_reviews above.
+    return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
   }
 
   await new Promise<void>((resolve, reject) => {

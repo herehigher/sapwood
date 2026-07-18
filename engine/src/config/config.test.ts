@@ -1153,3 +1153,29 @@ test("proxy: #244's new caps (maxReviewThreadsPerCall/maxCommentsPerThread) are 
   assert.equal(cfg.proxy.caps.maxCommentsPerThread, 7);
   assert.equal(cfg.proxy.caps.maxIssuesPerCall, 10, "other caps keep their own defaults");
 });
+
+// #244 (Codex sol-high PR #260 review, P1): pr_reviews/pr_checks' own fetch-bound caps.
+test("proxy: maxReviewsPerCall/maxChecksPerCall default to 50 and are independently overridable", () => {
+  const defaults = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n");
+  assert.equal(defaults.proxy.caps.maxReviewsPerCall, 50);
+  assert.equal(defaults.proxy.caps.maxChecksPerCall, 50);
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" + "proxy:\n  caps: { maxReviewsPerCall: 12, maxChecksPerCall: 34 }\n",
+  );
+  assert.equal(cfg.proxy.caps.maxReviewsPerCall, 12);
+  assert.equal(cfg.proxy.caps.maxChecksPerCall, 34);
+});
+
+// #244 (Codex sol-high PR #260 review, P1/P2 audit): every cap fed straight into a GraphQL
+// first:/last: argument is bounded at 100 — GitHub's own GraphQL API rejects a connection
+// argument above that, so this must be caught at config-parse time, not on the first live call.
+test("proxy: caps fed into a GraphQL first:/last: argument reject a value above 100 (maxRelationsPerIssue, maxCommentsPerThread, maxReviewsPerCall, maxChecksPerCall)", () => {
+  for (const key of ["maxRelationsPerIssue", "maxCommentsPerThread", "maxReviewsPerCall", "maxChecksPerCall"]) {
+    assert.throws(
+      () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nproxy:\n  caps: { ${key}: 101 }\n`),
+      `${key}: 101 should be rejected (> 100)`,
+    );
+    // exactly 100 is still valid
+    assert.doesNotThrow(() => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nproxy:\n  caps: { ${key}: 100 }\n`));
+  }
+});

@@ -94,6 +94,15 @@ export interface ProxyCaps {
    *  (GraphQL `comments(first: commentsCap)`) — bounds a single thread's own comment count,
    *  independent of maxReviewThreadsPerCall's bound on the NUMBER of threads returned. */
   maxCommentsPerThread: number;
+  /** #244 (Codex sol-high PR #260 review, P1): pr_reviews' fetch bound — GraphQL
+   *  `reviews(last: cap)`. No client-supplied lastN exists for this tool, so this IS the fetch
+   *  bound (never an over-cap rejection target); completeness is reported via
+   *  `PRReviewsResponse.complete` instead. */
+  maxReviewsPerCall: number;
+  /** #244 (Codex sol-high PR #260 review, P1): pr_checks' fetch bound — GraphQL
+   *  `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as
+   *  maxReviewsPerCall above. */
+  maxChecksPerCall: number;
 }
 
 // ── Arg schemas (strict — an unrecognized key, e.g. a caller-supplied `repo`/`owner`, fails
@@ -273,15 +282,27 @@ export interface ProxyToolError {
 }
 
 /** Token-shaped substrings that must never reach a session — GitHub PAT prefixes
- *  (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_), a bearer-scheme header value, and any bare 40-char hex
- *  string (a plausible legacy token or SHA that's cheaper to scrub than to risk). Scrubbed from
- *  upstream error TEXT ONLY — never applied to a successful tool response, which never contains
- *  credential material in the first place (IForge never returns one). */
+ *  (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_), a bearer-scheme header value, any bare 40-char hex
+ *  string (a plausible legacy token or SHA that's cheaper to scrub than to risk), a URL's
+ *  embedded userinfo (`https://user:pass@host/...` — a credential-bearing git remote URL is a
+ *  realistic upstream-error shape), and a token-bearing query parameter (`token=`/
+ *  `access_token=`/`x-access-token=`, case-insensitive) (Codex sol-high PR #260 review, P2: the
+ *  original 4 patterns didn't cover either shape). Scrubbed from upstream error TEXT ONLY — never
+ *  applied to a successful tool response, which never contains credential material in the first
+ *  place (IForge never returns one). */
 const TOKEN_PATTERNS: RegExp[] = [
   /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
   /\bBearer\s+\S+/gi,
   /\b[0-9a-f]{40}\b/gi,
+  // `scheme://user:pass@` — the userinfo segment of a URL (e.g. a credentialed git remote).
+  // Non-greedy up to the FIRST `@` so a legitimate path/query containing `@` later in the URL
+  // is never over-matched.
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@]+:[^\s/@]+@/gi,
+  // A token-bearing query parameter's VALUE only — the key + `=` are kept so the redaction is
+  // still diagnosable ("a token param was here"), same stance as Bearer's own pattern above
+  // (which keeps the scheme word, scrubs only the value).
+  /\b(token|access_token|x-access-token)=[^&\s]+/gi,
 ];
 
 /** Scrub anything token-shaped out of raw upstream error text before it can reach a session or a
@@ -485,49 +506,88 @@ export async function fetchSearchIssuesResponse(
 
 export interface PRDetailsResponse extends PRDetails {}
 
+/** #244 (Codex sol-high PR #260 review, P1): pr_reviews now carries the same
+ *  total/returned/complete completeness contract as every other bounded-but-uncapped-by-lastN
+ *  read in this file (search_issues' truncated flag is the closest precedent) — `complete` is
+ *  false whenever the fetch bound (caps.maxReviewsPerCall) actually cut the connection short. */
 export interface PRReviewsResponse {
   pr: number;
   reviews: PRReviewItem[];
+  total: number;
+  returned: number;
+  complete: boolean;
 }
 
 /** #244: the pr_review_threads completeness contract — same shape/semantics as CommentsView
  *  (issue #244 AC: "same completeness contract as issue_details"), just over threads instead of
- *  comments. */
+ *  comments. `pageCapped` (Codex sol-high PR #260 review, P1) distinguishes TWO independent
+ *  incompleteness reasons that can both be true or false independently: the proxy's own lastN
+ *  cap trimming an already-complete `threads` array (`complete: false`, `pageCapped: false`) vs.
+ *  the underlying fetch's hard 50-page safety ceiling cutting the array short BEFORE any lastN
+ *  cap was even applied (`pageCapped: true` — `total`/`complete` are then lower bounds, not
+ *  exact, regardless of `omittedRange`). */
 export interface ThreadsView {
   threads: ReviewThreadItem[];
   total: number;
   returned: number;
   complete: boolean;
   omittedRange?: { from: number; to: number };
+  pageCapped: boolean;
 }
 
 export interface PRReviewThreadsResponse extends ThreadsView {
   pr: number;
 }
 
+/** #244 (Codex sol-high PR #260 review, P1): pr_checks carries the same completeness contract as
+ *  pr_reviews above. */
 export interface PRChecksResponse {
   pr: number;
   checks: PRCheckItem[];
+  total: number;
+  returned: number;
+  complete: boolean;
 }
 
-/** Keep the `cap` MOST RECENT of `all` threads (GraphQL's reviewThreads connection returns
- *  oldest-created-first, same order countUnresolvedThreads/fetchAllReviewThreads already read) —
- *  never the oldest `cap`. Same fail-toward-inclusion rationale as capComments: the most recent
- *  threads are the ones most likely to matter for a session resolving CURRENT review findings. */
-export function capThreads(all: ReviewThreadItem[], cap: number): ThreadsView {
-  const total = all.length;
-  if (total <= cap) return { threads: all, total, returned: total, complete: true };
-  const kept = all.slice(total - cap);
-  return { threads: kept, total, returned: kept.length, complete: false, omittedRange: { from: 1, to: total - cap } };
+/** Sort threads chronologically by their OWN first comment's `createdAt`, ascending (oldest
+ *  first) — the GraphQL reviewThreads connection carries NO documented ordering guarantee
+ *  (Codex sol-high PR #260 review, P2), so "keep the most recent N" must not silently rely on
+ *  array-position order matching creation order. A thread with no comments at all (both sides,
+ *  or either side, lack a sort key) falls back to the connection's own relative order — the
+ *  comparator returns 0 for any incomparable pair, and `Array.prototype.sort` is a STABLE sort
+ *  (guaranteed since ES2019/Node's V8), so two comment-less threads (or one comment-less thread
+ *  next to one that has comments) never get reordered relative to each other; only threads that
+ *  BOTH carry a real timestamp are ever compared and reordered. */
+function sortThreadsChronologically(all: ReviewThreadItem[]): ReviewThreadItem[] {
+  return [...all].sort((a, b) => {
+    const ak = a.comments[0]?.createdAt;
+    const bk = b.comments[0]?.createdAt;
+    if (!ak || !bk) return 0;
+    return ak < bk ? -1 : ak > bk ? 1 : 0;
+  });
+}
+
+/** Keep the `cap` MOST RECENT of `all` threads, by chronological order (sortThreadsChronologically
+ *  above) — never raw array position, and never the oldest `cap`. Same fail-toward-inclusion
+ *  rationale as capComments: the most recent threads are the ones most likely to matter for a
+ *  session resolving CURRENT review findings. `pageCapped` is threaded through from the caller
+ *  (the underlying fetch's own completeness signal) rather than computed here — capThreads only
+ *  ever sees the (possibly already-partial) array the fetch layer handed it. */
+export function capThreads(all: ReviewThreadItem[], cap: number, pageCapped = false): ThreadsView {
+  const sorted = sortThreadsChronologically(all);
+  const total = sorted.length;
+  if (total <= cap) return { threads: sorted, total, returned: total, complete: !pageCapped, pageCapped };
+  const kept = sorted.slice(total - cap);
+  return { threads: kept, total, returned: kept.length, complete: false, omittedRange: { from: 1, to: total - cap }, pageCapped };
 }
 
 export async function fetchPRDetailsResponse(forge: Pick<IForge, "getPRDetails">, pr: number): Promise<PRDetailsResponse> {
   return forge.getPRDetails(pr);
 }
 
-export async function fetchPRReviewsResponse(forge: Pick<IForge, "getPRReviews">, pr: number): Promise<PRReviewsResponse> {
-  const reviews = await forge.getPRReviews(pr);
-  return { pr, reviews };
+export async function fetchPRReviewsResponse(forge: Pick<IForge, "getPRReviews">, pr: number, caps: ProxyCaps): Promise<PRReviewsResponse> {
+  const { reviews, total } = await forge.getPRReviews(pr, caps.maxReviewsPerCall);
+  return { pr, reviews, total, returned: reviews.length, complete: reviews.length >= total };
 }
 
 export async function fetchPRReviewThreadsResponse(
@@ -536,14 +596,14 @@ export async function fetchPRReviewThreadsResponse(
   lastN: number | undefined,
   caps: ProxyCaps,
 ): Promise<PRReviewThreadsResponse> {
-  const all = await forge.getPRReviewThreads(pr, caps.maxCommentsPerThread);
+  const { threads: all, pageCapped } = await forge.getPRReviewThreads(pr, caps.maxCommentsPerThread);
   const cap = lastN ?? caps.maxReviewThreadsPerCall;
-  return { pr, ...capThreads(all, cap) };
+  return { pr, ...capThreads(all, cap, pageCapped) };
 }
 
-export async function fetchPRChecksResponse(forge: Pick<IForge, "getPRChecks">, pr: number): Promise<PRChecksResponse> {
-  const checks = await forge.getPRChecks(pr);
-  return { pr, checks };
+export async function fetchPRChecksResponse(forge: Pick<IForge, "getPRChecks">, pr: number, caps: ProxyCaps): Promise<PRChecksResponse> {
+  const { checks, total } = await forge.getPRChecks(pr, caps.maxChecksPerCall);
+  return { pr, checks, total, returned: checks.length, complete: checks.length >= total };
 }
 
 // Re-exported so mcp-server.ts/journal.ts never need their own import of RelatedRef just to

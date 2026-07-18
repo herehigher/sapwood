@@ -43,6 +43,8 @@ const CAPS: ProxyCaps = {
   fullCommentStreamOptIn: false,
   maxReviewThreadsPerCall: 2,
   maxCommentsPerThread: 10,
+  maxReviewsPerCall: 5,
+  maxChecksPerCall: 5,
 };
 
 // ── tool names / tools/list ─────────────────────────────────────────────────────────────────
@@ -327,17 +329,18 @@ test("validateToolArgs: pr_review_threads lastN at exactly the cap -> ok", () =>
 
 // ── capThreads: same fail-toward-inclusion completeness contract as capComments ────────────
 
-function thread(id: string): ReviewThreadItem {
-  return { id, isResolved: false, comments: [] };
+function thread(id: string, createdAt?: string, commentsComplete = true): ReviewThreadItem {
+  return { id, isResolved: false, comments: createdAt ? [{ author: "a", body: "b", createdAt }] : [], commentsComplete };
 }
 
-test("capThreads: total at or under the cap -> complete, nothing omitted", () => {
+test("capThreads: total at or under the cap -> complete, nothing omitted, pageCapped false by default", () => {
   const all = [thread("T1"), thread("T2")];
   const v = capThreads(all, 5);
   assert.equal(v.complete, true);
   assert.equal(v.returned, 2);
   assert.equal(v.total, 2);
   assert.equal(v.omittedRange, undefined);
+  assert.equal(v.pageCapped, false);
   assert.deepEqual(v.threads, all);
 });
 
@@ -351,6 +354,50 @@ test("capThreads: over the cap -> keeps the MOST RECENT N (not the oldest), comp
   assert.deepEqual(v.omittedRange, { from: 1, to: 2 });
 });
 
+// ── capThreads ordering (Codex sol-high PR #260 review, P2): the reviewThreads connection has
+//    no documented ordering guarantee — "keep the most recent N" must sort by each thread's own
+//    first comment's createdAt, never assume array position already matches creation order. ──
+
+test("capThreads: sorts by first-comment createdAt before capping — an OUT-OF-ORDER connection (array position does NOT match chronological order) still keeps the truly most-recent threads", () => {
+  // Array/connection order: T2 (newest), T1 (oldest), T3 (middle) — deliberately NOT
+  // chronological, simulating a connection with no documented ordering guarantee.
+  const t2 = thread("T2", "2026-01-03T00:00:00Z");
+  const t1 = thread("T1", "2026-01-01T00:00:00Z");
+  const t3 = thread("T3", "2026-01-02T00:00:00Z");
+  const v = capThreads([t2, t1, t3], 2);
+  assert.equal(v.total, 3);
+  assert.equal(v.returned, 2);
+  // The two CHRONOLOGICALLY most recent are T3 (Jan 2) and T2 (Jan 3) — NOT the last two by
+  // ARRAY position (T1, T3), which is what a naive array.slice(-cap) would have kept.
+  assert.deepEqual(
+    v.threads.map((t) => t.id),
+    ["T3", "T2"],
+  );
+});
+
+test("capThreads: a comment-less thread falls back to connection order — never reordered relative to another comment-less thread, and never assumed to sort before/after a timestamped one incorrectly", () => {
+  const timestamped = thread("timestamped", "2026-01-01T00:00:00Z");
+  const commentLessA = thread("commentless-a"); // no comments -> no sort key
+  const commentLessB = thread("commentless-b");
+  // Connection order: commentLessA, commentLessB, timestamped — the two comment-less threads
+  // must stay in THIS relative order (stable sort, comparator returns 0 for incomparable pairs).
+  const v = capThreads([commentLessA, commentLessB, timestamped], 3);
+  assert.deepEqual(
+    v.threads.map((t) => t.id),
+    ["commentless-a", "commentless-b", "timestamped"],
+  );
+});
+
+test("capThreads: pageCapped is threaded through from the caller, independent of lastN capping", () => {
+  const all = [thread("T1"), thread("T2")];
+  const complete = capThreads(all, 5, true);
+  assert.equal(complete.complete, false, "pageCapped alone makes the view incomplete even when returned === total");
+  assert.equal(complete.pageCapped, true);
+  const capped = capThreads(all, 1, true);
+  assert.equal(capped.complete, false);
+  assert.equal(capped.pageCapped, true);
+});
+
 // ── fetch* response shaping ─────────────────────────────────────────────────────────────────
 
 test("fetchPRDetailsResponse: passes IForge.getPRDetails through verbatim", async () => {
@@ -359,28 +406,61 @@ test("fetchPRDetailsResponse: passes IForge.getPRDetails through verbatim", asyn
   assert.deepEqual(await fetchPRDetailsResponse(forge, 5), details);
 });
 
-test("fetchPRReviewsResponse: wraps IForge.getPRReviews with the pr number", async () => {
+test("fetchPRReviewsResponse: wraps IForge.getPRReviews with the pr number, threads caps.maxReviewsPerCall, sets completeness from total", async () => {
   const reviews: PRReviewItem[] = [{ author: "codex", commitOid: "h1", state: "APPROVED", body: "LGTM" }];
-  const forge = { getPRReviews: async () => reviews };
-  const r = await fetchPRReviewsResponse(forge, 5);
+  const forge = {
+    getPRReviews: async (_pr: number, cap: number) => {
+      assert.equal(cap, CAPS.maxReviewsPerCall);
+      return { reviews, total: 1 };
+    },
+  };
+  const r = await fetchPRReviewsResponse(forge, 5, CAPS);
   assert.equal(r.pr, 5);
   assert.deepEqual(r.reviews, reviews);
+  assert.equal(r.total, 1);
+  assert.equal(r.returned, 1);
+  assert.equal(r.complete, true);
 });
 
-test("fetchPRChecksResponse: wraps IForge.getPRChecks with the pr number", async () => {
+test("fetchPRReviewsResponse: complete is false when the fetch bound cut the connection short (returned < total)", async () => {
+  const reviews: PRReviewItem[] = [{ author: "codex", commitOid: "h1", state: "APPROVED", body: "LGTM" }];
+  const forge = { getPRReviews: async () => ({ reviews, total: 10 }) };
+  const r = await fetchPRReviewsResponse(forge, 5, CAPS);
+  assert.equal(r.complete, false);
+});
+
+test("fetchPRChecksResponse: wraps IForge.getPRChecks with the pr number, threads caps.maxChecksPerCall, sets completeness from total", async () => {
   const checks: PRCheckItem[] = [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null }];
-  const forge = { getPRChecks: async () => checks };
-  const r = await fetchPRChecksResponse(forge, 9);
+  const forge = {
+    getPRChecks: async (_pr: number, cap: number) => {
+      assert.equal(cap, CAPS.maxChecksPerCall);
+      return { checks, total: 1 };
+    },
+  };
+  const r = await fetchPRChecksResponse(forge, 9, CAPS);
   assert.equal(r.pr, 9);
   assert.deepEqual(r.checks, checks);
+  assert.equal(r.total, 1);
+  assert.equal(r.returned, 1);
+  assert.equal(r.complete, true);
+});
+
+test("fetchPRChecksResponse: complete is false when the fetch bound cut the connection short", async () => {
+  const forge = { getPRChecks: async () => ({ checks: [], total: 10 }) };
+  const r = await fetchPRChecksResponse(forge, 9, CAPS);
+  assert.equal(r.complete, false);
 });
 
 test("fetchPRReviewThreadsResponse: no lastN -> server default cap (caps.maxReviewThreadsPerCall) applies, completeness flags set", async () => {
-  const all: ReviewThreadItem[] = [thread("T1"), thread("T2"), thread("T3")];
+  const all: ReviewThreadItem[] = [
+    thread("T1", "2026-01-01T00:00:00Z"),
+    thread("T2", "2026-01-02T00:00:00Z"),
+    thread("T3", "2026-01-03T00:00:00Z"),
+  ];
   const forge = {
     getPRReviewThreads: async (_pr: number, commentsCap: number) => {
       assert.equal(commentsCap, CAPS.maxCommentsPerThread);
-      return all;
+      return { threads: all, pageCapped: false };
     },
   };
   const r = await fetchPRReviewThreadsResponse(forge, 5, undefined, CAPS);
@@ -388,13 +468,26 @@ test("fetchPRReviewThreadsResponse: no lastN -> server default cap (caps.maxRevi
   assert.equal(r.total, 3);
   assert.equal(r.returned, 2); // CAPS.maxReviewThreadsPerCall = 2
   assert.equal(r.complete, false);
+  assert.equal(r.pageCapped, false);
   assert.deepEqual(r.threads, [all[1], all[2]]);
 });
 
 test("fetchPRReviewThreadsResponse: explicit lastN overrides the server default cap", async () => {
-  const all: ReviewThreadItem[] = [thread("T1"), thread("T2"), thread("T3")];
-  const forge = { getPRReviewThreads: async () => all };
+  const all: ReviewThreadItem[] = [
+    thread("T1", "2026-01-01T00:00:00Z"),
+    thread("T2", "2026-01-02T00:00:00Z"),
+    thread("T3", "2026-01-03T00:00:00Z"),
+  ];
+  const forge = { getPRReviewThreads: async () => ({ threads: all, pageCapped: false }) };
   const r = await fetchPRReviewThreadsResponse(forge, 5, 1, CAPS);
   assert.equal(r.returned, 1);
   assert.deepEqual(r.threads, [all[2]]);
+});
+
+test("fetchPRReviewThreadsResponse: pageCapped from the underlying fetch propagates through — incomplete even when every fetched thread fits under lastN", async () => {
+  const all: ReviewThreadItem[] = [thread("T1", "2026-01-01T00:00:00Z")];
+  const forge = { getPRReviewThreads: async () => ({ threads: all, pageCapped: true }) };
+  const r = await fetchPRReviewThreadsResponse(forge, 5, undefined, CAPS);
+  assert.equal(r.complete, false, "pageCapped alone must make the response incomplete");
+  assert.equal(r.pageCapped, true);
 });

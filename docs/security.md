@@ -199,6 +199,46 @@ allow/deny pair on this page) — a role absent from the table below is granted 
 | `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks` |
 | *(any other role id)* | none — deny-by-default |
 
+**Scope: `dispatch()` only.** `WorkerSupervisor.resume()` does NOT attach a proxy — a resumed leg
+continues without one, unchanged from pre-#244 behavior. This is a deliberate scope decision (the
+`resume()` crash-consistency machinery is already substantial; consumer-shaped wiring, including
+its own proxy attachment, belongs to the actual consumer — issue #245's M9 fix loop), not an
+oversight — do not read anything on this page or in `configuration.md` as implying resumed legs
+are covered.
+
+**`credentialFree` severs a worker leg's forge reach down to the proxy alone** — env-VAR stripping
+by itself is NOT sufficient for a Bash-granted worker: `gh` falls back to on-disk stored
+credentials (`$HOME/.config/gh/hosts.yml`) when no token env var is present, and git can still
+reach a credential helper, a cached SSH agent, or an interactive prompt regardless of which env
+vars are absent. `worker.ts`'s `workerCredentialFreeEnv` (opt-in via `WorkerProxyOpts.
+credentialFree`) additionally:
+
+- points `GH_CONFIG_DIR` at a **fresh, empty, per-lane** scratch directory — `gh`'s own stored
+  host/token config is read from there, never from the operator's real `$HOME/.config/gh`;
+- sets `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` — a `credential.helper`
+  entry in either config file is never read;
+- sets `GIT_TERMINAL_PROMPT=0` — git fails closed rather than blocking on an interactive prompt;
+- drops `SSH_AUTH_SOCK` — an inherited SSH agent socket is a live credential channel on its own;
+- narrows the leg's own `--allowedTools` to drop `Bash(gh *)` (`WORKER_ALLOWED_TOOLS_NO_GH`) — a
+  grant a severed env can never authenticate through shouldn't still be offered. `Bash(git *)`
+  stays: worktree-local git operations (diff, log, add, commit) remain legitimately useful once
+  git's OWN credential path is severed, same "read is not the boundary, doing is" stance this page
+  takes everywhere else.
+
+A mint failure is non-fatal for an ordinary (non-`credentialFree`) proxy attachment — the lane
+still dispatches, unattached, same posture as `peripheral.ts`'s `RoleRunner`. `credentialFree:
+true` is different: a leg dispatched that way has neither ambient credentials nor (if mint fails)
+a working evidence channel, so `dispatch()` REFUSES outright rather than run silently degraded.
+Either branch records a durable `proxy-mint-failed` state event (lane/role/sanitized reason, via
+`WorkerDeps.state`) before deciding which way to go.
+
+**Residual surface (documented, not closed — same style as the Sentinel isolation boundary
+section below):** an arbitrary PATH binary the worker's `Bash` grant can still invoke may carry its
+OWN credential store this mechanism doesn't know about (a language package manager's token file, a
+cloud CLI's own config directory, etc.). `workerCredentialFreeEnv` hardens the two SPECIFIC
+channels this repo's own tooling actually uses (`gh`, git) — it is not a claim that every
+conceivable credential path on the machine is closed.
+
 ## Ambient repo context: record, don't seal (#236)
 
 Every session above — worker or peripheral — spawns `claude -p` **inside a real repo

@@ -38,7 +38,9 @@ import {
   probeLlmPing,
   renderPromptTemplate,
   shellSingleQuote,
+  WORKER_ALLOWED_TOOLS_NO_GH,
   WorkerSupervisor,
+  workerCredentialFreeEnv,
 } from "./worker.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
@@ -2903,13 +2905,17 @@ test("dispatch: credentialFree opt strips forge/git credential env vars even for
     GIT_ASKPASS: "/poison/askpass",
     GIT_CONFIG_GLOBAL: "/poison/gitconfig",
     GIT_CONFIG_COUNT: "1",
+    SSH_AUTH_SOCK: "/poison/ssh-agent.sock",
     ANTHROPIC_API_KEY: "preserved-anthropic-auth",
   } as const;
   const previous = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
   try {
     Object.assign(process.env, poisoned);
     const hook = mkHook(dir);
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nenv > "${join(dir, "env.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
     const s = new WorkerSupervisor({
       cfg,
       stateDir: dir,
@@ -2938,12 +2944,153 @@ test("dispatch: credentialFree opt strips forge/git credential env vars even for
     }
     assert.ok(envText.includes("ANTHROPIC_API_KEY=preserved-anthropic-auth"), "Claude auth is preserved");
     assert.ok(!envText.includes("proxy-test-token"), "the proxy's bearer token never reaches the spawn env — --mcp-config only");
+    // #244 (Codex sol-high PR #260 review, P1): env-var stripping alone is insufficient — assert
+    // the FULL severing shape: GH_CONFIG_DIR repointed at a fresh, EMPTY, per-lane directory
+    // (never the poisoned value, never the real $HOME/.config/gh), GIT_CONFIG_GLOBAL/SYSTEM
+    // pointed at /dev/null, GIT_TERMINAL_PROMPT=0 (fail closed rather than prompt), and no
+    // SSH_AUTH_SOCK at all (an inherited agent socket is a live credential channel on its own).
+    const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="));
+    assert.ok(ghConfigDirLine, "GH_CONFIG_DIR must be set");
+    const ghConfigDir = ghConfigDirLine!.slice("GH_CONFIG_DIR=".length);
+    assert.notEqual(ghConfigDir, "/poison/gh-config");
+    assert.ok(existsSync(ghConfigDir), "the GH_CONFIG_DIR path must actually exist as a directory");
+    assert.deepEqual(readdirSync(ghConfigDir), [], "GH_CONFIG_DIR must be a FRESH, EMPTY directory — never gh's real stored config");
+    assert.match(envText, /^GIT_CONFIG_GLOBAL=\/dev\/null$/m);
+    assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
+    assert.match(envText, /^GIT_TERMINAL_PROMPT=0$/m);
+    assert.doesNotMatch(envText, /^SSH_AUTH_SOCK=/m);
+    // #244 (Codex sol-high PR #260 review, P1): the grant itself narrows — a credentialFree leg
+    // whose env can no longer authenticate `gh` at all must not still be OFFERED `gh` as a tool.
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    const allowedToolsIdx = args.trim().split("\n").indexOf("--allowedTools");
+    const allowedTools = args.trim().split("\n")[allowedToolsIdx + 1]!;
+    assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "credentialFree must drop Bash(gh *) from the grant");
+    assert.match(allowedTools, /Bash\(git \*\)/, "git stays — its own credential path is what's severed, not the tool grant");
     s.dispose();
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("workerCredentialFreeEnv: pure unit — composes the exact env shape (GH_CONFIG_DIR/GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM/GIT_TERMINAL_PROMPT, no SSH_AUTH_SOCK/GH_TOKEN)", () => {
+  const previous = { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK, GH_TOKEN: process.env.GH_TOKEN };
+  try {
+    process.env.SSH_AUTH_SOCK = "/tmp/agent.sock";
+    process.env.GH_TOKEN = "poison";
+    const env = workerCredentialFreeEnv("/tmp/fake-gh-config-dir");
+    assert.equal(env.GH_CONFIG_DIR, "/tmp/fake-gh-config-dir");
+    assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+    assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null");
+    assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(env.SSH_AUTH_SOCK, undefined);
+    assert.equal(env.GH_TOKEN, undefined);
+  } finally {
+    if (previous.SSH_AUTH_SOCK === undefined) delete process.env.SSH_AUTH_SOCK;
+    else process.env.SSH_AUTH_SOCK = previous.SSH_AUTH_SOCK;
+    if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previous.GH_TOKEN;
+  }
+});
+
+test("WORKER_ALLOWED_TOOLS_NO_GH: byte-identical to WORKER_ALLOWED_TOOLS minus Bash(gh *), git stays", () => {
+  assert.doesNotMatch(WORKER_ALLOWED_TOOLS_NO_GH, /Bash\(gh \*\)/);
+  assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Bash\(git \*\)/);
+  assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Read/);
+  assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Write/);
+});
+
+// #244 (Codex sol-high PR #260 review, P2): fail-closed policy — credentialFree + a failed mint
+// leaves a leg with NEITHER ambient credentials NOR a working evidence channel, so dispatch()
+// must REFUSE outright rather than silently run degraded (distinct from the non-credentialFree
+// mint-failure case above, which stays non-fatal).
+test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fail-closed) — no lane created, no sentinel written", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await assert.rejects(
+      () =>
+        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-credfree-mintfail", {
+          proxy: {
+            mint: async () => {
+              throw new Error("mint failed");
+            },
+            credentialFree: true,
+          },
+        }),
+      /credentialFree|refused/i,
+    );
+    assert.ok(!existsSync(join(dir, "lane-credfree-mintfail.jsonl")), "no jsonl left behind for a refused dispatch");
+    assert.ok(!existsSync(join(dir, "lane-credfree-mintfail.running.json")), "no running marker left behind for a refused dispatch");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a
+// `proxy-mint-failed` event, recorded via WorkerDeps.state, for BOTH branches (non-fatal and
+// fail-closed) so a repeated/systemic mint failure is queryable, not just a transient log line.
+test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (WorkerDeps.state) — both the non-fatal and the fail-closed branch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      state,
+    });
+    // Branch 1: non-fatal (no credentialFree) — the lane still dispatches.
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-mintfail-nonfatal", {
+      proxy: {
+        mint: async () => {
+          throw new Error("mint failed #1");
+        },
+      },
+    });
+    // Branch 2: fail-closed (credentialFree) — dispatch is refused.
+    await assert.rejects(() =>
+      s.dispatch({ number: 2, title: "t", labels: [] }, "lane-mintfail-failclosed", {
+        proxy: {
+          mint: async () => {
+            throw new Error("mint failed #2");
+          },
+          credentialFree: true,
+        },
+      }),
+    );
+    const events = state.eventsSince("1970-01-01T00:00:00Z", ["proxy-mint-failed"]);
+    assert.equal(events.length, 2);
+    const lanes = events.map((e) => (e.payload as { lane: string }).lane).sort();
+    assert.deepEqual(lanes, ["lane-mintfail-failclosed", "lane-mintfail-nonfatal"]);
+    for (const e of events) {
+      const payload = e.payload as { role: string; reason: string };
+      assert.equal(payload.role, "worker");
+      assert.ok(payload.reason.includes("mint failed"));
+    }
+    s.dispose();
+  } finally {
+    state.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

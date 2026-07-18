@@ -544,10 +544,12 @@ tracked work).
 
 **Honest state:** `enabled: true` is still *inert* on its own — no engine startup path
 constructs a proxy server or reads this flag yet. `peripheral.ts`'s `RoleRunner` and
-`worker.ts`'s `WorkerSupervisor` (#244 extends the mechanism to worker legs, mirroring
-`RoleRunner`'s own `proxy` opt) only mint a proxy when a caller explicitly supplies one,
-and no shipped dispatch path does yet. Consumer adoption + the shadow-server startup
-wiring remain tracked follow-up work.
+`worker.ts`'s `WorkerSupervisor.dispatch()` (#244 extends the mechanism to worker legs,
+mirroring `RoleRunner`'s own `proxy` opt — **`dispatch()` only**: `resume()` does not
+attach a proxy, see [`security.md`](security.md#the-forge-mcp-proxys-role-x-tool-matrix-234-244)
+for why) only mint a proxy when a caller explicitly supplies one, and no shipped
+dispatch path does yet. Consumer adoption + the shadow-server startup wiring remain
+tracked follow-up work.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -556,11 +558,13 @@ wiring remain tracked follow-up work.
 | `caps.maxIssuesPerCall` | `10` | `issue_details`: max issue numbers per call. A caller-requested batch above this cap is **rejected** (typed error), never silently truncated. |
 | `caps.defaultCommentsPerIssue` | `20` | `issue_details`' default view: how many of an issue's **most recent** comments to include (fail-toward-inclusion — the newest comments are the ones most likely to carry an amendment to a stale body). Bounded, not rejected: `comments_complete`/counts/an omitted-range name the cut. |
 | `caps.maxCommentsPerCall` | `100` | `issue_comments`: max `lastN` a caller may request explicitly. Also the default view's cap when `fullCommentStreamOptIn` is true. |
-| `caps.maxRelationsPerIssue` | `20` | `issue_relations`: cap on each of linked-PRs and cross-references (GraphQL `first: cap` on each connection independently). |
+| `caps.maxRelationsPerIssue` | `20` (max `100`) | `issue_relations`: cap on each of linked-PRs and cross-references (GraphQL `first: cap` on each connection independently — capped at 100 since that's fed straight into a GraphQL connection argument, which GitHub itself rejects above 100). |
 | `caps.maxSearchResults` | `20` | `search_issues`: max matches returned. |
 | `caps.fullCommentStreamOptIn` | `false` | `true` widens `issue_details`' default comment cap to `maxCommentsPerCall` instead of `defaultCommentsPerIssue` — still bounded, never truly unbounded. |
 | `caps.maxReviewThreadsPerCall` | `20` | `pr_review_threads` (#244): max `lastN` threads a caller may request explicitly (or the default cap when omitted). Same reject-not-truncate contract as `maxCommentsPerCall`. |
-| `caps.maxCommentsPerThread` | `20` | `pr_review_threads` (#244): cap on each thread's OWN comment count (GraphQL `comments(first: ...)`), independent of `maxReviewThreadsPerCall`'s bound on the number of threads. |
+| `caps.maxCommentsPerThread` | `20` (max `100`) | `pr_review_threads` (#244): cap on each thread's OWN comment count (GraphQL `comments(first: ...)`), independent of `maxReviewThreadsPerCall`'s bound on the number of threads. |
+| `caps.maxReviewsPerCall` | `50` (max `100`) | `pr_reviews` (#244): fetch bound — GraphQL `reviews(last: cap)`. No client-supplied lastN exists for this tool, so this cap alone determines completeness (`complete: reviews.length >= total`), never an over-cap rejection. |
+| `caps.maxChecksPerCall` | `50` (max `100`) | `pr_checks` (#244): fetch bound — GraphQL `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as `maxReviewsPerCall`. |
 | `budget.maxCallsPerSession` | `30` | Hard ceiling on tool calls per session attempt, metered from the journal itself (no separate counter). Exhaustion returns an explicit `budget_exhausted` tool result, never a transport error — a session can still emit `unresolvedContext` and abstain. |
 | `budget.maxBytesPerSession` | `2000000` | Same, for cumulative response bytes. |
 | `timeoutMs` | `30000` | Hard per-call ceiling — a hung upstream `gh` read must never wedge a session waiting on the proxy forever. Independent of `worker.timeoutSec`, which bounds the whole session. |

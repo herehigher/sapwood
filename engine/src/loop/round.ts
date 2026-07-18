@@ -268,14 +268,14 @@ export class RoundScopedForge implements IForge {
   getPRDetails(pr: number) {
     return this.inner.getPRDetails(pr);
   }
-  getPRReviews(pr: number) {
-    return this.inner.getPRReviews(pr);
+  getPRReviews(pr: number, cap: number) {
+    return this.inner.getPRReviews(pr, cap);
   }
   getPRReviewThreads(pr: number, commentsCap: number) {
     return this.inner.getPRReviewThreads(pr, commentsCap);
   }
-  getPRChecks(pr: number) {
-    return this.inner.getPRChecks(pr);
+  getPRChecks(pr: number, cap: number) {
+    return this.inner.getPRChecks(pr, cap);
   }
 }
 
@@ -407,14 +407,14 @@ export class PoolScopedForge implements IForge {
   getPRDetails(pr: number) {
     return this.inner.getPRDetails(pr);
   }
-  getPRReviews(pr: number) {
-    return this.inner.getPRReviews(pr);
+  getPRReviews(pr: number, cap: number) {
+    return this.inner.getPRReviews(pr, cap);
   }
   getPRReviewThreads(pr: number, commentsCap: number) {
     return this.inner.getPRReviewThreads(pr, commentsCap);
   }
-  getPRChecks(pr: number) {
-    return this.inner.getPRChecks(pr);
+  getPRChecks(pr: number, cap: number) {
+    return this.inner.getPRChecks(pr, cap);
   }
 }
 
