@@ -332,6 +332,23 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   In Progress with no worker row. No `.catch(() => {})` swallows remain in tick paths.
 - **Scope boundaries / deferred:** fixup-worker auto-dispatch (review findings fold to
   needs-human for now — 0day's FIXABLE/fix-rounds loop is a follow-up subsystem).
+  **Landed by #245 (M9, fix-loop `fixing` lane state, 2026-07-18):** the producing worker
+  now gets a shot at addressing its own review findings *before* human escalation — a new
+  `fixing` `WorkerState` (`driving → fixing → driving`, counted in `activeWorkers()` like
+  the other two), a fix leg that reuses #172's resume machinery (same worker
+  row/worktree/branch/session — never a fresh dispatch, same squash-branch-reuse-hazard
+  avoidance #147 below already established), and a new `fix_rounds` counter (independent
+  of `resume_attempts`) bounded by `lanes.prFixCap`. The fix leg pulls its own PR's review
+  findings via the PR-facing forge MCP proxy tools (#244, now attached to `resume()` too)
+  rather than having them relayed through its prompt — no prompt-injection transport, no
+  forge credentials handed to the leg. The `fixing → driving` edge clears the review-
+  trigger pin, reusing `driveOne`'s own re-trigger machinery exactly like #147's gated
+  reentry does. **Still deferred to #246:** the actual `FIXABLE` gate decision (deriving
+  "this PR's findings are fixable, not a human matter" from a live review verdict) and the
+  DRIVE-loop wiring that calls #245's `startFixLeg` when it fires — until #246 lands,
+  `deriveGate` still folds `HANDLE_THREADS` straight to `HUMAN`, so `fixing` rows exist
+  only when created directly (tests, or a future caller). See
+  [`security.md`](security.md#fix-loop-fixing-lane-state-245) for the full mechanism.
   **Narrowed by #147 (gated-PR reentry, 2026-07-13):** a `needs-human` escalated on
   gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
   live-run report) is no longer a dead end requiring a manual fix→re-review→merge

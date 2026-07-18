@@ -94,6 +94,14 @@ const Worker = z
     // error (buildRenderPrompt loads it once, eagerly, before any dispatch) — never a silent
     // fallback to the shipped default.
     promptFile: z.string().optional(),
+    // #245: file-based FIX-LEG prompt — the instruction a fix leg (a `fixing`-state resume,
+    // #172's machinery reused, never a fresh dispatch) receives instead of the ordinary
+    // issue-rendered prompt above. Same #74 promptFile shape: a relative path resolves against
+    // the CONFIG FILE's directory; unset (default) -> the shipped preset at the engine package's
+    // `prompts/fix.md` (see worker.ts's defaultFixPromptPath). Set-but-missing/unreadable/empty
+    // is a fail-fast startup error (buildRenderFixPrompt loads it once, eagerly) — never a
+    // silent fallback to the shipped default.
+    fixPromptFile: z.string().optional(),
     // #33 follow-up (PR #85 human review): user-editable model rate table for the soft-budget
     // token estimator. Same shape as promptFile (#74): a relative path resolves against the
     // CONFIG FILE's directory (see loadConfig); unset (default) -> the shipped preset at the
@@ -1060,6 +1068,10 @@ export function loadConfig(path?: string): SapwoodConfig {
   // the same config the engine would run inside `repo/`.
   if (cfg.worker.promptFile !== undefined && !isAbsolute(cfg.worker.promptFile)) {
     cfg.worker.promptFile = resolve(dirname(file), cfg.worker.promptFile);
+  }
+  // Same rule for worker.fixPromptFile (#245).
+  if (cfg.worker.fixPromptFile !== undefined && !isAbsolute(cfg.worker.fixPromptFile)) {
+    cfg.worker.fixPromptFile = resolve(dirname(file), cfg.worker.fixPromptFile);
   }
   // Same rule for worker.pricingFile (#33 follow-up, PR #85 review).
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {

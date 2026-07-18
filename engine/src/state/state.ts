@@ -546,6 +546,18 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   (db) => {
     db.exec(`CREATE INDEX events_kind_idx ON events (kind);`);
   },
+  // 18 -> 19: fix-loop `fixing` lane state (#245). `fix_rounds` counts REWORK ROUNDS for a PR —
+  // how many times a `driving` lane has been sent back into a fix leg to address review
+  // findings — and is DELIBERATELY a separate counter from `resume_attempts` (schema v12->v13,
+  // #172): that one counts graceful-handoff CONTINUATION legs (the same leg picking back up
+  // after a soft-budget pause), an orthogonal axis that must never share a counter with rework
+  // rounds (#245 AC — a lane could legitimately need both a resumed continuation AND several fix
+  // rounds without either counter contaminating the other's cap accounting). NOT NULL DEFAULT 0:
+  // every pre-existing row (none of which has ever been through a fix leg) starts at zero, the
+  // same "never attempted" convention gated_reentry_attempts/resume_attempts already use.
+  (db) => {
+    db.exec(`ALTER TABLE workers ADD COLUMN fix_rounds INTEGER NOT NULL DEFAULT 0;`);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -601,8 +613,12 @@ function openReadOnly(path: string, isMemory: boolean): DatabaseSync {
 }
 
 // running = live worker (probed each reclaim). driving = produced a PR, lane held awaiting
-// the review gate (M3) — no live worker, but still occupies a lane. done/failed/handoff = terminal.
-export type WorkerState = "running" | "driving" | "done" | "failed" | "handoff";
+// the review gate (M3) — no live worker, but still occupies a lane. fixing (#245): a driving
+// lane's PR needs rework — a LIVE fix-leg worker process (same #172 resume machinery, same
+// worktree/branch/session lineage), addressing its own review findings before returning to
+// `driving` with a cleared review-trigger pin (see State.fixingWorkers' doc). done/failed/handoff
+// = terminal.
+export type WorkerState = "running" | "driving" | "fixing" | "done" | "failed" | "handoff";
 
 export interface WorkerRow {
   name: string;
@@ -680,6 +696,13 @@ export interface WorkerRow {
    *  round_artifacts.json) rather than 4 separate columns — one JSON blob read/written
    *  atomically per probe, and the shape is display-only (never queried by column). */
   token_composition?: string | null;
+  /** #245: rework rounds — how many times this PR's lane has been sent into a `fixing` leg to
+   *  address review findings. Independent of `resume_attempts` (#172's graceful-handoff
+   *  continuation counter) — the two axes never share a counter (see the schema v18->v19
+   *  migration comment). Bumped exactly once per fix leg started (conductor.ts's startFixLeg),
+   *  BEFORE the leg is considered live, so a crash-rerun never loses or double-counts a round.
+   *  Optional; DB default 0. */
+  fix_rounds?: number;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -985,8 +1008,8 @@ export class State {
            (name, issue, session_id, state, started_at, ended_at, pr, review_triggered,
             review_triggered_head, review_triggered_at, review_fallback_head, review_fallback_kind,
             gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled,
-            resume_attempts, resume_capped)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            resume_attempts, resume_capped, fix_rounds)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -1000,7 +1023,8 @@ export class State {
            gated_reentry_capped = excluded.gated_reentry_capped,
            gated_escalation_labeled = excluded.gated_escalation_labeled,
            resume_attempts = excluded.resume_attempts,
-           resume_capped = excluded.resume_capped`,
+           resume_capped = excluded.resume_capped,
+           fix_rounds = excluded.fix_rounds`,
       )
       .run(
         row.name,
@@ -1020,6 +1044,7 @@ export class State {
         row.gated_escalation_labeled ?? 0,
         row.resume_attempts ?? 0,
         row.resume_capped ?? 0,
+        row.fix_rounds ?? 0,
       );
   }
 
@@ -1076,24 +1101,42 @@ export class State {
     return this.db.prepare("SELECT * FROM workers WHERE state = 'running' ORDER BY name").all() as unknown as WorkerRow[];
   }
 
-  /** Occupied lanes: running + driving (a driving lane holds a PR awaiting the review gate
-   *  and still counts against cfg.lanes.max). The dispatch capacity + in-flight set. */
+  /** Occupied lanes: running + driving + fixing (#245: a `fixing` lane is a live fix-leg worker
+   *  process holding the SAME PR's lane occupied while it reworks it — it counts against
+   *  cfg.lanes.max exactly like `running`/`driving` do). The dispatch capacity + in-flight set. */
   activeWorkers(): WorkerRow[] {
-    return this.db.prepare("SELECT * FROM workers WHERE state IN ('running', 'driving') ORDER BY name").all() as unknown as WorkerRow[];
+    return this.db
+      .prepare("SELECT * FROM workers WHERE state IN ('running', 'driving', 'fixing') ORDER BY name")
+      .all() as unknown as WorkerRow[];
   }
 
   /** Rows that still own an issue for startup reconciliation. Handoff is terminal to the live
-   *  scheduler but resumable, so it deliberately prevents a board issue being called orphaned. */
+   *  scheduler but resumable, so it deliberately prevents a board issue being called orphaned.
+   *  #245: `fixing` is included for the same reason `running` is — a live fix-leg process still
+   *  owns its issue across a restart. */
   reconcileWorkers(): WorkerRow[] {
     return this.db
-      .prepare("SELECT * FROM workers WHERE state IN ('running', 'driving', 'handoff') ORDER BY name")
+      .prepare("SELECT * FROM workers WHERE state IN ('running', 'driving', 'fixing', 'handoff') ORDER BY name")
       .all() as unknown as WorkerRow[];
   }
 
   /** Lanes holding a PR awaiting the review gate (#13's merge driver). No live worker process —
-   *  just a lane occupying capacity until gate①/gate② resolve it to merged/needs-human/queued. */
+   *  just a lane occupying capacity until gate①/gate② resolve it to merged/needs-human/queued.
+   *  A `fixing` lane is deliberately EXCLUDED here (#245): it has a live worker process (unlike
+   *  `driving`), so it must never be scanned by the DRIVE loop's gate②/merge machinery — the
+   *  structural reason #170's review-silence escalation cannot arm while a lane is fixing (that
+   *  clock only ever fires from inside the DRIVE loop, which iterates this exact set). */
   drivingWorkers(): WorkerRow[] {
     return this.db.prepare("SELECT * FROM workers WHERE state = 'driving' ORDER BY name").all() as unknown as WorkerRow[];
+  }
+
+  /** #245 fix-loop candidates: lanes currently running a fix leg — a LIVE worker process (same
+   *  heartbeat/timeout/soft-budget supervision as `running`, see conductor.ts's FIXING RECLAIM
+   *  phase) holding a PR that needs rework. Never scanned by the DRIVE loop (drivingWorkers()
+   *  above) — the two sets are mutually exclusive by construction (a row is in exactly one
+   *  `state` at a time). */
+  fixingWorkers(): WorkerRow[] {
+    return this.db.prepare("SELECT * FROM workers WHERE state = 'fixing' ORDER BY name").all() as unknown as WorkerRow[];
   }
 
   /** #172 graceful-handoff resume candidates. `resume_capped = 0` is a permanent one-way
@@ -1115,7 +1158,19 @@ export class State {
    *  retried forever. `gated_escalation_labeled = 1` (#147 P2) requires the escalation's
    *  needs-human label write to have actually SUCCEEDED — label absence is only a human act if
    *  the engine provably applied the label; a row whose label write failed (or that predates
-   *  the marker) is permanently invisible here (fail-closed, manual drive as before #147). */
+   *  the marker) is permanently invisible here (fail-closed, manual drive as before #147).
+   *
+   *  #245 NARROWED SEMANTICS (fix-loop): once the FIXABLE gate (sibling issue #246) is wired in,
+   *  ordinary review findings (HANDLE_THREADS) no longer escalate straight to `failed`+pr at
+   *  all — they route to a `fixing` leg instead (this row's `state` briefly leaves `driving`
+   *  entirely, see WorkerState's doc and fixingWorkers()). The ONLY producer of a `failed`+pr
+   *  row left standing is the fix_rounds CAP escalation (#246: driveDecision's FIXABLE-at-cap ->
+   *  ESCALATE branch, conductor.ts) — a lane that has exhausted its rework-round budget without
+   *  a clean review. Findings no longer masquerade as `failed`; a `failed`+pr row reaching this
+   *  query means "a human's real judgment call is needed", never "the producer left work
+   *  unaddressed". (This module's own deriveGate/driveOne still fold HANDLE_THREADS to HUMAN
+   *  directly — that gate rewrite is #246's delivery, not this one's; this comment states the
+   *  end-state invariant this table's shape is designed to hold once it lands.) */
   gatedFailedWorkers(): WorkerRow[] {
     return this.db
       .prepare(

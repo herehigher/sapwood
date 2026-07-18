@@ -19,7 +19,7 @@ import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
-import { UnresumableLaneError } from "../roles/worker.js";
+import { UnresumableLaneError, type WorkerProxyOpts } from "../roles/worker.js";
 import type { BoardStatus, CategorizedTokenUsage, ModelUsageEntry, ParkRow, PendingRollback, State, WorkerRow } from "../state/state.js";
 import {
   classifyEnvFailure,
@@ -278,6 +278,53 @@ export function driveDecision(gate: string, fixRounds: number, cap: number, over
   }
 }
 
+/** #245: the fix-loop's dependency seam — deliberately narrower than the full TickDeps a caller
+ *  (this module's own tick(), or #246's future FIXUP-dispatch branch inside it) already holds,
+ *  so a caller can pass a `Pick`-shaped subset without constructing a whole fake tick(). */
+export interface FixLegDeps {
+  state: State;
+  supervisor: Supervisor;
+  /** Renders the fix-leg's own prompt from the driving lane's issue + PR number (worker.ts's
+   *  buildRenderFixPrompt(cfg), built once at startup — same injection shape as WorkerDeps.
+   *  renderPrompt). Never receives review-finding TEXT: the fix leg pulls that itself, over the
+   *  PR-facing proxy tools (#244), once its own session starts (#245 AC — no prompt-injection
+   *  transport). */
+  renderFixPrompt: (issue: Issue, pr: number) => string;
+}
+
+/** #245: start a fix leg for a `driving` lane whose PR needs rework — the SOLE producer of a
+ *  `fixing` row, and the seam #246 (the FIXABLE gate) calls once its own driveDecision reaches
+ *  "FIXUP". Reuses #172's resume machinery outright: SAME worker row, SAME worktree/branch/
+ *  session lineage — never a fresh dispatch (the squash-branch-reuse hazard a new dispatch
+ *  against this lane's (possibly stale, possibly ahead) head would create). `fix_rounds` is an
+ *  INDEPENDENT counter from `resume_attempts` (schema v18->v19 migration comment) — bumped here,
+ *  together with the `driving` -> `fixing` state transition, in the SAME upsertWorker call,
+ *  and only AFTER resume() has confirmed a spawn: a thrown resume() leaves the row untouched
+ *  (still `driving`, `fix_rounds` un-incremented) so a transient spawn failure costs zero
+ *  fix-round budget and the next tick's gate can simply retry.
+ *
+ *  `w.pr` MUST be set (every `driving` row's invariant, #13) — a null PR is a caller bug, not a
+ *  normal runtime state, so this throws rather than silently no-op-ing (fail-safe, matching the
+ *  DRIVE loop's own "driving-lane-missing-pr" fail-safe in tick()). */
+export async function startFixLeg(
+  deps: FixLegDeps,
+  w: WorkerRow,
+  proxy?: WorkerProxyOpts,
+  now: () => Date = () => new Date(),
+): Promise<{ name: string; sessionId: string }> {
+  if (w.pr == null) {
+    throw new Error(`startFixLeg: lane ${w.name} (issue #${w.issue}) has no PR — a driving lane must always carry one`);
+  }
+  const pr = w.pr;
+  const issue: Issue = { number: w.issue, title: "", labels: [] };
+  const prompt = deps.renderFixPrompt(issue, pr);
+  const result = await deps.supervisor.resume(issue, w.name, { prompt, ...(proxy ? { proxy } : {}) });
+  const fixRounds = (w.fix_rounds ?? 0) + 1;
+  deps.state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
+  deps.state.appendEvent("fix-leg-started", { worker: w.name, issue: w.issue, pr, fixRounds, at: now().toISOString() });
+  return result;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tick orchestration: reclaim -> drive -> resume -> dispatch. Side-effecting collaborators are
 // injected (IForge, Supervisor, State, MergeGate) so the whole tick is unit-testable without
@@ -347,8 +394,12 @@ export interface ReclaimResult {
 export interface Supervisor {
   probe(worker: string): Promise<LaneProbe>;
   dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
-  /** Re-enter a terminal handoff as a fresh leg in the same session/worktree (#172). */
-  resume(issue: Issue, worker: string): Promise<{ name: string; sessionId: string }>;
+  /** Re-enter a terminal handoff as a fresh leg in the same session/worktree (#172). `opts`
+   *  (#245) is additive: `prompt` overrides the ordinary issue-rendered prompt (the fix-leg's
+   *  own fix instruction — see startFixLeg below); `proxy` attaches a forge MCP proxy handle to
+   *  the resumed leg, mirroring dispatch()'s own #244 attachment. Omitted -> today's entire
+   *  #172 handoff-resume behavior, unchanged. */
+  resume(issue: Issue, worker: string, opts?: { proxy?: WorkerProxyOpts; prompt?: string }): Promise<{ name: string; sessionId: string }>;
   /** Cheap, read-only classification of resume()'s durable spawn-intent marker (#172). */
   resumeIntentState(worker: string, issue: number): ResumeIntentState;
   /** Tear down a dead/stale lane (process-tree kill + worktree retention/cleanup, #69). */
@@ -486,6 +537,10 @@ export interface TickResult {
   gatedReclaimed: GatedReclaimOutcome[];
   /** #172 handoff lanes re-admitted to `running`, or escalated+latch-capped. */
   resumed: ResumeOutcome[];
+  /** #245: fixing-lane reclaim decisions this tick — a `fixing` lane is a LIVE fix-leg worker
+   *  process (same shape as an ordinary `running`-lane reclaim outcome; see the FIXING RECLAIM
+   *  phase in tick()). Empty when there were no `fixing` lanes this tick. */
+  fixingReclaimed: ReclaimOutcome[];
 }
 
 export interface TickDeps {
@@ -749,7 +804,10 @@ async function drainThenEscalate(
   state.recordCeilingBreach(reasons, nowDate);
   const drainRequested: string[] = [];
   const escalated: string[] = [];
-  const stillRunning = state.runningWorkers();
+  // #245: `fixing` lanes are live fix-leg worker processes — drained/escalated exactly like
+  // `running` ones (worker-paradigm supervision applies uniformly; see clearFixingReviewPinIfDriving
+  // and the FIXING RECLAIM phase's own doc for the rest of that contract).
+  const stillRunning = [...state.runningWorkers(), ...state.fixingWorkers()];
   for (const w of stillRunning) {
     // #168 P1-B: a drained lane that happens to be the llm episode's CANARY is settled
     // INCONCLUSIVE right here, at drain-request time — see releaseCanaryInconclusive's doc
@@ -1162,6 +1220,22 @@ async function reclaimTerminalLane(
   return null; // KEEP or DEAD — not a terminal sentinel; caller handles it
 }
 
+/** #245: once a fixing-origin lane's reclaim (reclaimTerminalLane, or the DEAD-path rescue in
+ *  the FIXING RECLAIM phase below) has landed it back in `driving`, the review-trigger pin from
+ *  its PRE-fix drive cycle must not carry forward — clearing it makes the very next DRIVE tick
+ *  treat the head as never-triggered and post a fresh review, reusing driveOne's own re-trigger
+ *  machinery (same shape as #147's GATED RECLAIM). Cleared unconditionally, not only when the
+ *  head provably moved: a duplicate trigger on an unchanged head is a harmless re-poke, never a
+ *  false MERGE_OK, and this row has no independently-tracked "head at fix-leg start" to compare
+ *  against. No-op if the lane didn't actually land in `driving` this call (re-escalated to
+ *  `failed`, or stayed `fixing`/KEPT) or if there was no pin to clear. */
+function clearFixingReviewPinIfDriving(state: State, name: string): void {
+  const row = state.getWorker(name);
+  if (row?.state === "driving" && (row.review_triggered_head != null || row.review_triggered_at != null)) {
+    state.upsertWorker({ ...row, review_triggered_head: null, review_triggered_at: null });
+  }
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now ?? (() => new Date());
@@ -1213,17 +1287,25 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
     }
     const reclaimed: ReclaimOutcome[] = [];
-    for (const w of state.runningWorkers()) {
+    // #245: a `fixing` lane is a LIVE fix-leg worker process — the kill switch's drain/hard-kill
+    // contract must supervise it exactly like a `running` lane (worker paradigm); it must never
+    // be left spinning just because the engine considers itself "killed".
+    for (const w of [...state.runningWorkers(), ...state.fixingWorkers()]) {
+      const wasFixing = w.state === "fixing";
       const p = await supervisor.probe(w.name);
       const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
-      if (terminal) reclaimed.push(terminal); // KEEP/DEAD lanes stay running -> drained below
+      if (terminal) {
+        if (wasFixing) clearFixingReviewPinIfDriving(state, w.name);
+        reclaimed.push(terminal); // KEEP/DEAD lanes stay running/fixing -> drained below
+      }
       // #155: no setLiveTelemetry here for a still-running (KEEP) lane — this branch is drain-
       // only (kill switch engaged); telemetry is left as its last known value until the lane
       // actually leaves `running` (reclaimTerminalLane above, or drainThenEscalate below —
       // both clear it). Refreshing display telemetry mid-drain isn't worth a special case.
     }
-    // drainThenEscalate re-reads runningWorkers() AFTER the terminal reclaim above transitioned
-    // those lanes out of `running`, so a just-recorded handoff/done lane is never re-touched.
+    // drainThenEscalate re-reads runningWorkers()+fixingWorkers() AFTER the terminal reclaim
+    // above transitioned those lanes out of `running`/`fixing`, so a just-recorded
+    // handoff/done/driving lane is never re-touched.
     const { drainRequested, escalated } = await drainThenEscalate(forge, state, supervisor, cfg, ["kill-switch"], now(), iso);
     return {
       reclaimed,
@@ -1237,6 +1319,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       rollbacks: [],
       gatedReclaimed: [],
       resumed,
+      fixingReclaimed: [],
     };
   }
 
@@ -1401,6 +1484,85 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     }
     state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
     reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
+  }
+
+  // ── FIXING RECLAIM (#245): a `fixing` lane is a LIVE fix-leg worker process (worker
+  //   paradigm) — same heartbeat/timeout/soft-budget supervision as an ordinary `running` lane,
+  //   deliberately NOT #170's review-silence escalation: that clock only ever fires from inside
+  //   the DRIVE loop below, which iterates state.drivingWorkers() — a `fixing` lane is never a
+  //   member of that set (fixingWorkers()' own doc), so silence escalation structurally cannot
+  //   arm here. DONE/FAILED terminal handling reuses reclaimTerminalLane verbatim — identical
+  //   env-failure classification, dirty-worktree retention, and has-PR rescue-to-`driving`
+  //   disposition to the ordinary RECLAIM loop above. The ONE thing unique to a fixing-origin
+  //   lane is clearing the review-trigger pin the instant it lands back in `driving`
+  //   (clearFixingReviewPinIfDriving) — #245's "on push of a fixed head ... the review trigger
+  //   pin is cleared so DRIVE re-triggers a fresh review", reusing driveOne's own re-trigger
+  //   machinery exactly the way #147's GATED RECLAIM does.
+  const fixingReclaimed: ReclaimOutcome[] = [];
+  for (const w of state.fixingWorkers()) {
+    const p = await supervisor.probe(w.name);
+    const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
+    if (terminal) {
+      clearFixingReviewPinIfDriving(state, w.name);
+      fixingReclaimed.push(terminal);
+      continue;
+    }
+    const costUsd = p.costUsd ?? 0;
+    const modelUsage = p.modelUsage ?? [];
+    const laneClass = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive, p.dispatchedAgeSec, cfg.worker.timeoutSec);
+    if (laneClass === "KEEP") {
+      if (p.liveTelemetry) state.setLiveTelemetry(w.name, p.liveTelemetry);
+      else state.clearLiveTelemetry(w.name);
+      fixingReclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
+      continue;
+    }
+    if (laneClass === "ADOPT") {
+      if (supervisor.requestHandoff(w.name)) {
+        state.appendEvent("lane-adopted", { worker: w.name, issue: w.issue, note: "Spend during engine downtime was unobserved." });
+      }
+      state.clearLiveTelemetry(w.name);
+      fixingReclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
+      continue;
+    }
+    // DEAD: crashed with no terminal sentinel. Kill the tree; a fixing lane always already
+    // carries a PR (inherited from `driving`) — a dirty worktree overrides the rescue (same #69
+    // policy as the ordinary DEAD path), otherwise rescue straight back to `driving` with the
+    // pin cleared exactly like the terminal path above.
+    state.clearLiveTelemetry(w.name);
+    const r = await supervisor.reclaim(w.name);
+    const deadAt = iso();
+    if (r.worktreeRetained) {
+      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
+      await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
+      state.settleTerminalWorker(
+        { ...w, state: "failed", ended_at: deadAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
+    } else if (p.hasPr) {
+      state.settleTerminalWorker(
+        {
+          ...w,
+          state: "driving",
+          ended_at: deadAt,
+          pr: p.prNumber ?? w.pr ?? null,
+          review_triggered_head: null,
+          review_triggered_at: null,
+        },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
+    } else {
+      // Fail-safe only — a fixing lane should never lack a PR; treat like any other no-PR dead
+      // lane: escalate rather than silently drop the fix attempt.
+      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      state.settleTerminalWorker(
+        { ...w, state: "failed", ended_at: deadAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
+    }
+    const rescued = p.hasPr && !r.worktreeRetained;
+    state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
+    fixingReclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
 
   // ── GATED RECLAIM (#147): a failed lane that DRIVE escalated (gate②/mergeDecision
@@ -2058,5 +2220,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     rollbacks,
     gatedReclaimed,
     resumed,
+    fixingReclaimed,
   };
 }

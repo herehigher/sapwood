@@ -1197,7 +1197,31 @@ export class WorkerSupervisor implements Supervisor {
    * #172 established that resumed total_cost_usd is PER-LEG, so the conductor records it
    * directly; tick()'s RESUME phase is this method's production caller.
    */
-  async resume(issue: Issue, name: string): Promise<{ name: string; sessionId: string }> {
+  /** #245: resume()'s own forge MCP proxy attachment — mirrors dispatch()'s #244 mint-before-
+   *  argv / --allowedTools widening / --mcp-config injection / teardown-on-every-exit-path
+   *  treatment (see WorkerProxyOpts' doc for the shared fail-closed rationale). This is the
+   *  fix-loop worker leg's evidence channel: a resumed leg (the SAME worker row/worktree/branch/
+   *  session — never a new dispatch, #245's squash-branch-reuse hazard) pulls its own PR review
+   *  findings via the PR-facing proxy tools rather than having them injected into the prompt (no
+   *  prompt-injection transport, #245 AC). `opts.prompt`, when supplied, REPLACES the ordinary
+   *  issue-rendered prompt with the caller's own (the fix leg's fix instruction) — every other
+   *  caller (today's entire #172 handoff-resume path) omits both new opts and keeps deriving the
+   *  prompt from `renderPrompt(issue)` exactly as before, byte-identical to pre-#245 behavior.
+   *
+   *  FAIL-CLOSED POLICY, identical to dispatch()'s: a proxy WITHOUT `credentialFree` is
+   *  non-fatal on mint failure — the leg still resumes, unattached. `credentialFree: true` is
+   *  different: a resumed leg dispatched that way has neither the gh/git credentialed-tool path
+   *  nor (if mint fails) a working evidence channel, so a failed mint REFUSES the resume outright
+   *  — a fix leg must never run silently unable to see the findings it exists to address. The
+   *  pre-existing `.handoff` sentinel and the lane's prior jsonl are left INTACT on this path
+   *  (unlike dispatch()'s fresh-jsonl cleanup): this is a RESUME, not a first dispatch — the
+   *  jsonl already holds real prior-leg history, and a refused resume must leave the lane exactly
+   *  as resumable as it was before this call, not destroy its record. */
+  async resume(
+    issue: Issue,
+    name: string,
+    opts?: { proxy?: WorkerProxyOpts; prompt?: string },
+  ): Promise<{ name: string; sessionId: string }> {
     const handoffPath = this.path(name, "handoff.json");
     const runningPath = this.path(name, "running.json");
     const running = this.readJson(runningPath);
@@ -1240,7 +1264,7 @@ export class WorkerSupervisor implements Supervisor {
           `resuming; refusing to resume an unguarded worker in hard mode`,
       );
     }
-    const prompt = (this.deps.renderPrompt ?? defaultPrompt)(issue);
+    const prompt = opts?.prompt ?? (this.deps.renderPrompt ?? defaultPrompt)(issue);
     const jsonlPath = this.path(name, "jsonl");
     // #33 (gate② P1): snapshot the pre-handoff stream's estimated total ONCE, before the
     // resumed run appends anything, so checkSoftBudget can compare only THIS RUN's new spend
@@ -1252,6 +1276,37 @@ export class WorkerSupervisor implements Supervisor {
     const jsonlLegOffset = Buffer.byteLength(priorJsonl);
     const jsonlFd = openSync(jsonlPath, "a"); // append: preserve the pre-handoff stream
     const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
+    // #245: mint BEFORE argv — same ordering as dispatch() (WorkerProxyOpts' doc): the handle's
+    // tool names / --mcp-config are needed before claudeArgs runs.
+    let proxyHandle: ForgeProxyHandle | undefined;
+    if (opts?.proxy) {
+      try {
+        proxyHandle = await opts.proxy.mint({ role: "worker", session: name });
+      } catch (e) {
+        const reason = sanitizeUpstreamError(e instanceof Error ? e.message : String(e));
+        this.recordProxyMintFailed(name, reason);
+        if (opts.proxy.credentialFree) {
+          try {
+            closeSync(jsonlFd);
+          } catch {
+            /* noop */
+          }
+          // NB (unlike dispatch()'s fresh-jsonl cleanup): the jsonl/.handoff sentinel here
+          // PRE-EXIST this resume attempt (real prior-leg history) — never removed. A refused
+          // resume leaves the lane exactly as resumable as it was before this call.
+          throw new Error(
+            `resume refused for lane ${name}: credentialFree was requested but the forge proxy mint failed — ` +
+              `a fix leg with neither the gh/git credentialed-tool path nor a working evidence channel must not run: ${reason}`,
+          );
+        }
+        this.log(`[sapwood:forge-proxy] lane ${name}: mint failed (non-fatal, proxy unattached): ${reason}`);
+      }
+    }
+    // #245: same fresh/empty per-lane GH_CONFIG_DIR scratch directory dispatch() creates —
+    // created regardless of whether credentialFree ends up true (cheap; lifecycle tied to this
+    // lane's own stateDir). Only actually pointed at by the spawn env when credentialFree is set.
+    const ghConfigDir = this.path(name, "gh-config-empty");
+    if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
     const args = claudeArgs({
       prompt,
       model: this.deps.cfg.worker.model,
@@ -1262,6 +1317,17 @@ export class WorkerSupervisor implements Supervisor {
       sessionId,
       resumeSessionId: sessionId,
       settings: settingsJson,
+      // #245: widen --allowedTools with the proxy's own tool names — same pattern as dispatch().
+      // Unattached resume (today's entire #172 handoff path) passes neither flag, byte-identical
+      // to pre-#245 behavior.
+      ...(proxyHandle
+        ? {
+            allowedTools: [opts?.proxy?.credentialFree ? WORKER_ALLOWED_TOOLS_NO_GH : WORKER_ALLOWED_TOOLS, ...proxyHandle.toolNames].join(
+              ",",
+            ),
+          }
+        : {}),
+      ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
     });
     const startedMs = this.now().getTime();
     const runningMarker = {
@@ -1285,17 +1351,33 @@ export class WorkerSupervisor implements Supervisor {
       throw e;
     }
     let child: ChildProcess;
+    // #245: baseEnv is credential-stripped (workerCredentialFreeEnv) ONLY when
+    // opts.proxy.credentialFree is explicitly set — every other resume() caller keeps inheriting
+    // process.env verbatim, unchanged from pre-#245 behavior.
+    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : process.env;
     try {
       // SAPWOOD_WORKTREE_ROOT (#235 PR-A): same lane/worktree as the original dispatch — a
       // resumed leg must keep Read/Grep/Glob confined too, not just the fresh-dispatch path.
       child = spawn(this.bin, args, {
         detached: true,
         stdio: ["ignore", jsonlFd, jsonlFd],
-        env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name) },
+        env: { ...baseEnv, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name) },
       });
     } catch (e) {
       closeSync(jsonlFd);
       this.removeIfExists(runningPath);
+      // #245: tear down the proxy even though spawn itself failed — mirrors dispatch()'s own
+      // spawn-failure branch (a thrown spawn must never leak a live listener/token).
+      if (proxyHandle) {
+        try {
+          await proxyHandle.stop();
+        } catch (te) {
+          this.log(
+            `[sapwood:forge-proxy] lane ${name}: teardown failed after resume-spawn error (non-fatal): ${sanitizeUpstreamError(te instanceof Error ? te.message : String(te))}`,
+          );
+        }
+      }
+      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(e)}`);
     }
     const lane: Lane = {
@@ -1312,6 +1394,8 @@ export class WorkerSupervisor implements Supervisor {
       estimatedCostUsd: 0,
       estimateBaselineUsd,
       jsonlLegOffset,
+      ...(proxyHandle ? { proxyHandle } : {}),
+      ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
@@ -1341,6 +1425,20 @@ export class WorkerSupervisor implements Supervisor {
         /* noop */
       }
       this.removeIfExists(runningPath);
+      // #245: same "never leak a minted proxy" stance as the synchronous spawn-failure branch
+      // above — this is the OTHER spawn-failure path (an async 'error' event raced against
+      // 'spawn'), and onExit is never reached for it (the lane is deleted from `this.lanes`
+      // before any 'exit' event, if one even fires).
+      if (proxyHandle) {
+        try {
+          await proxyHandle.stop();
+        } catch (te) {
+          this.log(
+            `[sapwood:forge-proxy] lane ${name}: teardown failed after resume-spawn error (non-fatal): ${sanitizeUpstreamError(te instanceof Error ? te.message : String(te))}`,
+          );
+        }
+      }
+      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     child.on("error", () => this.onExit(name, 1));
@@ -2186,4 +2284,64 @@ export function buildRenderPrompt(cfg: SapwoodConfig): (issue: Issue) => string 
     }
   }
   return (issue: Issue) => template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issue));
+}
+
+// ── #245: file-based FIX-LEG prompt (config.ts's worker.fixPromptFile + the shipped default) ──
+// Same #74 shape as the worker prompt above, one deliberate addition: `{{pr.number}}` — the
+// fix leg needs to know WHICH PR's review threads to pull via the proxy tools (issue.number
+// alone doesn't name it; a PR-facing tool call takes a PR number, not an issue number).
+
+/** Resolves the shipped default fix-leg prompt — `engine/prompts/fix.md` inside the engine
+ *  package (mirrors defaultPromptPath's resolution: relative to the engine package, never the
+ *  orchestrated repo). */
+export function defaultFixPromptPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "..", "prompts", "fix.md");
+}
+
+/** Load the fix-leg prompt TEMPLATE, raw and un-substituted, exactly ONCE. Either the operator's
+ *  `worker.fixPromptFile` (loadConfig has already resolved a relative path against the CONFIG
+ *  FILE's directory) or, when unset, the shipped default at `engine/prompts/fix.md`.
+ *
+ *  FAIL-FAST (#74 pattern): an explicitly configured `fixPromptFile` that's missing or
+ *  unreadable throws here, naming the path — never a silent fallback to the shipped default. */
+export function loadFixPromptTemplate(cfg: SapwoodConfig): string {
+  const configured = cfg.worker.fixPromptFile;
+  if (configured === undefined) return readFileSync(defaultFixPromptPath(), "utf8");
+  if (!existsSync(configured)) {
+    throw new Error(`worker.fixPromptFile not found: ${configured} — refusing to start a fix leg`);
+  }
+  try {
+    return readFileSync(configured, "utf8");
+  } catch (e) {
+    throw new Error(`worker.fixPromptFile unreadable: ${configured} (${String(e)}) — refusing to start a fix leg`);
+  }
+}
+
+/** Builds the fix-leg prompt renderer (#245): loads the template ONCE, eagerly — fail-fast on a
+ *  missing/unreadable/EMPTY `worker.fixPromptFile` AND on any unknown `{{var}}` happens here, at
+ *  build time, not lazily on the first fix leg. Meant to be called once at startup (mirrors
+ *  buildRenderPrompt) and threaded into conductor.ts's startFixLeg as `renderFixPrompt`. */
+export function buildRenderFixPrompt(cfg: SapwoodConfig): (issue: Issue, pr: number) => string {
+  const template = loadFixPromptTemplate(cfg);
+  if (template.trim() === "") {
+    throw new Error(
+      `fix-leg prompt template is empty${cfg.worker.fixPromptFile !== undefined ? `: ${cfg.worker.fixPromptFile}` : ""} — refusing to start an undirected fix leg`,
+    );
+  }
+  const vars: Record<string, (issue: Issue, pr: number) => string> = {
+    "issue.number": (issue) => String(issue.number),
+    "issue.title": (issue) => issue.title,
+    "issue.body": (issue) => issue.body ?? "",
+    "issue.labels": (issue) => issue.labels.join(", "),
+    "labels.verifyNa": () => cfg.labels.verifyNa,
+    "pr.number": (_issue, pr) => String(pr),
+  };
+  for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
+    const name = raw!.trim();
+    if (!Object.hasOwn(vars, name)) {
+      throw new Error(`fix-leg prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`);
+    }
+  }
+  return (issue: Issue, pr: number) => template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issue, pr));
 }

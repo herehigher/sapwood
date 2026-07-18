@@ -199,12 +199,20 @@ allow/deny pair on this page) — a role absent from the table below is granted 
 | `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks` |
 | *(any other role id)* | none — deny-by-default |
 
-**Scope: `dispatch()` only.** `WorkerSupervisor.resume()` does NOT attach a proxy — a resumed leg
-continues without one, unchanged from pre-#244 behavior. This is a deliberate scope decision (the
-`resume()` crash-consistency machinery is already substantial; consumer-shaped wiring, including
-its own proxy attachment, belongs to the actual consumer — issue #245's M9 fix loop), not an
-oversight — do not read anything on this page or in `configuration.md` as implying resumed legs
-are covered.
+**Scope, updated by #245: `WorkerSupervisor.resume()` now attaches a proxy too.** #244 shipped
+`dispatch()`-only attachment deliberately (the `resume()` crash-consistency machinery was already
+substantial, and consumer-shaped wiring belonged with the actual consumer). #245 (the M9 fix loop)
+is that consumer: a fix leg is a *resumed* leg (same worker row/worktree/branch/session — see
+"Fix-loop `fixing` lane state" below), and it needs `pr_review_threads`/`pr_reviews`/`pr_checks` as
+its evidence channel exactly as much as a fresh dispatch would. `resume()`'s attachment mirrors
+`dispatch()`'s byte-for-byte: mint-before-argv, `--allowedTools` widening with the proxy's own
+tool names, inline `--mcp-config` injection, `credentialFree`'s fail-closed policy, and teardown on
+every exit path (including the two resume-specific spawn-failure branches `dispatch()` doesn't
+have — the synchronous `spawn()` throw and the async `'error'`-before-`'spawn'` race). One
+resume-only divergence: a `credentialFree` mint failure closes the (already-opened) jsonl fd but
+does **not** delete the jsonl file or the `.handoff` sentinel the way `dispatch()`'s cleanup deletes
+its fresh, empty jsonl — a resume's jsonl holds real prior-leg history, and a refused resume must
+leave the lane exactly as resumable as it was before the call, not destroy its record.
 
 **`credentialFree` severs the `gh`/git CREDENTIALED-TOOL reach — not a worker leg's forge reach in
 general.** That distinction matters and is stated precisely here after a round-2 delta review
@@ -254,6 +262,48 @@ login` by default stores the token in the OS **keychain** instead, which neither
 nor the PoC exposes — the risk this note describes is sharpest wherever `gh` ends up with a
 plaintext on-disk token (Linux, CI images, an explicit non-keychain login), not a universal
 property of every `gh` installation.
+
+### Fix-loop `fixing` lane state (#245)
+
+Review findings (`HANDLE_THREADS`) used to fold straight to `needs-human` (`merge-driver.ts`'s
+`deriveGate`) — asking a human to *resolve* a review, which inverts the autonomy principle
+(humans adjudicate reviews, they never resolve them). #245 gives the producing worker its own
+lane state to address findings itself, *before* human escalation, without ever handing it a new
+dispatch or forge credentials:
+
+- **New `WorkerState`: `fixing`.** `driving` (holds a PR awaiting gate①/gate②) → `fixing` (a
+  LIVE fix-leg worker process reworking that same PR) → back to `driving` once the fix leg
+  reaches a terminal outcome. `state.ts`'s `activeWorkers()` counts `running + driving + fixing`
+  — a fixing lane occupies capacity exactly like the other two. The actual gate decision that
+  triggers `driving → fixing` (deriving `FIXABLE` from a live review verdict) is sibling issue
+  #246; #245 ships the lane-state machinery and the seam (`conductor.ts`'s `startFixLeg`) #246
+  calls once it decides.
+- **Fix leg = `resume()`, never a new `dispatch()`.** `startFixLeg` reuses #172's resume
+  machinery outright — same worker row, same worktree/branch/session lineage — specifically to
+  avoid the squash-branch-reuse hazard a fresh dispatch against this lane's (possibly-stale,
+  possibly-ahead) head would create. The fix leg's prompt (`worker.fixPromptFile`, engine-shipped
+  default `prompts/fix.md` — same `#74` config pattern as `worker.promptFile`) instructs the
+  worker to pull its own PR's review findings via the PR-facing proxy tools
+  (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`) — never via findings text relayed
+  through the prompt itself (no prompt-injection transport).
+- **`fix_rounds`** is a new per-PR counter (`workers.fix_rounds`, schema v18→v19), counting
+  rework rounds — deliberately independent of `resume_attempts` (#172's continuation-leg
+  counter): one axis is "how many times did this PR need fixing", the other is "how many budget-
+  exhaustion handoffs did one leg need" — they never share a counter, and a lane can spend both
+  independently.
+- **The `fixing` → `driving` edge clears the review-trigger pin** (`review_triggered_head`/`at`
+  reset to `null`), reusing `MergeDriver.driveOne`'s own re-trigger machinery to force a fresh
+  review on the fix leg's new head — the same shape as #147's gated-PR reentry.
+- **Supervision**: a `fixing` lane is a live worker process, so the SAME heartbeat/timeout/soft-
+  budget supervision and crash-safety machinery (`reclaimTerminalLane`, dirty-worktree retention,
+  the kill-switch drain) applies to it as to a `running` lane. It is NOT scanned by the DRIVE
+  loop (`state.drivingWorkers()` excludes `fixing` rows by construction), which is also why
+  #170's review-silence escalation structurally cannot arm while a lane is fixing — that clock
+  only ever fires from inside the DRIVE loop.
+- **Narrowed `gatedFailedWorkers()` semantics**: once #246 wires the `FIXABLE` gate in, ordinary
+  review findings no longer produce a `failed`+PR row at all (they route to `fixing` instead) —
+  the only remaining producer of that shape is the `fix_rounds` cap escalation. Findings no
+  longer masquerade as `failed`.
 
 ## Ambient repo context: record, don't seal (#236)
 
