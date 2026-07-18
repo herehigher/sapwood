@@ -17,6 +17,7 @@ import { after, test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
+import type { ContextManifest } from "../roles/context-manifest.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
@@ -268,6 +269,31 @@ const tapAndPoisonEvents = (state: State, poisonKind: string): Array<[string, un
  *  exactly (sha256 hex, first 16 chars) so a test can construct a matching/mismatching
  *  `expected_hash` for the concurrent-edit guard and the write-ahead decision fixtures below. */
 const contentVersionForTest = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
+
+/** #251: a structurally-valid ContextManifest for context-manifest persistence tests — same
+ *  shape as architect.test.ts/plan-review.test.ts/retro.test.ts's own `mkFakeManifest` fixtures
+ *  (`model` doubles as a tag so the persisted json is trivially distinguishable from another
+ *  fixture's). PO sessions carry no gh grant (PO_ALLOWED_TOOLS), same "structural-no-write-tools"
+ *  dirtyBasis architect.test.ts's fixture uses. */
+const mkFakeManifest = (tag: string): ContextManifest => ({
+  sources: [],
+  probedPaths: [],
+  knownUnprobed: "imports, ancestor dirs, managed policy",
+  capturedPreSpawn: "2026-07-17T00:00:00Z",
+  capturedPostExit: "2026-07-17T00:00:01Z",
+  captureBasis: "init-observed",
+  model: tag,
+  modelSource: "requested-fallback",
+  cliBin: "claude",
+  cliVersion: null,
+  toolInventoryHash: null,
+  promptTemplateVersion: null,
+  mcpTools: [],
+  worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
+  settingsHash: "hash",
+  hookHash: null,
+  recordedAt: "2026-07-17T00:00:01Z",
+});
 
 const LEGACY_LABEL_CONFIG = {
   labels: {
@@ -527,6 +553,71 @@ test("createAligningStub #231: input-manifest rows record what a normal po-align
     manifest.every((r) => r.role === "po"),
     true,
   );
+  state.close();
+});
+
+// ── #251: context-manifest persistence at align.ts's three runSessionWithRetry sites ───────────
+//
+// #236 wired peripheral.ts's `RetriedSession.contextManifest` opt-in at 5/8 runSessionWithRetry
+// call sites (harvest, architect, plan-review's drafter + reviewer, retro), deferring align.ts's
+// three (po-align, po-triage, po-pool) to avoid conflicting with #231's parallel rewrite of this
+// same file. #251 closes that gap — same shape as architect.test.ts's/plan-review.test.ts's/
+// retro.test.ts's own #236 persistence tests: a scripted "done" result carrying a fixture
+// `contextManifest`, asserted against `state.listContextManifestsForRound`.
+
+test("createAligningStub #251: the po-align session's context manifest is persisted, keyed by (round, 'aligning', 'po-align', session name, attempt 1)", async () => {
+  const forge = new FakeForge();
+  const manifest = mkFakeManifest("po-align-attempt");
+  const runner = new ScriptedRunner([{ ...doneResult("po-align-1", alignResultText([])), contextManifest: manifest }]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg: mkCfg(), runner };
+  await createAligningStub(deps).run({ roundId: 11, phase: "aligning", marker: null });
+  const rows = state.listContextManifestsForRound(11);
+  const row = rows.find((r) => r.session === "po-align-1");
+  assert.ok(row);
+  assert.equal(row!.phase, "aligning");
+  assert.equal(row!.role, "po-align");
+  assert.equal(row!.attempt, 1);
+  assert.deepEqual(JSON.parse(row!.json), manifest);
+  state.close();
+});
+
+test("createAligningStub #251: the po-triage session's context manifest is persisted, keyed by (round, 'aligning', 'po-triage', session name, attempt 1)", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [], body: NO_PLAN_BODY }];
+  const manifest = mkFakeManifest("po-triage-attempt");
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    { ...doneResult("po-triage-1", triageResultText(9, PLAN_BODY)), contextManifest: manifest },
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg: mkCfg(), runner };
+  await createAligningStub(deps).run({ roundId: 12, phase: "aligning", marker: null });
+  const rows = state.listContextManifestsForRound(12);
+  const row = rows.find((r) => r.session === "po-triage-1");
+  assert.ok(row);
+  assert.equal(row!.phase, "aligning");
+  assert.equal(row!.role, "po-triage");
+  assert.equal(row!.attempt, 1);
+  assert.deepEqual(JSON.parse(row!.json), manifest);
+  state.close();
+});
+
+test("createAligningStub #251: the po-pool session's context manifest is persisted, keyed by (round, 'aligning', 'po-pool', session name, attempt 1)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { po: { poolSelection: true } }, lanes: { max: 3, roundDispatchCap: 2 }, round: { poolFactor: 1 } });
+  forge.ready = [mkReady(1, 3), mkReady(2, 3)];
+  const manifest = mkFakeManifest("po-pool-attempt");
+  const runner = new ScriptedRunner([{ ...doneResult("role-po-pool-1", poolResultText([1])), contextManifest: manifest }]);
+  const state = new State(":memory:");
+  await runPoolSelection({ forge, cfg, state, runner, roundId: 13 });
+  const rows = state.listContextManifestsForRound(13);
+  const row = rows.find((r) => r.session === "role-po-pool-1");
+  assert.ok(row);
+  assert.equal(row!.phase, "aligning");
+  assert.equal(row!.role, "po-pool");
+  assert.equal(row!.attempt, 1);
+  assert.deepEqual(JSON.parse(row!.json), manifest);
   state.close();
 });
 

@@ -1245,6 +1245,15 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
         issue: 0,
         now,
         ...(deps.log !== undefined ? { log: deps.log } : {}),
+        // #251: record this session's ambient-context manifest for EVERY attempt, same (round,
+        // phase, role, session, attempt) key shape as the input-manifest rows above — see
+        // peripheral.ts's RetriedSession.contextManifest doc. Completes the 8/8 wiring #236
+        // deferred for align.ts's three PO sessions.
+        contextManifest: {
+          roundId: deps.roundId,
+          phase: INPUT_MANIFEST_PHASE,
+          record: (key, json, at) => deps.state.recordContextManifest(key, json, at),
+        },
         degradeEvent: "pool-degraded",
         degradePayload: (r) => ({
           round_id: deps.roundId,
@@ -1502,6 +1511,15 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             issue: 0,
             now,
             ...(deps.log !== undefined ? { log: deps.log } : {}),
+            // #251: record this session's ambient-context manifest for EVERY attempt, same
+            // (round, phase, role, session, attempt) key shape as the input-manifest rows above
+            // — see peripheral.ts's RetriedSession.contextManifest doc. Completes the 8/8 wiring
+            // #236 deferred for align.ts's three PO sessions.
+            contextManifest: {
+              roundId,
+              phase: INPUT_MANIFEST_PHASE,
+              record: (key, json, at) => deps.state.recordContextManifest(key, json, at),
+            },
             degradeEvent: "po-degraded",
             degradePayload: (result) => ({
               round_id: roundId,
@@ -1777,6 +1795,15 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             issue: issue.number,
             now,
             ...(deps.log !== undefined ? { log: deps.log } : {}),
+            // #251: record this session's ambient-context manifest for EVERY attempt, same
+            // (round, phase, role, session, attempt) key shape as the input-manifest rows above
+            // — see peripheral.ts's RetriedSession.contextManifest doc. Completes the 8/8 wiring
+            // #236 deferred for align.ts's three PO sessions.
+            contextManifest: {
+              roundId,
+              phase: INPUT_MANIFEST_PHASE,
+              record: (key, json, at) => deps.state.recordContextManifest(key, json, at),
+            },
             degradeEvent: "triage-degraded",
             degradePayload: (result) => ({
               round_id: roundId,

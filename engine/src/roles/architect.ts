@@ -46,6 +46,7 @@
 // contradiction is. Degrade policy is DELIBERATELY looser than the candidate-set path's: an
 // invalid/failed session lets the pool proceed UNFILTERED (never a gate, always advisory) — see
 // createArchitectStub's `architect-review-degraded` handling.
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,7 +57,7 @@ import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { type PeripheralStub, removeRoundPoolLabel } from "../loop/round.js";
 import { capDigest } from "../retro/retro-digest.js";
-import type { State } from "../state/state.js";
+import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
@@ -162,6 +163,59 @@ export const NO_POOL_MEMBERS = "(This round's pool is empty — there is nothing
  *  createArchitectStub's early-return), so an all-approved round (every Ready issue already past
  *  gate⓪) can legitimately have zero candidates while still having pool members to batch-review. */
 export const NO_CANDIDATES = "(No candidate issues are awaiting gate⓪ review this round.)";
+
+// ── #251: input manifest for the architect's own engine-controlled channels ─────────────────
+//
+// #231 shipped `input_manifest` keyed on (round, phase, role, session, attempt) but scoped its
+// coverage to the channels align.ts itself dispatches a session with (goal-file, backlog-digest,
+// issue-body, pool-candidates) — a deliberate scoping ruling (#231 gate② F1), since instrumenting
+// architect.ts then would have conflicted with #236's parallel rewrite of this exact file. #236
+// has since landed (context-manifest recording, wired at this file's own runSessionWithRetry call
+// below), so this follow-up (#251) closes that gap: every engine-controlled input this module
+// substitutes into the architect prompt gets its own row, one attempt per session dispatch,
+// mirroring align.ts's own `recordInputManifest`/`nextInputManifestAttempt` usage exactly.
+//
+// Architect dispatches exactly ONE session per phase call (no per-issue looping, unlike align.ts's
+// po-triage) — so `role` and `session` are both the fixed string "architect" (matching the
+// session's own roleId), and one attempt number covers every channel row below, derived
+// immediately before the real dispatch (the #243 F4 rule: this stub's early-return above — zero
+// candidates AND zero pool members — means a row is never written for a phase call that never
+// reaches a session dispatch at all).
+//
+// Channels covered (the exact set #231/#236's own scoping notes named as deferred): `last-merged`
+// (deps.lastMerged), `candidate-issues` (the candidates.summary substitution — contradiction-
+// review targets), `doctrine` (deps.doctrine), `directive` (this round's resolved directive), and
+// `architecture-chapter` (the goal/architecture content loadArchitectureChapter produces). Each of
+// these is a plain string this module renders verbatim into the prompt with no failure mode of its
+// own visible here (a read failure upstream — e.g. a missing PLAN.md, a missing doctrine file —
+// already degraded to an explicit placeholder before reaching this module, per each field's own
+// doc comment above); `ok: true` on every row is honest by that same "what the session actually
+// saw" standard the rest of this table uses — the placeholder text IS what was seen. `round.pool`
+// (the pool-review digest) and `alignedGoals` are deliberately NOT covered here: neither is named
+// in #251's channel list, and expanding scope beyond the issue's own acceptance criteria is not
+// this PR's call to make.
+const INPUT_MANIFEST_PHASE = "architecting";
+const INPUT_MANIFEST_ROLE = "architect";
+const INPUT_MANIFEST_SESSION = "architect";
+
+/** Short, stable content fingerprint (#231's manifest `version` field) — same convention as
+ *  align.ts's own contentVersion. */
+function contentVersion(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+/** Best-effort input-manifest write (#231/#251): failing to RECORD what a session's input looked
+ *  like must never block the session itself — the manifest is a record, not a gate. Mirrors
+ *  align.ts's own recordInputManifest exactly. */
+function recordInputManifest(state: State, row: InputManifestRow, log?: (message: string) => void): void {
+  try {
+    state.appendInputManifest(row);
+  } catch (e) {
+    (log ?? console.error)(
+      `[sapwood:architect] round ${row.round_id}: failed to record the input-manifest row (session ${row.session}, channel ${row.channel}): ${String(e)}`,
+    );
+  }
+}
 
 /** Extract PLAN.md's "## Architecture" chapter (case-insensitive heading match) — same
  *  heading-to-next-heading-of-equal-or-shallower-level slicing forge.ts's
@@ -520,21 +574,71 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         poolIssues.length === 0
           ? NO_POOL_MEMBERS
           : capDigest(poolIssues.map(formatCandidate).join("\n\n---\n\n"), deps.cfg.roles.architect.poolDigestMaxChars);
+      const lastMergedText = deps.lastMerged ?? NO_PRIOR_ROUND_YET;
+      const doctrineText = deps.doctrine ?? NO_DOCTRINE;
+      const candidatesSummaryText = candidates.length === 0 ? NO_CANDIDATES : candidates.map(formatCandidate).join("\n\n---\n\n");
 
       const prompt = renderArchitectPrompt(template, {
         "round.id": String(roundId),
         "round.marker": marker_,
         "round.designNoteIssue": String(anchor.number),
         "round.alignedGoals": deps.alignedGoals ?? NO_ALIGNED_GOALS_YET,
-        "round.lastMerged": deps.lastMerged ?? NO_PRIOR_ROUND_YET,
-        "round.doctrine": deps.doctrine ?? NO_DOCTRINE,
+        "round.lastMerged": lastMergedText,
+        "round.doctrine": doctrineText,
         "plan.architectureChapter": architectureChapter,
-        "candidates.summary": candidates.length === 0 ? NO_CANDIDATES : candidates.map(formatCandidate).join("\n\n---\n\n"),
+        "candidates.summary": candidatesSummaryText,
         "round.pool": poolDigest,
         "labels.blocked": deps.cfg.labels.blocked,
         "labels.needsHuman": deps.cfg.labels.needsHuman,
         "round.directive": directive,
       });
+
+      // #251: this session dispatch's input-manifest rows — ONE attempt number, derived
+      // immediately before the real dispatch (the early-return above already ruled out a
+      // no-session-runs call, so this point is only ever reached when a session is about to
+      // actually run — the #243 F4 rule), shared across every engine-controlled channel this
+      // prompt substitutes (see this file's own #251 module doc, above NO_CANDIDATES).
+      const architectAttempt = deps.state.nextInputManifestAttempt(
+        roundId,
+        INPUT_MANIFEST_PHASE,
+        INPUT_MANIFEST_ROLE,
+        INPUT_MANIFEST_SESSION,
+      );
+      const architectManifestBase = {
+        round_id: roundId,
+        phase: INPUT_MANIFEST_PHASE,
+        role: INPUT_MANIFEST_ROLE,
+        session: INPUT_MANIFEST_SESSION,
+        attempt: architectAttempt,
+        ok: true as const,
+        total: 1,
+        rendered: 1,
+        omitted: 0,
+        truncated: false,
+      };
+      recordInputManifest(
+        deps.state,
+        { ...architectManifestBase, channel: "last-merged", version: contentVersion(lastMergedText) },
+        deps.log,
+      );
+      recordInputManifest(
+        deps.state,
+        {
+          ...architectManifestBase,
+          channel: "candidate-issues",
+          version: contentVersion(candidatesSummaryText),
+          total: candidates.length,
+          rendered: candidates.length,
+        },
+        deps.log,
+      );
+      recordInputManifest(deps.state, { ...architectManifestBase, channel: "doctrine", version: contentVersion(doctrineText) }, deps.log);
+      recordInputManifest(deps.state, { ...architectManifestBase, channel: "directive", version: contentVersion(directive) }, deps.log);
+      recordInputManifest(
+        deps.state,
+        { ...architectManifestBase, channel: "architecture-chapter", version: contentVersion(architectureChapter) },
+        deps.log,
+      );
 
       const role = deps.cfg.roles.architect;
 

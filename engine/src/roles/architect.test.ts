@@ -12,12 +12,14 @@
 // to simulate a direct `gh issue comment/edit` side effect. The engine reads `resultText`,
 // validates it (including the candidate-set check), and performs every forge write itself.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import { NO_ROUND_DIRECTIVE } from "../config/directive.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { State } from "../state/state.js";
@@ -271,6 +273,115 @@ test("createArchitectStub (#236): a done session's context manifest is persisted
   assert.equal(rows[0]?.session, "architect-1");
   assert.equal(rows[0]?.attempt, 1);
   assert.deepEqual(JSON.parse(rows[0]?.json ?? "{}"), manifest);
+  state.close();
+});
+
+// ── #251: input-manifest rows for the architect's own engine-controlled channels ───────────
+//
+// #231 scoped input_manifest coverage to align.ts's own dispatched channels, deliberately
+// deferring architect-side channels (its own gate② F1 scoping ruling) since instrumenting them
+// then would have conflicted with #236's parallel rewrite of this exact file. #251 closes that
+// gap: `lastMerged`, candidate issue bodies, doctrine, the round directive, and the architecture-
+// chapter excerpt each get their own row, one attempt per session dispatch.
+
+const contentVersionForTest = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
+
+test("createArchitectStub #251: a real session dispatch records an input-manifest row for each of the 5 engine-controlled channels, sharing one attempt number", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [
+    { number: 10, title: "a", labels: [] },
+    { number: 11, title: "b", labels: [] },
+  ];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = {
+    forge,
+    state,
+    cfg: mkCfg(),
+    runner,
+    planMdPath: "/nonexistent/PLAN.md",
+    lastMerged: "Round 8 merged: #100, #101.",
+    doctrine: "Doctrine: never smuggle a label via session output.",
+  };
+  await createArchitectStub(deps).run({ roundId: 20, phase: "architecting", marker: null });
+
+  const rows = state.inputManifestRows(20);
+  assert.equal(rows.length, 5, "last-merged + candidate-issues + doctrine + directive + architecture-chapter");
+  assert.ok(
+    rows.every((r) => r.phase === "architecting" && r.role === "architect" && r.session === "architect" && r.attempt === 1 && r.ok),
+    "all 5 rows share the same (phase, role, session, attempt) identity",
+  );
+
+  const lastMergedRow = rows.find((r) => r.channel === "last-merged");
+  assert.equal(lastMergedRow?.version, contentVersionForTest("Round 8 merged: #100, #101."));
+
+  const doctrineRow = rows.find((r) => r.channel === "doctrine");
+  assert.equal(doctrineRow?.version, contentVersionForTest("Doctrine: never smuggle a label via session output."));
+
+  const directiveRow = rows.find((r) => r.channel === "directive");
+  assert.equal(
+    directiveRow?.version,
+    contentVersionForTest(NO_ROUND_DIRECTIVE),
+    "no directive file configured -> the explicit placeholder",
+  );
+
+  const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
+  assert.equal(architectureRow?.version, contentVersionForTest(loadArchitectureChapter("/nonexistent/PLAN.md")));
+
+  const candidatesRow = rows.find((r) => r.channel === "candidate-issues");
+  assert.equal(candidatesRow?.total, 2);
+  assert.equal(candidatesRow?.rendered, 2);
+  assert.equal(candidatesRow?.omitted, 0);
+  assert.equal(candidatesRow?.truncated, false);
+  state.close();
+});
+
+test("createArchitectStub #251: the candidate-issues manifest version changes on a title-only edit (same candidate numbers)", async () => {
+  const mkDeps = (title: string): ArchitectDeps => {
+    const forge = new FakeForge();
+    forge.planReviewCandidates = [{ number: 10, title, labels: [] }];
+    return {
+      forge,
+      state: new State(":memory:"),
+      cfg: mkCfg(),
+      runner: new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]),
+      planMdPath: "/nonexistent/PLAN.md",
+    };
+  };
+  const depsA = mkDeps("Original title");
+  await createArchitectStub(depsA).run({ roundId: 1, phase: "architecting", marker: null });
+  const versionA = depsA.state.inputManifestRows(1).find((r) => r.channel === "candidate-issues")!.version;
+  depsA.state.close();
+
+  const depsB = mkDeps("A completely different title"); // same candidate number, different title
+  await createArchitectStub(depsB).run({ roundId: 1, phase: "architecting", marker: null });
+  const versionB = depsB.state.inputManifestRows(1).find((r) => r.channel === "candidate-issues")!.version;
+  depsB.state.close();
+
+  assert.ok(versionA && versionB);
+  assert.notEqual(versionA, versionB, "title drift with the SAME candidate number must still change the recorded version");
+});
+
+test("createArchitectStub #251: no candidates AND no pool -> no session dispatch -> zero input-manifest rows (the #243 F4 rule)", async () => {
+  const forge = new FakeForge();
+  const runner = new ScriptedRunner([{ result: doneResult("s1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  await createArchitectStub(deps).run({ roundId: 21, phase: "architecting", marker: null });
+  assert.equal(runner.calls.length, 0, "no session dispatched");
+  assert.equal(state.inputManifestRows(21).length, 0, "a phase call that never dispatches a session never mints a phantom attempt");
+  state.close();
+});
+
+test("createArchitectStub #251: already-externalized round (marker present) -> no session, no new input-manifest rows", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("s1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
+  await createArchitectStub(deps).run({ roundId: 22, phase: "architecting", marker: architectMarker(22) });
+  assert.equal(runner.calls.length, 0);
+  assert.equal(state.inputManifestRows(22).length, 0);
   state.close();
 });
 
