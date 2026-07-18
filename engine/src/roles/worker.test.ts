@@ -1947,7 +1947,17 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     // Ignores TERM so it survives requestHandoff's SIGTERM; only the timeout's SIGKILL stops it.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
+    // #241 (same class of race as #229/PR #240): touch a ready-sentinel immediately after the
+    // trap is installed, and the test polls for it (bounded) instead of trusting a fixed sleep
+    // before sending requestHandoff's own SIGTERM. A fixed sleep can lose to bash's own
+    // scheduling under CPU load, letting that SIGTERM arrive BEFORE `trap '' TERM` is installed
+    // -- the shell then falls back to the DEFAULT (trap-less) SIGTERM disposition and dies
+    // immediately, which (since handoffRequested was already set, and the timeout tick hadn't
+    // fired yet) tags the lane .handoff instead of .failed, defeating the very race this test
+    // exists to pin down. Waiting for the provable handshake removes that window entirely: the
+    // trap can no longer be beaten by the following signal.
+    const trapReady = join(dir, "trap-ready");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nsleep 30\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     const s = new WorkerSupervisor({
       cfg: tcfg,
@@ -1959,7 +1969,10 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
       guardHookPath: mkHook(dir),
     });
     const { name: laneName } = await s.dispatch({ number: 63, title: "t", labels: [] });
-    await sleep(200);
+    // Bounded poll (20ms x 400 = 8s ceiling, same pattern PR #240 used for its own trap-ready
+    // handshake) for the trap to be provably installed before this test sends its own SIGTERM.
+    for (let i = 0; i < 400 && !existsSync(trapReady); i++) await sleep(20);
+    assert.ok(existsSync(trapReady), "stub's TERM trap was installed before requestHandoff's SIGTERM");
     assert.equal(s.requestHandoff(laneName), true); // sets handoffRequested; the stub ignores this TERM
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${laneName}.failed.json`)), "timeout wins over a pending handoff request");
