@@ -283,11 +283,13 @@ test("createArchitectStub (#236): a done session's context manifest is persisted
 // then would have conflicted with #236's parallel rewrite of this exact file. #251 closes that
 // gap: `last-merged`, `aligned-goals`, `doctrine`, `directive`, `candidate-issues`,
 // `architecture-chapter`, and `pool-digest` each get their own row, one attempt per session
-// dispatch. Gate② review round 2 (PR #258): `truncated` is only asserted on the three channels
-// this module actually reads/caps itself (`candidate-issues`/`architecture-chapter`/
-// `pool-digest`) — the four pass-through channels (`last-merged`/`aligned-goals`/`doctrine`/
-// `directive`) omit it, since this module has no visibility into whether an upstream cap already
-// truncated them (see architect.ts's own #251 module doc).
+// dispatch. Gate② review round 3 (Codex delta-verify F1): `truncated` is a genuine THREE-STATE
+// column (schema v16->v17) — `true`/`false` for the three channels this module actually reads/
+// caps itself (`candidate-issues`/`architecture-chapter`/`pool-digest`), and `null` (never a
+// coerced `false`) for the four pass-through channels (`last-merged`/`aligned-goals`/`doctrine`/
+// `directive`), since this module has no visibility into whether an upstream cap already
+// truncated them (see architect.ts's own #251 module doc and state.ts's v16->v17 migration
+// comment for why the round-2 draft's `truncated: false` assertion there was dishonest).
 
 const contentVersionForTest = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
@@ -327,25 +329,24 @@ test("createArchitectStub #251: a real session dispatch records an input-manifes
     "all 7 rows share the same (phase, role, session, attempt) identity",
   );
 
-  // `truncated`'s DB column is `INTEGER NOT NULL DEFAULT 0` (#231's own schema) — omitting the
-  // key from the object literal we WRITE (rather than asserting `truncated: false`) can never
-  // round-trip back as anything but `false` at the storage layer; the honesty distinction PM's
-  // review asked for lives in the SOURCE (this module never claims in code "I know this wasn't
-  // truncated" for a channel it doesn't cap), not in a persisted value the schema can't
-  // represent as "unknown." A schema migration to make the column nullable is out of scope here
-  // (no new plumbing, PM ruling) and would buy nothing observable either way.
+  // `truncated`'s DB column is a genuine three-state `INTEGER` (schema v16->v17: nullable, no
+  // DEFAULT) — omitting the key from the object literal we WRITE round-trips as `null`, NEVER as
+  // an explicit `false`. This is the regression the round-2 fixture would NOT have caught (it
+  // asserted `false`, which is exactly what the pre-fix coercion bug also produced).
   const lastMergedRow = rows.find((r) => r.channel === "last-merged");
   assert.equal(lastMergedRow?.ok, true);
   assert.equal(lastMergedRow?.version, contentVersionForTest("Round 8 merged: #100, #101."));
-  assert.equal(lastMergedRow?.truncated, false);
+  assert.equal(lastMergedRow?.truncated, null, "omitted, not coerced to false — the pass-through channel has no cap visibility");
 
   const alignedGoalsRow = rows.find((r) => r.channel === "aligned-goals");
   assert.equal(alignedGoalsRow?.ok, true);
   assert.equal(alignedGoalsRow?.version, contentVersionForTest("Decompose the auth module first, then billing."));
+  assert.equal(alignedGoalsRow?.truncated, null);
 
   const doctrineRow = rows.find((r) => r.channel === "doctrine");
   assert.equal(doctrineRow?.ok, true);
   assert.equal(doctrineRow?.version, contentVersionForTest("Doctrine: never smuggle a label via session output."));
+  assert.equal(doctrineRow?.truncated, null);
 
   const directiveRow = rows.find((r) => r.channel === "directive");
   assert.equal(directiveRow?.ok, true);
@@ -354,6 +355,7 @@ test("createArchitectStub #251: a real session dispatch records an input-manifes
     contentVersionForTest(NO_ROUND_DIRECTIVE),
     "no directive file configured -> the explicit placeholder",
   );
+  assert.equal(directiveRow?.truncated, null);
 
   const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
   assert.equal(architectureRow?.ok, true, "a real, readable PLAN.md -> a genuine read success");

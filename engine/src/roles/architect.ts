@@ -249,23 +249,50 @@ export function extractArchitectureChapter(planMd: string): string | null {
   return extractMarkdownSections(planMd, /Architecture\b/)[0] ?? null;
 }
 
-/** Load + extract the architecture chapter from disk. Missing/unreadable file or missing
- *  heading both degrade to an explicit placeholder string (never a throw, never a silent
- *  substitution of the raw file) — architecture review is advisory, so a docs read failure
- *  must not abort the round; the placeholder makes the degradation visible to anyone reading
- *  the architect's rendered prompt/transcript. */
-export function loadArchitectureChapter(path: string): string {
+/** #251 gate② review round 3 (Codex delta-verify F2): ONE read, consumed by BOTH the prompt
+ *  substitution (`loadArchitectureChapter` below, unchanged public signature) and the
+ *  architecture-chapter input-manifest row — a duplicated existsSync/readFileSync check (this
+ *  module's round-2 draft) could disagree with the real read under concurrent file replacement
+ *  (a TOCTOU window: the file could be renamed/deleted between the two independent checks), and
+ *  "the two can never disagree" was accordingly a false claim. `ok`/`detail` reflect the ACTUAL
+ *  read outcome from this single pass (`false` + a reason only for ENOENT/an unreadable file —
+ *  never for a missing "## Architecture" heading in an otherwise-successfully-read file, which
+ *  is a content-shape issue, not a read failure). */
+function loadArchitectureChapterWithStatus(path: string): { chapter: string; ok: boolean; detail: string | null } {
   if (!existsSync(path)) {
-    return `(PLAN.md not found at ${path} — proceeding with no architecture chapter available.)`;
+    return {
+      chapter: `(PLAN.md not found at ${path} — proceeding with no architecture chapter available.)`,
+      ok: false,
+      detail: `PLAN.md not found at ${path}`,
+    };
   }
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch (e) {
-    return `(PLAN.md at ${path} could not be read: ${String(e)} — proceeding with no architecture chapter available.)`;
+    return {
+      chapter: `(PLAN.md at ${path} could not be read: ${String(e)} — proceeding with no architecture chapter available.)`,
+      ok: false,
+      detail: `PLAN.md at ${path} could not be read: ${String(e)}`,
+    };
   }
   const chapter = extractArchitectureChapter(text);
-  return chapter ?? `(No "## Architecture" heading found in ${path} — proceeding with no architecture chapter available.)`;
+  return {
+    chapter: chapter ?? `(No "## Architecture" heading found in ${path} — proceeding with no architecture chapter available.)`,
+    ok: true,
+    detail: null,
+  };
+}
+
+/** Load + extract the architecture chapter from disk. Missing/unreadable file or missing
+ *  heading both degrade to an explicit placeholder string (never a throw, never a silent
+ *  substitution of the raw file) — architecture review is advisory, so a docs read failure
+ *  must not abort the round; the placeholder makes the degradation visible to anyone reading
+ *  the architect's rendered prompt/transcript. Public signature UNCHANGED (delegates to
+ *  loadArchitectureChapterWithStatus above) — several existing call sites/tests already depend
+ *  on this returning a plain string. */
+export function loadArchitectureChapter(path: string): string {
+  return loadArchitectureChapterWithStatus(path).chapter;
 }
 
 /** One candidate issue's block in the substituted prompt: number, title, labels, full body —
@@ -576,28 +603,15 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // <cwd>/docs/PLAN.md, then roles.architect.planMdPath (#104), which broke for any target
       // repo keeping its architecture doc elsewhere).
       const architecturePath = deps.planMdPath ?? deps.cfg.goal.file;
-      const architectureChapter = loadArchitectureChapter(architecturePath);
-      // #251: this module's OWN read-status check for the architecture-chapter manifest channel
-      // below — kept LOCAL (no new ArchitectDeps/round-defaults plumbing, PM ruling on the #258
-      // gate② review) rather than changing loadArchitectureChapter's return shape, which several
-      // existing call sites/tests already depend on as a plain string. Mirrors
-      // loadArchitectureChapter's own existsSync/readFileSync checks exactly, so the two can never
-      // disagree about what "unreadable" means. A missing "## Architecture" heading in an
-      // otherwise-successfully-read file is deliberately NOT treated as a read failure here (see
-      // this file's own #251 module doc, above NO_CANDIDATES).
-      let architectureChapterOk = true;
-      let architectureChapterDetail: string | null = null;
-      if (!existsSync(architecturePath)) {
-        architectureChapterOk = false;
-        architectureChapterDetail = `PLAN.md not found at ${architecturePath}`;
-      } else {
-        try {
-          readFileSync(architecturePath, "utf8");
-        } catch (e) {
-          architectureChapterOk = false;
-          architectureChapterDetail = `PLAN.md at ${architecturePath} could not be read: ${String(e)}`;
-        }
-      }
+      // #251 gate② review round 3 (F2): ONE read (loadArchitectureChapterWithStatus, above),
+      // consumed by both the prompt substitution and the architecture-chapter manifest row below
+      // — a round-2 draft duplicated existsSync/readFileSync in two places, which could disagree
+      // under concurrent file replacement (TOCTOU); a single read can't disagree with itself.
+      const {
+        chapter: architectureChapter,
+        ok: architectureChapterOk,
+        detail: architectureChapterDetail,
+      } = loadArchitectureChapterWithStatus(architecturePath);
       // The round design note needs SOME issue to live on (GitHub has no round/project-level
       // comment surface this role can write to — its writes are issue comment/label edit only);
       // the lowest-numbered candidate is an arbitrary but deterministic, reproducible anchor —
