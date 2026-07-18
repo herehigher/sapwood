@@ -513,14 +513,31 @@ async function reviewOneIssue(
     }
 
     if (decision.decision === "verify_na") {
-      // ORDERING INVARIANT (dual-review round 1, P1): needsHuman MUST land BEFORE verifyNa.
-      // verify:n/a without needs-human is a DISPATCHABLE state (the doc-gate path) — so if the
-      // second addLabel call fails after the first succeeded, the label the issue is left
-      // holding alone must be the blocking one. needsHuman-first fails closed (issue stuck
-      // non-dispatchable, a human notices); verifyNa-first fails OPEN (the issue dispatches via
-      // the doc-gate path without the human adjudication this whole outcome exists to require).
+      // ORDERING INVARIANT (dual-review round 1, P1; extended #214 gate② review delta P2):
+      // needsHuman label -> comment -> verifyNa label, in that exact order. Three crash windows,
+      // every one safe:
+      //   1. Crash before/during the needsHuman write -> no verifyNa either -> the issue is
+      //      exactly as it was (or needs-human-only, still non-dispatchable) — safe.
+      //   2. Crash after needsHuman lands but before/during the comment -> needs-human-only,
+      //      still non-dispatchable, no instructions posted yet but also nothing to act on
+      //      incorrectly — safe, and a rerun of this issue (it never left the pool: needsHuman
+      //      excludes it from isPoolEligible, so nothing re-drives it, but nothing HARMFUL is
+      //      possible either — a human still sees the bare needs-human hold and the reviewer's
+      //      decision.body would need to be re-derived some other way; accepted, same class of
+      //      residual as any other mid-write crash in this file).
+      //   3. Crash after the comment lands but before/during the verifyNa write -> needs-human-
+      //      only, STILL non-dispatchable, but now WITH the (possibly dual-label) cleanup
+      //      instructions already visible — fails toward MORE information, never less.
+      // The one ordering this rules out by construction: verifyNa landing without the comment
+      // already having landed. Before #214 gate② review's delta, the comment (with its
+      // conditional dual-cleanup note, see below) was posted AFTER both labels — a crash between
+      // addLabel(verifyNa) and addIssueComment left needsHuman+verifyNa+planApproved (the exact
+      // forbidden #94 mixed state) with ZERO instruction on the issue, and no rerun ever revisits
+      // it (needsHuman-holding issues are excluded from pool eligibility, so nothing re-drives
+      // this code path) — a human then removing only needsHuman would recreate the very stranding
+      // this comment exists to prevent. verifyNa now lands LAST, only once the (possibly dual-
+      // label) instructions are already durably posted.
       await deps.forge.addLabel(issue.number, l.needsHuman);
-      await deps.forge.addLabel(issue.number, l.verifyNa);
       // #214 gate② review (P2): confirm-invalidate makes this branch reachable for an issue that
       // ALREADY carries plan:approved — a case reviewOneIssue never saw pre-#214 (a cold-start
       // candidate is always unapproved, see createPlanReviewStub's class 1). The engine may not
@@ -533,7 +550,7 @@ async function reviewOneIssue(
       // (forge.ts's isDispatchable) and pool re-entry (forge.ts's isPoolEligible, #214) alike, a
       // silent stranding a human would have no reason to suspect. Name BOTH cleanup options
       // explicitly whenever the issue's already-approved, no label machinery beyond the same two
-      // addLabel calls above.
+      // addLabel calls in this branch.
       const cleanupNote = labelsInclude(issue.labels, l.planApproved)
         ? `\n\n---\n\nThis issue already carries \`${l.planApproved}\` from a prior approval. To ` +
           `accept this verify:n/a proposal, remove BOTH \`${l.needsHuman}\` AND ` +
@@ -543,6 +560,7 @@ async function reviewOneIssue(
           `\`${l.verifyNa}\` — the plan goes through review again.`
         : "";
       await deps.forge.addIssueComment(issue.number, `${decision.body}${cleanupNote}\n\n${marker}`);
+      await deps.forge.addLabel(issue.number, l.verifyNa);
       return; // outcome 3 (verify:n/a proposal) — a human resolves it
     }
 
@@ -620,7 +638,12 @@ async function reviewOneIssue(
  *  reviewOneIssue's own session-invalid branch uses. `plan:approved` is NEVER touched here
  *  (neither branch ever calls addLabel/removeLabel for it) — a crash mid-confirm leaves the
  *  label exactly as it was, so a rerun simply re-confirms: idempotent by construction, no marker
- *  of its own needed beyond the phase's existing one. */
+ *  of its own needed beyond the phase's existing one.
+ *
+ *  A confirm SESSION is dispatched only when the current body still has SOMETHING to confirm —
+ *  see the extractVerificationPlan check at the top: an approved-but-planless orphan (#214 gate②
+ *  review's forge.ts fix widened pool eligibility to include it) skips the session entirely and
+ *  goes straight to the draft cycle, deterministically. */
 async function confirmOneIssue(
   deps: PlanReviewDeps,
   issue: Issue,
@@ -631,6 +654,34 @@ async function confirmOneIssue(
 ): Promise<void> {
   const now = deps.now ?? ((): Date => new Date());
   const currentBody = await deps.forge.getIssueBody(issue.number);
+
+  // #214 gate② review (delta P2): a schema-valid "confirm" over a planless body is a real,
+  // reachable session outcome — validateConfirmOutput deliberately carries no content invariant
+  // (a confirm is re-affirming an ALREADY-verified plan, not making a fresh claim one exists; see
+  // its own doc). Trusting the session here would leave: zero forge writes -> the body still has
+  // no plan section -> dispatch still fails (forge.ts's isDispatchable body check) -> round close
+  // releases the pool label -> the issue re-pools next round -> ANOTHER confirm session, forever
+  // — a silent, budget-burning loop with no forward progress. Fixed engine-side, deterministically,
+  // never relying on session honesty: re-check the SAME content invariant reviewOneIssue's own
+  // "approve" branch already re-checks (extractVerificationPlan) BEFORE ever dispatching a confirm
+  // session. A miss skips the confirm session entirely — zero session cost — and seeds the
+  // ORDINARY draft-cycle machinery directly with a deterministic, engine-authored brief, exactly
+  // as if a full reviewer had just bounced with "draft_request".
+  if (extractVerificationPlan(currentBody) == null) {
+    await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
+      decision: {
+        decision: "draft_request",
+        issue: issue.number,
+        body:
+          "This issue carries plan:approved but its body no longer contains a verification-plan " +
+          "section — restore or rewrite the plan so its acceptance criteria and verification " +
+          "steps are explicit again.",
+      },
+      trailEntry: "confirm: skipped — approved body has no verification plan section",
+    });
+    return;
+  }
+
   const currentIssue: Issue = { ...issue, body: currentBody };
   const confirmPrompt = renderRolePrompt(confirmTemplate, currentIssue, deps.cfg);
   // The confirm pass shares the plan-reviewer's own role config (model/effort/fallback) — #214
