@@ -24,31 +24,50 @@ import { labelsInclude, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { ReviewAction, Reviewer, ReviewFailoverTransition, ReviewFallbackLock, ReviewTriggerPin } from "./reviewer.js";
 import { changesRequestedOnHead, NO_FALLBACK_LOCK, resolveReviewVerdict } from "./reviewer.js";
 
-export type Gate = "MERGE" | "WAIT" | "HUMAN";
+export type Gate = "MERGE" | "WAIT" | "HUMAN" | "FIXABLE";
 
 /**
- * Pure gate derivation: gate① (CI green) + gate② (review verdict) + PR state/draft/risk-labels
- * -> a scheduling gate. Fail-safe ordering — a non-OPEN PR, a draft, or any configured
+ * Pure gate derivation: gate① (CI green/red) + gate② (review verdict) + PR state/draft/risk-
+ * labels -> a scheduling gate. Fail-safe ordering — a non-OPEN PR, a draft, or any configured
  * human-triage label always wins (never auto-act on one), checked before the review verdict.
  *
- * NOTE (scope): 0day's pr_gate.sh ACTION protocol also has a FIXABLE gate (CI_RED / unresolved
- * review threads) that dispatches a fixup-worker in a bounded retry loop
- * (drive_decision/fix_rounds, ops/loop/loop_conductor.sh:941-1053). This port folds
- * HANDLE_THREADS straight to HUMAN — fixup-worker auto-dispatch is a distinct subsystem (a new
- * Supervisor dispatch shape + a fix-rounds counter) out of scope for #13's review-gate +
- * merge-driver delivery. Deferred as a follow-up, same pattern as M2's #31/#33/#37.
+ * #246: FIXABLE — a bounded, mechanical rework loop. 0day's pr_gate.sh ACTION protocol has a
+ * FIXABLE gate (CI_RED / unresolved review threads) that dispatches a fixup-worker in a bounded
+ * retry loop (drive_decision/fix_rounds, ops/loop/loop_conductor.sh:941-1053); this function
+ * ported only the ELIGIBILITY half of that (whether findings/CI-red route to a rework attempt
+ * at all) — the fix_rounds COUNTER and the FIXUP-vs-ESCALATE-at-cap decision live one level up,
+ * in conductor.ts's driveDecision (fed by the caller's own WorkerRow.fix_rounds — genuinely
+ * per-lane state this pure PR-level function never sees). `prFixCap` here is only the STATIC
+ * enable/disable switch (cfg.lanes.prFixCap > 0): at 0 the FIXABLE gate never fires at all, and
+ * HANDLE_THREADS/CI_RED fold to the EXACT pre-#246 code path (HUMAN/WAIT respectively) — this is
+ * what makes `prFixCap: 0` byte-for-byte identical to today's behavior, not merely equivalent
+ * (the #246 acceptance criterion), independent of whatever fix_rounds a lane happens to carry.
+ *
+ * CI_RED is FIXABLE only "alongside a decisive verdict" (owner ruling, #246): `ciRed` is
+ * consulted ONLY in the MERGE_OK branch (review has nothing blocking, CI is the sole blocker) —
+ * a red check while review is still in progress (WAIT_REVIEW) or unavailable does not preempt
+ * those states, unlike 0day's pr_gate.sh (which checks CI_RED before anything else). `ciGreen`
+ * still wins over `ciRed` — a rollup only ever reports one or the other true (see
+ * forge.ts's parsePRStatus), so this is belt-and-suspenders ordering, not a real conflict.
  */
 export function deriveGate(input: {
   ciGreen: boolean;
+  /** #246: a genuinely FAILED check, tri-state alongside ciGreen — see PRStatus.ciRed's own doc
+   *  for why `!ciGreen` alone can't distinguish "still pending" from "actually red". */
+  ciRed: boolean;
   reviewAction: ReviewAction;
   isDraft: boolean;
   prState: PRStatus["state"];
   labels: string[];
   humanLabels: readonly string[];
+  /** #246: cfg.lanes.prFixCap — the FIXABLE gate's static enable switch (see this function's
+   *  own doc). NOT the per-lane fix_rounds counter (conductor.ts's driveDecision owns that). */
+  prFixCap: number;
 }): Gate {
   if (input.prState !== "OPEN") return "HUMAN"; // already merged/closed -> never touch
   if (input.isDraft) return "HUMAN"; // draft is human territory
   if (labelsIncludeAnySubstring(input.labels, input.humanLabels)) return "HUMAN";
+  const fixableEnabled = input.prFixCap > 0;
   switch (input.reviewAction) {
     case "REVIEW_UNAVAILABLE":
       // Rate-limit/timeout/malformed review query: QUEUE (WAIT), never skip gate② by treating
@@ -56,11 +75,17 @@ export function deriveGate(input: {
       // finding — it's an infrastructure hiccup, retried next tick (#13).
       return "WAIT";
     case "HANDLE_THREADS":
-      return "HUMAN"; // findings — see NOTE above
+      // #246: findings route to a bounded rework attempt (FIXABLE) when the loop is enabled;
+      // prFixCap === 0 preserves the exact pre-#246 fold-to-HUMAN.
+      return fixableEnabled ? "FIXABLE" : "HUMAN";
     case "WAIT_REVIEW":
       return "WAIT";
     case "MERGE_OK":
-      return input.ciGreen ? "MERGE" : "WAIT"; // gate① not yet green -> keep waiting
+      if (input.ciGreen) return "MERGE";
+      // #246: CI_RED alongside a decisive (MERGE_OK) verdict is also FIXABLE — a red pipeline
+      // is more mechanical than a review finding and has even less claim on human time (owner
+      // ruling). Still-pending CI (ciRed === false) keeps the pre-#246 WAIT.
+      return input.ciRed && fixableEnabled ? "FIXABLE" : "WAIT";
     default:
       return "HUMAN"; // fail-safe: an unrecognized action never auto-merges
   }
@@ -119,6 +144,11 @@ export type DriveOutcome = (
   | { kind: "needs-human"; pr: number; reason: string }
   | { kind: "queued"; pr: number; reason: string }
   | { kind: "stopped"; pr: number; reason: string } // produce-pr-and-stop: gates report, never merges
+  // #246: gate === FIXABLE in conductor-merge mode — the caller (conductor.ts tick()'s DRIVE
+  // loop) owns the fix_rounds/cap/budget decision (driveDecision) this pure class never sees;
+  // `reason` carries enough of the underlying signal (unresolved-thread count / CI-red) for the
+  // caller's own escalation comment, without this class fetching review-finding TEXT itself.
+  | { kind: "fixable"; pr: number; reason: string }
 ) & {
   /** The reviewer-failover audit signal for this tick (#54), when one applies. STATELESS —
    *  reported on every tick the condition holds (see ReviewFailoverTransition); the caller
@@ -372,15 +402,29 @@ export class MergeDriver {
 
     const gate = deriveGate({
       ciGreen: status.ciGreen,
+      ciRed: status.ciRed ?? false,
       reviewAction: verdict.action,
       isDraft: data.isDraft,
       prState: data.state,
       labels: data.labels,
       humanLabels: cfg.escalation.humanLabels,
+      prFixCap: cfg.lanes.prFixCap,
     });
 
     if (gate === "WAIT") return withSignals({ kind: "queued", pr, reason: `gate-pending:${verdict.action}` });
     if (gate === "HUMAN") return withSignals({ kind: "needs-human", pr, reason: `gate:${gate}:${verdict.action}` });
+    if (gate === "FIXABLE") {
+      // produce-pr-and-stop (#246 AC): gates report FIXABLE, never act — no fix-leg dispatch,
+      // no side effects. Same "stopped" outcome kind the MERGE gate already reuses below.
+      if (cfg.merge.mode === "produce-pr-and-stop") {
+        return withSignals({ kind: "stopped", pr, reason: `gates-passed:FIXABLE:${verdict.action}` });
+      }
+      return withSignals({
+        kind: "fixable",
+        pr,
+        reason: `gate:FIXABLE:${verdict.action}:unresolvedThreads=${data.unresolvedThreads}:ciRed=${status.ciRed ?? false}`,
+      });
+    }
 
     // gate === "MERGE" from here on.
     if (cfg.merge.mode === "produce-pr-and-stop") {

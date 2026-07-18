@@ -71,11 +71,13 @@ test("mergeDecision (sapwood extension beyond 0day parity): REVIEW_UNAVAILABLE q
 const HUMAN_LABELS = ["needs-human", "blocked"];
 const gateInput = (over: Partial<Parameters<typeof deriveGate>[0]> = {}) => ({
   ciGreen: true,
+  ciRed: false,
   reviewAction: "MERGE_OK" as ReviewAction,
   isDraft: false,
   prState: "OPEN" as const,
   labels: [] as string[],
   humanLabels: HUMAN_LABELS,
+  prFixCap: 2,
   ...over,
 });
 
@@ -95,8 +97,31 @@ test("deriveGate: REVIEW_UNAVAILABLE -> WAIT (queue) — never HUMAN, never MERG
   assert.equal(deriveGate(gateInput({ reviewAction: "REVIEW_UNAVAILABLE" })), "WAIT");
 });
 
-test("deriveGate: HANDLE_THREADS (findings) -> HUMAN (fixup-worker auto-dispatch deferred, see merge-driver.ts NOTE)", () => {
-  assert.equal(deriveGate(gateInput({ reviewAction: "HANDLE_THREADS" })), "HUMAN");
+test("deriveGate (#246): HANDLE_THREADS (findings) -> FIXABLE when the fix loop is enabled (prFixCap > 0)", () => {
+  assert.equal(deriveGate(gateInput({ reviewAction: "HANDLE_THREADS" })), "FIXABLE");
+});
+
+test("deriveGate (#246): prFixCap === 0 folds HANDLE_THREADS straight to HUMAN — byte-for-byte the pre-#246 behavior", () => {
+  assert.equal(deriveGate(gateInput({ reviewAction: "HANDLE_THREADS", prFixCap: 0 })), "HUMAN");
+});
+
+test("deriveGate (#246): CI_RED alongside a decisive (MERGE_OK) verdict -> FIXABLE when enabled; still-pending CI (not red) stays WAIT", () => {
+  assert.equal(deriveGate(gateInput({ ciGreen: false, ciRed: true })), "FIXABLE");
+  assert.equal(deriveGate(gateInput({ ciGreen: false, ciRed: false })), "WAIT"); // still pending, unchanged
+});
+
+test("deriveGate (#246): prFixCap === 0 folds CI_RED straight to WAIT — byte-for-byte the pre-#246 behavior (ciRed didn't exist before, so WAIT was always the fold for ciGreen===false)", () => {
+  assert.equal(deriveGate(gateInput({ ciGreen: false, ciRed: true, prFixCap: 0 })), "WAIT");
+});
+
+test("deriveGate (#246): ciGreen wins over ciRed when somehow both are set (belt-and-suspenders — a real rollup never reports both true)", () => {
+  assert.equal(deriveGate(gateInput({ ciGreen: true, ciRed: true })), "MERGE");
+});
+
+test("deriveGate (#246): FIXABLE still yields to prior fail-safe checks — draft/non-OPEN/human-label all outrank it", () => {
+  assert.equal(deriveGate(gateInput({ reviewAction: "HANDLE_THREADS", isDraft: true })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ reviewAction: "HANDLE_THREADS", prState: "CLOSED" })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ reviewAction: "HANDLE_THREADS", labels: ["needs-human"] })), "HUMAN");
 });
 
 test("deriveGate: a draft PR is always HUMAN, even with MERGE_OK + CI green", () => {
@@ -459,14 +484,52 @@ test("MergeDriver.driveOne: a review-data fetch failure (rate-limit/timeout) -> 
   assert.match((outcome as { reason: string }).reason, /gate-data-unavailable/);
 });
 
-test("MergeDriver.driveOne: unresolved findings (HANDLE_THREADS) -> needs-human, labels the PR, never merges", async () => {
+test("MergeDriver.driveOne (#246): unresolved findings (HANDLE_THREADS) -> fixable (fix loop enabled by default), never merges, never labels", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer();
   reviewer.verdict = { action: "HANDLE_THREADS", headOid: "HEAD" };
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "fixable");
+  assert.match((outcome as { reason: string }).reason, /HANDLE_THREADS/);
+  assert.deepEqual(forge.merged, []);
+  assert.deepEqual(forge.labelsAdded, []); // driveOne itself never labels — the caller (conductor.ts) owns escalation
+});
+
+test("MergeDriver.driveOne (#246): prFixCap: 0 -> unresolved findings (HANDLE_THREADS) still needs-human, byte-for-byte the pre-#246 path", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "HANDLE_THREADS", headOid: "HEAD" };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg({ lanes: { prFixCap: 0 } }) });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.equal(outcome.kind, "needs-human");
   assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne (#246): CI_RED alongside MERGE_OK -> fixable; produce-pr-and-stop mode reports it without dispatch (gates report, never act)", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, ciGreen: false, ciRed: true };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "fixable");
+  assert.match((outcome as { reason: string }).reason, /ciRed=true/);
+
+  const stopDriver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg({ merge: { mode: "produce-pr-and-stop" } }) });
+  const stopped = await stopDriver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(stopped.kind, "stopped");
+  assert.match((stopped as { reason: string }).reason, /FIXABLE/);
+  assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne (#246): produce-pr-and-stop + HANDLE_THREADS -> stopped (reports FIXABLE), never dispatches, never labels", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "HANDLE_THREADS", headOid: "HEAD" };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg({ merge: { mode: "produce-pr-and-stop" } }) });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "stopped");
+  assert.deepEqual(forge.merged, []);
+  assert.deepEqual(forge.labelsAdded, []);
 });
 
 test("MergeDriver.driveOne: a risk/human-triage label on the PR blocks merge even with MERGE_OK + CI green", async () => {
@@ -555,7 +618,10 @@ test("MergeDriver.driveOne reentered (round-2 P1): a STANDING pre-reentry human 
       codexReview("2026-07-02T00:05:00Z"),
     ],
   };
-  const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
+  // #246: prFixCap: 0 isolates this test to the STANDING-CR filter itself (this test's actual
+  // concern) — with the fix loop enabled, HANDLE_THREADS now routes to FIXABLE, not needs-human;
+  // that routing is covered on its own by the dedicated #246 driveOne/deriveGate tests above.
+  const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg({ lanes: { prFixCap: 0 } }) });
   const outcome = await driver.driveOne(7, 46, REENTRY_PIN, noopRecord, undefined, true);
   assert.equal(outcome.kind, "needs-human");
   assert.match((outcome as { reason: string }).reason, /HANDLE_THREADS/);
@@ -765,7 +831,13 @@ test("MergeDriver.driveOne R2: the lock does NOT override fresh blocking signals
   // Real primary mode (not scripted): CodexReviewer derives HANDLE_THREADS from the standing
   // change request — the exact end-to-end repro from the fable review, now expected to block.
   const primary = new CodexReviewer();
-  const cfg = mkCfg({ reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 } });
+  // #246: prFixCap: 0 isolates this test to the LOCK-vs-fresh-signal concern it actually tests
+  // (fable-review P1) — with the fix loop enabled, HANDLE_THREADS routes to FIXABLE, covered by
+  // its own dedicated #246 tests above.
+  const cfg = mkCfg({
+    reviewer: { trustedReviewers: ["trusted-bot"], fallback: ["same-model-trusted"], failoverAfterSec: 1200 },
+    lanes: { prFixCap: 0 },
+  });
   const recorded: Array<{ head: string | null; kind: string | null }> = [];
   const driver = new MergeDriver({
     forge,

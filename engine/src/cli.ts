@@ -804,9 +804,17 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // load deferred to first dispatch: that would let the engine claim issues / churn ticks before
   // failing, instead of a clean fail-fast with no dispatch ever happening.
   const renderPrompt = buildRenderPrompt(cfg);
-  // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — a fix leg (#246) isn't
-  // dispatched from this path yet (no shipped caller wires TickDeps.fixLegResume in this repo),
-  // but the config must still be validated eagerly at startup, matching runValidate/runDryRun.
+  // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — the config must still
+  // be validated eagerly at startup, matching runValidate/runDryRun. #246 wires the FIXABLE
+  // gate's dispatch logic (conductor.ts DRIVE loop's own `TickDeps.fixLegResume` consumer) but
+  // this run path still doesn't ATTACH one here: `createProxyMint` (proxy/mint.ts) needs a
+  // round id/phase this tick-driver path has no concept of (rounds are round.ts's own thing —
+  // see runRoundsEngine below, which has the same gap for the identical reason), and no
+  // production caller anywhere in this repo yet mints a REAL forge-MCP proxy for the ordinary
+  // coding-worker dispatch either — wiring a live mint chain is a pre-existing, separate gap,
+  // not #246's. Until it's wired, a FIXABLE gate here just stays `driving`
+  // (`fix-leg-dispatch-unconfigured` event), retried every tick, same "skip, don't corrupt"
+  // fail-closed stance as every other unconfigured optional dep in this file.
   buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);

@@ -56,6 +56,16 @@ export interface PRStatus {
   // boolean would either retry conflicts forever or escalate a transient UNKNOWN.
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   ciGreen: boolean;
+  /** #246: a genuinely FAILED check (completed non-passing conclusion/state) — tri-state
+   *  alongside `ciGreen`, not its negation: `ciGreen === false` alone is ambiguous between
+   *  "still computing" (queued/in-progress, or an empty just-pushed rollup) and "actually red",
+   *  and merge-driver.ts's deriveGate must never dispatch a fix leg for a CI run that simply
+   *  hasn't finished yet. `ciRed === false` with `ciGreen === false` means "still pending" —
+   *  the FIXABLE gate falls back to WAIT in that case, unchanged from pre-#246 behavior.
+   *  Optional: absent (older fixtures/fakes) treated as `false` by every reader (deriveGate's
+   *  caller does `status.ciRed ?? false`) — the same "additive, pre-existing callers unaffected"
+   *  convention `mergeable`'s tri-state and every other optional PRStatus-adjacent field use. */
+  ciRed?: boolean;
 }
 
 /** One reaction on the PR's top-level issue-comment thread (`gh api .../reactions`). */
@@ -1471,12 +1481,22 @@ export function parsePRStatus(json: string): PRStatus {
   // (Codex P1/P2, PR #22.)
   const PASSING = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
   const ciGreen = checks.length > 0 && checks.every((c) => (c.conclusion != null ? PASSING.has(c.conclusion) : c.state === "SUCCESS"));
+  // #246: a completed, non-passing conclusion/state — deliberately NARROWER than "not passing"
+  // (which would also match CANCELLED/ACTION_REQUIRED/STALE, ambiguous states a mechanical fix
+  // leg shouldn't be dispatched against). An empty rollup is never red (checks.length > 0
+  // required) — no checks reported yet is "still pending", the same fail-closed-to-not-green
+  // stance ciGreen already takes, not a failure signal.
+  const FAILING = new Set(["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ERROR"]);
+  const ciRed =
+    checks.length > 0 &&
+    checks.some((c) => (c.conclusion != null ? FAILING.has(c.conclusion) : c.state === "FAILURE" || c.state === "ERROR"));
   return {
     number: d.number,
     headOid: d.headRefOid,
     state: d.state as PRStatus["state"],
     mergeable: d.mergeable === "MERGEABLE" || d.mergeable === "CONFLICTING" ? d.mergeable : "UNKNOWN",
     ciGreen,
+    ciRed,
   };
 }
 

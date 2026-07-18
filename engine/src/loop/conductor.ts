@@ -483,7 +483,11 @@ export type DrivenOutcome =
   | { kind: "merged"; worker: string; issue: number; pr: number }
   | { kind: "needs-human"; worker: string; issue: number; pr: number; reason: string }
   | { kind: "queued"; worker: string; issue: number; pr: number; reason: string }
-  | { kind: "stopped"; worker: string; issue: number; pr: number; reason: string };
+  | { kind: "stopped"; worker: string; issue: number; pr: number; reason: string }
+  // #246: a FIXABLE gate that dispatched a fix leg this tick (driveDecision -> "FIXUP") — the
+  // lane leaves `driving` for `fixing` (startFixLeg's own transition); distinct from "queued" so
+  // dispatch activity is observable in TickResult without a separate query.
+  | { kind: "fixup"; worker: string; issue: number; pr: number; reason: string };
 
 // #47: every TERMINAL reclaim outcome carries the same {costUsd, modelUsage} the tick just
 // recorded into spend_ledger for that lane — groundwork for the #15 `status --cost` table and
@@ -646,15 +650,17 @@ export interface TickDeps {
    *  section) since `forge` above is a required field, never optional, so it always has a
    *  consumer. */
   probeLlmReachable?: () => Promise<boolean | { ok: boolean; detail?: string }>;
-  /** #245 round-2 fix A2: the fix-loop's own RESUME-continuation deps. When a `fixing` lane
-   *  hands off (soft budget) and later needs to resume, it must come back as a FIX leg (fix
-   *  prompt + mandatory `credentialFree` proxy + target state `fixing`), never an ordinary
-   *  running leg — the RESUME phase (below) checks `WorkerRow.fixing_handoff` and, ONLY when
-   *  set, uses this dep instead of the ordinary #172 resume path. Omitted -> a fixing-origin
-   *  handoff row is left untouched (never silently resumed as an ordinary leg, which would lose
-   *  its evidence channel/credential posture) — a durable `fix-leg-resume-unconfigured` event is
-   *  recorded and the row is retried next tick once this is wired (#246 is the caller that will
-   *  wire it in production). */
+  /** #245 round-2 fix A2, #246: the fix-loop's shared renderFixPrompt+mint source, consumed at
+   *  TWO points: (1) the DRIVE loop's own FIXUP dispatch (#246 — driveDecision reaching "FIXUP"
+   *  calls startFixLeg with this dep, entering a `driving` lane into `fixing` for the FIRST
+   *  time), and (2) the RESUME phase below, when a `fixing` lane hands off (soft budget) and
+   *  later needs to resume — it must come back as a FIX leg (fix prompt + mandatory
+   *  `credentialFree` proxy + target state `fixing`), never an ordinary running leg; the RESUME
+   *  phase checks `WorkerRow.fixing_handoff` and, ONLY when set, uses this SAME dep instead of
+   *  the ordinary #172 resume path. Omitted -> BOTH consumers skip, don't corrupt: a FIXABLE
+   *  gate stays driving (`fix-leg-dispatch-unconfigured` event) and a fixing-origin handoff row
+   *  is left untouched (`fix-leg-resume-unconfigured` event) — either way retried next tick once
+   *  this is wired. */
   fixLegResume?: FixLegResumeDeps;
 }
 
@@ -1809,6 +1815,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   down, in deps.mergeGate.driveOne (merge-driver.ts), invoked ONLY from here. Omitted
   //   mergeGate -> driving lanes stay driving with no gate/merge activity (pre-#13 behavior).
   const driven: DrivenOutcome[] = [];
+  // #246: the SAME round-budget read the DISPATCH phase re-derives later this tick (line below
+  // marked "Shared fresh-spend gates for RESUME + DISPATCH") — a fix leg is itself a fresh
+  // Claude worker leg (startFixLeg -> supervisor.resume), so a FIXUP dispatch must observe the
+  // identical post-reclaim round-spend gate a brand-new coding-worker dispatch does (zero new
+  // accounting machinery, per #246's own AC). Pure/cheap (just deps.roundSpendUsd() vs the cap,
+  // same as the later read) — evaluating it again here, right where DRIVE needs it, is safe;
+  // nothing in between mutates the round ledger.
+  const driveOverBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
   if (gate) {
     // #69: no per-lane kill-switch re-check here — an active switch never reaches this loop
     // at all (the global gate at the top of tick() returns first). See the gate's comment for
@@ -1974,6 +1988,79 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.appendEvent("drive-stopped", { worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           driven.push({ kind: "stopped", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
           break;
+        case "fixable": {
+          // #246: gate === FIXABLE (findings or CI-red, alongside a decisive verdict) in
+          // conductor-merge mode (produce-pr-and-stop already short-circuited to "stopped" inside
+          // MergeDriver.driveOne itself — this branch only ever sees the mode that actually acts).
+          // driveDecision owns the fix_rounds/cap/budget refinement this pure PR-level outcome
+          // never carries — fed from THIS lane's own WorkerRow.fix_rounds, cfg.lanes.prFixCap,
+          // and the round-budget read captured once above the DRIVE loop (driveOverBudget).
+          const fixRounds = w.fix_rounds ?? 0;
+          const cap = cfg.lanes.prFixCap;
+          const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget);
+          if (action === "FIXUP") {
+            if (!deps.fixLegResume) {
+              // Fail-closed, same "skip, don't corrupt" stance an unconfigured mergeGate takes
+              // for driving lanes generally (and the RESUME phase's own fixing_handoff check
+              // below) — stays driving, retried next tick once this is wired.
+              state.appendEvent("fix-leg-dispatch-unconfigured", { worker: w.name, issue: w.issue, pr });
+              driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "fix-leg-unconfigured" });
+              break;
+            }
+            try {
+              await startFixLeg(
+                { state, supervisor, renderFixPrompt: deps.fixLegResume.renderFixPrompt },
+                w,
+                { mint: deps.fixLegResume.mintProxy, credentialFree: true },
+                now,
+              );
+              state.appendEvent("drive-fixup", { worker: w.name, issue: w.issue, pr, fixRounds: fixRounds + 1, reason: outcome.reason });
+              driven.push({ kind: "fixup", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+            } catch (e) {
+              // startFixLeg's own contract (#245): a thrown resume() leaves the row untouched
+              // (still `driving`, fix_rounds un-incremented) — a transient spawn failure costs
+              // zero fix-round budget, and the next tick's gate simply retries. Never crash the
+              // DRIVE loop over it (same never-throws stance every other DRIVE branch keeps).
+              state.appendEvent("fix-leg-dispatch-failed", { worker: w.name, issue: w.issue, pr, error: String(e) });
+              driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: `fix-leg-dispatch-failed: ${String(e)}` });
+            }
+            break;
+          }
+          // action === "ESCALATE": either a transient this-tick budget block (retry next tick,
+          // no state change), or the fix_rounds cap is genuinely exhausted (permanent escalation
+          // — #147's GATED RECLAIM is the post-adjudication reentry channel back in).
+          if (driveOverBudget) {
+            state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: `fix-leg-over-budget:${outcome.reason}` });
+            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: `fix-leg-over-budget:${outcome.reason}` });
+            break;
+          }
+          // Cap exhausted. Hard rule (#69/#147 forge-before-terminal-upsert): the needs-human
+          // label AND the escalation comment (naming rounds spent + the standing signal) land
+          // BEFORE the terminal upsert. A label-write failure leaves the row untouched (still
+          // `driving`, no latch) so next tick's fresh FIXABLE-at-cap re-derivation retries the
+          // label write from scratch — never a permanently-invisible row from a transient write
+          // hiccup (unlike the ordinary needs-human case above, which already owns a PR and so
+          // has no "stay driving" fallback; a cap-exhausted lane still does).
+          try {
+            await forge.addLabel(w.issue, cfg.labels.needsHuman);
+          } catch (e) {
+            state.appendEvent("fix-rounds-cap-label-failed", { worker: w.name, issue: w.issue, pr, error: String(e) });
+            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "fix-rounds-cap-label-failed" });
+            break;
+          }
+          await forge
+            .addIssueComment(
+              w.issue,
+              `sapwood: fix-round cap (${cap}) reached for PR #${pr} — ${fixRounds} round(s) spent, ` +
+                `standing disagreement unresolved (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
+                `adjudication: review the disagreement, then remove the label once resolved to reclaim the PR (#147 gated reentry).`,
+            )
+            .catch(() => {}); // best-effort courtesy note, same stance every other DRIVE comment takes
+          state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
+          state.appendEvent("fix-rounds-capped", { worker: w.name, issue: w.issue, pr, fixRounds, cap });
+          driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `fix-rounds-cap:${fixRounds}/${cap}` });
+          break;
+        }
       }
     }
   }

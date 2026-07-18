@@ -393,6 +393,19 @@ test("lanes.gatedReentryCap: defaults to 2 (prFixCap's shape), overridable, nonn
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { gatedReentryCap: 1.5 }"), /gatedReentryCap/);
 });
 
+// ── #246: lanes.prFixCap (the FIXABLE gate's fix_rounds cap) — first real consumer of a key
+// accepted since #147 as "reserved, not yet wired" ──
+test("lanes.prFixCap: defaults to 2, overridable, nonnegative-int-guarded, 0 is legal (disables the FIXABLE gate)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.lanes.prFixCap, 2);
+  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { prFixCap: 5 }");
+  assert.equal(over.lanes.prFixCap, 5);
+  const zero = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { prFixCap: 0 }");
+  assert.equal(zero.lanes.prFixCap, 0);
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { prFixCap: -1 }"), /prFixCap/);
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { prFixCap: 1.5 }"), /prFixCap/);
+});
+
 // ── #74: worker.promptFile ──
 test("worker.promptFile: unset by default, overridable, strict schema", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
@@ -431,7 +444,8 @@ test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's dir
 // ── #88 gate⓪: labels.planApproved + roles.planReviewer.promptFile ──────────────────────────
 // Session wiring (actually loading/rendering this prompt) lands with the peripheral-role-
 // runner issue; here the config surface is validated + path-resolved, same "accepted, not
-// yet wired" shape as lanes.reserveCap/prFixCap/frictionMin.
+// yet wired" shape as lanes.reserveCap/frictionMin (prFixCap itself is wired as of #246 — see
+// deriveGate/driveDecision's own tests in merge-driver.test.ts/conductor.test.ts).
 
 test("labels.planApproved: defaults to sapwood:plan:approved, overridable", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
