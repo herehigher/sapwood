@@ -221,6 +221,14 @@ export class RoundScopedForge implements IForge {
     return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
   }
 
+  /** #214: same milestone scoping as getReadyIssues/getIssuesNeedingPlanReview above — the
+   *  round pool's candidate source is a dispatch candidate set too, so a round scoped to one
+   *  milestone should only pool-select issues actually in scope for it. */
+  async getPoolEligibleIssues(): Promise<Issue[]> {
+    const issues = await this.inner.getPoolEligibleIssues();
+    return this.milestone ? issues.filter((i) => i.milestone === this.milestone) : issues;
+  }
+
   createIssue(title: string, body: string) {
     return this.inner.createIssue(title, body);
   }
@@ -348,6 +356,15 @@ export class PoolScopedForge implements IForge {
   }
   getIssuesNeedingPlanReview() {
     return this.inner.getIssuesNeedingPlanReview();
+  }
+  // #214: plain passthrough, deliberately NOT pool-label-filtered — "pool eligible" (this round's
+  // CANDIDATE set, #214) is a different concept from "already pool scoped" (this class's own
+  // getReadyIssues filter, used ONLY for the executing phase's dispatch). Both align.ts's
+  // selection pass and plan-review.ts's gate⓪ scoping need the full eligible set to choose/filter
+  // from, same rationale as this class's own doc comment for why getReadyIssues stays unfiltered
+  // for those callers too.
+  getPoolEligibleIssues() {
+    return this.inner.getPoolEligibleIssues();
   }
   createIssue(title: string, body: string) {
     return this.inner.createIssue(title, body);

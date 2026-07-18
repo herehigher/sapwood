@@ -1141,6 +1141,35 @@ test("createArchitectStub #213: candidates EMPTY but pool NON-EMPTY still runs t
   state.close();
 });
 
+test("createArchitectStub (#214): an issue that is BOTH a drift-review candidate AND a pool member (an unapproved pool member still awaiting its first gate⓪ review) gets full, independent treatment from each — a contradiction comment/blocked label AND a verdict label/comment, both applied for the SAME issue number, through the real stub wiring (not just the pure validator)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  // #214: issue #90 is unapproved (still awaiting gate⓪) AND already pool-labelled — the widened
+  // pool-candidate source (forge.getPoolEligibleIssues) makes this a completely routine overlap,
+  // not an edge case — see forge.ts's selectPoolEligibleIssues / plan-review.ts's class 1+pool.
+  forge.planReviewCandidates = [{ number: 90, title: "overlaps candidates and pool", labels: [cfg.labels.roundPool] }];
+  const poolIssues: Issue[] = [{ number: 90, title: "overlaps candidates and pool", labels: [cfg.labels.roundPool] }];
+  const text = architectResult(
+    "Design note.",
+    [{ issue: 90, severe: true, explanation: "breaks the locked interface boundary" }],
+    [{ issue: 90, verdict: "needs-human", reason: "scope needs a human's judgment before it proceeds" }],
+  );
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", text) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md", poolIssues };
+  await createArchitectStub(deps).run({ roundId: 1, phase: "architecting", marker: null });
+  // The contradiction half: a comment naming the interface break, plus `blocked` (severe: true).
+  assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 90 && body.includes("breaks the locked interface boundary")));
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 90 && l === cfg.labels.blocked));
+  // The verdict half: `needs-human` applied, plus its own reasoned comment — independent of the
+  // contradiction write above, neither one suppressing or colliding with the other.
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 90 && l === cfg.labels.needsHuman));
+  assert.ok(forge.issueCommentsPosted.some(([n, body]) => n === 90 && body.includes("scope needs a human's judgment")));
+  // Never a rejection: overlap between the two lists is not itself an out-of-set violation.
+  assert.equal(runner.calls.length, 1);
+  state.close();
+});
+
 test("createArchitectStub #213: candidates AND pool BOTH empty -> the early return is unchanged (no session, marker set)", async () => {
   const forge = new FakeForge();
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);

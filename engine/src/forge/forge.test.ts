@@ -24,6 +24,7 @@ import {
   projectQuery,
   selectPlanReviewCandidates,
   selectPlanTriageCandidates,
+  selectPoolEligibleIssues,
   selectReadyIssues,
   selectUnplacedIssues,
 } from "./forge.js";
@@ -1157,6 +1158,59 @@ test("selectPlanReviewCandidates: #88 gate⓪ matrix — only issues still AWAIT
     candidates.map((i) => i.number).sort((a, b) => a - b),
     [41, 42],
   );
+});
+
+// ── #214: selectPoolEligibleIssues — the round pool's candidate source. LITERALLY "Ready lane
+//    minus holds" (gate② review P2): a body-INDEPENDENT label check, not the isDispatchable ∪
+//    needsPlanReview union an earlier draft used — that union has a gap an approved-but-planless
+//    issue falls through (see forge.ts's own doc on isPoolEligible for the full story). ──
+
+test("selectPoolEligibleIssues (#214): Ready lane minus holds — plain unadjudicated and plain approved are both eligible, an approved-but-planless orphan is STILL eligible (the gate② review P2 fix), the #94 mixed state and both hold labels are excluded, verify:n/a alone is eligible (doc-gate path, not a hold)", () => {
+  const mkItem = (number: number, labels: string[], body: string) => ({
+    itemId: `I${number}`,
+    number,
+    title: `issue ${number}`,
+    state: "OPEN" as const,
+    body,
+    repo: "herehigher/sapwood",
+    labels,
+    status: "Ready",
+    milestone: null,
+  });
+  const project = {
+    projectId: "P",
+    statusFieldId: "F",
+    options: [],
+    items: [
+      mkItem(60, [], "just vibes, no plan yet"), // plain unadjudicated -> eligible (class 1)
+      mkItem(61, [cfg.labels.planApproved], "## Verification\n- run npm test"), // plain approved, real plan -> eligible (class 2/3)
+      // The gate② review P2 case: plan:approved survives, but the body's plan SECTION was later
+      // deleted. The OLD isDispatchable ∪ needsPlanReview union stranded this — isDispatchable
+      // fails (no plan text), needsPlanReview fails (planApproved present) — permanently
+      // invisible to pool selection. The new label-only check makes it eligible again.
+      mkItem(62, [cfg.labels.planApproved], "no verification section here anymore"),
+      mkItem(63, [cfg.labels.needsHuman], "## Verification\n- x"), // hold -> excluded
+      mkItem(64, [cfg.labels.blocked, cfg.labels.planApproved], "## Verification\n- x"), // hold -> excluded
+      mkItem(65, [cfg.labels.verifyNa, cfg.labels.planApproved], "## Verification\n- x"), // #94 forbidden mixed state -> excluded
+      mkItem(66, [cfg.labels.verifyNa], "no plan needed"), // doc-gate path, not a hold -> eligible
+    ],
+    placements: [],
+  };
+  const eligible = selectPoolEligibleIssues(project, cfg)
+    .map((i) => i.number)
+    .sort((a, b) => a - b);
+  assert.deepEqual(eligible, [60, 61, 62, 66]);
+});
+
+test("selectPoolEligibleIssues (#214): full gate⓪ matrix fixture cross-check — same result shape as selectReadyIssues ∪ selectPlanReviewCandidates on GATE0_PROJECT_JSON (a fixture with no approved-but-planless orphan, where the old and new predicates happen to agree)", () => {
+  const p = parseProject(GATE0_PROJECT_JSON, "Status");
+  const eligible = selectPoolEligibleIssues(p, cfg)
+    .map((i) => i.number)
+    .sort((a, b) => a - b);
+  // #40 approved (real plan), #41 unadjudicated (real plan, no approval), #42 unadjudicated (no
+  // plan at all — still eligible, this predicate is body-independent), #44 verify:n/a alone.
+  // #43/#45/#46 carry a hold label; #47 is the forbidden verifyNa+planApproved mixed state.
+  assert.deepEqual(eligible, [40, 41, 42, 44]);
 });
 
 // ── #89: selectPlanTriageCandidates — the PO/triage peripheral's candidate query. Unlike

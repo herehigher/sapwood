@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { ContextManifest } from "./context-manifest.js";
 import {
+  CONFIRM_ALLOWED_TOOLS,
+  CONFIRM_DISALLOWED_TOOLS,
   PLAN_DRAFTER_DISALLOWED_TOOLS,
   PO_ALLOWED_TOOLS,
   PO_DISALLOWED_TOOLS,
@@ -568,6 +570,28 @@ test("PLAN_DRAFTER_DISALLOWED_TOOLS: strict superset of the base denies, adding 
   assert.ok(!ROLE_DISALLOWED_TOOLS.includes("--add-label"));
 });
 
+test("CONFIRM_ALLOWED_TOOLS/CONFIRM_DISALLOWED_TOOLS (#214 gate② review P1): the SECOND sanctioned allow-list widening in this codebase (after retro.ts's RETRO_ALLOWED_TOOLS) — read-only repo inspection ONLY, no Bash/gh of any kind, deny list keeps every other base denial", () => {
+  assert.equal(CONFIRM_ALLOWED_TOOLS, "Read,Glob,Grep");
+  assert.ok(!CONFIRM_ALLOWED_TOOLS.includes("Bash("), "no Bash grant of any kind — no git, no gh, no arbitrary command");
+  assert.ok(
+    !CONFIRM_ALLOWED_TOOLS.includes("Write") && !CONFIRM_ALLOWED_TOOLS.includes("Edit"),
+    "read-only — no write channel to the repo",
+  );
+  // The deny list is the base ROLE_DISALLOWED_TOOLS with Read removed and nothing else changed —
+  // Write/Edit/MultiEdit and every Bash(gh ...) denial still apply (deny wins over allow, so
+  // Read must come OUT for CONFIRM_ALLOWED_TOOLS's own Read entry to mean anything).
+  assert.ok(!CONFIRM_DISALLOWED_TOOLS.includes("Read"), "Read removed from the deny list — the whole point of the widening");
+  assert.ok(
+    CONFIRM_DISALLOWED_TOOLS.includes("Write") &&
+      CONFIRM_DISALLOWED_TOOLS.includes("Edit") &&
+      CONFIRM_DISALLOWED_TOOLS.includes("MultiEdit"),
+  );
+  assert.equal(CONFIRM_DISALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS.replace("Read,", ""), "derived from the base deny list, never hand-copied");
+  for (const denyFragment of ROLE_DISALLOWED_TOOLS.split(",").filter((t) => t !== "Read")) {
+    assert.ok(CONFIRM_DISALLOWED_TOOLS.includes(denyFragment), `base denial preserved: ${denyFragment}`);
+  }
+});
+
 test("run: a per-role disallowedTools override reaches the argv (the drafter's stricter deny-list path)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
@@ -693,6 +717,32 @@ test("run: the PO's allowedTools + disallowedTools pair BOTH reach the argv (the
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], PO_ALLOWED_TOOLS);
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], "");
     assert.equal(seen[seen.indexOf("--disallowedTools") + 1], PO_DISALLOWED_TOOLS);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: the confirm session's allowedTools + disallowedTools pair BOTH reach the argv (#214 gate② review P1) — exactly CONFIRM_ALLOWED_TOOLS/CONFIRM_DISALLOWED_TOOLS, the only role session with a non-empty allow-list besides retro", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    await runner.run({
+      roleId: "plan-reviewer-confirm",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: CONFIRM_ALLOWED_TOOLS,
+      disallowedTools: CONFIRM_DISALLOWED_TOOLS,
+    });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], CONFIRM_ALLOWED_TOOLS);
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
+    assert.equal(seen[seen.indexOf("--disallowedTools") + 1], CONFIRM_DISALLOWED_TOOLS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

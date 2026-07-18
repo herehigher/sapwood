@@ -36,9 +36,10 @@
 // so there is no per-issue looping here at all.
 //
 // #213: ADDITIVE to all of the above — a SECOND, independent batch under review in the SAME
-// session/prompt/output: this round's ACTUAL pool (#212's cfg.labels.roundPool members, disjoint
-// in normal operation from the drift-review `candidates` above — see ArchitectDeps.poolIssues's
-// doc comment), each getting a per-issue VERDICT (pass/drop/needs-human) instead of a
+// session/prompt/output: this round's ACTUAL pool (#212's cfg.labels.roundPool members — MAY
+// OVERLAP with the drift-review `candidates` above since #214 widened pool candidacy to include
+// issues still awaiting their first gate⓪ review, see ArchitectDeps.poolIssues's doc comment),
+// each getting a per-issue VERDICT (pass/drop/needs-human) instead of a
 // contradiction flag. THE POOL-SET INVARIANT mirrors the candidate-set invariant exactly (its own
 // authoritative set, its own fail-closed/atomic check in validateArchitectOutput) — a verdict for
 // an issue never shown as a pool member is rejected the same way an out-of-candidate-set
@@ -104,13 +105,17 @@ export interface ArchitectDeps {
    *  through `ArchitectDeps` rather than loaded directly here so the load logic lives in exactly
    *  one place (doctrine.ts), shared with worker.ts's own injection, never duplicated. */
   doctrine?: string;
-  /** #213: this round's ROUND-POOL members (#212's cfg.labels.roundPool-labeled, dispatchable
-   *  issues) — the batch-review target for the per-issue verdict mechanism (pass/drop/
-   *  needs-human), DISTINCT from `candidates` below (this stub's own `getIssuesNeedingPlanReview`
-   *  read, the pre-existing cross-issue-contradiction target): a pool member has ALREADY cleared
-   *  gate⓪ (it carries plan:approved or verify:n/a) and is queued for THIS round's dispatch,
-   *  while a candidate has NOT yet been gate⓪-reviewed — the two sets are disjoint in normal
-   *  operation. Threaded the same way `lastMerged`/`doctrine` are: a real caller
+  /** #213: this round's ROUND-POOL members (#212's cfg.labels.roundPool-labeled issues) — the
+   *  batch-review target for the per-issue verdict mechanism (pass/drop/needs-human), a SEPARATE
+   *  set from `candidates` below (this stub's own `getIssuesNeedingPlanReview` read, the
+   *  pre-existing cross-issue-contradiction target) that MAY OVERLAP with it: since #214 widened
+   *  pool candidacy past gate⓪-passed issues alone (Ready lane minus needsHuman/blocked — see
+   *  `forge.getPoolEligibleIssues`'s doc), a pool member may still be AWAITING its first gate⓪
+   *  review, in which case it legitimately appears in `candidates` too. Nothing here (or in
+   *  `validateArchitectOutput` below) assumes disjointness either way — each output kind
+   *  (contradiction vs. verdict) is validated against its OWN authoritative set regardless of
+   *  whether the flagged/verdicted issue also appears in the other. Threaded the same way
+   *  `lastMerged`/`doctrine` are: a real caller
    *  (round-defaults.ts's createDefaultPeripherals) computes this at architect-invocation time
    *  from a LIVE forge read (never cached across a crash-rerun) and assigns it before calling
    *  this stub; a caller that omits it (every direct unit test in this file, and any consumer
@@ -248,8 +253,8 @@ const ArchitectMetadataSchema = z
 // #213: a SECOND own-line sub-delimiter, alongside CONTRADICTION — same BODY block, same
 // containment doctrine, distinguished by kind so a contradiction explanation and a verdict
 // reason can never be mixed up even if the SAME issue number happens to appear in both arrays
-// (disjoint in normal operation — a pool member has already cleared gate⓪, a contradiction
-// candidate hasn't — but nothing here assumes that invariant holds).
+// (routine since #214: an unapproved pool member still awaiting gate⓪ IS a candidate too —
+// nothing here assumes candidates/pool are disjoint, by design).
 const MARKER_RE = /^<<<(CONTRADICTION|VERDICT) #(\d+)>>>[ \t]*$/gm;
 const CONTRADICTION_MARKER_SUBSTRING = "<<<CONTRADICTION";
 const VERDICT_MARKER_SUBSTRING = "<<<VERDICT";
@@ -339,9 +344,10 @@ export type ArchitectValidation =
  *  it (issue #110's Design section: "the engine must validate every flagged issue number against
  *  the round's candidate set... FAIL-CLOSED: any number outside the set invalidates the whole
  *  output"). `poolNumbers` is #213's ANALOGOUS authoritative set for `verdicts` — this round's
- *  ACTUAL pool membership, independent of `candidateNumbers` (the two sets are disjoint in normal
- *  operation, see ArchitectDeps.poolIssues's doc comment, but each metadata array is validated
- *  against its OWN set regardless). This function is the single point that enforces BOTH
+ *  ACTUAL pool membership, independent of `candidateNumbers` (the two sets MAY OVERLAP since
+ *  #214 — see ArchitectDeps.poolIssues's doc comment — but each metadata array is validated
+ *  against its OWN set regardless, so overlap changes nothing here). This function is the single
+ *  point that enforces BOTH
  *  invariants: it runs every check to completion and returns ok:false the moment any one fails,
  *  so a caller NEVER sees a partial `ok: true` result to selectively apply —
  *  createArchitectStub only ever writes anything (contradictions OR verdicts) after this returns
@@ -473,17 +479,18 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // number for a DETERMINISTIC round-design-note anchor (see below) — getIssuesNeedingPlanReview
       // makes no ordering guarantee of its own.
       const candidates = [...(await deps.forge.getIssuesNeedingPlanReview())].sort((a, b) => a.number - b.number);
-      // #213: this round's ACTUAL pool (cfg.labels.roundPool members) — a SEPARATE, disjoint-in-
-      // normal-operation set from `candidates` above (see ArchitectDeps.poolIssues's doc
-      // comment). Threaded by round-defaults.ts, computed at invocation time from a live forge
+      // #213: this round's ACTUAL pool (cfg.labels.roundPool members) — a SEPARATE set from
+      // `candidates` above that MAY OVERLAP with it since #214 (see ArchitectDeps.poolIssues's
+      // doc comment). Threaded by round-defaults.ts, computed at invocation time from a live forge
       // read; an omitted/empty deps.poolIssues means "nothing to batch-review", never a fabricated
       // pool. Sorted for the same determinism reason as `candidates`.
       const poolIssues = [...(deps.poolIssues ?? [])].sort((a, b) => a.number - b.number);
       // #213: run the session whenever there is EITHER a drift-review candidate OR a pool member
       // to batch-review — the pre-#213 short-circuit only checked `candidates`, which would have
       // silently skipped the ENTIRE pool-verdict feature on any round where every Ready issue was
-      // already gate⓪-approved (candidates empty, pool non-empty is the COMMON case in a healthy
-      // pipeline: candidates and pool members are disjoint by dispatch-approval state).
+      // already gate⓪-approved (candidates empty, pool non-empty is a common case in a healthy
+      // pipeline — though since #214 an unapproved pool member appears in BOTH arrays, so this is
+      // no longer the only way `candidates` ends up empty while `poolIssues` doesn't).
       if (candidates.length === 0 && poolIssues.length === 0) return { marker: architectMarker(roundId) };
 
       const template = loadRolePromptTemplate(deps.cfg.roles.architect.promptFile, defaultArchitectPromptPath());
@@ -496,10 +503,11 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // comment surface this role can write to — its writes are issue comment/label edit only);
       // the lowest-numbered candidate is an arbitrary but deterministic, reproducible anchor —
       // chosen and applied by the ENGINE, never the session (the session has no gh grant to act
-      // on a choice of its own here anyway). #213: candidates and pool members are disjoint sets,
-      // so with zero candidates (an all-approved round) the lowest-numbered POOL member is the
-      // fallback anchor instead — the early-return above guarantees at least one of the two is
-      // non-empty, so this is never undefined.
+      // on a choice of its own here anyway). #213: with zero candidates (every Ready issue already
+      // gate⓪-approved) the lowest-numbered POOL member is the fallback anchor instead — the
+      // early-return above guarantees at least one of the two is non-empty, so this is never
+      // undefined. (#214: `candidates` and `poolIssues` may overlap, but "zero candidates" is
+      // still a real, reachable case — an all-approved round — so this fallback still matters.)
       const anchor = candidates[0] ?? poolIssues[0]!;
       const marker_ = architectMarker(roundId);
       // THE CANDIDATE-SET INVARIANT's authoritative set: exactly what this round's prompt showed

@@ -127,6 +127,25 @@ The dangerous verbs `guard.ts` already blocks category-C are unchanged, and retr
 old `gh` deny patterns are kept byte-identical as regression trip-wires — the same
 stance the issues-only roles took after #110.
 
+**gate⓪'s freshness re-confirm session is the SECOND exception (#214), narrower than
+retro's.** A pool member's confirm pass ("does this plan still hold against current
+`main`?") cannot answer that question against a body it has no way to check — the
+base issues-only allow-list (above) carries no `Read` at all, so a plan referencing a
+file since renamed was structurally unverifiable. `peripheral.ts`'s
+`CONFIRM_ALLOWED_TOOLS` widens exactly this one session to `Read,Glob,Grep` — repo
+**inspection only**, no `Bash` of any kind (so no `git`, no `gh`, no arbitrary command
+— strictly narrower than retro's git-and-file-edit grant above) and no
+`Write`/`Edit`/`MultiEdit` — paired with `CONFIRM_DISALLOWED_TOOLS` (the base deny
+list with only `Read` removed, so every other denial — `Write`/`Edit`/`MultiEdit`,
+every `gh` verb — still applies). The session reads the conductor's own checkout, the
+same ephemeral worktree every role session already gets; its freshness relative to
+`main` is the conductor's responsibility, not a property this grant controls. Because
+there is still no `Bash` grant, there is still no shell to reach `gh` through — #110's
+zero-write boundary for this role family holds: the widening is read-only by
+construction, and this session's decision, like every other role's, is read from its
+structured output only, applied by the engine (`plan-review.ts`), never by a tool call
+of its own.
+
 ## Ambient repo context: record, don't seal (#236)
 
 Every session above — worker or peripheral — spawns `claude -p` **inside a real repo
@@ -466,6 +485,15 @@ retried once, then escalated to `needs-human` with the full attempt trail, exact
 an outright session crash. The shipped default prompt lives at
 `engine/prompts/plan-reviewer.md` (`roles.planReviewer.promptFile` overrides it — same
 `#74` pattern as `worker.promptFile`).
+
+**`plan:approved` is re-endorsed, not permanent (#214).** The plan-reviewer's candidate
+sweep above is now scoped to the round pool rather than the whole Ready lane, and a
+prior round's `plan:approved` is re-checked — a lightweight, zero-forge-write-on-confirm
+session — every time that issue re-enters a pool, before its approval is trusted for
+dispatch again; a session that can't confirm or fails escalates `needs-human` the same
+way an initial review does. The label itself is never removed by that check either way.
+See [`docs/PLAN.md`](PLAN.md#v02-north-star-the-round-orchestrator) (the "gate⓪ is scoped
+to the round pool..." locked decision, issue #214) for the full detail.
 
 ## See also
 

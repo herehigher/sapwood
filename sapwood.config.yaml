@@ -186,16 +186,26 @@ reviewer:
 #                        # If you re-run this experiment, isolate worktree/code reads for that
 #                        # run — production sessions may read the repo, but that is an
 #                        # uncontrolled signal for THIS experiment (titles/numbers only).
-#   planReviewer:
+#   planReviewer: # #214: gate⓪ is scoped to the ROUND POOL — every pool entry, a PRIOR-round
+#     #             plan:approved gets a lightweight confirm pass (below), not skipped outright;
+#     #             plan:approved now means "approved when granted, re-endorsed at every pool
+#     #             entry before dispatch", not "approved forever".
 #     # promptFile: prompts/my-plan-reviewer.md
 #     #                   #74-style override; relative paths resolve against THIS config file's
 #     #                   directory. Unset = the engine's shipped prompts/plan-reviewer.md.
+#     # confirmPromptFile: prompts/my-plan-reviewer-confirm.md
+#     #                   #214: the freshness re-confirm prompt for a pool member that ALREADY
+#     #                   carries plan:approved from a prior round — one question ("does this plan
+#     #                   still hold against current main?"), zero forge writes on confirm; an
+#     #                   invalidate enters the ordinary draft->re-review cycle below. Unset = the
+#     #                   engine's shipped prompts/plan-reviewer-confirm.md.
 #     model: sonnet
 #     effort: medium
 #     maxDraftCycles: 2  # #77 Amendment 2: bounded draft->re-review self-heal cycles per issue
 #                        # before the loop gives up and applies needs-human with the attempt
-#                        # trail. Positive int only (0 would disable the self-heal path).
-#     enabled: true      # #127: false -> the WHOLE gate⓪ unit (reviewer + drafter) no-ops.
+#                        # trail. Positive int only (0 would disable the self-heal path). Also the
+#                        # cap for a confirm-pass invalidate's own draft cycle (#214).
+#     enabled: true      # #127: false -> the WHOLE gate⓪ unit (reviewer + drafter + confirm) no-ops.
 #                        # WARNING: dispatch still requires plan:approved (or verify:n/a) on
 #                        # every issue (PLAN Decision #8) and ONLY the plan-reviewer applies
 #                        # plan:approved — with gate⓪ off a human/external process must label

@@ -188,8 +188,29 @@ export interface IForge {
    *  candidate set. Distinct from getReadyIssues() (which already applies gate⓪'s dispatch
    *  filter, i.e. only what's ALREADY approved or doc-gated): this returns Ready issues that
    *  haven't yet been adjudicated one way or the other (excludes needsHuman/blocked/verifyNa —
-   *  those are settled, not "awaiting review"). */
+   *  those are settled, not "awaiting review"). Still used by architect.ts's own (unrelated)
+   *  drift-review candidate set and round.ts's probeHasWork signal — #214 does NOT repurpose
+   *  this method; see getPoolEligibleIssues below for the round-pool's own, WIDER read. */
   getIssuesNeedingPlanReview(): Promise<Issue[]>;
+  /** #214: the round-pool's candidate source — LITERALLY Ready lane + OPEN + this repo, minus
+   *  the two fail-closed HOLDS (needsHuman/blocked) and the #94 forbidden verifyNa+planApproved
+   *  mixed state (a human-cleanup case, not a session target). Deliberately a body-INDEPENDENT
+   *  label check, NOT `getReadyIssues() ∪ getIssuesNeedingPlanReview()` (an earlier draft of this
+   *  method used that union — gate② review caught the gap: an issue carrying plan:approved whose
+   *  verification-plan section was later deleted from the body satisfies neither selector's body
+   *  check, so it would be invisible to both and permanently stranded — see selectPoolEligibleIssues'
+   *  own doc for the full rationale and the self-healing consequence this fix produces). This is
+   *  deliberately WIDER than getReadyIssues() alone: a Ready issue awaiting its first plan review
+   *  (no plan:approved yet) is NOT gate⓪-dispatchable, but it still must be reachable by pool
+   *  selection — scoping the pool to gate⓪-passed issues only would deadlock the system (an
+   *  unapproved issue never enters the pool -> gate⓪ (scoped to the pool, #214) never reviews it
+   *  -> it never gets approved -> it never dispatches). align.ts's computePoolCandidates draws
+   *  the round pool from this method; plan-review.ts's createPlanReviewStub filters this SAME
+   *  read by cfg.labels.roundPool to get its own candidate set (gate⓪ scoped to the pool, #214).
+   *  Executing-phase DISPATCH is unaffected — round.ts's PoolScopedForge still wraps the
+   *  NARROWER getReadyIssues(), so a pool member without plan:approved still cannot be dispatched
+   *  merely for having entered the pool. */
+  getPoolEligibleIssues(): Promise<Issue[]>;
   /** #87: an issue's current label set — the plan_review orchestrator's per-issue outcome
    *  check after a plan-reviewer/plan-drafter session runs (distinguishing approved vs
    *  needs-human vs still-awaiting without re-fetching the whole board). */
@@ -628,6 +649,12 @@ export class GithubForge implements IForge {
   async getIssuesNeedingPlanReview(): Promise<Issue[]> {
     const project = await this.fetchProject();
     return selectPlanReviewCandidates(project, this.cfg);
+  }
+
+  /** #214: see IForge.getPoolEligibleIssues' doc — one fetchProject read, one selector. */
+  async getPoolEligibleIssues(): Promise<Issue[]> {
+    const project = await this.fetchProject();
+    return selectPoolEligibleIssues(project, this.cfg);
   }
 
   async getIssueLabels(issue: number): Promise<string[]> {
@@ -1084,6 +1111,47 @@ export function selectPlanReviewCandidates(project: ParsedProject, cfg: ReadyCfg
     .filter((it) => it.state === "OPEN")
     .filter((it) => it.status === cfg.board.status.ready)
     .filter((it) => needsPlanReview(it.labels, cfg.labels))
+    .map((it) => ({
+      number: it.number,
+      title: it.title,
+      labels: it.labels,
+      body: it.body,
+      ...(it.milestone != null ? { milestone: it.milestone } : {}),
+    }));
+}
+
+/** #214 gate② review (P2): LITERALLY "Ready lane minus holds" — NOT the isDispatchable ∪
+ *  needsPlanReview union an earlier draft of this predicate used. That union has a gap: an
+ *  issue that carries `plan:approved` but whose verification-plan SECTION was later deleted
+ *  from the body satisfies neither isDispatchable (its body check fails — no plan text) nor
+ *  needsPlanReview (its label check fails — planApproved is present) — so it would carry no
+ *  hold label, yet could never re-enter a pool, never get confirmed, never get repaired:
+ *  permanently and invisibly stranded. This predicate is body-independent by design: OPEN +
+ *  Ready status + NOT needsHuman + NOT blocked + NOT the forbidden verifyNa+planApproved mixed
+ *  state (#94 — kept excluded: that state needs a human cleanup, not another session, same
+ *  stance as selectReadyIssues/selectPlanReviewCandidates). The DESIRABLE consequence: the
+ *  approved-but-planless orphan above is now pool-eligible, enters the pool, routes to class 2
+ *  (plan-review.ts's confirmOneIssue, since it still carries plan:approved), whose session reads
+ *  a plan-less body and invalidates it, which feeds the ordinary draft cycle that repairs it —
+ *  the exact self-healing loop #214 exists to build, reached automatically rather than requiring
+ *  a special case. */
+function isPoolEligible(labels: string[], l: ReadyCfg["labels"]): boolean {
+  if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
+  if (labelsInclude(labels, l.verifyNa) && labelsInclude(labels, l.planApproved)) return false;
+  return true;
+}
+
+/** Ready-lane + OPEN + this repo + pool-eligible (#214: Ready lane minus holds — see
+ *  isPoolEligible's doc for why this is a body-independent label check, not a dispatchability
+ *  union). The round pool's candidate source — see IForge.getPoolEligibleIssues' doc for the
+ *  deadlock this widening avoids and what stays narrow (executing-phase dispatch). */
+export function selectPoolEligibleIssues(project: ParsedProject, cfg: ReadyCfg): Issue[] {
+  const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
+  return project.items
+    .filter((it) => it.repo === fullName)
+    .filter((it) => it.state === "OPEN")
+    .filter((it) => it.status === cfg.board.status.ready)
+    .filter((it) => isPoolEligible(it.labels, cfg.labels))
     .map((it) => ({
       number: it.number,
       title: it.title,

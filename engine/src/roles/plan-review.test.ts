@@ -21,15 +21,23 @@ import { extractVerificationPlan } from "../forge/forge.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { ContextManifest } from "./context-manifest.js";
-import { PLAN_DRAFTER_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
+import {
+  CONFIRM_ALLOWED_TOOLS,
+  CONFIRM_DISALLOWED_TOOLS,
+  PLAN_DRAFTER_DISALLOWED_TOOLS,
+  type RoleSessionOpts,
+  type RoleSessionResult,
+} from "./peripheral.js";
 import {
   createPlanReviewStub,
+  defaultPlanConfirmPromptPath,
   defaultPlanDrafterPromptPath,
   defaultPlanReviewerPromptPath,
   loadRolePromptTemplate,
   type PlanReviewDeps,
   planReviewMarker,
   renderRolePrompt,
+  validateConfirmOutput,
   validateDrafterOutput,
   validateReviewerOutput,
 } from "./plan-review.js";
@@ -41,7 +49,10 @@ class FakeForge implements IForge {
   async readStartupReconcileData() {
     return { placements: [], openPrs: [] };
   }
-  planReviewCandidates: Issue[] = [];
+  /** #214: createPlanReviewStub's candidate set is now the round pool (forge.getPoolEligibleIssues
+   *  filtered by cfg.labels.roundPool) — every fixture issue in this file that should be seen by
+   *  the phase must carry cfg.labels.roundPool in its `labels` array. */
+  poolEligibleIssues: Issue[] = [];
   issueLabels: Record<number, string[]> = {};
   issueComments: Record<number, { login: string; createdAt: string; body: string }[]> = {};
   /** Mutable per-issue body — updateIssueBody writes here, and getIssueBody (the P1 refetch)
@@ -50,6 +61,12 @@ class FakeForge implements IForge {
   labelsAdded: Array<[number, string]> = [];
   issueCommentsPosted: Array<[number, string]> = [];
   getIssueCommentsCallCount = 0;
+  /** #214 gate② review (delta P2): a SINGLE ordered log spanning EVERY write type (label add,
+   *  label remove, comment) — labelsAdded/issueCommentsPosted above are per-write-type, so they
+   *  can't prove INTERLEAVING (e.g. "the comment landed between the two label writes, not before
+   *  or after both"). Tests pinning the verify_na branch's needsHuman -> comment -> verifyNa
+   *  ordering invariant read this log instead. */
+  writeLog: Array<{ kind: "add-label" | "remove-label" | "comment"; issue: number; detail: string }> = [];
 
   async detectOwnerKind(): Promise<"user"> {
     return "user";
@@ -61,9 +78,13 @@ class FakeForge implements IForge {
   async setBoardStatus(): Promise<void> {}
   async addLabel(n: number, l: string): Promise<void> {
     this.labelsAdded.push([n, l]);
+    this.writeLog.push({ kind: "add-label", issue: n, detail: l });
     this.issueLabels[n] = [...(this.issueLabels[n] ?? []), l];
   }
+  removeLabelCalls: Array<[number, string]> = [];
   async removeLabel(n: number, l: string): Promise<void> {
+    this.removeLabelCalls.push([n, l]);
+    this.writeLog.push({ kind: "remove-label", issue: n, detail: l });
     this.issueLabels[n] = (this.issueLabels[n] ?? []).filter((x) => x !== l);
   }
   async addPRLabel(): Promise<void> {}
@@ -77,6 +98,7 @@ class FakeForge implements IForge {
   async addPRComment(): Promise<void> {}
   async addIssueComment(n: number, body: string): Promise<void> {
     this.issueCommentsPosted.push([n, body]);
+    this.writeLog.push({ kind: "comment", issue: n, detail: body });
   }
   async getIssueBody(issue: number): Promise<string> {
     return this.issueBodies[issue] ?? "";
@@ -114,8 +136,8 @@ class FakeForge implements IForge {
   async listMilestoneTitles(): Promise<string[]> {
     return [];
   }
-  async getIssuesNeedingPlanReview(): Promise<Issue[]> {
-    return this.planReviewCandidates;
+  async getPoolEligibleIssues(): Promise<Issue[]> {
+    return this.poolEligibleIssues;
   }
   async getIssueLabels(issue: number): Promise<string[]> {
     return this.issueLabels[issue] ?? [];
@@ -195,6 +217,11 @@ const LEGACY_LABEL_CONFIG = {
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
   ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, ...LEGACY_LABEL_CONFIG, ...over });
 
+// #214: createPlanReviewStub's candidate set is the round pool now — every fixture issue below
+// that should be seen by the phase carries this label. No test in this file overrides
+// labels.roundPool or labels.prefix, so this one resolved value is valid for every mkCfg() call.
+const ROUND_POOL_LABEL = mkCfg().labels.roundPool;
+
 /** A structurally-valid ContextManifest for #236 persistence tests — `model` doubles as a tag so
  *  the persisted json is trivially distinguishable from another fixture's. */
 const mkFakeManifest = (tag: string): ContextManifest => ({
@@ -232,7 +259,7 @@ const NO_PLAN_BODY = "Some description with no verification section at all.";
 
 test("createPlanReviewStub: marker present -> returns it unchanged, no forge call, no session run (idempotence)", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 1, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 1, title: "t", labels: [ROUND_POOL_LABEL] }];
   const runner = new ScriptedRunner([{ result: doneResult("s1") }]);
   const state = new State(":memory:");
   const deps: PlanReviewDeps = { forge, state, cfg: mkCfg(), runner };
@@ -257,7 +284,7 @@ test("createPlanReviewStub: no candidates -> returns the round's marker, no sess
 
 test("createPlanReviewStub: outcome 1 (approve, no body revision) — engine applies plan:approved from the validated decision, no drafter is ever run", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 10, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 10, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[10] = PLAN_BODY; // the CURRENT body already carries a plan
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 10 })) }]);
@@ -276,7 +303,7 @@ test("createPlanReviewStub: outcome 1 (approve, no body revision) — engine app
 
 test("createPlanReviewStub: outcome 1 (approve WITH a body revision) — the revised body is applied via updateIssueBody BEFORE the label", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 50, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 50, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[50] = NO_PLAN_BODY; // current body has no plan — the REVISION supplies one
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: doneResult("reviewer-1", sapwoodResult({ decision: "approve", issue: 50 }, PLAN_BODY)) }]);
@@ -292,7 +319,7 @@ test("createPlanReviewStub: outcome 1 (approve WITH a body revision) — the rev
 
 test("createPlanReviewStub: outcome 3 (propose verify:n/a) — engine applies verify:n/a + needs-human together and posts the explanation as a comment", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 11, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 11, title: "t", labels: [ROUND_POOL_LABEL] }];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     {
@@ -322,7 +349,7 @@ test("createPlanReviewStub: outcome 3 (propose verify:n/a) — engine applies ve
 
 test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — reviewer draft_request -> engine posts the brief + briefs a plan-drafter -> engine applies the drafted body via updateIssueBody -> re-review approves", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 12, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 12, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[12] = NO_PLAN_BODY;
   // A pre-existing, unrelated comment already sits on the issue — proves the brief no longer
   // comes from (or is influenced by) issue comments at all (that snapshot/refetch machinery is
@@ -360,7 +387,7 @@ test("createPlanReviewStub: outcome 2 (request draft) end-to-end self-heal — r
 
 test("createPlanReviewStub (#236): both the reviewer AND the drafter session's context manifests are persisted, keyed by (round, 'plan_review', role, session, attempt 1)", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 12, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 12, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[12] = NO_PLAN_BODY;
   const reviewerManifest0 = mkFakeManifest("reviewer-attempt-0");
   const drafterManifest = mkFakeManifest("drafter-attempt");
@@ -397,7 +424,7 @@ test("createPlanReviewStub (#236): both the reviewer AND the drafter session's c
 
 test("createPlanReviewStub P1: after the drafter's body is applied, the NEXT reviewer render sees the NEW body (refetched per cycle, never the phase-start snapshot)", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 30, title: "t", labels: [], body: "OLD PLAN — inadequate" }];
+  forge.poolEligibleIssues = [{ number: 30, title: "t", labels: [ROUND_POOL_LABEL], body: "OLD PLAN — inadequate" }];
   forge.issueBodies[30] = "OLD PLAN — inadequate";
   const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
   const NEW_BODY = "NEW PLAN — concrete criteria\n\n## Verification\n\nRun the new test suite.";
@@ -418,7 +445,7 @@ test("createPlanReviewStub P1: after the drafter's body is applied, the NEXT rev
 
 test("createPlanReviewStub P2: a reviewer SESSION failure is retried once; a second failure escalates needs-human — NEVER briefs a drafter", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 31, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 31, title: "t", labels: [ROUND_POOL_LABEL] }];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: failedResult("reviewer-0") }, { result: failedResult("reviewer-0-retry") }]);
   const state = new State(":memory:");
@@ -439,7 +466,7 @@ test("createPlanReviewStub P2: a reviewer SESSION failure is retried once; a sec
 
 test("createPlanReviewStub P2: a reviewer failure followed by a successful+valid retry continues normally (approve on the retry)", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 32, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 32, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[32] = PLAN_BODY;
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
@@ -460,7 +487,7 @@ test("createPlanReviewStub P2: a reviewer failure followed by a successful+valid
 
 test("createPlanReviewStub #110: reviewer output with no structured block at all, TWICE -> degrades exactly like a session failure — needs-human, drafter never briefed", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 33, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 33, title: "t", labels: [ROUND_POOL_LABEL] }];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-0", "I looked at the issue and it seems fine to me.") },
@@ -489,7 +516,7 @@ test("createPlanReviewStub #110: reviewer output with no structured block at all
 
 test("createPlanReviewStub #110: reviewer 'draft_request' with NO BODY block, TWICE -> invalid output degrades — never briefs a drafter off nothing", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 34, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 34, title: "t", labels: [ROUND_POOL_LABEL] }];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 34 })) }, // no body
@@ -511,7 +538,7 @@ test("createPlanReviewStub #110: reviewer 'draft_request' with NO BODY block, TW
 
 test("createPlanReviewStub #110: an 'approve' whose body has no verification plan, TWICE -> treated as invalid output, never honored", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 35, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 35, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[35] = NO_PLAN_BODY; // no revision in the decision -> checked against THIS
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
@@ -531,7 +558,7 @@ test("createPlanReviewStub #110: an 'approve' whose body has no verification pla
 
 test("createPlanReviewStub #110: a plan-drafter session that produces invalid output TWICE degrades — the (bad) draft is never applied", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 36, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 36, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[36] = NO_PLAN_BODY;
   const cfg = mkCfg();
   const runner = new ScriptedRunner([
@@ -571,7 +598,7 @@ test("validateDrafterOutput: a smuggled 'decision' field in the metadata is reje
 
 test("createPlanReviewStub: exhausted after maxDraftCycles — applies needs-human with the attempt trail, never loops forever", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 13, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 13, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[13] = NO_PLAN_BODY;
   const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
   // Reviewer NEVER approves, NEVER escalates itself — always bounces. Drafter always drafts
@@ -598,7 +625,7 @@ test("createPlanReviewStub: exhausted after maxDraftCycles — applies needs-hum
 
 test("createPlanReviewStub #104: escalate() (maxDraftCycles exhausted) appends a plan-review-escalated state event naming the round and issue", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 13, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 13, title: "t", labels: [ROUND_POOL_LABEL] }];
   forge.issueBodies[13] = NO_PLAN_BODY;
   const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
   const runner = new ScriptedRunner([
@@ -621,7 +648,7 @@ test("createPlanReviewStub #104: escalate() (maxDraftCycles exhausted) appends a
 
 test("createPlanReviewStub #104: escalate() from a reviewer-session-failed-twice path also appends the event", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 31, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 31, title: "t", labels: [ROUND_POOL_LABEL] }];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: failedResult("reviewer-0") }, { result: failedResult("reviewer-0-retry") }]);
   const state = new State(":memory:");
@@ -638,7 +665,7 @@ test("createPlanReviewStub #104: escalate() from a reviewer-session-failed-twice
 
 test("createPlanReviewStub #104: a state-write failure on escalate() is contained — the forge label/comment still land, run() does not throw", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [{ number: 33, title: "t", labels: [] }];
+  forge.poolEligibleIssues = [{ number: 33, title: "t", labels: [ROUND_POOL_LABEL] }];
   const cfg = mkCfg();
   const runner = new ScriptedRunner([{ result: failedResult("reviewer-0") }, { result: failedResult("reviewer-0-retry") }]);
   const state = new State(":memory:");
@@ -654,9 +681,9 @@ test("createPlanReviewStub #104: a state-write failure on escalate() is containe
 
 test("createPlanReviewStub: processes every candidate issue, independently", async () => {
   const forge = new FakeForge();
-  forge.planReviewCandidates = [
-    { number: 20, title: "a", labels: [] },
-    { number: 21, title: "b", labels: [] },
+  forge.poolEligibleIssues = [
+    { number: 20, title: "a", labels: [ROUND_POOL_LABEL] },
+    { number: 21, title: "b", labels: [ROUND_POOL_LABEL] },
   ];
   forge.issueBodies[20] = PLAN_BODY;
   forge.issueBodies[21] = PLAN_BODY;
@@ -820,4 +847,434 @@ test("validateDrafterOutput: a template-shaped body with sibling Verification pl
   assert.ok(plan!.includes("N is config-driven"), "extracted plan must carry the AC lines");
   assert.ok(plan!.includes("## Verification plan"), "extracted plan must carry the Verification heading");
   assert.ok(plan!.includes("feeds the poller N+1 transient failures"), "extracted plan must carry the verification steps");
+});
+
+// ── #214: gate⓪ scoped to the round pool + freshness re-confirm ────────────────────────────
+
+test("createPlanReviewStub (#214): a pool with all four member classes gets exactly the class-appropriate treatment; a non-pool Ready issue in the same read gets zero attention", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  // Class 3 setup: a plan-approved event for #102 already recorded THIS round (id > the round's
+  // start_event_id) — simulating an approval granted earlier in this same round's pool pass.
+  state.appendEvent("plan-approved", { round_id: round.round_id, issue: 102 });
+
+  forge.issueBodies[100] = PLAN_BODY;
+  // #214 gate② review (delta P2): #101's body must carry a real verification-plan section, or
+  // confirmOneIssue's own extractVerificationPlan pre-check skips the confirm session outright
+  // (the approved-but-planless orphan path — a DIFFERENT test covers that directly). This test's
+  // point is the confirm session ITSELF, so #101 needs a genuine plan to reach it.
+  forge.issueBodies[101] = PLAN_BODY;
+  forge.poolEligibleIssues = [
+    { number: 100, title: "unadjudicated", labels: [ROUND_POOL_LABEL] }, // class 1
+    { number: 101, title: "approved prior round", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }, // class 2
+    { number: 102, title: "approved this round", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }, // class 3
+    { number: 103, title: "doc-gate", labels: [ROUND_POOL_LABEL, cfg.labels.verifyNa] }, // class 4
+    { number: 104, title: "non-pool ready", labels: [] }, // dispatchable but NOT a pool member
+  ];
+
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-100", sapwoodResult({ decision: "approve", issue: 100 })) },
+    { result: doneResult("confirm-101", sapwoodResult({ decision: "confirm", issue: 101 })) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.equal(runner.calls.length, 2, "exactly one session for class 1, one for class 2 — classes 3/4 and the non-pool issue get zero");
+  assert.deepEqual(
+    runner.calls.map((c) => [c.roleId, /Number: #(\d+)/.exec(c.prompt)?.[1]]),
+    [
+      ["plan-reviewer", "100"],
+      ["plan-reviewer-confirm", "101"],
+    ],
+  );
+  // #214 gate② review (P1): the confirm session — and ONLY the confirm session — runs under the
+  // widened, read-only CONFIRM_ALLOWED_TOOLS/CONFIRM_DISALLOWED_TOOLS pair; the ordinary reviewer
+  // session stays on the base issues-only (no tool grant) scope, unchanged.
+  assert.equal(runner.calls[0]!.allowedTools, undefined, "the reviewer session's tool scope is unchanged (base ROLE_ALLOWED_TOOLS)");
+  assert.equal(runner.calls[0]!.disallowedTools, undefined);
+  assert.equal(runner.calls[1]!.allowedTools, CONFIRM_ALLOWED_TOOLS);
+  assert.equal(runner.calls[1]!.disallowedTools, CONFIRM_DISALLOWED_TOOLS);
+  assert.ok(forge.issueLabels[100]!.includes(cfg.labels.planApproved), "class 1 converged to approved");
+  assert.equal(
+    forge.issueLabels[101],
+    undefined,
+    "class 2 confirm made ZERO forge label writes — addLabel/removeLabel never called for #101",
+  );
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "no body writes at all for the confirm-only class");
+  assert.equal(forge.issueCommentsPosted.length, 0, "confirm makes no comments either — truly zero forge writes");
+  assert.equal(forge.issueLabels[103], undefined, "class 4 (verify:n/a) untouched — no confirm, no session");
+  assert.equal(forge.issueLabels[104], undefined, "non-pool Ready issue gets zero gate⓪ attention of any kind");
+  state.close();
+});
+
+test("createPlanReviewStub (#214 gate② review delta P2): an approved-but-planless orphan (plan:approved survives, but the verification-plan section was deleted from the body) skips the confirm session ENTIRELY — a deterministic, engine-authored brief feeds the drafter cycle directly, no session spent on an unwinnable confirm, no infinite re-pool loop", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 220, title: "orphaned", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  forge.issueBodies[220] = "This body used to have a plan but someone deleted the section.";
+  const NEW_BODY = "Repaired.\n\n## Verification\n\nRun the suite.";
+  const runner = new ScriptedRunner([
+    { result: doneResult("drafter-220", sapwoodResult({ issue: 220 }, NEW_BODY)) },
+    { result: doneResult("reviewer-220", sapwoodResult({ decision: "approve", issue: 220 })) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-drafter", "plan-reviewer"],
+    "NO plan-reviewer-confirm session at all — the engine skipped straight to the draft cycle, deterministically",
+  );
+  assert.ok(
+    runner.calls[0]!.prompt.includes("verification-plan section"),
+    "the drafter's brief is the engine-authored, deterministic explanation, not anything a session produced",
+  );
+  assert.deepEqual(forge.updateIssueBodyCalls, [[220, NEW_BODY]]);
+  assert.ok(forge.issueLabels[220]!.includes(cfg.labels.planApproved), "converged back to approved via the ordinary cycle");
+  state.close();
+});
+
+test("createPlanReviewStub (#214): confirm 'invalidate' feeds the SAME draft-cycle machinery an unadjudicated draft_request would — reviewer brief -> drafter -> re-review, existing caps, converges to approved", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 200, title: "stale plan", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  // #214 gate② review (delta P2): a real verification-plan SECTION must be present (confirmOneIssue's
+  // own extractVerificationPlan pre-check would otherwise skip the confirm session outright) — the
+  // STALENESS this test's narrative is about lives in the CONTENT (a renamed file), not in the
+  // section's mere presence.
+  forge.issueBodies[200] =
+    "OLD PLAN referencing a file since renamed.\n\n## Verification\n\nRun `npm test` from the old (now-renamed) location.";
+  const NEW_BODY = "NEW PLAN\n\n## Verification\n\nRun the new suite.";
+  const runner = new ScriptedRunner([
+    { result: doneResult("confirm-200", sapwoodResult({ decision: "invalidate", issue: 200 }, "references a file since renamed on main")) },
+    { result: doneResult("drafter-200", sapwoodResult({ issue: 200 }, NEW_BODY)) },
+    { result: doneResult("reviewer-200", sapwoodResult({ decision: "approve", issue: 200 })) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer-confirm", "plan-drafter", "plan-reviewer"],
+  );
+  assert.ok(
+    runner.calls[1]!.prompt.includes("references a file since renamed on main"),
+    "the confirm's invalidate brief reached the drafter verbatim",
+  );
+  assert.equal(runner.calls[1]!.disallowedTools, PLAN_DRAFTER_DISALLOWED_TOOLS, "the drafter's own grants are unchanged");
+  assert.deepEqual(forge.updateIssueBodyCalls, [[200, NEW_BODY]]);
+  assert.ok(forge.issueLabels[200]!.includes(cfg.labels.planApproved), "converged back to approved via the existing cycle");
+  state.close();
+});
+
+// ── #214 gate② review (P2): confirm-invalidate can route into a verify_na verdict on an issue
+//    that ALREADY carries plan:approved — a state reviewOneIssue never saw pre-#214. Following
+//    the ordinary "remove needs-human to accept" comment literally would leave the forbidden
+//    verifyNa+planApproved mixed state (#94) — excluded from dispatch AND (post gate② review P2)
+//    pool re-entry — permanently, invisibly. The engine names BOTH cleanup options explicitly
+//    whenever this is reachable. ──
+
+test("createPlanReviewStub (#214 gate② review P2): confirm 'invalidate' -> seeded reviewer proposes verify_na on an issue that ALREADY carries plan:approved -> the escalation comment names BOTH cleanup options (remove needs-human+plan:approved to accept the doc-gate path, or needs-human+verify:n/a to keep the plan path) — never just 'remove needs-human'", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [
+    { number: 201, title: "stale plan, actually unverifiable", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] },
+  ];
+  // #214 gate② review (delta P2): a real plan section, or confirmOneIssue's own pre-check skips
+  // the confirm session entirely (a different test covers that path).
+  forge.issueBodies[201] = PLAN_BODY;
+  const runner = new ScriptedRunner([
+    { result: doneResult("confirm-201", sapwoodResult({ decision: "invalidate", issue: 201 }, "the whole approach is now moot")) },
+    // The seed's synthetic "draft_request" always briefs a drafter FIRST (reviewOneIssue's
+    // ordinary cycle shape — a seed only replaces cycle 0's REVIEWER session, never the
+    // drafter that decision type triggers); the drafted body then feeds a REAL cycle-1
+    // reviewer session, which is where this test's verify_na verdict actually lands.
+    { result: doneResult("drafter-201", sapwoodResult({ issue: 201 }, "Revised, but genuinely unverifiable.\n\n## Verification\n\nn/a")) },
+    {
+      result: doneResult(
+        "reviewer-201",
+        sapwoodResult({ decision: "verify_na", issue: 201 }, "Turns out this work is inherently unverifiable."),
+      ),
+    },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer-confirm", "plan-drafter", "plan-reviewer"],
+    "invalidate seeded the cycle into the ordinary brief -> drafter -> re-review shape; the re-review is where this test's verify_na verdict lands",
+  );
+  assert.ok(forge.issueLabels[201]!.includes(cfg.labels.needsHuman));
+  assert.ok(forge.issueLabels[201]!.includes(cfg.labels.verifyNa));
+  // plan:approved is never touched by the engine (#147) — it's still there, unmentioned by any
+  // addLabel/removeLabel call, exactly the reachable-but-unhandled state gate② review P2 flagged.
+  assert.ok(!forge.removeLabelCalls.some(([n, l]) => n === 201 && l === cfg.labels.planApproved));
+  const comment = lastComment(forge, 201);
+  assert.ok(comment.includes("Turns out this work is inherently unverifiable"), "the session's own explanation still leads");
+  assert.ok(
+    comment.includes(`remove BOTH`) && comment.includes(cfg.labels.planApproved),
+    "names plan:approved as part of the accept-doc-gate cleanup",
+  );
+  assert.ok(comment.includes("keep the plan path"), "also names the keep-the-plan-path alternative");
+  state.close();
+});
+
+test("createPlanReviewStub (#214 gate② review P2): an ORDINARY (never-approved) verify_na proposal's comment is UNCHANGED — no dual-label instruction, since plan:approved was never granted in the first place", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 202, title: "plain docs work", labels: [ROUND_POOL_LABEL] }]; // class 1, no plan:approved
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult(
+        "reviewer-202",
+        sapwoodResult({ decision: "verify_na", issue: 202 }, "Pure docs work, no verification plan applies."),
+      ),
+    },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  const comment = lastComment(forge, 202);
+  assert.ok(comment.includes("Pure docs work"));
+  assert.ok(!comment.includes("remove BOTH"), "no dual-label instruction — this issue never carried plan:approved to begin with");
+  assert.ok(!comment.includes(cfg.labels.planApproved), "plan:approved isn't even mentioned");
+  state.close();
+});
+
+// ── #214 gate② review (delta P2): the verify_na branch's write ORDER — needsHuman label ->
+//    comment -> verifyNa label, pinned via FakeForge's unified writeLog (labelsAdded/
+//    issueCommentsPosted alone can't prove INTERLEAVING). Every crash window must be safe: a
+//    crash between the two label writes must never leave verifyNa landed without the (possibly
+//    dual-label) comment already durably posted — see the branch's own ordering-invariant
+//    comment for the full crash-window analysis. ──
+
+test("createPlanReviewStub (#214 gate② review delta P2): verify_na write order, UNAPPROVED variant — needsHuman label, THEN the comment, THEN verifyNa label; verifyNa never lands before the comment", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 210, title: "plain docs work", labels: [ROUND_POOL_LABEL] }];
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-210", sapwoodResult({ decision: "verify_na", issue: 210 }, "Pure docs work.")) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  const log = forge.writeLog.filter((e) => e.issue === 210);
+  assert.deepEqual(
+    log.map((e) => [e.kind, e.detail.includes(cfg.labels.needsHuman) || e.detail.includes(cfg.labels.verifyNa) ? e.detail : "(comment)"]),
+    [
+      ["add-label", cfg.labels.needsHuman],
+      ["comment", "(comment)"],
+      ["add-label", cfg.labels.verifyNa],
+    ],
+  );
+});
+
+test("createPlanReviewStub (#214 gate② review delta P2): verify_na write order, ALREADY-APPROVED variant (confirm-invalidate reachable path) — same needsHuman -> comment -> verifyNa order, with the dual-cleanup comment landing BEFORE verifyNa either way", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 211, title: "stale, actually unverifiable", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  // #214 gate② review (delta P2): a real plan section, or the confirm session is skipped outright.
+  forge.issueBodies[211] = PLAN_BODY;
+  const runner = new ScriptedRunner([
+    { result: doneResult("confirm-211", sapwoodResult({ decision: "invalidate", issue: 211 }, "moot now")) },
+    { result: doneResult("drafter-211", sapwoodResult({ issue: 211 }, "Revised.\n\n## Verification\n\nn/a")) },
+    { result: doneResult("reviewer-211", sapwoodResult({ decision: "verify_na", issue: 211 }, "Turns out unverifiable.")) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  // #211's full write log: the seed's own draft_request brief is posted as a comment FIRST
+  // (reviewOneIssue's ordinary "request-a-draft" step, unrelated to the verify_na ordering under
+  // test here), THEN cycle 1's REAL reviewer session lands its verify_na verdict — that's the
+  // needsHuman -> comment -> verifyNa triple this test actually pins.
+  const log = forge.writeLog.filter((e) => e.issue === 211);
+  assert.deepEqual(
+    log.map((e) => e.kind),
+    ["comment", "add-label", "comment", "add-label"],
+    "the seed's own brief comment, THEN needsHuman add-label, THEN the verify_na comment, THEN verifyNa add-label — never verifyNa before its own comment",
+  );
+  assert.equal(log[1]!.detail, cfg.labels.needsHuman);
+  assert.equal(log[3]!.detail, cfg.labels.verifyNa);
+  assert.ok(log[2]!.detail.includes("remove BOTH"), "the comment that landed BEFORE verifyNa already carries the dual-cleanup instruction");
+});
+
+test("createPlanReviewStub (#214): a confirm session that fails TWICE escalates needs-human with a one-entry attempt trail — never briefs a drafter off nothing", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 300, title: "t", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  // #214 gate② review (delta P2): a real plan section, or the confirm session is skipped outright.
+  forge.issueBodies[300] = PLAN_BODY;
+  const runner = new ScriptedRunner([{ result: failedResult("confirm-0") }, { result: failedResult("confirm-0-retry") }]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer-confirm", "plan-reviewer-confirm"],
+    "one retry, never a drafter",
+  );
+  assert.ok(forge.issueLabels[300]!.includes(cfg.labels.needsHuman));
+  assert.ok(
+    !forge.removeLabelCalls.some(([n, l]) => n === 300 && l === cfg.labels.planApproved),
+    "plan:approved is NEVER removed by the confirm path, even on escalation",
+  );
+  const comment = lastComment(forge, 300);
+  assert.ok(/failed/.test(comment));
+  assert.ok(comment.includes(planReviewMarker(round.round_id)));
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { round_id: number; issue: number };
+  assert.equal(payload.round_id, round.round_id);
+  assert.equal(payload.issue, 300);
+  state.close();
+});
+
+test("createPlanReviewStub (#214): a confirm session producing invalid structured output TWICE also escalates (same isValid-hook treatment as the reviewer/drafter sessions)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 301, title: "t", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  // #214 gate② review (delta P2): a real plan section, or the confirm session is skipped outright.
+  forge.issueBodies[301] = PLAN_BODY;
+  const runner = new ScriptedRunner([
+    { result: doneResult("confirm-0", "no structured output at all") },
+    { result: doneResult("confirm-0-retry", "still just prose") },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  assert.ok(forge.issueLabels[301]!.includes(cfg.labels.needsHuman));
+  const comment = lastComment(forge, 301);
+  assert.ok(/structured output/.test(comment));
+  state.close();
+});
+
+test("createPlanReviewStub (#214) same-round detection: an issue approved earlier THIS round is skipped (class 3, no session) on a later same-round pool pass — never re-confirmed", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.issueBodies[400] = PLAN_BODY;
+  forge.poolEligibleIssues = [{ number: 400, title: "t", labels: [ROUND_POOL_LABEL] }]; // class 1, first pass
+  const runner = new ScriptedRunner([{ result: doneResult("reviewer-400", sapwoodResult({ decision: "approve", issue: 400 })) }]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null }); // approves #400
+  assert.equal(runner.calls.length, 1);
+  assert.ok(forge.issueLabels[400]!.includes(cfg.labels.planApproved));
+
+  // Simulate the SAME round re-entering the pool (a crash-rerun before the phase marker
+  // persisted, replaying with marker: null again) — #400 now carries plan:approved backed by a
+  // plan-approved event from THIS round, so it must read as class 3 (skip), never class 2.
+  forge.poolEligibleIssues = [{ number: 400, title: "t", labels: forge.issueLabels[400]! }];
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  assert.equal(runner.calls.length, 1, "no additional session — the approval happened THIS round");
+  state.close();
+});
+
+test("createPlanReviewStub (#214) same-round detection: an issue approved in a PRIOR round gets a confirm pass on its NEXT round's pool entry (class 2, not class 3)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round1 = state.startRound("2026-07-18T00:00:00.000Z");
+  state.appendEvent("plan-approved", { round_id: round1.round_id, issue: 500 });
+  const round2 = state.startRound("2026-07-18T01:00:00.000Z"); // start_event_id is AFTER the event above
+  forge.poolEligibleIssues = [{ number: 500, title: "t", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  // #214 gate② review (delta P2): a real plan section, or the confirm session is skipped outright.
+  forge.issueBodies[500] = PLAN_BODY;
+  const runner = new ScriptedRunner([{ result: doneResult("confirm-500", sapwoodResult({ decision: "confirm", issue: 500 })) }]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round2.round_id, phase: "plan_review", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer-confirm"],
+    "a confirm pass ran — the approval is from a PRIOR round",
+  );
+  state.close();
+});
+
+test("createPlanReviewStub (#214): a pre-#214 approval with NO plan-approved event at all reads as a PRIOR-round approval — one confirm pass (accepted one-time backfill), never silently skipped", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 600, title: "t", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  // #214 gate② review (delta P2): a real plan section, or the confirm session is skipped outright.
+  forge.issueBodies[600] = PLAN_BODY;
+  const runner = new ScriptedRunner([{ result: doneResult("confirm-600", sapwoodResult({ decision: "confirm", issue: 600 })) }]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer-confirm"],
+  );
+  state.close();
+});
+
+test("validateConfirmOutput: truncated sentinel (no matching end) -> fail-closed, never a partial parse", () => {
+  const text = `${RESULT_BLOCK_START}\n{"decision":"confirm"`;
+  const result = validateConfirmOutput(text, 1);
+  assert.equal(result.ok, false);
+});
+
+test("validateConfirmOutput: schema-invalid decision value -> fail-closed", () => {
+  const result = validateConfirmOutput(sapwoodResult({ decision: "maybe", issue: 1 }), 1);
+  assert.equal(result.ok, false);
+});
+
+test("validateConfirmOutput: issue number mismatch -> fail-closed (never trust a decision for the wrong issue)", () => {
+  const result = validateConfirmOutput(sapwoodResult({ decision: "confirm", issue: 999 }), 1);
+  assert.equal(result.ok, false);
+});
+
+test("validateConfirmOutput: 'invalidate' with no BODY block -> fail-closed (required brief absent)", () => {
+  const result = validateConfirmOutput(sapwoodResult({ decision: "invalidate", issue: 1 }), 1);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && /BODY block/.test(result.reason));
+});
+
+test("validateConfirmOutput: well-formed 'confirm' -> ok, no body required", () => {
+  const result = validateConfirmOutput(sapwoodResult({ decision: "confirm", issue: 1 }), 1);
+  assert.equal(result.ok, true);
+  assert.ok(result.ok && result.decision === "confirm");
+});
+
+test("validateConfirmOutput: well-formed 'invalidate' -> ok, carries the body verbatim as the drafter's brief", () => {
+  const result = validateConfirmOutput(sapwoodResult({ decision: "invalidate", issue: 1 }, "drifted: file renamed"), 1);
+  assert.equal(result.ok, true);
+  assert.ok(result.ok && result.decision === "invalidate" && result.body === "drifted: file renamed");
+});
+
+test("defaultPlanConfirmPromptPath: resolves to a real shipped file describing the confirm/invalidate contract, not a `gh` command", () => {
+  const confirmTemplate = loadRolePromptTemplate(undefined, defaultPlanConfirmPromptPath());
+  assert.ok(confirmTemplate.includes("{{issue.number}}"));
+  assert.ok(confirmTemplate.includes(RESULT_BLOCK_START) && confirmTemplate.includes(BODY_BLOCK_START));
+  assert.ok(!/`gh issue (comment|edit)/.test(confirmTemplate), "the confirm prompt never instructs a gh command");
+  assert.ok(/confirm/.test(confirmTemplate) && /invalidate/.test(confirmTemplate));
 });

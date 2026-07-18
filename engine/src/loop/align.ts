@@ -864,14 +864,24 @@ function persistPoolSelection(state: State, roundId: number, target: readonly Is
   }
 }
 
-/** The deterministic candidate/fallback ordering: Ready, sorted prio:0-first then issue-number-
- *  ascending, capped at `ceil(cfg.lanes.roundDispatchCap * cfg.round.poolFactor)`. Pure read, no
- *  forge writes — shared by the candidate digest (below) and every fallback path. A forge read
- *  failure propagates (callers decide how to degrade; see selectRoundPool/runPoolSelection). */
+/** The deterministic candidate/fallback ordering: Ready-lane-minus-holds, sorted prio:0-first
+ *  then issue-number-ascending, capped at `ceil(cfg.lanes.roundDispatchCap * cfg.round.poolFactor)`.
+ *  Pure read, no forge writes — shared by the candidate digest (below) and every fallback path. A
+ *  forge read failure propagates (callers decide how to degrade; see selectRoundPool/
+ *  runPoolSelection).
+ *
+ *  #214: sourced from forge.getPoolEligibleIssues() — WIDER than getReadyIssues() alone (gate⓪-
+ *  passed ∪ still-awaiting-plan-review). Scoping the pool to gate⓪-passed issues only would
+ *  deadlock the system: gate⓪ itself is now scoped to the pool (plan-review.ts's
+ *  createPlanReviewStub), so an unapproved issue that could never enter the pool would also
+ *  never get reviewed, never get approved, and so never dispatch. Dispatch itself stays exactly
+ *  as narrow as before — round.ts's PoolScopedForge (executing-phase only) still wraps
+ *  getReadyIssues(), so a pool member without plan:approved still cannot be dispatched merely
+ *  for having a pool label. */
 async function computePoolCandidates(forge: IForge, cfg: SapwoodConfig): Promise<Issue[]> {
   const cap = Math.ceil(cfg.lanes.roundDispatchCap * cfg.round.poolFactor);
-  const ready = await forge.getReadyIssues();
-  return [...ready]
+  const eligible = await forge.getPoolEligibleIssues();
+  return [...eligible]
     .sort((a, b) => issuePriority(a.labels, cfg.labels.prefix) - issuePriority(b.labels, cfg.labels.prefix) || a.number - b.number)
     .slice(0, cap);
 }
