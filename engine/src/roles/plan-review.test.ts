@@ -21,7 +21,13 @@ import { extractVerificationPlan } from "../forge/forge.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { ContextManifest } from "./context-manifest.js";
-import { PLAN_DRAFTER_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
+import {
+  CONFIRM_ALLOWED_TOOLS,
+  CONFIRM_DISALLOWED_TOOLS,
+  PLAN_DRAFTER_DISALLOWED_TOOLS,
+  type RoleSessionOpts,
+  type RoleSessionResult,
+} from "./peripheral.js";
 import {
   createPlanReviewStub,
   defaultPlanConfirmPromptPath,
@@ -870,6 +876,13 @@ test("createPlanReviewStub (#214): a pool with all four member classes gets exac
       ["plan-reviewer-confirm", "101"],
     ],
   );
+  // #214 gate② review (P1): the confirm session — and ONLY the confirm session — runs under the
+  // widened, read-only CONFIRM_ALLOWED_TOOLS/CONFIRM_DISALLOWED_TOOLS pair; the ordinary reviewer
+  // session stays on the base issues-only (no tool grant) scope, unchanged.
+  assert.equal(runner.calls[0]!.allowedTools, undefined, "the reviewer session's tool scope is unchanged (base ROLE_ALLOWED_TOOLS)");
+  assert.equal(runner.calls[0]!.disallowedTools, undefined);
+  assert.equal(runner.calls[1]!.allowedTools, CONFIRM_ALLOWED_TOOLS);
+  assert.equal(runner.calls[1]!.disallowedTools, CONFIRM_DISALLOWED_TOOLS);
   assert.ok(forge.issueLabels[100]!.includes(cfg.labels.planApproved), "class 1 converged to approved");
   assert.equal(
     forge.issueLabels[101],
@@ -911,6 +924,83 @@ test("createPlanReviewStub (#214): confirm 'invalidate' feeds the SAME draft-cyc
   assert.equal(runner.calls[1]!.disallowedTools, PLAN_DRAFTER_DISALLOWED_TOOLS, "the drafter's own grants are unchanged");
   assert.deepEqual(forge.updateIssueBodyCalls, [[200, NEW_BODY]]);
   assert.ok(forge.issueLabels[200]!.includes(cfg.labels.planApproved), "converged back to approved via the existing cycle");
+  state.close();
+});
+
+// ── #214 gate② review (P2): confirm-invalidate can route into a verify_na verdict on an issue
+//    that ALREADY carries plan:approved — a state reviewOneIssue never saw pre-#214. Following
+//    the ordinary "remove needs-human to accept" comment literally would leave the forbidden
+//    verifyNa+planApproved mixed state (#94) — excluded from dispatch AND (post gate② review P2)
+//    pool re-entry — permanently, invisibly. The engine names BOTH cleanup options explicitly
+//    whenever this is reachable. ──
+
+test("createPlanReviewStub (#214 gate② review P2): confirm 'invalidate' -> seeded reviewer proposes verify_na on an issue that ALREADY carries plan:approved -> the escalation comment names BOTH cleanup options (remove needs-human+plan:approved to accept the doc-gate path, or needs-human+verify:n/a to keep the plan path) — never just 'remove needs-human'", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [
+    { number: 201, title: "stale plan, actually unverifiable", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] },
+  ];
+  const runner = new ScriptedRunner([
+    { result: doneResult("confirm-201", sapwoodResult({ decision: "invalidate", issue: 201 }, "the whole approach is now moot")) },
+    // The seed's synthetic "draft_request" always briefs a drafter FIRST (reviewOneIssue's
+    // ordinary cycle shape — a seed only replaces cycle 0's REVIEWER session, never the
+    // drafter that decision type triggers); the drafted body then feeds a REAL cycle-1
+    // reviewer session, which is where this test's verify_na verdict actually lands.
+    { result: doneResult("drafter-201", sapwoodResult({ issue: 201 }, "Revised, but genuinely unverifiable.\n\n## Verification\n\nn/a")) },
+    {
+      result: doneResult(
+        "reviewer-201",
+        sapwoodResult({ decision: "verify_na", issue: 201 }, "Turns out this work is inherently unverifiable."),
+      ),
+    },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-reviewer-confirm", "plan-drafter", "plan-reviewer"],
+    "invalidate seeded the cycle into the ordinary brief -> drafter -> re-review shape; the re-review is where this test's verify_na verdict lands",
+  );
+  assert.ok(forge.issueLabels[201]!.includes(cfg.labels.needsHuman));
+  assert.ok(forge.issueLabels[201]!.includes(cfg.labels.verifyNa));
+  // plan:approved is never touched by the engine (#147) — it's still there, unmentioned by any
+  // addLabel/removeLabel call, exactly the reachable-but-unhandled state gate② review P2 flagged.
+  assert.ok(!forge.removeLabelCalls.some(([n, l]) => n === 201 && l === cfg.labels.planApproved));
+  const comment = lastComment(forge, 201);
+  assert.ok(comment.includes("Turns out this work is inherently unverifiable"), "the session's own explanation still leads");
+  assert.ok(
+    comment.includes(`remove BOTH`) && comment.includes(cfg.labels.planApproved),
+    "names plan:approved as part of the accept-doc-gate cleanup",
+  );
+  assert.ok(comment.includes("keep the plan path"), "also names the keep-the-plan-path alternative");
+  state.close();
+});
+
+test("createPlanReviewStub (#214 gate② review P2): an ORDINARY (never-approved) verify_na proposal's comment is UNCHANGED — no dual-label instruction, since plan:approved was never granted in the first place", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 202, title: "plain docs work", labels: [ROUND_POOL_LABEL] }]; // class 1, no plan:approved
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult(
+        "reviewer-202",
+        sapwoodResult({ decision: "verify_na", issue: 202 }, "Pure docs work, no verification plan applies."),
+      ),
+    },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  const comment = lastComment(forge, 202);
+  assert.ok(comment.includes("Pure docs work"));
+  assert.ok(!comment.includes("remove BOTH"), "no dual-label instruction — this issue never carried plan:approved to begin with");
+  assert.ok(!comment.includes(cfg.labels.planApproved), "plan:approved isn't even mentioned");
   state.close();
 });
 

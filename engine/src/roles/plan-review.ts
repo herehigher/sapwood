@@ -44,7 +44,14 @@ import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
-import { PLAN_DRAFTER_DISALLOWED_TOOLS, type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
+import {
+  CONFIRM_ALLOWED_TOOLS,
+  CONFIRM_DISALLOWED_TOOLS,
+  PLAN_DRAFTER_DISALLOWED_TOOLS,
+  type RoleRunner,
+  type RoleSessionResult,
+  runSessionWithRetry,
+} from "./peripheral.js";
 
 export interface PlanReviewDeps {
   forge: IForge;
@@ -514,7 +521,28 @@ async function reviewOneIssue(
       // the doc-gate path without the human adjudication this whole outcome exists to require).
       await deps.forge.addLabel(issue.number, l.needsHuman);
       await deps.forge.addLabel(issue.number, l.verifyNa);
-      await deps.forge.addIssueComment(issue.number, `${decision.body}\n\n${marker}`);
+      // #214 gate② review (P2): confirm-invalidate makes this branch reachable for an issue that
+      // ALREADY carries plan:approved — a case reviewOneIssue never saw pre-#214 (a cold-start
+      // candidate is always unapproved, see createPlanReviewStub's class 1). The engine may not
+      // strip plan:approved itself (#147: engine label REMOVAL is reserved for
+      // cfg.labels.roundPool alone, round.ts's removeRoundPoolLabel), and the session's own
+      // free-text explanation (decision.body) habitually only names removing needs-human — the
+      // plan-reviewer prompt's outcome-3 framing was written for the unapproved case, where that
+      // alone is correct. On THIS reachable path, following that comment literally would leave
+      // the forbidden verifyNa+planApproved mixed state (#94) — excluded from both dispatch
+      // (forge.ts's isDispatchable) and pool re-entry (forge.ts's isPoolEligible, #214) alike, a
+      // silent stranding a human would have no reason to suspect. Name BOTH cleanup options
+      // explicitly whenever the issue's already-approved, no label machinery beyond the same two
+      // addLabel calls above.
+      const cleanupNote = labelsInclude(issue.labels, l.planApproved)
+        ? `\n\n---\n\nThis issue already carries \`${l.planApproved}\` from a prior approval. To ` +
+          `accept this verify:n/a proposal, remove BOTH \`${l.needsHuman}\` AND ` +
+          `\`${l.planApproved}\` — removing only \`${l.needsHuman}\` leaves the forbidden ` +
+          `\`${l.verifyNa}\`+\`${l.planApproved}\` combination, which dispatches nothing and ` +
+          `re-enters no pool. To keep the plan path instead, remove \`${l.needsHuman}\` and ` +
+          `\`${l.verifyNa}\` — the plan goes through review again.`
+        : "";
+      await deps.forge.addIssueComment(issue.number, `${decision.body}${cleanupNote}\n\n${marker}`);
       return; // outcome 3 (verify:n/a proposal) — a human resolves it
     }
 
@@ -618,6 +646,11 @@ async function confirmOneIssue(
       model: reviewerRole.model,
       effort: reviewerRole.effort,
       fallbackModel: reviewerRole.fallbackModel,
+      // #214 gate② review (P1): the ONLY role session in this phase with a real (read-only)
+      // tool grant — see peripheral.ts's CONFIRM_ALLOWED_TOOLS doc for why this session, unlike
+      // every other one in this file, actually needs to inspect the repo to do its job.
+      allowedTools: CONFIRM_ALLOWED_TOOLS,
+      disallowedTools: CONFIRM_DISALLOWED_TOOLS,
     },
     issue: issue.number,
     now,

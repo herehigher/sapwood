@@ -71,6 +71,34 @@ export const ROLE_DISALLOWED_TOOLS =
 export const PLAN_DRAFTER_DISALLOWED_TOOLS =
   ROLE_DISALLOWED_TOOLS + ",Bash(gh issue edit *--add-label*),Bash(gh issue edit *--remove-label*)";
 
+/** #214 gate② review (P1): the freshness re-confirm session ("does this plan still hold against
+ *  current main?") is otherwise BLIND — the base ROLE_ALLOWED_TOOLS carries no Read grant at
+ *  all, and ROLE_DISALLOWED_TOOLS explicitly denies `Read`, so a session judging freshness
+ *  against the repo's current state (the issue's own live-smoke scenario: a plan referencing a
+ *  file since renamed) had no way to actually check. This is the SECOND sanctioned allow-list
+ *  widening in this codebase (the first is retro.ts's RETRO_ALLOWED_TOOLS — see
+ *  RoleSessionOpts.allowedTools's doc for why a widening is always paired with its own
+ *  disallowedTools override, never shipped wide-open) — deliberately the NARROWEST possible
+ *  grant for the job: read-only repository INSPECTION, nothing else. No `Bash` of any kind
+ *  (so no `git`, no `gh`, no arbitrary command execution), no `Write`/`Edit`/`MultiEdit` (the
+ *  confirm session's only output channel is its structured final message, exactly like every
+ *  other role in this file — plan-review.ts performs every write). The session reads the
+ *  CONDUCTOR'S OWN checkout (the same ephemeral worktree every role session gets) — its
+ *  freshness relative to `main` is the conductor's responsibility (the same worktree-provisioning
+ *  contract every other role session already relies on), not something this grant controls. The
+ *  widening is read-only BY CONSTRUCTION: with no Bash grant there is no shell to reach `gh`
+ *  through even if the prompt tried, so #110's zero-write boundary for this role family is
+ *  unaffected — this session still cannot write to GitHub OR to the repo. */
+export const CONFIRM_ALLOWED_TOOLS = "Read,Glob,Grep";
+
+/** The confirm session's deny list — the base ROLE_DISALLOWED_TOOLS with `Read` removed (deny
+ *  wins over allow in Claude Code, so `Read` staying denied would make CONFIRM_ALLOWED_TOOLS's
+ *  own `Read` entry above meaningless). Derived from ROLE_DISALLOWED_TOOLS by construction
+ *  (never hand-copied) so any future change to the base deny list's OTHER entries — the `Write`/
+ *  `Edit`/`MultiEdit`/every `Bash(gh ...)` denial this role still needs — propagates here
+ *  automatically; the only thing this role's deny list ever needs to differ on is `Read`. */
+export const CONFIRM_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS.replace(/^Read,/, "");
+
 /** #110 PR5: the PO/alignment role also carries no Bash grant — `gh issue create` is performed
  *  by the engine from align.ts's validated structured output, never by the session itself.
  *  PO_ALLOWED_TOOLS is kept as its own export (rather than folded away) so align.ts's callsite
