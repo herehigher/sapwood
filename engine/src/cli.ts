@@ -803,6 +803,12 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
     hasOpenPr: async (issue) => (await findOpenPrForIssue(forge, issue)) != null,
     findOpenPr: (issue) => findOpenPrForIssue(forge, issue),
     renderPrompt,
+    // #244 (Codex sol-high PR #260 review round 2, P2): wires the durable `proxy-mint-failed`
+    // event into the REAL tick-driver run — without this, a mint failure on a live proxy-
+    // attached leg (no shipped caller attaches one yet, but the observability must be live the
+    // instant one does) would only ever reach a log line, never the queryable state event
+    // WorkerDeps.state's own doc promises.
+    state,
   });
   const stopMode = parseRunStopMode(argv);
   const stop = resolveStopConfig(argv, cfg);
@@ -885,6 +891,9 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     hasOpenPr: async (issue) => (await findOpenPrForIssue(forge, issue)) != null,
     findOpenPr: (issue) => findOpenPrForIssue(forge, issue),
     renderPrompt,
+    // #244 (Codex sol-high PR #260 review round 2, P2): same durable mint-failure observability
+    // as the tick-driver path above, wired into the round-orchestrator's own WorkerSupervisor.
+    state,
   });
   const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log });
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, log });

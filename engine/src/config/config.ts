@@ -481,6 +481,16 @@ const Roles = z
 // a caller explicitly supplies a `proxy` opt, and nothing does in this PR). Flipping this flag
 // alone changes no runtime behavior; consumer adoption + the shadow-server startup wiring are
 // tracked as follow-up work (feeds #244).
+//
+// #244 EXTENSION: the tool algebra now also carries 4 PR-facing tools (pr_details/pr_reviews/
+// pr_review_threads/pr_checks — proxy/tools.ts), and the proxy MECHANISM extends to worker legs
+// (worker.ts's WorkerSupervisor, mirroring RoleRunner's `proxy` opt) alongside RoleRunner
+// peripheral sessions — same "ship inert, gate behind an explicit opt" posture: `enabled`/
+// `shadow` still gate nothing on their own until a real dispatch caller passes a `proxy` opt
+// (round-defaults.ts's peripheral wiring and any worker-leg consumer are still separately-flagged
+// follow-up work, same as #234 originally shipped). `caps.maxReviewThreadsPerCall`/
+// `caps.maxCommentsPerThread` are the PR-tool caps' user-tunable knobs, same convention as every
+// other cap in this section.
 const ProxyConfig = z
   .object({
     enabled: z.boolean().default(false),
@@ -490,12 +500,38 @@ const ProxyConfig = z
         maxIssuesPerCall: z.number().int().positive().default(10),
         defaultCommentsPerIssue: z.number().int().positive().default(20),
         maxCommentsPerCall: z.number().int().positive().default(100),
-        maxRelationsPerIssue: z.number().int().positive().default(20),
+        // .max(100): this cap is passed straight into a GraphQL `first:`/`last:` argument
+        // (getIssueRelations' ISSUE_RELATIONS_QUERY) — GitHub's GraphQL API itself rejects a
+        // connection argument above 100, so a configured value beyond that would fail at the
+        // FIRST call, not at config-parse time (Codex sol-high PR #260 review, P2 audit).
+        maxRelationsPerIssue: z.number().int().positive().max(100).default(20),
         maxSearchResults: z.number().int().positive().default(20),
         // issue #234's default-view contract: "Full comment stream is opt-in config." false
         // (default) -> issue_details' default view caps at defaultCommentsPerIssue; true -> it
         // caps at the wider maxCommentsPerCall instead (still bounded, never truly unbounded).
         fullCommentStreamOptIn: z.boolean().default(false),
+        // #244: pr_review_threads' analogue of maxCommentsPerCall/defaultCommentsPerIssue —
+        // caps the NUMBER of threads returned (an explicit lastN over this is REJECTED, same
+        // over-cap contract as issue_comments). NOT itself fed into a GraphQL first:/last:
+        // argument (PR_REVIEW_THREADS_QUERY always pages the outer connection at a fixed 100
+        // per page, exhaustively — this cap only bounds the CLIENT-SIDE array afterward), so no
+        // GraphQL-imposed .max(100) applies here.
+        maxReviewThreadsPerCall: z.number().int().positive().default(20),
+        // #244: caps EACH thread's own comment count (GraphQL comments(first: ...)) —
+        // independent of maxReviewThreadsPerCall's bound on the number of threads. .max(100):
+        // same GraphQL-argument-ceiling rationale as maxRelationsPerIssue above (Codex sol-high
+        // PR #260 review, P1).
+        maxCommentsPerThread: z.number().int().positive().max(100).default(20),
+        // #244 (Codex sol-high PR #260 review, P1): pr_reviews' fetch bound — GraphQL
+        // `reviews(last: cap)`. No client-supplied lastN exists for this tool (unlike
+        // pr_review_threads), so this cap IS the fetch bound; over-cap rejection doesn't apply
+        // (there is no caller-suppliable value to reject) — completeness is reported instead
+        // (`complete: reviews.length >= total`). .max(100): fed straight into GraphQL's `last:`.
+        maxReviewsPerCall: z.number().int().positive().max(100).default(50),
+        // #244 (Codex sol-high PR #260 review, P1): pr_checks' fetch bound — GraphQL
+        // `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as
+        // maxReviewsPerCall above. .max(100): fed straight into GraphQL's `first:`.
+        maxChecksPerCall: z.number().int().positive().max(100).default(50),
       })
       .strict()
       .default({}),
