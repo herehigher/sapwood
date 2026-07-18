@@ -38,6 +38,7 @@ test("assembleRoundArtifact: an empty ledger produces an empty-but-valid artifac
   assert.deepEqual(parsed.escalations, { needsHuman: [], ceiling: 0, driveNoPr: 0 });
   assert.equal(parsed.align, null);
   assert.deepEqual(parsed.retro, { opened: null, degraded: null });
+  assert.deepEqual(parsed.concerns, []); // #237: no objections this round is the normal case
 });
 
 test("assembleRoundArtifact: dispatches + merges are collected verbatim, in ledger order", () => {
@@ -224,6 +225,30 @@ test("ROUND_ARTIFACT_EVENT_KINDS: never includes the run-scoped standby events (
   assert.ok(!ROUND_ARTIFACT_EVENT_KINDS.includes("standby-exit"));
 });
 
+test("assembleRoundArtifact #237: concern-posted events populate the concerns section, in ledger order", () => {
+  const artifact = assembleRoundArtifact(
+    [
+      { kind: "concern-posted", payload: { round_id: 1, issue: 42, reason: "premise seems wrong", hash: "abc" } },
+      { kind: "concern-posted", payload: { round_id: 1, issue: 7, reason: "contradicts a non-goal", hash: "def" } },
+    ],
+    meta,
+    0,
+    30,
+  );
+  const parsed = RoundArtifactSchema.parse(artifact);
+  assert.deepEqual(parsed.concerns, [
+    { issue: 42, reason: "premise seems wrong" },
+    { issue: 7, reason: "contradicts a non-goal" },
+  ]);
+});
+
+test("RoundArtifactSchema #237: a pre-#237 persisted artifact (no `concerns` field at all) still parses — defaults to an empty array", () => {
+  const preExisting = { ...assembleRoundArtifact([], meta, 0, 30) } as Record<string, unknown>;
+  delete preExisting.concerns;
+  const parsed = RoundArtifactSchema.parse(preExisting);
+  assert.deepEqual(parsed.concerns, []);
+});
+
 // ── renderRoundArtifactMarkdown: deterministic view, never independently authored ───────────
 
 test("renderRoundArtifactMarkdown: same artifact -> byte-identical markdown every time (deterministic)", () => {
@@ -252,6 +277,21 @@ test("renderRoundArtifactMarkdown: an empty artifact renders '(none)' placeholde
   assert.ok(md.includes("(none)"));
   assert.ok(md.includes("(no aligning-phase summary recorded)"));
   assert.ok(md.includes("(no proposal this round)"));
+});
+
+test("renderRoundArtifactMarkdown #237: an 'Objections raised' section lists every delivered concern; '(none)' when empty", () => {
+  const empty = renderRoundArtifactMarkdown(assembleRoundArtifact([], meta, 0, 30));
+  assert.match(empty, /## Objections raised\n\(none\)/);
+
+  const withConcerns = renderRoundArtifactMarkdown(
+    assembleRoundArtifact(
+      [{ kind: "concern-posted", payload: { round_id: 1, issue: 42, reason: "premise seems wrong", hash: "abc" } }],
+      meta,
+      0,
+      30,
+    ),
+  );
+  assert.match(withConcerns, /## Objections raised\n- #42: premise seems wrong/);
 });
 
 test("capRoundArtifactMarkdown: deterministically truncates at the char cap (delegates to retro-digest.ts's capDigest)", () => {

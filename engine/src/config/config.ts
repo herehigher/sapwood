@@ -823,6 +823,15 @@ const ConfigSchemaRaw = z
       .object({ humanLabels: z.array(z.string()).optional() })
       .strict()
       .default({}),
+    // #237: who a posted PO-dissent concern comment @-mentions (dissent.ts's postConcernIfNew).
+    // Optional here (same "tell unset apart from explicitly set" shape as escalation.humanLabels
+    // above) — resolveLabelDefaults below defaults it to `[board.owner]` when omitted. An
+    // explicit array is used verbatim, in order, each entry `@`-prefixed at render time if not
+    // already. User-tunable-in-config, never hardcoded (CLAUDE.md's tunables-in-config rule).
+    notify: z
+      .object({ mentions: z.array(z.string()).optional() })
+      .strict()
+      .default({}),
     coverage: z
       .object({ minPercent: z.number().min(0).max(100).default(0) })
       .strict()
@@ -853,11 +862,12 @@ const ConfigSchemaRaw = z
 // path (only loadConfig's relative-to-config-file resolution mutates it), so a reader falls
 // back to `cfg.doctrine.file` itself and still never sees a resolved absolute path it didn't
 // ask for.
-export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine" | "labels" | "escalation"> & {
+export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine" | "labels" | "escalation" | "notify"> & {
   goal: { file: string };
   doctrine: { file: string; maxChars: number; fileRaw?: string };
   labels: ReturnType<typeof workflowLabelDefaults> & { prefix: string };
   escalation: { humanLabels: string[] };
+  notify: { mentions: string[] };
 };
 
 export const DEFAULT_GOAL_FILE = "docs/PLAN.md";
@@ -926,6 +936,10 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
   };
   cfg.labels = resolvedLabels;
   cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked];
+  // #237: default the dissent-comment mention list to the repo owner when unset — same
+  // "explicit array passes through verbatim, omitted derives from another already-resolved
+  // field" shape as escalation.humanLabels just above.
+  cfg.notify.mentions ??= [cfg.board.owner];
   return resolveGoalFile(cfg);
 }
 

@@ -62,6 +62,14 @@ test("omitted escalation derives from resolved custom labels, while an explicit 
   );
 });
 
+test("#237: notify.mentions defaults to [board.owner] when omitted; an explicit array is used verbatim", () => {
+  const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
+  assert.deepEqual(cfg.notify.mentions, ["acme"]);
+
+  const custom = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\nnotify: { mentions: [alice, bob] }\n");
+  assert.deepEqual(custom.notify.mentions, ["alice", "bob"]);
+});
+
 test("labels.prefix rejects whitespace", () => {
   assert.throws(
     () => parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { prefix: "team labels:" }'),

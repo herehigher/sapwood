@@ -31,7 +31,8 @@ function readPrompt(path: string): string {
 // ── Snapshot hashes — update deliberately, alongside a reviewed prompt edit, never casually ───
 
 const SNAPSHOT_HASHES: Record<string, string> = {
-  "po.md": "7f37fc9e0555e3e6b8f5ef1b2e381b46010f9619bf4aea015fc39f09847bce9b",
+  // #237: intentional edit — po.md now documents the optional `concerns` dissent field.
+  "po.md": "708e148423d5d4c6486031ed28c62239c791929457d97fb58f9156ce9d6d1ab5",
   "architect.md": "897b46fd4d8803ad7b25dc1ec467f29a56139af80ed8b7bb44fc42624441cbc5",
   "plan-reviewer.md": "d95245c8236e41bf3b33431e2d5d4dcea516dd3ca2719fee3ecdb76244ffe9c7",
   "plan-drafter.md": "3d65a3d7b198c4ac523da925c72f4fc3d552865461dbb2be6d06cc7b38a7a575",

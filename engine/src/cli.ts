@@ -12,6 +12,7 @@ import { DEFAULT_CONFIG_PATHS, loadConfig, type SapwoodConfig } from "./config/c
 import { loadPricingTable } from "./config/pricing.js";
 import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
 import { orderForDispatch, type TickResult } from "./loop/conductor.js";
+import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
 import { InitError, init } from "./loop/init.js";
 import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
@@ -402,6 +403,12 @@ export interface StatusSnapshot {
   parked: ParkRow[];
   /** Latest successful startup reconcile only. Absent/healthy runs render no section. */
   orphanReport?: { orphans: StartupOrphan[]; overflow: number } | null;
+  /** #237: PO-dissent concerns with a marker on GitHub but no `concern-adjudicated` event yet
+   *  (dissent.ts's unadjudicatedConcerns — the SAME fold the engine's own per-round adjudication
+   *  scan uses, so this count and that scan can never disagree on what "unadjudicated" means).
+   *  DB-only, same as every other field on this snapshot — no live GitHub call from `status`
+   *  itself; the live check that produces `concern-adjudicated` runs in the engine each round. */
+  unadjudicatedConcerns: number;
 }
 
 export function formatStatus(s: StatusSnapshot): string {
@@ -443,6 +450,7 @@ export function formatStatus(s: StatusSnapshot): string {
   } else {
     lines.push("park: inactive");
   }
+  lines.push(`PO-dissent concerns awaiting adjudication: ${s.unadjudicatedConcerns}`);
   if (s.orphanReport && (s.orphanReport.orphans.length > 0 || s.orphanReport.overflow > 0)) {
     lines.push("", `orphans: ${s.orphanReport.orphans.length + s.orphanReport.overflow}`);
     for (const orphan of s.orphanReport.orphans) {
@@ -495,6 +503,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       };
     }
     const reconcile = parseReconcileCompleted(state.latestEvent("reconcile-completed")?.payload);
+    const concernEvents = state.eventsAfterId(0, ["concern-posted", "concern-adjudicated"]);
     const snapshot: StatusSnapshot = {
       dbPath,
       schemaVersion: dbVersion,
@@ -508,6 +517,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
       dailyBudgetUsd: cfg?.cost.dailyBudgetUsd ?? null,
       parked: state.parkedSources(),
       orphanReport: reconcile ? { orphans: reconcile.orphans, overflow: reconcile.overflow } : null,
+      unadjudicatedConcerns: unadjudicatedConcerns(concernEvents).size,
     };
     return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
   } finally {

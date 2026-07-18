@@ -41,6 +41,7 @@ import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.j
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { issuePriority } from "./conductor.js";
+import { type Concern, ConcernSchema, processConcerns, validateConcerns } from "./dissent.js";
 import { type PeripheralStub, removeRoundPoolLabel } from "./round.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
@@ -164,6 +165,13 @@ export interface BacklogDigestResult extends BoundedDigest {
   ok: boolean;
   /** Failure reason, present only when `ok` is false. */
   reason?: string;
+  /** #237: the issue numbers ACTUALLY rendered into `text`, in the same order — i.e. the
+   *  session's real injected view of the open backlog, honoring packDigestRecords' truncation
+   *  (a candidate past the cap was never shown, so it is never "in view" either). This is the
+   *  bounds set align.ts's concern validation checks a `concerns` entry against: a concern about
+   *  an issue that exists but was truncated out of the digest is just as out-of-view as one about
+   *  an issue that was never a candidate at all. Empty on a read failure or an empty backlog. */
+  renderedIssueNumbers: number[];
 }
 
 /** Engine-side PO context (#215): deterministic, milestone-scoped here at the digest consumer.
@@ -178,10 +186,19 @@ export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Pro
     const allIssues = await forge.listOpenIssues();
     issues = filterIssuesByMilestone(allIssues, cfg.round.milestone);
   } catch (e) {
-    return { text: BACKLOG_READ_FAILED, ok: false, total: 0, rendered: 0, omitted: 0, truncated: false, reason: String(e) };
+    return {
+      text: BACKLOG_READ_FAILED,
+      ok: false,
+      total: 0,
+      rendered: 0,
+      omitted: 0,
+      truncated: false,
+      reason: String(e),
+      renderedIssueNumbers: [],
+    };
   }
   if (issues.length === 0) {
-    return { text: NO_OPEN_ISSUES, ok: true, total: 0, rendered: 0, omitted: 0, truncated: false };
+    return { text: NO_OPEN_ISSUES, ok: true, total: 0, rendered: 0, omitted: 0, truncated: false, renderedIssueNumbers: [] };
   }
   const ordered = [...issues].sort((a, b) => a.number - b.number);
   const lines = ordered.map((issue) => {
@@ -189,7 +206,11 @@ export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Pro
     const annotation = holds.length > 0 ? ` [hold: ${holds.join(", ")}]` : "";
     return `- #${issue.number} — ${issue.title}${annotation}`;
   });
-  return { ...packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES), ok: true };
+  const packed = packDigestRecords(lines, cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES);
+  // #237: packDigestRecords only ever drops a TRAILING run of whole records (its own doc
+  // comment) — so the first `rendered` entries of `ordered` (same order `lines` was built in)
+  // are exactly what made it into `packed.text`.
+  return { ...packed, ok: true, renderedIssueNumbers: ordered.slice(0, packed.rendered).map((issue) => issue.number) };
 }
 
 function filterIssuesByMilestone(issues: Issue[], milestone: string | undefined): Issue[] {
@@ -273,8 +294,12 @@ function recordInputManifest(state: State, row: InputManifestRow, log?: (message
 // other #110 PR needs a multi-body BODY segment.
 
 const AlignIssueMetaSchema = z.object({ title: z.string().min(1) }).strict();
-const AlignMetadataSchema = z.object({ issues: z.array(AlignIssueMetaSchema) }).strict();
-const TriageMetadataSchema = z.object({ issue: z.number().int().positive() }).strict();
+// #237: `concerns` is OPTIONAL and additive alongside the normal deliverable (`issues` here,
+// `issue`+BODY for triage below) — never a substitute for it. Bounds-checking against the
+// session's own injected view happens in validateAlignOutput/validateTriageOutput (dissent.ts's
+// validateConcerns), not in the schema itself — zod only enforces shape here.
+const AlignMetadataSchema = z.object({ issues: z.array(AlignIssueMetaSchema), concerns: z.array(ConcernSchema).optional() }).strict();
+const TriageMetadataSchema = z.object({ issue: z.number().int().positive(), concerns: z.array(ConcernSchema).optional() }).strict();
 
 const ISSUE_BODY_START = "<<<ISSUE>>>";
 const ISSUE_BODY_END = "<<<END_ISSUE>>>";
@@ -307,7 +332,9 @@ function splitAlignIssueBodies(raw: string, count: number): string[] | null {
   return bodies;
 }
 
-export type AlignValidation = { ok: true; issues: Array<{ title: string; body: string }> } | { ok: false; reason: string };
+export type AlignValidation =
+  | { ok: true; issues: Array<{ title: string; body: string }>; concerns: Concern[] }
+  | { ok: false; reason: string };
 
 interface PersistedProposal {
   proposalId: string;
@@ -319,7 +346,17 @@ interface PersistedProposal {
 const PersistedProposalSchema = z
   .object({ proposalId: z.string().min(1), index: z.number().int().nonnegative(), title: z.string().min(1), body: z.string().min(1) })
   .strict();
-const ProposalSetEventSchema = z.object({ round_id: z.number().int().positive(), proposals: z.array(PersistedProposalSchema) }).strict();
+// #237: `concerns` is round-level (not per-proposal — a concern targets an EXISTING issue, never
+// one of this batch's own new proposals), persisted alongside the proposal set in the SAME
+// write-ahead event so a crash-rerun's replay (proposalProgress below) recovers both together —
+// no second event kind needed for align-mode concern replay.
+const ProposalSetEventSchema = z
+  .object({
+    round_id: z.number().int().positive(),
+    proposals: z.array(PersistedProposalSchema),
+    concerns: z.array(ConcernSchema).optional(),
+  })
+  .strict();
 const ProposalCreatedEventSchema = z
   .object({ round_id: z.number().int().positive(), proposalId: z.string().min(1), issue: z.number().int().positive() })
   .passthrough();
@@ -340,12 +377,16 @@ function proposalProgress(
   roundId: number,
 ): {
   proposals: PersistedProposal[] | null;
+  /** #237: this round's persisted concerns (align-mode session), replayed verbatim on a
+   *  crash-rerun — null exactly when `proposals` is null (no persisted set at all this round). */
+  concerns: Concern[] | null;
   terminalIds: Set<string>;
   createdIssues: Map<string, number>;
   commentedIds: Set<string>;
 } {
   const events = state.eventsAfterId(0, ["proposal-set-persisted", "proposal-created", "proposal-skipped", "proposal-comment-posted"]);
   let proposals: PersistedProposal[] | null = null;
+  let concerns: Concern[] | null = null;
   const terminalIds = new Set<string>();
   const createdIssues = new Map<string, number>();
   const commentedIds = new Set<string>();
@@ -360,6 +401,7 @@ function proposalProgress(
       if (!parsed.success) throw new Error(`malformed persisted proposal set for round ${roundId}`);
       if (proposals != null) throw new Error(`multiple persisted proposal sets for round ${roundId}`);
       proposals = parsed.data.proposals;
+      concerns = parsed.data.concerns ?? [];
       continue;
     }
     if (event.kind === "proposal-comment-posted") {
@@ -392,7 +434,7 @@ function proposalProgress(
       if (!ids.has(id)) throw new Error(`unknown terminal proposal ${id} for round ${roundId}`);
     }
   }
-  return { proposals, terminalIds, createdIssues, commentedIds };
+  return { proposals, concerns, terminalIds, createdIssues, commentedIds };
 }
 
 /** Parse + schema-validate a po-align session's structured output. Deliberately does NOT
@@ -401,7 +443,12 @@ function proposalProgress(
  *  session attempt here, it is a normal per-issue outcome the caller labels `needs-human` for
  *  (see createAligningStub below) — exactly the pre-#110 behavior, which never retried the
  *  session over a planless creation either. */
-export function validateAlignOutput(text: string): AlignValidation {
+/** #237: `inView` is the align session's ACTUAL injected view of existing issues (the rendered
+ *  backlog-digest subset — buildBacklogDigest's `renderedIssueNumbers`), against which any
+ *  `concerns` entry is bounds-checked. Omitted (undefined) skips that bounds check — every
+ *  pre-#237 call site (and every existing test) that doesn't pass it keeps behaving exactly as
+ *  before; a real dispatch (createAligningStub) always passes the real set. */
+export function validateAlignOutput(text: string, inView?: ReadonlySet<number>): AlignValidation {
   const block = parseStructuredBlock(text);
   if (!block) return { ok: false, reason: "no structured output block found (missing or truncated sentinel)" };
   let metadata: unknown;
@@ -415,6 +462,11 @@ export function validateAlignOutput(text: string): AlignValidation {
     return { ok: false, reason: `structured output metadata failed schema validation: ${describeZodError(parsed.error)}` };
   }
   const { issues } = parsed.data;
+  const concerns = parsed.data.concerns ?? [];
+  if (inView) {
+    const concernsValid = validateConcerns(concerns, inView);
+    if (!concernsValid.ok) return { ok: false, reason: concernsValid.reason };
+  }
   // Codex review round 1: duplicate titles in one batch would double-create the same issue on
   // GitHub (the engine loops the array verbatim). A session declaring the same title twice is
   // ambiguous by construction — rejected whole, same fail-closed doctrine as every other
@@ -426,7 +478,7 @@ export function validateAlignOutput(text: string): AlignValidation {
     if (block.body !== undefined && block.body.trim() !== "") {
       return { ok: false, reason: "no issues declared but a BODY block was present" };
     }
-    return { ok: true, issues: [] };
+    return { ok: true, issues: [], concerns };
   }
   if (block.body === undefined || block.body.trim() === "") {
     return { ok: false, reason: "issues declared but no BODY block present" };
@@ -435,10 +487,10 @@ export function validateAlignOutput(text: string): AlignValidation {
   if (!bodies) {
     return { ok: false, reason: `BODY block does not contain exactly ${issues.length} well-formed <<<ISSUE>>> segment(s)` };
   }
-  return { ok: true, issues: issues.map((it, i) => ({ title: it.title, body: bodies[i]! })) };
+  return { ok: true, issues: issues.map((it, i) => ({ title: it.title, body: bodies[i]! })), concerns };
 }
 
-export type TriageValidation = { ok: true; issue: number; body: string } | { ok: false; reason: string };
+export type TriageValidation = { ok: true; issue: number; body: string; concerns: Concern[] } | { ok: false; reason: string };
 
 /** Parse + schema-validate a po-triage session's structured output. Same shape as
  *  plan-review.ts's validateDrafterOutput (issue + a full revised body) but deliberately NOT
@@ -446,8 +498,13 @@ export type TriageValidation = { ok: true; issue: number; body: string } | { ok:
  *  part of `ok`, which would make a planless draft an INVALID attempt (retried, then
  *  session-degraded). The pre-#110 triage pass never retried on that condition — it accepted
  *  the (schema-shaped) draft, wrote it, and treated "still planless after writing it" as a
- *  SEPARATE, non-retried degradation (see createAligningStub below) — preserved here exactly. */
-export function validateTriageOutput(text: string, expectedIssue: number): TriageValidation {
+ *  SEPARATE, non-retried degradation (see createAligningStub below) — preserved here exactly.
+ *
+ *  #237: `inView` is this triage session's ACTUAL injected view (the target issue itself, plus
+ *  the rendered backlog-digest subset it also sees — same buildBacklogDigest set align mode
+ *  uses), against which any `concerns` entry is bounds-checked. Omitted skips that check, same
+ *  back-compat stance as validateAlignOutput's own `inView` parameter above. */
+export function validateTriageOutput(text: string, expectedIssue: number, inView?: ReadonlySet<number>): TriageValidation {
   const block = parseStructuredBlock(text);
   if (!block) return { ok: false, reason: "no structured output block found (missing or truncated sentinel)" };
   let metadata: unknown;
@@ -463,21 +520,26 @@ export function validateTriageOutput(text: string, expectedIssue: number): Triag
   if (parsed.data.issue !== expectedIssue) {
     return { ok: false, reason: `structured output issue number mismatch (expected #${expectedIssue}, got #${parsed.data.issue})` };
   }
+  const concerns = parsed.data.concerns ?? [];
+  if (inView) {
+    const concernsValid = validateConcerns(concerns, inView);
+    if (!concernsValid.ok) return { ok: false, reason: concernsValid.reason };
+  }
   if (block.body === undefined || block.body.trim() === "") {
     return { ok: false, reason: "triage output requires a non-empty BODY block" };
   }
-  return { ok: true, issue: parsed.data.issue, body: block.body };
+  return { ok: true, issue: parsed.data.issue, body: block.body, concerns };
 }
 
-function alignDegradeReason(result: RoleSessionResult): string {
+function alignDegradeReason(result: RoleSessionResult, inView: ReadonlySet<number>): string {
   if (result.outcome !== "done") return `po-align session failed twice (${result.outcome})`;
-  const v = validateAlignOutput(result.resultText ?? "");
+  const v = validateAlignOutput(result.resultText ?? "", inView);
   return v.ok ? "po-align output valid" : `po-align produced invalid structured output twice: ${v.reason}`;
 }
 
-function triageDegradeReason(result: RoleSessionResult, expectedIssue: number): string {
+function triageDegradeReason(result: RoleSessionResult, expectedIssue: number, inView: ReadonlySet<number>): string {
   if (result.outcome !== "done") return `po-triage session failed twice (${result.outcome})`;
-  const v = validateTriageOutput(result.resultText ?? "", expectedIssue);
+  const v = validateTriageOutput(result.resultText ?? "", expectedIssue, inView);
   return v.ok ? "po-triage output valid" : `po-triage produced invalid structured output twice: ${v.reason}`;
 }
 
@@ -564,6 +626,10 @@ const TriageDecisionEventSchema = z
     attempt: z.number().int().positive(),
     body: z.string(),
     expected_hash: z.string(),
+    // #237: persisted alongside the decision (same write-ahead event, no second event kind) so a
+    // crash-rerun's replay recovers a triage session's concerns exactly like it recovers the
+    // decision's body/hash.
+    concerns: z.array(ConcernSchema).optional(),
   })
   .passthrough();
 const TriageTerminalEventSchema = z
@@ -578,8 +644,9 @@ interface TriageProgress {
   /** Accepted-but-not-yet-(fully)-terminal decisions for THIS round, by issue number — a
    *  crash-rerun resumes effects from here without dispatching another session. Each decision
    *  carries its own `attempt` (the same number as that dispatch's input-manifest rows), which
-   *  every terminal/receipt lookup below must match — see this section's module doc (F2). */
-  decisions: Map<number, { body: string; expectedHash: string; attempt: number }>;
+   *  every terminal/receipt lookup below must match — see this section's module doc (F2).
+   *  `concerns` (#237) replays this decision's session's concerns verbatim on resume. */
+  decisions: Map<number, { body: string; expectedHash: string; attempt: number; concerns: Concern[] }>;
   /** issue -> the ATTEMPT of its terminal event (`triage-effects-committed` or
    *  `triage-stale-hash-skipped`) for THIS round, if any. A decision is fully resolved only when
    *  `terminalAttempts.get(issue) === decisions.get(issue).attempt` — a terminal event for a
@@ -613,7 +680,7 @@ function triageProgress(state: State, roundId: number, log?: (message: string) =
     "triage-effects-committed",
     "triage-stale-hash-skipped",
   ]);
-  const decisions = new Map<number, { body: string; expectedHash: string; attempt: number }>();
+  const decisions = new Map<number, { body: string; expectedHash: string; attempt: number; concerns: Concern[] }>();
   const terminalAttempts = new Map<number, number>();
   const bodyCommittedAttempts = new Map<number, number>();
   const commentPostedAttempts = new Map<number, number>();
@@ -629,7 +696,12 @@ function triageProgress(state: State, roundId: number, log?: (message: string) =
         warn(`[sapwood:po] round ${roundId}: malformed triage-decision-accepted record — treating as absent`);
         continue;
       }
-      decisions.set(parsed.data.issue, { body: parsed.data.body, expectedHash: parsed.data.expected_hash, attempt: parsed.data.attempt });
+      decisions.set(parsed.data.issue, {
+        body: parsed.data.body,
+        expectedHash: parsed.data.expected_hash,
+        attempt: parsed.data.attempt,
+        concerns: parsed.data.concerns ?? [],
+      });
       continue;
     }
     const parsed = TriageTerminalEventSchema.safeParse(event.payload);
@@ -660,6 +732,7 @@ function persistTriageDecision(
   attempt: number,
   body: string,
   expectedHash: string,
+  concerns: Concern[],
   log?: (message: string) => void,
 ): boolean {
   const warn = log ?? console.error;
@@ -673,6 +746,7 @@ function persistTriageDecision(
       attempt,
       body,
       expected_hash: expectedHash,
+      concerns,
     });
     return true;
   } catch (e) {
@@ -1397,10 +1471,18 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // event + a log line) instead of wedging the round; the next round retries naturally. ──
       let persistedProposals = priorProgress.proposals;
       let alignValidated: AlignValidation;
+      // #237: the align session's actual injected view of existing issues — the rendered
+      // backlog-digest subset (same set the read-failure suppression above already gates
+      // creation on). A concern naming any other issue is out-of-view, invalid output.
+      const alignInView = new Set<number>(backlogDigest.ok ? backlogDigest.renderedIssueNumbers : []);
       if (persistedProposals != null) {
         // Crash reruns replay the durable proposal set directly. They never resume an old model
         // session, and they do not pay for a fresh session whose output would be discarded.
-        alignValidated = { ok: true, issues: persistedProposals.map(({ title, body }) => ({ title, body })) };
+        alignValidated = {
+          ok: true,
+          issues: persistedProposals.map(({ title, body }) => ({ title, body })),
+          concerns: priorProgress.concerns ?? [],
+        };
       } else {
         const goalFilePath = deps.planMdPath ?? deps.cfg.goal.file;
         const planRead = readPlanMd(goalFilePath);
@@ -1525,16 +1607,16 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
               round_id: roundId,
               outcome: result.outcome,
               session: result.name,
-              reason: alignDegradeReason(result),
+              reason: alignDegradeReason(result, alignInView),
             }),
             degradeMessage: (result) =>
               `[sapwood:po] round ${roundId}: po-align session failed twice (${result.outcome}) — ` +
-              `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result)}`,
-            isValid: (result) => validateAlignOutput(result.resultText ?? "").ok,
+              `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result, alignInView)}`,
+            isValid: (result) => validateAlignOutput(result.resultText ?? "", alignInView).ok,
           });
           alignValidated =
             alignResult.outcome === "done"
-              ? validateAlignOutput(alignResult.resultText ?? "")
+              ? validateAlignOutput(alignResult.resultText ?? "", alignInView)
               : { ok: false, reason: `po-align session failed twice (${alignResult.outcome})` };
         }
       }
@@ -1547,7 +1629,13 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             body,
           }));
           // Persist-first: no forge creation is reachable until the full validated set lands.
-          deps.state.appendEvent("proposal-set-persisted", { round_id: roundId, proposals: persistedProposals });
+          // #237: concerns travel in the SAME event so a crash-rerun's replay (persistedProposals
+          // != null, above) recovers them too — see proposalProgress's own doc comment.
+          deps.state.appendEvent("proposal-set-persisted", {
+            round_id: roundId,
+            proposals: persistedProposals,
+            concerns: alignValidated.concerns,
+          });
         }
       }
 
@@ -1577,6 +1665,10 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // pointer note. State event only — no new forge write.
       const alignSummaryCreated: Array<{ issue: number; title: string; hasPlan: boolean }> = [];
       const alignSummaryTriaged: Array<{ issue: number; drafted: boolean }> = [];
+      // #237: every triage session's validated concerns this round (both resumed and freshly
+      // dispatched), collected as the loop runs — fed to processConcerns alongside the align
+      // session's own concerns once both passes complete (see the end of this run() call).
+      const triageConcernsCollected: Concern[] = [];
       const terminalIds = priorProgress.terminalIds;
       // This read is deliberately fail-closed (unlike the prompt's best-effort digest): it is
       // the reconciliation and pre-create duplicate boundary, so an incomplete backlog must
@@ -1699,7 +1791,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           // #232: RESUME — an accepted decision exists from an earlier attempt this round with
           // no terminal receipt (crash between decision-persist and effect-commit). The durable
           // decision IS what executes now — no session, no re-validation, no re-render.
-          validated = { ok: true, issue: number, body: resumed.body };
+          validated = { ok: true, issue: number, body: resumed.body, concerns: resumed.concerns };
           expectedHash = resumed.expectedHash;
           attempt = resumed.attempt;
           bodyAlreadyCommitted = triageJournal.bodyCommittedAttempts.get(number) === attempt;
@@ -1780,6 +1872,10 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             "round.directive": directive,
             "backlog.digest": backlogDigest.text,
           });
+          // #237: this session's actual injected view — the target issue itself (it always sees
+          // its own body) plus whatever backlog-digest subset it also sees (same rendered set
+          // align mode uses). A concern naming any OTHER issue is out-of-view, invalid output.
+          const triageInView = new Set<number>([...(backlogDigest.ok ? backlogDigest.renderedIssueNumbers : []), issue.number]);
           const triageResult = await runSessionWithRetry({
             runner: deps.runner,
             state: deps.state,
@@ -1810,17 +1906,17 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
               issue: issue.number,
               outcome: result.outcome,
               session: result.name,
-              reason: triageDegradeReason(result, issue.number),
+              reason: triageDegradeReason(result, issue.number, triageInView),
             }),
             degradeMessage: (result) =>
               `[sapwood:po] round ${roundId}: po-triage session failed twice (${result.outcome}) for issue ` +
               `#${issue.number} — proceeding (pre-Ready, low stakes; the next round retries naturally): ` +
-              `${triageDegradeReason(result, issue.number)}`,
-            isValid: (result) => validateTriageOutput(result.resultText ?? "", issue.number).ok,
+              `${triageDegradeReason(result, issue.number, triageInView)}`,
+            isValid: (result) => validateTriageOutput(result.resultText ?? "", issue.number, triageInView).ok,
           });
           validated =
             triageResult.outcome === "done"
-              ? validateTriageOutput(triageResult.resultText ?? "", issue.number)
+              ? validateTriageOutput(triageResult.resultText ?? "", issue.number, triageInView)
               : { ok: false, reason: `po-triage session failed twice (${triageResult.outcome})` };
           // #232: the concurrent-edit guard's precondition — the hash of the BODY this session
           // actually read (captured HERE, at candidate-fetch/prompt-render content, before the
@@ -1837,11 +1933,23 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           alignSummaryTriaged.push({ issue: number, drafted: false });
           continue;
         }
+        // #237: collected regardless of resumed/fresh — a resumed decision's concerns are the
+        // SAME session attempt's, just read back from the journal instead of freshly validated.
+        triageConcernsCollected.push(...validated.concerns);
 
         // #232: write-ahead acceptance — the validated decision is durably recorded BEFORE any
         // forge effect. Skipped on the resume path (`resumed` already IS that durable record).
         if (!resumed) {
-          const persisted = persistTriageDecision(deps.state, roundId, number, attempt, validated.body, expectedHash, deps.log);
+          const persisted = persistTriageDecision(
+            deps.state,
+            roundId,
+            number,
+            attempt,
+            validated.body,
+            expectedHash,
+            validated.concerns,
+            deps.log,
+          );
           if (!persisted) {
             // Fail-closed: the decision itself never landed durably, so no effect may start for
             // it this pass (persistTriageDecision already recorded the honesty event + tick-
@@ -1981,6 +2089,20 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           /* telemetry only — the phase's forge writes above already landed */
         }
       }
+
+      // #237: the PO dissent channel — post this round's freshly validated concerns (align +
+      // every triage session), idempotent by marker, then re-check every still-open concern (any
+      // round) against live GitHub state for adjudication. Runs unconditionally, gated by the
+      // SAME phase marker every other aligning-phase write already is (this call only happens
+      // once per round, on the attempt that reaches here with `marker` still null coming in).
+      await processConcerns({
+        forge: deps.forge,
+        state: deps.state,
+        cfg: deps.cfg,
+        roundId,
+        concerns: [...(alignValidated.ok ? alignValidated.concerns : []), ...triageConcernsCollected],
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
+      });
 
       return { marker: mark };
     },

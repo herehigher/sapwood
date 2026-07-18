@@ -94,6 +94,12 @@ export const RoundArtifactSchema = z
       })
       .strict()
       .nullable(),
+    // #237: every PO-dissent concern actually POSTED this round (dissent.ts's processConcerns —
+    // idempotent by marker, so this is "delivered", not "raised" — a duplicate the marker
+    // suppressed never lands here twice). `.default([])` so a PRE-#237 persisted round_artifacts
+    // row (round-defaults.ts's RoundArtifactSchema.parse of an old JSON blob) still parses —
+    // absent reads as "no objections", the same as an empty array.
+    concerns: z.array(z.object({ issue: z.number().int(), reason: z.string() }).strict()).default([]),
   })
   .strict();
 
@@ -130,6 +136,8 @@ export const ROUND_ARTIFACT_EVENT_KINDS = [
   "retro-pr-opened",
   "retro-pr-degraded",
   "align-summary",
+  // #237: PO-dissent concerns actually delivered this round (dissent.ts's processConcerns).
+  "concern-posted",
 ];
 
 /** Maps a `*-degraded` event kind to the human-readable phase name recorded in the artifact. */
@@ -202,6 +210,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
     created: Array<{ issue: number; title: string; hasPlan: boolean }>;
     triaged: Array<{ issue: number; drafted: boolean }>;
   } | null = null;
+  const concerns: Array<{ issue: number; reason: string }> = [];
 
   const addNeedsHuman = (issue: unknown): void => {
     if (typeof issue === "number" && !needsHumanSet.has(issue)) {
@@ -282,6 +291,11 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
         // vanish from the source of truth. Union by issue; triage outcome: last wins.
         align = mergeAlignSummary(align, p);
         break;
+      case "concern-posted":
+        // #237: one entry per concern actually DELIVERED this round (dissent.ts's marker check
+        // already dedups cross-round — a suppressed repost never appends this event at all).
+        concerns.push({ issue: p.issue as number, reason: String(p.reason ?? "") });
+        break;
       case "po-degraded":
       case "triage-degraded":
       case "architect-degraded":
@@ -335,6 +349,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
     roundStops,
     retro: { opened: retroOpened, degraded: retroDegraded },
     align,
+    concerns,
   };
 }
 
@@ -418,6 +433,14 @@ export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
             ...artifact.align.triaged.map((t) => `- triaged #${t.issue}${t.drafted ? " (plan drafted)" : " (still planless)"}`),
           ]
         : ["(no aligning-phase summary recorded)"],
+    ),
+    // #237: the PO dissent channel — every concern actually delivered this round (comment
+    // posted, marker-verified). Adjudication itself is never rendered here (it's the issue's
+    // own GitHub lifecycle, not a round-scoped fact) — `sapwood status` reports the standing
+    // unadjudicated count instead (cli.ts).
+    section(
+      "Objections raised",
+      artifact.concerns.map((c) => `- #${c.issue}: ${c.reason}`),
     ),
   ];
   return parts.join("\n\n");
