@@ -1552,6 +1552,89 @@ test("createAligningStub #232: a triage-decision-accepted append failure aborts 
   state.close();
 });
 
+test("createAligningStub #237 finding 6: a triage concern is DROPPED (never posted) when its accompanying decision fails to persist durably", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 91, title: "t", labels: [], body: "no plan" }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult(
+      "po-triage-91",
+      sapwoodResult({ issue: 91, concerns: [{ issue: 91, reason: "this issue's premise seems wrong" }] }, "## Verification\n- x"),
+    ),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapAndPoisonEvents(state, "triage-decision-accepted");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 20, phase: "aligning", marker: null });
+  assert.ok(
+    logged.some(([kind]) => kind === "triage-decision-lost"),
+    "the decision itself was lost",
+  );
+  assert.equal(forge.comments[91]?.length ?? 0, 0, "the concern that rode along with the lost decision is never posted");
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0);
+  state.close();
+});
+
+test("createAligningStub #237 finding 6: a triage concern is DROPPED when the concurrent-edit guard refuses the body write (stale hash)", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 92, title: "t", labels: [], body: "original body, no plan" }];
+  const cfg = mkCfg();
+  const runner = {
+    calls: [] as RoleSessionOpts[],
+    async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
+      this.calls.push(opts);
+      if (opts.roleId === "po-triage") {
+        forge.issueBodies[92] = "a human edited this issue concurrently";
+        return doneResult(
+          "po-triage-92",
+          sapwoodResult({ issue: 92, concerns: [{ issue: 92, reason: "premise seems wrong" }] }, "## Verification\n- x"),
+        );
+      }
+      return doneResult("po-align-1", alignResultText([]));
+    },
+  };
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 21, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the write is refused");
+  assert.equal(forge.comments[92]?.length ?? 0, 0, "the concern is never posted — its decision's effect was refused");
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0);
+  state.close();
+});
+
+test("createAligningStub #237 finding 6: a RESUMED triage decision's concern IS posted (the decision itself already persisted successfully in an earlier attempt)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  // Simulate a crash-rerun: an accepted decision from an earlier attempt this round, with no
+  // terminal receipt yet — the body write hasn't landed, so this resumes straight to the guard.
+  forge.issueBodies[93] = "no plan";
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 22,
+    issue: 93,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:93",
+    attempt: 1,
+    body: "## Verification\n- x",
+    expected_hash: contentVersionForTest("no plan"),
+    concerns: [{ issue: 93, reason: "recovered concern" }],
+  });
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 22, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 1, "the resumed decision's body write lands");
+  // Two comments land on #93: the triage success comment (plan drafted) AND the concern —
+  // the concern IS posted because the resumed decision already durably persisted.
+  assert.equal(forge.comments[93]?.length, 2);
+  assert.ok(forge.comments[93]!.some((c) => /recovered concern/.test(c.body)));
+  state.close();
+});
+
 test("createAligningStub #110 (Codex round 1): a duplicate-title align batch twice -> align's degrade path, NOTHING created (never a double-create)", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();

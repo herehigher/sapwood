@@ -16,6 +16,7 @@ import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js"
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { LaneProbe, Supervisor } from "./conductor.js";
+import { concernHash } from "./dissent.js";
 import { noopPeripheralStub, type RoundDeps, runRounds } from "./round.js";
 import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 import { createDefaultPeripherals, renderAlignedGoalsFromSummary, renderLastMergedFromArtifact } from "./round-defaults.js";
@@ -138,6 +139,16 @@ class FakeForge implements IForge {
   planTriageCandidates: Issue[] = [];
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return this.planTriageCandidates;
+  }
+  issueMetaState: Record<number, "OPEN" | "CLOSED"> = {};
+  async getIssueMeta(issue: number) {
+    return {
+      number: issue,
+      title: "",
+      state: this.issueMetaState[issue] ?? ("OPEN" as const),
+      labels: [],
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
   }
 }
 
@@ -647,6 +658,29 @@ test("architecting stub (#127 gate② F3): with roles.po.enabled=false the archi
     /no structured summary was recorded/,
     "never the fallback wording that implies the aligning pass ran",
   );
+  state.close();
+});
+
+test("createDefaultPeripherals #237 finding 5 (2026-07-18 adjudication): the PO-dissent adjudication scan runs even with roles.po.enabled=false — decoupled from the PO's own toggle", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  // A still-open concern from a prior round, posted against an empty body ("" — FakeForge's
+  // getIssueBody default) — seeded directly, no PO session ever ran to produce it.
+  const hash = concernHash("premise seems wrong", "");
+  state.appendEvent("concern-posted", { round_id: 1, issue: 42, reason: "premise seems wrong", hash });
+  forge.issueMetaState[42] = "CLOSED"; // the issue closed since — this is what the scan should detect
+  const cfg = mkCfg({ roles: { po: { enabled: false } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+
+  await peripherals.aligning!.run({ roundId: 2, phase: "aligning", marker: null });
+
+  const adjudicated = state.eventsAfterId(0, ["concern-adjudicated"]);
+  assert.equal(adjudicated.length, 1, "the scan ran and adjudicated the concern even though roles.po.enabled is false");
+  assert.deepEqual(adjudicated[0]!.payload, { issue: 42, hash, outcome: "closed" });
+  // Confirms the PO's OWN decomposition/triage session genuinely never ran (roles.po.enabled
+  // gates alignStub.run, not the scan) — same #212 AC7 property the sibling test above checks.
+  assert.ok(!runner.calls.some((c) => c.roleId === "po-align" || c.roleId === "po-triage"));
   state.close();
 });
 

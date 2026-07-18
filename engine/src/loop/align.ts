@@ -41,7 +41,7 @@ import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.j
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { issuePriority } from "./conductor.js";
-import { type Concern, ConcernSchema, processConcerns, validateConcerns } from "./dissent.js";
+import { type Concern, ConcernSchema, postConcerns, validateConcerns } from "./dissent.js";
 import { type PeripheralStub, removeRoundPoolLabel } from "./round.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
@@ -1666,7 +1666,8 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const alignSummaryCreated: Array<{ issue: number; title: string; hasPlan: boolean }> = [];
       const alignSummaryTriaged: Array<{ issue: number; drafted: boolean }> = [];
       // #237: every triage session's validated concerns this round (both resumed and freshly
-      // dispatched), collected as the loop runs — fed to processConcerns alongside the align
+      // dispatched) whose accompanying decision actually took effect (finding 6 — collected
+      // further down, past both early-continues), fed to postConcerns alongside the align
       // session's own concerns once both passes complete (see the end of this run() call).
       const triageConcernsCollected: Concern[] = [];
       const terminalIds = priorProgress.terminalIds;
@@ -1872,10 +1873,13 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             "round.directive": directive,
             "backlog.digest": backlogDigest.text,
           });
-          // #237: this session's actual injected view — the target issue itself (it always sees
-          // its own body) plus whatever backlog-digest subset it also sees (same rendered set
-          // align mode uses). A concern naming any OTHER issue is out-of-view, invalid output.
-          const triageInView = new Set<number>([...(backlogDigest.ok ? backlogDigest.renderedIssueNumbers : []), issue.number]);
+          // #237 finding 7 (2026-07-18 adjudication): narrowed to the target issue ONLY — the
+          // triage prompt (po.md) explicitly tells the session "the only issue you may name is
+          // {{issue.number}} itself"; the backlog digest is duplicate-avoidance CONTEXT for the
+          // drafted body, never a grant to raise a concern about some OTHER issue in it (that
+          // capability belongs to align mode alone). Widening this set would accept output the
+          // prompt itself never offers, a contract mismatch between prompt and validator.
+          const triageInView = new Set<number>([issue.number]);
           const triageResult = await runSessionWithRetry({
             runner: deps.runner,
             state: deps.state,
@@ -1933,10 +1937,6 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           alignSummaryTriaged.push({ issue: number, drafted: false });
           continue;
         }
-        // #237: collected regardless of resumed/fresh — a resumed decision's concerns are the
-        // SAME session attempt's, just read back from the journal instead of freshly validated.
-        triageConcernsCollected.push(...validated.concerns);
-
         // #232: write-ahead acceptance — the validated decision is durably recorded BEFORE any
         // forge effect. Skipped on the resume path (`resumed` already IS that durable record).
         if (!resumed) {
@@ -2012,6 +2012,16 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
                re-run's write idempotent even without this receipt */
           }
         }
+
+        // #237 finding 6 (2026-07-18 adjudication): collected ONLY once the decision this
+        // concern rode along with actually took effect — either a resumed decision (already
+        // durably persisted in an earlier attempt, by definition) or a freshly-persisted
+        // decision whose guarded body write just succeeded (or was already committed). Both
+        // early `continue`s above (persistTriageDecision failure, stale-hash refusal) skip this
+        // line entirely — a concern must never outlive the decision it was validated alongside;
+        // if the PO still holds it, the SAME worded concern is re-raised (and reposted) next
+        // round once the candidate is re-triaged from a fresh read.
+        triageConcernsCollected.push(...validated.concerns);
 
         const planLanded = extractVerificationPlan(validated.body) != null;
         alignSummaryTriaged.push({ issue: number, drafted: planLanded });
@@ -2091,11 +2101,15 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       }
 
       // #237: the PO dissent channel — post this round's freshly validated concerns (align +
-      // every triage session), idempotent by marker, then re-check every still-open concern (any
-      // round) against live GitHub state for adjudication. Runs unconditionally, gated by the
-      // SAME phase marker every other aligning-phase write already is (this call only happens
-      // once per round, on the attempt that reaches here with `marker` still null coming in).
-      await processConcerns({
+      // every triage session), idempotent by marker (dissent.ts's postConcernIfNew). #237
+      // finding 5 (2026-07-18 adjudication): the adjudication SCAN is deliberately NOT called
+      // here — it is a separate, unconditional round-level call wired from round-defaults.ts's
+      // aligning wrapper, so it still runs even when this phase never reaches this line
+      // (roles.po.enabled: false skips alignStub.run entirely; a corrupt proposal journal
+      // early-returns above). Posting is still gated by the SAME phase marker every other
+      // aligning-phase write already is (this call only happens once per round, on the attempt
+      // that reaches here with `marker` still null coming in).
+      await postConcerns({
         forge: deps.forge,
         state: deps.state,
         cfg: deps.cfg,

@@ -4,6 +4,13 @@
 // deliverables, in-view bounds enforcement); this file is about dissent.ts's OWN orchestration
 // logic in isolation, same "fake the collaborator, not the CLI" split every other peripheral's
 // test file in this codebase uses.
+//
+// #237 2026-07-18 adjudication (gate② on PR #262, finding 5): postConcerns (posting) and
+// scanForAdjudication (adjudication) are now two SEPARATE exported functions — production wires
+// them from different call sites (align.ts's createAligningStub calls postConcerns only;
+// round-defaults.ts's aligning wrapper calls scanForAdjudication unconditionally, decoupled from
+// roles.po.enabled). The `run` helper below calls them in that SAME order (scan, then post) so
+// every test here exercises the real production sequencing rather than an ad hoc one.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
@@ -14,7 +21,8 @@ import {
   concernHash,
   concernMarker,
   isSapwoodComment,
-  processConcerns,
+  postConcerns,
+  scanForAdjudication,
   unadjudicatedConcerns,
   validateConcerns,
 } from "./dissent.js";
@@ -62,7 +70,13 @@ class FakeForge implements IForge {
   async mergePR(): Promise<void> {}
   async addPRComment(): Promise<void> {}
   async addIssueComment(issue: number, body: string): Promise<void> {
-    this.comments[issue] = [...(this.comments[issue] ?? []), { login: "sapwood-engine", createdAt: new Date().toISOString(), body }];
+    // #237 finding 2: production stamps ENGINE_COMMENT_MARKER at the forge.ts write boundary
+    // (GithubForge.addIssueComment) — this fake stands in for that boundary too, so isSapwoodComment
+    // recognizes every engine-posted comment here exactly like it would against real GitHub.
+    this.comments[issue] = [
+      ...(this.comments[issue] ?? []),
+      { login: "sapwood-engine", createdAt: new Date().toISOString(), body: `${body}\n\n<!-- sapwood:engine -->` },
+    ];
   }
   async getIssueBody(issue: number): Promise<string> {
     return this.bodies[issue] ?? "";
@@ -138,6 +152,20 @@ const tapEvents = (state: State): Array<[string, unknown]> => {
   return logged;
 };
 
+/** Mirrors the REAL production call sequence (module doc): round-defaults.ts's unconditional
+ *  scan, then align.ts's postConcerns for this round's freshly validated concerns. */
+async function runRound(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  roundId: number,
+  concerns: Concern[],
+  log?: (message: string) => void,
+): Promise<void> {
+  await scanForAdjudication(forge, state, log);
+  await postConcerns({ forge, state, cfg, roundId, concerns, ...(log ? { log } : {}) });
+}
+
 // ── validateConcerns ────────────────────────────────────────────────────────────────────────
 
 test("validateConcerns: a concern about an in-view issue is ok", () => {
@@ -178,18 +206,19 @@ test("concernHash: a body edit changes the hash even though the wording is uncha
 test("isSapwoodComment: recognizes any sapwood marker, rejects a plain comment", () => {
   assert.ok(isSapwoodComment("some text\n\n<!-- sapwood:round:1:aligning -->"));
   assert.ok(isSapwoodComment(concernMarker(5, "abc")));
+  assert.ok(isSapwoodComment("some text\n\n<!-- sapwood:engine -->")); // #237 finding 2: generic stamp
   assert.ok(!isSapwoodComment("just a human reply, no marker"));
 });
 
-// ── processConcerns: posting is idempotent by marker, zero label/status/dispatch effects ───
+// ── postConcerns: posting is idempotent by marker, zero label/status/dispatch effects ──────
 
-test("processConcerns: posts a comment mentioning notify.mentions and carrying the deterministic marker", async () => {
+test("postConcerns: posts a comment mentioning notify.mentions and carrying the deterministic marker", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "the issue body";
   const state = new State(":memory:");
   const cfg = mkCfg(["alice", "bob"]);
   const concerns: Concern[] = [{ issue: 10, reason: "this issue's premise contradicts the goal file" }];
-  await processConcerns({ forge, state, cfg, roundId: 3, concerns });
+  await postConcerns({ forge, state, cfg, roundId: 3, concerns });
 
   assert.equal(forge.comments[10]?.length, 1);
   const body = forge.comments[10]![0]!.body;
@@ -209,21 +238,21 @@ test("processConcerns: posts a comment mentioning notify.mentions and carrying t
   state.close();
 });
 
-test("processConcerns: the SAME (issue, hash) is never reposted across rounds — marker check IS the dedup boundary, not the durable event", async () => {
+test("postConcerns: the SAME (issue, hash) is never reposted across rounds — marker check IS the dedup boundary, not the durable event", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "the issue body";
   const state = new State(":memory:");
   const cfg = mkCfg();
   const concern: Concern = { issue: 10, reason: "same worded concern" };
-  await processConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
+  await postConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
   assert.equal(forge.comments[10]?.length, 1);
   // A LATER round raises the exact same worded concern about the exact same (unedited) body.
-  await processConcerns({ forge, state, cfg, roundId: 2, concerns: [concern] });
+  await postConcerns({ forge, state, cfg, roundId: 2, concerns: [concern] });
   assert.equal(forge.comments[10]?.length, 1, "no repost — the live marker check found the prior comment");
   state.close();
 });
 
-test("processConcerns: dedup holds even when the durable concern-posted event never landed (delivery idempotency is the LIVE marker, not the event)", async () => {
+test("postConcerns #237 finding 3: a live marker with NO matching durable receipt is RECONCILED (a concern-posted event is appended) rather than silently understated", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "the issue body";
   const state = new State(":memory:");
@@ -233,28 +262,38 @@ test("processConcerns: dedup holds even when the durable concern-posted event ne
   // never append the event.
   const hash = concernHash(concern.reason, "the issue body");
   await forge.addIssueComment(10, `some note\n\n${concernMarker(10, hash)}`);
-  assert.equal(state.eventsAfterId(0, ["concern-posted"] as never).length, 0);
-  await processConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0);
+
+  await postConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
+
   assert.equal(forge.comments[10]?.length, 1, "still no repost — the marker was already there");
+  const events = state.eventsAfterId(0, ["concern-posted"]);
+  assert.equal(events.length, 1, "the missing receipt was reconciled, not left permanently lost");
+  assert.deepEqual(events[0]!.payload, { round_id: 1, issue: 10, reason: "x", hash, reconciled: true });
+  // The reconciled receipt makes this concern visible to status/round-summary immediately —
+  // never posted twice on a THIRD pass either.
+  await postConcerns({ forge, state, cfg, roundId: 2, concerns: [concern] });
+  assert.equal(forge.comments[10]?.length, 1);
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 1, "reconciling again does not duplicate the receipt");
   state.close();
 });
 
-test("processConcerns: a body edit (why/what changed) re-arms the SAME worded concern (#237 AC5 fixture)", async () => {
+test("postConcerns: a body edit (why/what changed) re-arms the SAME worded concern (#237 AC5 fixture)", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "the ORIGINAL body";
   const state = new State(":memory:");
   const cfg = mkCfg();
   const concern: Concern = { issue: 10, reason: "same worded concern" };
-  await processConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
+  await postConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
   assert.equal(forge.comments[10]?.length, 1);
 
   // A human edits the issue's why/what.
   forge.bodies[10] = "the EDITED body";
-  await processConcerns({ forge, state, cfg, roundId: 2, concerns: [concern] });
+  await postConcerns({ forge, state, cfg, roundId: 2, concerns: [concern] });
   assert.equal(forge.comments[10]?.length, 2, "the same worded concern reposts against the new marker hash");
 });
 
-test("processConcerns: a forge failure while posting degrades to 'skip this concern this pass' — never throws", async () => {
+test("postConcerns: a forge failure while posting degrades to 'skip this concern this pass' — never throws", async () => {
   const forge = new FakeForge();
   forge.getIssueBody = async () => {
     throw new Error("network blip");
@@ -262,7 +301,7 @@ test("processConcerns: a forge failure while posting degrades to 'skip this conc
   const state = new State(":memory:");
   const cfg = mkCfg();
   const logged: string[] = [];
-  await processConcerns({
+  await postConcerns({
     forge,
     state,
     cfg,
@@ -275,82 +314,107 @@ test("processConcerns: a forge failure while posting degrades to 'skip this conc
   state.close();
 });
 
-// ── adjudication scan (part of processConcerns, run unconditionally) ───────────────────────
+// ── scanForAdjudication: a SEPARATE, unconditional round-level hook (#237 finding 5) ────────
 
-test("adjudication scan: a closed issue is marked adjudicated ('closed')", async () => {
+test("scanForAdjudication: a closed issue is marked adjudicated ('closed')", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "body";
   const state = new State(":memory:");
   const cfg = mkCfg();
   const concern: Concern = { issue: 10, reason: "x" };
-  await processConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
+  await runRound(forge, state, cfg, 1, [concern]);
   forge.states[10] = "CLOSED";
   const logged = tapEvents(state);
-  await processConcerns({ forge, state, cfg, roundId: 2, concerns: [] });
+  await runRound(forge, state, cfg, 2, []);
   const adjudicated = logged.find(([kind]) => kind === "concern-adjudicated");
   assert.ok(adjudicated);
   assert.deepEqual(adjudicated![1], { issue: 10, hash: concernHash("x", "body"), outcome: "closed" });
   state.close();
 });
 
-test("adjudication scan: a body edit is marked adjudicated ('issue-edited') — same mechanism that re-arms the marker also resolves the OLD one", async () => {
+test("scanForAdjudication #237 finding 1: a body edit is marked adjudicated 'body-changed' (renamed from 'issue-edited' — no human-attribution claim)", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "original";
   const state = new State(":memory:");
   const cfg = mkCfg();
   const concern: Concern = { issue: 10, reason: "x" };
-  await processConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
+  await runRound(forge, state, cfg, 1, [concern]);
   forge.bodies[10] = "edited";
   const logged = tapEvents(state);
-  await processConcerns({ forge, state, cfg, roundId: 2, concerns: [] });
+  await runRound(forge, state, cfg, 2, []);
   const adjudicated = logged.find(([kind]) => kind === "concern-adjudicated");
   assert.ok(adjudicated);
-  assert.equal((adjudicated![1] as { outcome: string }).outcome, "issue-edited");
+  assert.equal((adjudicated![1] as { outcome: string }).outcome, "body-changed");
   state.close();
 });
 
-test("adjudication scan: a human reply (a comment with no sapwood marker, after the concern comment) is marked adjudicated ('human-reply')", async () => {
+test("scanForAdjudication #237 finding 1: an ENGINE-authored body edit (e.g. a later triage draft) ALSO produces 'body-changed' — the outcome makes no claim about who edited it", async () => {
+  const forge = new FakeForge();
+  forge.bodies[10] = "planless body";
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  const concern: Concern = { issue: 10, reason: "no plan yet" };
+  await runRound(forge, state, cfg, 1, [concern]);
+  // Simulate the ENGINE's own triage write (align.ts's updateIssueBody), not a human edit.
+  forge.bodies[10] = "planless body\n## Verification\n- run npm test";
+  const logged = tapEvents(state);
+  await runRound(forge, state, cfg, 2, []);
+  const adjudicated = logged.find(([kind]) => kind === "concern-adjudicated");
+  assert.ok(adjudicated, "an engine write triggers the same outcome as a human edit — by design (module doc)");
+  assert.equal((adjudicated![1] as { outcome: string }).outcome, "body-changed");
+  state.close();
+});
+
+test("scanForAdjudication #237 finding 2: a non-sapwood-marked reply is 'external-reply' (renamed from 'human-reply' — any non-engine actor, e.g. another bot, counts)", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "body";
   const state = new State(":memory:");
   const cfg = mkCfg();
   const concern: Concern = { issue: 10, reason: "x" };
-  await processConcerns({ forge, state, cfg, roundId: 1, concerns: [concern] });
-  forge.comments[10]!.push({ login: "a-human", createdAt: new Date().toISOString(), body: "I disagree, proceeding anyway." });
+  await runRound(forge, state, cfg, 1, [concern]);
+  forge.comments[10]!.push({ login: "some-other-bot", createdAt: new Date().toISOString(), body: "Codex: I looked into this too." });
   const logged = tapEvents(state);
-  await processConcerns({ forge, state, cfg, roundId: 2, concerns: [] });
+  await runRound(forge, state, cfg, 2, []);
   const adjudicated = logged.find(([kind]) => kind === "concern-adjudicated");
   assert.ok(adjudicated);
-  assert.equal((adjudicated![1] as { outcome: string }).outcome, "human-reply");
+  assert.equal((adjudicated![1] as { outcome: string }).outcome, "external-reply");
   state.close();
 });
 
-test("adjudication scan: silence (no closure, no edit, no reply) leaves the concern unadjudicated — status's count stays 1", async () => {
+test("scanForAdjudication: silence (no closure, no edit, no reply) leaves the concern unadjudicated — status's count stays 1", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "body";
   const state = new State(":memory:");
   const cfg = mkCfg();
-  await processConcerns({ forge, state, cfg, roundId: 1, concerns: [{ issue: 10, reason: "x" }] });
-  await processConcerns({ forge, state, cfg, roundId: 2, concerns: [] }); // scan again, nothing changed
+  await runRound(forge, state, cfg, 1, [{ issue: 10, reason: "x" }]);
+  await runRound(forge, state, cfg, 2, []); // scan again, nothing changed
   const events = state.eventsAfterId(0, ["concern-posted", "concern-adjudicated"]);
   assert.equal(unadjudicatedConcerns(events).size, 1);
   state.close();
 });
 
-test("adjudication scan: a per-issue read failure leaves it unadjudicated this pass — never throws", async () => {
+test("scanForAdjudication: a per-issue read failure leaves it unadjudicated this pass — never throws", async () => {
   const forge = new FakeForge();
   forge.bodies[10] = "body";
   const state = new State(":memory:");
   const cfg = mkCfg();
-  await processConcerns({ forge, state, cfg, roundId: 1, concerns: [{ issue: 10, reason: "x" }] });
+  await runRound(forge, state, cfg, 1, [{ issue: 10, reason: "x" }]);
   forge.getIssueMeta = async () => {
     throw new Error("boom");
   };
   const logged: string[] = [];
-  await processConcerns({ forge, state, cfg, roundId: 2, concerns: [], log: (m) => logged.push(m) });
+  await scanForAdjudication(forge, state, (m) => logged.push(m));
   assert.ok(logged.some((m) => /left unadjudicated this pass/.test(m)));
   const events = state.eventsAfterId(0, ["concern-posted", "concern-adjudicated"]);
   assert.equal(unadjudicatedConcerns(events).size, 1);
+  state.close();
+});
+
+test("scanForAdjudication: runs and completes with zero forge calls when there is nothing posted yet (round-level unconditional hook, #237 finding 5)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  await scanForAdjudication(forge, state);
+  assert.equal(Object.keys(forge.comments).length, 0);
   state.close();
 });
 

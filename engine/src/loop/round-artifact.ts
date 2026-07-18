@@ -94,7 +94,7 @@ export const RoundArtifactSchema = z
       })
       .strict()
       .nullable(),
-    // #237: every PO-dissent concern actually POSTED this round (dissent.ts's processConcerns —
+    // #237: every PO-dissent concern actually POSTED this round (dissent.ts's postConcerns —
     // idempotent by marker, so this is "delivered", not "raised" — a duplicate the marker
     // suppressed never lands here twice). `.default([])` so a PRE-#237 persisted round_artifacts
     // row (round-defaults.ts's RoundArtifactSchema.parse of an old JSON blob) still parses —
@@ -136,7 +136,7 @@ export const ROUND_ARTIFACT_EVENT_KINDS = [
   "retro-pr-opened",
   "retro-pr-degraded",
   "align-summary",
-  // #237: PO-dissent concerns actually delivered this round (dissent.ts's processConcerns).
+  // #237: PO-dissent concerns actually delivered this round (dissent.ts's postConcerns).
   "concern-posted",
 ];
 

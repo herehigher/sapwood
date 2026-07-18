@@ -13,6 +13,21 @@ import { labelsInclude } from "./labels.js";
 
 const OPEN_ISSUES_LIMIT = 1000;
 
+/** #237 finding 2: appended to EVERY issue comment GithubForge.addIssueComment posts (see that
+ *  method's own doc comment) — the single, unconditional "this engine wrote this" stamp,
+ *  regardless of whatever call-site-specific marker (if any) the body already carries. dissent.ts
+ *  (`isSapwoodComment`) checks for the generic `<!-- sapwood:` prefix, which this marker (like
+ *  every specific one — round/proposal/triage/concern markers) also satisfies — no special-casing
+ *  needed on the reading side, only this one write-side guarantee that it is ALWAYS present. */
+export const ENGINE_COMMENT_MARKER = "<!-- sapwood:engine -->";
+
+/** Appends ENGINE_COMMENT_MARKER, exported so a caller composing a body that already ends in its
+ *  own marker (or not) never needs to special-case the join — this function is idempotent-enough
+ *  in intent (always appends once per addIssueComment call; GithubForge is the only caller). */
+export function stampEngineComment(body: string): string {
+  return `${body}\n\n${ENGINE_COMMENT_MARKER}`;
+}
+
 export type OwnerKind = "user" | "org";
 
 export interface Issue {
@@ -532,7 +547,25 @@ export class GithubForge implements IForge {
   }
 
   async addIssueComment(issue: number, body: string): Promise<void> {
-    await this.gh(["issue", "comment", String(issue), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
+    // #237 finding 2 (2026-07-18 adjudication on PR #262): stamp EVERY issue comment this engine
+    // posts, at this ONE write boundary — regardless of whether the call site already embeds its
+    // own specific marker (align.ts's round/proposal/triage markers, dissent.ts's concern
+    // marker, harvest.ts's round marker) or none at all (architect.ts's raw contradiction-verdict/
+    // per-issue-explanation comments, conductor.ts's retention/escalation comments — audited: both
+    // route through this same method, neither embedded a marker of its own before this change).
+    // dissent.ts's adjudication scan (isSapwoodComment) relies on EVERY engine comment carrying
+    // SOME `<!-- sapwood:` marker to distinguish its own activity from an external reply; a
+    // single central stamp here makes that true unconditionally, with no per-call-site duty to
+    // remember it. See ENGINE_COMMENT_MARKER's own doc comment.
+    await this.gh([
+      "issue",
+      "comment",
+      String(issue),
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--body",
+      stampEngineComment(body),
+    ]);
   }
 
   async addPRLabel(pr: number, label: string): Promise<void> {
