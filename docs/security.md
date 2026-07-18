@@ -53,15 +53,14 @@ The mode reaches the guard hook via a spawn-time environment variable
 worker-writable settings file — so a worker cannot weaken its own guard mode by editing
 config mid-run.
 
-## Issues-only role sessions carry no shell (#110)
+## Issues-only role sessions: read-only, worktree-confined, no shell (#110, #235)
 
 Workers are guarded by the argv-inspecting hook above. The round orchestrator's
-issues-only peripheral roles — plan-reviewer, plan-drafter, PO/align+triage, harvest,
-and architect — take a different, stronger approach: they hold no `Bash` tool grant at
-all (`peripheral.ts`'s `ROLE_ALLOWED_TOOLS`/`PO_ALLOWED_TOOLS` are the empty string).
-Each session is pure computation — its prompt never instructs a `gh` command, and it
-has no shell to run one through even if it tried. Its final message ends in a
-structured, sentinel-delimited output block instead. The deterministic engine
+issues-only peripheral roles — plan-reviewer, plan-drafter, PO/align+triage+pool,
+harvest, and architect — take a different, stronger approach on the WRITE side: they
+hold no `Bash` tool grant at all, and no `Write`/`Edit`/`MultiEdit`/`NotebookEdit`
+grant either. Each session's only output channel is its final message, which ends in a
+structured, sentinel-delimited block. The deterministic engine
 (`plan-review.ts`/`align.ts`/`harvest.ts`/`architect.ts`) parses that block, validates
 it against a per-role zod schema plus the content invariants worth cheaply re-checking
 (e.g. an "approve" claim's body must actually carry a verification-plan section —
@@ -75,14 +74,47 @@ gate⓪ escalates to `needs-human` with the attempt trail, the advisory roles (P
 harvest, architect) degrade-and-proceed with a durable state event, never a silent
 no-op and never a wedged round.
 
-Because no shell exists for these sessions to reach `gh` through at all, the
-pattern-layer bypass classes earlier hardening closed one glob at a time (#102's short
-`-F`/`-l`/`-p` flag aliases, #108's quoted/escaped `-F` spellings) are structurally
-moot for them — not closed by a better pattern, but by removing the capability the
-pattern was constraining. The old deny-list entries stay in `peripheral.ts`, byte-
-identical, as a regression trip-wire: a future PR that re-widens the allow-list with a
-`Bash(...)` entry lands back inside those denies rather than silently reopening a
-closed bypass class.
+**On the READ side (#235), every one of these roles is explicitly granted
+`Read`/`Grep`/`Glob`** — `peripheral.ts`'s `ROLE_ALLOWED_TOOLS` is
+`"Read,Grep,Glob"`, no longer the empty string, and the architect is not a special
+case: the 2026-07-17 owner ruling is that whether to read is the model's own
+role-scoped judgment (an architect reasoning about a contradiction via an approval
+protocol instead of just reading the code is absurd), because reading is not
+producing/approving/merging. What makes this safe is a **real, fail-closed
+containment mechanism**, not a permission-layer convention: the guard hook's
+`checkReadContainment` (`guard.ts`, landed as #235's PR-A) resolves every
+`Read`/`Grep`/`Glob`/`NotebookRead` call's target path against the session's own
+`SAPWOOD_WORKTREE_ROOT` (an env var the engine sets at spawn time, the same
+credential-stripped, engine-controlled channel `SAPWOOD_GUARD_MODE` already uses) and
+**blocks** anything that resolves outside it — an absolute host path, a
+`../`-traversal, a symlink escape. A live probe (a real `claude -p --worktree`
+session, this role's exact allow/deny pair) is part of this feature's verification:
+host-path and traversal reads are denied, an in-worktree read succeeds. Before #235
+PR-A, this containment did not exist — a real probe found an absolute host path and a
+`../`-traversal BOTH escaped the worktree and returned real host file content, which
+is why the read-only allow-list widening in this section shipped only once that gap
+was closed, never before.
+
+**`--disallowedTools` is the write/exec-side cross-source veto**: `peripheral.ts`'s
+`ROLE_DISALLOWED_TOOLS` denies `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and a
+**blanket `Bash`** — the bare tool name, not a pattern list. `--disallowedTools` wins
+over allow from ANY source, including a target repo's own checked-out
+`.claude/settings.json`, an authorization surface this engine does not control — so
+this is the real boundary, not a convention a repo's own config could quietly
+override. Because no shell exists for these sessions to reach `gh` (or anything else)
+through at all, the pattern-layer bypass classes earlier hardening closed one glob at
+a time (#102's short `-F`/`-l`/`-p` flag aliases, #108's quoted/escaped `-F`
+spellings) are structurally moot for them — not closed by a better pattern, but by
+removing the capability the pattern was constraining; the blanket `Bash` deny
+subsumes every one of those old per-pattern entries by construction. Per-role deny
+constants (`PLAN_DRAFTER_DISALLOWED_TOOLS`, `PO_DISALLOWED_TOOLS`,
+`HARVEST_DISALLOWED_TOOLS`, `CONFIRM_DISALLOWED_TOOLS`) are now byte-identical to the
+base and kept as their own named exports purely for call-site clarity — each is still
+independently regression-tested, so a future re-widening of any one role's grant
+lands inside a failing test rather than silently reopening a closed bypass class.
+Read-only git (`git log` etc.) deliberately stays **out** of the allow-list: the
+blanket `Bash` deny already covers it, and adding it back would be a live capability,
+not a trip-wire.
 
 Every `RoleRunner` session is additionally spawned without forge credentials:
 `peripheralSessionEnv()` in `peripheral.ts` strips inherited `GH_*`,
@@ -98,11 +130,13 @@ Code-producing worker lanes are unaffected: they legitimately hold the token,
 mediated by the guard hook.
 
 **`retro` is the one exception**, by session class rather than role name: it is
-worker-class, with `Read` + local git only — file edits, commit, and push inside its
-own ephemeral worktree (proposals land exclusively as PRs through the normal review
-gate, never a direct write) — the same broader trust level a code-producing worker
-gets, because its job (editing prompts/docs/config from round history) genuinely needs
-it. Its `gh` surface, however, is now **zero** — no `gh` entry of any kind remains in
+worker-class, with `Read`/`Grep`/`Glob` + local git only — file edits, commit, and
+push inside its own ephemeral worktree (proposals land exclusively as PRs through the
+normal review gate, never a direct write) — the same broader trust level a
+code-producing worker gets, because its job (editing prompts/docs/config from round
+history) genuinely needs it. (`Grep`/`Glob` joined its allow-list in #235 alongside
+every other role's — retro's job was already code-aware and already carried `Read`;
+it was simply missing the other two read tools.) Its `gh` surface, however, is now **zero** — no `gh` entry of any kind remains in
 its allowedTools (#111, shipped in two halves):
 
 - **Read side (#111 PR-A):** retro never browses GitHub live. Instead the engine
@@ -127,24 +161,20 @@ The dangerous verbs `guard.ts` already blocks category-C are unchanged, and retr
 old `gh` deny patterns are kept byte-identical as regression trip-wires — the same
 stance the issues-only roles took after #110.
 
-**gate⓪'s freshness re-confirm session is the SECOND exception (#214), narrower than
-retro's.** A pool member's confirm pass ("does this plan still hold against current
-`main`?") cannot answer that question against a body it has no way to check — the
-base issues-only allow-list (above) carries no `Read` at all, so a plan referencing a
-file since renamed was structurally unverifiable. `peripheral.ts`'s
-`CONFIRM_ALLOWED_TOOLS` widens exactly this one session to `Read,Glob,Grep` — repo
-**inspection only**, no `Bash` of any kind (so no `git`, no `gh`, no arbitrary command
-— strictly narrower than retro's git-and-file-edit grant above) and no
-`Write`/`Edit`/`MultiEdit` — paired with `CONFIRM_DISALLOWED_TOOLS` (the base deny
-list with only `Read` removed, so every other denial — `Write`/`Edit`/`MultiEdit`,
-every `gh` verb — still applies). The session reads the conductor's own checkout, the
-same ephemeral worktree every role session already gets; its freshness relative to
-`main` is the conductor's responsibility, not a property this grant controls. Because
-there is still no `Bash` grant, there is still no shell to reach `gh` through — #110's
-zero-write boundary for this role family holds: the widening is read-only by
-construction, and this session's decision, like every other role's, is read from its
-structured output only, applied by the engine (`plan-review.ts`), never by a tool call
-of its own.
+**gate⓪'s freshness re-confirm session** ("does this plan still hold against current
+`main`?", #214) needed repo read access before #235 for the same reason every other
+role does now: a plan referencing a file since renamed is otherwise unverifiable. Before
+#235, this was its OWN sanctioned widening (`CONFIRM_ALLOWED_TOOLS`, narrower than
+retro's git-and-file-edit grant) — the base issues-only allow-list carried no `Read` at
+all yet. #235 makes `Read`/`Grep`/`Glob` the UNIVERSAL issues-only baseline, so
+`CONFIRM_ALLOWED_TOOLS`/`CONFIRM_DISALLOWED_TOOLS` are now byte-identical to
+`ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` — kept as their own named exports purely
+for call-site clarity in `plan-review.ts`. The session reads the conductor's own
+checkout, the same ephemeral worktree every role session already gets and the same
+guard-hook containment described above; its freshness relative to `main` is the
+conductor's responsibility, not a property this grant controls. This session's
+decision, like every other role's, is read from its structured output only, applied by
+the engine (`plan-review.ts`), never by a tool call of its own.
 
 ## Ambient repo context: record, don't seal (#236)
 
@@ -266,14 +296,37 @@ common cases right by coincidence but would have mis-resolved any other shared
 namespace, e.g. `refs/notes/*`, from a stale worktree-local shadow.) `dirty` is
 derived, never measured,
 from three distinct, honestly-labeled bases: `"structural-no-write-tools"` (the
-session's tool grant is empty — the common case — so `dirty: false` is a structural
-guarantee); `"unknown-write-capable-session"` (a non-empty grant, e.g. `retro` — the
+session's tool grant carries no WRITE-capable tool — `Write`/`Edit`/`MultiEdit`/
+`NotebookEdit`/any `Bash(...)` entry — the common case, so `dirty: false` is a
+structural guarantee; #235 makes `Read`/`Grep`/`Glob` the universal issues-only
+baseline, so this is no longer the same thing as "the allow-list is empty" — a
+read-only grant is still `dirty: false`); `"unknown-write-capable-session"` (the grant
+DOES include a write-capable tool, e.g. `retro`'s `Write`/`Edit`/`Bash(git ...)` — the
 engine cannot rule out a write, so `dirty: true` conservatively, never a false
 "definitely clean"); and `"worktree-missing"` (the worktree never appeared on disk at
 all within the bounded wait — a distinct fact from either of the above, not folded
 into a guess).
 
+**What a session actually used (#235).** Alongside HEAD/cleanliness, the manifest also
+records which tools a session's stream actually INVOKED (`toolUsage`: name → call
+count, parsed from its jsonl `tool_use` blocks — including a DENIED attempt, e.g. a
+blocked `Bash` call, since the attempt itself is diagnostic evidence whether or not it
+executed) and which paths its `Read`/`Grep`/`Glob`/`NotebookRead` calls named
+(`readPaths`, sorted and deduplicated). This is a RECORD of what was asked for, not a
+re-verification of where it landed — the guard hook above is the actual containment
+enforcement; the manifest exists so a session's read footprint is diagnosable after
+the fact, the same "record, don't seal" stance this whole section takes for ambient
+`CLAUDE.md` absorption.
+
 ### Benchmark isolation recipe (evals only — never production)
+
+**Not to be confused with #235's guard-hook read containment above.** This section's
+`--bare` recipe seals a session's AMBIENT CONTEXT (no repo/user `CLAUDE.md`, no
+auto-memory, no MCP) for reproducible eval comparisons — a different goal from #235,
+which confines an ordinary (non-`--bare`) production session's explicit
+`Read`/`Grep`/`Glob` tool CALLS to its own worktree via the guard hook, while leaving
+ambient `CLAUDE.md` absorption open (see "Ambient repo context" above). Production
+dispatch uses #235's containment; it never uses `--bare` — see why below.
 
 Isolation is the *correct* tool for one use case: comparing models/prompts/configs in
 a controlled eval where ambient repo/user state must NOT leak into the comparison. For

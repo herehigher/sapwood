@@ -34,6 +34,7 @@ import {
   parseModelUsage,
   parseResultText,
   parseSessionInit,
+  parseToolUsage,
   probeLlmPing,
   renderPromptTemplate,
   shellSingleQuote,
@@ -293,6 +294,87 @@ test("parseAssistantUsageDeltas: no assistant lines / malformed message / missin
   assert.deepEqual(parseAssistantUsageDeltas(JSON.stringify({ type: "assistant", message: { model: "m", usage: {} } })), [
     { model: "m", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
   ]);
+});
+
+// ── #235 PR-B: parseToolUsage — which tools/paths a session's stream actually invoked ──
+test("parseToolUsage: counts tool_use blocks by name and collects Read/Grep/Glob paths, in first-seen tool order, sorted+deduplicated paths", () => {
+  const jsonl = [
+    `{"type":"system","subtype":"init"}`,
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id: "1", name: "Read", input: { file_path: "/wt/src/b.ts" } },
+          { type: "text", text: "reasoning, not a tool call" },
+        ],
+      },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "2", name: "Grep", input: { pattern: "foo", path: "/wt/src" } }] },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "3", name: "Read", input: { file_path: "/wt/src/a.ts" } }] },
+    }),
+    JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.01 }),
+  ].join("\n");
+  const { toolUsage, readPaths } = parseToolUsage(jsonl);
+  assert.deepEqual(toolUsage, [
+    { tool: "Read", count: 2 },
+    { tool: "Grep", count: 1 },
+  ]);
+  assert.deepEqual(readPaths, ["/wt/src", "/wt/src/a.ts", "/wt/src/b.ts"], "sorted, deduplicated");
+});
+
+test("parseToolUsage: Glob's path is captured when present, absent when the call searched cwd (no path field at all)", () => {
+  const withPath = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "1", name: "Glob", input: { pattern: "**/*.ts", path: "/wt/src" } }] },
+  });
+  assert.deepEqual(parseToolUsage(withPath).readPaths, ["/wt/src"]);
+
+  const noPath = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "1", name: "Glob", input: { pattern: "**/*.ts" } }] },
+  });
+  const result = parseToolUsage(noPath);
+  assert.deepEqual(result.toolUsage, [{ tool: "Glob", count: 1 }]);
+  assert.deepEqual(result.readPaths, [], "no path field -> nothing to record, tool usage still counted");
+});
+
+test("parseToolUsage: NotebookRead's notebook_path is captured under the same read-path record", () => {
+  const jsonl = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "1", name: "NotebookRead", input: { notebook_path: "/wt/nb.ipynb" } }] },
+  });
+  assert.deepEqual(parseToolUsage(jsonl).readPaths, ["/wt/nb.ipynb"]);
+});
+
+test("parseToolUsage: a DENIED tool call (e.g. an attempted Bash, blocked by the guard hook or the CLI's own disallowedTools) is still counted — the attempt itself is diagnostic evidence, whether or not it executed", () => {
+  const jsonl = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "1", name: "Bash", input: { command: "cat /etc/passwd" } }] },
+  });
+  const { toolUsage, readPaths } = parseToolUsage(jsonl);
+  assert.deepEqual(toolUsage, [{ tool: "Bash", count: 1 }]);
+  assert.deepEqual(readPaths, [], "Bash has no read-path field in this module's mapping");
+});
+
+test("parseToolUsage: no assistant lines / malformed content / malformed tool_use shapes -> empty result, never throws", () => {
+  assert.deepEqual(parseToolUsage(""), { toolUsage: [], readPaths: [] });
+  assert.deepEqual(parseToolUsage("garbage{{{\nnot json either"), { toolUsage: [], readPaths: [] });
+  assert.deepEqual(parseToolUsage(`{"type":"assistant","message":"not-an-object"}`), { toolUsage: [], readPaths: [] });
+  assert.deepEqual(parseToolUsage(`{"type":"assistant","message":{"content":"not-an-array"}}`), { toolUsage: [], readPaths: [] });
+  assert.deepEqual(parseToolUsage(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":123}]}}`), {
+    toolUsage: [],
+    readPaths: [],
+  });
+  assert.deepEqual(parseToolUsage(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":"nope"}]}}`), {
+    toolUsage: [{ tool: "Read", count: 1 }],
+    readPaths: [],
+  });
+  assert.deepEqual(parseToolUsage(`{"type":"result","total_cost_usd":0.1}`), { toolUsage: [], readPaths: [] });
 });
 
 test("discoverClaudeBin: env CLAUDE_BIN wins, else 'claude'", () => {

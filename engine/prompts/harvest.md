@@ -22,6 +22,16 @@ it on your behalf, and validates every issue number you name against this round'
 needs-human set before posting anything. If you find yourself reaching for a tool to post a
 comment, stop: there is no such tool. Decide what to say, then emit the structured block.
 
+You have read-only access to this worktree (`Read`/`Grep`/`Glob`, confined to it) if a comment
+genuinely needs grounding in something the round artifact above doesn't already cover. Two
+limits on that access, both absolute: a repository read must never change a LEDGER FACT — the
+round artifact's numbers (throughput, spend, dispatches, retries) are authoritative and
+reproduced verbatim; nothing you read overrides, recomputes, or second-guesses them, exactly as
+"Do NOT recompute, re-aggregate, or second-guess any of it" above already says. And a repository
+read must never EXPAND which issues you comment on — the needs-human list is closed-form before
+this session starts; finding something interesting elsewhere in the repo is never a reason to
+brief an issue outside that list.
+
 ## Your job
 
 Draft ONE short comment for each `needs-human` issue listed above (nothing else — you are

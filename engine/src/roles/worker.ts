@@ -264,6 +264,79 @@ export function parseAssistantUsageDeltas(jsonl: string): ModelUsageEntry[] {
   return out;
 }
 
+/** #235 PR-B: one tool name and how many times the session's stream invoked it — counts EVERY
+ *  `tool_use` block the session emitted, whether Claude Code actually allowed the call or the
+ *  guard hook/CLI denied it (a denied attempt is still evidence worth recording: "this session
+ *  tried to Bash" is itself a diagnosable fact, not something to silently drop because it never
+ *  executed). */
+export interface ToolUsageEntry {
+  tool: string;
+  count: number;
+}
+
+/** #235 PR-B: which repository paths a session's Read/Grep/Glob/NotebookRead tool calls actually
+ *  named — the manifest's "what did this session actually look at" half, alongside
+ *  toolInventoryHash's "what COULD it have used". Mirrors guard.ts's own checkReadContainment
+ *  path resolution exactly (Read/NotebookRead: a required single-file path; Grep/Glob: an
+ *  OPTIONAL search-root path, absent when the call searched the session's cwd) — so a path
+ *  recorded here is exactly the string the guard hook itself evaluated for containment, not a
+ *  re-derived approximation. Sorted, deduplicated, absolute-or-relative exactly as the session
+ *  supplied it (never re-resolved) — this is a RECORD of what was asked for, not a re-check of
+ *  where it landed; #235 PR-A's guard hook is the actual containment enforcement. */
+export interface ToolUsageResult {
+  toolUsage: ToolUsageEntry[];
+  readPaths: string[];
+}
+
+const READ_PATH_FIELD: Record<string, string> = {
+  Read: "file_path",
+  NotebookRead: "notebook_path",
+  Grep: "path",
+  Glob: "path",
+};
+
+/** #235 PR-B: parse every `tool_use` block from a session's stream-json transcript — the SAME
+ *  jsonl every other parser in this module scans (peripheral.ts's context-manifest assembly
+ *  passes the identical string already read for parseCostUsd/parseModelUsage/parseResultText).
+ *  Same tolerance guarantee as every sibling parser here: a partial/garbage line is skipped,
+ *  never thrown; a malformed/missing `message.content` array yields nothing for that line rather
+ *  than aborting the whole scan. Tool names are counted in FIRST-SEEN order for readability;
+ *  `readPaths` is sorted + deduplicated (see ToolUsageResult's doc for exactly which field each
+ *  read-shaped tool contributes). */
+export function parseToolUsage(jsonl: string): ToolUsageResult {
+  const counts = new Map<string, number>();
+  const pathSet = new Set<string>();
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // partial/garbage line — ignore (stream may be mid-write)
+    }
+    if (obj.type !== "assistant") continue;
+    const message = obj.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+      const b = block as Record<string, unknown>;
+      if (b.type !== "tool_use" || typeof b.name !== "string" || b.name.length === 0) continue;
+      counts.set(b.name, (counts.get(b.name) ?? 0) + 1);
+      const pathField = READ_PATH_FIELD[b.name];
+      if (!pathField) continue;
+      const input = b.input;
+      if (!input || typeof input !== "object" || Array.isArray(input)) continue;
+      const path = (input as Record<string, unknown>)[pathField];
+      if (typeof path === "string" && path.length > 0) pathSet.add(path);
+    }
+  }
+  const toolUsage: ToolUsageEntry[] = [...counts.entries()].map(([tool, count]) => ({ tool, count }));
+  return { toolUsage, readPaths: [...pathSet].sort() };
+}
+
 /** CLAUDE_BIN env override, else `claude` on PATH. */
 export function discoverClaudeBin(env: Record<string, string | undefined>): string {
   const b = env.CLAUDE_BIN?.trim();

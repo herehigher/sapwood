@@ -133,6 +133,31 @@ test("assembleContextManifest: mcpTools are sorted for determinism; settingsHash
   assert.equal(noHook.hookHash, null);
 });
 
+// ── #235 PR-B: toolUsage/readPaths — the "what did this session actually use" half ──────────
+
+test("assembleContextManifest (#235 PR-B): toolUsage/readPaths pass through verbatim when supplied", () => {
+  const manifest = assembleContextManifest(
+    baseEnv({
+      toolUsage: [
+        { tool: "Read", count: 3 },
+        { tool: "Grep", count: 1 },
+      ],
+      readPaths: ["src/foo.ts", "src/bar.ts"],
+    }),
+  );
+  assert.deepEqual(manifest.toolUsage, [
+    { tool: "Read", count: 3 },
+    { tool: "Grep", count: 1 },
+  ]);
+  assert.deepEqual(manifest.readPaths, ["src/foo.ts", "src/bar.ts"]);
+});
+
+test("assembleContextManifest (#235 PR-B): toolUsage/readPaths default to [] when omitted — existing fixtures/tests that predate this field keep compiling with an honest empty result, never undefined", () => {
+  const manifest = assembleContextManifest(baseEnv());
+  assert.deepEqual(manifest.toolUsage, []);
+  assert.deepEqual(manifest.readPaths, []);
+});
+
 test("assembleContextManifest: drift detection — identical env hashes identically; a single changed byte in a mutable source changes ITS hash but leaves every other field untouched", () => {
   const attempt1 = assembleContextManifest(
     baseEnv({ sources: [{ label: "user-global CLAUDE.md", path: "/home/u/.claude/CLAUDE.md", content: "v1" }] }),

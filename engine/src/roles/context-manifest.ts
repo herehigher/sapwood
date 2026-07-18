@@ -37,6 +37,14 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+// #235 PR-B: a TYPE-ONLY import (see this module's header doc — PURE, no filesystem/subprocess
+// of its own). worker.ts owns parseToolUsage (the jsonl-scan that PRODUCES this shape, the same
+// "read side" home parseModelUsage/ModelUsageEntry already establish for spend); this module
+// only carries the resulting data through assembleContextManifest, same as every other field
+// here.
+import type { ToolUsageEntry } from "./worker.js";
+
+export type { ToolUsageEntry };
 
 // ── Manifest shape ─────────────────────────────────────────────────────────────────────────
 
@@ -178,6 +186,18 @@ export interface ContextManifest {
   settingsHash: string;
   /** Hash of the guard hook file's content, or null when unreadable at manifest time. */
   hookHash: string | null;
+  /** #235 PR-B: which tools the session's stream actually INVOKED (name -> call count) —
+   *  distinct from toolInventoryHash above, which only records what tools were AVAILABLE. Empty
+   *  for a session whose jsonl carried no parseable tool_use block (a pure-text session, or one
+   *  that crashed before its first turn). See worker.ts's parseToolUsage for the exact parse. */
+  toolUsage: ToolUsageEntry[];
+  /** #235 PR-B: every distinct path a Read/Grep/Glob/NotebookRead tool_use call named, sorted +
+   *  deduplicated — the read-path half of "what did this session actually use" (item 4 of
+   *  #235's acceptance criteria). Recorded exactly as the session supplied it, never re-resolved
+   *  — #235 PR-A's guard hook (checkReadContainment) is the actual containment enforcement; this
+   *  field is a diagnostic record of what was ASKED for, not a re-verification of where it
+   *  landed. Empty when the session made no such call. */
+  readPaths: string[];
   recordedAt: string;
 }
 
@@ -224,6 +244,12 @@ export interface ContextManifestEnv {
    *  must never itself fail a session, so a read failure upstream is passed through as null
    *  rather than this function ever throwing. */
   hookContent: string | null;
+  /** #235 PR-B: pre-parsed from the session's jsonl (worker.ts's parseToolUsage — the same jsonl
+   *  string this manifest's other post-exit fields already scan). Omitted -> both resulting
+   *  manifest fields default to `[]`, so existing fixtures/tests that don't care about this
+   *  addition keep compiling unchanged. */
+  toolUsage?: ToolUsageEntry[];
+  readPaths?: string[];
   recordedAt: string;
 }
 
@@ -264,6 +290,8 @@ export function assembleContextManifest(env: ContextManifestEnv): ContextManifes
     worktree: env.worktree,
     settingsHash: sha256(env.settingsJson),
     hookHash: env.hookContent === null ? null : sha256(env.hookContent),
+    toolUsage: env.toolUsage ?? [],
+    readPaths: env.readPaths ?? [],
     recordedAt: env.recordedAt,
   };
 }
