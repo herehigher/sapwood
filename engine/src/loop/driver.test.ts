@@ -139,6 +139,7 @@ class FakeSupervisor implements Supervisor {
   requestHandoff(): boolean {
     return true;
   }
+  clearStaleFixEntrySentinel(): void {}
 }
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>

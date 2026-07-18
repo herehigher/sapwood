@@ -236,6 +236,12 @@ class FakeSupervisor implements Supervisor {
     this.handoffRequested.push(w);
     return true;
   }
+  /** #245 round-2 fix (B1): records every lane cleared, so tests can assert
+   *  reconcileDrivingFixIntents calls this on adoption. */
+  clearedFixEntrySentinels: string[] = [];
+  clearStaleFixEntrySentinel(w: string): void {
+    this.clearedFixEntrySentinels.push(w);
+  }
 }
 
 const LEGACY_LABEL_CONFIG = {
@@ -4349,6 +4355,10 @@ test("tick (A3): a driving row with a CONFIRMED resume intent (crash between res
   assert.equal(row.state, "fixing", "reconciled — the DB now matches the live confirmed-spawn reality");
   assert.equal(row.fix_rounds, 1, "the FIRST and ONLY bump for this round (startFixLeg's own bump never landed before the crash)");
   assert.ok(sup.handoffRequested.includes("lane-fix"), "never trust the adopted child's proxy channel — drain it gracefully instead");
+  assert.ok(
+    sup.clearedFixEntrySentinels.includes("lane-fix"),
+    "B1: consumes any stale prior-leg done/failed sentinel resume() itself may not have removed before the crash",
+  );
   const events = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-adopted"]);
   assert.equal(events.length, 1);
   // Reconciliation ran BEFORE FIXING RECLAIM even had a chance to probe it this same tick — no
@@ -4430,5 +4440,120 @@ test("tick (A5): the fixing->driving pin-clear is commit-ATOMIC with the state w
     "OLD_HEAD",
     "pin untouched — proves it was never written independently of the (rolled-back) state transition",
   );
+  st.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #245 round-2 fix ROUND 2 (Codex sol-high delta re-review): B2 — both resume-adoption paths
+// must preserve fix identity and never trust a cross-crash proxy. B3 — reconcileDrivingFixIntents'
+// own confirmed-branch ordering must be crash-safe (requestHandoff before the upsert). B4 — an
+// unconfirmed-intent escalation must never terminalize on a failed label write.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("tick RESUME (B2a): a fixing-continuation resume() that resolves to ADOPT (a live child already exists from a pre-crash attempt) drains it immediately instead of blessing it — no fresh proxy/prompt passed, fixing_handoff stays 1", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixingHandoff(st, "lane-fix", 5, 50, { fix_rounds: 1 });
+  sup.resumeIntents["lane-fix"] = "confirmed"; // -> resumeDecision always yields ADOPT
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    fixLegResume: { renderFixPrompt: () => "should never be used", mintProxy: async () => ({}) as never },
+  });
+
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "fixing", "adopted into fixing so it's visible to FIXING RECLAIM");
+  assert.equal(row.fixing_handoff, 1, "B2a: stays 1 — the NEXT resume must re-mint a genuinely fresh proxy, this adoption never did");
+  assert.equal(row.fix_rounds, 1, "still just a continuation — no new rework round");
+  assert.equal(row.resume_attempts, 1);
+  assert.equal(sup.resumeCalls[0]!.opts, undefined, "B2a: ADOPT never attempts a fresh mint — no proxy/prompt opts passed at all");
+  assert.ok(sup.handoffRequested.includes("lane-fix"), "B2a: drained immediately rather than trusted");
+  const events = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-adopted-drained"]);
+  assert.equal(events.length, 1);
+  assert.ok(r.resumed.some((o) => o.kind === "resumed" && o.worker === "lane-fix"));
+  st.close();
+});
+
+test("tick kill-switch (B2b): a fixing-origin handoff (fixing_handoff=1) adopted via a confirmed resume intent lands back in `fixing`, never `running` — fix identity preserved through the kill-switch adoption path", async () => {
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-conductor-"));
+  try {
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const st = new State(join(dir, "sapwood.sqlite"));
+    seedFixingHandoff(st, "lane-fix", 5, 50);
+    sup.resumeIntents["lane-fix"] = "confirmed";
+    sup.probes["lane-fix"] = { ...DEFAULT_PROBE };
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+    const row = st.getWorker("lane-fix")!;
+    assert.equal(row.state, "fixing", "B2b: must NOT be written as `running` — that would silently discard its fix identity");
+    assert.equal(row.fixing_handoff, 1, "unchanged — the kill-switch adoption path never clears it (this isn't a real fix continuation)");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick (B3): reconcileDrivingFixIntents' confirmed branch calls requestHandoff BEFORE the upsert — a crash between them (simulated: upsertWorker throws once) never loses the drain request, and the retry never double-counts fix_rounds", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-fix", 6, 60, { fix_rounds: 0 });
+  sup.resumeIntents["lane-fix"] = "confirmed";
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE };
+
+  const originalUpsert = st.upsertWorker.bind(st);
+  let crashed = false;
+  st.upsertWorker = (row) => {
+    if (!crashed && row.name === "lane-fix" && row.state === "fixing") {
+      crashed = true;
+      throw new Error("simulated crash between requestHandoff and the upsert");
+    }
+    originalUpsert(row);
+  };
+
+  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }));
+  assert.ok(crashed, "sanity: the simulated crash actually fired");
+  assert.ok(sup.handoffRequested.includes("lane-fix"), "requestHandoff is durable/idempotent and fired BEFORE the crashed upsert");
+  assert.equal(st.getWorker("lane-fix")?.state, "driving", "still driving — the crashed upsert never landed");
+  assert.equal(st.getWorker("lane-fix")?.fix_rounds ?? 0, 0, "fix_rounds NOT bumped by the crashed attempt");
+
+  // Retry: the row is STILL driving with the SAME confirmed intent, so the next tick's
+  // reconciliation re-enters this exact branch from scratch.
+  st.upsertWorker = originalUpsert;
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "fixing");
+  assert.equal(row.fix_rounds, 1, "exactly ONE bump total across both attempts — never double-counted");
+  st.close();
+});
+
+test("tick (B4): unconfirmed-intent escalation with a FAILING label write does NOT terminalize the row — stays driving, retried next tick, never permanently stranded failed+unlabeled", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.throwOnAddLabel = true;
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-fix", 6, 60);
+  sup.resumeIntents["lane-fix"] = "unconfirmed";
+
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "driving", "never terminalized without a durable, human-visible label landing first");
+  const failedLabelEvents = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-undecidable-label-failed"]);
+  assert.equal(failedLabelEvents.length, 1);
+  const terminalEvents = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-undecidable"]);
+  assert.equal(terminalEvents.length, 0, "the terminalizing event must never fire alongside a failed label write");
+
+  // Retry: label succeeds this time -> now it terminalizes correctly.
+  forge.throwOnAddLabel = false;
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const retried = st.getWorker("lane-fix")!;
+  assert.equal(retried.state, "failed");
+  assert.equal(retried.gated_escalation_labeled, 1);
   st.close();
 });

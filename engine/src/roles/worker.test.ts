@@ -3689,3 +3689,84 @@ test("resume: a failure AFTER a successful mint (intent-write failure) tears dow
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #245 round-2 fix ROUND 2 (Codex sol-high delta re-review): B1 — fix-leg entry required a
+// `.done`/`.failed` sentinel to EXIST but never consumed it, so once the fix leg was live
+// (lane spawned, spawn confirmed), FIXING RECLAIM's probe() kept reading the STALE prior-leg
+// sentinel as if it were the new leg's own terminal signal.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on spawn confirmation — a live fix child is never mistaken for already-terminal (B1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      ["#!/usr/bin/env bash", 'if [[ "$*" == *"--resume"* ]]; then', "  trap 'exit 0' TERM", "  sleep 30", "fi", RESULT_LINE].join("\n"),
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => true,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { name, sessionId } = await s.dispatch({ number: 30, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)), "sanity: the stale sentinel exists before the fix leg even starts");
+
+    await s.resume({ number: 30, title: "t", labels: [] }, name, { sessionId, prompt: "fix it" });
+
+    assert.ok(!existsSync(join(dir, `${name}.done.json`)), "B1: the stale sentinel is consumed once THIS leg's spawn is confirmed durable");
+    const probe = await s.probe(name);
+    assert.equal(probe.done, false, "a live, still-sleeping fix child must never be reported done via a stale sentinel");
+    await s.reclaim(name);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: fix-leg entry does NOT remove the stale terminal sentinel when the spawn attempt itself fails — the next retry's entry check must still pass (B1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { name, sessionId } = await s.dispatch({ number: 31, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)));
+
+    const s2 = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: join(dir, "does-not-exist-claude"),
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+    });
+    await assert.rejects(
+      () => s2.resume({ number: 31, title: "t", labels: [] }, name, { sessionId, prompt: "fix it" }),
+      /resume-spawn failed/i,
+    );
+    assert.ok(
+      existsSync(join(dir, `${name}.done.json`)),
+      "the stale sentinel must survive a FAILED spawn attempt — the next retry's entry check needs it",
+    );
+    s.dispose();
+    s2.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

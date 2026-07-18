@@ -173,6 +173,7 @@ class FakeSupervisor implements Supervisor {
   requestHandoff(): boolean {
     return true;
   }
+  clearStaleFixEntrySentinel(): void {}
 }
 
 /** A supervisor whose lanes complete IMMEDIATELY (done, no PR) unless a test explicitly

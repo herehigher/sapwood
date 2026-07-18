@@ -439,6 +439,11 @@ export interface Supervisor {
    *  same mechanism as a worker's own soft-budget handoff. Returns false if not applicable
    *  (already reclaiming/requested, or unknown lane) — never throws. */
   requestHandoff(worker: string): boolean;
+  /** #245 round-2 fix (B1): best-effort removal of a STALE prior-leg `.done`/`.failed` terminal
+   *  sentinel for `worker` — see worker.ts's own doc for the crash window this closes
+   *  (reconcileDrivingFixIntents' "confirmed" branch calls this to cover the case where
+   *  resume()'s own post-confirmation removal never ran before a crash). Never throws. */
+  clearStaleFixEntrySentinel(worker: string): void;
 }
 
 /** The conductor's only handle on the review + merge gate (#13). merge-driver.ts's
@@ -1304,11 +1309,30 @@ async function reclaimTerminalLane(
  *     the RECLAIM loop's own `ADOPT` class). The next resume of that handoff (A2's own
  *     fix-continuation RESUME path) mints a FRESH proxy from the CURRENT engine process before
  *     respawning.
+ *
+ *     #245 round-2 fix (B3): `requestHandoff` is called FIRST, before the upsert/event —
+ *     durable (persists `handoff_requested` in running.json) and idempotent, so a crash between
+ *     this call and the upsert below is safe: the NEXT tick's reconciliation still finds the row
+ *     `driving` with the SAME confirmed intent (the crashed attempt's upsert never landed, so
+ *     `fix_rounds` was never bumped) and retries the whole branch — `requestHandoff` is then a
+ *     harmless no-op re-signal, and the upsert's bump is still the first and only successful one
+ *     for this round. Zero new machinery: this reuses the exact convergent-retry shape the rest
+ *     of this reconciliation already relies on.
+ *
+ *     #245 round-2 fix (B1): also clears a STALE prior-leg `.done`/`.failed` terminal sentinel a
+ *     fix-entry `resume()` call may have crashed before removing itself (see that method's own
+ *     doc) — otherwise FIXING RECLAIM's very next `probe()` call would misread the PRIOR leg's
+ *     sentinel as this live leg's own terminal signal.
  *   - "unconfirmed": intent written, never confirmed (crashed truly mid-spawn — ambiguous
  *     whether a process exists at all; retrying could double-spawn into the same worktree).
  *     Escalate to `needs-human` — the same fail-safe #172's own unconfirmed-handoff ambiguity
  *     takes (escalateUndecidableResume), adapted to a `driving` row's own shape (no
- *     `resume_capped`/handoff semantics apply here).
+ *     `resume_capped`/handoff semantics apply here). #245 round-2 fix (B4): the label write goes
+ *     FIRST — same #69/#147 "forge work before the terminal upsert" rule the rest of this file
+ *     follows — and a FAILED label write does NOT terminalize the row at all (never `failed`
+ *     with `gated_escalation_labeled: 0`, which would be permanently invisible to BOTH gated
+ *     reentry and human triage). The row stays `driving`; the next tick retries the whole
+ *     escalation from scratch.
  *   - "none": no resume intent recorded at all — an ordinary `driving` lane #246 may still call
  *     `startFixLeg` on later. Nothing to reconcile. */
 async function reconcileDrivingFixIntents(
@@ -1321,20 +1345,26 @@ async function reconcileDrivingFixIntents(
   for (const w of state.drivingWorkers()) {
     const intent = supervisor.resumeIntentState(w.name, w.issue);
     if (intent === "confirmed") {
+      // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
+      // gracefully now rather than let it keep running against a dead evidence channel. Ordered
+      // FIRST (B3): durable + idempotent, so a crash before the upsert below just re-enters this
+      // same branch next tick.
+      supervisor.requestHandoff(w.name);
+      // B1: consume any stale PRIOR-leg sentinel resume() itself may not have gotten to.
+      supervisor.clearStaleFixEntrySentinel(w.name);
       const fixRounds = (w.fix_rounds ?? 0) + 1;
       state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
       state.appendEvent("fix-leg-adopted", { worker: w.name, issue: w.issue, fixRounds });
-      // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
-      // gracefully now rather than let it keep running against a dead evidence channel.
-      supervisor.requestHandoff(w.name);
     } else if (intent === "unconfirmed") {
-      let labeled = 1;
+      // B4: label FIRST; a failed write must NOT terminalize the row — leave it `driving` and
+      // retry the whole escalation next tick (never a permanently-stranded failed+unlabeled row).
       try {
         await forge.addLabel(w.issue, cfg.labels.needsHuman);
-      } catch {
-        labeled = 0;
+      } catch (e) {
+        state.appendEvent("fix-leg-undecidable-label-failed", { worker: w.name, issue: w.issue, error: String(e) });
+        continue;
       }
-      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
       state.appendEvent("fix-leg-undecidable", { worker: w.name, issue: w.issue });
     }
     // "none": nothing to reconcile.
@@ -1384,10 +1414,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         throw new Error(`resume returned worker ${result.name}; expected existing lane ${w.name}`);
       }
       const attempt = (w.resume_attempts ?? 0) + 1;
+      // #245 round-2 fix (B2b): a fixing-origin handoff adopted here must land back in
+      // `fixing`, never `running` — writing `running` unconditionally silently discarded its
+      // fix identity (`fixing_handoff` stays 1 on `w`, spread through unchanged below, but a
+      // `running`-state row is invisible to the ordinary RESUME phase's fixing_handoff check
+      // entirely). Landing it in `fixing` makes it visible to THIS SAME tick's drain loop just
+      // below (which now scans running+fixing) — no separate requestHandoff needed here, same
+      // as the ordinary (non-fix) adoption case.
       state.upsertWorker({
         ...w,
         session_id: result.sessionId,
-        state: "running",
+        state: w.fixing_handoff === 1 ? "fixing" : "running",
         started_at: iso(),
         ended_at: null,
         resume_attempts: attempt,
@@ -2179,6 +2216,43 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       const pr = w.pr;
+      // #245 round-2 fix (B2a): `decision === "ADOPT"` means a live child ALREADY exists from a
+      // PRIOR resume() call that confirmed a spawn before this engine crashed — its proxy (if
+      // any) was minted by that now-dead process and can never be trusted, the same "never trust
+      // a cross-crash proxy" stance reconcileDrivingFixIntents takes for the driving-row entry
+      // case. Adopt it via resume()'s own confirmed-intent early return (it never even looks at
+      // proxy/prompt opts on that path — no fresh mint is attempted), then immediately drain it
+      // gracefully rather than bless it as a healthy continuation. `fixing_handoff` STAYS 1 so
+      // the NEXT handoff/resume cycle re-mints a genuinely fresh proxy.
+      if (decision === "ADOPT") {
+        let adoptResult: { name: string; sessionId: string };
+        try {
+          adoptResult = await supervisor.resume(issue, w.name);
+        } catch (e) {
+          if (e instanceof UnresumableLaneError) {
+            const outcome = await escalateUndecidableResume(forge, state, cfg, w, attempts, iso);
+            if (outcome) resumed.push(outcome);
+            continue;
+          }
+          state.appendEvent("fix-leg-resume-failed", { worker: w.name, issue: w.issue, error: String(e) });
+          throw e;
+        }
+        const adoptAttempt = attempts + 1;
+        state.upsertWorker({
+          ...w,
+          session_id: adoptResult.sessionId,
+          state: "fixing",
+          started_at: iso(),
+          ended_at: null,
+          resume_attempts: adoptAttempt,
+          fixing_handoff: 1,
+        });
+        state.appendEvent("fix-leg-adopted-drained", { worker: w.name, issue: w.issue, pr, attempt: adoptAttempt });
+        supervisor.requestHandoff(w.name);
+        resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: adoptAttempt });
+        resumeLanesUsed++;
+        continue;
+      }
       const fixPrompt = deps.fixLegResume.renderFixPrompt(w.issue, pr);
       let fixResult: { name: string; sessionId: string };
       try {

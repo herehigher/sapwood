@@ -972,6 +972,18 @@ export class WorkerSupervisor implements Supervisor {
     }
   }
 
+  /** #245 round-2 fix (B1): best-effort removal of a STALE prior-leg `.done`/`.failed` terminal
+   *  sentinel — the reconciliation-side counterpart to resume()'s own post-spawn-confirmation
+   *  removal (see that method's doc). Called by conductor.ts's `reconcileDrivingFixIntents` when
+   *  it adopts a `driving` row with a confirmed fix-entry spawn intent, covering the crash
+   *  window between resume()'s confirmation write and its own sentinel removal (a restart-safe
+   *  belt-and-suspenders — removeIfExists is already idempotent on an already-gone file). Never
+   *  throws; a no-op when neither sentinel exists. */
+  clearStaleFixEntrySentinel(name: string): void {
+    this.removeIfExists(this.path(name, "done.json"));
+    this.removeIfExists(this.path(name, "failed.json"));
+  }
+
   async dispatch(issue: Issue, name?: string, opts?: { proxy?: WorkerProxyOpts }): Promise<{ name: string; sessionId: string }> {
     const laneName = name ?? `lane-${issue.number}-${randomUUID().slice(0, 8)}`;
     // Refuse name reuse — a stale sentinel under this name means a concurrent/old lane; a
@@ -1495,6 +1507,18 @@ export class WorkerSupervisor implements Supervisor {
     // `.handoff` may disappear only after the confirmed marker is durable. Adoption completes
     // this same removal if the engine crashes between these two writes.
     this.removeIfExists(handoffPath);
+    // #245 round-2 fix (B1): fix-leg entry consumes the STALE prior-leg terminal sentinel the
+    // SAME way — only now that THIS leg's spawn is confirmed durable, never before a failed
+    // spawn attempt (which must leave it in place so the next retry's entry check — "a
+    // done/failed sentinel must exist" — still passes). Without this, probe() would keep
+    // reading the PRIOR leg's done/failed sentinel as if it were THIS live leg's own terminal
+    // signal, letting FIXING RECLAIM settle a still-running fix child to `driving`/`failed` out
+    // from under it. `reconcileDrivingFixIntents` (conductor.ts) repeats this same removal for
+    // the crash window between this line and its own upsert — see that function's doc.
+    if (opts?.sessionId != null) {
+      this.removeIfExists(this.path(name, "done.json"));
+      this.removeIfExists(this.path(name, "failed.json"));
+    }
     if (this.lanes.has(name) && child.exitCode === null && child.signalCode === null) {
       this.touchHeartbeat(name);
       lane.hb = setInterval(() => this.heartbeatTick(name), this.hbMs);

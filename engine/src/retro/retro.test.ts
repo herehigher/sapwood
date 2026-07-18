@@ -737,6 +737,7 @@ class MinimalSupervisor implements Supervisor {
   requestHandoff(): boolean {
     return true;
   }
+  clearStaleFixEntrySentinel(): void {}
 }
 
 const baseIntegrationDeps = (state: State, peripherals: Partial<Record<PeripheralPhase, PeripheralStub>>): RoundDeps => ({
