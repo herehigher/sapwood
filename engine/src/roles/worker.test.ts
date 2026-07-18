@@ -1948,32 +1948,54 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
   try {
     // Ignores TERM so it survives requestHandoff's SIGTERM; only the timeout's SIGKILL stops it.
     // #241 (same class of race as #229/PR #240): touch a ready-sentinel immediately after the
-    // trap is installed, and the test polls for it (bounded) instead of trusting a fixed sleep
-    // before sending requestHandoff's own SIGTERM. A fixed sleep can lose to bash's own
-    // scheduling under CPU load, letting that SIGTERM arrive BEFORE `trap '' TERM` is installed
-    // -- the shell then falls back to the DEFAULT (trap-less) SIGTERM disposition and dies
-    // immediately, which (since handoffRequested was already set, and the timeout tick hadn't
-    // fired yet) tags the lane .handoff instead of .failed, defeating the very race this test
-    // exists to pin down. Waiting for the provable handshake removes that window entirely: the
-    // trap can no longer be beaten by the following signal.
+    // trap is installed, so requestHandoff's SIGTERM can never beat the trap. That alone still
+    // left two real-time races on a real wall-clock timeoutSec (Codex second-opinion review):
+    //   (a) the bounded trap-ready poll is itself real-time-unbounded under load -- if it ran
+    //       long enough for the real timeout to fire FIRST, requestHandoff would never get a
+    //       pending handoff to race against;
+    //   (b) even a fast trap-ready could land inside killTree's own 200ms SIGTERM->SIGKILL grace,
+    //       letting requestHandoff() return true AFTER timedOut was already set -- silently
+    //       reversing "handoff pending, THEN timeout" (the ordering this test exists to pin
+    //       down) while every assertion still happened to pass.
+    // Both windows exist only because "elapsed since dispatch" was read off the real wall clock.
+    // Fix: inject a fully controllable fake clock (WorkerSupervisor's `now` dep, already designed
+    // for this) and DRIVE elapsed time explicitly instead of racing it:
+    //   1. freeze the clock at dispatch, so elapsedSec is provably 0 no matter how long the real
+    //      trap-ready handshake takes in wall-clock time -- the timeout branch cannot fire.
+    //   2. confirm the trap, call requestHandoff(), and assert it returns true -- still provably
+    //      BEFORE any timeout, since the fake clock has not moved.
+    //   3. only THEN advance the fake clock past timeoutSec, and let the heartbeat timer (real,
+    //      but fast) observe the new elapsed time and drive the hard-kill path.
+    // This proves the exact ordering deterministically; the only remaining real-time waits are
+    // monotonic bounded polls for effects that are certain to eventually happen (never a race
+    // against a competing real deadline).
     const trapReady = join(dir, "trap-ready");
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nsleep 30\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
+    let fakeNowMs = Date.now();
     const s = new WorkerSupervisor({
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
       hasOpenPr: async () => false,
       renderPrompt: () => "p",
-      heartbeatMs: 100,
+      heartbeatMs: 20, // real timer -- but the elapsed-time MATH below is driven by fakeNowMs, not by how fast this fires
       guardHookPath: mkHook(dir),
+      now: () => new Date(fakeNowMs),
     });
     const { name: laneName } = await s.dispatch({ number: 63, title: "t", labels: [] });
     // Bounded poll (20ms x 400 = 8s ceiling, same pattern PR #240 used for its own trap-ready
-    // handshake) for the trap to be provably installed before this test sends its own SIGTERM.
+    // handshake) for the trap to be provably installed. The fake clock is still frozen at
+    // dispatch time here, so no matter how long this takes in real wall-clock time, the
+    // supervisor's own elapsed-time math still reads exactly 0 -- the timeout branch structurally
+    // cannot fire during this window (race (a), closed).
     for (let i = 0; i < 400 && !existsSync(trapReady); i++) await sleep(20);
     assert.ok(existsSync(trapReady), "stub's TERM trap was installed before requestHandoff's SIGTERM");
+    // Still provably pre-timeout (elapsed reads 0): a pending handoff is established first.
     assert.equal(s.requestHandoff(laneName), true); // sets handoffRequested; the stub ignores this TERM
+    // Only NOW advance the fake clock past timeoutSec -- the ordering (handoff pending, THEN
+    // timeout) is asserted by construction, not raced (race (b), closed).
+    fakeNowMs += (tcfg.worker.timeoutSec + 1) * 1000;
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${laneName}.failed.json`)), "timeout wins over a pending handoff request");
     assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)));
