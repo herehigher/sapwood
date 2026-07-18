@@ -244,8 +244,110 @@ for (const command of ALLOW) {
   });
 }
 
-test("non-Bash, non-Write tool is always allowed", () => {
+test("a tool the guard doesn't inspect (e.g. WebFetch) is always allowed", () => {
+  assert.equal(guardDecision("WebFetch", {}, CWD).allow, true);
+});
+
+test("Read/Grep/Glob with no worktreeRoot: containment inactive, allowed regardless of path (unset == not an engine-dispatched session)", () => {
   assert.equal(guardDecision("Read", { file_path: "/repo/anything" }, CWD).allow, true);
+  assert.equal(guardDecision("Read", { file_path: "/etc/hosts" }, CWD).allow, true);
+  assert.equal(guardDecision("Grep", {}, CWD).allow, true);
+  assert.equal(guardDecision("Glob", {}, CWD).allow, true);
+});
+
+// ── Read/Grep/Glob worktree containment (#235 PR-A) ──────────────────────────
+const WORKTREE_ROOT = "/repo/.claude/worktrees/lane-1";
+
+test("Read ALLOW: a path inside the worktree root", () => {
+  const d = guardDecision("Read", { file_path: `${WORKTREE_ROOT}/src/app.ts` }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
+test("Read ALLOW: the worktree root itself", () => {
+  const d = guardDecision("Read", { file_path: WORKTREE_ROOT }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
+test("Read BLOCK: an absolute host path outside the worktree root (Phase-0's /etc/hosts case)", () => {
+  const d = guardDecision("Read", { file_path: "/etc/hosts" }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("read-containment"));
+});
+
+test("Read BLOCK: a ../-traversal path that resolves outside the worktree root", () => {
+  const d = guardDecision("Read", { file_path: "../../../etc/hosts" }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("read-containment"));
+});
+
+test("Read BLOCK: a sibling worktree directory whose name merely starts with the same prefix is NOT treated as inside (no root+'/' boundary bypass)", () => {
+  const d = guardDecision("Read", { file_path: `${WORKTREE_ROOT}-evil/secret.txt` }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("read-containment"));
+});
+
+test("Read DENY (fail-closed): missing file_path with worktreeRoot set", () => {
+  const d = guardDecision("Read", {}, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("fail-closed"));
+});
+
+test("Grep ALLOW: path inside the worktree root", () => {
+  const d = guardDecision("Grep", { path: `${WORKTREE_ROOT}/src` }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
+test("Grep ALLOW: no path given defaults to cwd, which is inside the worktree root", () => {
+  const d = guardDecision("Grep", {}, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
+test("Grep BLOCK: absolute path outside the worktree root", () => {
+  const d = guardDecision("Grep", { path: "/etc" }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("read-containment"));
+});
+
+test("Glob ALLOW: path inside the worktree root", () => {
+  const d = guardDecision("Glob", { path: `${WORKTREE_ROOT}/src` }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
+test("Glob BLOCK: ../-traversal path escaping the worktree root", () => {
+  const d = guardDecision("Glob", { path: "../../secrets" }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("read-containment"));
+});
+
+test("Read containment is independent of Write/Edit boundary-file protection: an in-worktree read of the guard's OWN source is allowed", () => {
+  const d = guardDecision("Read", { file_path: `${WORKTREE_ROOT}/engine/src/guard/guard.ts` }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
+test("hook: Read/Grep/Glob with malformed/non-object tool_input fails closed (GUARDED_TOOLS widened by #235 PR-A)", () => {
+  assert.equal(hookResponse({ tool_name: "Read", tool_input: "oops" })?.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(hookResponse({ tool_name: "Grep" })?.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(hookResponse({ tool_name: "Glob", tool_input: null })?.hookSpecificOutput.permissionDecision, "deny");
+});
+
+test("hook: SAPWOOD_WORKTREE_ROOT threaded through responseFromText denies an outside Read and allows an inside one", () => {
+  const outside = responseFromText(
+    JSON.stringify({ tool_name: "Read", tool_input: { file_path: "/etc/hosts" }, cwd: WORKTREE_ROOT }),
+    WORKTREE_ROOT,
+  );
+  assert.equal(outside?.hookSpecificOutput.permissionDecision, "deny");
+  assert.ok(outside?.hookSpecificOutput.permissionDecisionReason.toLowerCase().includes("read-containment"));
+
+  const inside = responseFromText(
+    JSON.stringify({ tool_name: "Read", tool_input: { file_path: `${WORKTREE_ROOT}/README.md` }, cwd: WORKTREE_ROOT }),
+    WORKTREE_ROOT,
+  );
+  assert.equal(inside, null, "in-worktree read is allowed (null = no intervention)");
+});
+
+test("hook: SAPWOOD_WORKTREE_ROOT omitted (no third arg) leaves Read containment inactive — matches a non-engine-spawned session", () => {
+  const out = responseFromText(JSON.stringify({ tool_name: "Read", tool_input: { file_path: "/etc/hosts" }, cwd: WORKTREE_ROOT }));
+  assert.equal(out, null, "no worktreeRoot -> containment inactive -> allowed");
 });
 
 // ── Write-path protection (issue #9) ─────────────────────────────────────────
@@ -327,8 +429,9 @@ test("hook: non-object payload fails closed (deny)", () => {
 test("hook: a guarded tool with missing/non-object tool_input fails closed", () => {
   assert.equal(hookResponse({ tool_name: "Bash" })?.hookSpecificOutput.permissionDecision, "deny");
   assert.equal(hookResponse({ tool_name: "Write", tool_input: "oops" })?.hookSpecificOutput.permissionDecision, "deny");
-  // a non-guarded tool without input is still fine (allowed)
-  assert.equal(hookResponse({ tool_name: "Read" }), null);
+  // #235 PR-A: Read joined GUARDED_TOOLS (it's now containment-checked), so a genuinely
+  // non-guarded tool (WebFetch — the guard never inspects it) is the ALLOWED example now.
+  assert.equal(hookResponse({ tool_name: "WebFetch" }), null);
 });
 
 test("hook: a write to a boundary file is denied through the hook", () => {
