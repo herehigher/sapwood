@@ -101,9 +101,13 @@ the issue's label list; `{{labels.verifyNa}}` renders the configured `verify:n/a
 name (`labels.verifyNa` below), so a custom prompt can still tell the worker which label
 means "skip the test-driven gate and make the doc change instead."
 
-**`worker.fixPromptFile` template variables:** the same four `issue.*`/`labels.verifyNa`
-variables above, plus `{{pr.number}}` — the fix leg needs to know *which* PR's review
-threads to pull via the PR-facing proxy tools (`issue.number` alone doesn't name it).
+**`worker.fixPromptFile` template variables (round-2 fix A7 — deliberately NARROWER than
+`worker.promptFile`'s):** `{{issue.number}}`, `{{pr.number}}`, `{{labels.verifyNa}}` only —
+never `{{issue.title}}`/`{{issue.body}}`/`{{issue.labels}}`. A fix leg's evidence channel is
+the PR-facing proxy tools (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`), not
+issue prose, so the render function never needs a full issue object — just the issue and PR
+numbers (`{{pr.number}}` is required because a PR-facing tool call takes a PR number, not an
+issue number, and `{{issue.number}}` alone doesn't name it).
 
 **Fail-fast rules:** the template is loaded once, eagerly, at engine startup (before any
 dispatch) — never lazily on first use. A `promptFile` (or `fixPromptFile`) that's set but

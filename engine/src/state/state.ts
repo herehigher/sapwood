@@ -558,6 +558,22 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   (db) => {
     db.exec(`ALTER TABLE workers ADD COLUMN fix_rounds INTEGER NOT NULL DEFAULT 0;`);
   },
+  // 19 -> 20: fix-loop review round 1 fix A2 (#245, Codex sol-high PR #263 review, P1). A
+  // soft-budget handoff mid-fix-leg used to write a generic `handoff` row indistinguishable
+  // from an ordinary running lane's handoff — the RESUME phase then resumed it as an ORDINARY
+  // leg (issue-rendered prompt, no proxy, ambient credentials, target state `running`), silently
+  // destroying the fix leg's identity. `fixing_handoff` is the durable marker: set to 1 ONLY
+  // when a `fixing`-state lane hands off (reclaimTerminalLane's `p.handoff` branch checks
+  // `w.state === "fixing"` at settle time — before the row itself is overwritten), read by the
+  // RESUME phase (conductor.ts) to restore a FIX continuation (fix prompt + mandatory
+  // `credentialFree` proxy + target state `fixing`, bumping only `resume_attempts`, never
+  // `fix_rounds` — the same continuation-leg/rework-round separation `fix_rounds` itself
+  // maintains) instead of an ordinary resume. Cleared (0) the instant that resume lands.
+  // NOT NULL DEFAULT 0: every pre-existing handoff row (none of which could have been a fixing
+  // handoff before this migration existed) is unambiguously ordinary.
+  (db) => {
+    db.exec(`ALTER TABLE workers ADD COLUMN fixing_handoff INTEGER NOT NULL DEFAULT 0;`);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -703,6 +719,12 @@ export interface WorkerRow {
    *  BEFORE the leg is considered live, so a crash-rerun never loses or double-counts a round.
    *  Optional; DB default 0. */
   fix_rounds?: number;
+  /** #245 round-2 fix A2 (schema v19->v20): 1 iff this `handoff` row's PREVIOUS state (the
+   *  instant it handed off) was `fixing` — the durable marker the RESUME phase (conductor.ts)
+   *  reads to restore a FIX continuation (fix prompt + mandatory `credentialFree` proxy, target
+   *  state `fixing`) instead of resuming it as an ordinary leg. Cleared (0) the instant that
+   *  resume lands. Optional; DB default 0 (every ordinary handoff row). */
+  fixing_handoff?: number;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -1008,8 +1030,8 @@ export class State {
            (name, issue, session_id, state, started_at, ended_at, pr, review_triggered,
             review_triggered_head, review_triggered_at, review_fallback_head, review_fallback_kind,
             gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled,
-            resume_attempts, resume_capped, fix_rounds)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            resume_attempts, resume_capped, fix_rounds, fixing_handoff)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -1024,7 +1046,8 @@ export class State {
            gated_escalation_labeled = excluded.gated_escalation_labeled,
            resume_attempts = excluded.resume_attempts,
            resume_capped = excluded.resume_capped,
-           fix_rounds = excluded.fix_rounds`,
+           fix_rounds = excluded.fix_rounds,
+           fixing_handoff = excluded.fixing_handoff`,
       )
       .run(
         row.name,
@@ -1045,6 +1068,7 @@ export class State {
         row.resume_attempts ?? 0,
         row.resume_capped ?? 0,
         row.fix_rounds ?? 0,
+        row.fixing_handoff ?? 0,
       );
   }
 

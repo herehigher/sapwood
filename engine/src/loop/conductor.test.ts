@@ -208,9 +208,13 @@ class FakeSupervisor implements Supervisor {
   }
   /** #245: records the opts a caller passed (prompt/proxy) so tests can assert startFixLeg's
    *  own shape without a real forge MCP proxy or a spawned claude process. */
-  resumeCalls: Array<{ issue: Issue; worker: string; opts?: { proxy?: unknown; prompt?: string } }> = [];
+  resumeCalls: Array<{ issue: Issue; worker: string; opts?: { proxy?: unknown; prompt?: string; sessionId?: string } }> = [];
   resumeShouldThrow: string | null = null;
-  async resume(issue: Issue, worker: string, opts?: { proxy?: unknown; prompt?: string }): Promise<{ name: string; sessionId: string }> {
+  async resume(
+    issue: Issue,
+    worker: string,
+    opts?: { proxy?: unknown; prompt?: string; sessionId?: string },
+  ): Promise<{ name: string; sessionId: string }> {
     this.resumed.push({ issue, worker });
     this.resumeCalls.push({ issue, worker, opts });
     if (this.resumeShouldThrow) throw new Error(this.resumeShouldThrow);
@@ -3995,14 +3999,18 @@ const seedDriving = (st: State, name: string, issue: number, pr: number, over: P
 const seedFixing = (st: State, name: string, issue: number, pr: number, over: Partial<WorkerRow> = {}) =>
   st.upsertWorker({ name, issue, session_id: `s-${name}`, state: "fixing", started_at: "t", ended_at: null, pr, ...over });
 
+// #245 round-2 fix A6: startFixLeg now REQUIRES a credentialFree proxy — every test call below
+// supplies this fixture rather than omitting the (now-mandatory) 3rd argument.
+const fixProxy = { mint: async () => ({}) as never, credentialFree: true };
+
 test("startFixLeg: transitions driving -> fixing, bumps fix_rounds, resumes the SAME lane (never a fresh dispatch — squash-branch-reuse hazard)", async () => {
   const st = new State(":memory:");
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-9", 9, 90);
   const row = st.getWorker("lane-9")!;
-  const renderFixPrompt = (issue: Issue, pr: number) => `fix #${issue.number} pr #${pr}`;
+  const renderFixPrompt = (issueNumber: number, pr: number) => `fix #${issueNumber} pr #${pr}`;
 
-  const result = await startFixLeg({ state: st, supervisor: sup, renderFixPrompt }, row);
+  const result = await startFixLeg({ state: st, supervisor: sup, renderFixPrompt }, row, fixProxy);
 
   assert.equal(result.name, "lane-9");
   const updated = st.getWorker("lane-9")!;
@@ -4014,6 +4022,11 @@ test("startFixLeg: transitions driving -> fixing, bumps fix_rounds, resumes the 
   assert.equal(sup.resumeCalls[0]!.worker, "lane-9");
   assert.equal(sup.resumeCalls[0]!.issue.number, 9);
   assert.equal(sup.resumeCalls[0]!.opts?.prompt, "fix #9 pr #90");
+  assert.equal(
+    sup.resumeCalls[0]!.opts?.sessionId,
+    "s-lane-9",
+    "A1: fix-leg ENTRY passes the row's own session id — no .handoff sentinel exists to read one off",
+  );
   st.close();
 });
 
@@ -4022,7 +4035,7 @@ test("startFixLeg: fix_rounds is independent of resume_attempts — starting a f
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-9", 9, 90, { resume_attempts: 5 });
   const row = st.getWorker("lane-9")!;
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, row);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, row, fixProxy);
   const updated = st.getWorker("lane-9")!;
   assert.equal(updated.fix_rounds, 1);
   assert.equal(updated.resume_attempts, 5, "resume_attempts must never be disturbed by a fix leg starting");
@@ -4033,11 +4046,11 @@ test("startFixLeg: a second fix leg on the same row bumps fix_rounds to 2 (rewor
   const st = new State(":memory:");
   const sup = new FakeSupervisor();
   seedDriving(st, "lane-9", 9, 90);
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy);
   // Simulate the fixing leg completing and landing back in driving (FIXING RECLAIM's own job,
   // tested separately below) before a second fix round starts.
   st.upsertWorker({ ...st.getWorker("lane-9")!, state: "driving" });
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy);
   assert.equal(st.getWorker("lane-9")?.fix_rounds, 2);
   st.close();
 });
@@ -4047,7 +4060,7 @@ test("startFixLeg: a thrown resume() leaves the row untouched — driving, fix_r
   const sup = new FakeSupervisor();
   sup.resumeShouldThrow = "mint failed";
   seedDriving(st, "lane-9", 9, 90);
-  await assert.rejects(() => startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!));
+  await assert.rejects(() => startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy));
   const row = st.getWorker("lane-9")!;
   assert.equal(row.state, "driving", "still driving — never transitioned on a failed resume");
   assert.equal(row.fix_rounds ?? 0, 0, "fix_rounds must not be spent on a spawn that never happened");
@@ -4058,7 +4071,10 @@ test("startFixLeg: refuses (throws) when the row has no PR — a driving lane mu
   const st = new State(":memory:");
   const sup = new FakeSupervisor();
   st.upsertWorker({ name: "lane-9", issue: 9, session_id: "s", state: "driving", started_at: "t", ended_at: "t2" }); // no pr
-  await assert.rejects(() => startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!), /no PR/i);
+  await assert.rejects(
+    () => startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, fixProxy),
+    /no PR/i,
+  );
   assert.deepEqual(sup.resumeCalls, []);
   st.close();
 });
@@ -4070,6 +4086,20 @@ test("startFixLeg: forwards a proxy opt straight through to resume() (the fix le
   const proxy = { mint: async () => ({}) as never, credentialFree: true };
   await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, proxy);
   assert.equal(sup.resumeCalls[0]!.opts?.proxy, proxy);
+  st.close();
+});
+
+test("startFixLeg: refuses (throws) when proxy.credentialFree is NOT true — a fix leg must never run with ambient forge credentials (A6)", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-9", 9, 90);
+  await assert.rejects(
+    () =>
+      startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "p" }, st.getWorker("lane-9")!, { mint: async () => ({}) as never }),
+    /credentialFree must be true/i,
+  );
+  assert.deepEqual(sup.resumeCalls, [], "resume() must never be called without a valid credentialFree proxy");
+  assert.equal(st.getWorker("lane-9")?.state, "driving", "row untouched — never transitioned without a valid proxy");
   st.close();
 });
 
@@ -4111,7 +4141,7 @@ test("tick FIXING RECLAIM + DRIVE, same tick: once a fixing lane lands back in d
   // Start driving, spawn a fix leg (the seam #246 will call), then simulate the fix leg pushing
   // and completing — all inside one fabricated flow, then let tick() reclaim + drive it.
   seedDriving(st, "lane-fix", 3, 30, { review_triggered_head: "OLD_HEAD", review_triggered_at: "2026-07-01T00:00:00Z" });
-  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "fix it" }, st.getWorker("lane-fix")!);
+  await startFixLeg({ state: st, supervisor: sup, renderFixPrompt: () => "fix it" }, st.getWorker("lane-fix")!, fixProxy);
   assert.equal(st.getWorker("lane-fix")?.state, "fixing");
 
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30 };
@@ -4218,4 +4248,187 @@ test("tick kill-switch: a `fixing` lane is drained (SIGTERM) exactly like a `run
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #245 round-2 fix (Codex sol-high review, PR #263): A2 — a `fixing` lane that hands off
+// (soft budget) must resume as a FIX continuation, never an ordinary leg. A3 — a crash between
+// resume()'s own confirmed spawn and startFixLeg's row-transition upsert must never leave a
+// live fix child invisible to the kill-switch drain. A5 — the fixing->driving pin-clear is
+// commit-atomic with the state write (proven via settleTerminalWorker's existing all-or-nothing
+// transaction, same #223 pattern this file already tests for other fields).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const seedFixingHandoff = (st: State, name: string, issue: number, pr: number | null, over: Partial<WorkerRow> = {}) =>
+  st.upsertWorker({
+    name,
+    issue,
+    session_id: `s-${name}`,
+    state: "handoff",
+    started_at: "t",
+    ended_at: "t2",
+    pr: pr ?? undefined,
+    fixing_handoff: 1,
+    ...over,
+  });
+
+test("tick RESUME (A2): a fixing-origin handoff (fixing_handoff=1) resumes as a FIX continuation — fix prompt + mandatory credentialFree proxy + target state `fixing`, bumping only resume_attempts, never fix_rounds", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixingHandoff(st, "lane-fix", 5, 50, { fix_rounds: 1 });
+  const mintProxy = async () => ({}) as never;
+  const renderFixPrompt = (issueNumber: number, pr: number) => `fix #${issueNumber} pr #${pr}`;
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), fixLegResume: { renderFixPrompt, mintProxy } });
+
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "fixing", "resumes back into `fixing`, never `running`");
+  assert.equal(row.fixing_handoff, 0, "cleared once the fix continuation lands");
+  assert.equal(row.resume_attempts, 1, "resume_attempts bumped — this IS a continuation leg");
+  assert.equal(row.fix_rounds, 1, "fix_rounds UNTOUCHED — a continuation is not a new rework round");
+  assert.equal(sup.resumeCalls[0]!.opts?.prompt, "fix #5 pr #50");
+  const proxy = sup.resumeCalls[0]!.opts?.proxy as { credentialFree?: boolean } | undefined;
+  assert.equal(proxy?.credentialFree, true, "A2: the restored continuation must be credentialFree — never ambient credentials");
+  assert.ok(r.resumed.some((o) => o.kind === "resumed" && o.worker === "lane-fix"));
+  st.close();
+});
+
+test("tick RESUME (A2): a fixing-origin handoff with NO fixLegResume dep configured is left untouched (fail-closed) — never silently resumed as an ordinary leg", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixingHandoff(st, "lane-fix", 5, 50);
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }); // no fixLegResume
+
+  assert.deepEqual(sup.resumeCalls, [], "resume() must never be called for a fix-leg-origin handoff without the dep wired");
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "handoff", "left exactly as it was — retried next tick once configured");
+  assert.equal(row.fixing_handoff, 1);
+  const events = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-resume-unconfigured"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(r.resumed, []);
+  st.close();
+});
+
+test("tick RESUME (A2): a fixing-origin handoff with no PR escalates (fail-safe) rather than guessing or silently dropping the fix attempt", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixingHandoff(st, "lane-fix", 5, null);
+  await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+
+  assert.deepEqual(sup.resumeCalls, []);
+  assert.equal(
+    st.getWorker("lane-fix")?.state,
+    "handoff",
+    "not transitioned — escalated via label, not state, since it's already terminal-handoff shaped",
+  );
+  assert.deepEqual(forge.labelsAdded, [[5, "needs-human"]]);
+  const events = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-resume-no-pr"]);
+  assert.equal(events.length, 1);
+  st.close();
+});
+
+test("tick (A3): a driving row with a CONFIRMED resume intent (crash between resume()'s confirm and startFixLeg's own upsert) is reconciled to `fixing`, fix_rounds bumped exactly once, and a graceful handoff is requested (never trusts a dead-proxy-adopted child long-term)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-fix", 6, 60, { fix_rounds: 0 });
+  sup.resumeIntents["lane-fix"] = "confirmed";
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE }; // still running (KEEP) — nothing else this tick
+
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "fixing", "reconciled — the DB now matches the live confirmed-spawn reality");
+  assert.equal(row.fix_rounds, 1, "the FIRST and ONLY bump for this round (startFixLeg's own bump never landed before the crash)");
+  assert.ok(sup.handoffRequested.includes("lane-fix"), "never trust the adopted child's proxy channel — drain it gracefully instead");
+  const events = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-adopted"]);
+  assert.equal(events.length, 1);
+  // Reconciliation ran BEFORE FIXING RECLAIM even had a chance to probe it this same tick — no
+  // duplicate/second bump from a later phase seeing the now-`fixing` row.
+  assert.equal(r.fixingReclaimed.length <= 1, true);
+  st.close();
+});
+
+test("tick (A3): a driving row with an UNCONFIRMED resume intent escalates to needs-human — ambiguous crash state, never silently retried (would risk a duplicate spawn)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-fix", 6, 60);
+  sup.resumeIntents["lane-fix"] = "unconfirmed";
+
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.pr, 60, "failed+PR — the gated-reentry shape, so a human can still reclaim it later");
+  assert.deepEqual(forge.labelsAdded, [[6, "needs-human"]]);
+  const events = st.eventsSince("1970-01-01T00:00:00Z", ["fix-leg-undecidable"]);
+  assert.equal(events.length, 1);
+  st.close();
+});
+
+test("tick (A3): a driving row with NO resume intent ('none') is left completely untouched — the ordinary, healthy case", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-fix", 6, 60);
+  // sup.resumeIntents defaults every unlisted lane to "none".
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "driving");
+  assert.equal(row.fix_rounds ?? 0, 0);
+  st.close();
+});
+
+test("tick (A3): reconciliation runs BEFORE the kill-switch gate — a confirmed driving-row fix intent is drained in the SAME kill-switch tick it's reconciled in", async () => {
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-conductor-"));
+  try {
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const st = new State(join(dir, "sapwood.sqlite"));
+    seedDriving(st, "lane-fix", 6, 60);
+    sup.resumeIntents["lane-fix"] = "confirmed";
+    sup.probes["lane-fix"] = { ...DEFAULT_PROBE };
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.equal(st.getWorker("lane-fix")?.state, "fixing", "reconciled to fixing before the kill-switch gate ran");
+    // reconciliation's OWN requestHandoff call (not drainThenEscalate's — that call is a no-op
+    // here since requestHandoff is idempotent and reconciliation already asked first) is what
+    // drains it — the raw fact of "a handoff was requested this tick" proves it was never left
+    // spinning invisibly, regardless of which phase's call actually returned true.
+    assert.ok(sup.handoffRequested.includes("lane-fix"), "drained THIS SAME tick — never invisible to the kill switch");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick (A5): the fixing->driving pin-clear is commit-ATOMIC with the state write — a failure inside settleTerminalWorker's transaction rolls back BOTH (never a stale pin surviving with a committed `driving` state)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixing(st, "lane-fix", 3, 30, { review_triggered_head: "OLD_HEAD", review_triggered_at: "2026-07-01T00:00:00Z" });
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30 };
+  // Force recordSpend (the SAME transaction settleTerminalWorker wraps the state write in) to
+  // throw — proving the pin-clear + state write can only ever land together, never split.
+  st.recordSpend = () => {
+    throw new Error("simulated ledger failure");
+  };
+  await assert.rejects(() => tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }), /simulated ledger failure/);
+  const row = st.getWorker("lane-fix")!;
+  assert.equal(row.state, "fixing", "the whole transaction rolled back — state write did NOT land without its paired pin-clear");
+  assert.equal(
+    row.review_triggered_head,
+    "OLD_HEAD",
+    "pin untouched — proves it was never written independently of the (rolled-back) state transition",
+  );
+  st.close();
 });

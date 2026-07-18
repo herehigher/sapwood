@@ -22,12 +22,15 @@ import { estimateUsd, loadPricingTable } from "../config/pricing.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 import { State } from "../state/state.js";
 import {
+  buildRenderFixPrompt,
   buildRenderPrompt,
   claudeArgs,
+  defaultFixPromptPath,
   defaultPromptPath,
   discoverClaudeBin,
   extractFailureText,
   guardSettings,
+  loadFixPromptTemplate,
   loadWorkerPromptTemplate,
   parseAssistantUsageDeltas,
   parseCostUsd,
@@ -2648,6 +2651,80 @@ test("buildRenderPrompt: the shipped default prompt builds clean (all its vars a
   assert.doesNotMatch(rendered, /\{\{/);
 });
 
+// ── #245 round-2 fix A7: buildRenderFixPrompt — deliberately NARROWER var set than
+//    buildRenderPrompt's own (issue.number/pr.number/labels.verifyNa only; never
+//    issue.title/body/labels — a fix leg's evidence channel is the PR-facing proxy tools, not
+//    issue prose) — and takes a bare issue NUMBER, never a fabricated `Issue` object. ──────────
+
+test("defaultFixPromptPath: resolves to the shipped prompts/fix.md, which exists and mentions pr.number/issue.number", () => {
+  const p = defaultFixPromptPath();
+  assert.ok(existsSync(p));
+  const content = readFileSync(p, "utf8");
+  assert.match(content, /\{\{pr\.number\}\}/);
+  assert.match(content, /\{\{issue\.number\}\}/);
+});
+
+test("loadFixPromptTemplate: unset fixPromptFile -> the shipped default (byte-identical)", () => {
+  const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  assert.equal(loadFixPromptTemplate(scfg), readFileSync(defaultFixPromptPath(), "utf8"));
+});
+
+test("loadFixPromptTemplate: fails fast, naming the path, when fixPromptFile is missing (never silently falls back)", () => {
+  const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { fixPromptFile: "/no/such/fix.md" } });
+  assert.throws(() => loadFixPromptTemplate(scfg), /fix\.md/);
+});
+
+test("buildRenderFixPrompt: the shipped default prompt builds clean (all its vars are known) and takes a bare issue NUMBER + pr number", () => {
+  const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  const rendered = buildRenderFixPrompt(scfg)(42, 77);
+  assert.match(rendered, /#77/);
+  assert.match(rendered, /#42/);
+  assert.doesNotMatch(rendered, /\{\{/);
+});
+
+test("buildRenderFixPrompt: supported vars are issue.number/pr.number/labels.verifyNa ONLY — issue.title/issue.body/issue.labels are UNKNOWN and fail closed at build time (A7 narrowing)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fixprompt-"));
+  try {
+    for (const badVar of ["issue.title", "issue.body", "issue.labels"]) {
+      const p = join(dir, `bad-${badVar.replace(".", "-")}.md`);
+      writeFileSync(p, `fix {{${badVar}}}`);
+      const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { fixPromptFile: p } });
+      assert.throws(() => buildRenderFixPrompt(cfg), new RegExp(`unknown variable.*${badVar.replace(".", "\\.")}`, "i"));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderFixPrompt: {{issue.number}}/{{pr.number}}/{{labels.verifyNa}} all substitute correctly from a custom template", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fixprompt-"));
+  try {
+    const p = join(dir, "custom-fix.md");
+    writeFileSync(p, "fix issue #{{issue.number}} pr #{{pr.number}}, skip if {{labels.verifyNa}}");
+    const cfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { fixPromptFile: p },
+      labels: { verifyNa: "verify:custom" },
+    });
+    const rendered = buildRenderFixPrompt(cfg)(9, 99);
+    assert.equal(rendered, "fix issue #9 pr #99, skip if verify:custom");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildRenderFixPrompt: empty/whitespace template throws at build time — never start an undirected fix leg", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fixprompt-"));
+  try {
+    const p = join(dir, "empty-fix.md");
+    writeFileSync(p, "   \n  ");
+    const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { fixPromptFile: p } });
+    assert.throws(() => buildRenderFixPrompt(cfg), /empty/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #167: {{doctrine}} — repo-level review doctrine injected into the worker brief ─────────────
 
 test("buildRenderPrompt: with no doctrine.file on disk, {{doctrine}} substitutes the explicit 'none' placeholder — behavior unchanged, never an error", () => {
@@ -3461,6 +3538,154 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
     s.dispose();
   } finally {
     state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #245 round-2 fix (Codex sol-high review, PR #263): A1 — resume() must support FIX-LEG ENTRY
+// (starting a fix leg from a `driving` lane, which has a `.done`/`.failed` sentinel but NO
+// `.handoff` sentinel — the ordinary #172 handoff-resume precondition). The real WorkerSupervisor
+// used to throw "no .handoff sentinel — nothing to resume" here, which every prior test missed
+// because they all used a FakeSupervisor. This section is a REAL WorkerSupervisor integration.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real WorkerSupervisor integration: dispatch -> done (driving precondition) -> resume -> a second leg reusing the SAME session (A1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  printf '%s\\n' "$@" > "${join(dir, "fix-args.seen")}"`,
+        RESULT_LINE,
+        "fi",
+        `echo '{"type":"result","subtype":"success","total_cost_usd":0.001,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}'`,
+        "exit 0",
+      ].join("\n"),
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => true,
+      renderPrompt: () => "issue-rendered-prompt",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    // Fresh dispatch completes DONE quickly (the fake stub exits 0 immediately when NOT
+    // --resume) — exactly the `driving`-lane precondition a fix leg starts from: a done
+    // sentinel, no handoff sentinel.
+    const { name, sessionId } = await s.dispatch({ number: 20, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)));
+    assert.ok(
+      !existsSync(join(dir, `${name}.handoff.json`)),
+      "no handoff sentinel — this is exactly the driving-lane precondition a fix leg starts from",
+    );
+
+    // The real bug A1 fixes: resume() used to unconditionally require .handoff and throw here.
+    const resumed = await s.resume({ number: 20, title: "t", labels: [] }, name, {
+      sessionId,
+      prompt: "fix-leg: address PR #77's review findings",
+    });
+    assert.equal(resumed.name, name);
+    assert.equal(resumed.sessionId, sessionId, "SAME session — a fix leg continues the original conversation, never --fork-session");
+
+    for (let i = 0; i < 400 && !existsSync(join(dir, "fix-args.seen")); i++) await sleep(20);
+    const args = readFileSync(join(dir, "fix-args.seen"), "utf8").trim().split("\n");
+    const promptIdx = args.indexOf("-p");
+    assert.equal(args[promptIdx + 1], "fix-leg: address PR #77's review findings");
+    const resumeIdx = args.indexOf("--resume");
+    assert.equal(args[resumeIdx + 1], sessionId, "claude --resume reuses the ORIGINAL session id");
+
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    const probe = await s.probe(name);
+    assert.equal(probe.done, true, "the fix leg reaches its own fresh terminal sentinel");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: fix-leg entry fails closed with NO terminal sentinel at all (never starts a fix leg with no prior-leg evidence)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+    });
+    await assert.rejects(
+      () => s.resume({ number: 1, title: "t", labels: [] }, "lane-never-existed", { sessionId: "sess-x", prompt: "fix it" }),
+      /no done\/failed terminal sentinel/i,
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: fix-leg entry fails closed when opts.sessionId is set but opts.prompt is missing (caller bug, not a runtime condition)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+    });
+    await assert.rejects(
+      () => s.resume({ number: 1, title: "t", labels: [] }, "lane-x", { sessionId: "sess-x" }),
+      /opts\.sessionId .* requires opts\.prompt/i,
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #245 round-2 fix (A4): a failure AFTER a successful mint (here: the durable intent-write,
+// writeJsonAtomic(runningPath, ...)) must still tear down the minted proxy and remove any
+// GH_CONFIG_DIR already created — not just a credentialFree mint-failure's own throw.
+test("resume: a failure AFTER a successful mint (intent-write failure) tears down the minted proxy and removes any created GH_CONFIG_DIR (A4)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const { s, name } = await mkHandoffLane(dir, `  ${RESULT_LINE}`);
+    const runningPath = join(dir, `${name}.running.json`);
+    // Force writeJsonAtomic's internal rename to fail deterministically: pre-create the EXACT
+    // tmp path it will try to write to as a DIRECTORY (EISDIR on writeFileSync) — no reliance
+    // on filesystem permission bits, which root/CI environments can bypass.
+    mkdirSync(`${runningPath}.tmp.${process.pid}`, { recursive: true });
+    const { calls, handle } = fakeWorkerProxyHandle();
+    await assert.rejects(() =>
+      s.resume({ number: 9, title: "t", labels: [] }, name, {
+        proxy: {
+          mint: async () => {
+            calls.minted++;
+            return handle as never;
+          },
+          credentialFree: true,
+        },
+      }),
+    );
+    assert.equal(calls.minted, 1, "mint succeeded before the intent-write failed");
+    assert.equal(calls.stopped, 1, "A4: the minted proxy must be torn down even though the failure happened AFTER mint, not at mint time");
+    const ghConfigDir = join(dir, `${name}.gh-config-empty`);
+    assert.ok(!existsSync(ghConfigDir), "A4: the GH_CONFIG_DIR scratch directory created before the intent-write failure must be removed");
+    s.dispose();
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

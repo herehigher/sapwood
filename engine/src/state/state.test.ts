@@ -1654,6 +1654,69 @@ test("migration v18->v19: a populated v18 DB opens with data intact, fix_rounds 
   }
 });
 
+test("migration v19->v20: a populated v19 DB opens with data intact, fixing_handoff defaults to 0 on pre-existing rows, user_version SCHEMA_VERSION, idempotent reopen (#245 round-2 fix A2)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 19; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 19");
+    raw
+      .prepare(
+        `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("legacy-handoff", 8, "sess-2", "handoff", "2026-07-01T00:00:00Z", "2026-07-01T01:00:00Z", null);
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 20);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    const row = s.getWorker("legacy-handoff");
+    assert.equal(row?.fixing_handoff, 0, "a pre-#245-round-2 handoff row was never a fixing handoff — defaults to 0, not NULL");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("legacy-handoff")?.fixing_handoff, 0);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fixing_handoff round-trips independently of fix_rounds/resume_attempts and persists across a State reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const s = new State(dbPath);
+    s.upsertWorker({
+      name: "lane-a",
+      issue: 1,
+      session_id: "s1",
+      state: "handoff",
+      started_at: "t",
+      ended_at: "t2",
+      pr: 10,
+      fix_rounds: 2,
+      fixing_handoff: 1,
+    });
+    const row = s.getWorker("lane-a")!;
+    assert.equal(row.fixing_handoff, 1);
+    assert.equal(row.fix_rounds, 2);
+    s.close();
+
+    const reopened = new State(dbPath);
+    const reopenedRow = reopened.getWorker("lane-a")!;
+    assert.equal(reopenedRow.fixing_handoff, 1);
+    assert.equal(reopenedRow.fix_rounds, 2, "fix_rounds unaffected by fixing_handoff's own value");
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("input manifest #251: an OMITTED truncated round-trips as null, never a fabricated false — the exact dishonesty the three-state column fixes", () => {
   const s = new State(":memory:");
   s.appendInputManifest({
