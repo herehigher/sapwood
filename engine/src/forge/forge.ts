@@ -280,6 +280,41 @@ export interface IForge {
    *  query is opaque GitHub search syntax, this forge always adds `--repo owner/repo` itself) —
    *  the proxy's `search_issues` tool. Capped server-side (`--limit cap`). */
   searchIssues(query: string, cap: number): Promise<IssueSearchResult[]>;
+  /** #244: a PR's own core metadata (distinct from getPRStatus's `ciGreen` — that's a computed
+   *  GATE signal reviewer.ts/merge-driver.ts own; this is the raw fact set) — the forge MCP
+   *  proxy's `pr_details` tool. Read-only; a nonexistent PR number propagates gh's own error
+   *  (fail-closed, same stance as every other single-PR read in this file). */
+  getPRDetails(pr: number): Promise<PRDetails>;
+  /** #244 (bounded per Codex sol-high PR #260 review, P1): every review on a PR, verbatim
+   *  (author/commitOid/state/body/submittedAt), fetched via a CAPPED GraphQL `reviews(last: cap)`
+   *  read (never an unbounded `gh pr view --json reviews` — a PR with hundreds of reviews would
+   *  otherwise silently pull them all into one response). `total` is the connection's own
+   *  `totalCount`, so the proxy layer can report an honest `complete` flag without a second call.
+   *  Deliberately a SEPARATE gh call from getPRReviewData (which reviewer.ts/merge-driver.ts use
+   *  to DERIVE gate② verdicts): this method returns raw review data for a session to read, never
+   *  a verdict — no role recomputes "did the review pass" (issue #244's "raw data only" ruling). */
+  getPRReviews(pr: number, cap: number): Promise<PRReviewsPage>;
+  /** #244: every review thread on a PR, each with its own comment bodies, paged to EXHAUSTION
+   *  (same Codex PR #42 P2 rationale as countUnresolvedThreads — a first-page-only fetch could
+   *  under-report). `commentsCap` bounds how many comments PER THREAD are fetched (GraphQL
+   *  `comments(first: commentsCap)`) — each thread's own `commentsComplete` flag (from that
+   *  sub-connection's `totalCount`) tells the proxy layer whether commentsCap actually bounded
+   *  it. `pageCapped` (Codex sol-high PR #260 review, P1) is true when the outer thread
+   *  connection's own pagination hit ITS hard safety ceiling (50 pages) before exhausting the
+   *  connection — a DISTINCT incompleteness reason from the proxy's own lastN capping, which
+   *  operates on an already-complete `threads` array. The proxy's own `pr_review_threads` tool
+   *  applies its OWN, separate cap to the number of THREADS returned (mirrors issue_comments'
+   *  lastN contract: this method returns ALL threads it could page to, the tool layer bounds
+   *  them). */
+  getPRReviewThreads(pr: number, commentsCap: number): Promise<ReviewThreadsPage>;
+  /** #244 (bounded per Codex sol-high PR #260 review, P1): a PR's raw per-check-suite
+   *  conclusions (CheckRun entries carry `conclusion`, legacy commit StatusContext entries carry
+   *  `state` instead — both shapes passed through verbatim, never reduced to a single ciGreen
+   *  boolean, which is getPRStatus's job, not this one's), fetched via a CAPPED GraphQL
+   *  `contexts(first: cap)` read off the head commit's `statusCheckRollup` (never an unbounded
+   *  read — a monorepo PR can carry far more than a handful of check runs). `total` is the
+   *  sub-connection's own `totalCount` — the proxy's `pr_checks` tool. */
+  getPRChecks(pr: number, cap: number): Promise<PRChecksPage>;
 }
 
 /** #234: one issue's core metadata — see IForge.getIssueMeta's doc. */
@@ -319,6 +354,88 @@ export interface IssueSearchResult {
   state: string;
   labels: string[];
   updatedAt: string;
+}
+
+/** #244: a PR's core metadata — see IForge.getPRDetails' doc. `mergeable` is the same tri-state
+ *  PRStatus already uses (never a boolean — CONFLICTING must be distinguishable from GitHub
+ *  still-computing UNKNOWN). Deliberately carries NO `ciGreen` — that's a computed gate signal,
+ *  not raw data (see IForge.getPRDetails' doc; pr_checks is the raw-data counterpart). */
+export interface PRDetails {
+  number: number;
+  headOid: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  draft: boolean;
+  labels: string[];
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+}
+
+/** #244: one review, verbatim — see IForge.getPRReviews' doc. A proxy-specific shape (distinct
+ *  from the internal `PRReview` gate.ts/reviewer.ts consume): carries `body`, which the internal
+ *  gate type has no reason to hold, and deliberately does NOT import/extend PRReview — keeping
+ *  the raw-data proxy surface uncoupled from the gate-verdict type it must never influence. */
+export interface PRReviewItem {
+  author: string;
+  commitOid: string;
+  state: string;
+  body: string;
+  submittedAt?: string;
+}
+
+/** #244 (Codex sol-high PR #260 review, P1): IForge.getPRReviews' bounded result — `total` is
+ *  the GraphQL `reviews` connection's own `totalCount`, letting the proxy layer report an honest
+ *  `complete` flag (`reviews.length >= total`) without a second call or heuristic. */
+export interface PRReviewsPage {
+  reviews: PRReviewItem[];
+  total: number;
+}
+
+/** #244: one review-thread comment — see IForge.getPRReviewThreads' doc. */
+export interface ReviewThreadComment {
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
+/** #244: one review thread (a GraphQL `PullRequestReviewThread` node) with its own comments —
+ *  see IForge.getPRReviewThreads' doc. `commentsComplete` (Codex sol-high PR #260 review, P1):
+ *  false when this THREAD's own comments sub-connection carries more than `commentsCap` fetched
+ *  (the sub-connection's own `totalCount`/`hasNextPage`) — distinct from `ReviewThreadsPage`'s
+ *  `pageCapped`, which is about the OUTER threads connection, not any one thread's comments. */
+export interface ReviewThreadItem {
+  id: string;
+  isResolved: boolean;
+  comments: ReviewThreadComment[];
+  commentsComplete: boolean;
+}
+
+/** #244 (Codex sol-high PR #260 review, P1): IForge.getPRReviewThreads' bounded result.
+ *  `pageCapped` is true when fetchAllReviewThreads' hard 50-page safety ceiling was hit BEFORE
+ *  the outer reviewThreads connection was exhausted (`hasNextPage` still true) — a distinct
+ *  incompleteness reason from the proxy tool's own lastN capping (which operates on an
+ *  already-complete `threads` array here). `threads` is only a PARTIAL view of the PR's review
+ *  threads when `pageCapped` is true. */
+export interface ReviewThreadsPage {
+  threads: ReviewThreadItem[];
+  pageCapped: boolean;
+}
+
+/** #244: one check-suite entry off a PR's `statusCheckRollup` — see IForge.getPRChecks' doc.
+ *  `conclusion`/`status` are a modern CheckRun's fields; `state` is a legacy commit StatusContext
+ *  entry's own field (mutually exclusive in practice — a CheckRun entry's `state` is always
+ *  null here, a StatusContext entry's `conclusion`/`status` are always null — never merged or
+ *  guessed into a single value, see parsePRChecks). */
+export interface PRCheckItem {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  state: string | null;
+}
+
+/** #244 (Codex sol-high PR #260 review, P1): IForge.getPRChecks' bounded result — `total` is
+ *  the GraphQL `contexts` sub-connection's own `totalCount`. */
+export interface PRChecksPage {
+  checks: PRCheckItem[];
+  total: number;
 }
 
 export class GithubForge implements IForge {
@@ -824,6 +941,83 @@ export class GithubForge implements IForge {
       query,
     ]);
     return parseSearchIssues(out);
+  }
+
+  async getPRDetails(pr: number): Promise<PRDetails> {
+    const out = await this.gh([
+      "pr",
+      "view",
+      String(pr),
+      "--repo",
+      `${this.cfg.board.owner}/${this.repo()}`,
+      "--json",
+      "number,headRefOid,state,isDraft,labels,mergeable",
+    ]);
+    return parsePRDetails(out);
+  }
+
+  async getPRReviews(pr: number, cap: number): Promise<PRReviewsPage> {
+    // #244 (Codex sol-high PR #260 review, P1): CAPPED GraphQL `reviews(last: cap)` — never the
+    // previous unbounded `gh pr view --json reviews` (a PR with hundreds of reviews would
+    // otherwise pull them all into one response). `last` (not `first`) so the cap keeps the MOST
+    // RECENT reviews, same fail-toward-inclusion stance as every other capped connection here.
+    const out = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${PR_REVIEWS_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `number=${pr}`,
+      "-F",
+      `cap=${cap}`,
+    ]);
+    return parsePRReviewsPage(out);
+  }
+
+  async getPRReviewThreads(pr: number, commentsCap: number): Promise<ReviewThreadsPage> {
+    return fetchAllReviewThreads((after) =>
+      this.gh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${PR_REVIEW_THREADS_QUERY}`,
+        "-f",
+        `owner=${this.cfg.board.owner}`,
+        "-f",
+        `repo=${this.repo()}`,
+        "-F",
+        `number=${pr}`,
+        "-F",
+        `commentsCap=${commentsCap}`,
+        // Same -F null / -f cursor split as getPRReviewData's own reviewThreads paging.
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ]),
+    );
+  }
+
+  async getPRChecks(pr: number, cap: number): Promise<PRChecksPage> {
+    // #244 (Codex sol-high PR #260 review, P1): CAPPED GraphQL `contexts(first: cap)` off the
+    // head commit's statusCheckRollup — never the previous unbounded `gh pr view --json
+    // statusCheckRollup` (a monorepo PR can carry far more than a handful of check runs).
+    const out = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${PR_CHECKS_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `number=${pr}`,
+      "-F",
+      `cap=${cap}`,
+    ]);
+    return parsePRChecksPage(out);
   }
 
   private repo(): string {
@@ -1597,4 +1791,236 @@ export function parseSearchIssues(json: string): IssueSearchResult[] {
     labels: (i.labels ?? []).map((l) => l.name),
     updatedAt: i.updatedAt,
   }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #244: PR-facing forge MCP proxy read surface (extends #234) — pure parsers + the 4 new
+// IForge methods above. Same impure-gh-call/pure-parse split as everywhere else in this file.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Pure parse of `gh pr view --json number,headRefOid,state,isDraft,labels,mergeable`. */
+export function parsePRDetails(json: string): PRDetails {
+  const d = JSON.parse(json) as {
+    number: number;
+    headRefOid: string;
+    state: string;
+    isDraft: boolean;
+    labels?: { name: string }[];
+    mergeable: string;
+  };
+  return {
+    number: d.number,
+    headOid: d.headRefOid,
+    state: d.state === "CLOSED" || d.state === "MERGED" ? d.state : "OPEN",
+    draft: d.isDraft,
+    labels: (d.labels ?? []).map((l) => l.name),
+    mergeable: d.mergeable === "MERGEABLE" || d.mergeable === "CONFLICTING" ? d.mergeable : "UNKNOWN",
+  };
+}
+
+/** #244 (Codex sol-high PR #260 review, P1): the CAPPED reviews query — `reviews(last: $cap)`
+ *  keeps the MOST RECENT `cap` reviews (never `first`, which would keep the OLDEST — the same
+ *  fail-toward-inclusion stance every other capped connection in this file takes), plus the
+ *  connection's own `totalCount` so the proxy layer can report an honest `complete` flag without
+ *  a second call. Replaces the previous unbounded `gh pr view --json reviews` read. */
+export const PR_REVIEWS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviews(last: $cap) {
+        totalCount
+        nodes { author { login } commit { oid } state body submittedAt }
+      }
+    }
+  }
+}`;
+
+/** Pure parse of PR_REVIEWS_QUERY. A missing `body` degrades to "" — same tolerance as every
+ *  other optional string field in this file, never a throw. */
+export function parsePRReviewsPage(json: string): PRReviewsPage {
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          reviews?: {
+            totalCount?: number;
+            nodes?: { author?: { login?: string }; commit?: { oid?: string }; state: string; body?: string; submittedAt?: string }[];
+          };
+        };
+      };
+    };
+  };
+  const conn = d.data?.repository?.pullRequest?.reviews;
+  const reviews: PRReviewItem[] = (conn?.nodes ?? []).map((r) => ({
+    author: r.author?.login ?? "",
+    commitOid: r.commit?.oid ?? "",
+    state: r.state,
+    body: r.body ?? "",
+    ...(r.submittedAt !== undefined ? { submittedAt: r.submittedAt } : {}),
+  }));
+  return { reviews, total: conn?.totalCount ?? reviews.length };
+}
+
+/** #244 (Codex sol-high PR #260 review, P1): the CAPPED checks query — reads the PR's HEAD
+ *  commit's `statusCheckRollup.contexts(first: $cap)`, plus the sub-connection's own
+ *  `totalCount`. Replaces the previous unbounded `gh pr view --json statusCheckRollup` read.
+ *  `contexts` is a union of `CheckRun` (modern) and `StatusContext` (legacy commit status) — both
+ *  inline fragments requested, mirroring parsePRStatus's own dual-shape tolerance. */
+export const PR_CHECKS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: $cap) {
+                totalCount
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion }
+                  ... on StatusContext { context state }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** Pure parse of PR_CHECKS_QUERY. A legacy StatusContext node (`context` instead of `name`, no
+ *  `conclusion`) falls back to `context` for the name field — same dual-shape tolerance
+ *  parsePRStatus already has for the REST rollup shape. */
+export function parsePRChecksPage(json: string): PRChecksPage {
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          commits?: {
+            nodes?: {
+              commit?: {
+                statusCheckRollup?: {
+                  contexts?: {
+                    totalCount?: number;
+                    nodes?: { name?: string; context?: string; status?: string; conclusion?: string | null; state?: string | null }[];
+                  };
+                } | null;
+              };
+            }[];
+          };
+        };
+      };
+    };
+  };
+  const conn = d.data?.repository?.pullRequest?.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts;
+  const checks: PRCheckItem[] = (conn?.nodes ?? []).map((c) => ({
+    name: c.name ?? c.context ?? "",
+    status: c.status ?? "",
+    conclusion: c.conclusion ?? null,
+    state: c.state ?? null,
+  }));
+  return { checks, total: conn?.totalCount ?? checks.length };
+}
+
+/** #244: the review-threads-WITH-COMMENTS query — extends REVIEW_THREADS_QUERY (which only
+ *  needs `isResolved` for the unresolved COUNT gate②'s reviewer.ts consumes) with each thread's
+ *  own comment bodies, for the proxy's `pr_review_threads` tool. `commentsCap` bounds the
+ *  PER-THREAD comments sub-connection (`comments(first: $commentsCap)`) — a config-driven cap
+ *  (ProxyCaps.maxCommentsPerThread), never hardcoded. `totalCount`/`pageInfo` on that same
+ *  sub-connection (Codex sol-high PR #260 review, P1) let parsePRReviewThreadsPage derive a
+ *  per-thread `commentsComplete` flag, so a thread whose OWN comments exceed `commentsCap` is
+ *  distinguishable from one that doesn't. Kept as its own query (not a widening of
+ *  REVIEW_THREADS_QUERY in place) so reviewer.ts's existing unresolved-count path is untouched by
+ *  this PR — the two queries evolve independently. */
+export const PR_REVIEW_THREADS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $after: String, $commentsCap: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          comments(first: $commentsCap) {
+            totalCount
+            pageInfo { hasNextPage }
+            nodes { author { login } body createdAt }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** One page of PR_REVIEW_THREADS_QUERY: the threads on this page plus the cursor — same
+ *  terminal-on-malformed-pageInfo tolerance as parseReviewThreadsPage. Each thread's
+ *  `commentsComplete` (Codex sol-high PR #260 review, P1) is true when its OWN comments
+ *  sub-connection either reports no further page (`hasNextPage: false`) or its `totalCount` is
+ *  already within the fetched node count — either signal alone is sufficient; both absent (a
+ *  malformed/partial response) degrades to `true` only when nodes were actually returned in full
+ *  (empty-and-unknown reads as complete, matching every other tolerant parser in this file). */
+export function parsePRReviewThreadsPage(json: string): {
+  threads: ReviewThreadItem[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+} {
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          reviewThreads?: {
+            pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+            nodes?: {
+              id: string;
+              isResolved: boolean;
+              comments?: {
+                totalCount?: number;
+                pageInfo?: { hasNextPage?: boolean };
+                nodes?: { author?: { login?: string }; body?: string; createdAt?: string }[];
+              };
+            }[];
+          };
+        };
+      };
+    };
+  };
+  const conn = d.data?.repository?.pullRequest?.reviewThreads;
+  const threads: ReviewThreadItem[] = (conn?.nodes ?? []).map((n) => {
+    const commentNodes = n.comments?.nodes ?? [];
+    const hasNextPage = n.comments?.pageInfo?.hasNextPage ?? false;
+    const totalCount = n.comments?.totalCount;
+    const commentsComplete = !hasNextPage && (totalCount === undefined || totalCount <= commentNodes.length);
+    return {
+      id: n.id,
+      isResolved: n.isResolved,
+      comments: commentNodes.map((c) => ({ author: c.author?.login ?? "", body: c.body ?? "", createdAt: c.createdAt ?? "" })),
+      commentsComplete,
+    };
+  });
+  return { threads, hasNextPage: conn?.pageInfo?.hasNextPage ?? false, endCursor: conn?.pageInfo?.endCursor ?? null };
+}
+
+/**
+ * ALL review threads (with their own comments) across the WHOLE connection, paged to
+ * EXHAUSTION — same Codex PR #42 P2 rationale as countUnresolvedThreads: a first-100-only fetch
+ * could silently miss threads past the first page on a heavily-reviewed PR. The proxy's own
+ * `pr_review_threads` tool applies its OWN cap to the returned array afterward (mirrors
+ * issue_comments' lastN contract: this function returns everything it could page to, the tool
+ * layer bounds it). Same hard page ceiling (50 pages) as countUnresolvedThreads, for the same
+ * reason: a cursor bug must never spin forever — `pageCapped` (Codex sol-high PR #260 review,
+ * P1) tells the caller whether that ceiling actually cut the fetch short (`hasNextPage` still
+ * true when the loop gave up), a DISTINCT incompleteness reason from the tool's own lastN cap.
+ */
+export async function fetchAllReviewThreads(fetchPage: (after: string | null) => Promise<string>): Promise<ReviewThreadsPage> {
+  const all: ReviewThreadItem[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < 50; page++) {
+    const p = parsePRReviewThreadsPage(await fetchPage(after));
+    all.push(...p.threads);
+    if (!p.hasNextPage || !p.endCursor) return { threads: all, pageCapped: false };
+    after = p.endCursor;
+  }
+  return { threads: all, pageCapped: true }; // page ceiling hit; hasNextPage was still true
 }

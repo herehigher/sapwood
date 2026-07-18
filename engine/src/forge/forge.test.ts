@@ -6,6 +6,7 @@ import {
   countUnresolvedThreads,
   ENGINE_COMMENT_MARKER,
   extractVerificationPlan,
+  fetchAllReviewThreads,
   findItemId,
   findOpenPrNumber,
   findOptionId,
@@ -15,8 +16,12 @@ import {
   parseIssueMeta,
   parseIssueRelations,
   parsePageInfo,
+  parsePRChecksPage,
   parsePRComments,
+  parsePRDetails,
   parsePRReactions,
+  parsePRReviewsPage,
+  parsePRReviewThreadsPage,
   parsePRReviewView,
   parsePRStatus,
   parseProject,
@@ -1668,6 +1673,300 @@ test("searchIssues: an ADVERSARIAL query shaped like a flag (--repo=x/y, --limit
   );
   assert.equal(beforeTerm[beforeTerm.indexOf("--limit") + 1], "5", "the server's own cap, never the caller's 999");
   assert.deepEqual(args.slice(termIdx + 1), [adversarial], "the adversarial text is the query, verbatim, and nothing else");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #244: PR-facing forge MCP proxy read surface (extends #234) — parsePRDetails/
+// parsePRReviewsPage/parsePRChecksPage/parsePRReviewThreadsPage/fetchAllReviewThreads + the 4
+// new IForge methods. #260 review: getPRReviews/getPRReviewThreads/getPRChecks are now CAPPED
+// GraphQL reads (never the previous unbounded `gh pr view --json ...`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("parsePRDetails: parses gh pr view --json number,headRefOid,state,isDraft,labels,mergeable", () => {
+  const json = JSON.stringify({
+    number: 42,
+    headRefOid: "abc123",
+    state: "OPEN",
+    isDraft: true,
+    labels: [{ name: "type:feature" }],
+    mergeable: "MERGEABLE",
+  });
+  assert.deepEqual(parsePRDetails(json), {
+    number: 42,
+    headOid: "abc123",
+    state: "OPEN",
+    draft: true,
+    labels: ["type:feature"],
+    mergeable: "MERGEABLE",
+  });
+});
+
+test("parsePRDetails: CLOSED/MERGED pass through, an unrecognized state normalizes to OPEN", () => {
+  const closed = JSON.parse('{"number":1,"headRefOid":"x","state":"CLOSED","isDraft":false,"mergeable":"UNKNOWN"}');
+  assert.equal(parsePRDetails(JSON.stringify(closed)).state, "CLOSED");
+  const merged = JSON.parse('{"number":1,"headRefOid":"x","state":"MERGED","isDraft":false,"mergeable":"UNKNOWN"}');
+  assert.equal(parsePRDetails(JSON.stringify(merged)).state, "MERGED");
+});
+
+test("parsePRDetails: mergeable normalizes an unrecognized value to UNKNOWN, no labels -> []", () => {
+  const d = parsePRDetails(JSON.stringify({ number: 1, headRefOid: "x", state: "OPEN", isDraft: false, mergeable: "WEIRD" }));
+  assert.equal(d.mergeable, "UNKNOWN");
+  assert.deepEqual(d.labels, []);
+});
+
+test("getPRDetails: scoped to owner/repo, requests the right --json fields", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({ number: 1, headRefOid: "x", state: "OPEN", isDraft: false, labels: [], mergeable: "MERGEABLE" });
+  };
+  await forge.getPRDetails(1);
+  assert.deepEqual(seen[0]!.slice(0, 2), ["pr", "view"]);
+  assert.ok(seen[0]!.includes("--repo") && seen[0]!.includes("o/r"));
+  assert.ok(seen[0]!.some((a) => a === "number,headRefOid,state,isDraft,labels,mergeable"));
+});
+
+test("parsePRReviewsPage: parses author/commitOid/state/body/submittedAt verbatim + totalCount, missing fields degrade to defaults", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviews: {
+            totalCount: 2,
+            nodes: [
+              {
+                author: { login: "codex" },
+                commit: { oid: "HEAD1" },
+                state: "APPROVED",
+                body: "LGTM",
+                submittedAt: "2026-07-18T00:00:00Z",
+              },
+              { state: "COMMENTED" }, // missing author/commit/body/submittedAt
+            ],
+          },
+        },
+      },
+    },
+  });
+  const page = parsePRReviewsPage(json);
+  assert.equal(page.total, 2);
+  assert.deepEqual(page.reviews, [
+    { author: "codex", commitOid: "HEAD1", state: "APPROVED", body: "LGTM", submittedAt: "2026-07-18T00:00:00Z" },
+    { author: "", commitOid: "", state: "COMMENTED", body: "" },
+  ]);
+});
+
+test("parsePRReviewsPage: no reviews connection -> empty reviews, total 0", () => {
+  assert.deepEqual(parsePRReviewsPage(JSON.stringify({})), { reviews: [], total: 0 });
+});
+
+test("getPRReviews: scoped to owner/repo, GraphQL reviews(last: cap) with owner/repo/number/cap variables", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({ data: { repository: { pullRequest: { reviews: { totalCount: 0, nodes: [] } } } } });
+  };
+  await forge.getPRReviews(7, 25);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
+  assert.ok(args.includes("owner=o"));
+  assert.ok(args.includes("repo=r"));
+  assert.ok(args.includes("number=7"));
+  assert.ok(args.includes("cap=25"));
+});
+
+test("parsePRChecksPage: CheckRun entries carry conclusion, legacy StatusContext entries carry state, never merged, plus totalCount", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: {
+                    contexts: {
+                      totalCount: 3,
+                      nodes: [
+                        { name: "build", status: "COMPLETED", conclusion: "SUCCESS" },
+                        { context: "legacy-ci", state: "PENDING" },
+                        { conclusion: null }, // in-progress CheckRun, no name at all
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  const page = parsePRChecksPage(json);
+  assert.equal(page.total, 3);
+  assert.deepEqual(page.checks, [
+    { name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null },
+    { name: "legacy-ci", status: "", conclusion: null, state: "PENDING" },
+    { name: "", status: "", conclusion: null, state: null },
+  ]);
+});
+
+test("parsePRChecksPage: no statusCheckRollup/commits -> empty checks, total 0", () => {
+  assert.deepEqual(parsePRChecksPage(JSON.stringify({})), { checks: [], total: 0 });
+  assert.deepEqual(
+    parsePRChecksPage(
+      JSON.stringify({ data: { repository: { pullRequest: { commits: { nodes: [{ commit: { statusCheckRollup: null } }] } } } } }),
+    ),
+    { checks: [], total: 0 },
+  );
+});
+
+test("getPRChecks: scoped to owner/repo, GraphQL contexts(first: cap) with owner/repo/number/cap variables", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({});
+  };
+  await forge.getPRChecks(3, 40);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
+  assert.ok(args.includes("owner=o"));
+  assert.ok(args.includes("repo=r"));
+  assert.ok(args.includes("number=3"));
+  assert.ok(args.includes("cap=40"));
+});
+
+test("parsePRReviewThreadsPage: parses threads + their own comments + per-thread commentsComplete, tolerates malformed/missing pageInfo", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: true, endCursor: "CUR1" },
+            nodes: [
+              {
+                id: "T1",
+                isResolved: false,
+                comments: {
+                  totalCount: 1,
+                  pageInfo: { hasNextPage: false },
+                  nodes: [{ author: { login: "codex" }, body: "fix this", createdAt: "2026-07-18T00:00:00Z" }],
+                },
+              },
+              {
+                id: "T2",
+                isResolved: true,
+                comments: { totalCount: 5, pageInfo: { hasNextPage: true }, nodes: [] }, // more comments than fetched -> incomplete
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  const page = parsePRReviewThreadsPage(json);
+  assert.equal(page.hasNextPage, true);
+  assert.equal(page.endCursor, "CUR1");
+  assert.deepEqual(page.threads, [
+    {
+      id: "T1",
+      isResolved: false,
+      comments: [{ author: "codex", body: "fix this", createdAt: "2026-07-18T00:00:00Z" }],
+      commentsComplete: true,
+    },
+    { id: "T2", isResolved: true, comments: [], commentsComplete: false },
+  ]);
+});
+
+test("parsePRReviewThreadsPage: malformed/absent response -> empty threads, terminal (no infinite loop)", () => {
+  const page = parsePRReviewThreadsPage(JSON.stringify({ data: {} }));
+  assert.deepEqual(page.threads, []);
+  assert.equal(page.hasNextPage, false);
+  assert.equal(page.endCursor, null);
+});
+
+test("fetchAllReviewThreads: pages to exhaustion across a multi-page connection (Codex PR #42 P2 rationale — a first-page-only fetch could miss a later thread), pageCapped false", async () => {
+  let calls = 0;
+  const page1 = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: true, endCursor: "CUR1" },
+            nodes: [{ id: "T1", isResolved: false, comments: { nodes: [] } }],
+          },
+        },
+      },
+    },
+  });
+  const page2 = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [{ id: "T2", isResolved: true, comments: { nodes: [] } }],
+          },
+        },
+      },
+    },
+  });
+  const { threads, pageCapped } = await fetchAllReviewThreads(async (after) => {
+    calls++;
+    return after === null ? page1 : page2;
+  });
+  assert.equal(calls, 2);
+  assert.equal(pageCapped, false);
+  assert.deepEqual(
+    threads.map((t) => t.id),
+    ["T1", "T2"],
+  );
+});
+
+test("fetchAllReviewThreads: a page ceiling (50 pages) bounds a runaway cursor, never spins forever, and reports pageCapped: true", async () => {
+  let calls = 0;
+  const { threads, pageCapped } = await fetchAllReviewThreads(async () => {
+    calls++;
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage: true, endCursor: `CUR${calls}` },
+              nodes: [{ id: `T${calls}`, isResolved: false, comments: { nodes: [] } }],
+            },
+          },
+        },
+      },
+    });
+  });
+  assert.equal(calls, 50);
+  assert.equal(threads.length, 50);
+  assert.equal(pageCapped, true, "the hard 50-page ceiling was hit while hasNextPage was still true");
+});
+
+test("getPRReviewThreads: threads owner/repo/number/commentsCap through the GraphQL query variables", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: {}, nodes: [] } } } } });
+  };
+  await forge.getPRReviewThreads(9, 15);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
+  assert.ok(args.includes("owner=o"));
+  assert.ok(args.includes("repo=r"));
+  assert.ok(args.includes("number=9"));
+  assert.ok(args.includes("commentsCap=15"));
+  assert.ok(args.includes("after=null"));
 });
 
 // ── #237 finding 2 (2026-07-18 adjudication on PR #262): every issue comment this engine posts

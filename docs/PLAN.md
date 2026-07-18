@@ -387,6 +387,19 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
 
 ## Security & trust model (trusted-first, designed toward public)
 
+**Positioning statement (locked 2026-07-17 adjudication, issue #238).** sapwood makes
+autonomous development bounded, inspectable, recoverable, and conservatively governed.
+Models receive broad read access within a recorded, metered repository scope; action
+capabilities remain explicitly bounded by role, the guard, engine validation, forge
+controls, and review gates. Humans own why/what at Ready; the engine owns durable
+process and effects; models supply judgment without being treated as deterministic. It
+does not make missing intent or missing evidence deterministic. This statement
+supersedes an earlier draft slogan — "information plane fully open, action plane fully
+mediated, never constrains curiosity" — rejected in review as overclaiming: workers and
+`retro` act directly (not fully mediated), the read proxy is capped (not fully open),
+and budgets bound curiosity (curiosity is constrained). The paragraphs below are the
+honest, load-bearing version this positioning statement summarizes.
+
 **The trust boundary is on the ACTION side, not the content side.** Under the locked
 trusted-repos-first scope, issue and PR content is semi-trusted input, and every model
 session — worker or peripheral — is assumed corruptible by prompt injection,
@@ -398,10 +411,14 @@ worker actions, while producer ≠ reviewer ≠ merger keeps production, gate②
 different-model review, and the Conductor's merge in separate hands (soft guard mode,
 other reviewer choices, and produce-PR-and-stop remain selectable). Issues-only
 peripheral sessions (PO alignment/triage, architect, plan review/drafting, and harvest)
-carry zero tool grants via an empty `--allowedTools` allowlist, with a
-deny-list of forge-write patterns retained as regression trip-wires; the engine alone
-executes forge writes from schema-validated structured output. The board workflow
-supplies the `origin:agent` governance gate: agent-created issues land outside `Ready`,
+carry a shared **read-only, worktree-confined, no-shell** grant — `Read`/`Grep`/`Glob`
+allowed, `Write`/`Edit`/`MultiEdit`/`NotebookEdit`/`Bash` denied (#235's allow/deny
+matrix, `engine/src/roles/peripheral.ts`), with the guard hook's own
+`checkReadContainment` (keyed off `SAPWOOD_WORKTREE_ROOT`) confining any real read to
+the session's own ephemeral worktree — never a host path, `/etc/hosts`, or a
+`../`-traversal. No session in this class carries a `gh`/forge credential (#218); the
+engine alone executes forge writes from schema-validated structured output. The
+board workflow supplies the `origin:agent` governance gate: agent-created issues land outside `Ready`,
 and a human moves them to `Ready`; the dispatch code does not verify who moved the card.
 
 **Capability/context decision rule:** within the trusted-repos threat model,
@@ -409,10 +426,33 @@ input-side prompt-injection hardening neither drives nor vetoes capability or co
 choices. Prompt scope is governed by noise, size, and determinism; capability is
 decided by whether its effects are enforceable at the action boundary. This is why
 the zero-`gh` peripheral design (#110) was decided by enforceability, and the same
-rule governs engine-injected context plus two-pass retrieval (#215, #217). Revisit
-input-side hardening when untrusted-repo support is actually scheduled, as its own
-milestone-level threat-model decision rather than a standing constraint on trusted-
-repo capabilities.
+rule governs engine-injected context plus retrieval design (#215; #217, superseded —
+see the guardrail/shackle criterion immediately below). Revisit input-side hardening
+when untrusted-repo support is actually scheduled, as its own milestone-level
+threat-model decision rather than a standing constraint on trusted-repo capabilities.
+
+**The guardrail/shackle criterion (locked 2026-07-17, issue #238; first applied in
+#234).** A mediation design for role-session information access must never deny a
+request AND still demand a definitive judgment from the same session — that
+combination is a shackle: it manufactures confidence from a session that was denied
+the evidence to earn it. The alternative is a guardrail: explicit denial paired with
+a first-class abstention/escalation path, so a session that cannot get evidence can
+say so instead of guessing. This criterion is why #217's two-pass `needsDetails`
+protocol (request → engine-inject → decide, with no first-class "still can't tell"
+exit once details land) was superseded, pre-implementation, by #234's design: an
+engine-hosted, read-only forge MCP proxy, built to widen what a session may ask for
+without ever forcing a verdict once it has asked. **Scaffolded, not yet activated:**
+the proxy module ships `enabled: false` by default and, when turned on, defaults to
+shadow mode (calls journaled, no consumer may act on the output); no built-in role
+supplies the proxy option to a session yet — wiring a real consumer is separately
+tracked (#253). The criterion drove the *design*; live bring-up is deliberately
+later, separately-tracked work (see [`configuration.md`](configuration.md#proxy) for
+the shipped-vs-deferred split). The same 2026-07-17 M8 round cut two further
+mechanism issues from this posture: #213 (one batched architect session — explicit
+`drop`/`needs-human` verdicts per round-pool member, with an unlisted member reading
+as `pass` by omission, never a forced binary judgment on every member) and #214
+(gate⓪ scoped to the round pool, with a lightweight re-confirm rather than a stale
+approval standing in for a judgment nobody actually re-made).
 
 **Ambient repo context — record, don't seal (locked 2026-07-16/17, issue #236).**
 Every session — worker or peripheral — runs `claude -p` inside a real repo worktree
@@ -468,6 +508,14 @@ and the guard hook is the actual safety boundary. See
 [`security.md`](security.md#ambient-repo-context-record-dont-seal-236) for the full
 model and the isolation recipe.
 
+**Honest framing (2026-07-17, issue #238).** This same broad, recorded read access is
+what makes architecture-debt detection possible at all — the architect role (and any
+future audit-shaped role) forms its drift/contradiction judgment from the SAME
+ambient repo/doc access every session already has, not from a separate,
+more-privileged audit grant. sapwood has no standing "audit role" with elevated read
+scope; if one is ever justified, it is an addition to this recorded posture, not
+evidence that today's posture was incomplete.
+
 The committee's keystone finding remains: 0day's guard was built for a *trusted* model
 on a *private* repo. v1 stays in that deployment context, **but we build the seams so
 public-repo hardening is additive, not a rewrite.** v1 requirements:
@@ -516,22 +564,32 @@ public-repo hardening is additive, not a rewrite.** v1 requirements:
     spend, not routine cost management — prefer drain (let in-flight workers hand off)
     over kill; hard kill is the last resort. Conservative defaults (small round budget,
     dispatch cap 1–2).
-- **Issues-only peripheral role sessions carry no shell (#110, supersedes this
-  section's original guard-tokenizer scope for these roles):** plan-reviewer,
-  plan-drafter, PO/align+triage, harvest, and architect hold no `Bash` tool grant at
-  all — pure computation, prompt substituted in, no repo/`gh` access of their own.
-  Each session's final message ends in a structured, sentinel-delimited output block;
-  the deterministic engine parses it, validates it against a per-role zod schema plus
-  cheap content invariants, and performs every GitHub write itself via `IForge`,
-  fail-closed (ambiguous/duplicate/out-of-candidate-set output rejects the WHOLE
-  attempt, retried once, then the role's degrade path — gate⓪ escalates
-  `needs-human`, advisory roles proceed with a durable event). Because no shell
-  exists for these sessions, the string-level Bash-pattern bypass classes (short-flag
-  aliases, quoting/escaping) earlier hardening chased one glob at a time are moot for
-  them — closed by removing the capability, not a better pattern. `retro` stays
-  worker-class (`Read`/git + `gh pr create`, proposals land exclusively as PRs) —
-  out of this design's scope by session class; its own hardening is #111. Full model:
-  `docs/security.md`'s "Issues-only role sessions carry no shell" section.
+- **Issues-only peripheral role sessions carry no shell and no forge credential
+  (#110; read grant widened to worktree-confined by #235, 2026-07-17):**
+  plan-reviewer, plan-drafter, PO/align+triage, harvest, and architect hold no
+  `Bash` tool grant and no `gh`/forge credential of their own — decisions are
+  computed from prompt-injected content plus a real, but worktree-confined,
+  `Read`/`Grep`/`Glob` grant (#235), never a live `gh` call. Every role in this
+  class shares the SAME allow/deny pair, enforced two ways: `--allowedTools`/
+  `--disallowedTools` at spawn, and the guard hook's own `checkReadContainment`
+  (keyed off `SAPWOOD_WORKTREE_ROOT`), which resolves a `Read`/`Grep`/`Glob` target
+  only inside the session's own ephemeral worktree — a live-tested containment
+  (absolute host paths, `/etc/hosts`, `../`-traversal all denied; in-worktree reads
+  succeed). Each session's final message ends in a structured, sentinel-delimited
+  output block; the deterministic engine parses it, validates it against a
+  per-role zod schema plus cheap content invariants, and performs every GitHub
+  write itself via `IForge`, fail-closed (ambiguous/duplicate/out-of-candidate-set
+  output rejects the WHOLE attempt, retried once, then the role's degrade path —
+  gate⓪ escalates `needs-human`, advisory roles proceed with a durable event).
+  Because no shell exists for these sessions, the string-level Bash-pattern bypass
+  classes (short-flag aliases, quoting/escaping) earlier hardening chased one glob
+  at a time are moot for them — closed by removing the capability, not a better
+  pattern. `retro` stays worker-class (`Read`/git + `gh pr create`, proposals land
+  exclusively as PRs) — out of this design's scope by session class; its own
+  hardening is #111. **The write/shell/credential boundary is unchanged by #235's
+  read widening — only what a session may *read* grew, never what it may *do*.**
+  Full model: `docs/security.md`'s "Issues-only role sessions: read-only,
+  worktree-confined, no shell" section.
 - **Designed-for-public seams (built as interfaces in v1, enforced in v1.1):**
   scoped ephemeral GitHub App tokens per worker (replacing host `gh` auth); a written
   threat model treating issue text as hostile data; fixing the public-repo merge-gate
@@ -952,6 +1010,17 @@ cursor before exiting; a crash reruns whatever phase was `in_progress`, and the 
 make that idempotent rather than duplicating output. This deliberately never attempts to
 restore a model's mid-conversation state — only its externally-visible artifacts.
 
+**Honest framing (2026-07-17, issue #238).** What a fresh peripheral session
+"remembers" across rounds is never conversational continuity — no session resumes a
+prior chat. It is externalized institutional memory, held in artifacts a fresh
+session re-reads AS RELEVANT TO ITS OWN ROLE — not a uniform feed every role
+consumes alike: the goal file and `PLAN.md` (aligning, architecting), issue
+bodies/labels/comments (triage, plan review), and the round ledger's own persisted
+artifacts (harvest, retro) each reach only the role that needs them (e.g. `po-triage`
+does not read the goal file). Calling this "LLM context continuity" would overclaim
+a persistence the architecture doesn't have and doesn't need — rerun-not-resume is
+the honest name for it.
+
 **Self-evolution goes through a PR, never a direct write.** When the retrospective role
 proposes a change to a prompt, doc, or config, it opens a PR through the same gate②
 path every other change takes — never a direct write to disk. This is why
@@ -964,6 +1033,22 @@ to open a PR against, rather than an inline prompt with no addressable target.
 `Ready` — the round loop can propose work, but a human still decides what actually
 enters the dispatch queue. The mechanics of that confirmation gate are a v0.2
 implementation detail, cut as its own issue when the milestone opens.
+
+**Ready-as-signature (locked 2026-07-17, issues #237/#238).** Moving an issue to
+`Ready` — whether confirming an `origin:agent` proposal or leaving a human-authored
+issue's why/what untouched — is a human signature: it endorses that issue's why/what
+regardless of who typed the body. Past that point, **dissent, not revision, is the
+only agent channel past `Ready`**: a role that believes a `Ready` issue's premise is
+wrong may raise it, but may not itself revise the why/what or hold up/reject
+dispatch. The mechanism for raising that dissent is #237's PO dissent channel (see
+that issue for the mechanics — not duplicated here per the docs/issues source-of-truth
+partition). This is why the `origin:agent` confirmation gate above needs no separate
+adjudication machinery beyond the ordinary triage path: the human act of moving the
+card IS the endorsement; nothing downstream re-litigates it outside that channel.
+**Framed honestly (issue #238): this human
+confirmation step is the product, not a limitation to be automated away** — it is
+the one place autonomy is deliberately bounded by design, matching the positioning
+statement's "humans own why/what at Ready" (Security & trust model, above).
 
 **gate⓪ — the verification-plan quality gate (locked 2026-07-09, amends Decision
 #8).** Decision #8 enforced plan *presence* (dispatch refuses a plan-less issue) and
@@ -1018,9 +1103,11 @@ actually enter a pool.
 does not park the issue until the next round (that would stall against the autonomy
 principle below): the reviewer's bounce comment — what's missing or wrong,
 concretely — becomes the brief for a scoped **plan-drafting session** the loop
-dispatches. The drafter is an issues-only peripheral like PO/triage (no repo
-checkout, no code access, no shell at all — pure computation, #110), runs in a
-session distinct from the plan-reviewer (plan-author ≠ plan-approver holds; the
+dispatches. The drafter is an issues-only peripheral like PO/triage (no shell, no
+`gh`/forge credential, and no dedicated worker checkout — only the same
+worktree-confined `Read`/`Grep`/`Glob` grant every role in this class shares,
+#110 + #235), runs in a session distinct from the plan-reviewer (plan-author ≠
+plan-approver holds; the
 reviewer never approves a plan it authored, its minor-correction latitude aside), and
 its structured output — the revised acceptance criteria + verification plan, which
 the engine writes into the issue body — never touches anything else; it never

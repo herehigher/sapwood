@@ -38,7 +38,9 @@ import {
   probeLlmPing,
   renderPromptTemplate,
   shellSingleQuote,
+  WORKER_ALLOWED_TOOLS_NO_GH,
   WorkerSupervisor,
+  workerCredentialFreeEnv,
 } from "./worker.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
@@ -1947,20 +1949,60 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     // Ignores TERM so it survives requestHandoff's SIGTERM; only the timeout's SIGKILL stops it.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
+    // #241 (same class of race as #229/PR #240): touch a ready-sentinel immediately after the
+    // trap is installed, so requestHandoff's SIGTERM can never beat the trap. That alone still
+    // left two real-time races on a real wall-clock timeoutSec (Codex second-opinion review):
+    //   (a) the bounded trap-ready poll is itself real-time-unbounded under load -- if it ran
+    //       long enough for the real timeout to fire FIRST, requestHandoff would never get a
+    //       pending handoff to race against;
+    //   (b) even a fast trap-ready could land inside killTree's own 200ms SIGTERM->SIGKILL grace,
+    //       letting requestHandoff() return true AFTER timedOut was already set -- silently
+    //       reversing "handoff pending, THEN timeout" (the ordering this test exists to pin
+    //       down) while every assertion still happened to pass.
+    // Both windows exist only because "elapsed since dispatch" was read off the real wall clock.
+    // Fix: inject a fully controllable fake clock (WorkerSupervisor's `now` dep, already designed
+    // for this) and DRIVE elapsed time explicitly instead of racing it:
+    //   1. freeze the clock at dispatch, so elapsedSec is provably 0 no matter how long the real
+    //      trap-ready handshake takes in wall-clock time -- the timeout branch cannot fire.
+    //   2. confirm the trap, call requestHandoff(), and assert it returns true -- still provably
+    //      BEFORE any timeout, since the fake clock has not moved.
+    //   3. only THEN advance the fake clock past timeoutSec, and let the heartbeat timer (real,
+    //      but fast) observe the new elapsed time and drive the hard-kill path.
+    // This proves the exact ordering deterministically; the only remaining real-time waits are
+    // monotonic bounded polls for effects that are certain to eventually happen (never a race
+    // against a competing real deadline).
+    // #241 (Codex delta confirm, P2): a finite `sleep 30` was still a theoretical real-time race
+    // -- if the event loop stalled ~30s after the fake-clock advance, the stub would exit
+    // NATURALLY (code 0) before heartbeatTick ever observed the new elapsed time, writing
+    // .handoff (handoffRequested, not timedOut) instead of .failed. A non-terminating loop
+    // removes that window entirely: the stub can only ever end via the timeout path's SIGKILL.
+    const trapReady = join(dir, "trap-ready");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nwhile true; do sleep 1; done\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
+    let fakeNowMs = Date.now();
     const s = new WorkerSupervisor({
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
       hasOpenPr: async () => false,
       renderPrompt: () => "p",
-      heartbeatMs: 100,
+      heartbeatMs: 20, // real timer -- but the elapsed-time MATH below is driven by fakeNowMs, not by how fast this fires
       guardHookPath: mkHook(dir),
+      now: () => new Date(fakeNowMs),
     });
     const { name: laneName } = await s.dispatch({ number: 63, title: "t", labels: [] });
-    await sleep(200);
+    // Bounded poll (20ms x 400 = 8s ceiling, same pattern PR #240 used for its own trap-ready
+    // handshake) for the trap to be provably installed. The fake clock is still frozen at
+    // dispatch time here, so no matter how long this takes in real wall-clock time, the
+    // supervisor's own elapsed-time math still reads exactly 0 -- the timeout branch structurally
+    // cannot fire during this window (race (a), closed).
+    for (let i = 0; i < 400 && !existsSync(trapReady); i++) await sleep(20);
+    assert.ok(existsSync(trapReady), "stub's TERM trap was installed before requestHandoff's SIGTERM");
+    // Still provably pre-timeout (elapsed reads 0): a pending handoff is established first.
     assert.equal(s.requestHandoff(laneName), true); // sets handoffRequested; the stub ignores this TERM
+    // Only NOW advance the fake clock past timeoutSec -- the ordering (handoff pending, THEN
+    // timeout) is asserted by construction, not raced (race (b), closed).
+    fakeNowMs += (tcfg.worker.timeoutSec + 1) * 1000;
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${laneName}.failed.json`)), "timeout wins over a pending handoff request");
     assert.ok(!existsSync(join(dir, `${laneName}.handoff.json`)));
@@ -2728,3 +2770,445 @@ function alive(pid: number): boolean {
     return false;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #244: worker-leg forge MCP proxy attachment — mirrors peripheral.ts's RoleRunner mechanism
+// (#234), extended here to WorkerSupervisor.dispatch(). Unattached dispatch (every test above
+// this section) is COMPLETELY UNCHANGED — these tests only cover the NEW opt-in `proxy` param.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function fakeWorkerProxyHandle(over: Partial<{ mcpConfigJson: string; toolNames: string[] }> = {}) {
+  const calls = { minted: 0, stopped: 0 };
+  const handle = {
+    port: 1,
+    token: "proxy-test-token",
+    url: "http://127.0.0.1:1/mcp",
+    mcpConfigJson: JSON.stringify({
+      mcpServers: { forge: { type: "http", url: "http://127.0.0.1:1/mcp", headers: { Authorization: "Bearer proxy-test-token" } } },
+    }),
+    toolNames: ["mcp__forge__pr_details", "mcp__forge__pr_reviews", "mcp__forge__pr_review_threads", "mcp__forge__pr_checks"],
+    ...over,
+    stop: async () => {
+      calls.stopped++;
+    },
+  };
+  return { calls, handle };
+}
+
+test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handle's own tool names, and injects --mcp-config inline JSON", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { calls, handle } = fakeWorkerProxyHandle();
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
+      proxy: {
+        mint: async (session) => {
+          calls.minted++;
+          assert.equal(session.role, "worker");
+          return handle as never;
+        },
+      },
+    });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    assert.match(args, /mcp__forge__pr_details/);
+    assert.match(args, /--mcp-config/);
+    assert.ok(args.includes(JSON.stringify(handle.mcpConfigJson)) === false); // sanity: not double-JSON-encoded
+    const i = args.trim().split("\n").indexOf("--mcp-config");
+    assert.equal(args.trim().split("\n")[i + 1], handle.mcpConfigJson);
+    assert.equal(calls.minted, 1);
+    for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
+    for (let i2 = 0; i2 < 400 && calls.stopped === 0; i2++) await sleep(20);
+    assert.equal(calls.stopped, 1, "the proxy is torn down once the lane's process exits (onExit)");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config flag, --allowedTools unchanged — byte-identical to pre-#244 behavior", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    assert.doesNotMatch(args, /--mcp-config/);
+    assert.doesNotMatch(args, /mcp__forge__/);
+    assert.match(args, /Bash\(gh \*\)/, "the code-producing worker's own default --allowedTools is unchanged");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: a proxy mint FAILURE is non-fatal — the lane still dispatches and runs, unattached (mirrors peripheral.ts's RoleRunner stance)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
+      proxy: {
+        mint: async () => {
+          throw new Error("mint failed");
+        },
+      },
+    });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)), "lane still completes despite the mint failure");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: a spawn failure with a proxy attached still tears down the minted proxy (never leaks a live listener/token)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: join(dir, "does-not-exist-claude"),
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+    });
+    const { calls, handle } = fakeWorkerProxyHandle();
+    await assert.rejects(
+      () =>
+        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-bad-proxy", {
+          proxy: {
+            mint: async () => {
+              calls.minted++;
+              return handle as never;
+            },
+          },
+        }),
+      /spawn failed/i,
+    );
+    assert.equal(calls.minted, 1);
+    assert.equal(calls.stopped, 1, "the proxy is torn down even though dispatch() THREW rather than returned");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #244 (Codex sol-high PR #260 review round 2, P2): the credentialFree GH_CONFIG_DIR scratch
+// directory (created BEFORE spawn, once mint has already succeeded) must be cleaned up on the
+// spawn-failure path too — not just onExit — or it leaks as directory litter under stateDir
+// every time a credentialFree leg fails to spawn.
+test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn failed) removes the GH_CONFIG_DIR scratch directory it already created", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: join(dir, "does-not-exist-claude"),
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+    });
+    const { handle } = fakeWorkerProxyHandle();
+    await assert.rejects(
+      () =>
+        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-credfree-spawnfail", {
+          proxy: { mint: async () => handle as never, credentialFree: true },
+        }),
+      /spawn failed/i,
+    );
+    const ghConfigDir = join(dir, "lane-credfree-spawnfail.gh-config-empty");
+    assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must not survive a spawn failure");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #244 AC (issue's own phrasing): "#218 credential-free regression tests extended to a worker
+// leg with the proxy handle attached (spawn env token-free; proxy is the only forge reach)".
+// HONEST SCOPE (round-2 delta review, P1): "only forge reach" holds for the `gh`/git
+// CREDENTIALED-TOOL path this test asserts — it does NOT mean a worker leg's Bash(node/npm)
+// grant can't read an ambient credential store directly off disk (workerCredentialFreeEnv's own
+// doc names that residual explicitly; it is NOT closed here or anywhere in this PR). Distinct
+// from the ordinary dispatch env test above (line ~1238), which asserts workers LEGITIMATELY
+// keep GH_TOKEN by default — this is the NEW, separately-opted-into shape
+// (WorkerProxyOpts.credentialFree).
+test("dispatch: credentialFree opt strips forge/git credential env vars and severs gh/git's own credential-lookup paths for a worker leg — same denylist as peripheral.ts's #218 regression, NOT a claim of full isolation (see workerCredentialFreeEnv's doc)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const poisoned = {
+    GH_TOKEN: "poison-gh-token",
+    GITHUB_TOKEN: "poison-github-token",
+    GITHUB_ENTERPRISE_TOKEN: "poison-github-enterprise-token",
+    GH_CONFIG_DIR: "/poison/gh-config",
+    GH_HOST: "poison.example",
+    GIT_ASKPASS: "/poison/askpass",
+    GIT_CONFIG_GLOBAL: "/poison/gitconfig",
+    GIT_CONFIG_COUNT: "1",
+    SSH_AUTH_SOCK: "/poison/ssh-agent.sock",
+    ANTHROPIC_API_KEY: "preserved-anthropic-auth",
+  } as const;
+  const previous = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, poisoned);
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      // #244 (Codex sol-high PR #260 review round 2, P2): a brief sleep AFTER writing env.seen,
+      // BEFORE exiting — without it, the process can fully exit (triggering onExit's own
+      // GH_CONFIG_DIR cleanup) before the test ever gets to assert the directory's PRE-cleanup
+      // shape, racing the two concerns (mid-run existence vs. post-exit removal) against each
+      // other. This gives a deterministic window for the former before the latter can happen.
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen")}"\nsleep 1\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { handle } = fakeWorkerProxyHandle();
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
+      proxy: { mint: async () => handle as never, credentialFree: true },
+    });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "env.seen")); i++) await sleep(20);
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    for (const key of [
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "GITHUB_ENTERPRISE_TOKEN",
+      "GH_CONFIG_DIR",
+      "GH_HOST",
+      "GIT_ASKPASS",
+      "GIT_CONFIG_GLOBAL",
+    ]) {
+      assert.ok(!envText.includes(`${key}=poison`), `${key} leaked into the credential-free worker leg's env`);
+    }
+    assert.ok(envText.includes("ANTHROPIC_API_KEY=preserved-anthropic-auth"), "Claude auth is preserved");
+    assert.ok(!envText.includes("proxy-test-token"), "the proxy's bearer token never reaches the spawn env — --mcp-config only");
+    // #244 (Codex sol-high PR #260 review, P1): env-var stripping alone is insufficient — assert
+    // the FULL severing shape: GH_CONFIG_DIR repointed at a fresh, EMPTY, per-lane directory
+    // (never the poisoned value, never the real $HOME/.config/gh), GIT_CONFIG_GLOBAL/SYSTEM
+    // pointed at /dev/null, GIT_TERMINAL_PROMPT=0 (fail closed rather than prompt), and no
+    // SSH_AUTH_SOCK at all (an inherited agent socket is a live credential channel on its own).
+    const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="));
+    assert.ok(ghConfigDirLine, "GH_CONFIG_DIR must be set");
+    const ghConfigDir = ghConfigDirLine!.slice("GH_CONFIG_DIR=".length);
+    assert.notEqual(ghConfigDir, "/poison/gh-config");
+    assert.ok(existsSync(ghConfigDir), "the GH_CONFIG_DIR path must actually exist as a directory");
+    assert.deepEqual(readdirSync(ghConfigDir), [], "GH_CONFIG_DIR must be a FRESH, EMPTY directory — never gh's real stored config");
+    assert.match(envText, /^GIT_CONFIG_GLOBAL=\/dev\/null$/m);
+    assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
+    assert.match(envText, /^GIT_TERMINAL_PROMPT=0$/m);
+    assert.doesNotMatch(envText, /^SSH_AUTH_SOCK=/m);
+    // #244 (Codex sol-high PR #260 review, P1): the grant itself narrows — a credentialFree leg
+    // whose env can no longer authenticate `gh` at all must not still be OFFERED `gh` as a tool.
+    const args = readFileSync(join(dir, "args.seen"), "utf8");
+    const allowedToolsIdx = args.trim().split("\n").indexOf("--allowedTools");
+    const allowedTools = args.trim().split("\n")[allowedToolsIdx + 1]!;
+    assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/, "credentialFree must drop Bash(gh *) from the grant");
+    assert.match(allowedTools, /Bash\(git \*\)/, "git stays — its own credential path is what's severed, not the tool grant");
+    // #244 (Codex sol-high PR #260 review round 2, P2): the per-lane GH_CONFIG_DIR scratch
+    // directory is cleaned up once the lane exits — never left behind as directory litter.
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
+    assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must be removed once the lane exits (onExit)");
+    s.dispose();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("workerCredentialFreeEnv: pure unit — composes the exact env shape (GH_CONFIG_DIR/GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM/GIT_TERMINAL_PROMPT, no SSH_AUTH_SOCK/GH_TOKEN)", () => {
+  const previous = { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK, GH_TOKEN: process.env.GH_TOKEN };
+  try {
+    process.env.SSH_AUTH_SOCK = "/tmp/agent.sock";
+    process.env.GH_TOKEN = "poison";
+    const env = workerCredentialFreeEnv("/tmp/fake-gh-config-dir");
+    assert.equal(env.GH_CONFIG_DIR, "/tmp/fake-gh-config-dir");
+    assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+    assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null");
+    assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(env.SSH_AUTH_SOCK, undefined);
+    assert.equal(env.GH_TOKEN, undefined);
+  } finally {
+    if (previous.SSH_AUTH_SOCK === undefined) delete process.env.SSH_AUTH_SOCK;
+    else process.env.SSH_AUTH_SOCK = previous.SSH_AUTH_SOCK;
+    if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previous.GH_TOKEN;
+  }
+});
+
+test("WORKER_ALLOWED_TOOLS_NO_GH: byte-identical to WORKER_ALLOWED_TOOLS minus Bash(gh *), git stays", () => {
+  assert.doesNotMatch(WORKER_ALLOWED_TOOLS_NO_GH, /Bash\(gh \*\)/);
+  assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Bash\(git \*\)/);
+  assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Read/);
+  assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Write/);
+});
+
+// #244 (Codex sol-high PR #260 review, P2): fail-closed policy — credentialFree + a failed mint
+// leaves a leg with NEITHER the gh/git credentialed-tool path (severed by workerCredentialFreeEnv)
+// NOR a working evidence channel, so dispatch() must REFUSE outright rather than silently run
+// degraded (distinct from the non-credentialFree mint-failure case above, which stays non-fatal).
+test("dispatch: credentialFree + mint FAILURE refuses the dispatch outright (fail-closed) — no lane created, no sentinel written", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await assert.rejects(
+      () =>
+        s.dispatch({ number: 1, title: "t", labels: [] }, "lane-credfree-mintfail", {
+          proxy: {
+            mint: async () => {
+              throw new Error("mint failed");
+            },
+            credentialFree: true,
+          },
+        }),
+      /credentialFree|refused/i,
+    );
+    assert.ok(!existsSync(join(dir, "lane-credfree-mintfail.jsonl")), "no jsonl left behind for a refused dispatch");
+    assert.ok(!existsSync(join(dir, "lane-credfree-mintfail.running.json")), "no running marker left behind for a refused dispatch");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a
+// `proxy-mint-failed` event, recorded via WorkerDeps.state, for BOTH branches (non-fatal and
+// fail-closed) so a repeated/systemic mint failure is queryable, not just a transient log line.
+test("dispatch: a mint failure records a durable 'proxy-mint-failed' event (WorkerDeps.state) — both the non-fatal and the fail-closed branch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      state,
+    });
+    // Branch 1: non-fatal (no credentialFree) — the lane still dispatches.
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-mintfail-nonfatal", {
+      proxy: {
+        mint: async () => {
+          throw new Error("mint failed #1");
+        },
+      },
+    });
+    // Branch 2: fail-closed (credentialFree) — dispatch is refused.
+    await assert.rejects(() =>
+      s.dispatch({ number: 2, title: "t", labels: [] }, "lane-mintfail-failclosed", {
+        proxy: {
+          mint: async () => {
+            throw new Error("mint failed #2");
+          },
+          credentialFree: true,
+        },
+      }),
+    );
+    const events = state.eventsSince("1970-01-01T00:00:00Z", ["proxy-mint-failed"]);
+    assert.equal(events.length, 2);
+    const lanes = events.map((e) => (e.payload as { lane: string }).lane).sort();
+    assert.deepEqual(lanes, ["lane-mintfail-failclosed", "lane-mintfail-nonfatal"]);
+    for (const e of events) {
+      const payload = e.payload as { role: string; reason: string };
+      assert.equal(payload.role, "worker");
+      assert.ok(payload.reason.includes("mint failed"));
+    }
+    s.dispose();
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheritance — a worker leg legitimately keeps GH_TOKEN unless it explicitly opts into credentialFree", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const previousGhToken = process.env.GH_TOKEN;
+  try {
+    process.env.GH_TOKEN = "worker-forge-token";
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho "$GH_TOKEN" > "${join(dir, "token.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { handle } = fakeWorkerProxyHandle();
+    await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, { proxy: { mint: async () => handle as never } });
+    for (let i = 0; i < 400 && !existsSync(join(dir, "token.seen")); i++) await sleep(20);
+    assert.equal(readFileSync(join(dir, "token.seen"), "utf8").trim(), "worker-forge-token");
+    s.dispose();
+  } finally {
+    if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previousGhToken;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

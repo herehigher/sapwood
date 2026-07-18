@@ -4,14 +4,21 @@
 // journal.test.ts for those).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { IssueMeta, IssueRelations, PRComment } from "../forge/forge.js";
+import type { IssueMeta, IssueRelations, PRCheckItem, PRComment, PRDetails, PRReviewItem, ReviewThreadItem } from "../forge/forge.js";
 import {
   canonicalJson,
   capComments,
+  capThreads,
   fetchIssueDetailsView,
   fetchIssueRelationsResponse,
+  fetchPRChecksResponse,
+  fetchPRDetailsResponse,
+  fetchPRReviewsResponse,
+  fetchPRReviewThreadsResponse,
+  ISSUE_TOOLS,
   mcpToolFullName,
   outgoingMentions,
+  PR_TOOLS,
   type ProxyCaps,
   sanitizeUpstreamError,
   TOOL_DEFINITIONS,
@@ -19,6 +26,10 @@ import {
   TOOL_ISSUE_DETAILS,
   TOOL_ISSUE_RELATIONS,
   TOOL_NAMES,
+  TOOL_PR_CHECKS,
+  TOOL_PR_DETAILS,
+  TOOL_PR_REVIEW_THREADS,
+  TOOL_PR_REVIEWS,
   TOOL_SEARCH_ISSUES,
   validateToolArgs,
 } from "./tools.js";
@@ -30,6 +41,10 @@ const CAPS: ProxyCaps = {
   maxRelationsPerIssue: 10,
   maxSearchResults: 10,
   fullCommentStreamOptIn: false,
+  maxReviewThreadsPerCall: 2,
+  maxCommentsPerThread: 10,
+  maxReviewsPerCall: 5,
+  maxChecksPerCall: 5,
 };
 
 // ── tool names / tools/list ─────────────────────────────────────────────────────────────────
@@ -43,10 +58,17 @@ test("TOOL_DEFINITIONS: one entry per fixed tool, in TOOL_NAMES order, each a st
     TOOL_DEFINITIONS.map((t) => t.name),
     TOOL_NAMES,
   );
+  assert.equal(TOOL_DEFINITIONS.length, 8, "4 issue tools (#234) + 4 PR tools (#244)");
   for (const def of TOOL_DEFINITIONS) {
     assert.equal(def.inputSchema.type, "object");
     assert.equal(def.inputSchema.additionalProperties, false);
   }
+});
+
+test("ISSUE_TOOLS / PR_TOOLS: partition TOOL_NAMES exactly, no overlap", () => {
+  assert.deepEqual([...ISSUE_TOOLS].sort(), [TOOL_ISSUE_COMMENTS, TOOL_ISSUE_DETAILS, TOOL_ISSUE_RELATIONS, TOOL_SEARCH_ISSUES].sort());
+  assert.deepEqual([...PR_TOOLS].sort(), [TOOL_PR_CHECKS, TOOL_PR_DETAILS, TOOL_PR_REVIEWS, TOOL_PR_REVIEW_THREADS].sort());
+  assert.deepEqual([...ISSUE_TOOLS, ...PR_TOOLS].sort(), [...TOOL_NAMES].sort());
 });
 
 // ── arg validation: schema / scope / cap / unknown-tool matrix (issue #234 AC) ──────────────
@@ -169,6 +191,35 @@ test("sanitizeUpstreamError: non-string input degrades to a placeholder, never t
   assert.doesNotThrow(() => sanitizeUpstreamError({ some: "object" }));
 });
 
+// Round-2 delta review, P2: the userinfo pattern originally required a user:pass PAIR — a bare
+// token userinfo (no colon at all) slipped through. Broadened to redact ANY userinfo shape.
+test("sanitizeUpstreamError: redacts a BARE-TOKEN URL userinfo (no colon) — e.g. a credentialed git remote shaped like https://<token>@host/...", () => {
+  const raw = "fatal: unable to access 'https://ghp_ABCDEFGHIJ0123456789abcdefghij@github.com/owner/repo.git/'";
+  const clean = sanitizeUpstreamError(raw);
+  assert.doesNotMatch(clean, /ghp_[A-Za-z0-9]{20,}/);
+  assert.match(clean, /:\/\/\[redacted\]@github\.com/, "the scheme and host survive, only the userinfo is redacted");
+});
+
+test("sanitizeUpstreamError: redacts a user:pass URL userinfo — e.g. https://user:pass@host/...", () => {
+  const raw = "fatal: unable to access 'https://someuser:some-secret-pass@github.com/owner/repo.git/'";
+  const clean = sanitizeUpstreamError(raw);
+  assert.doesNotMatch(clean, /someuser/);
+  assert.doesNotMatch(clean, /some-secret-pass/);
+  assert.match(clean, /:\/\/\[redacted\]@github\.com/);
+});
+
+test("sanitizeUpstreamError: redacts token/access_token/x-access-token query param VALUES, preserving the key name", () => {
+  for (const [key, url] of [
+    ["token", "https://api.example.com/foo?token=ghp_ABCDEFGHIJ0123456789abcdefghij"],
+    ["access_token", "https://api.example.com/foo?access_token=ghp_ABCDEFGHIJ0123456789abcdefghij"],
+    ["x-access-token", "https://api.example.com/foo?x-access-token=ghp_ABCDEFGHIJ0123456789abcdefghij"],
+  ] as const) {
+    const clean = sanitizeUpstreamError(url);
+    assert.doesNotMatch(clean, /ghp_[A-Za-z0-9]{20,}/, `${key} value should be redacted`);
+    assert.match(clean, new RegExp(`${key}=\\[redacted\\]`, "i"), `${key}= should be preserved verbatim`);
+  }
+});
+
 // ── canonicalization: deterministic key order regardless of input order ────────────────────
 
 test("canonicalJson: identical logical value canonicalizes identically regardless of key order", () => {
@@ -258,4 +309,233 @@ test("fetchIssueRelationsResponse: combines IForge relations with outgoing menti
   assert.equal(r.number, 1);
   assert.deepEqual(r.linkedPRs, relations.linkedPRs);
   assert.deepEqual(r.outgoingMentions, [5]);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #244: PR-facing tools' arg schema/scope/cap/error matrix — mirrors the #234 issue-tool matrix
+// above exactly (same strict-schema out-of-repo-scope enforcement, same over-cap contract).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("validateToolArgs: pr_details/pr_reviews/pr_checks valid shapes -> ok", () => {
+  assert.equal(validateToolArgs(TOOL_PR_DETAILS, { pr: 1 }, CAPS).ok, true);
+  assert.equal(validateToolArgs(TOOL_PR_REVIEWS, { pr: 1 }, CAPS).ok, true);
+  assert.equal(validateToolArgs(TOOL_PR_CHECKS, { pr: 1 }, CAPS).ok, true);
+});
+
+test("validateToolArgs: pr_review_threads valid with/without lastN -> ok", () => {
+  assert.equal(validateToolArgs(TOOL_PR_REVIEW_THREADS, { pr: 1 }, CAPS).ok, true);
+  assert.equal(validateToolArgs(TOOL_PR_REVIEW_THREADS, { pr: 1, lastN: 2 }, CAPS).ok, true);
+});
+
+test("validateToolArgs: PR tools reject malformed args (wrong shape) -> typed invalid_args error", () => {
+  for (const [tool, args] of [
+    [TOOL_PR_DETAILS, { pr: "not-a-number" }],
+    [TOOL_PR_REVIEWS, {}],
+    [TOOL_PR_REVIEW_THREADS, { pr: 1, lastN: "nope" }],
+    [TOOL_PR_CHECKS, { pr: 0 }], // positive-int required, 0 fails
+  ] as const) {
+    const r = validateToolArgs(tool, args, CAPS);
+    assert.equal(r.ok, false, `expected invalid_args for ${tool}`);
+    assert.equal(!r.ok && r.error.code, "invalid_args", `expected invalid_args for ${tool}`);
+  }
+});
+
+test("validateToolArgs: PR tools reject an out-of-repo-scope attempt (a caller-supplied repo field) — strict schema rejects the unrecognized key", () => {
+  const r = validateToolArgs(TOOL_PR_DETAILS, { pr: 1, repo: "someone-else/other-repo" }, CAPS);
+  assert.equal(r.ok, false);
+  assert.equal(!r.ok && r.error.code, "invalid_args");
+});
+
+test("validateToolArgs: pr_review_threads lastN over maxReviewThreadsPerCall -> REJECTED (typed over_cap error), never silently truncated", () => {
+  const r = validateToolArgs(TOOL_PR_REVIEW_THREADS, { pr: 1, lastN: 3 }, CAPS); // CAPS.maxReviewThreadsPerCall = 2
+  assert.equal(r.ok, false);
+  assert.equal(!r.ok && r.error.code, "over_cap");
+});
+
+test("validateToolArgs: pr_review_threads lastN at exactly the cap -> ok", () => {
+  assert.equal(validateToolArgs(TOOL_PR_REVIEW_THREADS, { pr: 1, lastN: 2 }, CAPS).ok, true);
+});
+
+// ── capThreads: same fail-toward-inclusion completeness contract as capComments ────────────
+
+function thread(id: string, createdAt?: string, commentsComplete = true): ReviewThreadItem {
+  return { id, isResolved: false, comments: createdAt ? [{ author: "a", body: "b", createdAt }] : [], commentsComplete };
+}
+
+test("capThreads: total at or under the cap -> complete, nothing omitted, pageCapped false by default", () => {
+  const all = [thread("T1"), thread("T2")];
+  const v = capThreads(all, 5);
+  assert.equal(v.complete, true);
+  assert.equal(v.returned, 2);
+  assert.equal(v.total, 2);
+  assert.equal(v.omittedRange, undefined);
+  assert.equal(v.pageCapped, false);
+  assert.deepEqual(v.threads, all);
+});
+
+test("capThreads: over the cap -> keeps the MOST RECENT N (not the oldest), complete false, omitted range names the cut", () => {
+  const all = [thread("oldest"), thread("middle"), thread("newest")];
+  const v = capThreads(all, 1);
+  assert.equal(v.complete, false);
+  assert.equal(v.total, 3);
+  assert.equal(v.returned, 1);
+  assert.deepEqual(v.threads, [all[2]]);
+  assert.deepEqual(v.omittedRange, { from: 1, to: 2 });
+});
+
+// ── capThreads ordering (Codex sol-high PR #260 review, P2): the reviewThreads connection has
+//    no documented ordering guarantee — "keep the most recent N" must sort by each thread's own
+//    first comment's createdAt, never assume array position already matches creation order. ──
+
+test("capThreads: sorts by first-comment createdAt before capping — an OUT-OF-ORDER connection (array position does NOT match chronological order) still keeps the truly most-recent threads", () => {
+  // Array/connection order: T2 (newest), T1 (oldest), T3 (middle) — deliberately NOT
+  // chronological, simulating a connection with no documented ordering guarantee.
+  const t2 = thread("T2", "2026-01-03T00:00:00Z");
+  const t1 = thread("T1", "2026-01-01T00:00:00Z");
+  const t3 = thread("T3", "2026-01-02T00:00:00Z");
+  const v = capThreads([t2, t1, t3], 2);
+  assert.equal(v.total, 3);
+  assert.equal(v.returned, 2);
+  // The two CHRONOLOGICALLY most recent are T3 (Jan 2) and T2 (Jan 3) — NOT the last two by
+  // ARRAY position (T1, T3), which is what a naive array.slice(-cap) would have kept.
+  assert.deepEqual(
+    v.threads.map((t) => t.id),
+    ["T3", "T2"],
+  );
+});
+
+test("capThreads: a comment-less thread sorts as the NEWEST (fail-toward-inclusion) — ahead of any timestamped thread — while two comment-less threads keep their OWN relative connection order (index tiebreak)", () => {
+  const timestamped = thread("timestamped", "2026-01-01T00:00:00Z");
+  const commentLessA = thread("commentless-a"); // no comments -> no sort key -> treated as newest
+  const commentLessB = thread("commentless-b");
+  // Connection order: commentLessA, commentLessB, timestamped.
+  const v = capThreads([commentLessA, commentLessB, timestamped], 3);
+  assert.deepEqual(
+    v.threads.map((t) => t.id),
+    ["timestamped", "commentless-a", "commentless-b"],
+  );
+});
+
+// Round-2 delta review, P2: the comparator MUST be transitive. Repro of the bug the original
+// (non-transitive) comparator had: comparator(new, commentless) = 0 and
+// comparator(commentless, old) = 0 do NOT imply comparator(new, old) = 0 — `Array.sort` assumes
+// a consistent total order and could return a result that depends on its own internal algorithm
+// rather than a well-defined answer. Under the broken comparator this repro returned "old" when
+// capped to 1 (wrong on every reading: not the most recent BY TIMESTAMP, and not "the one thread
+// with no visible content yet" either) — the fixed decorate-sort-undecorate comparator must
+// deterministically keep "commentless" (treated as newest, fail-toward-inclusion).
+test("capThreads: comparator transitivity repro — [new, commentless, old] capped to 1 deterministically keeps the comment-less thread (never 'old', the bug's actual failure mode)", () => {
+  const newT = thread("new", "2026-01-03T00:00:00Z");
+  const commentless = thread("commentless");
+  const oldT = thread("old", "2026-01-01T00:00:00Z");
+  const v = capThreads([newT, commentless, oldT], 1);
+  assert.equal(v.returned, 1);
+  assert.deepEqual(
+    v.threads.map((t) => t.id),
+    ["commentless"],
+  );
+});
+
+test("capThreads: pageCapped is threaded through from the caller, independent of lastN capping", () => {
+  const all = [thread("T1"), thread("T2")];
+  const complete = capThreads(all, 5, true);
+  assert.equal(complete.complete, false, "pageCapped alone makes the view incomplete even when returned === total");
+  assert.equal(complete.pageCapped, true);
+  const capped = capThreads(all, 1, true);
+  assert.equal(capped.complete, false);
+  assert.equal(capped.pageCapped, true);
+});
+
+// ── fetch* response shaping ─────────────────────────────────────────────────────────────────
+
+test("fetchPRDetailsResponse: passes IForge.getPRDetails through verbatim", async () => {
+  const details: PRDetails = { number: 5, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" };
+  const forge = { getPRDetails: async () => details };
+  assert.deepEqual(await fetchPRDetailsResponse(forge, 5), details);
+});
+
+test("fetchPRReviewsResponse: wraps IForge.getPRReviews with the pr number, threads caps.maxReviewsPerCall, sets completeness from total", async () => {
+  const reviews: PRReviewItem[] = [{ author: "codex", commitOid: "h1", state: "APPROVED", body: "LGTM" }];
+  const forge = {
+    getPRReviews: async (_pr: number, cap: number) => {
+      assert.equal(cap, CAPS.maxReviewsPerCall);
+      return { reviews, total: 1 };
+    },
+  };
+  const r = await fetchPRReviewsResponse(forge, 5, CAPS);
+  assert.equal(r.pr, 5);
+  assert.deepEqual(r.reviews, reviews);
+  assert.equal(r.total, 1);
+  assert.equal(r.returned, 1);
+  assert.equal(r.complete, true);
+});
+
+test("fetchPRReviewsResponse: complete is false when the fetch bound cut the connection short (returned < total)", async () => {
+  const reviews: PRReviewItem[] = [{ author: "codex", commitOid: "h1", state: "APPROVED", body: "LGTM" }];
+  const forge = { getPRReviews: async () => ({ reviews, total: 10 }) };
+  const r = await fetchPRReviewsResponse(forge, 5, CAPS);
+  assert.equal(r.complete, false);
+});
+
+test("fetchPRChecksResponse: wraps IForge.getPRChecks with the pr number, threads caps.maxChecksPerCall, sets completeness from total", async () => {
+  const checks: PRCheckItem[] = [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null }];
+  const forge = {
+    getPRChecks: async (_pr: number, cap: number) => {
+      assert.equal(cap, CAPS.maxChecksPerCall);
+      return { checks, total: 1 };
+    },
+  };
+  const r = await fetchPRChecksResponse(forge, 9, CAPS);
+  assert.equal(r.pr, 9);
+  assert.deepEqual(r.checks, checks);
+  assert.equal(r.total, 1);
+  assert.equal(r.returned, 1);
+  assert.equal(r.complete, true);
+});
+
+test("fetchPRChecksResponse: complete is false when the fetch bound cut the connection short", async () => {
+  const forge = { getPRChecks: async () => ({ checks: [], total: 10 }) };
+  const r = await fetchPRChecksResponse(forge, 9, CAPS);
+  assert.equal(r.complete, false);
+});
+
+test("fetchPRReviewThreadsResponse: no lastN -> server default cap (caps.maxReviewThreadsPerCall) applies, completeness flags set", async () => {
+  const all: ReviewThreadItem[] = [
+    thread("T1", "2026-01-01T00:00:00Z"),
+    thread("T2", "2026-01-02T00:00:00Z"),
+    thread("T3", "2026-01-03T00:00:00Z"),
+  ];
+  const forge = {
+    getPRReviewThreads: async (_pr: number, commentsCap: number) => {
+      assert.equal(commentsCap, CAPS.maxCommentsPerThread);
+      return { threads: all, pageCapped: false };
+    },
+  };
+  const r = await fetchPRReviewThreadsResponse(forge, 5, undefined, CAPS);
+  assert.equal(r.pr, 5);
+  assert.equal(r.total, 3);
+  assert.equal(r.returned, 2); // CAPS.maxReviewThreadsPerCall = 2
+  assert.equal(r.complete, false);
+  assert.equal(r.pageCapped, false);
+  assert.deepEqual(r.threads, [all[1], all[2]]);
+});
+
+test("fetchPRReviewThreadsResponse: explicit lastN overrides the server default cap", async () => {
+  const all: ReviewThreadItem[] = [
+    thread("T1", "2026-01-01T00:00:00Z"),
+    thread("T2", "2026-01-02T00:00:00Z"),
+    thread("T3", "2026-01-03T00:00:00Z"),
+  ];
+  const forge = { getPRReviewThreads: async () => ({ threads: all, pageCapped: false }) };
+  const r = await fetchPRReviewThreadsResponse(forge, 5, 1, CAPS);
+  assert.equal(r.returned, 1);
+  assert.deepEqual(r.threads, [all[2]]);
+});
+
+test("fetchPRReviewThreadsResponse: pageCapped from the underlying fetch propagates through — incomplete even when every fetched thread fits under lastN", async () => {
+  const all: ReviewThreadItem[] = [thread("T1", "2026-01-01T00:00:00Z")];
+  const forge = { getPRReviewThreads: async () => ({ threads: all, pageCapped: true }) };
+  const r = await fetchPRReviewThreadsResponse(forge, 5, undefined, CAPS);
+  assert.equal(r.complete, false, "pageCapped alone must make the response incomplete");
+  assert.equal(r.pageCapped, true);
 });

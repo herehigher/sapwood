@@ -41,12 +41,20 @@ import {
   fetchIssueCommentsResponse,
   fetchIssueDetailsView,
   fetchIssueRelationsResponse,
+  fetchPRChecksResponse,
+  fetchPRDetailsResponse,
+  fetchPRReviewsResponse,
+  fetchPRReviewThreadsResponse,
   fetchSearchIssuesResponse,
   type IssueCommentsArgs,
   type IssueDetailsArgs,
   type IssueRelationsArgs,
   mcpToolFullName,
+  type PRChecksArgs,
+  type PRDetailsArgs,
   PROXY_VERSION,
+  type PRReviewsArgs,
+  type PRReviewThreadsArgs,
   type ProxyCaps,
   type ProxyToolError,
   type SearchIssuesArgs,
@@ -56,11 +64,27 @@ import {
   TOOL_ISSUE_DETAILS,
   TOOL_ISSUE_RELATIONS,
   TOOL_NAMES,
+  TOOL_PR_DETAILS,
+  TOOL_PR_REVIEW_THREADS,
+  TOOL_PR_REVIEWS,
+  TOOL_SEARCH_ISSUES,
   type ToolName,
+  toolError,
   validateToolArgs,
 } from "./tools.js";
 
-export type ProxyForge = Pick<IForge, "getIssueMeta" | "getIssueBody" | "getIssueComments" | "getIssueRelations" | "searchIssues">;
+export type ProxyForge = Pick<
+  IForge,
+  | "getIssueMeta"
+  | "getIssueBody"
+  | "getIssueComments"
+  | "getIssueRelations"
+  | "searchIssues"
+  | "getPRDetails"
+  | "getPRReviews"
+  | "getPRReviewThreads"
+  | "getPRChecks"
+>;
 
 export interface ForgeProxyDeps {
   forge: ProxyForge;
@@ -72,6 +96,14 @@ export interface ForgeProxyDeps {
   /** Hard per-call ceiling — a hung upstream `gh` call must never wedge the session waiting on
    *  the proxy forever (mirrors worker.ts's own timeout-ceiling stance elsewhere in this repo). */
   timeoutMs: number;
+  /** #244: the fixed-algebra subset THIS session's role may call — proxy/access.ts's role x tool
+   *  matrix (deny-by-default for an unrecognized role). Omitted -> every fixed tool is allowed
+   *  (today's #234 behavior, unchanged — every existing caller that doesn't yet pass this keeps
+   *  working exactly as before). Enforced HERE, server-side (handleToolCall/`tools/list`), not
+   *  merely via the CLI's `--allowedTools` widening (`ForgeProxyHandle.toolNames` below narrows
+   *  to the same subset, but that's noise reduction only — same stance as every other
+   *  allowed/disallowedTools pair in this codebase, see peripheral.ts's doc). */
+  allowedTools?: readonly ToolName[];
   now?: () => Date;
   log?: (message: string) => void;
 }
@@ -83,7 +115,8 @@ export interface ForgeProxyHandle {
   /** Inline `--mcp-config` JSON — worker.ts's claudeArgs()/peripheral.ts's RoleRunner pass this
    *  straight through, never written to a file (same inline-never-a-file stance as --settings). */
   mcpConfigJson: string;
-  /** `mcp__forge__<tool>` for every fixed tool — the `--allowedTools` entries a session needs. */
+  /** `mcp__forge__<tool>` for every tool this session's role is granted (#244: ForgeProxyDeps.
+   *  allowedTools, all fixed tools when omitted) — the `--allowedTools` entries a session needs. */
   toolNames: string[];
   /** Revoke the token FIRST (any in-flight/late request 401s immediately), then close the
    *  listener and any still-open sockets. Idempotent — a second call is a no-op. */
@@ -111,7 +144,12 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
 
   const server: Server = createServer((req, res) => {
     void handleRequest(req, res).catch((e) => {
-      log(`[sapwood:forge-proxy] unhandled request error (non-fatal): ${String(e)}`);
+      // #244 (Codex sol-high PR #260 review, P2): every log interpolation of a caught error
+      // routes through sanitizeUpstreamError — this is a bare `log()` line, not a tool-result
+      // error (which already sanitizes via toolError), so it needed its own explicit scrub.
+      log(
+        `[sapwood:forge-proxy] unhandled request error (non-fatal): ${sanitizeUpstreamError(e instanceof Error ? e.message : String(e))}`,
+      );
       try {
         if (!res.headersSent) res.writeHead(500).end();
         else res.end();
@@ -193,8 +231,13 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
           serverInfo: { name: FORGE_MCP_SERVER_NAME, version: PROXY_VERSION },
         };
       }
-      case "tools/list":
-        return { tools: TOOL_DEFINITIONS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
+      case "tools/list": {
+        // #244: a role's `tools/list` view is scoped to its own allowed subset too — a denied
+        // tool isn't just rejected on call, it's never even ADVERTISED to this session.
+        const allowed = deps.allowedTools;
+        const visible = allowed === undefined ? TOOL_DEFINITIONS : TOOL_DEFINITIONS.filter((t) => allowed.includes(t.name));
+        return { tools: visible.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
+      }
       case "tools/call":
         return handleToolCall(rpc.params as { name?: string; arguments?: unknown } | undefined);
       default:
@@ -208,6 +251,16 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
     const validation = validateToolArgs(name, rawArgs, deps.caps);
     if (!validation.ok) return toolResultError(validation.error);
     const tool = name as ToolName; // validateToolArgs's isToolName check narrows this
+
+    // #244: role x tool matrix enforcement — a real, schema-valid tool name this SESSION's role
+    // isn't granted (proxy/access.ts). The REAL boundary (not the CLI's --allowedTools noise
+    // reduction) — see ForgeProxyDeps.allowedTools' doc. Checked AFTER schema/cap validation (a
+    // malformed call is still `invalid_args`/`over_cap` regardless of role) but BEFORE any
+    // budget/journal/upstream work — a denied call never even reserves budget or writes an
+    // intent row.
+    if (deps.allowedTools !== undefined && !deps.allowedTools.includes(tool)) {
+      return toolResultError(toolError("role_denied", `tool "${tool}" is not granted to this session's role`));
+    }
 
     // #234: deferred — see follow-up (Codex #8, PR #252 review; moves with #244/consumer
     // adoption). `withTimeout` below races the promise and rejects on the timer, but does NOT
@@ -284,23 +337,52 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
         truncated: value.truncated,
       };
     }
-    // TOOL_SEARCH_ISSUES — the fourth and last fixed-algebra member (validateToolArgs already
+    if (tool === TOOL_SEARCH_ISSUES) {
+      const { query } = args as z.infer<typeof SearchIssuesArgs>;
+      const value = await fetchSearchIssuesResponse(deps.forge, query, deps.caps);
+      // #234 F6: every matched issue's number, plus the most recent updatedAt among the matches
+      // (same batch-audit rationale as issue_details above) — `gh search issues` already returns
+      // updatedAt per result, so this costs nothing extra to thread through. Omitted (never
+      // explicit undefined, exactOptionalPropertyTypes) when a search legitimately returns zero
+      // matches.
+      const searchUpdatedAt = maxUpdatedAt(value.results.map((r) => r.updatedAt));
+      return {
+        value,
+        upstreamIds: value.results.map((r) => r.number),
+        ...(searchUpdatedAt !== undefined ? { upstreamUpdatedAt: searchUpdatedAt } : {}),
+        counts: { returned: value.results.length },
+        truncated: value.truncated,
+      };
+    }
+    if (tool === TOOL_PR_DETAILS) {
+      const { pr } = args as z.infer<typeof PRDetailsArgs>;
+      const value = await fetchPRDetailsResponse(deps.forge, pr);
+      // #244: a fixed-field single-PR read (no batching, no cap) — no updatedAt/truncation
+      // signal to report, same stance as issue_relations/issue_comments' no-updatedAt case.
+      return { value, upstreamIds: [pr] };
+    }
+    if (tool === TOOL_PR_REVIEWS) {
+      const { pr } = args as z.infer<typeof PRReviewsArgs>;
+      const value = await fetchPRReviewsResponse(deps.forge, pr, deps.caps);
+      // #244 (Codex sol-high PR #260 review, P1): same completeness-drives-truncation contract
+      // as issue_comments/pr_review_threads — a capped `reviews(last: cap)` fetch can be
+      // incomplete even with no client-supplied lastN to reject.
+      return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
+    }
+    if (tool === TOOL_PR_REVIEW_THREADS) {
+      const { pr, lastN } = args as z.infer<typeof PRReviewThreadsArgs>;
+      const value = await fetchPRReviewThreadsResponse(deps.forge, pr, lastN, deps.caps);
+      // #244: same completeness-drives-truncation contract as issue_comments above. truncated
+      // also fires on pageCapped (the underlying fetch's own 50-page safety ceiling), which
+      // capThreads/fetchPRReviewThreadsResponse already folds into `complete`.
+      return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
+    }
+    // TOOL_PR_CHECKS — the eighth and last fixed-algebra member (validateToolArgs already
     // rejected anything else as unknown_tool).
-    const { query } = args as z.infer<typeof SearchIssuesArgs>;
-    const value = await fetchSearchIssuesResponse(deps.forge, query, deps.caps);
-    // #234 F6: every matched issue's number, plus the most recent updatedAt among the matches
-    // (same batch-audit rationale as issue_details above) — `gh search issues` already returns
-    // updatedAt per result, so this costs nothing extra to thread through. Omitted (never
-    // explicit undefined, exactOptionalPropertyTypes) when a search legitimately returns zero
-    // matches.
-    const searchUpdatedAt = maxUpdatedAt(value.results.map((r) => r.updatedAt));
-    return {
-      value,
-      upstreamIds: value.results.map((r) => r.number),
-      ...(searchUpdatedAt !== undefined ? { upstreamUpdatedAt: searchUpdatedAt } : {}),
-      counts: { returned: value.results.length },
-      truncated: value.truncated,
-    };
+    const { pr } = args as z.infer<typeof PRChecksArgs>;
+    const value = await fetchPRChecksResponse(deps.forge, pr, deps.caps);
+    // #244 (Codex sol-high PR #260 review, P1): same completeness contract as pr_reviews above.
+    return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
   }
 
   await new Promise<void>((resolve, reject) => {
@@ -319,7 +401,10 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
     token,
     url,
     mcpConfigJson: buildMcpConfigJson(url, token),
-    toolNames: TOOL_NAMES.map(mcpToolFullName),
+    // #244: scoped to deps.allowedTools when supplied (proxy/access.ts's role x tool matrix) —
+    // the CLI's own `--allowedTools` widening never offers a role-denied tool as callable in the
+    // first place, consistent with (but not a substitute for) the server-side enforcement above.
+    toolNames: (deps.allowedTools ?? TOOL_NAMES).map(mcpToolFullName),
     stop: async () => {
       if (revoked) return; // idempotent
       revoked = true; // any in-flight/late request 401s from here, before the socket even closes
