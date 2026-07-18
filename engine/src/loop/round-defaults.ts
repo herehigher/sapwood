@@ -24,7 +24,7 @@ import type { RoleRunner } from "../roles/peripheral.js";
 import { createPlanReviewStub } from "../roles/plan-review.js";
 import type { State } from "../state/state.js";
 import { alignMarker, createAligningStub, runPoolSelection } from "./align.js";
-import { scanForAdjudication } from "./dissent.js";
+import { reconcileDurableConcerns, scanForAdjudication } from "./dissent.js";
 import { createHarvestStub } from "./harvest.js";
 import { type PeripheralPhase, type PeripheralStub, RoundScopedForge } from "./round.js";
 import { type AlignSection, mergeAlignSummary, type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
@@ -200,6 +200,12 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
       // regardless of whatever alignStub.run does internally (including its own early-return on
       // a corrupt proposal journal — align.ts's own doc comment). Scan-then-bail: this always
       // runs before the rest of the phase, whether or not that rest does anything at all.
+      // #237 round-2 adjudication (2026-07-19, finding 1): reconcileDurableConcerns runs FIRST —
+      // it's the durable backstop that recovers a concern align.ts's own (session-scoped)
+      // postConcerns call could never re-collect after its decision went terminal (see
+      // dissent.ts's own module doc) — so any concern it recovers is visible to THIS SAME round's
+      // scanForAdjudication call right below, not just a future one.
+      await reconcileDurableConcerns(forge, deps.state, deps.cfg, deps.log);
       await scanForAdjudication(forge, deps.state, deps.log);
       const result = deps.cfg.roles.po.enabled ? await alignStub.run(ctx) : { marker: alignMarker(ctx.roundId) };
       await runPoolSelection({

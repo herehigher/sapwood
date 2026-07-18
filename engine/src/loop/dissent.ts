@@ -46,8 +46,11 @@
 // Adjudication (#237 item 5) is the issue's OWN GitHub lifecycle, never a dedicated ack
 // protocol. `scanForAdjudication` checks every still-open concern against live GitHub state and
 // appends `concern-adjudicated` the moment ANY of the following is observed:
-//   - the issue closed -> outcome "closed". Attributable to a human act (closing/merging is not
-//     an engine write path this module or align.ts's PO ever takes).
+//   - the issue closed -> outcome "closed". #237 round-2 adjudication (2026-07-19, finding 3):
+//     this is ALSO neutral, not human-attributable — the conductor merges `Closes #N` PRs
+//     autonomously (round.ts), so an issue closing can be an ENGINE-caused merge just as easily
+//     as a human closing it by hand. No provenance tracking distinguishes them, deliberately
+//     (same stance as "body-changed" below).
 //   - a comment landed AFTER the concern comment that does NOT itself carry a `<!-- sapwood:`
 //     marker (this engine's own universal comment-marker convention, centrally stamped on EVERY
 //     comment this engine posts at the forge write boundary — see forge.ts's
@@ -55,20 +58,19 @@
 //     adjudication): renamed from "human-reply" — a reply from ANY non-sapwood-stamped actor
 //     (another bot, e.g. Codex's own review comments, not only a human) satisfies this check; it
 //     is a content check, not an identity check, and makes no claim about WHO replied beyond
-//     "not this engine."
+//     "not this engine." This is the ONLY outcome that carries any actor claim at all (and even
+//     that claim is "not this engine," never "a human specifically").
 //   - its body no longer hashes to the concern's own recorded hash -> outcome "body-changed".
 //     #237 finding 1 (2026-07-18 adjudication): renamed from "issue-edited" — this outcome makes
 //     NO claim about who changed the body. This engine's OWN writes (a later triage pass drafting
 //     a plan into the same issue, a plan-reviewer/drafter revision, ...) trigger it exactly like
 //     a human edit would; there is no provenance tracking here to tell them apart, deliberately
 //     (PM ruling, marginal-complexity: a bounded blind spot with this honesty note, not new
-//     machinery). Consequently "body-changed" is EXCLUDED from any human-activity/precision-
-//     metric semantics a future consumer might build on `concern-adjudicated` — only "closed" and
-//     "external-reply" are human/external-attributable. The self-heal for "body-changed" is
-//     RE-RAISE, not re-read: this event only ever resolves the OLD (now-stale) marker; if the PO
-//     still holds the concern, a LATER round's session raises the SAME worded concern again,
-//     which hashes against the (now current) body, produces a NEW marker, and reposts with a
-//     fresh mention — never silently re-adopting the old marker's already-closed state.
+//     machinery). The self-heal for "body-changed" is RE-RAISE, not re-read: this event only
+//     ever resolves the OLD (now-stale) marker; if the PO still holds the concern, a LATER
+//     round's session raises the SAME worded concern again, which hashes against the (now
+//     current) body, produces a NEW marker, and reposts with a fresh mention — never silently
+//     re-adopting the old marker's already-closed state.
 //   - "adopted" (an issue pulled from Ready without closing) is NOT detected here: #237 finding 5
 //     (2026-07-18 adjudication) — IForge has no cheap read of board-status/lane membership this
 //     module could use without adding new forge surface, and the PM ruling was not to build one
@@ -76,8 +78,13 @@
 //     observed only INDIRECTLY here (typically as "body-changed", if the pull came with an edit,
 //     or not at all if it didn't) — never as its own "adopted" outcome. Documented as a narrowed
 //     lifecycle claim, not a gap to silently paper over.
-// This module never runs an ack protocol and never gates on a reply's CONTENT — only its
-// presence/absence and authorship-by-marker.
+// #237 round-2 adjudication (2026-07-19, finding 3): consequently, a future precision-metric
+// consumer of `concern-adjudicated` can honestly attribute ONLY "external-reply" as any kind of
+// actor-driven signal (and even then, "not this engine" is the only claim, never "a human"
+// specifically) — "closed" and "body-changed" are both neutral/unattributed, since this engine's
+// own write paths (conductor merges, PO triage drafts) can produce either one. This module never
+// runs an ack protocol and never gates on a reply's CONTENT — only its presence/absence and
+// authorship-by-marker.
 //
 // #237 finding 5 (2026-07-18 adjudication): the scan must run EVERY round regardless of
 // `roles.po.enabled` and regardless of align.ts's own internal early-returns (e.g. a corrupt
@@ -85,6 +92,39 @@
 // wrapper calls `scanForAdjudication` directly, unconditionally, decoupled from whether
 // `alignStub.run` (which owns `postConcerns`, since only IT knows this round's freshly validated
 // concerns) ran at all this round.
+//
+// #237 round-2 adjudication (2026-07-19, finding 1): `postConcerns` alone is NOT a durable-enough
+// delivery guarantee. align.ts's per-round triage loop only re-collects a decision's concerns
+// into THIS round's post queue while that decision is still non-terminal in ITS OWN round's
+// journal (triageProgress/proposalProgress, both round-scoped) — a decision that reached its
+// TERMINAL receipt (`triage-effects-committed`, or a proposal's terminal event) on an EARLIER
+// attempt is short-circuited (`continue`) on any later same-round rerun, before concern
+// collection ever runs again. If the crash landed strictly between that terminal receipt and
+// `postConcerns` actually delivering the concern (never dispatched a second po-triage/po-align
+// session — that would be wasteful and is not what happens), the concern is invisible to EVERY
+// future attempt at that round's own per-issue loop — a permanent loss no manual "try again"
+// within the round can reach, since the terminal check is exactly what makes triage/align
+// idempotent in the first place. `reconcileDurableConcerns` is the durable backstop for this:
+// unlike `postConcerns` (session-scoped, in-memory `triageConcernsCollected`/`alignValidated`),
+// it reads the concerns EMBEDDED IN the write-ahead decision events themselves
+// (`triage-decision-accepted`/`proposal-set-persisted` — #232/#216's own persist-first events,
+// which this module's finding-6 fix already made concerns ride along with) across the WHOLE
+// ledger, not just this round's journal, and re-runs `postConcernIfNew` for any embedded concern
+// with no matching `concern-posted` receipt yet — idempotent by construction (posts fresh if the
+// comment never landed either, or reconciles the receipt if it did). Called unconditionally,
+// every round, from round-defaults.ts's aligning wrapper (the same home `scanForAdjudication`
+// already uses) — never gated on session memory, so a same-round crash-rerun OR a much later
+// round both recover it identically.
+//
+// #237 round-2 adjudication (2026-07-19, finding 2): `reconcileDurableConcerns` always posts
+// (or reconciles) using the DECISION EVENT'S OWN `round_id` — never the round the sweep happens
+// to run in — since that decision event is the one durable source of truth for "which round this
+// concern actually belongs to." This matters for round-artifact.ts's per-round "Objections
+// raised" section: a `concern-posted` event landing in round N+2's event-ID window but carrying
+// `round_id: N` in its payload is NOT something round N+2 delivered — round-artifact.ts's
+// assembleRoundArtifact checks the payload's `round_id` against the round being assembled and
+// routes a mismatch into a separate "reconciled from an earlier round" list, never the main
+// per-round list (see that module's own doc comment).
 //
 // Explicitly OUT of scope (issue #237 item 7): no auto-escalation of any kind. The durable
 // `concern-posted`/`concern-adjudicated` events carry `issue`, `round_id`, and `hash` — enough
@@ -339,5 +379,60 @@ export async function postConcerns(deps: PostConcernsDeps): Promise<void> {
   const log = deps.log ?? console.error;
   for (const concern of deps.concerns) {
     await postConcernIfNew(deps.forge, deps.state, deps.cfg, deps.roundId, concern, log);
+  }
+}
+
+const DecisionConcernsEventSchema = z
+  .object({ round_id: z.number().int().positive(), concerns: z.array(ConcernSchema).optional() })
+  .passthrough();
+const ConcernReceiptEventSchema = z
+  .object({ round_id: z.number().int().positive(), issue: z.number().int().positive(), reason: z.string() })
+  .passthrough();
+
+/** #237 round-2 adjudication (finding 1): the DURABLE backstop `postConcerns` alone cannot be —
+ *  see the module doc's own "finding 1" note for the exact crash window this closes. Reads every
+ *  `triage-decision-accepted`/`proposal-set-persisted` event on the WHOLE ledger (never scoped to
+ *  a single round — that scoping is exactly what makes the in-memory path fragile), extracts each
+ *  one's embedded `concerns` array, and re-runs `postConcernIfNew` — using THAT DECISION's OWN
+ *  `round_id` (#237 finding 2, never the round this sweep happens to run in) — for every concern
+ *  that has no matching `concern-posted` receipt yet, keyed by (round_id, issue, reason): the
+ *  ONE stable triple both event shapes carry (the hash itself is NOT stable ahead of time — it
+ *  depends on the issue's body at whatever moment posting/reconciling actually happens).
+ *
+ *  Idempotent and safe to call every round, forever: `postConcernIfNew` itself is idempotent (a
+ *  live marker match reconciles or no-ops; module doc), and this function's OWN receipt lookup
+ *  additionally skips any concern that already has a matching event, so a concern that posted
+ *  cleanly the very first time costs this sweep nothing beyond the receipt lookup itself ever
+ *  again. A full-ledger scan (not an incremental cursor) is the same "record, not gate" tradeoff
+ *  this codebase already accepts elsewhere (e.g. align.ts's own proposalProgress/triageProgress,
+ *  which read `state.eventsAfterId(0, ...)` unbounded and filter client-side) — concern volume is
+ *  expected to be low (structured objections are rare, not a bulk mechanism), so this is a
+ *  deliberate simplicity choice, not an oversight. */
+export async function reconcileDurableConcerns(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  log?: (message: string) => void,
+): Promise<void> {
+  const warn = log ?? console.error;
+  const decisionEvents = state.eventsAfterId(0, ["triage-decision-accepted", "proposal-set-persisted"]);
+  const receiptEvents = state.eventsAfterId(0, ["concern-posted"]);
+  const receiptKeys = new Set<string>();
+  for (const e of receiptEvents) {
+    const parsed = ConcernReceiptEventSchema.safeParse(e.payload);
+    if (!parsed.success) continue; // malformed receipt — never thrown, just excluded from the "already delivered" set
+    receiptKeys.add(`${parsed.data.round_id}:${parsed.data.issue}:${parsed.data.reason}`);
+  }
+  const pending: Array<{ roundId: number; concern: Concern }> = [];
+  for (const e of decisionEvents) {
+    const parsed = DecisionConcernsEventSchema.safeParse(e.payload);
+    if (!parsed.success) continue; // malformed/pre-#237 decision record — nothing to sweep from it
+    for (const concern of parsed.data.concerns ?? []) {
+      const key = `${parsed.data.round_id}:${concern.issue}:${concern.reason}`;
+      if (!receiptKeys.has(key)) pending.push({ roundId: parsed.data.round_id, concern });
+    }
+  }
+  for (const { roundId, concern } of pending) {
+    await postConcernIfNew(forge, state, cfg, roundId, concern, warn);
   }
 }

@@ -22,6 +22,7 @@ import {
   concernMarker,
   isSapwoodComment,
   postConcerns,
+  reconcileDurableConcerns,
   scanForAdjudication,
   unadjudicatedConcerns,
   validateConcerns,
@@ -437,4 +438,176 @@ test("unadjudicatedConcerns: a matching concern-adjudicated event removes the (i
     { kind: "concern-adjudicated", payload: { issue: 5, hash: "abc", outcome: "closed" } },
   ];
   assert.equal(unadjudicatedConcerns(events).size, 0);
+});
+
+// ── reconcileDurableConcerns (#237 round-2 adjudication, finding 1): the durable backstop ──
+//
+// align.ts's own per-round journal (triageProgress/proposalProgress) short-circuits a decision
+// the INSTANT it reaches its terminal receipt — so a concern whose post never completed (crash
+// strictly between the terminal receipt landing and postConcerns finishing) can NEVER be
+// re-collected by that in-memory, per-round path again, even on a same-round rerun. These tests
+// seed the EXACT durable event shapes align.ts itself would have written (a
+// triage-decision-accepted / proposal-set-persisted event carrying `concerns`, PLUS a terminal
+// receipt) with NO matching concern-posted event, and verify the sweep recovers it — reading only
+// the durable ledger, never any in-memory queue.
+
+test("reconcileDurableConcerns: a triage-decision-accepted concern with a terminal receipt already landed, but NO concern-posted event, is recovered — the real terminal-replay path (finding 1)", async () => {
+  const forge = new FakeForge();
+  forge.bodies[91] = "planless body\n## Verification\n- x"; // the ALREADY-COMMITTED body (post-write)
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  // Exactly what align.ts's triage loop persists — concerns riding along, per this issue's own
+  // finding-6 fix.
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 5,
+    issue: 91,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:91",
+    attempt: 1,
+    body: forge.bodies[91],
+    expected_hash: "irrelevant-to-this-sweep",
+    concerns: [{ issue: 91, reason: "this issue's premise seems wrong" }],
+  });
+  // The decision reached its TERMINAL receipt — align.ts's own per-round journal now
+  // short-circuits any same-round re-collection of this decision's concerns forever.
+  state.appendEvent("triage-effects-committed", {
+    round_id: 5,
+    issue: 91,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:91",
+    attempt: 1,
+  });
+  // NO concern-posted event exists — the crash landed strictly between the terminal receipt and
+  // postConcerns() actually delivering this concern (never posted at all in this scenario).
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0);
+
+  // A LATER round's unconditional sweep (round-defaults.ts's wiring) runs.
+  await reconcileDurableConcerns(forge, state, cfg);
+
+  assert.equal(forge.comments[91]?.length, 1, "the sweep posted the concern fresh — it never existed on GitHub before this");
+  const events = state.eventsAfterId(0, ["concern-posted"]);
+  assert.equal(events.length, 1);
+  // #237 finding 2: attributed to the DECISION's own original round (5), never the sweep's
+  // current round (8).
+  assert.equal((events[0]!.payload as { round_id: number }).round_id, 5);
+  state.close();
+});
+
+test("reconcileDurableConcerns: the comment ALREADY posted (crash between comment and receipt) is reconciled with the ORIGINAL round_id, not the sweep's current round (finding 2)", async () => {
+  const forge = new FakeForge();
+  forge.bodies[91] = "body";
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  const concern: Concern = { issue: 91, reason: "premise seems wrong" };
+  const hash = concernHash(concern.reason, "body");
+  // The comment already landed on GitHub in round 5 (simulated directly, bypassing dissent.ts —
+  // exactly what "crashed after addIssueComment, before the event append" looks like).
+  await forge.addIssueComment(91, `some note\n\n${concernMarker(91, hash)}`);
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 5,
+    issue: 91,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:91",
+    attempt: 1,
+    body: "body",
+    expected_hash: "x",
+    concerns: [concern],
+  });
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 0);
+
+  await reconcileDurableConcerns(forge, state, cfg); // running in round 8, well after round 5
+
+  assert.equal(forge.comments[91]?.length, 1, "no repost — the live marker was already there");
+  const events = state.eventsAfterId(0, ["concern-posted"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, { round_id: 5, issue: 91, reason: concern.reason, hash, reconciled: true });
+  state.close();
+});
+
+test("reconcileDurableConcerns: align-mode concerns embedded in proposal-set-persisted are ALSO swept", async () => {
+  const forge = new FakeForge();
+  forge.bodies[42] = "existing issue body";
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  state.appendEvent("proposal-set-persisted", {
+    round_id: 3,
+    proposals: [],
+    concerns: [{ issue: 42, reason: "align concern, never delivered" }],
+  });
+
+  await reconcileDurableConcerns(forge, state, cfg);
+
+  assert.equal(forge.comments[42]?.length, 1);
+  const events = state.eventsAfterId(0, ["concern-posted"]);
+  assert.equal((events[0]!.payload as { round_id: number }).round_id, 3);
+  state.close();
+});
+
+test("reconcileDurableConcerns: idempotent — a second sweep does not repost or duplicate the receipt", async () => {
+  const forge = new FakeForge();
+  forge.bodies[91] = "body";
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 5,
+    issue: 91,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:91",
+    attempt: 1,
+    body: "body",
+    expected_hash: "x",
+    concerns: [{ issue: 91, reason: "x" }],
+  });
+
+  await reconcileDurableConcerns(forge, state, cfg);
+  await reconcileDurableConcerns(forge, state, cfg);
+
+  assert.equal(forge.comments[91]?.length, 1);
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 1);
+  state.close();
+});
+
+test("reconcileDurableConcerns: a decision that ALREADY has a matching receipt is never re-swept (no wasted forge calls)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 5,
+    issue: 91,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:91",
+    attempt: 1,
+    body: "body",
+    expected_hash: "x",
+    concerns: [{ issue: 91, reason: "already delivered cleanly" }],
+  });
+  state.appendEvent("concern-posted", { round_id: 5, issue: 91, reason: "already delivered cleanly", hash: "whatever-hash" });
+
+  await reconcileDurableConcerns(forge, state, cfg);
+
+  assert.equal(Object.keys(forge.comments).length, 0, "no forge call at all — the receipt already matched");
+  assert.equal(state.eventsAfterId(0, ["concern-posted"]).length, 1, "no duplicate receipt");
+  state.close();
+});
+
+test("reconcileDurableConcerns: a malformed decision event (no concerns array) and a malformed receipt are both skipped, never thrown", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  state.appendEvent("triage-decision-accepted", { round_id: 5, issue: 91, body: "x" }); // no concerns field at all — pre-#237 shape
+  state.appendEvent("concern-posted", { issue: 5 }); // malformed receipt — missing round_id/reason
+  await assert.doesNotReject(() => reconcileDurableConcerns(forge, state, cfg));
+  assert.equal(Object.keys(forge.comments).length, 0);
+  state.close();
+});
+
+test("round-defaults integration (#237 round-2 adjudication, finding 1+2): reconcileDurableConcerns is what round-defaults.ts's aligning wrapper actually calls — sanity import check", () => {
+  // Full round.ts/round-defaults.ts integration coverage lives in round-defaults.test.ts; this
+  // file only asserts the function this module exports is the one that gets wired there.
+  assert.equal(typeof reconcileDurableConcerns, "function");
 });

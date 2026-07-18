@@ -98,8 +98,24 @@ export const RoundArtifactSchema = z
     // idempotent by marker, so this is "delivered", not "raised" — a duplicate the marker
     // suppressed never lands here twice). `.default([])` so a PRE-#237 persisted round_artifacts
     // row (round-defaults.ts's RoundArtifactSchema.parse of an old JSON blob) still parses —
-    // absent reads as "no objections", the same as an empty array.
+    // absent reads as "no objections", the same as an empty array. ONLY concern-posted events
+    // whose OWN payload `round_id` matches THIS round (assembleRoundArtifact checks this
+    // explicitly, never event-ID-window membership alone) — #237 round-2 adjudication (finding 2)
+    // fixed a real misattribution: dissent.ts's reconcileDurableConcerns (the durable sweep) can
+    // append a concern-posted event whose event ID falls inside a LATER round's window while its
+    // payload still names the concern's true ORIGINAL round — that event belongs in
+    // `concernsReconciled` below, never here.
     concerns: z.array(z.object({ issue: z.number().int(), reason: z.string() }).strict()).default([]),
+    // #237 round-2 adjudication (2026-07-19, finding 2): concern-posted events that land in THIS
+    // round's event-ID window but carry a DIFFERENT round_id in their payload — i.e. the durable
+    // sweep (dissent.ts's reconcileDurableConcerns) caught up a receipt (or, rarely, delivered a
+    // long-overdue first post) for a concern that actually belongs to an earlier round whose own
+    // artifact already closed without it. Listed separately so nothing silently vanishes from the
+    // round-summary VIEW, without falsely claiming THIS round raised it. `.default([])` for the
+    // same pre-#237 back-compat reason as `concerns` above.
+    concernsReconciled: z
+      .array(z.object({ issue: z.number().int(), reason: z.string(), originRound: z.number().int() }).strict())
+      .default([]),
   })
   .strict();
 
@@ -211,6 +227,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
     triaged: Array<{ issue: number; drafted: boolean }>;
   } | null = null;
   const concerns: Array<{ issue: number; reason: string }> = [];
+  const concernsReconciled: Array<{ issue: number; reason: string; originRound: number }> = [];
 
   const addNeedsHuman = (issue: unknown): void => {
     if (typeof issue === "number" && !needsHumanSet.has(issue)) {
@@ -291,11 +308,20 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
         // vanish from the source of truth. Union by issue; triage outcome: last wins.
         align = mergeAlignSummary(align, p);
         break;
-      case "concern-posted":
-        // #237: one entry per concern actually DELIVERED this round (dissent.ts's marker check
-        // already dedups cross-round — a suppressed repost never appends this event at all).
-        concerns.push({ issue: p.issue as number, reason: String(p.reason ?? "") });
+      case "concern-posted": {
+        // #237: one entry per concern actually DELIVERED (dissent.ts's marker check already
+        // dedups cross-round — a suppressed repost never appends this event at all). #237
+        // round-2 adjudication (finding 2): the payload's OWN `round_id` — not event-ID-window
+        // membership — decides whether this belongs to THIS round's "delivered" list or the
+        // separate "reconciled from an earlier round" one; dissent.ts's reconcileDurableConcerns
+        // (the durable sweep) can append an event in a LATER round's window whose payload still
+        // names the concern's true original round.
+        const payloadRoundId = typeof p.round_id === "number" ? p.round_id : meta.roundId;
+        const entry = { issue: p.issue as number, reason: String(p.reason ?? "") };
+        if (payloadRoundId === meta.roundId) concerns.push(entry);
+        else concernsReconciled.push({ ...entry, originRound: payloadRoundId });
         break;
+      }
       case "po-degraded":
       case "triage-degraded":
       case "architect-degraded":
@@ -350,6 +376,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
     retro: { opened: retroOpened, degraded: retroDegraded },
     align,
     concerns,
+    concernsReconciled,
   };
 }
 
@@ -442,6 +469,19 @@ export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
       "Objections raised",
       artifact.concerns.map((c) => `- #${c.issue}: ${c.reason}`),
     ),
+    // #237 round-2 adjudication (2026-07-19, finding 2): concerns the durable sweep
+    // (dissent.ts's reconcileDurableConcerns) caught up THIS round but that actually belong to an
+    // earlier round — never folded into "Objections raised" above (that would falsely claim THIS
+    // round raised them). Omitted entirely (not even a "(none)" placeholder) when empty — the
+    // common case — so a round that never reconciles anything renders no extra noise.
+    ...(artifact.concernsReconciled.length > 0
+      ? [
+          section(
+            "Objections reconciled from earlier rounds",
+            artifact.concernsReconciled.map((c) => `- #${c.issue} (originally round ${c.originRound}): ${c.reason}`),
+          ),
+        ]
+      : []),
   ];
   return parts.join("\n\n");
 }

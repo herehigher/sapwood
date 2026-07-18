@@ -249,6 +249,35 @@ test("RoundArtifactSchema #237: a pre-#237 persisted artifact (no `concerns` fie
   assert.deepEqual(parsed.concerns, []);
 });
 
+test("RoundArtifactSchema #237 round-2 adjudication (finding 2): a pre-existing artifact with no `concernsReconciled` field still parses — defaults to an empty array", () => {
+  const preExisting = { ...assembleRoundArtifact([], meta, 0, 30) } as Record<string, unknown>;
+  delete preExisting.concernsReconciled;
+  const parsed = RoundArtifactSchema.parse(preExisting);
+  assert.deepEqual(parsed.concernsReconciled, []);
+});
+
+test("assembleRoundArtifact #237 round-2 adjudication (finding 2): a concern-posted event whose payload round_id matches THIS round's is a 'delivered this round' entry", () => {
+  const artifact = assembleRoundArtifact(
+    [{ kind: "concern-posted", payload: { round_id: 8, issue: 42, reason: "premise seems wrong", hash: "abc" } }],
+    { roundId: 8, startedAt: meta.startedAt, endedAt: meta.endedAt },
+    0,
+    30,
+  );
+  assert.deepEqual(artifact.concerns, [{ issue: 42, reason: "premise seems wrong" }]);
+  assert.deepEqual(artifact.concernsReconciled, []);
+});
+
+test("assembleRoundArtifact #237 round-2 adjudication (finding 2): a concern-posted event whose payload round_id DIFFERS from this round's is routed to concernsReconciled, NEVER claimed as delivered this round", () => {
+  const artifact = assembleRoundArtifact(
+    [{ kind: "concern-posted", payload: { round_id: 5, issue: 42, reason: "premise seems wrong", hash: "abc", reconciled: true } }],
+    { roundId: 8, startedAt: meta.startedAt, endedAt: meta.endedAt }, // this round is 8; the concern belongs to round 5
+    0,
+    30,
+  );
+  assert.deepEqual(artifact.concerns, [], "round 8 never raised this — must not falsely claim it");
+  assert.deepEqual(artifact.concernsReconciled, [{ issue: 42, reason: "premise seems wrong", originRound: 5 }]);
+});
+
 // ── renderRoundArtifactMarkdown: deterministic view, never independently authored ───────────
 
 test("renderRoundArtifactMarkdown: same artifact -> byte-identical markdown every time (deterministic)", () => {
@@ -292,6 +321,22 @@ test("renderRoundArtifactMarkdown #237: an 'Objections raised' section lists eve
     ),
   );
   assert.match(withConcerns, /## Objections raised\n- #42: premise seems wrong/);
+});
+
+test("renderRoundArtifactMarkdown #237 round-2 adjudication (finding 2): a reconciled-from-earlier-round concern gets its OWN section, naming the origin round; the section is OMITTED entirely (not even '(none)') when there's nothing to reconcile", () => {
+  const noReconciled = renderRoundArtifactMarkdown(assembleRoundArtifact([], meta, 0, 30));
+  assert.doesNotMatch(noReconciled, /Objections reconciled/);
+
+  const withReconciled = renderRoundArtifactMarkdown(
+    assembleRoundArtifact(
+      [{ kind: "concern-posted", payload: { round_id: 5, issue: 42, reason: "premise seems wrong", hash: "abc", reconciled: true } }],
+      { roundId: 8, startedAt: meta.startedAt, endedAt: meta.endedAt },
+      0,
+      30,
+    ),
+  );
+  assert.match(withReconciled, /## Objections reconciled from earlier rounds\n- #42 \(originally round 5\): premise seems wrong/);
+  assert.doesNotMatch(withReconciled, /## Objections raised\n- #42/, "never double-counted under 'Objections raised' too");
 });
 
 test("capRoundArtifactMarkdown: deterministically truncates at the char cap (delegates to retro-digest.ts's capDigest)", () => {
