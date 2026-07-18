@@ -1,12 +1,15 @@
-// prompts.test.ts (#235 PR-B): snapshot tests for the role prompt templates under
-// engine/prompts/ — every prompt this issue's "role-scoped discretion" flip touches gets a
-// content hash pinned here (any future edit, intentional or not, must update the hash alongside
-// it — the whole point of a snapshot test) PLUS assertions on the specific new/retained
-// language the issue's acceptance criteria name. retro.md gets ONLY a hash pin: item 3's "retro
-// unchanged (already code-aware) — do not touch" is itself a regression trip-wire this test
-// enforces. po-pool.md is pinned too even though this PR doesn't touch it (its non-negotiables
-// never carried the "wanting to open a file" language po.md did, so there was nothing to flip)
-// — same trip-wire reasoning.
+// prompts.test.ts (#235 PR-B, F1 follow-up): snapshot tests for the role prompt templates under
+// engine/prompts/ — every prompt this issue's "role-scoped discretion" flip touches (po.md,
+// architect.md, plan-reviewer.md, plan-drafter.md, harvest.md) gets a content hash pinned here
+// (any future edit, intentional or not, must update the hash alongside it — the whole point of
+// a snapshot test) PLUS assertions on the specific new/retained language the issue's acceptance
+// criteria name. plan-drafter.md's flip landed one round later than the other four (a review
+// finding: the matrix grants it Read/Grep/Glob same as every peripheral role, but its prompt
+// still forbade opening a file) — same shape as the others, added here for the same reason.
+// retro.md gets ONLY a hash pin: item 3's "retro unchanged (already code-aware) — do not touch"
+// is itself a regression trip-wire this test enforces. po-pool.md is pinned too even though this
+// PR doesn't touch it (its non-negotiables never carried the "wanting to open a file" language
+// po.md did, so there was nothing to flip) — same trip-wire reasoning.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -15,7 +18,7 @@ import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultRetroPromptPath } from "../retro/retro.js";
 import { defaultArchitectPromptPath } from "./architect.js";
-import { defaultPlanReviewerPromptPath } from "./plan-review.js";
+import { defaultPlanDrafterPromptPath, defaultPlanReviewerPromptPath } from "./plan-review.js";
 
 function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
@@ -31,6 +34,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   "po.md": "7f37fc9e0555e3e6b8f5ef1b2e381b46010f9619bf4aea015fc39f09847bce9b",
   "architect.md": "897b46fd4d8803ad7b25dc1ec467f29a56139af80ed8b7bb44fc42624441cbc5",
   "plan-reviewer.md": "d95245c8236e41bf3b33431e2d5d4dcea516dd3ca2719fee3ecdb76244ffe9c7",
+  "plan-drafter.md": "3d65a3d7b198c4ac523da925c72f4fc3d552865461dbb2be6d06cc7b38a7a575",
   "harvest.md": "c05f0751f6087666860f7568c4613a208dc85f4c5e92ee792f88fc3b5a20ae98",
   "retro.md": "d667893510d96a67e5e8041861daa2d6767e708acfeca2f98c498e09e6a21917",
   "po-pool.md": "20ccec5f8a073f7424651c195c7b85ea685bfe2c2bf49dc9420755e9b2d60b1d",
@@ -46,6 +50,10 @@ test("prompt snapshot: architect.md hash matches the pinned #235 PR-B revision",
 
 test("prompt snapshot: plan-reviewer.md hash matches the pinned #235 PR-B revision", () => {
   assert.equal(sha256(readPrompt(defaultPlanReviewerPromptPath())), SNAPSHOT_HASHES["plan-reviewer.md"]);
+});
+
+test("prompt snapshot: plan-drafter.md hash matches the pinned #235 PR-B revision", () => {
+  assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
 });
 
 test("prompt snapshot: harvest.md hash matches the pinned #235 PR-B revision", () => {
@@ -95,4 +103,16 @@ test("harvest.md (#235 AC item 3): repository reads must not alter ledger facts 
     "names the comment-scope invariant explicitly",
   );
   assert.ok(body.includes("Read`/`Grep`/`Glob`"), "names the actual read-only grant");
+});
+
+test("plan-drafter.md (#235 PR-B follow-up F1): the matrix grants plan-drafter Read/Grep/Glob (it's a peripheral role, no allowedTools override at its plan-review.ts callsite — falls back to the base), so the prompt's old 'wanting to open a file = wrong role' line — which contradicted that grant — is gone, replaced by role-scoped discretion; 'plan-author ≠ plan-approver' and 'never implement' survive verbatim in spirit", () => {
+  const body = readPrompt(defaultPlanDrafterPromptPath());
+  assert.ok(
+    !body.includes("wanting to open a file or run tests"),
+    "the old blanket file-read prohibition (contradicting the matrix) is gone",
+  );
+  assert.ok(body.includes("Read`/`Grep`/`Glob`"), "names the actual read-only grant");
+  assert.ok(body.includes("plan-author ≠ plan-approver."), "the plan-author ≠ plan-approver boundary survives verbatim");
+  assert.ok(body.toLowerCase().includes("never implement"), "the never-implement boundary survives");
+  assert.ok(body.includes("producer ≠ plan-drafter."), "the core intent-prohibition heading survives verbatim");
 });

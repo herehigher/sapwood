@@ -264,6 +264,7 @@ mkdir -p "${worktreeRoot}/$wt"
 echo '{"type":"system","subtype":"init","model":"claude-stub-model"}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"1","name":"Read","input":{"file_path":"src/foo.ts"}}]}}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"2","name":"Grep","input":{"pattern":"TODO","path":"src"}}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"3","name":"Glob","input":{"pattern":"**/*.ts"}}]}}'
 echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"claude-stub-model"}'
 exit 0
 `,
@@ -276,8 +277,13 @@ exit 0
     assert.deepEqual(manifest!.toolUsage, [
       { tool: "Read", count: 1 },
       { tool: "Grep", count: 1 },
+      { tool: "Glob", count: 1 },
     ]);
-    assert.deepEqual(manifest!.readPaths, ["src", "src/foo.ts"]);
+    // #235 PR-B F2 (Codex review): the pathless Glob call still searched (and read from) this
+    // session's own worktree root — RoleRunner threads it through as parseToolUsage's
+    // defaultSearchPath, so it lands in readPaths rather than silently vanishing. Sorted: the
+    // absolute worktree path (leading "/") sorts before the relative "src"/"src/foo.ts" entries.
+    assert.deepEqual(manifest!.readPaths, [join(worktreeRoot, result.name), "src", "src/foo.ts"]);
     // The read-only Read/Grep/Glob grant (#235 PR-B's universal baseline) must NOT flip
     // worktree.dirty — that's the hasWriteCapableGrant fix this same PR makes: a non-empty
     // allow-list is no longer synonymous with "write-capable" now that Read/Grep/Glob is the

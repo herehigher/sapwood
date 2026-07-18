@@ -327,20 +327,51 @@ test("parseToolUsage: counts tool_use blocks by name and collects Read/Grep/Glob
   assert.deepEqual(readPaths, ["/wt/src", "/wt/src/a.ts", "/wt/src/b.ts"], "sorted, deduplicated");
 });
 
-test("parseToolUsage: Glob's path is captured when present, absent when the call searched cwd (no path field at all)", () => {
+test("parseToolUsage: Glob's explicit path is always captured verbatim, regardless of defaultSearchPath", () => {
   const withPath = JSON.stringify({
     type: "assistant",
     message: { content: [{ type: "tool_use", id: "1", name: "Glob", input: { pattern: "**/*.ts", path: "/wt/src" } }] },
   });
   assert.deepEqual(parseToolUsage(withPath).readPaths, ["/wt/src"]);
+  assert.deepEqual(parseToolUsage(withPath, "/wt").readPaths, ["/wt/src"], "explicit path wins over defaultSearchPath, never overridden");
+});
 
-  const noPath = JSON.stringify({
+test("parseToolUsage (Codex review PR #257 F2): a PATHLESS Grep/Glob call still searches — and reads — the session's cwd, so it's recorded under defaultSearchPath when the caller supplies one (peripheral.ts passes the session's worktree root)", () => {
+  const noPathGlob = JSON.stringify({
     type: "assistant",
     message: { content: [{ type: "tool_use", id: "1", name: "Glob", input: { pattern: "**/*.ts" } }] },
   });
-  const result = parseToolUsage(noPath);
-  assert.deepEqual(result.toolUsage, [{ tool: "Glob", count: 1 }]);
-  assert.deepEqual(result.readPaths, [], "no path field -> nothing to record, tool usage still counted");
+  const withoutDefault = parseToolUsage(noPathGlob);
+  assert.deepEqual(withoutDefault.toolUsage, [{ tool: "Glob", count: 1 }]);
+  assert.deepEqual(
+    withoutDefault.readPaths,
+    [],
+    "defaultSearchPath omitted -> caller doesn't know the worktree root yet, degrades honestly rather than fabricating one",
+  );
+
+  const withDefault = parseToolUsage(noPathGlob, "/wt/probe-role-1");
+  assert.deepEqual(withDefault.toolUsage, [{ tool: "Glob", count: 1 }]);
+  assert.deepEqual(
+    withDefault.readPaths,
+    ["/wt/probe-role-1"],
+    "pathless Glob recorded under the supplied worktree root — it DID read from there",
+  );
+
+  const noPathGrep = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "1", name: "Grep", input: { pattern: "TODO" } }] },
+  });
+  assert.deepEqual(parseToolUsage(noPathGrep, "/wt/probe-role-1").readPaths, ["/wt/probe-role-1"], "same fallback applies to Grep");
+});
+
+test("parseToolUsage: defaultSearchPath does NOT apply to Read/NotebookRead — a missing file_path/notebook_path is a malformed call (no cwd-search fallback exists for a single-file read), so it contributes no read path even with a default supplied", () => {
+  const readNoPath = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "1", name: "Read", input: {} }] },
+  });
+  const result = parseToolUsage(readNoPath, "/wt/probe-role-1");
+  assert.deepEqual(result.toolUsage, [{ tool: "Read", count: 1 }]);
+  assert.deepEqual(result.readPaths, [], "Read has no 'searches cwd' fallback — a missing file_path records nothing, default or not");
 });
 
 test("parseToolUsage: NotebookRead's notebook_path is captured under the same read-path record", () => {

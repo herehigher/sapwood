@@ -315,9 +315,11 @@ async function waitForInitLine(jsonlPath: string, timeoutMs: number, pollMs: num
  *  also relies on platform-specific runtime variables. Peripheral roles need that runtime
  *  environment, but never need GitHub credentials because they have no forge responsibilities.
  *
- *  Keep this boundary paired with ROLE_ALLOWED_TOOLS's empty allowlist. The empty allowlist is
- *  the primary action boundary; stripping credentials ensures a future tool-widening regression
- *  cannot silently turn an inherited engine credential into forge authority. */
+ *  Keep this boundary paired with ROLE_ALLOWED_TOOLS's zero-write, zero-`Bash` allowlist (#235
+ *  PR-B: `Read,Grep,Glob` only, guard-confined to the worktree — no longer the empty string
+ *  #110 shipped, but still zero forge-reaching capability). That allowlist is the primary
+ *  action boundary; stripping credentials ensures a future tool-widening regression cannot
+ *  silently turn an inherited engine credential into forge authority. */
 function peripheralSessionEnv(guardMode: SapwoodConfig["guard"]["mode"], worktreePath: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -747,8 +749,11 @@ export class RoleRunner {
 
     // #235 PR-B: parse tool usage from the SAME jsonl string every other post-exit field above
     // already scans (worker.ts's parseToolUsage — item 4 of #235's acceptance criteria: which
-    // paths/tools a session actually USED land in the manifest).
-    const { toolUsage, readPaths } = parseToolUsage(jsonl);
+    // paths/tools a session actually USED land in the manifest). worktreePath (this session's
+    // own resolved worktree root, already computed above) is passed as defaultSearchPath: a
+    // pathless Grep/Glob call searches exactly this cwd, and Codex review (PR #257 F2) flagged
+    // that omitting it understated what the session actually read.
+    const { toolUsage, readPaths } = parseToolUsage(jsonl, worktreePath);
 
     return assembleContextManifest({
       sources,

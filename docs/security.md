@@ -121,13 +121,14 @@ Every `RoleRunner` session is additionally spawned without forge credentials:
 `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, and `GIT_CONFIG_*`
 variables through a case-normalized denylist, while preserving the CLI's own
 Anthropic authentication and `SAPWOOD_GUARD_MODE`. For the five issues-only roles,
-the empty tool allowlist remains the primary boundary; environment absence is a
-backstop, regression-tested with a poisoned parent environment, so a future
-allowlist-widening regression cannot turn an inherited engine credential into forge
-authority. Worker-class `retro` receives the same stripped environment but keeps
-push working through the ambient git credential helper, as described below.
-Code-producing worker lanes are unaffected: they legitimately hold the token,
-mediated by the guard hook.
+the zero-`Bash`/zero-write tool grant (`Read`/`Grep`/`Glob` allowed, guard-confined
+to the worktree, as described above — no `gh`-reaching capability of any kind)
+remains the primary boundary; environment absence is a backstop, regression-tested
+with a poisoned parent environment, so a future allowlist-widening regression
+cannot turn an inherited engine credential into forge authority. Worker-class
+`retro` receives the same stripped environment but keeps push working through the
+ambient git credential helper, as described below. Code-producing worker lanes are
+unaffected: they legitimately hold the token, mediated by the guard hook.
 
 **`retro` is the one exception**, by session class rather than role name: it is
 worker-class, with `Read`/`Grep`/`Glob` + local git only — file edits, commit, and
@@ -190,8 +191,10 @@ is now corrected at its source (`config.ts`'s `RoleSession` schema comment).
 open in production.** Sealing it — running with no ambient `CLAUDE.md` at all — would
 move the trust boundary to the *content* side, contradicting the locked boundary
 this page already states above and in [PLAN.md](PLAN.md#security--trust-model-trusted-first-designed-toward-public):
-the boundary is what a session can **do** (the empty tool allowlist, #110; the
-credential-stripped spawn env, #218), never what it can **read**. Repo conventions
+the boundary is what a session can **do** (the zero-write, zero-`Bash` tool allowlist
+— empty until #235, now `Read`/`Grep`/`Glob` guard-confined to the worktree, #110/
+#235; the credential-stripped spawn env, #218), never what it can **read**. Repo
+conventions
 living in `CLAUDE.md` are exactly what a role session *should* absorb — the same
 reason a human contributor reads it too. The obligation this channel creates is
 **honesty and diagnosability, not isolation**: record what each session attempt

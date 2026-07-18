@@ -278,11 +278,16 @@ export interface ToolUsageEntry {
  *  named — the manifest's "what did this session actually look at" half, alongside
  *  toolInventoryHash's "what COULD it have used". Mirrors guard.ts's own checkReadContainment
  *  path resolution exactly (Read/NotebookRead: a required single-file path; Grep/Glob: an
- *  OPTIONAL search-root path, absent when the call searched the session's cwd) — so a path
- *  recorded here is exactly the string the guard hook itself evaluated for containment, not a
- *  re-derived approximation. Sorted, deduplicated, absolute-or-relative exactly as the session
- *  supplied it (never re-resolved) — this is a RECORD of what was asked for, not a re-check of
- *  where it landed; #235 PR-A's guard hook is the actual containment enforcement. */
+ *  OPTIONAL search-root path — when explicitly supplied, recorded EXACTLY as the session
+ *  supplied it, absolute-or-relative, never re-resolved). A Grep/Glob call with NO `path`
+ *  doesn't skip the repository — it searches the session's own cwd (the worktree root), and
+ *  Claude Code's own containment resolves it there too (`guard.ts`'s `checkReadContainment`
+ *  falls back to `cwd` for exactly this case) — so `parseToolUsage`'s caller-supplied
+ *  `defaultSearchPath` (the session's worktree root) is recorded for that case instead of
+ *  silently dropping it (Codex review, PR #257 F2: a pathless Grep/Glob still reads and returns
+ *  file contents; omitting it from `readPaths` understated what the session actually used). This
+ *  is a RECORD of what was asked for / where it searched, not a re-check of where it landed —
+ *  #235 PR-A's guard hook is the actual containment enforcement. */
 export interface ToolUsageResult {
   toolUsage: ToolUsageEntry[];
   readPaths: string[];
@@ -295,6 +300,12 @@ const READ_PATH_FIELD: Record<string, string> = {
   Glob: "path",
 };
 
+/** Grep/Glob search the session's cwd when called with no `path` — Read/NotebookRead have no
+ *  such fallback (a missing `file_path`/`notebook_path` is simply a malformed call, the same
+ *  fail-closed shape `guard.ts`'s own containment check treats it as), so only these two tools
+ *  get `defaultSearchPath` substituted in `parseToolUsage` below. */
+const PATHLESS_SEARCHES_CWD = new Set(["Grep", "Glob"]);
+
 /** #235 PR-B: parse every `tool_use` block from a session's stream-json transcript — the SAME
  *  jsonl every other parser in this module scans (peripheral.ts's context-manifest assembly
  *  passes the identical string already read for parseCostUsd/parseModelUsage/parseResultText).
@@ -302,8 +313,15 @@ const READ_PATH_FIELD: Record<string, string> = {
  *  never thrown; a malformed/missing `message.content` array yields nothing for that line rather
  *  than aborting the whole scan. Tool names are counted in FIRST-SEEN order for readability;
  *  `readPaths` is sorted + deduplicated (see ToolUsageResult's doc for exactly which field each
- *  read-shaped tool contributes). */
-export function parseToolUsage(jsonl: string): ToolUsageResult {
+ *  read-shaped tool contributes).
+ *
+ *  `defaultSearchPath` (optional, typically the session's resolved worktree root — peripheral.ts
+ *  passes it) is the path recorded for a Grep/Glob call with no explicit `path` field (see
+ *  PATHLESS_SEARCHES_CWD's doc and ToolUsageResult's doc for why this isn't just dropped).
+ *  Omitted -> a pathless Grep/Glob call is still counted in `toolUsage` but contributes no entry
+ *  to `readPaths` (the pre-fix behavior, kept as the default so a caller that doesn't know its
+ *  session's worktree root yet degrades honestly rather than fabricating one). */
+export function parseToolUsage(jsonl: string, defaultSearchPath?: string): ToolUsageResult {
   const counts = new Map<string, number>();
   const pathSet = new Set<string>();
   for (const line of jsonl.split("\n")) {
@@ -324,13 +342,18 @@ export function parseToolUsage(jsonl: string): ToolUsageResult {
       if (!block || typeof block !== "object" || Array.isArray(block)) continue;
       const b = block as Record<string, unknown>;
       if (b.type !== "tool_use" || typeof b.name !== "string" || b.name.length === 0) continue;
-      counts.set(b.name, (counts.get(b.name) ?? 0) + 1);
-      const pathField = READ_PATH_FIELD[b.name];
+      const name = b.name;
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+      const pathField = READ_PATH_FIELD[name];
       if (!pathField) continue;
       const input = b.input;
-      if (!input || typeof input !== "object" || Array.isArray(input)) continue;
-      const path = (input as Record<string, unknown>)[pathField];
-      if (typeof path === "string" && path.length > 0) pathSet.add(path);
+      const rawPath =
+        input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>)[pathField] : undefined;
+      if (typeof rawPath === "string" && rawPath.length > 0) {
+        pathSet.add(rawPath);
+      } else if (PATHLESS_SEARCHES_CWD.has(name) && defaultSearchPath) {
+        pathSet.add(defaultSearchPath);
+      }
     }
   }
   const toolUsage: ToolUsageEntry[] = [...counts.entries()].map(([tool, count]) => ({ tool, count }));
