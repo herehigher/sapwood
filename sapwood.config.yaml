@@ -81,6 +81,17 @@ worker:
   #                   Missing/unreadable/empty file or an unknown {{var}} = startup error,
   #                   never a silent fallback. Unset = the engine's shipped prompts/worker.md
   #                   (TDD + two-gate method).
+  # fixPromptFile: prompts/my-fix.md
+  #                   #245: override the FIX-LEG prompt (a `fixing`-state resume addressing its
+  #                   own PR's review findings — same worker row/worktree/branch/session, never
+  #                   a new dispatch). Relative paths resolve against THIS config file's
+  #                   directory. Supported {{vars}}: issue.number, pr.number, labels.verifyNa
+  #                   ONLY (round-2 fix A7: deliberately NOT issue.title/body/labels — a fix
+  #                   leg's evidence channel is the PR-facing proxy tools, not issue prose).
+  #                   Missing/unreadable/empty file or an unknown {{var}} = startup error, never
+  #                   a silent fallback. Unset = the engine's shipped prompts/fix.md (fetch
+  #                   findings via the PR-facing proxy tools, address them, push to the same
+  #                   branch).
 
 cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
   roundBudgetUsd: 30

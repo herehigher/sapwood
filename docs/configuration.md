@@ -74,7 +74,7 @@ Concurrency and dispatch shape.
 | `max` | `3` | Max concurrent workers (occupied lanes). |
 | `roundDispatchCap` | `2` | Max new dispatches in a single round/tick (conservative by design). |
 | `reserveCap` | `1` | **Accepted, not yet wired** — parsed and validated, but no engine code reads it yet. |
-| `prFixCap` | `2` | **Accepted, not yet wired** — the PR-fix iteration loop it will bound doesn't exist yet (review findings currently escalate to `needs-human`). |
+| `prFixCap` | `2` | (#245/#246) Bounds rework rounds on one PR — the cap `workers.fix_rounds` is checked against once the `FIXABLE` gate (#246) decides whether a further fix leg is warranted or the lane escalates to `needs-human` instead. `#245` ships the `fixing` lane state + fix-leg-resume machinery this cap will gate; `#246` wires the gate decision itself. |
 | `frictionMin` | `0` | **Accepted, not yet wired** — no dispatch rate-limit is enforced from it yet. |
 | `gatedReentryCap` | `2` | (#147) Bounds the **GATED RECLAIM** phase: a gate②-escalated PR whose issue a human clears of **every** `escalation.humanLabels` entry (default `sapwood:needs-human` *and* `sapwood:blocked` — the same hold set dispatch honors) is reclaimed back to `driving` and re-driven through the existing gate①/gate② + merge path — no new worker, same PR/branch. Each reclaim counts as one attempt; once this many have re-escalated, a further label removal is rejected (re-applies `labels.needsHuman` + a "cap reached" comment) and the lane is never retried again — merge it by hand. `0` disables automatic reentry outright. |
 
@@ -93,6 +93,7 @@ Per-worker execution.
 | `pricingFile` | unset | Override the model rate table the soft-budget estimator prices against. A relative path resolves against **the config file's own directory** (same rule as `promptFile`). Unset uses the engine's shipped `pricing.yaml` — a commented snapshot of per-model USD-per-million-token rates (`input` / `output` / `cacheWrite` / `cacheRead`) plus each model's `contextWindow` (tokens — the dashboard's context-usage gauge denominator). Your file **replaces** the shipped table entirely (no merging), so copy every model you use; you may add your own aliases. Aliases match case-insensitively as substrings of the model id (`opus` matches `claude-opus-4-8`); a model matching nothing is priced at the most expensive tier in the loaded table. A set-but-missing/unreadable/malformed file — including a model entry missing `contextWindow` — is a fail-fast startup error (`sapwood validate` catches it too) — never a silent fallback to the shipped rates. |
 | `heartbeatStaleSecs` | `180` | A worker heartbeat older than this is considered dead (stale-heartbeat reclaim). |
 | `promptFile` | unset | Override the worker's prompt template with your own file. A relative path resolves against **the config file's own directory**, not the CLI's cwd — so the same config behaves identically no matter where `sapwood` is invoked from. Unset uses the engine's shipped `prompts/worker.md` (TDD + two-gate method). |
+| `fixPromptFile` | unset | (#245) Override the **fix-leg** prompt — the instruction a `fixing`-state resume (same worker row/worktree/branch/session as the original leg, never a new dispatch) receives instead of the ordinary issue-rendered prompt above. Same resolution/fail-fast rules as `promptFile`. Unset uses the engine's shipped `prompts/fix.md` (fetch findings via the PR-facing proxy tools, address them, push to the same branch). |
 
 **`worker.promptFile` template variables:** `{{issue.number}}`, `{{issue.title}}`,
 `{{issue.body}}`, `{{issue.labels}}`, `{{labels.verifyNa}}`. `{{issue.labels}}` renders
@@ -100,12 +101,21 @@ the issue's label list; `{{labels.verifyNa}}` renders the configured `verify:n/a
 name (`labels.verifyNa` below), so a custom prompt can still tell the worker which label
 means "skip the test-driven gate and make the doc change instead."
 
+**`worker.fixPromptFile` template variables (round-2 fix A7 — deliberately NARROWER than
+`worker.promptFile`'s):** `{{issue.number}}`, `{{pr.number}}`, `{{labels.verifyNa}}` only —
+never `{{issue.title}}`/`{{issue.body}}`/`{{issue.labels}}`. A fix leg's evidence channel is
+the PR-facing proxy tools (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`), not
+issue prose, so the render function never needs a full issue object — just the issue and PR
+numbers (`{{pr.number}}` is required because a PR-facing tool call takes a PR number, not an
+issue number, and `{{issue.number}}` alone doesn't name it).
+
 **Fail-fast rules:** the template is loaded once, eagerly, at engine startup (before any
-dispatch) — never lazily on first use. A `promptFile` that's set but missing, unreadable,
-or empty is a startup error, and so is a template referencing an unknown `{{var}}`. There
-is no silent fallback to the shipped default once `promptFile` is set: either the exact
-file you named loads and validates, or the engine refuses to start. `sapwood validate`
-runs this same check, so a broken `promptFile` is caught before you ever run the engine.
+dispatch) — never lazily on first use. A `promptFile` (or `fixPromptFile`) that's set but
+missing, unreadable, or empty is a startup error, and so is a template referencing an
+unknown `{{var}}`. There is no silent fallback to the shipped default once the key is set:
+either the exact file you named loads and validates, or the engine refuses to start.
+`sapwood validate` runs this same check, so a broken prompt file is caught before you ever
+run the engine.
 
 ## `cost`
 
@@ -546,12 +556,12 @@ tracked work).
 
 **Honest state:** `enabled: true` is still *inert* on its own — no engine startup path
 constructs a proxy server or reads this flag yet. `peripheral.ts`'s `RoleRunner` and
-`worker.ts`'s `WorkerSupervisor.dispatch()` (#244 extends the mechanism to worker legs,
-mirroring `RoleRunner`'s own `proxy` opt — **`dispatch()` only**: `resume()` does not
-attach a proxy, see [`security.md`](security.md#the-forge-mcp-proxys-role-x-tool-matrix-234-244)
-for why) only mint a proxy when a caller explicitly supplies one, and no shipped
-dispatch path does yet. Consumer adoption + the shadow-server startup wiring remain
-tracked follow-up work.
+`worker.ts`'s `WorkerSupervisor` (#244 extended the mechanism to worker legs' `dispatch()`,
+mirroring `RoleRunner`'s own `proxy` opt; #245 extended the same mechanism to `resume()`
+too — see [`security.md`](security.md#fix-loop-fixing-lane-state-245) for the fix-loop
+consumer this exists for) only mint a proxy when a caller explicitly supplies one, and no
+shipped dispatch/resume path does yet. Consumer adoption + the shadow-server startup
+wiring remain tracked follow-up work.
 
 | Key | Default | Meaning |
 |---|---|---|

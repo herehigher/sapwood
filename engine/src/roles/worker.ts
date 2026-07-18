@@ -972,6 +972,18 @@ export class WorkerSupervisor implements Supervisor {
     }
   }
 
+  /** #245 round-2 fix (B1): best-effort removal of a STALE prior-leg `.done`/`.failed` terminal
+   *  sentinel — the reconciliation-side counterpart to resume()'s own post-spawn-confirmation
+   *  removal (see that method's doc). Called by conductor.ts's `reconcileDrivingFixIntents` when
+   *  it adopts a `driving` row with a confirmed fix-entry spawn intent, covering the crash
+   *  window between resume()'s confirmation write and its own sentinel removal (a restart-safe
+   *  belt-and-suspenders — removeIfExists is already idempotent on an already-gone file). Never
+   *  throws; a no-op when neither sentinel exists. */
+  clearStaleFixEntrySentinel(name: string): void {
+    this.removeIfExists(this.path(name, "done.json"));
+    this.removeIfExists(this.path(name, "failed.json"));
+  }
+
   async dispatch(issue: Issue, name?: string, opts?: { proxy?: WorkerProxyOpts }): Promise<{ name: string; sessionId: string }> {
     const laneName = name ?? `lane-${issue.number}-${randomUUID().slice(0, 8)}`;
     // Refuse name reuse — a stale sentinel under this name means a concurrent/old lane; a
@@ -1197,7 +1209,42 @@ export class WorkerSupervisor implements Supervisor {
    * #172 established that resumed total_cost_usd is PER-LEG, so the conductor records it
    * directly; tick()'s RESUME phase is this method's production caller.
    */
-  async resume(issue: Issue, name: string): Promise<{ name: string; sessionId: string }> {
+  /** #245: resume()'s own forge MCP proxy attachment — mirrors dispatch()'s #244 mint-before-
+   *  argv / --allowedTools widening / --mcp-config injection / teardown-on-every-exit-path
+   *  treatment (see WorkerProxyOpts' doc for the shared fail-closed rationale). This is the
+   *  fix-loop worker leg's evidence channel: a resumed leg (the SAME worker row/worktree/branch/
+   *  session — never a new dispatch, #245's squash-branch-reuse hazard) pulls its own PR review
+   *  findings via the PR-facing proxy tools rather than having them injected into the prompt (no
+   *  prompt-injection transport, #245 AC). `opts.prompt`, when supplied, REPLACES the ordinary
+   *  issue-rendered prompt with the caller's own (the fix leg's fix instruction) — every other
+   *  caller (today's entire #172 handoff-resume path) omits both new opts and keeps deriving the
+   *  prompt from `renderPrompt(issue)` exactly as before, byte-identical to pre-#245 behavior.
+   *
+   *  FAIL-CLOSED POLICY, identical to dispatch()'s: a proxy WITHOUT `credentialFree` is
+   *  non-fatal on mint failure — the leg still resumes, unattached. `credentialFree: true` is
+   *  different: a resumed leg dispatched that way has neither the gh/git credentialed-tool path
+   *  nor (if mint fails) a working evidence channel, so a failed mint REFUSES the resume outright
+   *  — a fix leg must never run silently unable to see the findings it exists to address. The
+   *  pre-existing `.handoff` sentinel and the lane's prior jsonl are left INTACT on this path
+   *  (unlike dispatch()'s fresh-jsonl cleanup): this is a RESUME, not a first dispatch — the
+   *  jsonl already holds real prior-leg history, and a refused resume must leave the lane exactly
+   *  as resumable as it was before this call, not destroy its record.
+   *
+   *  #245 round-2 fix (A1): `opts.sessionId` is FIX-LEG ENTRY MODE — starting a fix leg from a
+   *  `driving` lane, which has NO `.handoff` sentinel at all (its prior leg's terminal signal was
+   *  `.done`/`.failed`, already consumed by RECLAIM's own rescue-to-`driving` transition). The
+   *  ordinary #172 handoff path (reading session_id off `.handoff.json`) cannot apply here — the
+   *  caller (conductor.ts's `startFixLeg`) supplies the session id straight from the durable DB
+   *  row instead. Requires `opts.prompt` too (a caller bug otherwise — a fix leg always carries
+   *  its own fix instruction) and requires a `.done`/`.failed` terminal sentinel to exist (the
+   *  same "prove a real prior leg actually terminated" invariant the ordinary path enforces via
+   *  `.handoff`'s existence) — fail-closed, never silently starts a fix leg with no prior-leg
+   *  evidence at all. */
+  async resume(
+    issue: Issue,
+    name: string,
+    opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string },
+  ): Promise<{ name: string; sessionId: string }> {
     const handoffPath = this.path(name, "handoff.json");
     const runningPath = this.path(name, "running.json");
     const running = this.readJson(runningPath);
@@ -1211,7 +1258,9 @@ export class WorkerSupervisor implements Supervisor {
     //   after .handoff removal, before DB persist   -> adopt
     //   confirmed spawn error                       -> intent removed, .handoff intact, safe retry
     // `spawn_confirmed` is the boundary: only resume()'s confirmed marker proves a child was
-    // started. A dispatch-authored running marker must never masquerade as resume evidence.
+    // started. A dispatch-authored running marker must never masquerade as resume evidence. This
+    // check is entry-mode-agnostic — it's about THIS resume() call's own durable spawn-intent
+    // marker, not about which sentinel authorized the call in the first place.
     if (matchingResumeIntent && running.spawn_confirmed === true) {
       this.removeIfExists(handoffPath);
       return { name, sessionId: runningSessionId };
@@ -1220,19 +1269,36 @@ export class WorkerSupervisor implements Supervisor {
       if (!this.lanes.has(name)) throw new UnresumableLaneError(name, issue.number);
       throw new Error(`resume: ${name} already has an in-memory unconfirmed spawn`);
     }
-    if (!existsSync(handoffPath)) {
-      throw new Error(`resume: ${name} has no .handoff sentinel — nothing to resume`);
+    // #245 round-2 (A1): fix-leg entry (opts.sessionId set) vs. the ordinary #172 handoff-sentinel
+    // path — mutually exclusive, resolved once here into a common (sessionId, dispatchedAt) pair
+    // the rest of this method uses unchanged either way.
+    let sessionId: string;
+    let dispatchedAt: string | null;
+    if (opts?.sessionId != null) {
+      if (!opts.prompt) {
+        throw new Error(`resume: ${name} — opts.sessionId (fix-leg entry) requires opts.prompt too`);
+      }
+      if (!existsSync(this.path(name, "done.json")) && !existsSync(this.path(name, "failed.json"))) {
+        throw new Error(`resume: ${name} has no done/failed terminal sentinel — nothing to fix`);
+      }
+      sessionId = opts.sessionId;
+      dispatchedAt = this.dispatchedAtIso(name);
+    } else {
+      if (!existsSync(handoffPath)) {
+        throw new Error(`resume: ${name} has no .handoff sentinel — nothing to resume`);
+      }
+      const handoff = this.readJson(handoffPath);
+      const handoffSessionId = typeof handoff?.session_id === "string" ? handoff.session_id : null;
+      if (!handoffSessionId) {
+        throw new Error(`resume: ${name}'s handoff sentinel carries no session_id`);
+      }
+      sessionId = handoffSessionId;
+      // #69 (fable P1): carry the IMMUTABLE first-dispatch time across the handoff -> resume
+      // boundary. The retention baseline must stay the original dispatch time so pre-handoff WIP
+      // (older than this resumed run's start) is still judged possibly-dirty. Absent on a legacy
+      // sentinel -> null below -> the baseline resolves to NaN -> fail-safe dirty (retain).
+      dispatchedAt = typeof handoff?.dispatched_at === "string" ? handoff.dispatched_at : null;
     }
-    const handoff = this.readJson(handoffPath);
-    const sessionId = typeof handoff?.session_id === "string" ? handoff.session_id : null;
-    if (!sessionId) {
-      throw new Error(`resume: ${name}'s handoff sentinel carries no session_id`);
-    }
-    // #69 (fable P1): carry the IMMUTABLE first-dispatch time across the handoff -> resume
-    // boundary. The retention baseline must stay the original dispatch time so pre-handoff WIP
-    // (older than this resumed run's start) is still judged possibly-dirty. Absent on a legacy
-    // sentinel -> omitted below -> the baseline resolves to NaN -> fail-safe dirty (retain).
-    const dispatchedAt = typeof handoff?.dispatched_at === "string" ? handoff.dispatched_at : null;
     const guardMode = this.deps.cfg.guard.mode;
     if (guardMode === "hard" && !existsSync(this.guardHookPath)) {
       throw new Error(
@@ -1240,7 +1306,7 @@ export class WorkerSupervisor implements Supervisor {
           `resuming; refusing to resume an unguarded worker in hard mode`,
       );
     }
-    const prompt = (this.deps.renderPrompt ?? defaultPrompt)(issue);
+    const prompt = opts?.prompt ?? (this.deps.renderPrompt ?? defaultPrompt)(issue);
     const jsonlPath = this.path(name, "jsonl");
     // #33 (gate② P1): snapshot the pre-handoff stream's estimated total ONCE, before the
     // resumed run appends anything, so checkSoftBudget can compare only THIS RUN's new spend
@@ -1251,51 +1317,129 @@ export class WorkerSupervisor implements Supervisor {
     const estimateBaselineUsd = parseAssistantUsageDeltas(priorJsonl).reduce((sum, d) => sum + estimateUsd(d, this.pricing), 0);
     const jsonlLegOffset = Buffer.byteLength(priorJsonl);
     const jsonlFd = openSync(jsonlPath, "a"); // append: preserve the pre-handoff stream
-    const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
-    const args = claudeArgs({
-      prompt,
-      model: this.deps.cfg.worker.model,
-      effort: this.deps.cfg.worker.effort,
-      fallbackModel: this.deps.cfg.worker.fallbackModel,
-      worktree: name,
-      name,
-      sessionId,
-      resumeSessionId: sessionId,
-      settings: settingsJson,
-    });
-    const startedMs = this.now().getTime();
-    const runningMarker = {
-      name,
-      issue: issue.number,
-      session_id: sessionId,
-      started_at: new Date(startedMs).toISOString(),
-      estimate_baseline_usd: estimateBaselineUsd,
-      jsonl_leg_offset: jsonlLegOffset,
-      resume_pending_db: true,
-      spawn_confirmed: false,
-      // Preserve the original first-dispatch baseline (not this resume's start).
-      ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
-    };
-    // Intent precedes spawn: after this durable point, a restart never guesses whether it is
-    // safe to create another process in the same worktree/session.
+    const ghConfigDir = this.path(name, "gh-config-empty");
+    // #245 round-2 (A4): mint / mkdir(GH_CONFIG_DIR) / claudeArgs / the durable intent-write below
+    // are ALL "post-mint, pre-lane-registration" — a failure ANYWHERE in this block (not just the
+    // intent-write) must tear down an already-minted proxy and remove an already-created
+    // GH_CONFIG_DIR scratch directory. One try/catch replaces three separate ad-hoc cleanups
+    // (the mint-failure branch's own throw, a possible mkdirSync failure, and the intent-write's
+    // own failure) with a single guard covering all of them uniformly.
+    let proxyHandle: ForgeProxyHandle | undefined;
+    let args: string[];
+    let startedMs: number;
+    let runningMarker: Record<string, unknown>;
     try {
+      // #245: mint BEFORE argv — same ordering as dispatch() (WorkerProxyOpts' doc): the handle's
+      // tool names / --mcp-config are needed before claudeArgs runs.
+      if (opts?.proxy) {
+        try {
+          proxyHandle = await opts.proxy.mint({ role: "worker", session: name });
+        } catch (e) {
+          const reason = sanitizeUpstreamError(e instanceof Error ? e.message : String(e));
+          this.recordProxyMintFailed(name, reason);
+          if (opts.proxy.credentialFree) {
+            // NB (unlike dispatch()'s fresh-jsonl cleanup): the jsonl/terminal sentinel here
+            // PRE-EXIST this resume attempt (real prior-leg history) — never removed by the
+            // catch below. A refused resume leaves the lane exactly as resumable as it was
+            // before this call.
+            throw new Error(
+              `resume refused for lane ${name}: credentialFree was requested but the forge proxy mint failed — ` +
+                `a fix leg with neither the gh/git credentialed-tool path nor a working evidence channel must not run: ${reason}`,
+            );
+          }
+          this.log(`[sapwood:forge-proxy] lane ${name}: mint failed (non-fatal, proxy unattached): ${reason}`);
+        }
+      }
+      // #245: same fresh/empty per-lane GH_CONFIG_DIR scratch directory dispatch() creates —
+      // created regardless of whether credentialFree ends up true (cheap; lifecycle tied to this
+      // lane's own stateDir). Only actually pointed at by the spawn env when credentialFree is set.
+      if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
+      const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
+      args = claudeArgs({
+        prompt,
+        model: this.deps.cfg.worker.model,
+        effort: this.deps.cfg.worker.effort,
+        fallbackModel: this.deps.cfg.worker.fallbackModel,
+        worktree: name,
+        name,
+        sessionId,
+        resumeSessionId: sessionId,
+        settings: settingsJson,
+        // #245: widen --allowedTools with the proxy's own tool names — same pattern as dispatch().
+        // Unattached resume (today's entire #172 handoff path) passes neither flag, byte-identical
+        // to pre-#245 behavior.
+        ...(proxyHandle
+          ? {
+              allowedTools: [
+                opts?.proxy?.credentialFree ? WORKER_ALLOWED_TOOLS_NO_GH : WORKER_ALLOWED_TOOLS,
+                ...proxyHandle.toolNames,
+              ].join(","),
+            }
+          : {}),
+        ...(proxyHandle ? { mcpConfig: proxyHandle.mcpConfigJson } : {}),
+      });
+      startedMs = this.now().getTime();
+      runningMarker = {
+        name,
+        issue: issue.number,
+        session_id: sessionId,
+        started_at: new Date(startedMs).toISOString(),
+        estimate_baseline_usd: estimateBaselineUsd,
+        jsonl_leg_offset: jsonlLegOffset,
+        resume_pending_db: true,
+        spawn_confirmed: false,
+        // Preserve the original first-dispatch baseline (not this resume's start).
+        ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
+      };
+      // Intent precedes spawn: after this durable point, a restart never guesses whether it is
+      // safe to create another process in the same worktree/session.
       this.writeJsonAtomic(runningPath, runningMarker);
     } catch (e) {
-      closeSync(jsonlFd);
+      try {
+        closeSync(jsonlFd);
+      } catch {
+        /* noop */
+      }
+      if (proxyHandle) {
+        try {
+          await proxyHandle.stop();
+        } catch (te) {
+          this.log(
+            `[sapwood:forge-proxy] lane ${name}: teardown failed after resume pre-spawn error (non-fatal): ${sanitizeUpstreamError(te instanceof Error ? te.message : String(te))}`,
+          );
+        }
+      }
+      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
       throw e;
     }
     let child: ChildProcess;
+    // #245: baseEnv is credential-stripped (workerCredentialFreeEnv) ONLY when
+    // opts.proxy.credentialFree is explicitly set — every other resume() caller keeps inheriting
+    // process.env verbatim, unchanged from pre-#245 behavior.
+    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : process.env;
     try {
       // SAPWOOD_WORKTREE_ROOT (#235 PR-A): same lane/worktree as the original dispatch — a
       // resumed leg must keep Read/Grep/Glob confined too, not just the fresh-dispatch path.
       child = spawn(this.bin, args, {
         detached: true,
         stdio: ["ignore", jsonlFd, jsonlFd],
-        env: { ...process.env, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name) },
+        env: { ...baseEnv, SAPWOOD_GUARD_MODE: guardMode, SAPWOOD_WORKTREE_ROOT: resolve(this.worktreeRoot, name) },
       });
     } catch (e) {
       closeSync(jsonlFd);
       this.removeIfExists(runningPath);
+      // #245: tear down the proxy even though spawn itself failed — mirrors dispatch()'s own
+      // spawn-failure branch (a thrown spawn must never leak a live listener/token).
+      if (proxyHandle) {
+        try {
+          await proxyHandle.stop();
+        } catch (te) {
+          this.log(
+            `[sapwood:forge-proxy] lane ${name}: teardown failed after resume-spawn error (non-fatal): ${sanitizeUpstreamError(te instanceof Error ? te.message : String(te))}`,
+          );
+        }
+      }
+      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(e)}`);
     }
     const lane: Lane = {
@@ -1312,6 +1456,8 @@ export class WorkerSupervisor implements Supervisor {
       estimatedCostUsd: 0,
       estimateBaselineUsd,
       jsonlLegOffset,
+      ...(proxyHandle ? { proxyHandle } : {}),
+      ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
@@ -1341,12 +1487,38 @@ export class WorkerSupervisor implements Supervisor {
         /* noop */
       }
       this.removeIfExists(runningPath);
+      // #245: same "never leak a minted proxy" stance as the synchronous spawn-failure branch
+      // above — this is the OTHER spawn-failure path (an async 'error' event raced against
+      // 'spawn'), and onExit is never reached for it (the lane is deleted from `this.lanes`
+      // before any 'exit' event, if one even fires).
+      if (proxyHandle) {
+        try {
+          await proxyHandle.stop();
+        } catch (te) {
+          this.log(
+            `[sapwood:forge-proxy] lane ${name}: teardown failed after resume-spawn error (non-fatal): ${sanitizeUpstreamError(te instanceof Error ? te.message : String(te))}`,
+          );
+        }
+      }
+      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     child.on("error", () => this.onExit(name, 1));
     // `.handoff` may disappear only after the confirmed marker is durable. Adoption completes
     // this same removal if the engine crashes between these two writes.
     this.removeIfExists(handoffPath);
+    // #245 round-2 fix (B1): fix-leg entry consumes the STALE prior-leg terminal sentinel the
+    // SAME way — only now that THIS leg's spawn is confirmed durable, never before a failed
+    // spawn attempt (which must leave it in place so the next retry's entry check — "a
+    // done/failed sentinel must exist" — still passes). Without this, probe() would keep
+    // reading the PRIOR leg's done/failed sentinel as if it were THIS live leg's own terminal
+    // signal, letting FIXING RECLAIM settle a still-running fix child to `driving`/`failed` out
+    // from under it. `reconcileDrivingFixIntents` (conductor.ts) repeats this same removal for
+    // the crash window between this line and its own upsert — see that function's doc.
+    if (opts?.sessionId != null) {
+      this.removeIfExists(this.path(name, "done.json"));
+      this.removeIfExists(this.path(name, "failed.json"));
+    }
     if (this.lanes.has(name) && child.exitCode === null && child.signalCode === null) {
       this.touchHeartbeat(name);
       lane.hb = setInterval(() => this.heartbeatTick(name), this.hbMs);
@@ -1929,15 +2101,26 @@ export class WorkerSupervisor implements Supervisor {
    *  Missing/unparseable everywhere -> NaN, which worktreeMaybeDirty treats as fail-safe dirty
    *  (covers legacy sentinels predating this field). */
   private dispatchedBaselineMs(name: string): number {
+    const iso = this.dispatchedAtIso(name);
+    if (iso) {
+      const t = Date.parse(iso);
+      if (!Number.isNaN(t)) return t;
+    }
+    return NaN;
+  }
+
+  /** #245 round-2 (A1): the raw ISO `dispatched_at` string, read from whichever sentinel
+   *  currently carries it — factored out of dispatchedBaselineMs (which parses it to ms) so
+   *  resume()'s fix-leg entry path (no `.handoff` sentinel — see resume()'s own doc) can recover
+   *  the SAME immutable first-dispatch baseline from the `.done`/`.failed` sentinel a `driving`
+   *  lane's prior leg actually left behind, without duplicating the file-scan order. */
+  private dispatchedAtIso(name: string): string | null {
     for (const ext of ["running.json", "handoff.json", "done.json", "failed.json"]) {
       const r = this.readJson(this.path(name, ext));
       const iso = typeof r?.dispatched_at === "string" ? r.dispatched_at : null;
-      if (iso) {
-        const t = Date.parse(iso);
-        if (!Number.isNaN(t)) return t;
-      }
+      if (iso) return iso;
     }
-    return NaN;
+    return null;
   }
 
   /** Clear timers/fds so a host process can exit cleanly (tests). Does not kill children. */
@@ -2186,4 +2369,67 @@ export function buildRenderPrompt(cfg: SapwoodConfig): (issue: Issue) => string 
     }
   }
   return (issue: Issue) => template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issue));
+}
+
+// ── #245: file-based FIX-LEG prompt (config.ts's worker.fixPromptFile + the shipped default) ──
+// Same #74 shape as the worker prompt above, but a DELIBERATELY NARROWER var set (#245 round-2
+// fix A7): issue.number, pr.number, labels.verifyNa ONLY — never issue.title/body/labels. A fix
+// leg's evidence channel is the PR-facing proxy tools, not issue prose; the caller
+// (conductor.ts's startFixLeg/FixLegDeps) therefore never needs to construct a full `Issue`
+// object just to render this prompt — a bare issue NUMBER is enough.
+
+/** Resolves the shipped default fix-leg prompt — `engine/prompts/fix.md` inside the engine
+ *  package (mirrors defaultPromptPath's resolution: relative to the engine package, never the
+ *  orchestrated repo). */
+export function defaultFixPromptPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "..", "prompts", "fix.md");
+}
+
+/** Load the fix-leg prompt TEMPLATE, raw and un-substituted, exactly ONCE. Either the operator's
+ *  `worker.fixPromptFile` (loadConfig has already resolved a relative path against the CONFIG
+ *  FILE's directory) or, when unset, the shipped default at `engine/prompts/fix.md`.
+ *
+ *  FAIL-FAST (#74 pattern): an explicitly configured `fixPromptFile` that's missing or
+ *  unreadable throws here, naming the path — never a silent fallback to the shipped default. */
+export function loadFixPromptTemplate(cfg: SapwoodConfig): string {
+  const configured = cfg.worker.fixPromptFile;
+  if (configured === undefined) return readFileSync(defaultFixPromptPath(), "utf8");
+  if (!existsSync(configured)) {
+    throw new Error(`worker.fixPromptFile not found: ${configured} — refusing to start a fix leg`);
+  }
+  try {
+    return readFileSync(configured, "utf8");
+  } catch (e) {
+    throw new Error(`worker.fixPromptFile unreadable: ${configured} (${String(e)}) — refusing to start a fix leg`);
+  }
+}
+
+/** Builds the fix-leg prompt renderer (#245): loads the template ONCE, eagerly — fail-fast on a
+ *  missing/unreadable/EMPTY `worker.fixPromptFile` AND on any unknown `{{var}}` happens here, at
+ *  build time, not lazily on the first fix leg. Meant to be called once at startup (mirrors
+ *  buildRenderPrompt) and threaded into conductor.ts's startFixLeg as `renderFixPrompt`.
+ *
+ *  #245 round-2 fix A7: takes the bare issue NUMBER, not a full `Issue` — see the module-level
+ *  comment above for why the supported var set makes a fabricated `Issue` unnecessary. */
+export function buildRenderFixPrompt(cfg: SapwoodConfig): (issueNumber: number, pr: number) => string {
+  const template = loadFixPromptTemplate(cfg);
+  if (template.trim() === "") {
+    throw new Error(
+      `fix-leg prompt template is empty${cfg.worker.fixPromptFile !== undefined ? `: ${cfg.worker.fixPromptFile}` : ""} — refusing to start an undirected fix leg`,
+    );
+  }
+  const vars: Record<string, (issueNumber: number, pr: number) => string> = {
+    "issue.number": (issueNumber) => String(issueNumber),
+    "labels.verifyNa": () => cfg.labels.verifyNa,
+    "pr.number": (_issueNumber, pr) => String(pr),
+  };
+  for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
+    const name = raw!.trim();
+    if (!Object.hasOwn(vars, name)) {
+      throw new Error(`fix-leg prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`);
+    }
+  }
+  return (issueNumber: number, pr: number) =>
+    template.replace(/\{\{([^{}]*)\}\}/g, (_match, raw: string) => vars[raw.trim()]!(issueNumber, pr));
 }

@@ -19,7 +19,7 @@ import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
-import { UnresumableLaneError } from "../roles/worker.js";
+import { UnresumableLaneError, type WorkerProxyOpts } from "../roles/worker.js";
 import type { BoardStatus, CategorizedTokenUsage, ModelUsageEntry, ParkRow, PendingRollback, State, WorkerRow } from "../state/state.js";
 import {
   classifyEnvFailure,
@@ -278,6 +278,73 @@ export function driveDecision(gate: string, fixRounds: number, cap: number, over
   }
 }
 
+/** #245: the fix-loop's dependency seam — deliberately narrower than the full TickDeps a caller
+ *  (this module's own tick(), or #246's future FIXUP-dispatch branch inside it) already holds,
+ *  so a caller can pass a `Pick`-shaped subset without constructing a whole fake tick(). */
+export interface FixLegDeps {
+  state: State;
+  supervisor: Supervisor;
+  /** Renders the fix-leg's own prompt from the driving lane's issue NUMBER + PR number
+   *  (worker.ts's buildRenderFixPrompt(cfg), built once at startup — same injection shape as
+   *  WorkerDeps.renderPrompt). #245 round-2 (A7): takes the bare issue NUMBER, not a full
+   *  `Issue` — the fix-leg prompt's own template vars are `issue.number`/`pr.number`/
+   *  `labels.verifyNa` only (never issue title/body/labels: a fix leg's evidence channel is the
+   *  PR-facing proxy tools, not issue prose), so there is no need to fabricate an empty-shell
+   *  `Issue` object just to satisfy this signature. Never receives review-finding TEXT: the fix
+   *  leg pulls that itself, over the PR-facing proxy tools (#244), once its own session starts
+   *  (#245 AC — no prompt-injection transport). */
+  renderFixPrompt: (issueNumber: number, pr: number) => string;
+}
+
+/** #245: start a fix leg for a `driving` lane whose PR needs rework — the SOLE producer of a
+ *  `fixing` row, and the seam #246 (the FIXABLE gate) calls once its own driveDecision reaches
+ *  "FIXUP". Reuses #172's resume machinery outright: SAME worker row, SAME worktree/branch/
+ *  session lineage — never a fresh dispatch (the squash-branch-reuse hazard a new dispatch
+ *  against this lane's (possibly stale, possibly ahead) head would create). Calls
+ *  `supervisor.resume` in FIX-LEG ENTRY MODE (`opts.sessionId: w.session_id` — a `driving` row
+ *  has no `.handoff` sentinel to read a session id off, #245 round-2 fix A1).
+ *
+ *  `fix_rounds` is an INDEPENDENT counter from `resume_attempts` (schema v18->v19 migration
+ *  comment) — bumped here, together with the `driving` -> `fixing` state transition, in the SAME
+ *  upsertWorker call, and only AFTER resume() has confirmed a spawn: a thrown resume() leaves
+ *  the row untouched (still `driving`, `fix_rounds` un-incremented) so a transient spawn failure
+ *  costs zero fix-round budget and the next tick's gate can simply retry. A crash between
+ *  resume()'s own confirmed-spawn write and THIS function's upsertWorker call is repaired by
+ *  `reconcileDrivingFixIntents` (tick()'s own pre-kill-switch-gate pass, #245 round-2 fix A3) —
+ *  never left as a live, DB-invisible child.
+ *
+ *  `w.pr` MUST be set (every `driving` row's invariant, #13) — a null PR is a caller bug, not a
+ *  normal runtime state, so this throws rather than silently no-op-ing (fail-safe, matching the
+ *  DRIVE loop's own "driving-lane-missing-pr" fail-safe in tick()).
+ *
+ *  `proxy` is MANDATORY, and `proxy.credentialFree` MUST be true (#245 round-2 fix A6): a fix
+ *  leg is never granted ambient forge credentials — the proxy is its ONLY evidence channel, so
+ *  this function refuses to start one without it rather than silently degrading. #246 (the sole
+ *  production caller) always supplies a `credentialFree` proxy. */
+export async function startFixLeg(
+  deps: FixLegDeps,
+  w: WorkerRow,
+  proxy: WorkerProxyOpts,
+  now: () => Date = () => new Date(),
+): Promise<{ name: string; sessionId: string }> {
+  if (w.pr == null) {
+    throw new Error(`startFixLeg: lane ${w.name} (issue #${w.issue}) has no PR — a driving lane must always carry one`);
+  }
+  if (!proxy.credentialFree) {
+    throw new Error(
+      `startFixLeg: lane ${w.name} — proxy.credentialFree must be true; a fix leg must never run with ambient forge credentials`,
+    );
+  }
+  const pr = w.pr;
+  const prompt = deps.renderFixPrompt(w.issue, pr);
+  const issue: Issue = { number: w.issue, title: "", labels: [] };
+  const result = await deps.supervisor.resume(issue, w.name, { prompt, sessionId: w.session_id, proxy });
+  const fixRounds = (w.fix_rounds ?? 0) + 1;
+  deps.state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
+  deps.state.appendEvent("fix-leg-started", { worker: w.name, issue: w.issue, pr, fixRounds, at: now().toISOString() });
+  return result;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tick orchestration: reclaim -> drive -> resume -> dispatch. Side-effecting collaborators are
 // injected (IForge, Supervisor, State, MergeGate) so the whole tick is unit-testable without
@@ -347,8 +414,18 @@ export interface ReclaimResult {
 export interface Supervisor {
   probe(worker: string): Promise<LaneProbe>;
   dispatch(issue: Issue): Promise<{ name: string; sessionId: string }>;
-  /** Re-enter a terminal handoff as a fresh leg in the same session/worktree (#172). */
-  resume(issue: Issue, worker: string): Promise<{ name: string; sessionId: string }>;
+  /** Re-enter a terminal handoff as a fresh leg in the same session/worktree (#172). `opts`
+   *  (#245) is additive: `prompt` overrides the ordinary issue-rendered prompt (the fix-leg's
+   *  own fix instruction — see startFixLeg below); `proxy` attaches a forge MCP proxy handle to
+   *  the resumed leg, mirroring dispatch()'s own #244 attachment; `sessionId` (round-2 fix A1) is
+   *  FIX-LEG ENTRY MODE — starting a fix leg from a `driving` lane (no `.handoff` sentinel to
+   *  read a session id off) rather than resuming a genuine `.handoff`. Omitted -> today's entire
+   *  #172 handoff-resume behavior, unchanged. */
+  resume(
+    issue: Issue,
+    worker: string,
+    opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string },
+  ): Promise<{ name: string; sessionId: string }>;
   /** Cheap, read-only classification of resume()'s durable spawn-intent marker (#172). */
   resumeIntentState(worker: string, issue: number): ResumeIntentState;
   /** Tear down a dead/stale lane (process-tree kill + worktree retention/cleanup, #69). */
@@ -362,6 +439,11 @@ export interface Supervisor {
    *  same mechanism as a worker's own soft-budget handoff. Returns false if not applicable
    *  (already reclaiming/requested, or unknown lane) — never throws. */
   requestHandoff(worker: string): boolean;
+  /** #245 round-2 fix (B1): best-effort removal of a STALE prior-leg `.done`/`.failed` terminal
+   *  sentinel for `worker` — see worker.ts's own doc for the crash window this closes
+   *  (reconcileDrivingFixIntents' "confirmed" branch calls this to cover the case where
+   *  resume()'s own post-confirmation removal never ran before a crash). Never throws. */
+  clearStaleFixEntrySentinel(worker: string): void;
 }
 
 /** The conductor's only handle on the review + merge gate (#13). merge-driver.ts's
@@ -486,6 +568,10 @@ export interface TickResult {
   gatedReclaimed: GatedReclaimOutcome[];
   /** #172 handoff lanes re-admitted to `running`, or escalated+latch-capped. */
   resumed: ResumeOutcome[];
+  /** #245: fixing-lane reclaim decisions this tick — a `fixing` lane is a LIVE fix-leg worker
+   *  process (same shape as an ordinary `running`-lane reclaim outcome; see the FIXING RECLAIM
+   *  phase in tick()). Empty when there were no `fixing` lanes this tick. */
+  fixingReclaimed: ReclaimOutcome[];
 }
 
 export interface TickDeps {
@@ -560,6 +646,26 @@ export interface TickDeps {
    *  section) since `forge` above is a required field, never optional, so it always has a
    *  consumer. */
   probeLlmReachable?: () => Promise<boolean | { ok: boolean; detail?: string }>;
+  /** #245 round-2 fix A2: the fix-loop's own RESUME-continuation deps. When a `fixing` lane
+   *  hands off (soft budget) and later needs to resume, it must come back as a FIX leg (fix
+   *  prompt + mandatory `credentialFree` proxy + target state `fixing`), never an ordinary
+   *  running leg — the RESUME phase (below) checks `WorkerRow.fixing_handoff` and, ONLY when
+   *  set, uses this dep instead of the ordinary #172 resume path. Omitted -> a fixing-origin
+   *  handoff row is left untouched (never silently resumed as an ordinary leg, which would lose
+   *  its evidence channel/credential posture) — a durable `fix-leg-resume-unconfigured` event is
+   *  recorded and the row is retried next tick once this is wired (#246 is the caller that will
+   *  wire it in production). */
+  fixLegResume?: FixLegResumeDeps;
+}
+
+/** #245 round-2 fix A2: mirrors FixLegDeps' own `renderFixPrompt` shape (issue NUMBER + PR
+ *  number, #245 round-2 fix A7 — never a fabricated Issue) plus the mint function a resumed fix
+ *  continuation needs to re-attach a FRESH proxy (never trusting a proxy handle from a prior,
+ *  possibly-crashed engine process — see reconcileDrivingFixIntents' own doc for the related
+ *  dead-proxy hazard on the ENTRY side). */
+export interface FixLegResumeDeps {
+  renderFixPrompt: (issueNumber: number, pr: number) => string;
+  mintProxy: WorkerProxyOpts["mint"];
 }
 
 /** #167 review (Codex P2+P3 adjudication): the gated-reentry-cap-hit escalation note appended
@@ -749,7 +855,10 @@ async function drainThenEscalate(
   state.recordCeilingBreach(reasons, nowDate);
   const drainRequested: string[] = [];
   const escalated: string[] = [];
-  const stillRunning = state.runningWorkers();
+  // #245: `fixing` lanes are live fix-leg worker processes — drained/escalated exactly like
+  // `running` ones (worker-paradigm supervision applies uniformly; see reclaimTerminalLane's
+  // `fixingPinClear` and the FIXING RECLAIM phase's own doc for the rest of that contract).
+  const stillRunning = [...state.runningWorkers(), ...state.fixingWorkers()];
   for (const w of stillRunning) {
     // #168 P1-B: a drained lane that happens to be the llm episode's CANARY is settled
     // INCONCLUSIVE right here, at drain-request time — see releaseCanaryInconclusive's doc
@@ -963,6 +1072,13 @@ async function reclaimTerminalLane(
 ): Promise<ReclaimOutcome | null> {
   const costUsd = p.costUsd ?? 0;
   const modelUsage = p.modelUsage ?? [];
+  // #245 round-2 fix A5: computed ONCE, from `w.state` as it stood BEFORE this call (never
+  // re-derived after a transition already happened) — spread into every branch below that lands
+  // the row in `driving`, in the SAME settleTerminalWorker transaction that writes it, so a crash
+  // can never observe `driving` with a STALE pre-fix pin (the old two-write shape: settle to
+  // `driving` here, THEN a separate clearFixingReviewPinIfDriving call from the caller — a crash
+  // between the two left the pin standing, silently suppressing the promised fresh review).
+  const fixingPinClear = w.state === "fixing" ? { review_triggered_head: null, review_triggered_at: null } : {};
   if (p.handoff) {
     // Soft-budget graceful handoff: terminal-but-resumable. Never killed; the conductor may
     // --resume later. Checked before classifyLane (a handoff is not a failure).
@@ -974,12 +1090,17 @@ async function reclaimTerminalLane(
     // spend across the initial handoff + resumed legs therefore sums exactly once.
     // #223: state + spend in ONE transaction (settleTerminalWorker) — no forge call in this
     // branch, so the only crash window was the two separate writes themselves.
+    // #245 round-2 fix A2: `fixing_handoff` durably marks a handoff that interrupted a FIX leg
+    // (not an ordinary running leg) — read back by the RESUME phase to restore a fix
+    // continuation (fix prompt + mandatory credentialFree proxy + state `fixing`) instead of
+    // silently resuming it as an ordinary leg.
+    const fixLegHandoff = w.state === "fixing" ? 1 : 0;
     const handoffAt = iso();
     state.settleTerminalWorker(
-      { ...w, state: "handoff", ended_at: handoffAt },
+      { ...w, state: "handoff", ended_at: handoffAt, fixing_handoff: fixLegHandoff },
       { worker: w.name, issue: w.issue, usd: costUsd, at: handoffAt, models: modelUsage },
     );
-    state.appendEvent("handoff", { worker: w.name, issue: w.issue });
+    state.appendEvent("handoff", { worker: w.name, issue: w.issue, fixLegHandoff: fixLegHandoff === 1 });
     // #168 P1-1b: a handed-off canary RAN (crossed its soft budget doing real work) — the
     // strongest possible non-env terminal signal. Resume.
     settleCanary(state, w.name, false, iso);
@@ -1001,7 +1122,7 @@ async function reclaimTerminalLane(
       // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
       // gate resolves it). No requeue, no human escalation.
       state.settleTerminalWorker(
-        { ...w, state: "driving", ended_at: doneAt, pr: p.prNumber ?? w.pr ?? null },
+        { ...w, state: "driving", ended_at: doneAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
         { worker: w.name, issue: w.issue, usd: costUsd, at: doneAt, models: modelUsage },
       );
     } else {
@@ -1113,7 +1234,7 @@ async function reclaimTerminalLane(
       // #223: state + spend atomic — no forge write on this path either.
       const rescuedAt = iso();
       state.settleTerminalWorker(
-        { ...w, state: "driving", ended_at: rescuedAt, pr: p.prNumber ?? w.pr ?? null },
+        { ...w, state: "driving", ended_at: rescuedAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
         { worker: w.name, issue: w.issue, usd: costUsd, at: rescuedAt, models: modelUsage },
       );
       state.appendEvent("reclaim-failed", { worker: w.name, issue: w.issue, next: "DRIVING" });
@@ -1140,7 +1261,7 @@ async function reclaimTerminalLane(
       // Failed but a clean PR exists (e.g. budget-exhausted after opening it): rescue — hold
       // the lane driving for the review gate rather than escalating.
       state.settleTerminalWorker(
-        { ...w, state: "driving", ended_at: failedAt, pr: p.prNumber ?? w.pr ?? null },
+        { ...w, state: "driving", ended_at: failedAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
         { worker: w.name, issue: w.issue, usd: costUsd, at: failedAt, models: modelUsage },
       );
     } else {
@@ -1162,11 +1283,103 @@ async function reclaimTerminalLane(
   return null; // KEEP or DEAD — not a terminal sentinel; caller handles it
 }
 
+/** #245 round-2 fix A3: crash-window reconciliation for `startFixLeg`'s own two-step protocol
+ *  (`supervisor.resume()` FIRST — confirming a spawn via #172's own battle-tested
+ *  intent-precedes-spawn running.json dance — THEN `startFixLeg`'s own upsertWorker bumping
+ *  `driving` -> `fixing` + `fix_rounds`). A crash between those two steps leaves a `driving` row
+ *  with a LIVE, spawn-confirmed fix-leg child the DB doesn't know about — invisible to both
+ *  ordinary RECLAIM (scans `running`) and FIXING RECLAIM (scans `fixing`), and critically
+ *  invisible to the kill-switch drain (the SAME two sets). Called at the very top of tick(),
+ *  BEFORE the kill-switch gate, so a row this reconciles into `fixing` is visible to THAT SAME
+ *  tick's drain if the switch happens to be active.
+ *
+ *  Scans every `driving` row (cheap — normally a handful) and reads
+ *  `supervisor.resumeIntentState(name, issue)` — state-agnostic (a plain running.json read), so
+ *  it works for a `driving` row exactly as it already does for `handoff` rows elsewhere in this
+ *  file:
+ *   - "confirmed": a live child exists that the DB doesn't know about. Promote the row to
+ *     `fixing` and bump `fix_rounds` — the FIRST and ONLY bump for this round (the crash means
+ *     `startFixLeg`'s own bump never landed; a row that reaches this branch was, by
+ *     construction, never able to reach it — never double-counts). Dead-proxy adoption: the
+ *     adopted child's `--mcp-config` was minted by the CRASHED engine process — its in-process
+ *     HTTP listener died with it, and the child's baked-in proxy config can never be fixed
+ *     post-spawn. Rather than trust a dead evidence channel (or attempt a live remint/respawn —
+ *     out-of-scope machinery), immediately request a graceful handoff: the SAME adopt-then-drain
+ *     pattern this file already uses for a stale-but-alive `running` lane after a restart (see
+ *     the RECLAIM loop's own `ADOPT` class). The next resume of that handoff (A2's own
+ *     fix-continuation RESUME path) mints a FRESH proxy from the CURRENT engine process before
+ *     respawning.
+ *
+ *     #245 round-2 fix (B3): `requestHandoff` is called FIRST, before the upsert/event —
+ *     durable (persists `handoff_requested` in running.json) and idempotent, so a crash between
+ *     this call and the upsert below is safe: the NEXT tick's reconciliation still finds the row
+ *     `driving` with the SAME confirmed intent (the crashed attempt's upsert never landed, so
+ *     `fix_rounds` was never bumped) and retries the whole branch — `requestHandoff` is then a
+ *     harmless no-op re-signal, and the upsert's bump is still the first and only successful one
+ *     for this round. Zero new machinery: this reuses the exact convergent-retry shape the rest
+ *     of this reconciliation already relies on.
+ *
+ *     #245 round-2 fix (B1): also clears a STALE prior-leg `.done`/`.failed` terminal sentinel a
+ *     fix-entry `resume()` call may have crashed before removing itself (see that method's own
+ *     doc) — otherwise FIXING RECLAIM's very next `probe()` call would misread the PRIOR leg's
+ *     sentinel as this live leg's own terminal signal.
+ *   - "unconfirmed": intent written, never confirmed (crashed truly mid-spawn — ambiguous
+ *     whether a process exists at all; retrying could double-spawn into the same worktree).
+ *     Escalate to `needs-human` — the same fail-safe #172's own unconfirmed-handoff ambiguity
+ *     takes (escalateUndecidableResume), adapted to a `driving` row's own shape (no
+ *     `resume_capped`/handoff semantics apply here). #245 round-2 fix (B4): the label write goes
+ *     FIRST — same #69/#147 "forge work before the terminal upsert" rule the rest of this file
+ *     follows — and a FAILED label write does NOT terminalize the row at all (never `failed`
+ *     with `gated_escalation_labeled: 0`, which would be permanently invisible to BOTH gated
+ *     reentry and human triage). The row stays `driving`; the next tick retries the whole
+ *     escalation from scratch.
+ *   - "none": no resume intent recorded at all — an ordinary `driving` lane #246 may still call
+ *     `startFixLeg` on later. Nothing to reconcile. */
+async function reconcileDrivingFixIntents(
+  forge: IForge,
+  state: State,
+  supervisor: Supervisor,
+  cfg: SapwoodConfig,
+  iso: () => string,
+): Promise<void> {
+  for (const w of state.drivingWorkers()) {
+    const intent = supervisor.resumeIntentState(w.name, w.issue);
+    if (intent === "confirmed") {
+      // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
+      // gracefully now rather than let it keep running against a dead evidence channel. Ordered
+      // FIRST (B3): durable + idempotent, so a crash before the upsert below just re-enters this
+      // same branch next tick.
+      supervisor.requestHandoff(w.name);
+      // B1: consume any stale PRIOR-leg sentinel resume() itself may not have gotten to.
+      supervisor.clearStaleFixEntrySentinel(w.name);
+      const fixRounds = (w.fix_rounds ?? 0) + 1;
+      state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
+      state.appendEvent("fix-leg-adopted", { worker: w.name, issue: w.issue, fixRounds });
+    } else if (intent === "unconfirmed") {
+      // B4: label FIRST; a failed write must NOT terminalize the row — leave it `driving` and
+      // retry the whole escalation next tick (never a permanently-stranded failed+unlabeled row).
+      try {
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      } catch (e) {
+        state.appendEvent("fix-leg-undecidable-label-failed", { worker: w.name, issue: w.issue, error: String(e) });
+        continue;
+      }
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
+      state.appendEvent("fix-leg-undecidable", { worker: w.name, issue: w.issue });
+    }
+    // "none": nothing to reconcile.
+  }
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now ?? (() => new Date());
   const iso = () => now().toISOString();
   const threshold = cfg.worker.heartbeatStaleSecs;
+
+  // #245 round-2 fix A3: reconcile any driving-row fix-leg spawn intent BEFORE the kill-switch
+  // gate — see reconcileDrivingFixIntents' own doc for the crash window this repairs.
+  await reconcileDrivingFixIntents(forge, state, supervisor, cfg, iso);
 
   // ── KILL SWITCH (#69): ONE global gate, checked before anything else runs. Active ->
   //   this tick is DRAIN + TERMINAL-RECLAIM ONLY. Replaces the per-phase gates from #59/#61/#64
@@ -1201,10 +1414,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         throw new Error(`resume returned worker ${result.name}; expected existing lane ${w.name}`);
       }
       const attempt = (w.resume_attempts ?? 0) + 1;
+      // #245 round-2 fix (B2b): a fixing-origin handoff adopted here must land back in
+      // `fixing`, never `running` — writing `running` unconditionally silently discarded its
+      // fix identity (`fixing_handoff` stays 1 on `w`, spread through unchanged below, but a
+      // `running`-state row is invisible to the ordinary RESUME phase's fixing_handoff check
+      // entirely). Landing it in `fixing` makes it visible to THIS SAME tick's drain loop just
+      // below (which now scans running+fixing) — no separate requestHandoff needed here, same
+      // as the ordinary (non-fix) adoption case.
       state.upsertWorker({
         ...w,
         session_id: result.sessionId,
-        state: "running",
+        state: w.fixing_handoff === 1 ? "fixing" : "running",
         started_at: iso(),
         ended_at: null,
         resume_attempts: attempt,
@@ -1213,17 +1433,26 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt });
     }
     const reclaimed: ReclaimOutcome[] = [];
-    for (const w of state.runningWorkers()) {
+    // #245: a `fixing` lane is a LIVE fix-leg worker process — the kill switch's drain/hard-kill
+    // contract must supervise it exactly like a `running` lane (worker paradigm); it must never
+    // be left spinning just because the engine considers itself "killed".
+    for (const w of [...state.runningWorkers(), ...state.fixingWorkers()]) {
       const p = await supervisor.probe(w.name);
+      // #245 round-2 fix A5: reclaimTerminalLane itself clears the fixing-origin review-trigger
+      // pin atomically (same settleTerminalWorker transaction as the `driving` write) — no
+      // separate follow-up call needed here.
       const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
-      if (terminal) reclaimed.push(terminal); // KEEP/DEAD lanes stay running -> drained below
+      if (terminal) {
+        reclaimed.push(terminal); // KEEP/DEAD lanes stay running/fixing -> drained below
+      }
       // #155: no setLiveTelemetry here for a still-running (KEEP) lane — this branch is drain-
       // only (kill switch engaged); telemetry is left as its last known value until the lane
       // actually leaves `running` (reclaimTerminalLane above, or drainThenEscalate below —
       // both clear it). Refreshing display telemetry mid-drain isn't worth a special case.
     }
-    // drainThenEscalate re-reads runningWorkers() AFTER the terminal reclaim above transitioned
-    // those lanes out of `running`, so a just-recorded handoff/done lane is never re-touched.
+    // drainThenEscalate re-reads runningWorkers()+fixingWorkers() AFTER the terminal reclaim
+    // above transitioned those lanes out of `running`/`fixing`, so a just-recorded
+    // handoff/done/driving lane is never re-touched.
     const { drainRequested, escalated } = await drainThenEscalate(forge, state, supervisor, cfg, ["kill-switch"], now(), iso);
     return {
       reclaimed,
@@ -1237,6 +1466,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       rollbacks: [],
       gatedReclaimed: [],
       resumed,
+      fixingReclaimed: [],
     };
   }
 
@@ -1401,6 +1631,85 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     }
     state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
     reclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
+  }
+
+  // ── FIXING RECLAIM (#245): a `fixing` lane is a LIVE fix-leg worker process (worker
+  //   paradigm) — same heartbeat/timeout/soft-budget supervision as an ordinary `running` lane,
+  //   deliberately NOT #170's review-silence escalation: that clock only ever fires from inside
+  //   the DRIVE loop below, which iterates state.drivingWorkers() — a `fixing` lane is never a
+  //   member of that set (fixingWorkers()' own doc), so silence escalation structurally cannot
+  //   arm here. DONE/FAILED terminal handling reuses reclaimTerminalLane verbatim — identical
+  //   env-failure classification, dirty-worktree retention, and has-PR rescue-to-`driving`
+  //   disposition to the ordinary RECLAIM loop above. The ONE thing unique to a fixing-origin
+  //   lane — clearing the review-trigger pin the instant it lands back in `driving`, ATOMICALLY
+  //   with that same state write (#245 round-2 fix A5) — is now handled INSIDE
+  //   reclaimTerminalLane itself (via its own `fixingPinClear`, derived from `w.state ===
+  //   "fixing"`), reusing driveOne's own re-trigger machinery exactly the way #147's GATED
+  //   RECLAIM does.
+  const fixingReclaimed: ReclaimOutcome[] = [];
+  for (const w of state.fixingWorkers()) {
+    const p = await supervisor.probe(w.name);
+    const terminal = await reclaimTerminalLane(forge, state, supervisor, cfg, w, p, threshold, iso);
+    if (terminal) {
+      fixingReclaimed.push(terminal);
+      continue;
+    }
+    const costUsd = p.costUsd ?? 0;
+    const modelUsage = p.modelUsage ?? [];
+    const laneClass = classifyLane(p.done, p.failed, p.hbAge, threshold, p.wrapperAlive, p.dispatchedAgeSec, cfg.worker.timeoutSec);
+    if (laneClass === "KEEP") {
+      if (p.liveTelemetry) state.setLiveTelemetry(w.name, p.liveTelemetry);
+      else state.clearLiveTelemetry(w.name);
+      fixingReclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
+      continue;
+    }
+    if (laneClass === "ADOPT") {
+      if (supervisor.requestHandoff(w.name)) {
+        state.appendEvent("lane-adopted", { worker: w.name, issue: w.issue, note: "Spend during engine downtime was unobserved." });
+      }
+      state.clearLiveTelemetry(w.name);
+      fixingReclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
+      continue;
+    }
+    // DEAD: crashed with no terminal sentinel. Kill the tree; a fixing lane always already
+    // carries a PR (inherited from `driving`) — a dirty worktree overrides the rescue (same #69
+    // policy as the ordinary DEAD path), otherwise rescue straight back to `driving` with the
+    // pin cleared exactly like the terminal path above.
+    state.clearLiveTelemetry(w.name);
+    const r = await supervisor.reclaim(w.name);
+    const deadAt = iso();
+    if (r.worktreeRetained) {
+      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      if (p.prNumber != null) await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman);
+      await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
+      state.settleTerminalWorker(
+        { ...w, state: "failed", ended_at: deadAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
+    } else if (p.hasPr) {
+      state.settleTerminalWorker(
+        {
+          ...w,
+          state: "driving",
+          ended_at: deadAt,
+          pr: p.prNumber ?? w.pr ?? null,
+          review_triggered_head: null,
+          review_triggered_at: null,
+        },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
+    } else {
+      // Fail-safe only — a fixing lane should never lack a PR; treat like any other no-PR dead
+      // lane: escalate rather than silently drop the fix attempt.
+      await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      state.settleTerminalWorker(
+        { ...w, state: "failed", ended_at: deadAt },
+        { worker: w.name, issue: w.issue, usd: costUsd, at: deadAt, models: modelUsage },
+      );
+    }
+    const rescued = p.hasPr && !r.worktreeRetained;
+    state.appendEvent("reclaim-dead", { worker: w.name, issue: w.issue, rescued });
+    fixingReclaimed.push({ kind: "dead", worker: w.name, issue: w.issue, rescued, costUsd, modelUsage });
   }
 
   // ── GATED RECLAIM (#147): a failed lane that DRIVE escalated (gate②/mergeDecision
@@ -1884,6 +2193,106 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // strand an already-running child during forge park. Fresh RESUME still refreshes it.
       ...(decision === "ADOPT" ? {} : { body: await forge.getIssueBody(w.issue) }),
     };
+    // #245 round-2 fix A2: a handoff row whose PRIOR state was `fixing` (reclaimTerminalLane's
+    // `fixing_handoff` marker) must resume as a FIX continuation — fix prompt + mandatory
+    // credentialFree proxy + target state `fixing` — never silently as an ordinary leg (wrong
+    // prompt, no proxy, ambient credentials, wrong state). Bumps ONLY resume_attempts, never
+    // fix_rounds: this is a continuation of the SAME fix leg, not a new rework round.
+    if (w.fixing_handoff === 1) {
+      if (!deps.fixLegResume) {
+        // Fail-closed: never silently resume a fix-leg-origin handoff as an ordinary leg just
+        // because the caller hasn't wired this dependency yet. Left in `handoff`, retried every
+        // tick until configured — same "skip, don't corrupt" stance an unconfigured mergeGate
+        // takes for driving lanes.
+        state.appendEvent("fix-leg-resume-unconfigured", { worker: w.name, issue: w.issue });
+        continue;
+      }
+      if (w.pr == null) {
+        // Fail-safe only — a fixing-origin handoff should always carry a PR (inherited from
+        // `driving`). Escalate rather than silently drop the fix attempt or guess a PR number.
+        await forge.addLabel(w.issue, cfg.labels.needsHuman).catch(() => {});
+        state.upsertWorker({ ...w, ended_at: iso() });
+        state.appendEvent("fix-leg-resume-no-pr", { worker: w.name, issue: w.issue });
+        continue;
+      }
+      const pr = w.pr;
+      // #245 round-2 fix (B2a): `decision === "ADOPT"` means a live child ALREADY exists from a
+      // PRIOR resume() call that confirmed a spawn before this engine crashed — its proxy (if
+      // any) was minted by that now-dead process and can never be trusted, the same "never trust
+      // a cross-crash proxy" stance reconcileDrivingFixIntents takes for the driving-row entry
+      // case. Adopt it via resume()'s own confirmed-intent early return (it never even looks at
+      // proxy/prompt opts on that path — no fresh mint is attempted), then immediately drain it
+      // gracefully rather than bless it as a healthy continuation. `fixing_handoff` STAYS 1 so
+      // the NEXT handoff/resume cycle re-mints a genuinely fresh proxy.
+      if (decision === "ADOPT") {
+        let adoptResult: { name: string; sessionId: string };
+        try {
+          adoptResult = await supervisor.resume(issue, w.name);
+        } catch (e) {
+          if (e instanceof UnresumableLaneError) {
+            const outcome = await escalateUndecidableResume(forge, state, cfg, w, attempts, iso);
+            if (outcome) resumed.push(outcome);
+            continue;
+          }
+          state.appendEvent("fix-leg-resume-failed", { worker: w.name, issue: w.issue, error: String(e) });
+          throw e;
+        }
+        // #245 round-3 fix (B5): requestHandoff FIRST — durable (persists handoff_requested in
+        // running.json) and idempotent, so a crash between this call and the upsert below is
+        // safe: the row stays `handoff` with fixing_handoff=1 and the SAME confirmed intent, so
+        // the next tick re-enters this exact ADOPT branch — resume() re-adopts, requestHandoff
+        // is then a harmless no-op re-signal, and the upsert's resume_attempts bump is still the
+        // first and only successful one. Same convergence argument as B3's reordering.
+        supervisor.requestHandoff(w.name);
+        const adoptAttempt = attempts + 1;
+        state.upsertWorker({
+          ...w,
+          session_id: adoptResult.sessionId,
+          state: "fixing",
+          started_at: iso(),
+          ended_at: null,
+          resume_attempts: adoptAttempt,
+          fixing_handoff: 1,
+        });
+        state.appendEvent("fix-leg-adopted-drained", { worker: w.name, issue: w.issue, pr, attempt: adoptAttempt });
+        resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: adoptAttempt });
+        resumeLanesUsed++;
+        continue;
+      }
+      const fixPrompt = deps.fixLegResume.renderFixPrompt(w.issue, pr);
+      let fixResult: { name: string; sessionId: string };
+      try {
+        fixResult = await supervisor.resume(issue, w.name, {
+          prompt: fixPrompt,
+          proxy: { mint: deps.fixLegResume.mintProxy, credentialFree: true },
+        });
+      } catch (e) {
+        if (e instanceof UnresumableLaneError) {
+          const outcome = await escalateUndecidableResume(forge, state, cfg, w, attempts, iso);
+          if (outcome) resumed.push(outcome);
+          continue;
+        }
+        state.appendEvent("fix-leg-resume-failed", { worker: w.name, issue: w.issue, error: String(e) });
+        throw e;
+      }
+      if (fixResult.name !== w.name) {
+        throw new Error(`resume returned worker ${fixResult.name}; expected existing lane ${w.name}`);
+      }
+      const fixAttempt = attempts + 1;
+      state.upsertWorker({
+        ...w,
+        session_id: fixResult.sessionId,
+        state: "fixing",
+        started_at: iso(),
+        ended_at: null,
+        resume_attempts: fixAttempt,
+        fixing_handoff: 0,
+      });
+      state.appendEvent("fix-leg-resumed", { worker: w.name, issue: w.issue, pr, attempt: fixAttempt });
+      resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: fixAttempt });
+      resumeLanesUsed++;
+      continue;
+    }
     let result: { name: string; sessionId: string };
     try {
       result = await supervisor.resume(issue, w.name);
@@ -2058,5 +2467,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     rollbacks,
     gatedReclaimed,
     resumed,
+    fixingReclaimed,
   };
 }

@@ -179,6 +179,7 @@ class MinimalSupervisor implements Supervisor {
   requestHandoff(): boolean {
     return true;
   }
+  clearStaleFixEntrySentinel(): void {}
 }
 
 /** One shared scripted fake for every role session dispatched across the whole round — real

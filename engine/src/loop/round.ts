@@ -863,7 +863,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         for (const r of batchResult.resumed) {
           if (r.kind === "resumed" && !dispatchedNames.includes(r.worker)) dispatchedNames.push(r.worker);
         }
-        recoveryBeatPending = batchResult.reclaimed.some((r) => r.kind === "handoff");
+        // #245 round-2 fix (Codex sol-high review, verifying the A2 finding): a `fixing` lane's
+        // own soft-budget handoff lands in `fixingReclaimed`, a SEPARATE array from the ordinary
+        // RECLAIM phase's `reclaimed` — checking `reclaimed` alone would miss it and let this
+        // loop think it's idle (break) with a fix-leg-origin handoff sitting there needing the
+        // NEXT tick's RESUME phase to restore it.
+        recoveryBeatPending =
+          batchResult.reclaimed.some((r) => r.kind === "handoff") || batchResult.fixingReclaimed.some((r) => r.kind === "handoff");
       }
     }
     recordBudgetStop();
@@ -895,7 +901,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         for (const r of tickResult.resumed) {
           if (r.kind === "resumed" && !dispatchedNames.includes(r.worker)) dispatchedNames.push(r.worker);
         }
-        recoveryBeatPending = tickResult.reclaimed.some((r) => r.kind === "handoff");
+        // #245 round-2 fix: same fixingReclaimed check as the wave-1 branch above.
+        recoveryBeatPending =
+          tickResult.reclaimed.some((r) => r.kind === "handoff") || tickResult.fixingReclaimed.some((r) => r.kind === "handoff");
       }
       recordBudgetStop();
       if (deps.state.activeWorkers().length === 0 && !recoveryBeatPending) break;

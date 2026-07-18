@@ -113,6 +113,88 @@ test("drivingWorkers returns only state=driving rows (#13 merge-driver targets)"
   s.close();
 });
 
+// ── #245: fixing lane state ─────────────────────────────────────────────────────────────
+
+test("activeWorkers extends to running + driving + fixing (#245 lane occupancy)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "driving", started_at: "t", ended_at: "t2", pr: 21 });
+  s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "fixing", started_at: "t", ended_at: null, pr: 22 });
+  s.upsertWorker({ name: "d", issue: 4, session_id: "s4", state: "done", started_at: "t", ended_at: "t2" });
+  s.upsertWorker({ name: "e", issue: 5, session_id: "s5", state: "handoff", started_at: "t", ended_at: "t2" });
+  assert.deepEqual(
+    s.activeWorkers().map((w) => w.name),
+    ["a", "b", "c"],
+  );
+  s.close();
+});
+
+test("fixingWorkers returns only state=fixing rows, disjoint from drivingWorkers (#245: DRIVE loop must never scan a fixing lane)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: "t2", pr: 1 });
+  s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "fixing", started_at: "t", ended_at: null, pr: 2 });
+  s.upsertWorker({ name: "c", issue: 3, session_id: "s3", state: "fixing", started_at: "t", ended_at: null, pr: 3 });
+  assert.deepEqual(
+    s.fixingWorkers().map((w) => w.name),
+    ["b", "c"],
+  );
+  assert.deepEqual(
+    s.drivingWorkers().map((w) => w.name),
+    ["a"],
+  );
+  s.close();
+});
+
+test("reconcileWorkers includes fixing rows for startup reconciliation (#245: a live fix leg still owns its issue across a restart)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "fixing", started_at: "t", ended_at: null, pr: 1 });
+  s.upsertWorker({ name: "b", issue: 2, session_id: "s2", state: "done", started_at: "t", ended_at: "t2" });
+  assert.deepEqual(
+    s.reconcileWorkers().map((w) => w.name),
+    ["a"],
+  );
+  s.close();
+});
+
+test("fix_rounds: independent of resume_attempts — bumping one never touches the other, and both persist across upserts", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: "t2", pr: 1 });
+  const row = s.getWorker("a")!;
+  assert.equal(row.fix_rounds ?? 0, 0);
+  assert.equal(row.resume_attempts ?? 0, 0);
+
+  // Bump fix_rounds only.
+  s.upsertWorker({ ...row, state: "fixing", fix_rounds: 1 });
+  let updated = s.getWorker("a")!;
+  assert.equal(updated.fix_rounds, 1);
+  assert.equal(updated.resume_attempts ?? 0, 0);
+
+  // Separately bump resume_attempts only — fix_rounds must not move.
+  s.upsertWorker({ ...updated, resume_attempts: 3 });
+  updated = s.getWorker("a")!;
+  assert.equal(updated.fix_rounds, 1, "fix_rounds must not be disturbed by a resume_attempts-only write");
+  assert.equal(updated.resume_attempts, 3);
+  s.close();
+});
+
+test("fix_rounds: restart-safe — persists on disk across a State reopen (crash-rerun, #223 terminal-state atomicity pattern)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const s = new State(dbPath);
+    s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "fixing", started_at: "t", ended_at: null, pr: 1, fix_rounds: 2 });
+    s.close();
+
+    const reopened = new State(dbPath);
+    const row = reopened.getWorker("a");
+    assert.equal(row?.fix_rounds, 2, "fix_rounds survives a crash/restart — never silently reset to 0");
+    assert.equal(row?.state, "fixing");
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #147: gated-PR reentry (gated_reentry_attempts/capped/labeled + gatedFailedWorkers) ────
 test("worker.gated_reentry_attempts/capped/labeled round-trip: default 0/0/0, persisted across upserts", () => {
   const s = mem();
@@ -1538,6 +1620,101 @@ test("migration v17->v18: the events(kind) index is actually created and usable 
     .get();
   assert.ok(indexRow, "events_kind_idx exists on the events table");
   s.close();
+});
+
+test("migration v18->v19: a populated v18 DB opens with data intact, fix_rounds defaults to 0 on pre-existing rows, user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 18; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 18");
+    raw
+      .prepare(
+        `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("legacy-driving", 7, "sess-1", "driving", "2026-07-01T00:00:00Z", null, 70);
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 19);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    const row = s.getWorker("legacy-driving");
+    assert.equal(row?.fix_rounds, 0, "a pre-#245 row never had a fix leg — defaults to 0, not NULL");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("legacy-driving")?.fix_rounds, 0);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration v19->v20: a populated v19 DB opens with data intact, fixing_handoff defaults to 0 on pre-existing rows, user_version SCHEMA_VERSION, idempotent reopen (#245 round-2 fix A2)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 19; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 19");
+    raw
+      .prepare(
+        `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("legacy-handoff", 8, "sess-2", "handoff", "2026-07-01T00:00:00Z", "2026-07-01T01:00:00Z", null);
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 20);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    const row = s.getWorker("legacy-handoff");
+    assert.equal(row?.fixing_handoff, 0, "a pre-#245-round-2 handoff row was never a fixing handoff — defaults to 0, not NULL");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("legacy-handoff")?.fixing_handoff, 0);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fixing_handoff round-trips independently of fix_rounds/resume_attempts and persists across a State reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const s = new State(dbPath);
+    s.upsertWorker({
+      name: "lane-a",
+      issue: 1,
+      session_id: "s1",
+      state: "handoff",
+      started_at: "t",
+      ended_at: "t2",
+      pr: 10,
+      fix_rounds: 2,
+      fixing_handoff: 1,
+    });
+    const row = s.getWorker("lane-a")!;
+    assert.equal(row.fixing_handoff, 1);
+    assert.equal(row.fix_rounds, 2);
+    s.close();
+
+    const reopened = new State(dbPath);
+    const reopenedRow = reopened.getWorker("lane-a")!;
+    assert.equal(reopenedRow.fixing_handoff, 1);
+    assert.equal(reopenedRow.fix_rounds, 2, "fix_rounds unaffected by fixing_handoff's own value");
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("input manifest #251: an OMITTED truncated round-trips as null, never a fabricated false — the exact dishonesty the three-state column fixes", () => {

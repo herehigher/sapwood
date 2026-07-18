@@ -494,6 +494,36 @@ test("validate: worker.promptFile with an unknown {{var}} fails validation, exit
   }
 });
 
+// #245 round-2 fix A7: worker.fixPromptFile gets the SAME eager fail-fast validation as
+// worker.promptFile — `sapwood validate` must reject a broken fix-leg prompt too.
+test("validate: worker.fixPromptFile pointing nowhere fails validation, exits 1 (#245 round-2 fix A7)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const path = join(dir, "sapwood.config.yaml");
+  writeFileSync(path, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  fixPromptFile: /nonexistent/nope.md\n");
+  try {
+    const r = runCli(["node", "sapwood", "validate", path]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /\/nonexistent\/nope\.md/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("validate: worker.fixPromptFile with an unknown {{var}} fails validation, exits 1 — including a var worker.promptFile WOULD allow (issue.title is narrowed OUT of the fix-leg var set, #245 round-2 fix A7)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
+  const cfgPath = join(dir, "sapwood.config.yaml");
+  const promptPath = join(dir, "bad-fix.md");
+  writeFileSync(promptPath, "fix {{issue.title}}");
+  writeFileSync(cfgPath, `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  fixPromptFile: ${promptPath}\n`);
+  try {
+    const r = runCli(["node", "sapwood", "validate", cfgPath]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /unknown variable.*issue\.title/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("validate: relative worker.promptFile resolves against the CONFIG's directory, not cwd (#74)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-validate-"));
   const cfgPath = join(dir, "sapwood.config.yaml");

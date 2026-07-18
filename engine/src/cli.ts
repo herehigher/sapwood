@@ -22,7 +22,7 @@ import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
 import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
-import { buildRenderPrompt, discoverClaudeBin, probeLlmPing, WorkerSupervisor } from "./roles/worker.js";
+import { buildRenderFixPrompt, buildRenderPrompt, discoverClaudeBin, probeLlmPing, WorkerSupervisor } from "./roles/worker.js";
 import { type ParkRow, SCHEMA_VERSION, State, type WorkerRow } from "./state/state.js";
 
 const require = createRequire(import.meta.url);
@@ -244,6 +244,10 @@ export function runValidate(argv: string[]): { stdout: string; stderr: string; c
     // Validate the prompt template too (#74) — `sapwood validate` must reject everything the
     // real run would reject at startup, including a missing promptFile or unknown {{var}}.
     buildRenderPrompt(cfg);
+    // #245 round-2 fix A7: same fail-fast stance for the FIX-LEG prompt template — a missing/
+    // unreadable/empty worker.fixPromptFile or an unknown {{var}} must surface here too, not
+    // only when a fix leg is actually started (#246). Renderer discarded; only validation matters.
+    buildRenderFixPrompt(cfg);
     // Same for the soft-budget rate table (#33 follow-up): a missing/malformed
     // worker.pricingFile aborts the real run at supervisor construction, so validate it here.
     loadPricingTable(cfg);
@@ -328,6 +332,9 @@ export async function runDryRun(overrides: Pick<EngineOverrides, "cfg" | "forge"
   // preview too — dry-run exists to predict the real run, not to green-light a config the
   // real run would reject at startup. Renderer is discarded; only validation matters here.
   buildRenderPrompt(cfg);
+  // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — see runValidate's
+  // own comment.
+  buildRenderFixPrompt(cfg);
   loadPricingTable(cfg); // #33 follow-up: a broken worker.pricingFile surfaces here too
   const forge = overrides.forge ?? new GithubForge(cfg);
   const preview = computeDryRunPreview(await forge.getReadyIssues(), cfg);
@@ -756,9 +763,9 @@ function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger:
 
 function formatTickSummary(result: TickResult): string {
   return (
-    `[sapwood:tick] reclaimed=${result.reclaimed.length} dispatched=${result.dispatched.length} ` +
-    `driven=${result.driven.length} resumed=${result.resumed.length} rollbacks=${result.rollbacks.length} ` +
-    `gatedReclaimed=${result.gatedReclaimed.length} ` +
+    `[sapwood:tick] reclaimed=${result.reclaimed.length} fixingReclaimed=${result.fixingReclaimed.length} ` +
+    `dispatched=${result.dispatched.length} driven=${result.driven.length} resumed=${result.resumed.length} ` +
+    `rollbacks=${result.rollbacks.length} gatedReclaimed=${result.gatedReclaimed.length} ` +
     `drainRequested=${result.drainRequested.length} escalated=${result.escalated.length} ceilingBreached=${result.ceilingBreached}`
   );
 }
@@ -797,6 +804,10 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // load deferred to first dispatch: that would let the engine claim issues / churn ticks before
   // failing, instead of a clean fail-fast with no dispatch ever happening.
   const renderPrompt = buildRenderPrompt(cfg);
+  // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — a fix leg (#246) isn't
+  // dispatched from this path yet (no shipped caller wires TickDeps.fixLegResume in this repo),
+  // but the config must still be validated eagerly at startup, matching runValidate/runDryRun.
+  buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);
   const reviewer = makeReviewer(cfg);
@@ -890,6 +901,9 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // startup before any dispatch — the round loop's `executing` phase still dispatches workers
   // via WorkerSupervisor exactly like the tick driver does.
   const renderPrompt = buildRenderPrompt(cfg);
+  // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — see runTickEngine's
+  // own comment above.
+  buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);
   const reviewer = makeReviewer(cfg);
