@@ -15,7 +15,7 @@
 //      BLOCK fail-closed (a worker could hide anything inside them).
 //   4. gh-overreach semantic check.
 // For Write/Edit tools: deny writes to the guard's boundary files.
-// For Read/Grep/Glob (#235 PR-A): confine the resolved target path to the session's
+// For Read/Grep/Glob/NotebookRead (#235 PR-A): confine the resolved target path to the session's
 // worktree, when the engine told us what that worktree is (worktreeRoot param — see below).
 
 export interface Decision {
@@ -31,6 +31,7 @@ export interface GuardInput {
   command?: string; // Bash
   file_path?: string; // Write / Edit / MultiEdit / Read
   path?: string; // Grep / Glob search root (optional — Claude Code defaults it to cwd when absent)
+  notebook_path?: string; // NotebookRead
 }
 
 // ── shlex-equivalent tokenizer ───────────────────────────────────────────────
@@ -735,15 +736,20 @@ function checkBashWritePath(tokens: string[], cwd: string): string | null {
 // (docs/security.md "Benchmark isolation recipe"). So containment has to be this guard's
 // job, the same way Write/Edit boundary-file protection already is.
 //
-// Read/Grep/Glob all resolve to a single filesystem target: Read's `file_path` (required —
-// a Read call with no path can't be verified, so it fails closed below); Grep/Glob's
-// `path` (optional, Claude Code itself defaults an absent one to cwd — see each tool's
-// documented input shape). Resolve that target against `cwd` with the SAME normalizePath
-// helper the write-path check uses, then require it to sit at-or-under the worktree root —
-// mirroring the exact containment check peripheral.ts's scratchFile logic already uses
-// (`target === root || target.startsWith(root + sep)`), just expressed over normalizePath's
-// forward-slash-normalized absolute paths instead of node:path's `resolve`/`sep`.
-const READ_CONTAINED_TOOLS = new Set(["Read", "Grep", "Glob"]);
+// Read/Grep/Glob/NotebookRead all resolve to a single filesystem target: Read's `file_path`
+// and NotebookRead's `notebook_path` (both required — a call with no path can't be verified,
+// so it fails closed below); Grep/Glob's `path` (optional, Claude Code itself defaults an
+// absent one to cwd — see each tool's documented input shape). NotebookRead joined this set
+// (PM review of PR-A) for the same reason Read/Grep/Glob did: it is a built-in read-family
+// tool that reads an arbitrary file path (a `.ipynb`), and #235's own thesis is a complete
+// boundary, not one that relies on allowlist-absence — omitting it would leave an
+// inconsistent "why is this tool special" hole. Resolve the target against `cwd` with the
+// SAME normalizePath helper the write-path check uses, then require it to sit at-or-under
+// the worktree root — mirroring the exact containment check peripheral.ts's scratchFile
+// logic already uses (`target === root || target.startsWith(root + sep)`), just expressed
+// over normalizePath's forward-slash-normalized absolute paths instead of node:path's
+// `resolve`/`sep`.
+const READ_CONTAINED_TOOLS = new Set(["Read", "Grep", "Glob", "NotebookRead"]);
 
 /**
  * worktreeRoot is undefined when the engine didn't tell us where the worktree is — which
@@ -755,7 +761,7 @@ const READ_CONTAINED_TOOLS = new Set(["Read", "Grep", "Glob"]);
  * deliberately mirroring how the guard already treats a human-run, non-engine `claude`
  * process (SAPWOOD_GUARD_MODE unset still resolves safely to "hard" in guard-hook.ts, but
  * there is no lane/worktree convention to confine such a session to in the first place).
- * Containment INACTIVE here means Read/Grep/Glob fall through to ALLOW, same as they were
+ * Containment INACTIVE here means Read/Grep/Glob/NotebookRead fall through to ALLOW, same as they were
  * before this change — a deliberate, additive-only widening of what's checked, not a
  * default-deny flip for non-engine usage.
  */
@@ -763,12 +769,13 @@ function checkReadContainment(tool: string, input: GuardInput, cwd: string, work
   if (!READ_CONTAINED_TOOLS.has(tool)) return null;
   if (!worktreeRoot) return null; // containment inactive: no engine-supplied worktree root
 
-  const rawTarget = tool === "Read" ? input.file_path : (input.path ?? cwd);
+  const rawTarget = tool === "Read" ? input.file_path : tool === "NotebookRead" ? input.notebook_path : (input.path ?? cwd);
   if (!rawTarget) {
-    // Read's file_path is required; a missing one means the guard can't verify containment
-    // at all — fail closed rather than silently allow (same stance as guard-hook.ts's
-    // GUARDED_TOOLS malformed-tool_input branch, just enforced here for the field-level case
-    // a valid-but-incomplete tool_input object doesn't trip at the hook layer).
+    // Read's file_path / NotebookRead's notebook_path are required; a missing one means the
+    // guard can't verify containment at all — fail closed rather than silently allow (same
+    // stance as guard-hook.ts's GUARDED_TOOLS malformed-tool_input branch, just enforced here
+    // for the field-level case a valid-but-incomplete tool_input object doesn't trip at the
+    // hook layer).
     return block(`BLOCK [fail-closed] ${tool} with missing path — cannot verify worktree containment`);
   }
 
@@ -785,7 +792,7 @@ const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
  * The PreToolUse safety decision. Pure & deterministic — worktreeRoot is a plain string
  * argument (never read from env inside this function; guard-hook.ts's IO layer reads
  * SAPWOOD_WORKTREE_ROOT and threads it in). Bash commands are guarded for opaque
- * constructs + gh overreach; Write/Edit are guarded for boundary files; Read/Grep/Glob are
+ * constructs + gh overreach; Write/Edit are guarded for boundary files; Read/Grep/Glob/NotebookRead are
  * guarded for worktree containment (#235 PR-A) when a worktreeRoot is known; every other
  * tool is allowed.
  */

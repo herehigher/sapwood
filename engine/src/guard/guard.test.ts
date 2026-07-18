@@ -319,15 +319,46 @@ test("Glob BLOCK: ../-traversal path escaping the worktree root", () => {
   assert.ok(d.reason.toLowerCase().includes("read-containment"));
 });
 
+// ── NotebookRead worktree containment (#235 PR-A, added in PM review — same read-family
+//    gap as Read/Grep/Glob: NotebookRead reads an arbitrary `.ipynb` path via notebook_path,
+//    was left out of the first pass, and is fixed the same way here. ────────────────────────
+test("NotebookRead ALLOW: an in-worktree .ipynb", () => {
+  const d = guardDecision("NotebookRead", { notebook_path: `${WORKTREE_ROOT}/analysis.ipynb` }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
+test("NotebookRead BLOCK: an absolute host path outside the worktree root", () => {
+  const d = guardDecision("NotebookRead", { notebook_path: "/Users/host/secret.ipynb" }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("read-containment"));
+});
+
+test("NotebookRead BLOCK: a ../-traversal path escaping the worktree root", () => {
+  const d = guardDecision("NotebookRead", { notebook_path: "../../secret.ipynb" }, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("read-containment"));
+});
+
+test("NotebookRead DENY (fail-closed): missing notebook_path with worktreeRoot set", () => {
+  const d = guardDecision("NotebookRead", {}, WORKTREE_ROOT, WORKTREE_ROOT);
+  assert.equal(d.allow, false);
+  assert.ok(d.reason.toLowerCase().includes("fail-closed"));
+});
+
+test("NotebookRead: no worktreeRoot -> containment inactive, allowed regardless of path", () => {
+  assert.equal(guardDecision("NotebookRead", { notebook_path: "/etc/hosts" }, CWD).allow, true);
+});
+
 test("Read containment is independent of Write/Edit boundary-file protection: an in-worktree read of the guard's OWN source is allowed", () => {
   const d = guardDecision("Read", { file_path: `${WORKTREE_ROOT}/engine/src/guard/guard.ts` }, WORKTREE_ROOT, WORKTREE_ROOT);
   assert.equal(d.allow, true, d.reason);
 });
 
-test("hook: Read/Grep/Glob with malformed/non-object tool_input fails closed (GUARDED_TOOLS widened by #235 PR-A)", () => {
+test("hook: Read/Grep/Glob/NotebookRead with malformed/non-object tool_input fails closed (GUARDED_TOOLS widened by #235 PR-A)", () => {
   assert.equal(hookResponse({ tool_name: "Read", tool_input: "oops" })?.hookSpecificOutput.permissionDecision, "deny");
   assert.equal(hookResponse({ tool_name: "Grep" })?.hookSpecificOutput.permissionDecision, "deny");
   assert.equal(hookResponse({ tool_name: "Glob", tool_input: null })?.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(hookResponse({ tool_name: "NotebookRead" })?.hookSpecificOutput.permissionDecision, "deny");
 });
 
 test("hook: SAPWOOD_WORKTREE_ROOT threaded through responseFromText denies an outside Read and allows an inside one", () => {

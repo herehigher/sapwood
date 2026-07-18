@@ -514,12 +514,13 @@ export function extractFailureText(jsonl: string): string {
 
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
- *  matcher covers exactly the tools the guard inspects — Read/Grep/Glob joined
- *  Bash/Write/Edit/MultiEdit in #235 PR-A (worktree read-containment). This matcher IS what
- *  makes Claude Code invoke the hook at all for a given tool: guard.ts/guard-hook.ts's own
- *  widened GUARDED_TOOLS set is necessary but not sufficient — without the matcher change here
- *  too, a Read call would never reach the hook process in the first place (Phase-0's exact
- *  finding: GUARDED_TOOLS never included Read, so "the guard never even saw the call").
+ *  matcher covers exactly the tools the guard inspects — Read/Grep/Glob/NotebookRead joined
+ *  Bash/Write/Edit/MultiEdit in #235 PR-A (worktree read-containment; NotebookRead added in
+ *  PM review of the same PR — same read-family gap, same fix). This matcher IS what makes
+ *  Claude Code invoke the hook at all for a given tool: guard.ts/guard-hook.ts's own widened
+ *  GUARDED_TOOLS set is necessary but not sufficient — without the matcher change here too, a
+ *  Read call would never reach the hook process in the first place (Phase-0's exact finding:
+ *  GUARDED_TOOLS never included Read, so "the guard never even saw the call").
  *
  *  FAIL-CLOSED even if `node` can't run the hook (stale dist whose guard-hook.js imports a
  *  missing guard.js, a module-load/syntax error, missing node/PATH): Claude Code treats a
@@ -542,7 +543,7 @@ export function guardSettings(hookPath: string): object {
     // #26 R3 P1). Explicitly re-enabling here overrides that layer.
     disableAllHooks: false,
     hooks: {
-      PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit|Read|Grep|Glob", hooks: [{ type: "command", command }] }],
+      PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit|Read|Grep|Glob|NotebookRead", hooks: [{ type: "command", command }] }],
     },
   };
 }

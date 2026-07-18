@@ -13,7 +13,10 @@ import { type GuardInput, guardDecision } from "./guard.js";
 // #235 PR-A: Read/Grep/Glob added alongside Write/Edit/MultiEdit — the Phase-0 finding was
 // exactly that these three were ABSENT here, so the guard never saw a Read call at all and
 // couldn't confine it to the session's worktree regardless of any matrix work elsewhere.
-const GUARDED_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit", "Read", "Grep", "Glob"]);
+// NotebookRead added in PM review of PR-A: it's a built-in read-family tool (reads an
+// arbitrary `.ipynb` path) that was left out of the first pass — same containment gap,
+// same fix.
+const GUARDED_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit", "Read", "Grep", "Glob", "NotebookRead"]);
 
 export interface DenyOutput {
   hookSpecificOutput: {
