@@ -29,6 +29,7 @@ import {
   probeBackoffSec,
   probeDue,
 } from "./env-failure.js";
+import { attemptThreadWrite, type FixResponseWriteOutcome, journaledReviewThreadIds, validateFixResponseOutput } from "./fix-response.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -398,6 +399,16 @@ export interface LaneProbe {
    *  for probe fixtures that predate #168 — classifyEnvFailure treats undefined/"" as no match
    *  (an ordinary task failure), never a park. */
   failureText?: string;
+  /** #247: a DONE lane's own final-message text (worker.ts's parseResultText, the SAME
+   *  stream-json `result` field read every peripheral role's structured-output validator
+   *  already consumes via RoleSessionResult.resultText) — a fix leg's structured
+   *  threadResponses block lives here. undefined for a non-DONE lane, or for probe fixtures
+   *  that predate #247 — reclaimTerminalLane treats undefined/"" as "no structured output",
+   *  the harvest fails closed (validateFixResponseOutput's own "no block found" case), never a
+   *  guess. Populated unconditionally for every DONE lane (not just `fixing` ones) — same
+   *  "cheap, existing capture, just a new read" stance failureText already takes; an ordinary
+   *  worker's DONE result text is simply never consumed by anything. */
+  resultText?: string;
 }
 
 /** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
@@ -572,6 +583,10 @@ export interface TickResult {
    *  process (same shape as an ordinary `running`-lane reclaim outcome; see the FIXING RECLAIM
    *  phase in tick()). Empty when there were no `fixing` lanes this tick. */
   fixingReclaimed: ReclaimOutcome[];
+  /** #247: every pending fix-thread write (persisted this tick or a prior one) attempted this
+   *  tick — recorded / resolved / still-retrying / escalated-to-needs-human. Empty when nothing
+   *  was pending and no fixing lane's terminal reclaim enqueued anything new this tick. */
+  fixResponses: FixResponseWriteOutcome[];
 }
 
 export interface TickDeps {
@@ -1125,6 +1140,13 @@ async function reclaimTerminalLane(
         { ...w, state: "driving", ended_at: doneAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
         { worker: w.name, issue: w.issue, usd: costUsd, at: doneAt, models: modelUsage },
       );
+      // #247: a `fixing` lane's terminal DONE output is where its structured threadResponses
+      // block gets harvested — see harvestFixLegResponse's own doc for the validate-then-
+      // enqueue contract. `w.state` is checked BEFORE this call's own settle above overwrote
+      // it (same "read w.state as it stood on entry" stance fixingPinClear already takes).
+      if (w.state === "fixing") {
+        harvestFixLegResponse(state, w, p, p.prNumber ?? w.pr ?? null, doneAt);
+      }
     } else {
       // ESCALATE_NOPR: done but no PR -> nothing to drive; free the lane, escalate to human.
       state.settleTerminalWorker(
@@ -1281,6 +1303,43 @@ async function reclaimTerminalLane(
     return { kind: "failed", worker: w.name, issue: w.issue, next, costUsd, modelUsage };
   }
   return null; // KEEP or DEAD — not a terminal sentinel; caller handles it
+}
+
+/** #247: a `fixing` lane's terminal DONE reclaim is where its structured threadResponses block
+ *  gets harvested — parsed from the SAME per-leg result text worker.ts's probe() now captures
+ *  (LaneProbe.resultText), validated against the SAME journaled `pr_review_threads` response(s)
+ *  this lane's session was actually served (no TOCTOU — journal rows are keyed by session name
+ *  alone, State.listForgeProxyJournalForSession, which never changes across a fix leg's resumed
+ *  continuations), then enqueued to the durable write queue (State.enqueueThreadWrite) for a
+ *  LATER tick's attemptThreadWrite to actually execute — never a synchronous forge call here:
+ *  reclaimTerminalLane's caller is mid state-transition, and fix-response.ts's own module doc
+ *  is the write-ahead rationale (the same one pending_rollbacks established for board
+ *  mutations, #31).
+ *
+ *  Invalid/malformed output degrades VISIBLY (a `fix-response-invalid` event) and enqueues
+ *  NOTHING — the reviewed threads simply stay unresolved, which is exactly the
+ *  "disputed-still-blocks"/fail-closed posture issue #247's AC requires: a fix leg whose output
+ *  never validates never buys any thread's resolution. Never throws. */
+function harvestFixLegResponse(state: State, w: WorkerRow, p: LaneProbe, prNumber: number | null, at: string): void {
+  if (prNumber == null) {
+    // Fail-safe only — a fixing lane always already carries a PR (startFixLeg's own invariant).
+    state.appendEvent("fix-response-invalid", { worker: w.name, issue: w.issue, reason: "fixing lane reclaimed DONE with no PR" });
+    return;
+  }
+  const rows = state.listForgeProxyJournalForSession(w.name);
+  const known = journaledReviewThreadIds(rows);
+  const validated = validateFixResponseOutput(p.resultText ?? "", known);
+  if (!validated.ok) {
+    state.appendEvent("fix-response-invalid", { worker: w.name, issue: w.issue, pr: prNumber, reason: validated.reason });
+    return;
+  }
+  for (const r of validated.responses) {
+    state.enqueueThreadWrite(
+      { worker: w.name, issue: w.issue, pr: prNumber, threadId: r.threadId, reply: r.reply, resolution: r.resolution },
+      at,
+    );
+  }
+  state.appendEvent("fix-response-queued", { worker: w.name, issue: w.issue, pr: prNumber, count: validated.responses.length });
 }
 
 /** #245 round-2 fix A3: crash-window reconciliation for `startFixLeg`'s own two-step protocol
@@ -1467,6 +1526,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       gatedReclaimed: [],
       resumed,
       fixingReclaimed: [],
+      fixResponses: [],
     };
   }
 
@@ -1505,6 +1565,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   for (const pending of state.pendingRollbacks()) {
     if (forgeParkedThisTick && pending.reason === ENV_FAILURE_REQUEUE_REASON) continue; // suspended
     rollbacks.push(await attemptRollback(forge, state, cfg, pending, iso));
+  }
+
+  // ── FIX RESPONSE RETRY (#247): same "drain every durably-persisted recovery-path write
+  //   before this tick does anything else" convention as ROLLBACK RETRY above, for the
+  //   fix-loop's own thread-write queue (fix-response.ts's attemptThreadWrite — reply/resolve
+  //   GraphQL calls, never a board mutation). Never throws; a still-failing forge only bumps
+  //   the retry count or escalates. Not suspended by a forge park episode the way env-failure
+  //   requeues are (#168's SUSPENSION doesn't apply: a resolve/reply failure here has no
+  //   "the issue did nothing wrong, hold it open forever" contract — it is bounded-retry-then-
+  //   escalate like every OTHER pending rollback).
+  const fixResponses: FixResponseWriteOutcome[] = [];
+  for (const pending of state.pendingThreadWrites()) {
+    fixResponses.push(await attemptThreadWrite(forge, state, cfg, pending, iso));
   }
   const reclaimed: ReclaimOutcome[] = [];
 
@@ -2468,5 +2541,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     gatedReclaimed,
     resumed,
     fixingReclaimed,
+    fixResponses,
   };
 }

@@ -15,6 +15,7 @@ import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer } from "../roles/reviewer.js";
 import { WorkerSupervisor } from "../roles/worker.js";
 import { State, type WorkerRow } from "../state/state.js";
+import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import {
   budgetExceeded,
   capHitEscalationNote,
@@ -182,6 +183,17 @@ class FakeForge implements IForge {
   }
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
+  }
+  // #247: fix-leg thread-response writes — recorded for tests to assert the exact call
+  // sequence (fix-response.ts's attemptThreadWrite).
+  threadReplies: Array<[string, string]> = [];
+  threadResolves: string[] = [];
+  async replyToReviewThread(threadId: string, body: string): Promise<void> {
+    this.threadReplies.push([threadId, body]);
+  }
+  async resolveReviewThread(threadId: string): Promise<void> {
+    this.threadResolves.push(threadId);
+    this.prReviewData = { ...this.prReviewData, unresolvedThreads: Math.max(0, this.prReviewData.unresolvedThreads - 1) };
   }
 }
 
@@ -4137,6 +4149,126 @@ test("tick FIXING RECLAIM: a fixing lane reaching DONE+PR (pushed a fix) lands b
   assert.equal(row.review_triggered_at, null);
   assert.equal(r.fixingReclaimed.length, 1);
   assert.equal(r.fixingReclaimed[0]!.kind, "done");
+  st.close();
+});
+
+// #247: structured review-thread responses harvested from a fixing lane's terminal DONE
+// reclaim, enqueued to the durable pending_thread_writes queue, and executed (idempotently)
+// by the SAME tick's FIX RESPONSE RETRY phase.
+const sapwoodResult = (metadata: Record<string, unknown>): string =>
+  `${RESULT_BLOCK_START}\n${JSON.stringify(metadata)}\n${RESULT_BLOCK_END}`;
+
+/** Seeds the journal row `harvestFixLegResponse` reads back — the SAME `pr_review_threads`
+ *  response the fixing lane's session was actually served, keyed by session name alone
+ *  (State.listForgeProxyJournalForSession). */
+function seedJournaledThreads(st: State, session: string, threadIds: string[]): void {
+  const id = st.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session, attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T00:00:00Z",
+  });
+  st.recordForgeProxyJournalResponse(id, {
+    responseCanonical: JSON.stringify({ threads: threadIds.map((tid) => ({ id: tid })) }),
+    contentHash: "h",
+    truncated: false,
+    fetchedAt: "2026-07-19T00:00:00Z",
+  });
+}
+
+test("tick FIXING RECLAIM (#247): a fixing lane's valid structured threadResponses output is harvested and enqueued to pending_thread_writes — never executed synchronously", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixing(st, "lane-fix", 3, 30);
+  seedJournaledThreads(st, "lane-fix", ["T1", "T2"]);
+  const resultText = sapwoodResult({
+    threadResponses: [
+      { threadId: "T1", reply: "fixed as suggested", resolution: "addressed" },
+      { threadId: "T2", reply: "disagree, see PR description", resolution: "disputed" },
+    ],
+  });
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getWorker("lane-fix")?.state, "driving");
+  // Harvested and queued this SAME tick (before FIX RESPONSE RETRY next runs) — but the forge
+  // reply/resolve calls happen on drain, never synchronously inside the harvest itself; by the
+  // time this tick RETURNS the queue has already been drained once too (FIX RESPONSE RETRY runs
+  // before RECLAIM in tick() — the harvest lands AFTER this tick's own retry pass, so the new
+  // rows are picked up on the FOLLOWING tick).
+  const pending = st.pendingThreadWrites();
+  assert.equal(pending.length, 2);
+  assert.deepEqual(pending.map((p) => [p.threadId, p.resolution]).sort(), [
+    ["T1", "addressed"],
+    ["T2", "disputed"],
+  ]);
+  assert.equal(forge.threadReplies.length, 0, "not yet executed — queued for the NEXT tick's FIX RESPONSE RETRY");
+
+  // The next tick drains the queue: reply+resolve for T1 (addressed), reply-only for T2 (disputed).
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(forge.threadReplies.sort(), [
+    ["T1", "fixed as suggested"],
+    ["T2", "disagree, see PR description"],
+  ]);
+  assert.deepEqual(forge.threadResolves, ["T1"], "only the addressed thread is resolved — disputed never calls resolveReviewThread");
+  assert.deepEqual(st.pendingThreadWrites(), [], "fully drained");
+  assert.equal(r2.fixResponses.length, 2);
+  assert.ok(r.fixingReclaimed.length === 1 && r.fixingReclaimed[0]!.kind === "done");
+  st.close();
+});
+
+test("tick FIXING RECLAIM (#247): a fabricated threadId (never journaled to this leg) fails the WHOLE output closed — nothing enqueued, disputed-still-blocks posture preserved", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixing(st, "lane-fix", 3, 30);
+  seedJournaledThreads(st, "lane-fix", ["T1"]); // only T1 was ever served to this leg
+  const resultText = sapwoodResult({
+    threadResponses: [{ threadId: "GHOST", reply: "fabricated", resolution: "addressed" }],
+  });
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(st.pendingThreadWrites(), [], "fail-closed — no partial execution");
+  st.close();
+});
+
+test("tick FIXING RECLAIM (#247): malformed/missing structured output degrades visibly (no throw, no crash mid-reclaim) — the lane still lands in driving normally", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixing(st, "lane-fix", 3, 30);
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30 }; // no resultText at all
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getWorker("lane-fix")?.state, "driving", "the fix leg's OWN terminal transition is unaffected by invalid/absent output");
+  assert.deepEqual(st.pendingThreadWrites(), []);
+  assert.equal(r.fixingReclaimed.length, 1);
+  st.close();
+});
+
+test("issue #247 AC: an all-disputed structured output resolves NOTHING via the forge — every thread stays open (unresolvedThreads unaffected, still blocks gate②)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.prReviewData = { ...forge.prReviewData, unresolvedThreads: 2 };
+  const sup = new FakeSupervisor();
+  seedFixing(st, "lane-fix", 3, 30);
+  seedJournaledThreads(st, "lane-fix", ["T1", "T2"]);
+  const resultText = sapwoodResult({
+    threadResponses: [
+      { threadId: "T1", reply: "disagree 1", resolution: "disputed" },
+      { threadId: "T2", reply: "disagree 2", resolution: "disputed" },
+    ],
+  });
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }); // harvest + enqueue
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() }); // drain (replies only)
+  assert.equal(forge.threadResolves.length, 0, "an all-disputed batch never calls resolveReviewThread");
+  assert.equal(forge.prReviewData.unresolvedThreads, 2, "still blocks — resolution never touched, gate② sees it unchanged");
   st.close();
 });
 

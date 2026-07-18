@@ -315,6 +315,23 @@ export interface IForge {
    *  read — a monorepo PR can carry far more than a handful of check runs). `total` is the
    *  sub-connection's own `totalCount` — the proxy's `pr_checks` tool. */
   getPRChecks(pr: number, cap: number): Promise<PRChecksPage>;
+  /** #247: post a reply comment on ONE review thread (GraphQL `addPullRequestReviewThreadReply`,
+   *  `threadId` a `PullRequestReviewThread` node id — the SAME opaque id `getPRReviewThreads`'
+   *  `ReviewThreadItem.id` already carries). The fix-loop's ONLY write path for a fix leg's
+   *  reply — the leg itself never calls this; the ENGINE calls it from validated structured
+   *  output (issue #247's paradigm: producer never touches the forge, #218). Never mutates
+   *  thread resolution — see resolveReviewThread for that, a deliberately separate call so a
+   *  `disputed` entry can reply without ever resolving. */
+  replyToReviewThread(threadId: string, body: string): Promise<void>;
+  /** #247: mark ONE review thread resolved (GraphQL `resolveReviewThread`). Bookkeeping /
+   *  courtesy-to-reviewer only — issue #247's Why: "gate integrity does NOT rest on thread
+   *  state... the fresh review is the gate", so resolving every thread on a PR can never by
+   *  itself flip the merge verdict (unresolvedThreads is re-derived live from GitHub on every
+   *  gate② read, via countUnresolvedThreads — this call changes what that NEXT read sees, it
+   *  does not touch any cached/decided verdict). Called ONLY for an `addressed` structured-output
+   *  entry — never for `disputed` (that thread stays open on purpose, routed to human
+   *  adjudication if the fix-loop's round cap is reached, sibling issue #246). */
+  resolveReviewThread(threadId: string): Promise<void>;
 }
 
 /** #234: one issue's core metadata — see IForge.getIssueMeta's doc. */
@@ -1020,10 +1037,52 @@ export class GithubForge implements IForge {
     return parsePRChecksPage(out);
   }
 
+  /** #247: reply to a review thread — see IForge.replyToReviewThread's doc. `threadId` is an
+   *  opaque GraphQL node id (never owner/repo/pr-addressable), so this mutation carries no
+   *  `owner`/`repo`/`number` variable at all — the SAME out-of-repo-scope-by-construction shape
+   *  the proxy's own tool schemas rely on (no field exists to redirect scope through). */
+  async replyToReviewThread(threadId: string, body: string): Promise<void> {
+    await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${ADD_REVIEW_THREAD_REPLY_MUTATION}`,
+      "-f",
+      `threadId=${threadId}`,
+      "-f",
+      `body=${body}`,
+    ]);
+  }
+
+  /** #247: resolve a review thread — see IForge.resolveReviewThread's doc. */
+  async resolveReviewThread(threadId: string): Promise<void> {
+    await this.gh(["api", "graphql", "-f", `query=${RESOLVE_REVIEW_THREAD_MUTATION}`, "-f", `threadId=${threadId}`]);
+  }
+
   private repo(): string {
     return this.cfg.board.repo;
   }
 }
+
+/** #247: `addPullRequestReviewThreadReply` — posts ONE reply comment on an existing review
+ *  thread (distinct from a fresh top-level review; this attaches to the thread's own comment
+ *  chain, the same UI surface a human's "Reply" button posts to). See
+ *  IForge.replyToReviewThread's doc for the write-boundary rationale. */
+export const ADD_REVIEW_THREAD_REPLY_MUTATION = `
+mutation($threadId: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
+    comment { id }
+  }
+}`;
+
+/** #247: `resolveReviewThread` — marks a thread resolved. See IForge.resolveReviewThread's doc
+ *  for why this can never by itself flip a merge verdict. */
+export const RESOLVE_REVIEW_THREAD_MUTATION = `
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ProjectV2 board — pure parse/select helpers (exported for offline testing). The

@@ -1717,6 +1717,149 @@ test("fixing_handoff round-trips independently of fix_rounds/resume_attempts and
   }
 });
 
+test("migration v20->v21: a populated v20 DB opens with data intact, an empty pending_thread_writes table, user_version SCHEMA_VERSION, idempotent reopen (#247)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 20; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 20");
+    raw
+      .prepare(
+        `INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("legacy-fixing", 9, "sess-3", "fixing", "2026-07-01T00:00:00Z", null, 90);
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 21);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    assert.equal(s.getWorker("legacy-fixing")?.state, "fixing", "pre-existing data survives untouched");
+    assert.deepEqual(s.pendingThreadWrites(), [], "a fresh table on a pre-#247 DB — empty, never a migration error");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.deepEqual(s2.pendingThreadWrites(), []);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pending_thread_writes (#247): enqueue/markThreadReplyPosted/markThreadResolved/bumpThreadWriteAttempt/clearThreadWrite round-trip, oldest-first", () => {
+  const s = mem();
+  const id1 = s.enqueueThreadWrite(
+    { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed" },
+    "2026-07-19T00:00:00Z",
+  );
+  const id2 = s.enqueueThreadWrite(
+    { worker: "lane-a", issue: 1, pr: 10, threadId: "T2", reply: "disagree", resolution: "disputed" },
+    "2026-07-19T00:00:01Z",
+  );
+  let rows = s.pendingThreadWrites();
+  assert.equal(rows.length, 2);
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    [id1, id2],
+    "oldest-first (retry order)",
+  );
+  assert.equal(rows[0]!.replyPosted, false);
+  assert.equal(rows[0]!.resolved, false);
+  assert.equal(rows[0]!.attempts, 0);
+  assert.equal(rows[0]!.lastAttemptAt, null);
+  assert.equal(rows[0]!.resolution, "addressed");
+  assert.equal(rows[1]!.resolution, "disputed");
+
+  s.markThreadReplyPosted(id1, "2026-07-19T00:01:00Z");
+  s.bumpThreadWriteAttempt(id1, "2026-07-19T00:02:00Z");
+  rows = s.pendingThreadWrites();
+  assert.equal(rows[0]!.replyPosted, true);
+  assert.equal(rows[0]!.attempts, 1);
+  assert.equal(rows[0]!.lastAttemptAt, "2026-07-19T00:02:00Z", "last write wins");
+
+  s.markThreadResolved(id1, "2026-07-19T00:03:00Z");
+  assert.equal(s.pendingThreadWrites()[0]!.resolved, true);
+
+  s.clearThreadWrite(id1);
+  rows = s.pendingThreadWrites();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.id, id2, "only id1 removed");
+  s.close();
+});
+
+test("pending_thread_writes persists across close/reopen (an engine restart mid-retry does not lose the queue)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const s = new State(dbPath);
+    const id = s.enqueueThreadWrite(
+      { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed" },
+      "2026-07-19T00:00:00Z",
+    );
+    s.markThreadReplyPosted(id, "2026-07-19T00:01:00Z");
+    s.close();
+
+    const reopened = new State(dbPath);
+    const rows = reopened.pendingThreadWrites();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.replyPosted, true, "the durable reply-posted marker survives a restart — never double-posted after resume");
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listForgeProxyJournalForSession (#247): every row for a session name alone, regardless of round/phase/attempt — the fix-leg harvest's no-TOCTOU read", () => {
+  const s = mem();
+  const at = "2026-07-19T00:00:00Z";
+  const id1 = s.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "driving", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: at,
+  });
+  s.recordForgeProxyJournalResponse(id1, {
+    responseCanonical: JSON.stringify({ threads: [{ id: "T1" }] }),
+    contentHash: "h1",
+    truncated: false,
+    fetchedAt: at,
+  });
+  // A DIFFERENT session must never leak into this session's read.
+  const idOther = s.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "driving", role: "worker", session: "lane-other", attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: at,
+  });
+  s.recordForgeProxyJournalResponse(idOther, {
+    responseCanonical: JSON.stringify({ threads: [{ id: "OTHER" }] }),
+    contentHash: "h2",
+    truncated: false,
+    fetchedAt: at,
+  });
+
+  const rows = s.listForgeProxyJournalForSession("lane-fix");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.identity.session, "lane-fix");
+  assert.equal(rows[0]!.responseCanonical, JSON.stringify({ threads: [{ id: "T1" }] }));
+  s.close();
+});
+
 test("input manifest #251: an OMITTED truncated round-trips as null, never a fabricated false — the exact dishonesty the three-state column fixes", () => {
   const s = new State(":memory:");
   s.appendInputManifest({

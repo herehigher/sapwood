@@ -1800,6 +1800,75 @@ test("#168: failureText is tail-capped for a large jsonl — the classifiable er
   }
 });
 
+// ── #247: a DONE lane's resultText capture — probe() reads the SAME per-leg jsonl slice
+//    terminalCostUsd/terminalModelUsage's jsonl-fallback already reads (currentLegJsonl), only
+//    for a DONE lane. A fix leg's structured threadResponses block lives here.
+
+test("#247: probe() of a DONE lane surfaces resultText from the jsonl's final structured result line", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-247-done";
+    writeFileSync(
+      join(dir, `${name}.done.json`),
+      JSON.stringify({ name, issue: 247, session_id: "s", total_cost_usd: 0.01, exit_code: 0 }),
+    );
+    const resultText = '<<<SAPWOOD_RESULT>>>\n{"threadResponses":[]}\n<<<END_SAPWOOD_RESULT>>>';
+    writeFileSync(
+      join(dir, `${name}.jsonl`),
+      `{"type":"system","subtype":"init"}\n{"type":"result","subtype":"success","total_cost_usd":0.01,"result":${JSON.stringify(resultText)}}\n`,
+    );
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.equal(p.done, true);
+    assert.equal(p.resultText, resultText);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#247: probe() of a FAILED (non-DONE) lane never populates resultText", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-247-failed";
+    writeFileSync(join(dir, `${name}.failed.json`), JSON.stringify({ name, issue: 247, session_id: "s", total_cost_usd: 0 }));
+    writeFileSync(join(dir, `${name}.jsonl`), `{"type":"result","subtype":"error","is_error":true,"result":"some text"}\n`);
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.equal(p.failed, true);
+    assert.equal(p.resultText, undefined);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#247: resultText is scoped to the CURRENT LEG's jsonl offset — a resumed fix leg's own final message, never an earlier leg's superseded result line", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const name = "lane-247-leg";
+    const legOneLine = `{"type":"result","subtype":"success","total_cost_usd":0.01,"result":"leg one final message — stale"}\n`;
+    const legOneBytes = Buffer.byteLength(legOneLine, "utf8");
+    const legTwoResult = '<<<SAPWOOD_RESULT>>>\n{"threadResponses":[]}\n<<<END_SAPWOOD_RESULT>>>';
+    const legTwoLine = `{"type":"result","subtype":"success","total_cost_usd":0.02,"result":${JSON.stringify(legTwoResult)}}\n`;
+    writeFileSync(join(dir, `${name}.jsonl`), legOneLine + legTwoLine);
+    writeFileSync(
+      join(dir, `${name}.running.json`),
+      JSON.stringify({ name, issue: 247, session_id: "s", dispatched_at: new Date().toISOString(), jsonl_leg_offset: legOneBytes }),
+    );
+    writeFileSync(
+      join(dir, `${name}.done.json`),
+      JSON.stringify({ name, issue: 247, session_id: "s", total_cost_usd: 0.02, exit_code: 0 }),
+    );
+    const s = sup(dir, "claude");
+    const p = await s.probe(name);
+    assert.equal(p.resultText, legTwoResult, "only the SECOND (current) leg's result text — the first leg's is never leaked through");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #168 (PR #180 review P1-3): failureText is built from STRUCTURED error records only —
 //    NEVER assistant message content. A worker legitimately WORKING ON rate-limit handling
 //    prints the exact signature strings as part of doing its job; that must never park the

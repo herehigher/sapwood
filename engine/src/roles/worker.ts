@@ -1910,6 +1910,10 @@ export class WorkerSupervisor implements Supervisor {
     // computing it unconditionally would re-read the jsonl on every probe of every lane for no
     // reason.
     const failureText = failed ? this.terminalFailureText(name) : undefined;
+    // #247: only for a DONE lane — same "compute it lazily, only where a consumer could ever
+    // use it" stance failureText already takes for FAILED lanes (conductor.ts's fix-leg harvest
+    // is the first reader; an ordinary worker's DONE result text is otherwise unconsumed).
+    const resultText = done ? this.terminalResultText(name) : undefined;
     const running = this.readJson(this.path(name, "running.json"));
     if ((done || failed || handoff) && running?.resume_pending_db === true) {
       this.removeIfExists(this.path(name, "running.json"));
@@ -1927,6 +1931,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(prNumber != null ? { prNumber } : {}),
       ...(liveTelemetry ? { liveTelemetry } : {}),
       ...(failureText !== undefined ? { failureText } : {}),
+      ...(resultText !== undefined ? { resultText } : {}),
     };
   }
 
@@ -1972,6 +1977,17 @@ export class WorkerSupervisor implements Supervisor {
   private terminalFailureText(name: string): string {
     const text = extractFailureText(this.readJsonl(this.path(name, "jsonl")));
     return text.length > FAILURE_TEXT_TAIL_CHARS ? text.slice(-FAILURE_TEXT_TAIL_CHARS) : text;
+  }
+
+  /** #247: a DONE lane's own final-message text — parseResultText over this lane's CURRENT LEG
+   *  jsonl slice (currentLegJsonl, the same per-leg offset terminalCostUsd/terminalModelUsage's
+   *  jsonl-fallback already reads), never the whole cumulative transcript across every resumed
+   *  leg. A resumed fix leg's OWN final message is what carries its structured threadResponses
+   *  block; an earlier leg's now-superseded result line must never leak through here. No tail
+   *  cap (unlike terminalFailureText): parseResultText already extracts only the LAST `result`
+   *  field value, an inherently bounded slice, not a raw transcript to cap. */
+  private terminalResultText(name: string): string {
+    return parseResultText(this.currentLegJsonl(name));
   }
 
   /** #69: tears the lane's process down, THEN decides its worktree's fate — see

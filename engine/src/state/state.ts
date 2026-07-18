@@ -574,6 +574,41 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   (db) => {
     db.exec(`ALTER TABLE workers ADD COLUMN fixing_handoff INTEGER NOT NULL DEFAULT 0;`);
   },
+  // 20 -> 21: fix-leg structured thread-response write queue (#247). A fix leg's structured
+  // output validates against the SAME journaled `pr_review_threads` response it was served
+  // (proxy/journal.ts, #234/#244 — no TOCTOU between what the leg saw and what the engine acts
+  // on), then each per-thread {reply, resolution} decision is persisted HERE before any forge
+  // write is attempted — the same write-ahead-durable-queue shape pending_rollbacks established
+  // (#31 — see the schema v3->v4 migration comment): a reply/resolve GraphQL mutation can fail
+  // transiently, and the retry must survive an engine crash/restart rather than depend on the
+  // fix-leg session ever running again (it already exited by the time this row is read back).
+  // `reply_posted`/`resolved` are TWO INDEPENDENT completion flags (never a single status
+  // column) so a reply that posted successfully is NEVER re-attempted even when that SAME
+  // thread's resolve call keeps failing on later ticks — the exact idempotency issue #247's AC
+  // names ("a failed resolve retries next tick; replies are never double-posted"). A `disputed`
+  // row has no resolve step at all — conductor.ts's attemptThreadWrite (fix-response.ts) clears
+  // it the instant reply_posted=1. `pr` is carried on the row (not re-derived from `worker` at
+  // drain time) because the worker row itself may already be long gone from `fixing`/`driving`
+  // by the time a later tick retries — the row is a self-contained write intent, same
+  // independence pending_rollbacks' own (issue, target, reason) triple has from the worker table.
+  (db) => {
+    db.exec(`
+      CREATE TABLE pending_thread_writes (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        worker          TEXT NOT NULL,
+        issue           INTEGER NOT NULL,
+        pr              INTEGER NOT NULL,
+        thread_id       TEXT NOT NULL,
+        reply           TEXT NOT NULL,
+        resolution      TEXT NOT NULL CHECK (resolution IN ('addressed', 'disputed')),
+        reply_posted    INTEGER NOT NULL DEFAULT 0,
+        resolved        INTEGER NOT NULL DEFAULT 0,
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        last_attempt_at TEXT
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -825,6 +860,25 @@ export interface PendingRollback {
   attempts: number;
   created_at: string;
   last_attempt_at: string | null;
+}
+
+/** A durably-persisted fix-leg thread-response write still awaiting success or escalation
+ *  (#247 — see the schema v20->v21 migration comment). One row per THREAD (a fix leg's
+ *  structured output may validate several threadResponses entries at once; each becomes its
+ *  own independent row, so one thread's forge failure never blocks another's retry). */
+export interface PendingThreadWrite {
+  id: number;
+  worker: string;
+  issue: number;
+  pr: number;
+  threadId: string;
+  reply: string;
+  resolution: "addressed" | "disputed";
+  replyPosted: boolean;
+  resolved: boolean;
+  attempts: number;
+  createdAt: string;
+  lastAttemptAt: string | null;
 }
 
 export type EnvFailureSource = "llm" | "forge";
@@ -1598,6 +1652,53 @@ export class State {
     this.db.prepare("DELETE FROM pending_rollbacks WHERE id = ?").run(id);
   }
 
+  // ── Fix-leg thread-response write queue (#247) ──────────────────────────────────────────
+
+  /** Persist one pending thread write BEFORE any forge call is attempted (write-ahead, same
+   *  rationale as addPendingRollback) — the row IS "attempt 0"; the immediately-following
+   *  attempt is recorded via markThreadReplyPosted/markThreadResolved/bumpThreadWriteAttempt,
+   *  never a second insert. Returns the row id. */
+  enqueueThreadWrite(
+    input: { worker: string; issue: number; pr: number; threadId: string; reply: string; resolution: "addressed" | "disputed" },
+    at: string,
+  ): number {
+    const res = this.db
+      .prepare(
+        "INSERT INTO pending_thread_writes (worker, issue, pr, thread_id, reply, resolution, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(input.worker, input.issue, input.pr, input.threadId, input.reply, input.resolution, at);
+    return Number(res.lastInsertRowid);
+  }
+
+  /** Every thread write still awaiting completion or escalation, oldest first (retry order). */
+  pendingThreadWrites(): PendingThreadWrite[] {
+    const rows = this.db.prepare("SELECT * FROM pending_thread_writes ORDER BY id").all() as unknown as RawPendingThreadWrite[];
+    return rows.map(mapPendingThreadWrite);
+  }
+
+  /** The reply half completed — never re-attempted after this, regardless of how the resolve
+   *  half (if any) fares afterward. */
+  markThreadReplyPosted(id: number, at: string): void {
+    this.db.prepare("UPDATE pending_thread_writes SET reply_posted = 1, last_attempt_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** The resolve half completed (`addressed` rows only — a `disputed` row never calls this). */
+  markThreadResolved(id: number, at: string): void {
+    this.db.prepare("UPDATE pending_thread_writes SET resolved = 1, last_attempt_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Record one more failed attempt (attempts++, last_attempt_at refreshed) — the row stays,
+   *  to be retried again next tick. */
+  bumpThreadWriteAttempt(id: number, at: string): void {
+    this.db.prepare("UPDATE pending_thread_writes SET attempts = attempts + 1, last_attempt_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Resolved — either every remaining half succeeded, or attempts hit the bounded retry cap
+   *  and the conductor escalated to needs-human instead. Either way, stop retrying. */
+  clearThreadWrite(id: number): void {
+    this.db.prepare("DELETE FROM pending_thread_writes WHERE id = ?").run(id);
+  }
+
   // ── Rounds ledger (#86) ─────────────────────────────────────────────────────────────────
 
   /** Insert a fresh round in phase 'aligning', status 'in_progress', no marker. Returns the
@@ -2012,6 +2113,22 @@ export class State {
     return rows.map(mapForgeProxyJournalRow);
   }
 
+  /** #247: every journal row for a SESSION NAME alone (no round/phase/role/attempt filter) — a
+   *  fix leg's terminal-reclaim harvest (conductor.ts's reclaimTerminalLane) needs "every
+   *  pr_review_threads response this lane's session ever saw" without depending on which
+   *  literal `phase`/`attempt` string the caller who minted its proxy used (proxy/mint.ts's
+   *  ForgeProxyIdentity.session is the lane name itself, generated fresh per dispatch/resume —
+   *  never reused across lanes — so filtering by session alone is exact, not an approximation).
+   *  Kept as its own query rather than widening listForgeProxyJournal's signature: that method's
+   *  round/phase/role/attempt-scoped contract is exactly what its existing callers (the
+   *  budget/completeness readers) need and must keep. */
+  listForgeProxyJournalForSession(session: string): ForgeProxyJournalRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM forge_proxy_journal WHERE session = ? ORDER BY id")
+      .all(session) as unknown as RawForgeProxyJournalRow[];
+    return rows.map(mapForgeProxyJournalRow);
+  }
+
   /** Cumulative call count + response bytes already ledgered for this session attempt — the
    *  budget-exhaustion check meters against this (issue #234's Budget: "meter call count +
    *  response bytes against the round ledger machinery" — this table IS that ledger for the
@@ -2156,5 +2273,37 @@ function mapForgeProxyJournalRow(r: RawForgeProxyJournalRow): ForgeProxyJournalR
     requestedAt: r.requested_at,
     fetchedAt: r.fetched_at,
     deliveredAt: r.delivered_at,
+  };
+}
+
+interface RawPendingThreadWrite {
+  id: number;
+  worker: string;
+  issue: number;
+  pr: number;
+  thread_id: string;
+  reply: string;
+  resolution: "addressed" | "disputed";
+  reply_posted: number;
+  resolved: number;
+  attempts: number;
+  created_at: string;
+  last_attempt_at: string | null;
+}
+
+function mapPendingThreadWrite(r: RawPendingThreadWrite): PendingThreadWrite {
+  return {
+    id: r.id,
+    worker: r.worker,
+    issue: r.issue,
+    pr: r.pr,
+    threadId: r.thread_id,
+    reply: r.reply,
+    resolution: r.resolution,
+    replyPosted: r.reply_posted === 1,
+    resolved: r.resolved === 1,
+    attempts: r.attempts,
+    createdAt: r.created_at,
+    lastAttemptAt: r.last_attempt_at,
   };
 }
