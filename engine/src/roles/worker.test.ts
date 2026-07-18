@@ -1969,8 +1969,13 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
     // This proves the exact ordering deterministically; the only remaining real-time waits are
     // monotonic bounded polls for effects that are certain to eventually happen (never a race
     // against a competing real deadline).
+    // #241 (Codex delta confirm, P2): a finite `sleep 30` was still a theoretical real-time race
+    // -- if the event loop stalled ~30s after the fake-clock advance, the stub would exit
+    // NATURALLY (code 0) before heartbeatTick ever observed the new elapsed time, writing
+    // .handoff (handoffRequested, not timedOut) instead of .failed. A non-terminating loop
+    // removes that window entirely: the stub can only ever end via the timeout path's SIGKILL.
     const trapReady = join(dir, "trap-ready");
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nsleep 30\n`);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nwhile true; do sleep 1; done\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     let fakeNowMs = Date.now();
     const s = new WorkerSupervisor({
