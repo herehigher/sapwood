@@ -151,7 +151,7 @@ one job:
 | **Draining to kill** | KILL_SWITCH tripped; handoff window running | `data/KILL_SWITCH` exists; workers transitioning to handoff | countdown against `drainWindowSec`; "will exit 1" |
 | **Winding down** | stop condition hit; finishing the round | `round-stop`/stop-condition events; dispatch skipped with reason | "Stop condition met (N issues merged) — finishing in-flight work" |
 | **Escalated dry** | board empty because everything needs a human | Ready empty + `needs-human`-labeled issues / `drive-needs-human`, `plan-review-escalated` events | pin the escalation list; "the loop is waiting on YOU, not broken" |
-| **Stalled PR** | lane parked in `driving` on a PR reporting no CI | `driving` lane age ≫ normal; (GitHub: PR mergeable=CONFLICTING builds **no merge ref → zero check-suites** — looks like CI never ran) | "PR #N stuck — likely merge conflict suppressing CI" |
+| **Stalled PR** | lane parked in `driving` on a PR reporting no CI | `driving` lane age ≫ normal; (GitHub: PR mergeable=CONFLICTING builds **no merge ref → zero check-suites** — looks like CI never ran). Since #270 the engine senses CONFLICTING each tick and dispatches a conflict fix leg, so this state self-heals; seeing it persist means the fix lane itself is stuck (or cap-exhausted → see Escalated) | "PR #N conflicted — conflict fix leg dispatched (round n/cap)" |
 | **Dead** | process gone; lanes orphaned | `lastTickAt` age ≫ `tickIntervalSec`; no process | "Engine not running since T — restart resumes round R at phase P" |
 
 Derivation rule: **files beat DB beats staleness** — sentinels are absolute;
