@@ -31,7 +31,7 @@ Tests are colocated with their modules as `*.test.ts`.
 | `loop/` | Scheduler and lifecycle: tick phases (`conductor.ts`), flat driver (`driver.ts`), round orchestration (`round.ts`), alignment/pool selection (`align.ts`), initialization (`init.ts`), startup reconciliation, harvest, dissent, environment-failure parking, and round artifacts. |
 | `proxy/` | Per-session read-only forge MCP server (`mcp-server.ts`), role/tool access matrix (`access.ts`), scoped minting (`mint.ts`), tool algebra/caps (`tools.ts`), and write-ahead journal/evidence bundles (`journal.ts`). |
 | `retro/` | Builds the bounded round digest (`retro-digest.ts`) and runs the self-improvement role whose changes can only arrive through a branch and PR (`retro.ts`). |
-| `roles/` | Worker process/worktree protocol (`worker.ts`), role-session runner (`peripheral.ts`), merge gate (`merge-driver.ts`), reviewer adapters (`reviewer.ts`), plan review, architect, prompts, and ambient context manifests. `reviewer.ts` is HANDS-OFF. |
+| `roles/` | Worker process/worktree protocol (`worker.ts`), role-session runner (`peripheral.ts`), merge gate (`merge-driver.ts`), reviewer adapters (`reviewer.ts`), plan review, architect, prompts, and ambient context manifests. `reviewer.ts` and `merge-driver.ts` are HANDS-OFF. |
 | `state/` | SQLite schema and state API (`state.ts`) plus sentinel-delimited structured-output parsing (`structured-output.ts`). |
 | `util/` | Small shared utilities; currently Markdown-safe truncation/rendering in `markdown.ts`. |
 

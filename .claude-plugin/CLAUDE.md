@@ -14,12 +14,14 @@ them itself or leaves the merge for a human.
 
 ## Slash commands
 
-- **`/sapwood-run [--once|--until-idle|--dry-run]`** — run the engine. No flags = daemon
-  mode (ticks forever). `--once` = a single tick; dispatched workers keep running
-  detached after it returns, so follow with `/sapwood-status` and further ticks.
-  `--until-idle` = keep ticking until nothing is in flight (the "watch one issue
-  end-to-end" mode). `--dry-run` = preview what would dispatch + a cost estimate, no
-  worker spawned, no state written.
+- **`/sapwood-run [--once|--until-idle|--dry-run]`** — run the engine. No flags = the
+  **rounds driver** (the default): a governed round of aligning → architecting →
+  plan_review → executing → harvesting → retro, with scheduling ticks running inside
+  the executing phase. `--once` (a single tick; dispatched workers keep running
+  detached, so follow with `/sapwood-status` and further ticks) and `--until-idle`
+  (keep ticking until nothing is in flight) are only accepted with
+  `engine.driver: tick` in the config — the rounds driver rejects both. `--dry-run` =
+  preview what would dispatch + a cost estimate, no worker spawned, no state written.
 - **`/sapwood-status [db-path]`** — read engine state (active lanes, PRs awaiting
   review, spend vs. the daily ceiling, kill-switch/pause state) directly from
   `data/sapwood.sqlite`. Works with no engine session currently running.
@@ -53,5 +55,6 @@ Full documentation lives in this repo's `docs/` directory:
 **producer ≠ reviewer ≠ merger.** A worker writing code for an issue never approves its
 own review or merges its own PR — that's enforced structurally (a PreToolUse guard
 hook), not by asking nicely. Don't try to route around it; if a task genuinely needs to
-touch `guard.ts`, `reviewer.ts`, hook wiring, or security config, that change is
-human-merge-only regardless of sapwood's configured merge mode.
+touch `guard.ts`, `reviewer.ts`, `merge-driver.ts`, hook wiring, security config,
+`.claude/settings*.json`, or `.github/workflows/**`, that change is human-merge-only
+regardless of sapwood's configured merge mode.

@@ -22,8 +22,9 @@ re-implemented as a standalone, public tool. Status: **early development, pre-v1
 
 - **producer ≠ reviewer ≠ merger.** The worker that writes code never approves or
   merges it. Enforced by a fail-closed PreToolUse hook (`guard.ts`), not a prompt.
-  Anything touching `guard.ts`, hook wiring, `reviewer.ts`, or security config is
-  **human-merge-only**.
+  Anything touching `guard.ts`, hook wiring, `reviewer.ts`, `merge-driver.ts`,
+  security-relevant config, `.claude/settings*.json`, or `.github/workflows/**` is
+  **human-merge-only** (canonical list: docs/security.md "Human-merge-only paths").
 - **Guard ships green before anything autonomous runs** (M1, before M2 engine).
 - **GitHub is the source of truth for *process*** — the ProjectV2 board `Status` +
   labels are the work queue (no parallel task DB). For *durable knowledge*, the docs

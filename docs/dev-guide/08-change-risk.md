@@ -4,14 +4,16 @@ This file turns repository policy into concrete review obligations. [Security](.
 
 ## Human-merge-only surface
 
-Any change to the following must be merged by a human, regardless of configured merge mode (`CLAUDE.md`, “Non-negotiables”):
+Any change to the following must be merged by a human, regardless of configured merge mode (canonical list: [Security](../security.md), "Human-merge-only paths"):
 
 | Surface | Why | Enforcement |
 | --- | --- | --- |
 | `engine/src/guard/guard.ts` | Defines what producer/tool activity is blocked. | Process policy plus protected write paths in `guard.ts`; worker and role sessions receive the hook through `worker.ts`/`peripheral.ts`. |
 | Guard-hook wiring, including `engine/src/guard/guard-hook.ts` and the worker/role inline settings in `worker.ts` and `peripheral.ts` | A wiring change can disable a correct guard. | Hard-mode startup rejects a missing compiled hook; guard-protected source/settings paths block worker writes (`guard-hook.ts`, `worker.ts`, `peripheral.ts`). |
 | `engine/src/roles/reviewer.ts` | Controls reviewer identity, verdict, head freshness, and fallback semantics. | Process policy plus guard write-path protection for `reviewer.ts`. |
-| Security-relevant configuration | `guard.mode`, `reviewer.*`, and `merge.*` can weaken the producer/reviewer/merger boundary. | Strict Zod validation and fail-closed defaults in `engine/src/config/config.ts`; human review remains a process control because config files are operator-writable. |
+| `engine/src/roles/merge-driver.ts` | The merge path itself: gate derivation, the final pre-merge fail-safe, and the head-pinned merge call. | Process policy plus guard write-path protection for `merge-driver.ts` (source and compiled `dist/` artifact alike). |
+| Security-relevant configuration | `guard.mode`, `reviewer.*`, and `merge.*` can weaken the producer/reviewer/merger boundary. | Strict Zod validation and fail-closed defaults in `engine/src/config/config.ts`; guard blocks session writes to the engine config; human review remains a process control because config files are operator-writable. |
+| `.claude/settings*.json` and `.github/workflows/**` | Settings carry the hook wiring; workflows are CI integrity — either can neutralize a gate without touching engine source. | Guard write-path denial for both patterns, checked position-independently in Bash commands as well as file tools. |
 
 The guard prevents an autonomous session from writing protected paths through file tools and recognized Bash write vectors. That does not replace the human-merge process rule: a branch prepared outside a guarded session still requires human handling.
 
