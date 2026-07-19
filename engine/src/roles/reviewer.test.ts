@@ -381,6 +381,32 @@ test("CodexReviewer #273: emphasis-only decoration around the standalone canonic
   assert.equal(new CodexReviewer().verdictFromData(data, PIN).action, "MERGE_OK");
 });
 
+test("CodexReviewer #273: verdict indentation permits 0-3 spaces but rejects indented-code and tabs", () => {
+  const r = new CodexReviewer();
+  const comment = { login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z" };
+  for (const spaces of [" ", "  ", "   "]) {
+    const data = mkData({ comments: [{ ...comment, body: `${spaces}${CLEAN}\nReviewed head OID: HEAD` }] });
+    assert.equal(r.verdictFromData(data, PIN).action, "MERGE_OK", JSON.stringify(spaces));
+  }
+  for (const indentation of ["    ", "\t"]) {
+    const data = mkData({ comments: [{ ...comment, body: `${indentation}${CLEAN}\nReviewed head OID: HEAD` }] });
+    assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW", JSON.stringify(indentation));
+  }
+});
+
+test("CodexReviewer #273: OID assertions remain column-0 anchored", () => {
+  const data = mkData({
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-07T07:48:44Z",
+        body: `${CLEAN}\n    Reviewed head OID: HEAD`,
+      },
+    ],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
 test("CodexReviewer #273: delayed prior-generation clean comment cannot satisfy an ambiguous H2 pin; an H2-quoting response can", () => {
   const r = new CodexReviewer();
   const pin = { head: "H2", at: "2026-07-07T08:00:00Z", generation: 2, ambiguous: true };

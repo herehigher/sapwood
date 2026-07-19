@@ -233,7 +233,7 @@ function freshTrustedThumbCount(): number {
  * quoted lines without rewriting them; BOTH phrase and OID parsing see only clean lines. The
  * verdict phrase must occupy its whole line (apart from whitespace/emphasis decoration).
  */
-const CLEAN_VERDICT_RE = /^[\s*_]*Codex Review: Didn't find any major issues\.?[\s*_]*$/i;
+const CLEAN_VERDICT_RE = /^ {0,3}[*_]*Codex Review: Didn't find any major issues\.?[\s*_]*$/i;
 const REVIEWED_HEAD_OID_RE = /^Reviewed head OID: (\S+)\s*$/;
 
 function cleanReviewCommentLines(body: string): string[] {
