@@ -2024,7 +2024,7 @@ test("listForgeProxyJournalForSession (#247): every row for a session name alone
   s.close();
 });
 
-test("listForgeProxyJournalForSession (#247 D2): a sinceIso cutoff excludes rows requested BEFORE it — the per-fix-round leg-bound scoping fixLegJournalCursor relies on", () => {
+test("listForgeProxyJournalForSession (#247 F1): an afterId cursor excludes rows AT OR BEFORE it (strict '>') — the per-fix-round leg-bound scoping fixLegJournalCursor relies on", () => {
   const s = mem();
   const earlyId = s.appendForgeProxyJournalIntent({
     identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
@@ -2036,7 +2036,7 @@ test("listForgeProxyJournalForSession (#247 D2): a sinceIso cutoff excludes rows
     capsCanonical: "{}",
     budgetRemainingCalls: 10,
     budgetRemainingBytes: 1000,
-    requestedAt: "2026-07-19T00:00:00Z", // round 1 — before the cutoff
+    requestedAt: "2026-07-19T00:00:00Z", // round 1
   });
   s.recordForgeProxyJournalResponse(earlyId, {
     responseCanonical: JSON.stringify({ threads: [{ id: "EARLY" }] }),
@@ -2054,7 +2054,7 @@ test("listForgeProxyJournalForSession (#247 D2): a sinceIso cutoff excludes rows
     capsCanonical: "{}",
     budgetRemainingCalls: 10,
     budgetRemainingBytes: 1000,
-    requestedAt: "2026-07-19T02:00:00Z", // round 2 — at/after the cutoff
+    requestedAt: "2026-07-19T02:00:00Z", // round 2
   });
   s.recordForgeProxyJournalResponse(lateId, {
     responseCanonical: JSON.stringify({ threads: [{ id: "LATE" }] }),
@@ -2064,11 +2064,62 @@ test("listForgeProxyJournalForSession (#247 D2): a sinceIso cutoff excludes rows
   });
 
   const unscoped = s.listForgeProxyJournalForSession("lane-fix");
-  assert.equal(unscoped.length, 2, "omitting sinceIso keeps the pre-D2 unscoped read unchanged");
+  assert.equal(unscoped.length, 2, "omitting afterId keeps the pre-D2 unscoped read unchanged");
 
-  const scoped = s.listForgeProxyJournalForSession("lane-fix", "2026-07-19T02:00:00Z");
-  assert.equal(scoped.length, 1);
+  const scoped = s.listForgeProxyJournalForSession("lane-fix", earlyId);
+  assert.equal(scoped.length, 1, "the row AT the cursor id itself is excluded — strict '>', not '>='");
   assert.equal(scoped[0]!.responseCanonical, JSON.stringify({ threads: [{ id: "LATE" }] }));
+
+  const allExcluded = s.listForgeProxyJournalForSession("lane-fix", lateId);
+  assert.deepEqual(allExcluded, [], "a cursor at the LATEST row's own id excludes everything");
+  s.close();
+});
+
+test("maxForgeProxyJournalId (#247 F1): 0 for a session with no rows yet, then the row's own id once one exists, scoped to that session only", () => {
+  const s = mem();
+  assert.equal(s.maxForgeProxyJournalId("lane-fix"), 0, "no rows yet — a valid 0 cursor, not an error");
+  const id = s.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T00:00:00Z",
+  });
+  assert.equal(s.maxForgeProxyJournalId("lane-fix"), id);
+  assert.equal(s.maxForgeProxyJournalId("lane-other"), 0, "a different session's rows never leak in");
+  s.close();
+});
+
+test("completeThreadReply (#247 F3): atomically flips reply_posted and appends its receipt event — both land, or (on a thrown appendEvent) neither does", () => {
+  const s = mem();
+  const id = s.enqueueThreadWrite(
+    { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed", batchKey: "lane-a#10#1", fixRounds: 1 },
+    "2026-07-19T00:00:00Z",
+  );
+  s.completeThreadReply(id, "2026-07-19T00:01:00Z", { worker: "lane-a", threadId: "T1" });
+  assert.equal(s.pendingThreadWrites()[0]!.replyPosted, true);
+  const events = s.eventsSince("1970-01-01T00:00:00.000Z", ["fix-thread-reply-posted"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, { worker: "lane-a", threadId: "T1" });
+  s.close();
+});
+
+test("completeThreadResolve (#247 F3): atomically flips resolved, clears the row, and appends its receipt event", () => {
+  const s = mem();
+  const id = s.enqueueThreadWrite(
+    { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed", batchKey: "lane-a#10#1", fixRounds: 1 },
+    "2026-07-19T00:00:00Z",
+  );
+  s.completeThreadResolve(id, "2026-07-19T00:01:00Z", { worker: "lane-a", threadId: "T1" });
+  assert.deepEqual(s.pendingThreadWrites(), [], "cleared as part of the same atomic commit");
+  const events = s.eventsSince("1970-01-01T00:00:00.000Z", ["fix-thread-resolved"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, { worker: "lane-a", threadId: "T1" });
   s.close();
 });
 

@@ -205,10 +205,15 @@ class FakeForge implements IForge {
     this.threadResolves.push(threadId);
     this.prReviewData = { ...this.prReviewData, unresolvedThreads: Math.max(0, this.prReviewData.unresolvedThreads - 1) };
   }
-  /** #247 D3: attemptThreadWrite's crash-safety marker check reads this back before every
+  /** #247 D3/F2(b): attemptThreadWrite's crash-safety marker check reads this back before every
    *  reply-post attempt — simulate GitHub's own live state from every reply already recorded
-   *  above (single global bucket by threadId; every test here uses one PR, so no per-PR
-   *  partitioning is needed for the fake). */
+   *  above (single global bucket by threadId). */
+  async getReviewThreadCommentsTail(threadId: string, cap: number): Promise<string[]> {
+    return this.threadReplies
+      .filter(([tid]) => tid === threadId)
+      .map(([, body]) => body)
+      .slice(-cap);
+  }
   async getPRReviewThreads(_pr: number, _commentsCap: number) {
     const byThread: Record<string, string[]> = {};
     for (const [tid, body] of this.threadReplies) {
@@ -4602,12 +4607,14 @@ const sapwoodResult = (metadata: Record<string, unknown>): string =>
   `${RESULT_BLOCK_START}\n${JSON.stringify(metadata)}\n${RESULT_BLOCK_END}`;
 
 /** Seeds (a) the `fix-leg-started` event computeFixResponseHarvest's fixLegJournalCursor reads
- *  back (D2 leg-bound scoping — `fixRounds` defaults to 0, matching seedFixing's own default
- *  when `over.fix_rounds` is never set) and (b) the journal row itself — the SAME, PR-bound
- *  `pr_review_threads` response the fixing lane's session was actually served
- *  (State.listForgeProxyJournalForSession). */
+ *  back (D2/F1 leg-bound scoping — `fixRounds` defaults to 0, matching seedFixing's own default
+ *  when `over.fix_rounds` is never set; `journalCursor` is the monotonic row id captured BEFORE
+ *  this same journal row below is appended, exactly like conductor.ts's startFixLeg does) and
+ *  (b) the journal row itself — the SAME, PR-bound `pr_review_threads` response the fixing
+ *  lane's session was actually served (State.listForgeProxyJournalForSession). */
 function seedJournaledThreads(st: State, session: string, issue: number, pr: number, threadIds: string[], fixRounds = 0): void {
-  st.appendEvent("fix-leg-started", { worker: session, issue, pr, fixRounds, at: "2026-07-18T23:59:59Z" });
+  const journalCursor = st.maxForgeProxyJournalId(session);
+  st.appendEvent("fix-leg-started", { worker: session, issue, pr, fixRounds, journalCursor, at: "2026-07-18T23:59:59Z" });
   const id = st.appendForgeProxyJournalIntent({
     identity: { roundId: 1, phase: "fixing", role: "worker", session, attempt: 1 },
     seq: 1,
@@ -4659,8 +4666,8 @@ test("tick FIXING RECLAIM (#247): a fixing lane's valid structured threadRespons
   // The next tick drains the queue: reply+resolve for T1 (addressed), reply-only for T2 (disputed).
   const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
   assert.deepEqual(forge.threadReplies.sort(), [
-    ["T1", "fixed as suggested\n\n<!-- sapwood:fix-reply:lane-fix#0:T1 -->"],
-    ["T2", "disagree, see PR description\n\n<!-- sapwood:fix-reply:lane-fix#0:T2 -->"],
+    ["T1", "fixed as suggested\n\n<!-- sapwood:fix-reply:lane-fix#30#0:T1 -->"],
+    ["T2", "disagree, see PR description\n\n<!-- sapwood:fix-reply:lane-fix#30#0:T2 -->"],
   ]);
   assert.deepEqual(forge.threadResolves, ["T1"], "only the addressed thread is resolved — disputed never calls resolveReviewThread");
   assert.deepEqual(st.pendingThreadWrites(), [], "fully drained");
@@ -4738,7 +4745,16 @@ test("tick DRIVE (#247 D5): a driving lane with a STILL-pending thread write is 
   const gate = new FakeMergeGate();
   seedDriving(st, "lane-fix", 3, 30);
   st.enqueueThreadWrite(
-    { worker: "lane-fix", issue: 3, pr: 30, threadId: "T1", reply: "fixed", resolution: "addressed", batchKey: "lane-fix#1", fixRounds: 1 },
+    {
+      worker: "lane-fix",
+      issue: 3,
+      pr: 30,
+      threadId: "T1",
+      reply: "fixed",
+      resolution: "addressed",
+      batchKey: "lane-fix#30#1",
+      fixRounds: 1,
+    },
     "2026-07-19T00:00:00Z",
   );
 
@@ -4767,7 +4783,16 @@ test("issue #247 AC (D8, real path): resolving a thread via the queue never buys
   const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
   seedDriving(st, "lane-fix", 3, 30);
   st.enqueueThreadWrite(
-    { worker: "lane-fix", issue: 3, pr: 30, threadId: "T1", reply: "fixed", resolution: "addressed", batchKey: "lane-fix#1", fixRounds: 1 },
+    {
+      worker: "lane-fix",
+      issue: 3,
+      pr: 30,
+      threadId: "T1",
+      reply: "fixed",
+      resolution: "addressed",
+      batchKey: "lane-fix#30#1",
+      fixRounds: 1,
+    },
     "2026-07-19T00:00:00Z",
   );
 

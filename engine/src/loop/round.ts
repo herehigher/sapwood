@@ -286,6 +286,9 @@ export class RoundScopedForge implements IForge {
   resolveReviewThread(threadId: string) {
     return this.inner.resolveReviewThread(threadId);
   }
+  getReviewThreadCommentsTail(threadId: string, cap: number) {
+    return this.inner.getReviewThreadCommentsTail(threadId, cap);
+  }
 }
 
 /** #212: wraps an IForge so getReadyIssues() only returns issues carrying the round-pool label
@@ -431,6 +434,9 @@ export class PoolScopedForge implements IForge {
   }
   resolveReviewThread(threadId: string) {
     return this.inner.resolveReviewThread(threadId);
+  }
+  getReviewThreadCommentsTail(threadId: string, cap: number) {
+    return this.inner.getReviewThreadCommentsTail(threadId, cap);
   }
 }
 

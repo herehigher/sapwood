@@ -1807,6 +1807,40 @@ export class State {
     this.db.prepare("DELETE FROM pending_thread_writes WHERE id = ?").run(id);
   }
 
+  /** #247 F3 (Codex sol-high PR #265 review round 2, P2): markThreadReplyPosted + its
+   *  fix-thread-reply-posted receipt event, committed in ONE transaction — as two separate
+   *  writes, a crash between them could leave the reply durably marked posted with NO receipt
+   *  event ever recorded (or vice versa), losing the "every executed write journaled with
+   *  leg/round provenance" AC's own promise for that write. `receipt` is fix-response.ts's
+   *  provenance() payload — accepted as an opaque object so this method stays agnostic of the
+   *  fix-response shape (state.ts owns no fix-response-specific types beyond FixResponseSettle*). */
+  completeThreadReply(id: number, at: string, receipt: Record<string, unknown>): void {
+    this.db.exec("BEGIN");
+    try {
+      this.markThreadReplyPosted(id, at);
+      this.appendEvent("fix-thread-reply-posted", receipt);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** #247 F3: markThreadResolved + clearThreadWrite + the fix-thread-resolved receipt event, all
+   *  in ONE transaction — same rationale as completeThreadReply above, for the resolve half. */
+  completeThreadResolve(id: number, at: string, receipt: Record<string, unknown>): void {
+    this.db.exec("BEGIN");
+    try {
+      this.markThreadResolved(id, at);
+      this.clearThreadWrite(id);
+      this.appendEvent("fix-thread-resolved", receipt);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   // ── Rounds ledger (#86) ─────────────────────────────────────────────────────────────────
 
   /** Insert a fresh round in phase 'aligning', status 'in_progress', no marker. Returns the
@@ -2231,21 +2265,39 @@ export class State {
    *  round/phase/role/attempt-scoped contract is exactly what its existing callers (the
    *  budget/completeness readers) need and must keep.
    *
-   *  `sinceIso` (D2, Codex sol-high PR #265 review round 1, P1): a lane's SESSION NAME persists
-   *  across every fix round on it (startFixLeg reuses the same worker row/lane), so session
-   *  alone would conflate every round's journal rows together — an EARLIER round's threadId
-   *  could then validate a LATER round's structured output. When supplied, only rows with
-   *  `requestedAt >= sinceIso` are returned (fix-response.ts's fixLegJournalCursor supplies the
-   *  current round's own `fix-leg-started` timestamp) — omit it for the pre-#247-D2 unscoped
-   *  read (no production caller does; kept optional so existing tests of the session-only
-   *  contract keep working unchanged). */
-  listForgeProxyJournalForSession(session: string, sinceIso?: string): ForgeProxyJournalRow[] {
-    const rows = (sinceIso !== undefined
-      ? this.db.prepare("SELECT * FROM forge_proxy_journal WHERE session = ? AND requested_at >= ? ORDER BY id").all(session, sinceIso)
+   *  `afterId` (D2, Codex sol-high PR #265 review round 1, P1; replaced with a monotonic ROW ID
+   *  cursor in review round 2, F1 — a wall-clock `requestedAt` cutoff admitted an equal-
+   *  timestamp prior-leg row, and a cursor captured AFTER resume() confirmed the spawn could
+   *  postdate a fast child's genuinely-first tool call): a lane's SESSION NAME persists across
+   *  every fix round on it (startFixLeg reuses the same worker row/lane), so session alone would
+   *  conflate every round's journal rows together — an EARLIER round's threadId could then
+   *  validate a LATER round's structured output. When supplied, only rows with `id > afterId`
+   *  are returned (fix-response.ts's fixLegJournalCursor supplies the round's own captured
+   *  pre-resume cursor — State.maxForgeProxyJournalId, read BEFORE that round's resume() call
+   *  ever runs, so it can never postdate the round's own first journal row) — omit it for the
+   *  pre-#247-D2 unscoped read (no production caller does; kept optional so existing tests of
+   *  the session-only contract keep working unchanged). */
+  listForgeProxyJournalForSession(session: string, afterId?: number): ForgeProxyJournalRow[] {
+    const rows = (afterId !== undefined
+      ? this.db.prepare("SELECT * FROM forge_proxy_journal WHERE session = ? AND id > ? ORDER BY id").all(session, afterId)
       : this.db
           .prepare("SELECT * FROM forge_proxy_journal WHERE session = ? ORDER BY id")
           .all(session)) as unknown as RawForgeProxyJournalRow[];
     return rows.map(mapForgeProxyJournalRow);
+  }
+
+  /** #247 F1: the current max journal row id for `session` — read BEFORE a fix leg's resume()
+   *  call ever runs (conductor.ts's startFixLeg / the fixing-continuation resume / the
+   *  reconcileDrivingFixIntents adoption path), so it can never postdate that leg's own first
+   *  journal row (unlike a wall-clock timestamp captured AFTER resume() confirms the spawn). 0
+   *  when the session has no journal rows yet — a valid cursor (not "no cursor"; the caller's
+   *  own event-payload lookup is what distinguishes "found a 0 cursor" from "found no cursor-
+   *  bearing event at all"). */
+  maxForgeProxyJournalId(session: string): number {
+    const row = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS maxId FROM forge_proxy_journal WHERE session = ?").get(session) as {
+      maxId: number;
+    };
+    return row.maxId;
   }
 
   /** Cumulative call count + response bytes already ledgered for this session attempt — the

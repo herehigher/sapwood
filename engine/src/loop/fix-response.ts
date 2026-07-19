@@ -159,31 +159,59 @@ export function journaledReviewThreadIds(rows: readonly ForgeProxyJournalRow[], 
   return ids;
 }
 
-/** #247 D2: the per-fix-round journal cursor — validateFixResponseOutput must only trust
- *  `pr_review_threads` rows THIS fix round's session actually saw, never an earlier round's
- *  journal rows for the SAME session name (startFixLeg, conductor.ts, reuses the SAME worker
- *  row/lane name across every fix round — session alone conflates every round together).
- *  Reuses the `fix-leg-started` event startFixLeg already appends unconditionally (no new
- *  schema for this half): that event's own `at` — recorded the instant AFTER `resume()`
- *  confirms the spawn, strictly before that round's own first tool call — is the cutoff.
- *  Returns null when no matching event is found (should never happen for a real `fixing` lane;
- *  the caller treats null as "trust nothing this round", fail-closed). */
-export function fixLegJournalCursor(state: Pick<State, "eventsSince">, worker: string, fixRounds: number): string | null {
-  const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-started"]);
+/** #247 D2/F1 (Codex sol-high PR #265 review rounds 1+2): the per-fix-round journal cursor —
+ *  validateFixResponseOutput must only trust `pr_review_threads` rows THIS fix round's session
+ *  actually saw, never an earlier round's journal rows for the SAME session name (`startFixLeg`,
+ *  conductor.ts, reuses the SAME worker row/lane name across every fix round — session alone
+ *  conflates every round together).
+ *
+ *  F1 (round 2): a WALL-CLOCK cutoff (round 1's own `fix-leg-started.at`) has three defects a
+ *  monotonic ROW ID closes: (1) `requestedAt >= cutoff` admits an equal-timestamp prior-leg row
+ *  (a `>=` compare on colliding timestamps, not a strict ordering); (2) the cutoff was captured
+ *  AFTER `resume()` already confirmed the spawn, so a genuinely fast child's OWN first tool call
+ *  could complete and journal BEFORE the engine got around to computing `now().toISOString()`
+ *  for the event it appends immediately after — postdating a legitimate row, spuriously failing
+ *  the whole batch; (3) a crash-adopted leg (reconcileDrivingFixIntents' "confirmed" branch)
+ *  never went through `startFixLeg` at all, so no `fix-leg-started` event — and thus no
+ *  cursor — ever existed for it, permanently rejecting its output. The fix: conductor.ts now
+ *  reads `State.maxForgeProxyJournalId(session)` BEFORE each of the three places a fix leg's
+ *  child can start making tool calls (`startFixLeg`, the fixing-continuation resume, and the
+ *  adoption path), and carries that number as `journalCursor` on the `fix-leg-started` /
+ *  `fix-leg-resumed` / `fix-leg-adopted` events respectively (no new schema — same event-reuse
+ *  trick as round 1). A row id captured strictly BEFORE resume() is called can never postdate
+ *  that leg's own first journal row, closing defect (2); an integer `>` comparison
+ *  (`listForgeProxyJournalForSession`'s `id > afterId`) is a true strict ordering, closing defect
+ *  (1); and the adoption path now carries its own cursor too, closing defect (3).
+ *
+ *  Looks up whichever of the three event kinds is NEWEST for (worker, fixRounds) — a lane can
+ *  pass through adopt-then-resume for the SAME round (fix_rounds bumped once, at whichever step
+ *  first confirms the spawn), so the tightest, most-recent cursor for that round wins. Returns
+ *  null only when NO cursor-bearing event exists for (worker, fixRounds) at all — the caller
+ *  treats null as "trust nothing this round", fail-closed; `journalCursor: 0` (a session with no
+ *  prior journal rows at cursor time) is a perfectly valid cursor, not "no cursor found". */
+export function fixLegJournalCursor(state: Pick<State, "eventsSince">, worker: string, fixRounds: number): number | null {
+  const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-started", "fix-leg-resumed", "fix-leg-adopted"]);
   for (let i = events.length - 1; i >= 0; i--) {
-    const payload = events[i]!.payload as { worker?: unknown; fixRounds?: unknown; at?: unknown };
-    if (payload.worker === worker && payload.fixRounds === fixRounds && typeof payload.at === "string") return payload.at;
+    const payload = events[i]!.payload as { worker?: unknown; fixRounds?: unknown; journalCursor?: unknown };
+    if (payload.worker === worker && payload.fixRounds === fixRounds && typeof payload.journalCursor === "number") {
+      return payload.journalCursor;
+    }
   }
   return null;
 }
 
 /** The stable key identifying ONE fix round's whole batch of thread responses (D4/D6
- *  provenance) — a given (worker, fixRounds) pair produces at most one validated batch by
- *  construction (a fix round runs its session exactly once), so this doubles as the
- *  pending_thread_writes de-dup key (State.enqueueThreadWrite's `INSERT OR IGNORE` on
- *  (batch_key, thread_id)) and the deterministic reply marker's namespace (D3). */
-export function fixResponseBatchKey(worker: string, fixRounds: number): string {
-  return `${worker}#${fixRounds}`;
+ *  provenance) — a given (worker, pr, fixRounds) triple produces at most one validated batch by
+ *  construction (a fix round runs its session exactly once against exactly one PR), so this
+ *  doubles as the pending_thread_writes de-dup key (State.enqueueThreadWrite's `INSERT OR
+ *  IGNORE` on (batch_key, thread_id)) and the deterministic reply marker's namespace (D3). `pr`
+ *  is included (F5, Codex sol-high PR #265 review round 2, P3): `worker` alone is a lane NAME,
+ *  and lane names CAN be reused across an engine's lifetime (a fresh dispatch long after an old
+ *  lane's rows were swept) — without `pr` in the key, a name-reuse pathology could let a stale
+ *  row from an unrelated PR's fix round collide with a new one's (batch_key, thread_id) pair
+ *  under `INSERT OR IGNORE`, silently dropping a legitimate write. */
+export function fixResponseBatchKey(worker: string, pr: number, fixRounds: number): string {
+  return `${worker}#${pr}#${fixRounds}`;
 }
 
 /** Compute (READ-ONLY, no writes — D4) what a fixing lane's terminal DONE output resolves to:
@@ -218,7 +246,7 @@ export function computeFixResponseHarvest(
       issue: input.issue,
       pr: input.prNumber,
       fixRounds: input.fixRounds,
-      batchKey: fixResponseBatchKey(input.worker, input.fixRounds),
+      batchKey: fixResponseBatchKey(input.worker, input.prNumber, input.fixRounds),
       writes: validated.responses,
     },
   };
@@ -241,26 +269,27 @@ function replyMarker(batchKey: string, threadId: string): string {
   return `<!-- sapwood:fix-reply:${batchKey}:${threadId} -->`;
 }
 
-/** D3: true when `marker` is already present on `threadId`'s own comments, per a LIVE
- *  `pr_review_threads` read — the crash-safety check attemptThreadWrite makes BEFORE every
- *  reply-post attempt. A read failure (or the thread having vanished) fails toward `false`
- *  (never yet posted): the durable `reply_posted` flag is the PRIMARY idempotency guard (once
- *  set, this function is never consulted again for that row) — this check only closes the
- *  narrow crash window between a successful forge post and that flag's own commit. */
+/** D3/F2 (Codex sol-high PR #265 review rounds 1+2): true when `marker` is already present
+ *  among `threadId`'s own NEWEST comments, per a LIVE read — the crash-safety check
+ *  attemptThreadWrite makes BEFORE every reply-post attempt. Uses getReviewThreadCommentsTail
+ *  (F2(b): `last:` semantics), not getPRReviewThreads' `first: cap` default view — the marker
+ *  this function looks for is, by construction, the NEWEST comment on the thread (it was just
+ *  posted), so a `first:`-capped read on a thread longer than the cap would never see it,
+ *  producing a false "not posted" on every subsequent tick.
+ *
+ *  F2(a): DELIBERATELY never catches — a read failure propagates to the caller, which fails
+ *  CLOSED (retries next tick, never posts through this unverifiable window). Round 1's version
+ *  caught and returned `false` ("not yet posted"), which reposted in EXACTLY the crash window
+ *  D3 exists to close (a transient read failure right after a successful post would have looked
+ *  identical to "never posted", triggering a duplicate replyToReviewThread call). */
 async function replyAlreadyPosted(
-  forge: Pick<IForge, "getPRReviewThreads">,
-  pr: number,
+  forge: Pick<IForge, "getReviewThreadCommentsTail">,
   threadId: string,
   marker: string,
   commentsCap: number,
 ): Promise<boolean> {
-  try {
-    const { threads } = await forge.getPRReviewThreads(pr, commentsCap);
-    const thread = threads.find((t) => t.id === threadId);
-    return thread ? thread.comments.some((c) => c.body.includes(marker)) : false;
-  } catch {
-    return false;
-  }
+  const bodies = await forge.getReviewThreadCommentsTail(threadId, commentsCap);
+  return bodies.some((b) => b.includes(marker));
 }
 
 /** D6 (Codex sol-high PR #265 review round 1, P2): the provenance every receipt event carries —
@@ -285,21 +314,33 @@ function provenance(row: PendingThreadWrite): {
  *  a second, functionally-identical bounded-retry policy).
  *
  *  IDEMPOTENCY (issue #247 AC): the reply half is attempted ONLY when `row.replyPosted` is still
- *  false, and EVEN THEN a marker check (replyAlreadyPosted, D3) runs first — a crash between a
- *  successful post and the durable flag's own commit is reconciled here instead of double-
- *  posting. Once replyPosted is durably true, no later call ever re-posts, regardless of how
- *  the resolve half fares. A `disputed` row has no resolve half at all: it is cleared (fully
- *  done) the instant its reply posts. */
+ *  false, and EVEN THEN a marker check (replyAlreadyPosted, D3/F2) runs first — a crash between
+ *  a successful post and the durable flag's own commit is reconciled here instead of double-
+ *  posting; a FAILED check fails CLOSED (F2(a) — retries next tick, never posts through an
+ *  unverifiable window). Once replyPosted is durably true, no later call ever re-posts,
+ *  regardless of how the resolve half fares. A `disputed` row has no resolve half at all: it is
+ *  cleared (fully done) the instant its reply posts. F3: the reply-posted/resolved state
+ *  changes and their own receipt events are each committed atomically
+ *  (State.completeThreadReply/completeThreadResolve) — never separate writes a crash could
+ *  split. */
 export async function attemptThreadWrite(
-  forge: Pick<IForge, "replyToReviewThread" | "resolveReviewThread" | "getPRReviewThreads" | "addLabel" | "addPRLabel">,
-  state: Pick<State, "markThreadReplyPosted" | "markThreadResolved" | "bumpThreadWriteAttempt" | "clearThreadWrite" | "appendEvent">,
+  forge: Pick<IForge, "replyToReviewThread" | "resolveReviewThread" | "getReviewThreadCommentsTail" | "addLabel" | "addPRLabel">,
+  state: Pick<State, "completeThreadReply" | "completeThreadResolve" | "bumpThreadWriteAttempt" | "clearThreadWrite" | "appendEvent">,
   cfg: Pick<SapwoodConfig, "recovery" | "labels" | "proxy">,
   row: PendingThreadWrite,
   iso: () => string,
 ): Promise<FixResponseWriteOutcome> {
   if (!row.replyPosted) {
     const marker = replyMarker(row.batchKey, row.threadId);
-    const alreadyPosted = await replyAlreadyPosted(forge, row.pr, row.threadId, marker, cfg.proxy.caps.maxCommentsPerThread);
+    let alreadyPosted: boolean;
+    try {
+      alreadyPosted = await replyAlreadyPosted(forge, row.threadId, marker, cfg.proxy.caps.maxCommentsPerThread);
+    } catch (e) {
+      // F2(a): the reconcile read itself failed — never default to "not posted yet" (that
+      // would repost through exactly the crash window D3 exists to close). Fail closed: retry
+      // (re-check, and maybe post) next tick instead.
+      return escalateOrRetry(forge, state, cfg, row, e, iso);
+    }
     if (!alreadyPosted) {
       try {
         await forge.replyToReviewThread(row.threadId, `${row.reply}\n\n${marker}`);
@@ -308,19 +349,22 @@ export async function attemptThreadWrite(
       }
     }
     try {
-      state.markThreadReplyPosted(row.id, iso());
+      state.completeThreadReply(row.id, iso(), provenance(row));
     } catch (e) {
       // D3: the forge post above (or the marker check finding it already there) SUCCEEDED, but
       // this durable write did not — never re-post on the next attempt (replyAlreadyPosted will
       // find the marker and skip straight to here again), only retry THIS write.
       return escalateOrRetry(forge, state, cfg, row, e, iso);
     }
-    state.appendEvent("fix-thread-reply-posted", provenance(row));
   }
   if (row.resolution === "disputed") {
     // Speak-not-act (issue #247's Why, PLAN.md dissent doctrine): a disputed thread stays open
     // on GitHub — nothing left to do once its reply lands (already receipted above).
-    state.clearThreadWrite(row.id);
+    try {
+      state.clearThreadWrite(row.id);
+    } catch (e) {
+      return escalateOrRetry(forge, state, cfg, row, e, iso);
+    }
     return { kind: "recorded", worker: row.worker, issue: row.issue, threadId: row.threadId };
   }
   if (!row.resolved) {
@@ -330,26 +374,36 @@ export async function attemptThreadWrite(
       return escalateOrRetry(forge, state, cfg, row, e, iso);
     }
     try {
-      state.markThreadResolved(row.id, iso());
+      state.completeThreadResolve(row.id, iso(), provenance(row));
     } catch (e) {
       // The resolve mutation itself already succeeded upstream — GitHub's resolveReviewThread
       // on an already-resolved thread is a no-op success, so re-attempting on the next tick is
       // safe (unlike reply, no marker check is needed here).
       return escalateOrRetry(forge, state, cfg, row, e, iso);
     }
-    state.clearThreadWrite(row.id);
-    state.appendEvent("fix-thread-resolved", provenance(row));
     return { kind: "resolved", worker: row.worker, issue: row.issue, threadId: row.threadId };
   }
   // Defensive only: reply posted, addressed, and already resolved — a prior attempt succeeded
   // at both but the row was somehow never cleared. Clear it now rather than retry forever.
-  state.clearThreadWrite(row.id);
+  try {
+    state.clearThreadWrite(row.id);
+  } catch (e) {
+    return escalateOrRetry(forge, state, cfg, row, e, iso);
+  }
   return { kind: "resolved", worker: row.worker, issue: row.issue, threadId: row.threadId };
 }
 
-/** Bump-and-retry under `cfg.recovery.rollbackRetryCap`; escalate (needs-human label, best-
- *  effort — attemptRollback's own precedent) and clear the row once the cap is hit. Never
- *  throws. */
+/** Bump-and-retry under `cfg.recovery.rollbackRetryCap`; escalate once the cap is hit. Never
+ *  throws.
+ *
+ *  F4 (Codex sol-high PR #265 review round 2, P2): #147's own ordering rule — a durable latch a
+ *  human's escalation depends on (the needs-human label) must land BEFORE the evidence it
+ *  depends on disappears. Round 1's order (clear the row FIRST, label best-effort/swallowed)
+ *  let a FAILED label write leave NOTHING pending: DRIVE would resume the lane the very same
+ *  tick with zero trace anything had gone wrong. Now: the label writes are attempted FIRST: on
+ *  failure the row is KEPT (pending — DRIVE keeps skipping this lane) and the WHOLE escalation
+ *  is retried next tick (never silently re-admits the lane); only once both labels have landed
+ *  does the row actually clear and the escalation event fire. */
 async function escalateOrRetry(
   forge: Pick<IForge, "addLabel" | "addPRLabel">,
   state: Pick<State, "bumpThreadWriteAttempt" | "clearThreadWrite" | "appendEvent">,
@@ -360,9 +414,15 @@ async function escalateOrRetry(
 ): Promise<FixResponseWriteOutcome> {
   const attempts = row.attempts + 1;
   if (attempts >= cfg.recovery.rollbackRetryCap) {
+    try {
+      await forge.addLabel(row.issue, cfg.labels.needsHuman);
+      await forge.addPRLabel(row.pr, cfg.labels.needsHuman);
+    } catch (labelError) {
+      state.bumpThreadWriteAttempt(row.id, iso());
+      state.appendEvent("fix-thread-write-escalation-label-failed", { ...provenance(row), attempts, error: String(labelError) });
+      return { kind: "retrying", worker: row.worker, issue: row.issue, threadId: row.threadId, attempts };
+    }
     state.clearThreadWrite(row.id);
-    await forge.addLabel(row.issue, cfg.labels.needsHuman).catch(() => {});
-    await forge.addPRLabel(row.pr, cfg.labels.needsHuman).catch(() => {});
     state.appendEvent("fix-thread-write-escalated", { ...provenance(row), attempts, error: String(e) });
     return { kind: "escalated", worker: row.worker, issue: row.issue, threadId: row.threadId, attempts };
   }

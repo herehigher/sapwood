@@ -25,6 +25,7 @@ import {
   parsePRReviewView,
   parsePRStatus,
   parseProject,
+  parseReviewThreadCommentsTail,
   parseReviewThreadsPage,
   parseSearchIssues,
   projectQuery,
@@ -2039,6 +2040,28 @@ test("resolveReviewThread: resolves the mutation with the exact threadId", async
   const args = seen[0]!;
   assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
   assert.ok(args.includes("threadId=THREAD_1"));
+});
+
+test("getReviewThreadCommentsTail (#247 F2(b)): reads via node(id:) with `last: cap` — no owner/repo/pr variable, scoped to the thread's own opaque id", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({ data: { node: { comments: { nodes: [{ body: "old" }, { body: "newest — has the marker" }] } } } });
+  };
+  const bodies = await forge.getReviewThreadCommentsTail("THREAD_1", 2);
+  const args = seen[0]!;
+  assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
+  assert.ok(args.includes("threadId=THREAD_1"));
+  assert.ok(args.includes("cap=2"));
+  assert.ok(!args.some((a) => a.startsWith("owner=") || a.startsWith("repo=") || a.startsWith("pr=")));
+  assert.deepEqual(bodies, ["old", "newest — has the marker"]);
+});
+
+test("parseReviewThreadCommentsTail: a vanished/malformed node degrades to an empty array, never throws on a well-formed-but-absent shape", () => {
+  const bodies = parseReviewThreadCommentsTail(JSON.stringify({ data: { node: null } }));
+  assert.deepEqual(bodies, []);
 });
 
 // ── #237 finding 2 (2026-07-18 adjudication on PR #262): every issue comment this engine posts

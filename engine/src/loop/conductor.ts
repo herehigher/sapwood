@@ -367,10 +367,15 @@ export async function startFixLeg(
   const pr = w.pr;
   const prompt = deps.renderFixPrompt(w.issue, pr);
   const issue: Issue = { number: w.issue, title: "", labels: [] };
+  // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE resume() — the child
+  // cannot make its first tool call before this line runs, so this row id can never postdate
+  // it (unlike a wall-clock timestamp recorded AFTER resume() confirms the spawn, round 1's own
+  // defect). See fix-response.ts's fixLegJournalCursor for the full rationale.
+  const journalCursor = deps.state.maxForgeProxyJournalId(w.name);
   const result = await deps.supervisor.resume(issue, w.name, { prompt, sessionId: w.session_id, proxy });
   const fixRounds = (w.fix_rounds ?? 0) + 1;
   deps.state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
-  deps.state.appendEvent("fix-leg-started", { worker: w.name, issue: w.issue, pr, fixRounds, at: now().toISOString() });
+  deps.state.appendEvent("fix-leg-started", { worker: w.name, issue: w.issue, pr, fixRounds, journalCursor, at: now().toISOString() });
   return result;
 }
 
@@ -1423,6 +1428,14 @@ async function reconcileDrivingFixIntents(
   for (const w of state.drivingWorkers()) {
     const intent = supervisor.resumeIntentState(w.name, w.issue);
     if (intent === "confirmed") {
+      // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE this reconciliation
+      // acts on the row at all (before even requestHandoff) — an adopted child's own resume()
+      // call already happened in a NOW-CRASHED process, so there is no "before resume()" moment
+      // left to observe directly; this is the earliest point THIS process can still capture one.
+      // Superseded harmlessly once the eventual drain+fresh-resume produces its own, later
+      // (and by construction >=) cursor on the "fix-leg-resumed" event — fixLegJournalCursor
+      // picks whichever of the three cursor-bearing events is NEWEST for (worker, fixRounds).
+      const journalCursor = state.maxForgeProxyJournalId(w.name);
       // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
       // gracefully now rather than let it keep running against a dead evidence channel. Ordered
       // FIRST (B3): durable + idempotent, so a crash before the upsert below just re-enters this
@@ -1432,7 +1445,7 @@ async function reconcileDrivingFixIntents(
       supervisor.clearStaleFixEntrySentinel(w.name);
       const fixRounds = (w.fix_rounds ?? 0) + 1;
       state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
-      state.appendEvent("fix-leg-adopted", { worker: w.name, issue: w.issue, fixRounds });
+      state.appendEvent("fix-leg-adopted", { worker: w.name, issue: w.issue, fixRounds, journalCursor });
     } else if (intent === "unconfirmed") {
       // B4: label FIRST; a failed write must NOT terminalize the row — leave it `driving` and
       // retry the whole escalation next tick (never a permanently-stranded failed+unlabeled row).
@@ -2537,6 +2550,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       const fixPrompt = deps.fixLegResume.renderFixPrompt(w.issue, pr);
+      // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE resume() — this is
+      // a genuinely FRESH mint/spawn (unlike the ADOPT branch above), so the same "child cannot
+      // call before this line runs" guarantee startFixLeg's own capture relies on holds here too.
+      const journalCursor = state.maxForgeProxyJournalId(w.name);
       let fixResult: { name: string; sessionId: string };
       try {
         fixResult = await supervisor.resume(issue, w.name, {
@@ -2565,7 +2582,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         resume_attempts: fixAttempt,
         fixing_handoff: 0,
       });
-      state.appendEvent("fix-leg-resumed", { worker: w.name, issue: w.issue, pr, attempt: fixAttempt });
+      // fixRounds: this is a CONTINUATION of the same fix round (only resume_attempts bumps
+      // above, never fix_rounds) — carried so fixLegJournalCursor can match this event against
+      // the SAME (worker, fixRounds) key the round's original fix-leg-started event used.
+      state.appendEvent("fix-leg-resumed", {
+        worker: w.name,
+        issue: w.issue,
+        pr,
+        attempt: fixAttempt,
+        fixRounds: w.fix_rounds ?? 0,
+        journalCursor,
+      });
       resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: fixAttempt });
       resumeLanesUsed++;
       continue;
