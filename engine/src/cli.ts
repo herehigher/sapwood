@@ -804,9 +804,20 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // load deferred to first dispatch: that would let the engine claim issues / churn ticks before
   // failing, instead of a clean fail-fast with no dispatch ever happening.
   const renderPrompt = buildRenderPrompt(cfg);
-  // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — a fix leg (#246) isn't
-  // dispatched from this path yet (no shipped caller wires TickDeps.fixLegResume in this repo),
-  // but the config must still be validated eagerly at startup, matching runValidate/runDryRun.
+  // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — the config must still
+  // be validated eagerly at startup, matching runValidate/runDryRun. #246 wires the FIXABLE
+  // gate's dispatch logic (conductor.ts DRIVE loop's own `TickDeps.fixLegResume` consumer) but
+  // this run path still doesn't ATTACH one here: `createProxyMint` (proxy/mint.ts) needs a
+  // round id/phase this tick-driver path has no concept of (rounds are round.ts's own thing —
+  // see runRoundsEngine below, which has the same gap for the identical reason), and no
+  // production caller anywhere in this repo yet mints a REAL forge-MCP proxy for the ordinary
+  // coding-worker dispatch either — wiring a live mint chain is a pre-existing, separate gap,
+  // tracked as #253, not #246's. #246 review round 1 (C1): with prFixCap > 0 (the default) and
+  // no fixLegResume wired, a FIXABLE gate DEGRADES to the exact pre-#246 needs-human escalation
+  // (visible, actionable) rather than silently staying `driving` forever — see
+  // conductor.ts's escalateNeedsHuman/`fix-leg-dispatch-unconfigured` event for the degrade path.
+  // Never a silent retry-loop; #253 only needs to attach a real mintProxy to make FIXUP dispatch
+  // itself live.
   buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);

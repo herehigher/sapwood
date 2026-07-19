@@ -44,7 +44,9 @@ lanes:
   #                     for bigger, less-frequently-reviewed rounds; lower it for tighter retro
   #                     loops.
   reserveCap: 1 # lanes held back as reserve
-  prFixCap: 2 # max PR-fix iterations before escalating
+  prFixCap: 2 # #246: max fix-leg rounds (review findings / CI-red) before escalating to
+  #             needs-human for adjudication. 0 disables the FIXABLE gate outright — every
+  #             finding/CI-red PR folds straight to today's pre-#246 behavior (HUMAN/WAIT).
   frictionMin: 0 # min minutes between dispatches (rate limit; 0 = off)
   gatedReentryCap: 2 # #147: max gated-PR reentry attempts (human removes needs-human on an
   #                    escalated PR -> reclaimed back to driving, re-driven on the SAME branch,
