@@ -229,18 +229,20 @@ function freshTrustedThumbCount(): number {
 /**
  * Codex's clean verdict is sometimes a plain conversation COMMENT ("Codex Review: Didn't find
  * any major issues") with NO review object (post-#55 P2). #273 requires every such comment to
- * carry exactly one distinct, matching OID assertion. Quoted material is stripped before BOTH
- * phrase and OID parsing so examples, fences, and HTML comments cannot impersonate a verdict.
+ * carry exactly one distinct, matching OID assertion. A single-pass classifier quarantines
+ * quoted lines without rewriting them; BOTH phrase and OID parsing see only clean lines.
  */
 const CLEAN_VERDICT_RE = /didn't find any major issues/i;
 const REVIEWED_HEAD_OID_RE = /^Reviewed head OID: (\S+)\s*$/;
 
-function sanitizeReviewCommentBody(body: string): string {
-  const withoutHtmlComments = body.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
-  const residue: string[] = [];
+function cleanReviewCommentLines(body: string): string[] {
+  const clean: string[] = [];
   let fence: { char: "`" | "~"; length: number } | null = null;
-  for (const line of withoutHtmlComments.split(/\r?\n/)) {
-    const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+  let inHtmlComment = false;
+  let inLazyBlockquote = false;
+  for (const line of body.split(/\r?\n/)) {
+    // Precedence is fence -> HTML comment -> blockquote; quarantined lines are never rewritten.
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence !== null) {
       const marker = fenceMatch?.[1];
       if (marker?.startsWith(fence.char) && marker.length >= fence.length && fenceMatch?.[2]?.trim() === "") fence = null;
@@ -251,15 +253,41 @@ function sanitizeReviewCommentBody(body: string): string {
       fence = { char: marker[0] as "`" | "~", length: marker.length };
       continue;
     }
-    if (/^\s*>/.test(line)) continue;
-    residue.push(line);
+
+    let htmlCursor = 0;
+    let htmlQuarantined = inHtmlComment;
+    while (htmlCursor <= line.length) {
+      if (inHtmlComment) {
+        const close = line.indexOf("-->", htmlCursor);
+        if (close < 0) break;
+        inHtmlComment = false;
+        htmlCursor = close + 3;
+      } else {
+        const open = line.indexOf("<!--", htmlCursor);
+        if (open < 0) break;
+        htmlQuarantined = true;
+        inHtmlComment = true;
+        htmlCursor = open + 4;
+      }
+    }
+    if (htmlQuarantined) continue;
+
+    if (/^ {0,3}>/.test(line)) {
+      inLazyBlockquote = true;
+      continue;
+    }
+    if (inLazyBlockquote) {
+      if (line.trim() !== "") continue;
+      inLazyBlockquote = false;
+    }
+    clean.push(line);
   }
-  return residue.join("\n");
+  return clean;
 }
 
-function assertedHeadOids(sanitizedBody: string): Set<string> {
+function assertedHeadOids(cleanLines: readonly string[]): Set<string> {
   const values = new Set<string>();
-  for (const line of sanitizedBody.split(/\r?\n/)) {
+  for (const line of cleanLines) {
     const match = REVIEWED_HEAD_OID_RE.exec(line);
     if (match?.[1]) values.add(match[1]);
   }
@@ -273,15 +301,15 @@ function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: st
   const author = normalizeLogin(data.author);
   return (data.comments ?? []).filter((c) => {
     const createdAt = Date.parse(c.createdAt);
-    const sanitizedBody = sanitizeReviewCommentBody(c.body);
-    const statedOids = assertedHeadOids(sanitizedBody);
+    const cleanLines = cleanReviewCommentLines(c.body);
+    const statedOids = assertedHeadOids(cleanLines);
     const oidMatches = statedOids.size === 1 && statedOids.has(data.headOid);
     return (
       normalizeLogin(c.login) !== author &&
       trustedLogin(normalizeLogin(c.login)) &&
       Number.isFinite(createdAt) &&
       createdAt > cutoff &&
-      CLEAN_VERDICT_RE.test(sanitizedBody) &&
+      cleanLines.some((line) => CLEAN_VERDICT_RE.test(line)) &&
       oidMatches
     );
   }).length;

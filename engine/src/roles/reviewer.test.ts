@@ -428,6 +428,33 @@ test("CodexReviewer #273: verdict text and OID inside fenced or HTML-comment con
   }
 });
 
+test("CodexReviewer #273: an HTML comment cannot be deleted into a valid fence closer", () => {
+  const data = mkData({
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-07T07:48:44Z",
+        body: `\`\`\`text\nquoted example\n\`\`\` <!-- x -->\n${CLEAN}\nReviewed head OID: HEAD`,
+      },
+    ],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(data, PIN).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer #273: lazy blockquote continuation is quarantined until a blank line", () => {
+  const r = new CodexReviewer();
+  const comment = { login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z" };
+  const lazyQuoted = mkData({
+    comments: [{ ...comment, body: `> quoted review example\n${CLEAN}\n\nReviewed head OID: HEAD` }],
+  });
+  assert.equal(r.verdictFromData(lazyQuoted, PIN).action, "WAIT_REVIEW");
+
+  const afterBlank = mkData({
+    comments: [{ ...comment, body: `> quoted review example\nquoted continuation\n\n${CLEAN}\nReviewed head OID: HEAD` }],
+  });
+  assert.equal(r.verdictFromData(afterBlank, PIN).action, "MERGE_OK");
+});
+
 test("CodexReviewer #273: an incidental fenced snippet does not hide a normal OID-bound verdict", () => {
   const data = mkData({
     comments: [
