@@ -2062,8 +2062,9 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
     // #241 (Codex delta confirm, P2): a finite `sleep 30` was still a theoretical real-time race
     // -- if the event loop stalled ~30s after the fake-clock advance, the stub would exit
     // NATURALLY (code 0) before heartbeatTick ever observed the new elapsed time, writing
-    // .handoff (handoffRequested, not timedOut) instead of .failed. A non-terminating loop
-    // removes that window entirely: the stub can only ever end via the timeout path's SIGKILL.
+    // .handoff (handoffRequested, not timedOut) instead of .failed. The 600s bounded loop
+    // pushes that window far past any test lifetime (while still self-reaping a failure-path
+    // orphan): within the test, the stub can only end via the timeout path's SIGKILL.
     const trapReady = join(dir, "trap-ready");
     const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nfor _ in $(seq 1 600); do sleep 1; done\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
