@@ -685,10 +685,13 @@ export interface TickDeps {
    *  later needs to resume — it must come back as a FIX leg (fix prompt + mandatory
    *  `credentialFree` proxy + target state `fixing`), never an ordinary running leg; the RESUME
    *  phase checks `WorkerRow.fixing_handoff` and, ONLY when set, uses this SAME dep instead of
-   *  the ordinary #172 resume path. Omitted -> BOTH consumers skip, don't corrupt: a FIXABLE
-   *  gate stays driving (`fix-leg-dispatch-unconfigured` event) and a fixing-origin handoff row
-   *  is left untouched (`fix-leg-resume-unconfigured` event) — either way retried next tick once
-   *  this is wired. */
+   *  the ordinary #172 resume path. Omitted, the two consumers differ (#246 review round 1, C1):
+   *  the DRIVE loop's FIXUP branch DEGRADE-ESCALATES — same needs-human escalation the pre-#246
+   *  gate produced (`fix-leg-dispatch-unconfigured` event, then `escalateNeedsHuman`), visible
+   *  and terminal, never a silent retry; the RESUME phase's fixing-origin-handoff branch instead
+   *  leaves the row untouched (`fix-leg-resume-unconfigured` event, still `handoff`), retried
+   *  next tick — that one has no equivalent "fold to the pre-#245 behavior" to degrade to (fixing
+   *  lanes didn't exist before #245), so skip-don't-corrupt is the only sound default there. */
   fixLegResume?: FixLegResumeDeps;
 }
 
@@ -1910,29 +1913,33 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // same as the later read) — evaluating it again here, right where DRIVE needs it, is safe;
   // nothing in between mutates the round ledger.
   const driveOverBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
-  // #246 review round 1 (C2): a FIXUP dispatch is a fresh paid worker leg — it must observe the
+  // #246 review round 2 (E1, Codex sol-high PR #264 delta): a FIXUP dispatch must observe the
   // SAME admission gates RESUME/DISPATCH do (pause / ceiling / park / run-spend-stop), not just
-  // the round budget above. `ceilingReasons`/`ceilingBreached` and `parkedBeforeProbes` are
-  // HOISTED here from their pre-#246 position (the CEILING/PARK sections below) rather than
-  // re-derived: `evaluateCeiling` is pure, but `state.engineSessionStart` (which it feeds into)
-  // WRITES on every call (advances last_tick_at, resets started_at past the stale gap) — calling
-  // it a second time later this same tick would double that write. Computing it ONCE, here, and
-  // having the CEILING section below reuse these same bindings preserves byte-for-byte semantics
-  // for everything downstream (the drain call, `state.clearCeilingBreach()`, the PARK section's
-  // `!ceilingBreached` gate) while making the value available to DRIVE too. `state.isParked()` is
-  // a cheap read with no side effects, so `parkedBeforeProbes` is simply computed earlier — same
-  // value either way, RECLAIM/GATED RECLAIM/DRIVE never write park state.
-  const nowDate = now();
-  const ceilingReasons = evaluateCeiling({
-    dailySpendUsd: state.dailySpendUsd(nowDate),
-    dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
-    wallClockElapsedSec:
-      (nowDate.getTime() - state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec ?? 0)).getTime()) / 1000,
-    maxWallClockSec: cfg.cost.maxWallClockSec,
-  });
-  const ceilingBreached = ceilingReasons.length > 0;
+  // the round budget above — but DRIVE makes a remote gate.driveOne call per driving lane and can
+  // run long, so round 1's approach (snapshot everything ONCE before the loop) can go stale
+  // mid-loop: wall-clock keeps elapsing even when no spend banks, so a LATER lane could see a
+  // stale "not breached" right as the real ceiling crosses — and the CEILING/DISPATCH sections
+  // below, which round 1 had reuse that same stale snapshot, would drain/gate on an OLDER value
+  // than their pre-#246 positions ever gave them. Fix: memoize ONLY the side-effecting piece —
+  // `state.engineSessionStart` WRITES on every call (advances last_tick_at, resets started_at
+  // past the stale gap), so it must run exactly once per tick — and re-derive the (pure, cheap)
+  // ceiling reasons FRESH, with a fresh `now()`, at EVERY consumption point via
+  // `ceilingReasonsAsOf` below: the fixable case's own admission check (per lane, inside the
+  // loop), the CEILING section at its original position, and the DISPATCH gate. Same stance for
+  // `runSpendStopCrossed` — a cheap callback, called fresh at each admission point rather than
+  // snapshotted once. `parkedBeforeProbes` stays a single up-front snapshot: `state.isParked()`
+  // has no side effects, and nothing between here and PARK's own later re-check mutates park
+  // state within the same tick (unlike wall-clock time, which elapses regardless) — no
+  // staleness risk, so hoisting it is genuinely safe, unlike the ceiling snapshot was.
+  const engineSessionStartDate = state.engineSessionStart(now(), engineSessionGapSec(deps.tickIntervalSec ?? 0));
+  const ceilingReasonsAsOf = (asOf: Date): CeilingReason[] =>
+    evaluateCeiling({
+      dailySpendUsd: state.dailySpendUsd(asOf),
+      dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+      wallClockElapsedSec: (asOf.getTime() - engineSessionStartDate.getTime()) / 1000,
+      maxWallClockSec: cfg.cost.maxWallClockSec,
+    });
   const parkedBeforeProbes = state.isParked();
-  const driveRunSpendStop = deps.runSpendStopCrossed?.() ?? false;
   if (gate) {
     // #69: no per-lane kill-switch re-check here — an active switch never reaches this loop
     // at all (the global gate at the top of tick() returns first). See the gate's comment for
@@ -2078,19 +2085,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               driven.push(await escalateNeedsHuman(forge, state, cfg, w, pr, reason, iso));
               break;
             }
-            // #246 review round 1 (C2): a FIXUP dispatch spawns a FRESH paid Claude worker leg
-            // (startFixLeg -> supervisor.resume) — it must pass the SAME new-leg admission gate
-            // RESUME/DISPATCH do (pause / ceiling breach / environment park / run-spend-stop),
-            // not just the round budget driveDecision already folded in above. A wind-down must
-            // drain, never start a brand-new fix leg instead. Blocked -> stays driving, retried
-            // next tick (transient); the gate derivation itself already ran (this only gates the
-            // spawn).
+            // #246 review round 1 (C2) + round 2 (E1): a FIXUP dispatch spawns a FRESH paid
+            // Claude worker leg (startFixLeg -> supervisor.resume) — it must pass the SAME
+            // new-leg admission gate RESUME/DISPATCH do (pause / ceiling breach / environment
+            // park / run-spend-stop), not just the round budget driveDecision already folded in
+            // above. A wind-down must drain, never start a brand-new fix leg instead. Blocked ->
+            // stays driving, retried next tick (transient); the gate derivation itself already
+            // ran (this only gates the spawn). Ceiling/run-spend-stop are read FRESH here (E1),
+            // not from a pre-DRIVE-loop snapshot — DRIVE can run long across many lanes, and
+            // wall-clock keeps elapsing regardless of spend, so a snapshot taken before the loop
+            // started could be stale by the time a LATER lane reaches this check.
             const admissionBlock = fixLegAdmissionBlockReason({
               paused,
-              ceilingBreached,
+              ceilingBreached: ceilingReasonsAsOf(now()).length > 0,
               parkActive: parkedBeforeProbes,
               overBudget: driveOverBudget,
-              runSpendStop: driveRunSpendStop,
+              runSpendStop: deps.runSpendStopCrossed?.() ?? false,
             });
             if (admissionBlock != null) {
               const reason = `fix-leg-admission-blocked:${admissionBlock}`;
@@ -2180,9 +2190,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   nothing until they finish and the cap trips on the completion that crosses it. Max
   //   overshoot ≈ concurrent lanes × per-worker spend — bounded in practice by
   //   lanes.roundDispatchCap (default 2) × worker.budgetUsdSoft, plus the wall-clock tier.
-  //   #246 review round 1 (C2): `nowDate`/`ceilingReasons`/`ceilingBreached` are now HOISTED
-  //   above the DRIVE loop (so a FIXUP dispatch can observe the same breach this tick) — see
-  //   that hoist's own comment for why (engineSessionStart's write must only run once/tick). ──
+  //   #246 review round 2 (E1): re-derived FRESH here via `ceilingReasonsAsOf` (a fresh `now()`,
+  //   same as pre-#246) rather than reusing a pre-DRIVE-loop snapshot — see that helper's own
+  //   comment (above the DRIVE loop) for why a snapshot taken before a potentially-long DRIVE
+  //   loop would be stale here. Only `state.engineSessionStart`'s own WRITE is memoized
+  //   (must run exactly once per tick); this evaluation itself is exactly as fresh as before
+  //   #246 ever touched this section. ──
+  const nowDate = now();
+  const ceilingReasons = ceilingReasonsAsOf(nowDate);
+  const ceilingBreached = ceilingReasons.length > 0;
   let drainRequested: string[] = [];
   let escalated: string[] = [];
   if (ceilingBreached) {

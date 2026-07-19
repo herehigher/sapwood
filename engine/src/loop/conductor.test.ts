@@ -1178,6 +1178,55 @@ test("tick DRIVE (#246 C2): with EVERY admission gate clear and fixLegResume con
   st.close();
 });
 
+test("tick DRIVE (#246 review round 2, E1): a ceiling breach crossing DURING the DRIVE loop (not before it) admission-blocks a LATER fixable lane, even though an EARLIER lane in the SAME tick saw it clear — proves the admission check reads FRESH, not a pre-loop snapshot", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  // Two driving lanes, both FIXABLE+FIXUP-eligible; state.drivingWorkers() orders by name, so
+  // lane-a is admission-checked BEFORE lane-b within this same DRIVE loop.
+  seedDriving(st, "lane-a", 2, 55);
+  seedDriving(st, "lane-b", 3, 56);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  gate.outcomes[56] = { kind: "fixable", pr: 56, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  // A monotonic `now()` sequence: +200s per call, regardless of which logical call site makes
+  // it — robust to exactly how many now()/iso() calls a given lane's own processing happens to
+  // make, since more calls only push further PAST the threshold, never back under it. The first
+  // call (engineSessionStartDate, before the loop) anchors the session start at t=0 (elapsed 0,
+  // never breached by construction); lane-a's own admission check lands well under the 300s cap;
+  // by the time lane-b's admission check runs, elapsed has crossed it.
+  const base = new Date("2026-07-18T00:00:00.000Z").getTime();
+  let calls = 0;
+  const now = () => {
+    const d = new Date(base + calls * 200_000);
+    calls++;
+    return d;
+  };
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg({ cost: { maxWallClockSec: 300 } }),
+    mergeGate: gate,
+    now,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(st.getWorker("lane-a")?.state, "fixing", "lane-a's admission check ran BEFORE the ceiling crossed — it dispatched normally");
+  assert.equal(
+    st.getWorker("lane-b")?.state,
+    "driving",
+    "lane-b's admission check ran AFTER the ceiling crossed — admission-blocked, not dispatched",
+  );
+  assert.deepEqual(
+    sup.resumeCalls.map((c) => c.worker),
+    ["lane-a"],
+  ); // only lane-a ever reached startFixLeg
+  const outcomeB = r.driven.find((d) => d.pr === 56)!;
+  assert.equal(outcomeB.kind, "queued");
+  assert.match((outcomeB as { reason: string }).reason, /fix-leg-admission-blocked:ceiling/);
+  st.close();
+});
+
 test("tick DRIVE (#246): fixable + FIXUP but startFixLeg's resume() throws -> stays driving, queued, fix_rounds NOT bumped (transient spawn failure costs zero fix-round budget)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
