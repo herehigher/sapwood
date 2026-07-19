@@ -133,6 +133,12 @@ flowchart LR
 Built in TypeScript. Targets your own / your team's repos first (trusted context),
 architected toward public-repo hardening.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and
+[docs/dev-guide/](docs/dev-guide/README.md) for the codebase tour. Security
+reports: [SECURITY.md](SECURITY.md).
+
 ## License
 
-TBD.
+[MIT](LICENSE).

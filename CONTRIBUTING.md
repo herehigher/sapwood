@@ -38,4 +38,4 @@ exact same gate.
 
 Open a GitHub issue. For anything security-sensitive (a way to defeat the
 guard, escape the worktree, or bypass the merge gate), please avoid a public
-issue and contact the maintainer privately first.
+issue and use the private channel described in [SECURITY.md](SECURITY.md).
