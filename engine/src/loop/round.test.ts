@@ -8,11 +8,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
-import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
+import type {
+  CommitInfo,
+  IForge,
+  Issue,
+  IssueMeta,
+  IssueRelations,
+  IssueSearchResult,
+  PRCheckItem,
+  PRComment,
+  PRDetails,
+  PRReviewData,
+  PRReviewItem,
+  PRStatus,
+  ReviewThreadItem,
+} from "../forge/forge.js";
+import type { ProxyForge } from "../proxy/mcp-server.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
+import type { WorkerProxyOpts } from "../roles/worker.js";
 import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import {
+  buildFixLegResume,
   noopPeripheralStub,
   type PeripheralPhase,
   type PeripheralStub,
@@ -2316,5 +2333,244 @@ test("runRounds standby (#212 probe residual fix): a mixed milestone (one held, 
   stopSafety();
   assert.equal(result.rounds, 2, "round 2 opened straight after idle round 1 — never entered standby");
   assert.equal(events.filter(([kind]) => kind === "standby-wait").length, 0, "the one non-held issue was enough to count as work");
+  state.close();
+});
+
+// ── #253: engine-side proxy manager — buildFixLegResume + fix-loop mint wiring ──────────────
+
+/** Mirrors proxy/mint.test.ts's own fakeForge() — a minimal ProxyForge satisfying every method
+ *  the forge MCP proxy's tool algebra needs, independent of this file's own FakeForge (which
+ *  fakes IForge's DISPATCH-side surface only, never the proxy's issue/PR-detail reads). */
+function fakeProxyForge(): ProxyForge {
+  const meta: IssueMeta = { number: 1, title: "t", state: "OPEN", labels: [], updatedAt: "2026-07-17T00:00:00Z" };
+  const comments: PRComment[] = [];
+  const relations: IssueRelations = { linkedPRs: [], crossReferences: [], truncated: false };
+  const results: IssueSearchResult[] = [];
+  const prDetails: PRDetails = { number: 1, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" };
+  const reviews: PRReviewItem[] = [];
+  const threads: ReviewThreadItem[] = [
+    {
+      id: "T1",
+      isResolved: false,
+      comments: [{ author: "codex", body: "fix this", createdAt: "2026-07-18T00:00:00Z" }],
+      commentsComplete: true,
+    },
+  ];
+  const checks: PRCheckItem[] = [];
+  return {
+    getIssueMeta: async () => meta,
+    getIssueBody: async () => "",
+    getIssueComments: async () => comments,
+    getIssueRelations: async () => relations,
+    searchIssues: async () => results,
+    getPRDetails: async () => prDetails,
+    getPRReviews: async () => ({ reviews, total: reviews.length }),
+    getPRReviewThreads: async () => ({ threads, pageCapped: false }),
+    getPRChecks: async () => ({ checks, total: checks.length }),
+  };
+}
+
+async function callProxyTool(url: string, token: string, name: string, args: unknown): Promise<{ isError: boolean; text: string }> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const json = (await res.json()) as { result: { isError: boolean; content: { type: string; text: string }[] } };
+  return { isError: json.result.isError, text: json.result.content[0]!.text };
+}
+
+test("buildFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefined regardless of renderFixPrompt being supplied", () => {
+  const state = new State(":memory:");
+  try {
+    const result = buildFixLegResume({ cfg: mkCfg(), state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` }, fakeProxyForge(), 1);
+    assert.equal(result, undefined);
+  } finally {
+    state.close();
+  }
+});
+
+test("buildFixLegResume (#253): cfg.proxy.enabled: true, shadow: false, but NO renderFixPrompt supplied -> undefined (round.ts's own skeleton tests/callers never touch #246's FIXABLE path)", () => {
+  const state = new State(":memory:");
+  try {
+    const result = buildFixLegResume({ cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state }, fakeProxyForge(), 1);
+    assert.equal(result, undefined);
+  } finally {
+    state.close();
+  }
+});
+
+test("buildFixLegResume (#253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> undefined even WITH renderFixPrompt supplied — shadow gates production ATTACHMENT, not per-consumer effects", () => {
+  const state = new State(":memory:");
+  try {
+    const cfg = mkCfg({ proxy: { enabled: true } }); // shadow defaults true
+    assert.equal(cfg.proxy.shadow, true);
+    const result = buildFixLegResume({ cfg, state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` }, fakeProxyForge(), 1);
+    assert.equal(result, undefined, "shadow mode: the machinery stays mintable for a scoped harness, but never attached in production");
+  } finally {
+    state.close();
+  }
+});
+
+test("buildFixLegResume (#253): proxy.enabled: true, shadow: false (the go-live flip) + renderFixPrompt -> a real fixLegResume whose mintProxy threads the given roundId/phase='executing' into the minted session's own journal identity", async () => {
+  const state = new State(":memory:");
+  try {
+    const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
+    const result = buildFixLegResume(
+      { cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state, renderFixPrompt },
+      fakeProxyForge(),
+      42,
+    );
+    assert.ok(result, "expected a real fixLegResume");
+    assert.equal(result.renderFixPrompt(7, 9), "fix #7 for PR #9");
+    const handle = await result.mintProxy({ role: "worker", session: "lane-99-abc" });
+    try {
+      assert.deepEqual(
+        handle.toolNames.sort(),
+        ["pr_details", "pr_reviews", "pr_review_threads", "pr_checks"].map((t) => `mcp__forge__${t}`).sort(),
+        "the fix-loop worker role gets PR_TOOLS only",
+      );
+      const { isError, text } = await callProxyTool(handle.url, handle.token, "pr_review_threads", { pr: 5 });
+      assert.equal(isError, false);
+      assert.equal(JSON.parse(text).threads.length, 1);
+      const rows = state.listForgeProxyJournal({ roundId: 42, phase: "executing", role: "worker", session: "lane-99-abc", attempt: 1 });
+      assert.equal(
+        rows.length,
+        1,
+        "the call was journaled under EXACTLY this round's id/phase — proof buildFixLegResume threaded them through",
+      );
+      assert.equal(rows[0]!.tool, "pr_review_threads");
+    } finally {
+      await handle.stop();
+    }
+  } finally {
+    state.close();
+  }
+});
+
+/** A Supervisor that captures every resume() call's opts (the fix leg's `proxy`/`credentialFree`/
+ *  `prompt`) — the observation point for proving round.ts's REAL wiring, not a fake, reaches
+ *  startFixLeg's own supervisor.resume() call unmodified. */
+class CapturingResumeSupervisor extends FakeSupervisor {
+  resumeCalls: Array<{ issue: Issue; worker: string; opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string } }> = [];
+  override async resume(
+    issue: Issue,
+    worker: string,
+    opts?: { proxy?: WorkerProxyOpts; prompt?: string; sessionId?: string },
+  ): Promise<{ name: string; sessionId: string }> {
+    this.resumeCalls.push({ issue, worker, opts });
+    return { name: worker, sessionId: `sess-${worker}` };
+  }
+}
+
+test("runRounds (#253): cfg.proxy.enabled: true, shadow: false (the go-live flip) wires a REAL fixLegResume into the executing phase — a FIXABLE gate dispatches a fix leg whose supervisor.resume() carries a working proxy mint", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new CapturingResumeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
+  const gate = new ScriptedMergeGate([{ kind: "fixable", pr: 1, reason: "ci-red" }]);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
+  const deps = baseDeps({
+    forge,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
+    // roundDispatchCap deliberately > 1 (unlike most dispatch-count tests in this file): with the
+    // quota exhausted after the initial dispatch, round.ts sets forceDispatchPause for the REST
+    // of the round — and the fix-leg admission gate (conductor.ts's fixLegAdmissionBlockReason)
+    // treats that "paused" signal as blocking a NEW fix leg exactly like it blocks ordinary
+    // dispatch (#246 review round 1, C2's own admission-gate contract). A cap of 1 here would
+    // wedge every FIXUP attempt on "fix-leg-admission-blocked:paused" forever — not a #253 bug,
+    // just the wrong fixture for THIS test's own question (proving resume() gets a real proxy).
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 10 }, proxy: { enabled: true, shadow: false } }),
+    renderFixPrompt,
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 20);
+  await runRounds(deps);
+  stopSafety();
+  assert.ok(sup.resumeCalls.length >= 1, "expected the FIXABLE gate to dispatch a fix leg via supervisor.resume()");
+  const call = sup.resumeCalls[0]!;
+  assert.ok(call.opts?.proxy, "expected a real proxy opt attached to the fix leg's resume() call");
+  assert.equal(call.opts!.proxy!.credentialFree, true, "a fix leg is never granted ambient forge credentials (#245 round-2 fix A6)");
+  const handle = await call.opts!.proxy!.mint({ role: "worker", session: call.worker });
+  try {
+    assert.ok(handle.port > 0);
+    assert.ok(handle.token.length > 0);
+    assert.deepEqual(
+      handle.toolNames.sort(),
+      ["pr_details", "pr_reviews", "pr_review_threads", "pr_checks"].map((t) => `mcp__forge__${t}`).sort(),
+    );
+  } finally {
+    await handle.stop();
+  }
+  deps.state.close();
+});
+
+test("runRounds (#253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> fixLegResume is NEVER attached — a FIXABLE gate degrades EXACTLY like the fully-disabled case, never dispatching a fix leg", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new CapturingResumeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
+  const gate = new ScriptedMergeGate([{ kind: "fixable", pr: 1, reason: "ci-red" }]);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
+  const cfg = mkCfg({ lanes: { max: 1, roundDispatchCap: 10 }, proxy: { enabled: true } });
+  assert.equal(cfg.proxy.shadow, true, "shadow defaults true once enabled");
+  const deps = baseDeps({
+    forge,
+    state,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
+    cfg,
+    renderFixPrompt, // supplied, same as a real cli.ts caller would — proves shadow alone blocks attachment
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 20);
+  await runRounds(deps);
+  stopSafety();
+  assert.equal(sup.resumeCalls.length, 0, "shadow mode: no fix leg was ever dispatched, even with renderFixPrompt supplied");
+  assert.ok(
+    events.some(([kind]) => kind === "fix-leg-dispatch-unconfigured"),
+    "degrades identically to proxy.enabled: false — the shadow guarantee is structural (no attachment), not a suppressed effect",
+  );
+  state.close();
+});
+
+test("runRounds (#253): cfg.proxy.enabled: false (the default) -> no fixLegResume is ever built — a FIXABLE gate still degrades to the pre-#246 needs-human escalation exactly as before, unchanged", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new CapturingResumeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
+  const gate = new ScriptedMergeGate([{ kind: "fixable", pr: 1, reason: "ci-red" }]);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const deps = baseDeps({
+    forge,
+    state,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } }), // proxy.enabled unset -> defaults false
+    // renderFixPrompt deliberately omitted too — cli.ts always supplies it in production, but
+    // this proves buildFixLegResume degrades safely even without it.
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 20);
+  await runRounds(deps);
+  stopSafety();
+  assert.equal(sup.resumeCalls.length, 0, "no fix leg was ever dispatched — the gate degraded instead");
+  assert.ok(
+    events.some(([kind]) => kind === "fix-leg-dispatch-unconfigured"),
+    "the unwired-fixLegResume degrade path (#246 C1) fired, visible and actionable — never a silent retry-forever",
+  );
   state.close();
 });

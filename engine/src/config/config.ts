@@ -478,35 +478,38 @@ const Roles = z
   .strict();
 
 // #234: engine-hosted read-only forge MCP proxy for role sessions (supersedes #217's two-pass
-// needsDetails protocol). Ships OFF by default, and shadow-mode-first when it IS enabled — issue
-// #234's Rollout: "shadow mode first, config-gated... any effect path requires an explicit flag
-// flip." `enabled` gates whether RoleRunner mints a proxy server for a session at all (no
-// consumer flips it to true / passes a `proxy` opt in THIS PR — see #234's scope ruling: proxy-
-// consumer wiring is later, separately-flagged work; `enabled` exists now so the first real
-// consumer has a config surface to read rather than needing a further migration). `shadow` is a
-// SEPARATE flag from `enabled` (not "off vs on has two speeds") — a future consumer reads BOTH:
-// enabled gates whether the proxy exists for a session at all; shadow (default true) gates
-// whether that session's own OUTPUT is allowed to cause any effect (forge write, label change,
-// merge decision, ...) — shadow=true means calls + journals are fully live, but the session's
-// result must never be applied. Caps/budget are the user-tunable-in-config values this repo's
-// convention requires for any size/cost bound (never hardcoded — see e.g. worker.budgetUsdSoft's
-// own doc).
-//
-// HONEST STATE (PR #252 review): `enabled: true` is currently INERT on its own — no engine
-// startup path constructs a proxy server or reads this flag yet (RoleRunner only mints one when
-// a caller explicitly supplies a `proxy` opt, and nothing does in this PR). Flipping this flag
-// alone changes no runtime behavior; consumer adoption + the shadow-server startup wiring are
-// tracked as follow-up work (feeds #244).
-//
-// #244 EXTENSION: the tool algebra now also carries 4 PR-facing tools (pr_details/pr_reviews/
-// pr_review_threads/pr_checks — proxy/tools.ts), and the proxy MECHANISM extends to worker legs
-// (worker.ts's WorkerSupervisor, mirroring RoleRunner's `proxy` opt) alongside RoleRunner
-// peripheral sessions — same "ship inert, gate behind an explicit opt" posture: `enabled`/
-// `shadow` still gate nothing on their own until a real dispatch caller passes a `proxy` opt
-// (round-defaults.ts's peripheral wiring and any worker-leg consumer are still separately-flagged
-// follow-up work, same as #234 originally shipped). `caps.maxReviewThreadsPerCall`/
+// needsDetails protocol). #244 EXTENSION: the tool algebra also carries 4 PR-facing tools
+// (pr_details/pr_reviews/pr_review_threads/pr_checks — proxy/tools.ts), and the proxy MECHANISM
+// extends to worker legs (worker.ts's WorkerSupervisor, mirroring RoleRunner's `proxy` opt)
+// alongside RoleRunner peripheral sessions. `caps.maxReviewThreadsPerCall`/
 // `caps.maxCommentsPerThread` are the PR-tool caps' user-tunable knobs, same convention as every
 // other cap in this section.
+//
+// #253: engine startup (cli.ts's runTickEngine/runRoundsEngine, round.ts's buildFixLegResume)
+// now actually READS these two flags, per a three-state model (#253 review round 2, H1 —
+// PM-narrowed ruling: `shadow` gates PRODUCTION ATTACHMENT, never per-consumer effect-
+// suppression — building effect-suppression into every forge write a proxy-informed session's
+// output could reach would be over-machinery for a transitional validation mode):
+//
+//   1. `enabled: false` (default): fully inert, exactly as #234 originally shipped. No engine
+//      startup path constructs anything; flipping every other proxy.* key changes nothing.
+//   2. `enabled: true, shadow: true` (the default once enabled — "shadow mode first"): the proxy
+//      machinery (createProxyMint, buildTickFixLegResume, round.ts's buildFixLegResume) is
+//      CONSTRUCTIBLE and mintable by a scoped harness (this is how the shadow bring-up run,
+//      #253's own item 2/3, exercises real calls/journals/spend end-to-end) — but ZERO
+//      PRODUCTION ATTACHMENT: neither live driver ever builds a real `TickDeps.fixLegResume`,
+//      and `runRoundsEngine` never builds a `RoleRunner` `defaultProxy`. No session a real
+//      `sapwood run` dispatches — peripheral role session or fix-loop worker leg — ever holds a
+//      handle, so no session's output can be proxy-informed. The shadow guarantee is structural
+//      (no attachment happens at all), not a per-call effect check layered on top of a live one.
+//   3. `enabled: true, shadow: false`: the deliberate go-live flip, taken only after the shadow
+//      bring-up validates the proxy. Both live drivers attach a real `fixLegResume` to the
+//      fix-loop worker leg, and `runRoundsEngine` attaches a real `defaultProxy` to every
+//      peripheral role session (aligning/architecting/plan_review/harvesting/retro).
+//
+// STILL UNWIRED regardless of state 3: ordinary (non-fix-loop) `WorkerSupervisor.dispatch()` for
+// the main coding-worker leg has no production caller attaching a proxy — that would require
+// touching conductor.ts's DISPATCH call site, out of #253's own scope (see its PR).
 const ProxyConfig = z
   .object({
     enabled: z.boolean().default(false),

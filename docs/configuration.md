@@ -548,27 +548,42 @@ A session's role scopes it to a fixed subset of this algebra (deny-by-default fo
 unrecognized role) — see [`security.md`](security.md#the-forge-mcp-proxys-role-x-tool-matrix-234-244)'s
 role x tool matrix table.
 
-**Ships OFF, and shadow-mode-first when enabled.** `enabled: false` (default) — no proxy
-is ever started; the whole feature is inert. `enabled: true, shadow: true` (the default
-once enabled) — calls and journal rows are fully live, but no consumer may act on a
-session's output. Flipping a role from shadow to live-effect is a *separate*, per-role
-decision no shipped config touches yet — no built-in role reads this config in this PR
-(the proxy module exists, wired, and tested; consumer adoption is later, separately
-tracked work).
+**Ships OFF, and shadow-mode-first when enabled — a three-state model (#253).** Engine
+startup (`cli.ts`'s `runTickEngine`/`runRoundsEngine`, `round.ts`'s `buildFixLegResume`)
+reads both `enabled` and `shadow` to decide production attachment:
 
-**Honest state:** `enabled: true` is still *inert* on its own — no engine startup path
-constructs a proxy server or reads this flag yet. `peripheral.ts`'s `RoleRunner` and
-`worker.ts`'s `WorkerSupervisor` (#244 extended the mechanism to worker legs' `dispatch()`,
-mirroring `RoleRunner`'s own `proxy` opt; #245 extended the same mechanism to `resume()`
-too — see [`security.md`](security.md#fix-loop-fixing-lane-state-245) for the fix-loop
-consumer this exists for) only mint a proxy when a caller explicitly supplies one, and no
-shipped dispatch/resume path does yet. Consumer adoption + the shadow-server startup
-wiring remain tracked follow-up work.
+1. **`enabled: false`** (default) — fully inert, no proxy server is ever constructed
+   anywhere, and no other `proxy.*` key changes any runtime behavior.
+2. **`enabled: true, shadow: true`** (the default once enabled — shadow mode) — the
+   proxy machinery is constructible and mintable (a scoped harness can call it directly
+   for a live bring-up run, exercising real calls/journals/spend end-to-end), but **zero
+   production attachment**: neither live driver ever attaches a real proxy handle to a
+   fix-loop worker leg, and no peripheral role session (aligning/architecting/
+   plan_review/harvesting/retro) ever gets one either. No session a real `sapwood run`
+   dispatches holds a handle, so no session's output can be proxy-informed — the shadow
+   guarantee is *structural* (attachment never happens), not a per-call effect check
+   layered on top of a live one.
+3. **`enabled: true, shadow: false`** — the deliberate go-live flip, taken only after a
+   shadow bring-up run has validated the proxy. Both live drivers attach a real handle to
+   the fix-loop worker leg, and every peripheral role session gets one too (`peripheral.ts`'s
+   `RoleRunner` `defaultProxy`, applied whenever a session's own `RoleSessionOpts.proxy`
+   is omitted — which every shipped stub does today).
+
+`peripheral.ts`'s `RoleRunner` and `worker.ts`'s `WorkerSupervisor` (#244 extended the
+mechanism to worker legs' `dispatch()`, mirroring `RoleRunner`'s own `proxy` opt; #245
+extended the same mechanism to `resume()` too — see
+[`security.md`](security.md#fix-loop-fixing-lane-state-245) for the fix-loop consumer
+this exists for) are the two attachment points; a caller-supplied `proxy` opt always
+wins over the RoleRunner-wide default, never silently overridden.
+
+**Still unwired regardless of state 3:** ordinary (non-fix-loop) `WorkerSupervisor.
+dispatch()` for the main coding-worker leg has no production caller attaching a proxy —
+that would require touching `conductor.ts`'s DISPATCH call site, out of #253's own scope.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `false` | Master switch — off means RoleRunner never mints a proxy server for a session. |
-| `shadow` | `true` | Session output may not cause any effect while true — a future consumer's own gate, not enforced by the proxy itself (which only ever performs reads). |
+| `enabled` | `false` | Master switch — off means the proxy is fully inert; nothing is ever constructed. |
+| `shadow` | `true` | With `enabled: true`, gates PRODUCTION ATTACHMENT (not per-call effects): `true` (default once enabled) means no live driver ever attaches a real handle to any session — the machinery stays mintable for a scoped harness only; `false` is the deliberate go-live flip that attaches a real handle to every fix-loop worker leg and peripheral role session. |
 | `caps.maxIssuesPerCall` | `10` | `issue_details`: max issue numbers per call. A caller-requested batch above this cap is **rejected** (typed error), never silently truncated. |
 | `caps.defaultCommentsPerIssue` | `20` | `issue_details`' default view: how many of an issue's **most recent** comments to include (fail-toward-inclusion — the newest comments are the ones most likely to carry an amendment to a stale body). Bounded, not rejected: `comments_complete`/counts/an omitted-range name the cut. |
 | `caps.maxCommentsPerCall` | `100` | `issue_comments`: max `lastN` a caller may request explicitly. Also the default view's cap when `fullCommentStreamOptIn` is true. |

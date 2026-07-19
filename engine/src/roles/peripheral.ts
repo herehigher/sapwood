@@ -228,6 +228,24 @@ export interface RoleRunnerDeps {
    *  overridden lower in tests that don't care about the timeout-fallback path itself. */
   preSpawnCaptureTimeoutMs?: number;
   preSpawnCapturePollMs?: number;
+  /** #253: a DEFAULT forge MCP proxy mint, applied to every session whose own RoleSessionOpts
+   *  doesn't supply one. round-defaults.ts's stub factories (align.ts/architect.ts/plan-
+   *  review.ts/harvest.ts/retro.ts) each build their own session object per invocation, none of
+   *  which attach a `proxy` opt today — rather than touching every one of those call sites, the
+   *  engine's real startup wiring (cli.ts) supplies ONE mint HERE, shared across every
+   *  peripheral phase/round this RoleRunner instance ever runs. A per-call `opts.proxy` still
+   *  WINS when a caller supplies one (see run()'s `proxyOpt` fallback below) — this is a
+   *  fallback, never a silent override.
+   *
+   *  cli.ts only ever CONSTRUCTS this field (and passes it here) in the proxy's production-
+   *  attach state — `cfg.proxy.enabled: true, shadow: false` (#253 review round 2, H1's
+   *  three-state ruling: `enabled: false` never constructs one; `enabled: true, shadow: true`,
+   *  the default once enabled, ALSO never constructs one — the machinery stays mintable for a
+   *  scoped harness, but no production session holds a handle). peripheral.ts itself has no
+   *  opinion on `shadow` at all — this field is simply present or absent, the same "omitted =
+   *  today's behavior, unchanged: no session anywhere gets a proxy attached" contract regardless
+   *  of WHY the caller omitted it. */
+  defaultProxy?: RoleSessionOpts["proxy"];
 }
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "jsonl"];
@@ -416,10 +434,15 @@ export class RoleRunner {
     // claudeArgs runs. Non-fatal on failure (see RoleSessionOpts.proxy's doc): the session simply
     // runs without the proxy attached, never a wedged/aborted role session over an optional
     // capability's own setup failure.
+    // #253: opts.proxy (a caller-supplied mint for THIS session) wins when present; otherwise
+    // fall back to the RoleRunner-wide default (RoleRunnerDeps.defaultProxy's own doc) — the
+    // engine's real startup wiring attaches the default there rather than touching every
+    // stub's own session-construction call site.
+    const proxyOpt = opts.proxy ?? this.deps.defaultProxy;
     let proxyHandle: ForgeProxyHandle | undefined;
-    if (opts.proxy) {
+    if (proxyOpt) {
       try {
-        proxyHandle = await opts.proxy.mint({ role: opts.roleId, session: name });
+        proxyHandle = await proxyOpt.mint({ role: opts.roleId, session: name });
       } catch (e) {
         (this.deps.log ?? console.error)(`[sapwood:forge-proxy] session ${name}: mint failed (non-fatal, proxy unattached): ${String(e)}`);
       }

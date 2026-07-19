@@ -11,7 +11,7 @@ import { ZodError } from "zod";
 import { DEFAULT_CONFIG_PATHS, loadConfig, type SapwoodConfig } from "./config/config.js";
 import { loadPricingTable } from "./config/pricing.js";
 import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
-import { orderForDispatch, type TickResult } from "./loop/conductor.js";
+import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
 import { InitError, init } from "./loop/init.js";
@@ -19,6 +19,7 @@ import { type EngineLogger, FileEngineLogger } from "./loop/logger.js";
 import { parseReconcileCompleted, reconcileStartup, type StartupOrphan, sweepStaleRoleSessions } from "./loop/reconcile.js";
 import { type PeripheralPhase, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
+import { createProxyMint } from "./proxy/mint.js";
 import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
 import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
@@ -791,6 +792,51 @@ function findOpenPrForIssue(forge: IForge, issue: number): Promise<number | null
   return typeof withPr.findOpenPrForIssue === "function" ? withPr.findOpenPrForIssue(issue) : Promise.resolve(null);
 }
 
+/** #253: builds the tick-driver's TickDeps.fixLegResume — round 0 / phase "tick" is this
+ *  driver's fixed SENTINEL audit identity (never a real round: the tick driver, #106's explicit
+ *  escape hatch, has no round concept at all) for the proxy's own journal rows. This identity is
+ *  informational only — it does NOT double as the (round, phase, attempt) tuple #231's context-
+ *  manifest schema uses for a REAL role/worker session (a fix-leg's own resume attempt isn't
+ *  separately tracked here either, always `attempt: 1` — see proxy/mint.ts's createProxyMint doc
+ *  for why that's harmless for journal uniqueness). Evaluating whether a fix leg needs its own
+ *  tracked attempt ordinal is live-run territory (#253 item 3), not plumbed here.
+ *
+ *  #253 review round 2 (Codex sol-high, H1 — PM-narrowed three-state ruling): `shadow` gates
+ *  PRODUCTION ATTACHMENT, not per-consumer effect-suppression.
+ *    1. `enabled: false` (default): nothing constructed. Unchanged.
+ *    2. `enabled: true, shadow: true` (the default once enabled): this function still returns
+ *       `undefined` — NO production attachment. The proxy machinery stays constructible/mintable
+ *       (this function, `createProxyMint`, round.ts's `buildFixLegResume` are all still callable
+ *       directly by a scoped harness — that's how the owner's live shadow bring-up run (#253
+ *       item 2/3) exercises it) but no LIVE `sapwood run` session ever holds a handle, so no
+ *       session's output can be proxy-informed. The shadow guarantee is structural, not a
+ *       per-call effect check.
+ *    3. `enabled: true, shadow: false`: full production attachment — the deliberate go-live flip,
+ *       taken only after the shadow bring-up validates the proxy.
+ *  A FIXABLE gate degrades to the pre-#246 needs-human escalation (#246 C1) in states 1 AND 2,
+ *  unchanged from before this issue — only state 3 makes FIXUP dispatch itself live.
+ *
+ *  Observable guarantee in states 1/2 (#253 review round 2, H4 — narrowed from an overreaching
+ *  "byte-for-byte" claim): no proxy handle, no HTTP listener, no bearer token, no forge_proxy_
+ *  journal write, no ProxyForge call, no argv change (`--mcp-config`/widened `--allowedTools`) on
+ *  ANY production session. The module graph still loads and this function still runs (returning
+ *  `undefined`) — that in-memory branch evaluation is not itself an observable effect.
+ *
+ *  Exported for direct testing. */
+export function buildTickFixLegResume(
+  cfg: SapwoodConfig,
+  forge: IForge,
+  state: State,
+  renderFixPrompt: (issueNumber: number, pr: number) => string,
+  log?: (message: string) => void,
+): FixLegResumeDeps | undefined {
+  if (!cfg.proxy.enabled || cfg.proxy.shadow) return undefined;
+  return {
+    renderFixPrompt,
+    mintProxy: createProxyMint({ cfg, forge, state, roundId: 0, phase: "tick", ...(log !== undefined ? { log } : {}) }),
+  };
+}
+
 /** The M4 tick-driver path (`driver.ts`'s `runDriver`) — unchanged behavior, kept reachable via
  *  `engine.driver: tick` (#106's explicit escape hatch) now that the round orchestrator
  *  (runRoundsEngine below) is the default. */
@@ -806,21 +852,17 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   const renderPrompt = buildRenderPrompt(cfg);
   // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — the config must still
   // be validated eagerly at startup, matching runValidate/runDryRun. #246 wires the FIXABLE
-  // gate's dispatch logic (conductor.ts DRIVE loop's own `TickDeps.fixLegResume` consumer) but
-  // this run path still doesn't ATTACH one here: `createProxyMint` (proxy/mint.ts) needs a
-  // round id/phase this tick-driver path has no concept of (rounds are round.ts's own thing —
-  // see runRoundsEngine below, which has the same gap for the identical reason), and no
-  // production caller anywhere in this repo yet mints a REAL forge-MCP proxy for the ordinary
-  // coding-worker dispatch either — wiring a live mint chain is a pre-existing, separate gap,
-  // tracked as #253, not #246's. #246 review round 1 (C1): with prFixCap > 0 (the default) and
-  // no fixLegResume wired, a FIXABLE gate DEGRADES to the exact pre-#246 needs-human escalation
-  // (visible, actionable) rather than silently staying `driving` forever — see
-  // conductor.ts's escalateNeedsHuman/`fix-leg-dispatch-unconfigured` event for the degrade path.
-  // Never a silent retry-loop; #253 only needs to attach a real mintProxy to make FIXUP dispatch
-  // itself live.
-  buildRenderFixPrompt(cfg);
+  // gate's dispatch logic (conductor.ts DRIVE loop's own `TickDeps.fixLegResume` consumer); #253
+  // (below, after state/forge exist) closes the production gap #246 left open — see
+  // buildTickFixLegResume's own doc for the tick driver's round 0 / phase "tick" audit identity.
+  const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);
+  // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
+  // write/argv change on any production session — see buildTickFixLegResume's own doc for the
+  // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
+  // true, shadow: false).
+  const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, log);
   const reviewer = makeReviewer(cfg);
   // #54: the ordered reviewer-failover chain (cfg.reviewer.fallback) — empty by default, in
   // which case MergeDriver.driveOne behaves exactly as before this existed.
@@ -884,6 +926,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
     stop,
     probeLlmReachable,
     log,
+    ...(fixLegResume !== undefined ? { fixLegResume } : {}),
     onTick: (result) => {
       log(formatTickSummary(result));
       overrides.onTick?.(result);
@@ -913,8 +956,12 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // via WorkerSupervisor exactly like the tick driver does.
   const renderPrompt = buildRenderPrompt(cfg);
   // #245 round-2 fix A7: same fail-fast stance for worker.fixPromptFile — see runTickEngine's
-  // own comment above.
-  buildRenderFixPrompt(cfg);
+  // own comment above. #253: captured (not discarded) — RoundDeps.renderFixPrompt below, paired
+  // with round.ts's OWN per-round mintProxy construction (buildFixLegResume) so each round's
+  // fix-loop proxy carries THAT round's id as its audit identity, unlike the tick driver's fixed
+  // round-0 identity (buildTickFixLegResume) — see round.ts's own doc for why this can't be
+  // built once here the way the tick driver's fixLegResume is.
+  const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);
   const reviewer = makeReviewer(cfg);
@@ -930,7 +977,26 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     // as the tick-driver path above, wired into the round-orchestrator's own WorkerSupervisor.
     state,
   });
-  const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log });
+  // #253: a default forge MCP proxy mint, shared by every peripheral role session this
+  // RoleRunner instance ever runs across the whole `sapwood run` (round 0 / phase "peripheral"
+  // is its own fixed SENTINEL audit identity, informational only — see buildTickFixLegResume's
+  // own doc for why this never claims a real (round, phase, attempt) tuple; peripheral role
+  // sessions have no single round at RoleRunner-construction time, unlike the round-scoped
+  // fix-loop mint below, which is built fresh per round). A per-session RoleSessionOpts.proxy
+  // (none of round-defaults.ts's stubs supply one today) would still win — see peripheral.ts's
+  // RoleRunnerDeps.defaultProxy doc.
+  //
+  // #253 review round 2 (H1, PM-narrowed three-state ruling — see buildTickFixLegResume's own
+  // doc for the full rationale): `enabled && !shadow` gates PRODUCTION ATTACHMENT here too — with
+  // `shadow: true` (the default once enabled), NO RoleRunner ever gets a defaultProxy, so no
+  // peripheral session anywhere holds a handle; the shadow guarantee is structural rather than a
+  // per-consumer effect check. Only `enabled: true, shadow: false` (the deliberate go-live flip)
+  // constructs one. `enabled: false` (the default): unchanged, today's behavior.
+  const defaultProxy =
+    cfg.proxy.enabled && !cfg.proxy.shadow
+      ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", log }) }
+      : undefined;
+  const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, ...(defaultProxy !== undefined ? { defaultProxy } : {}) });
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, log });
   const stop = resolveStopConfig(argv, cfg);
   // #76: same fail-fast stance as the tick driver — a typo'd milestone goal must abort startup
@@ -966,6 +1032,10 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     stop,
     probeLlmReachable,
     log,
+    // #253: paired with cfg.proxy.enabled inside round.ts's own buildFixLegResume — see this
+    // function's own comment above for why the mint itself is built per-round, there, rather
+    // than passed in from here.
+    renderFixPrompt,
     onTick: (tickResult) => {
       log(formatTickSummary(tickResult));
       overrides.onTick?.(tickResult);

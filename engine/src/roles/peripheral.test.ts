@@ -1544,3 +1544,91 @@ exit 0
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #253: RoleRunnerDeps.defaultProxy — the fallback every stub's session inherits ──────────
+
+test("run: #253 RoleRunnerDeps.defaultProxy is used when a session's own RoleSessionOpts.proxy is omitted — mints, widens allowedTools, injects --mcp-config, tears down on exit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const { calls, handle } = fakeProxyHandle();
+    let mintedFor: { role: string; session: string } | undefined;
+    const runner = mkRunner(dir, bin, {
+      defaultProxy: {
+        mint: async (session) => {
+          mintedFor = session;
+          calls.minted++;
+          return handle as unknown as Awaited<ReturnType<NonNullable<RoleSessionOpts["proxy"]>["mint"]>>;
+        },
+      },
+    });
+    // NO opts.proxy of its own — round-defaults.ts's stub factories never attach one today.
+    const result = await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(calls.minted, 1, "the default proxy was used since this session supplied none of its own");
+    assert.equal(mintedFor?.role, "architect");
+    assert.equal(mintedFor?.session, result.name);
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const allowedTools = seen[seen.indexOf("--allowedTools") + 1] ?? "";
+    for (const t of handle.toolNames) assert.ok(allowedTools.includes(t), `${t} missing from allowedTools: ${allowedTools}`);
+    assert.equal(seen[seen.indexOf("--mcp-config") + 1], handle.mcpConfigJson);
+    assert.equal(calls.stopped, 1, "the default proxy is torn down once the session exits, same as an opts.proxy-attached one");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: #253 a session's OWN RoleSessionOpts.proxy wins over RoleRunnerDeps.defaultProxy — never silently overridden", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const own = fakeProxyHandle({ toolNames: ["mcp__forge__pr_details"] });
+    const fallback = fakeProxyHandle({ toolNames: ["mcp__forge__issue_details"] });
+    const runner = mkRunner(dir, bin, {
+      defaultProxy: {
+        mint: async () => {
+          fallback.calls.minted++;
+          return fallback.handle as unknown as Awaited<ReturnType<NonNullable<RoleSessionOpts["proxy"]>["mint"]>>;
+        },
+      },
+    });
+    await runner.run({
+      roleId: "worker",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      proxy: {
+        mint: async () => {
+          own.calls.minted++;
+          return own.handle as unknown as Awaited<ReturnType<NonNullable<RoleSessionOpts["proxy"]>["mint"]>>;
+        },
+      },
+    });
+    assert.equal(own.calls.minted, 1, "the session's own proxy opt was used");
+    assert.equal(fallback.calls.minted, 0, "the RoleRunner-wide default was never consulted — opts.proxy already won");
+    assert.equal(own.calls.stopped, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> today's behavior, byte-for-byte unchanged (no --mcp-config, base allowedTools)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin); // no defaultProxy
+    const result = await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(result.outcome, "done");
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.ok(!seen.includes("--mcp-config"), "no proxy anywhere -> no --mcp-config flag");
+    assert.equal(seen[seen.indexOf("--allowedTools") + 1], ROLE_ALLOWED_TOOLS, "base allowedTools, unwidened");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
