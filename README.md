@@ -43,6 +43,55 @@ GitHub issue (Ready)
    → board: Done
 ```
 
+## Architecture
+
+<!-- ARCHITECTURE-DIAGRAM: the same diagram is maintained in
+     docs/dev-guide/README.md — keep the two in sync when editing. -->
+
+```mermaid
+flowchart LR
+  subgraph GH["GitHub — source of truth for process"]
+    BOARD["ProjectV2 board<br/>Status + labels = work queue"]
+    ISSUES["Issues<br/>(Ready = dispatchable)"]
+    PRS["Pull requests"]
+    CI["CI checks"]
+  end
+
+  subgraph ENGINE["sapwood engine (TypeScript, Node ≥ 24)"]
+    ROUND["Round driver (runRounds)<br/>aligning → architecting → plan_review →<br/>executing → harvesting → retro<br/>(loop/round.ts)"]
+    CONDUCTOR["Conductor<br/>tick loop (loop/conductor.ts)"]
+    GATE["MergeDriver — gate②<br/>CI + independent review + FIXABLE<br/>(roles/merge-driver.ts)"]
+    PERIPH["Peripheral roles<br/>architect · plan-review · PO triage · retro<br/>(roles/, retro/)"]
+    STATE[("SQLite state<br/>lanes · events · spend ledger<br/>(state/state.ts)")]
+    PROXY["Forge MCP proxy<br/>read-only, token-minted per session<br/>(proxy/)"]
+    FORGE["Forge adapter<br/>gh CLI wrapper (forge/)"]
+  end
+
+  subgraph SESSIONS["Headless Claude sessions"]
+    WORKER["Workers<br/>one git worktree per issue<br/>TDD → PR, never merge"]
+    GUARD["guard.ts<br/>fail-closed PreToolUse hook"]
+    WORKER --- GUARD
+  end
+
+  REVIEWER["Independent reviewer<br/>(different model, e.g. Codex)"]
+
+  ISSUES -->|Ready| CONDUCTOR
+  ROUND -->|"drives ticks (executing phase)"| CONDUCTOR
+  CONDUCTOR -->|dispatch| WORKER
+  WORKER -->|PR + sentinel files| PRS
+  CONDUCTOR --> GATE
+  GATE -->|trigger review| REVIEWER
+  REVIEWER -->|verdict| GATE
+  CI --> GATE
+  GATE -->|"merge (or stop for human)"| PRS
+  ENGINE <--> FORGE
+  FORGE <--> GH
+  SESSIONS <-->|"scoped reads (config-gated)"| PROXY
+  PROXY --> FORGE
+  ENGINE <--> STATE
+  ROUND --> PERIPH
+```
+
 ## Documentation
 
 - [`docs/getting-started.md`](docs/getting-started.md) — install, `sapwood init`, the
@@ -56,13 +105,16 @@ GitHub issue (Ready)
   validation, escalation).
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — common failures and what they
   mean.
+- [`docs/dev-guide/`](docs/dev-guide/README.md) — **contributor development guide**:
+  architecture, repository layout, core modules, persistence schema, and the
+  change-risk map for anyone modifying sapwood itself.
 
 ## Requirements
 
 - **Node.js ≥ 24** — the engine uses the built-in `node:sqlite` (WAL) for durable
   state, so no native build step.
 - **Claude Code CLI ≥ 2.0** — workers run as headless `claude -p` sessions; the
-  worker module pins the exact flags it depends on and CI tests against this floor.
+  worker module pins the exact flags it depends on.
 - **GitHub CLI (`gh`)** authenticated with the `project` scope (the loop drives a
   ProjectV2 board).
 
