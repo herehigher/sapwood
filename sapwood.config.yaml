@@ -148,6 +148,10 @@ reviewer:
 #                              # close auto-removes labels.roundPool, so aliasing it to a
 #                              # protected label (e.g. needsHuman) would let the engine silently
 #                              # strip that label too. Config load rejects the collision.
+#                              # NOTE: there is no `labels.hold` key here — the human-applied hold
+#                              # label is configured via `escalation.holdLabels` below instead
+#                              # (a list, like escalation.humanLabels), because the engine never
+#                              # writes it (see that section's own comment).
 
 # #87/#104: peripheral role sessions — the round orchestrator's aligning (PO)/architecting/
 # plan_review (gate⓪)/harvesting/retro phases, each a role-scoped session wired into runRounds's
@@ -406,7 +410,24 @@ reviewer:
 #     maxBytesPerSession: 2000000
 #   timeoutMs: 30000              # hard per-call ceiling, independent of worker.timeoutSec
 
-# escalation omitted: humanLabels derives from the default labels.prefix.
+# escalation omitted: humanLabels/holdLabels derive from the default labels.prefix.
+# escalation:
+#   humanLabels: [sapwood:needs-human, sapwood:blocked]
+#   holdLabels: [sapwood:hold]  # #248: human-applied WAIT-tier hold (three-tier escalation
+#                                # model: hold/needs-human/blocked, each one fact). Matched by
+#                                # EXACT case-insensitive identity everywhere (never substring —
+#                                # unlike humanLabels above); entries are trimmed and must be
+#                                # non-empty. `sapwood init` provisions the repo-level label
+#                                # itself. Two carriers, each its own surface: a PR-level hold is
+#                                # checked in deriveGate BEFORE review signals and FIXABLE (no
+#                                # merge, no new fix-leg dispatch, #170 review-silence suppressed
+#                                # — the lane just stays driving/fixing, holding its slot); an
+#                                # issue-level hold is also checked by #147's GATED RECLAIM (SKIPs
+#                                # reentry for an already-escalated lane without burning an
+#                                # attempt). The engine NEVER writes this label (only a human
+#                                # applies/removes it); removing it resumes the ordinary gate/
+#                                # reentry path next tick. See docs/PLAN.md's escalation-model
+#                                # section for the full handshake protocol.
 
 coverage:
   minPercent: 0 # test-coverage gate (0 = off for M0)

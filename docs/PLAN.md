@@ -401,6 +401,112 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   re-admits eligible `handoff` rows through `WorkerSupervisor.resume()` while capacity and
   fresh-spend gates permit; `worker.maxResumes` bounds the additional legs and escalates a
   capped lane once through `needs-human`.
+- **The three-tier escalation model (#248, human hold — WAIT-tier control handover, adjudicated
+  2026-07-17).** Humans intervene to *review*, never to *resolve reviews* — but the only
+  human-hold signal that existed through #147/#170 (`escalation.humanLabels`, meaning ESCALATE)
+  conflated that with a human simply saying "I'm looking at this right now": pressing an
+  imagined "I'm reviewing" control would have burned a gated-reentry attempt and fabricated an
+  escalation record for a twenty-minute look. The fix is **one handshake protocol — a label as
+  carrier; apply = take control, remove = return it — with three tiers, each encoding exactly
+  one fact (one fact, one bit):**
+
+  | tier | written by | gate behavior | lane | queue |
+  |---|---|---|---|---|
+  | `hold` | human | WAIT | **held** (keeps its slot) | none (self-assigned, short) |
+  | `needs-human` | **engine** | ESCALATE marker | released | human queue; removal = sign-off |
+  | `blocked` | human | veto | released | nobody's queue (external wait) |
+
+  Collapsing any two of these into one label loses a bit: escalations would pollute the human
+  queue with external-dependency waits (`blocked`), and removing one shared label would
+  accidentally sign off two unrelated facts at once. (The 👀 reaction was considered and
+  rejected as the hold carrier: it's Codex's own review-protocol signal, it can't suppress
+  fix-leg dispatch once findings exist, and it ages into #170's own machinery — a genuinely
+  different concern.) Config: `escalation.holdLabels` (default `[sapwood:hold]`, resolved under
+  the same `labels.prefix` convention as `escalation.humanLabels` — #199) — deliberately NOT a
+  `labels.*` field, because of the write-side rule below. Config load rejects a `holdLabels`
+  value that collides with any other protected label (`needsHuman`, `blocked`, `roundPool`, …) —
+  the same guard `labels.roundPool`'s collision check uses, generalized: collapsing tiers by
+  accidental aliasing is caught at load, not discovered in production.
+
+  **Two carriers, one surface each.** The `hold` label is applied on TWO different objects
+  depending on which automation surface a human wants to take control of — **each carrier gates
+  only the surface it sits on; applying either takes control of that ONE surface, not both:**
+  - **PR-level hold** (`deriveGate`, `merge-driver.ts`) gates the drive/merge gate for a
+    currently-`driving` lane — see "Gate ordering" below.
+  - **Issue-level hold** (`gatedReentryDecision`, `conductor.ts`'s GATED RECLAIM phase) gates
+    reentry eligibility for a lane that has ALREADY been escalated to `failed`+`needs-human`
+    (#147's cap-escalation path, e.g. #246's fix-rounds-cap-reached branch) — see "GATED RECLAIM
+    interaction" below.
+
+  **Exact match, not substring (review round 1, G3).** Unlike `escalation.humanLabels` (matched
+  by substring — historical, unchanged, its own accepted footgun), a hold label is a configured
+  NAME, matched by exact case-insensitive identity (`labelsIncludeAny`/`hasReserveLabel`) at
+  every runtime check (`deriveGate`, `reviewSilenceDuration`'s call site, and the GATED RECLAIM
+  check below). A substring match would let a short entry (e.g. `holdLabels: ["sapwood"]`) hold
+  every label sharing that text, or an accidentally-empty entry hold everything unconditionally
+  — `escalation.holdLabels` schema entries are also trimmed and rejected if empty, so this class
+  of misconfiguration is caught at load, not silently over-broad at runtime.
+
+  **Gate ordering (`deriveGate`, `merge-driver.ts`) — PR-level hold sits between `humanLabels`
+  and every review signal:** `prState`/`draft` fail-safes first (unchanged), then `humanLabels`
+  (a standing `needs-human`/`blocked` always wins — **escalation semantics win, fail-safe**, so a
+  hold applied alongside an existing escalation never masks it), then `holdLabels` -> WAIT
+  (before the review-verdict switch, so hold precedes `MERGE`, `WAIT_REVIEW`, `HANDLE_THREADS`,
+  and #246's `FIXABLE` alike — a hold suppresses the NEXT action of every kind, not just merge).
+  While held: no merge, no NEW fix-leg dispatch, and **#170's review-silence escalation is
+  provably suppressed** (`reviewSilenceDuration` gained a `holdLabelPresent` input, checked
+  exactly like `needsHumanLabelPresent`) — the lane simply stays `driving`/`fixing`, work
+  unfinished, worker on post, keeping its slot rather than being released to the human queue.
+  **In-flight fix legs are never interrupted** — same doctrine as the soft worker budget (never
+  a mid-work kill): a PR-level hold only ever gates the NEXT drive decision, and structurally
+  cannot reach a `fixing` lane at all (`deriveGate`/`driveOne` only ever run over
+  `state.drivingWorkers()`; a `fixing` row is invisible to DRIVE until it lands back in
+  `driving`, at which point the still-present hold governs the next tick exactly like any other
+  driving lane).
+
+  **GATED RECLAIM interaction (review round 1, G1 — PM-narrowed).** The original #248 design
+  reasoned hold was orthogonal to #147's GATED RECLAIM because a PR-level hold never produces a
+  `failed` row — true, but incomplete: it missed the confirmed scenario where a lane is ALREADY
+  `failed`+issue-`needs-human` (the fix-rounds-cap path) and a human applies an ISSUE-level
+  `hold` while investigating, then removes `needs-human` before finishing — without an explicit
+  check, `gatedReentryDecision` would RECLAIM the instant `needs-human` cleared, burning a
+  `gated_reentry_attempts` slot and letting DRIVE immediately re-escalate or re-latch at the cap,
+  violating "apply hold = take control" for that surface. Fixed minimally (marginal-complexity
+  ruling: reuse the ALREADY-fetched issue-label read, no new forge call, and do NOT extend this
+  into a new per-tick issue-label fetch inside the DRIVE loop for a rare, short-lived manual
+  state): `gatedReentryDecision` takes `issueHoldPresent` as a SEPARATE SKIP input alongside
+  `humanHoldPresent`, checked against the SAME `forge.getIssueLabels` read GATED RECLAIM already
+  performs. **Accepted, documented bounded blind spot:** an issue-level hold applied to a lane
+  that is STILL `driving` (never escalated) has no effect until/unless that lane later reaches
+  `gatedFailedWorkers()` — a `driving` lane's own hold-handling is exclusively the PR-level
+  `holdLabels` check in `deriveGate`, a different carrier on a different surface; there is no
+  single hold action that pre-emptively protects a lane against a *future* escalation.
+
+  **Write-side asymmetry is the audit trail:** the engine never writes a hold label — only
+  `needsHuman`/`blocked` are ever engine-applied (grep-proof: every `addLabel`/`addPRLabel` call
+  site in the engine names its label via `cfg.labels.*`, never `escalation.holdLabels`) — a
+  human applies and removes `hold` themselves. **`sapwood init` DOES provision the repo-level
+  label definition itself** (review round 1, G2) — the shipped `escalation.holdLabels` default
+  (`sapwood:hold`) is otherwise unusable on a clean repo (nothing ever creates the GitHub label,
+  so a human has nothing to pick from the PR UI); creating the label's NAME/color/description is
+  ordinary one-time repo setup, the same act `sapwood init` already performs for
+  `needsHuman`/`blocked`/etc — it is not "writing a hold" (applying the label to an issue/PR),
+  which the engine still never does. Human review output during a hold needs no special channel:
+  threads/`CHANGES_REQUESTED` left while held are ordinary gate② signals (`verdictFrom`'s
+  contract already lets anyone's blocking signal count); only trusted identities can *approve*.
+  Removing the hold resumes the ordinary gate path next tick — no re-dispatch, no re-triggered
+  review unless the head actually moved (same lane, same PR, same session lineage). **Accepted,
+  documented bounded blind spot (marginal-complexity principle: zero new machinery over a
+  perfect fix):** `reviewSilenceDuration`'s pin-based clock is a pure per-tick evaluation with no
+  memory of a hold's own start/end — while held it's suppressed outright, and once removed the
+  very next tick resumes counting off the **same, unchanged** trigger pin, i.e. the elapsed
+  silence includes time spent held. A hold outlasting `reviewer.escalateAfterSec` can therefore
+  fire the `#170` escalation on the very first post-removal tick — a single, tick-scale-imprecise
+  evaluation, never a repeated "burst" (the existing label-presence latch still applies from
+  that point on). The dashboard's future "I'm reviewing" button (deferred to the dashboard
+  milestone, v0.2) is just a remote hand on this SAME label — apply/remove with the panel's own
+  credentials; the label mechanics above are the whole contract, the panel is only a control
+  surface.
 
 ## Security & trust model (trusted-first, designed toward public)
 

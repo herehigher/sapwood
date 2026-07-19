@@ -19,6 +19,16 @@ export function workflowLabelDefaults(prefix: string) {
   };
 }
 
+/** #248: default for `escalation.holdLabels` (the WAIT-tier human hold, three-tier escalation
+ * model) — resolved under the SAME prefix convention `workflowLabelDefaults` uses above, but
+ * deliberately kept SEPARATE from it (not a `Labels`/`cfg.labels` field): there is no
+ * `labels.hold` override key, because the engine never writes this label (write-side asymmetry
+ * is the audit trail distinguishing it from `needsHuman`) — only `escalation.holdLabels` (a
+ * list, like `escalation.humanLabels`) is user-configurable, and this is just its default. */
+export function holdLabelDefault(prefix: string): string {
+  return `${normalizeLabel(prefix)}hold`;
+}
+
 const TAXONOMY_SPECS = [
   { name: "type:feature", color: "1d76db", description: "Feature work (1 issue = 1 PR)" },
   { name: "type:bug", color: "d73a4a", description: "Defect" },
@@ -47,13 +57,28 @@ export function labelsInclude(labels: readonly string[], want: string): boolean 
   return labels.some((label) => normalizeLabel(label) === normalizedWant);
 }
 
-/** Preserve the PR gate's historical substring semantics while normalizing both sides. */
+/** Preserve the PR gate's historical substring semantics while normalizing both sides.
+ * ONLY for `escalation.humanLabels` (needs-human/blocked) — the historical, intentionally loose
+ * matching those risk/triage labels have always used. Do NOT reuse this for a NEW label list
+ * (like `escalation.holdLabels` below) without a deliberate decision to accept its footguns: a
+ * one-word `wants` entry (e.g. `"sapwood"`) matches every label sharing that substring, and an
+ * EMPTY `wants` entry matches every label unconditionally (`"".includes("")` is always true). */
 export function labelsIncludeAnySubstring(labels: readonly string[], wants: readonly string[]): boolean {
   const normalizedWants = wants.map(normalizeLabel);
   return labels.some((label) => {
     const normalizedLabel = normalizeLabel(label);
     return normalizedWants.some((want) => normalizedLabel.includes(want));
   });
+}
+
+/** #248 (G3, review round 1): EXACT case-insensitive identity match against a LIST of wanted
+ * label names — the counterpart to `labelsInclude` (single exact match) the way
+ * `labelsIncludeAnySubstring` is the counterpart to a single substring match. Hold labels are
+ * configured label NAMES, not risk/triage substrings — `escalation.holdLabels` (and any future
+ * exact-match label list) must use this, never `labelsIncludeAnySubstring`, or a single-word
+ * entry (or an accidentally-empty one) would silently hold far more than configured. */
+export function labelsIncludeAny(labels: readonly string[], wants: readonly string[]): boolean {
+  return wants.some((want) => labelsInclude(labels, want));
 }
 
 /** Match only the priority namespace selected by the configured prefix. */
