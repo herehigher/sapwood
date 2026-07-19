@@ -330,24 +330,32 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   succeed; bounded retries escalate to needs-human with a structured tick-result entry.
   Invariant: a transient forge failure during recovery can no longer strand an issue
   In Progress with no worker row. No `.catch(() => {})` swallows remain in tick paths.
-- **Scope boundaries / deferred:** fixup-worker auto-dispatch (review findings fold to
-  needs-human for now — 0day's FIXABLE/fix-rounds loop is a follow-up subsystem).
-  **Landed by #245 (M9, fix-loop `fixing` lane state, 2026-07-18):** the producing worker
-  now gets a shot at addressing its own review findings *before* human escalation — a new
-  `fixing` `WorkerState` (`driving → fixing → driving`, counted in `activeWorkers()` like
-  the other two), a fix leg that reuses #172's resume machinery (same worker
-  row/worktree/branch/session — never a fresh dispatch, same squash-branch-reuse-hazard
-  avoidance #147 below already established), and a new `fix_rounds` counter (independent
-  of `resume_attempts`) bounded by `lanes.prFixCap`. The fix leg pulls its own PR's review
-  findings via the PR-facing forge MCP proxy tools (#244, now attached to `resume()` too)
-  rather than having them relayed through its prompt — no prompt-injection transport, no
-  forge credentials handed to the leg. The `fixing → driving` edge clears the review-
-  trigger pin, reusing `driveOne`'s own re-trigger machinery exactly like #147's gated
-  reentry does. **Still deferred to #246:** the actual `FIXABLE` gate decision (deriving
-  "this PR's findings are fixable, not a human matter" from a live review verdict) and the
-  DRIVE-loop wiring that calls #245's `startFixLeg` when it fires — until #246 lands,
-  `deriveGate` still folds `HANDLE_THREADS` straight to `HUMAN`, so `fixing` rows exist
-  only when created directly (tests, or a future caller). See
+- **The fix loop (#245/#246/#247, M9, shipped 2026-07-18/19):** review findings get one
+  bounded, mechanical rework pass before human escalation, instead of folding straight to
+  `needs-human`. A new `fixing` `WorkerState` (`driving → fixing → driving`, counted in
+  `activeWorkers()` like the other two) is entered by a fix leg that reuses #172's resume
+  machinery (same worker row/worktree/branch/session — never a fresh dispatch, same
+  squash-branch-reuse-hazard avoidance #147 below already established), tracked by a new
+  `fix_rounds` counter (independent of `resume_attempts`) bounded by `lanes.prFixCap`.
+  `deriveGate` (`merge-driver.ts`) derives `FIXABLE` from a live review verdict —
+  `HANDLE_THREADS` findings, or `CI_RED` alongside a decisive verdict — whenever the fix
+  loop is enabled (`prFixCap > 0`; at `0` it folds straight to `HUMAN`, byte-for-byte the
+  pre-#246 behavior); `driveDecision` then turns `FIXABLE` into `FIXUP` (dispatch a fix leg
+  via `startFixLeg`, itself gated by the same pause/ceiling/park/run-spend-stop admission
+  checks RESUME/DISPATCH already pass — a blocked admission is a transient `queued` retry
+  next tick, not an escalation) while `fix_rounds < cap`, or `ESCALATE` when the cap is
+  exhausted, the round count is malformed, or this tick is over the round budget. Of those
+  three, only cap-exhaustion and the malformed-count fail-safe are terminal — they escalate
+  to `needs-human`, the same escalation #147's GATED RECLAIM below can then reclaim once a
+  human clears the label; an over-budget tick is, like a blocked admission, just a transient
+  `queued` retry, costing zero fix-round budget. The fix leg pulls its own PR's review
+  findings via the PR-facing forge MCP
+  proxy tools (#244, attached to `resume()` too) rather than having them relayed through its
+  prompt — no prompt-injection transport, no forge credentials handed to the leg — and, per
+  #247, can act on individual review threads directly: the engine executes structured
+  reply/resolve responses the leg emits, rather than relaying free-text back through a
+  prompt. The `fixing → driving` edge clears the review-trigger pin, reusing `driveOne`'s
+  own re-trigger machinery exactly like #147's gated reentry does. See
   [`security.md`](security.md#fix-loop-fixing-lane-state-245) for the full mechanism.
   **Narrowed by #147 (gated-PR reentry, 2026-07-13):** a `needs-human` escalated on
   gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
@@ -371,8 +379,9 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   not read as human approval next tick). Bounded by
   `lanes.gatedReentryCap` (prFixCap's shape); a lane that keeps
   re-escalating past the cap is permanently excluded and re-labeled for a manual
-  merge. This is reentry for an *already-produced* PR, not the broader fixup-worker
-  auto-dispatch subsystem above, which remains deferred. #33 unchanged (no in-flight
+  merge. This is reentry for an *already-produced* PR, distinct from the fix loop above
+  (#245/#246), which handles bounded rework on a lane still in `fixing`/`driving`, before
+  it ever reaches this escalated-and-cleared path. #33 unchanged (no in-flight
   cost signal). Review evidence: #42 survived 3 Codex
   rounds (3 P1 + 3 P2 fail-open finds, all fixed + regression-tested); #41 survived 4
   rounds (3 Codex + 1 fresh non-author stand-in when Codex rate-limited) — the
@@ -564,13 +573,20 @@ say so instead of guessing. This criterion is why #217's two-pass `needsDetails`
 protocol (request → engine-inject → decide, with no first-class "still can't tell"
 exit once details land) was superseded, pre-implementation, by #234's design: an
 engine-hosted, read-only forge MCP proxy, built to widen what a session may ask for
-without ever forcing a verdict once it has asked. **Scaffolded, not yet activated:**
-the proxy module ships `enabled: false` by default and, when turned on, defaults to
-shadow mode (calls journaled, no consumer may act on the output); no built-in role
-supplies the proxy option to a session yet — wiring a real consumer is separately
-tracked (#253). The criterion drove the *design*; live bring-up is deliberately
-later, separately-tracked work (see [`configuration.md`](configuration.md#proxy) for
-the shipped-vs-deferred split). The same 2026-07-17 M8 round cut two further
+without ever forcing a verdict once it has asked. **Three-state production model (#253,
+shipped 2026-07-19):** `enabled: false` (default) stays fully inert — no proxy server is
+ever constructed. `enabled: true, shadow: true` (the default once enabled) makes the
+proxy mintable and journaled but attaches no real handle to any live session — the
+machinery is real, production dispatch isn't. Only `enabled: true, shadow: false` is the
+deliberate go-live flip: both live drivers then attach a real handle — a real
+`TickDeps.fixLegResume` (`mintProxy` + `renderFixPrompt`) to the fix loop's worker leg,
+and a real `RoleRunner` `defaultProxy` to every peripheral role session — two distinct
+seams, not one shared mechanism. #253 wired both real consumers and ran + verified a live
+shadow bring-up validating the proxy; production ships shadow-first by default, and the
+flip to live is a deliberate config change, not an
+automatic consequence of shipping. The criterion drove the *design*; see
+[`configuration.md`](configuration.md#proxy) for the full three-state contract. The same
+2026-07-17 M8 round cut two further
 mechanism issues from this posture: #213 (one batched architect session — explicit
 `drop`/`needs-human` verdicts per round-pool member, with an unlisted member reading
 as `pass` by omission, never a forced binary judgment on every member) and #214
