@@ -1048,6 +1048,46 @@ test("tick DRIVE (#246): fixable + under cap + fixLegResume configured -> dispat
   st.close();
 });
 
+test("tick DRIVE (#270): conflict FIXABLE uses the existing lane/counter with a conflict-only prescription", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "base fix prompt", mintProxy: async () => ({}) as never },
+  });
+  const prompt = sup.resumeCalls[0]!.opts?.prompt ?? "";
+  assert.match(prompt, /Conflict-only prescription/);
+  assert.match(prompt, /merge that base branch from origin into\s+the existing PR branch/);
+  assert.match(prompt, /Do not address standing review findings/);
+  assert.equal(st.getWorker("lane-a")?.fix_rounds, 1, "shared #246 counter, no conflict-specific counter");
+  assert.equal(r.driven[0]?.kind, "fixup");
+  st.close();
+});
+
+test("tick DRIVE (#270): conflict at the shared fix-round cap preserves label + comment before terminal upsert", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.match(forge.issueComments[0]![1], /merge-conflict/);
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.equal(st.getWorker("lane-a")?.gated_escalation_labeled, 1);
+  assert.equal(r.driven[0]?.kind, "needs-human");
+  st.close();
+});
+
 test("tick DRIVE (#246 review round 1, C1): fixable but NO fixLegResume dep configured -> DEGRADES to the pre-#246 needs-human escalation (visible, actionable), never a silent retry-forever", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

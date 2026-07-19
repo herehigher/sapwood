@@ -357,6 +357,16 @@ export interface FixLegDeps {
   renderFixPrompt: (issueNumber: number, pr: number) => string;
 }
 
+export type FixPrescription = "conflict" | "findings";
+
+const CONFLICT_FIX_PRESCRIPTION = `## Conflict-only prescription
+
+This PR is currently CONFLICTING. Do only the mechanical conflict-resolution work in this leg:
+check mcp__forge__pr_details for the PR's base branch, merge that base branch from origin into
+the existing PR branch, resolve every conflict, run the relevant tests, then commit and push the
+resolved branch. Do not address standing review findings in this leg; they will be re-evaluated
+by a fresh review of the conflict-free head.`;
+
 /** #245: start a fix leg for a `driving` lane whose PR needs rework — the SOLE producer of a
  *  `fixing` row, and the seam #246 (the FIXABLE gate) calls once its own driveDecision reaches
  *  "FIXUP". Reuses #172's resume machinery outright: SAME worker row, SAME worktree/branch/
@@ -387,6 +397,7 @@ export async function startFixLeg(
   w: WorkerRow,
   proxy: WorkerProxyOpts,
   now: () => Date = () => new Date(),
+  prescription: FixPrescription = "findings",
 ): Promise<{ name: string; sessionId: string }> {
   if (w.pr == null) {
     throw new Error(`startFixLeg: lane ${w.name} (issue #${w.issue}) has no PR — a driving lane must always carry one`);
@@ -397,7 +408,8 @@ export async function startFixLeg(
     );
   }
   const pr = w.pr;
-  const prompt = deps.renderFixPrompt(w.issue, pr);
+  const basePrompt = deps.renderFixPrompt(w.issue, pr);
+  const prompt = prescription === "conflict" ? `${basePrompt}\n\n${CONFLICT_FIX_PRESCRIPTION}` : basePrompt;
   const issue: Issue = { number: w.issue, title: "", labels: [] };
   // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE resume() — the child
   // cannot make its first tool call before this line runs, so this row id can never postdate
@@ -2243,6 +2255,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                 w,
                 { mint: deps.fixLegResume.mintProxy, credentialFree: true },
                 now,
+                outcome.prescription,
               );
               state.appendEvent("drive-fixup", { worker: w.name, issue: w.issue, pr, fixRounds: fixRounds + 1, reason: outcome.reason });
               driven.push({ kind: "fixup", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
@@ -2292,8 +2305,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             await forge.addIssueComment(
               w.issue,
               `sapwood: fix-round cap (${cap}) reached for PR #${pr} — ${fixRounds} round(s) spent, ` +
-                `standing disagreement unresolved (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
-                `adjudication: review the disagreement, then remove the label once resolved to reclaim the PR (#147 gated reentry).`,
+                `standing fixable signal unresolved (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
+                `adjudication: resolve the signal, then remove the label to reclaim the PR (#147 gated reentry).`,
             );
           } catch (e) {
             state.appendEvent("fix-rounds-cap-comment-failed", { worker: w.name, issue: w.issue, pr, error: String(e) });

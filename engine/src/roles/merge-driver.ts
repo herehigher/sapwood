@@ -2,7 +2,7 @@
 // merge. TS port of 0day's ops/loop/loop_merge_driver.sh: the ONLY place a merge happens.
 //
 // Two-layer safety (mirrors 0day exactly):
-//  1. deriveGate() — the SCHEDULING gate (MERGE/WAIT/HUMAN), combining gate① (PRStatus.ciGreen)
+//  1. deriveGate() — the SCHEDULING gate (MERGE/WAIT/HUMAN/FIXABLE), combining PR status
 //     with gate②'s review verdict (reviewer.ts) + PR state/draft/risk-labels. Feeds the
 //     Conductor's existing driveDecision (conductor.ts) is NOT used here — see the NOTE below
 //     driveOne for why FIXABLE/fixup-dispatch is out of scope for this port.
@@ -52,8 +52,8 @@ export type Gate = "MERGE" | "WAIT" | "HUMAN" | "FIXABLE";
  *
  * #248: `holdLabels` — the human-applied WAIT-tier hold (three-tier escalation model: hold ≠
  * needs-human ≠ blocked, see docs/PLAN.md's escalation-model section). Checked AFTER
- * `humanLabels` but BEFORE the review-action switch (and therefore before FIXABLE, which lives
- * inside that switch) — this precedence is deliberate, not incidental:
+ * `humanLabels` but BEFORE conflict detection and the review-action switch — this precedence
+ * is deliberate, not incidental:
  *  - `humanLabels` first means a simultaneous hold + needs-human/blocked resolves HUMAN, never
  *    WAIT — escalation semantics win, fail-safe (a human-hold self-assignment must never mask a
  *    standing escalation the SAME human, or a different one, already raised).
@@ -70,6 +70,7 @@ export function deriveGate(input: {
   /** #246: a genuinely FAILED check, tri-state alongside ciGreen — see PRStatus.ciRed's own doc
    *  for why `!ciGreen` alone can't distinguish "still pending" from "actually red". */
   ciRed: boolean;
+  mergeable: PRStatus["mergeable"];
   reviewAction: ReviewAction;
   isDraft: boolean;
   prState: PRStatus["state"];
@@ -90,11 +91,14 @@ export function deriveGate(input: {
   if (input.prState !== "OPEN") return "HUMAN"; // already merged/closed -> never touch
   if (input.isDraft) return "HUMAN"; // draft is human territory
   if (labelsIncludeAnySubstring(input.labels, input.humanLabels)) return "HUMAN";
-  // #248: hold precedes review signals AND FIXABLE (both live in the switch below) — checked
+  // #248: hold precedes review signals AND FIXABLE — checked
   // here, after humanLabels (escalation wins over a simultaneous hold) and before any review
   // verdict is consulted at all. Exact match (G3) — see holdLabels' own doc above.
   if (labelsIncludeAny(input.labels, input.holdLabels)) return "WAIT";
   const fixableEnabled = input.prFixCap > 0;
+  // #270: conflicts outrank every review/CI signal because none is meaningful until the head
+  // is conflict-free. Human escalation and hold remain above it by design.
+  if (input.mergeable === "CONFLICTING") return fixableEnabled ? "FIXABLE" : "HUMAN";
   switch (input.reviewAction) {
     case "REVIEW_UNAVAILABLE":
       // Rate-limit/timeout/malformed review query: QUEUE (WAIT), never skip gate② by treating
@@ -175,7 +179,7 @@ export type DriveOutcome = (
   // loop) owns the fix_rounds/cap/budget decision (driveDecision) this pure class never sees;
   // `reason` carries enough of the underlying signal (unresolved-thread count / CI-red) for the
   // caller's own escalation comment, without this class fetching review-finding TEXT itself.
-  | { kind: "fixable"; pr: number; reason: string }
+  | { kind: "fixable"; pr: number; reason: string; prescription?: "conflict" | "findings" }
 ) & {
   /** The reviewer-failover audit signal for this tick (#54), when one applies. STATELESS —
    *  reported on every tick the condition holds (see ReviewFailoverTransition); the caller
@@ -337,6 +341,31 @@ export class MergeDriver {
       return { kind: "queued", pr, reason: `gate-head-mismatch: ci-head=${status.headOid} review-head=${data.headOid}` };
     }
 
+    // #270: sense conflicts before triggering or evaluating review. A born-conflicted PR has
+    // no merge ref/check suites, while a mid-review conflict makes the standing review moot.
+    // deriveGate supplies the label/draft/open/cap precedence; the action is deliberately inert
+    // because CONFLICTING is evaluated before the review-action switch.
+    if (status.mergeable === "CONFLICTING") {
+      const conflictGate = deriveGate({
+        ciGreen: status.ciGreen,
+        ciRed: status.ciRed ?? false,
+        mergeable: status.mergeable,
+        reviewAction: "WAIT_REVIEW",
+        isDraft: data.isDraft,
+        prState: data.state,
+        labels: data.labels,
+        humanLabels: cfg.escalation.humanLabels,
+        holdLabels: cfg.escalation.holdLabels,
+        prFixCap: cfg.lanes.prFixCap,
+      });
+      if (conflictGate === "WAIT") return { kind: "queued", pr, reason: "gate-pending:merge-conflict-held" };
+      if (conflictGate === "HUMAN") return { kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" };
+      if (cfg.merge.mode === "produce-pr-and-stop") {
+        return { kind: "stopped", pr, reason: "gates-passed:FIXABLE:merge-conflict" };
+      }
+      return { kind: "fixable", pr, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
+    }
+
     // #55 P1-B: the head is now KNOWN (both reads agree) — this is the one place that can
     // correctly decide whether the recorded trigger pin still applies. A mismatch covers BOTH
     // "never triggered" (triggerPin.head === null) and "triggered, but the PR was pushed since"
@@ -462,6 +491,7 @@ export class MergeDriver {
     const gate = deriveGate({
       ciGreen: status.ciGreen,
       ciRed: status.ciRed ?? false,
+      mergeable: status.mergeable,
       reviewAction: verdict.action,
       isDraft: data.isDraft,
       prState: data.state,
@@ -483,6 +513,7 @@ export class MergeDriver {
         kind: "fixable",
         pr,
         reason: `gate:FIXABLE:${verdict.action}:unresolvedThreads=${data.unresolvedThreads}:ciRed=${status.ciRed ?? false}`,
+        prescription: "findings",
       });
     }
 
@@ -504,14 +535,14 @@ export class MergeDriver {
       return withSignals({ kind: "needs-human", pr, reason: "refuse-unpinned-merge-no-head-oid" });
     }
 
-    // Deterministic un-mergeability is HUMAN work, not a retry (Codex PR #42 P2): a
-    // CONFLICTING PR fails `gh pr merge` forever, so returning "queued" would pin the lane
-    // in `driving` re-attempting every tick. UNKNOWN means GitHub is still computing
-    // mergeability (transient, normal right after a push) — that one queues.
-    if (status.mergeable === "CONFLICTING") {
+    // Defense in depth: #270 routes CONFLICTING through FIXABLE earlier, but if later changes
+    // ever bypass that scheduling check, the merge point still refuses it fail-closed. UNKNOWN
+    // remains transient (normal right after a push) and queues here only.
+    const mergeabilityAtMerge = (status as PRStatus).mergeable;
+    if (mergeabilityAtMerge === "CONFLICTING") {
       return withSignals({ kind: "needs-human", pr, reason: "merge-conflict" });
     }
-    if (status.mergeable === "UNKNOWN") {
+    if (mergeabilityAtMerge === "UNKNOWN") {
       return withSignals({ kind: "queued", pr, reason: "mergeability-unknown" });
     }
 
