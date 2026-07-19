@@ -111,7 +111,7 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         issue           INTEGER NOT NULL,
         target          TEXT NOT NULL,   -- board status to reach: ready | inProgress | done
-        reason          TEXT NOT NULL,   -- dispatch-rollback | dead-lane-requeue
+        reason          TEXT NOT NULL,   -- dispatch-rollback | dead-lane-requeue | merged-board-done
         attempts        INTEGER NOT NULL DEFAULT 0,
         created_at      TEXT NOT NULL,
         last_attempt_at TEXT

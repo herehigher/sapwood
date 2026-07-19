@@ -825,8 +825,48 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
     .map((x) => x.i);
 }
 
+const ENV_FAILURE_REQUEUE_REASON = "env-failure-requeue";
+const MERGED_BOARD_DONE_REASON = "merged-board-done";
+
+function suspendRollbackDuringForgePark(reason: string): boolean {
+  return reason === ENV_FAILURE_REQUEUE_REASON || reason === MERGED_BOARD_DONE_REASON;
+}
+
+async function handleRollbackFailure(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  row: Pick<PendingRollback, "id" | "issue" | "target" | "reason" | "attempts">,
+  error: unknown,
+  iso: () => string,
+): Promise<RollbackOutcome> {
+  const attempts = row.attempts + 1;
+  if (attempts >= cfg.recovery.rollbackRetryCap && row.reason !== ENV_FAILURE_REQUEUE_REASON) {
+    state.clearPendingRollback(row.id);
+    // The structured event below remains the evidence if this best-effort label also fails.
+    await forge.addLabel(row.issue, cfg.labels.needsHuman).catch(() => {});
+    state.appendEvent("rollback-escalated", {
+      issue: row.issue,
+      target: row.target,
+      reason: row.reason,
+      attempts,
+      error: String(error),
+    });
+    return { kind: "escalated", issue: row.issue, attempts, reason: row.reason };
+  }
+  state.bumpPendingRollback(row.id, iso());
+  state.appendEvent("rollback-retry-failed", {
+    issue: row.issue,
+    target: row.target,
+    reason: row.reason,
+    attempts,
+    error: String(error),
+  });
+  return { kind: "retrying", issue: row.issue, attempts, reason: row.reason };
+}
+
 /**
- * One attempt at a durably-persisted recovery-path board mutation (#31). `row` may be a
+ * One attempt at a durably-persisted board mutation (#31). `row` may be a
  * freshly-inserted pending_rollbacks row (attempts: 0, its own attempt not yet made) or one
  * read back via state.pendingRollbacks() on a later tick — either way this makes exactly one
  * forge.setBoardStatus attempt and resolves the row: cleared on success, bumped (retried next
@@ -853,32 +893,7 @@ async function attemptRollback(
     state.appendEvent("rollback-recovered", { issue: row.issue, target: row.target, reason: row.reason });
     return { kind: "recovered", issue: row.issue, target: row.target, reason: row.reason };
   } catch (e) {
-    const attempts = row.attempts + 1;
-    if (attempts >= cfg.recovery.rollbackRetryCap && row.reason !== ENV_FAILURE_REQUEUE_REASON) {
-      state.clearPendingRollback(row.id);
-      // Best-effort last-mile notification — its own failure is not re-persisted (this is
-      // already the bounded-retry escalation path, not another recovery loop to harden) but
-      // the structured event + returned outcome below always fire regardless, so the
-      // escalation itself is never silently swallowed even if the label call is.
-      await forge.addLabel(row.issue, cfg.labels.needsHuman).catch(() => {});
-      state.appendEvent("rollback-escalated", {
-        issue: row.issue,
-        target: row.target,
-        reason: row.reason,
-        attempts,
-        error: String(e),
-      });
-      return { kind: "escalated", issue: row.issue, attempts, reason: row.reason };
-    }
-    state.bumpPendingRollback(row.id, iso());
-    state.appendEvent("rollback-retry-failed", {
-      issue: row.issue,
-      target: row.target,
-      reason: row.reason,
-      attempts,
-      error: String(e),
-    });
-    return { kind: "retrying", issue: row.issue, attempts, reason: row.reason };
+    return handleRollbackFailure(forge, state, cfg, row, e, iso);
   }
 }
 
@@ -1016,12 +1031,6 @@ function summarizeFailureText(text: string): string {
   const trimmed = text.trim().replace(/\s+/g, " ");
   return trimmed.length > PARK_REASON_MAX_CHARS ? `${trimmed.slice(0, PARK_REASON_MAX_CHARS)}…` : trimmed;
 }
-
-/** #168: the pending_rollbacks `reason` tag for an env-failure requeue — typed as a constant
- *  because THREE sites must agree on it byte-for-byte (PR #180 review P1-2): the requeue
- *  creation in reclaimTerminalLane, the suspension filter in tick()'s ROLLBACK RETRY phase, and
- *  attemptRollback's never-needs-human cap exemption. */
-const ENV_FAILURE_REQUEUE_REASON = "env-failure-requeue";
 
 /** #168: the forge probe — a lightweight, ALREADY-EXISTING IForge read (no new forge method),
  *  wrapped so any throw (network/auth/5xx — exactly the conditions env-failure.ts's forge
@@ -1689,17 +1698,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   recovery-path failure, BEFORE this tick does anything else. Never throws (see
   //   attemptRollback) — a still-failing forge only bumps the retry count or escalates.
   //   #168 SUSPENSION (PR #180 review P1-2): while a FORGE park episode is open, env-failure
-  //   requeues are not attempted at all — no forge write, no attempt-counter bump; the durable
-  //   rows simply wait (frozen) and drain here on the first tick after the forge episode
-  //   clears. Scoped to env-failure requeues only: every OTHER pending rollback keeps its
-  //   pre-#168 retry behavior unchanged (its issue's failure was real, and its bounded
+  //   requeues and merged-path Done writes are not attempted at all — no forge write, no
+  //   attempt-counter bump; the durable rows simply wait (frozen) and drain here on the first
+  //   tick after the forge episode clears. Every OTHER pending rollback keeps its pre-#168
+  //   retry behavior unchanged (its issue's failure was real, and its bounded
   //   retry-then-escalate contract predates parking). Gated on the FORGE row specifically —
   //   an llm-only park leaves the forge healthy, and holding requeues then would starve the
   //   canary of anything to dispatch.
   const rollbacks: RollbackOutcome[] = [];
   const forgeParkedThisTick = state.parkRow("forge") != null;
   for (const pending of state.pendingRollbacks()) {
-    if (forgeParkedThisTick && pending.reason === ENV_FAILURE_REQUEUE_REASON) continue; // suspended
+    if (forgeParkedThisTick && suspendRollbackDuringForgePark(pending.reason)) continue;
     rollbacks.push(await attemptRollback(forge, state, cfg, pending, iso));
   }
 
@@ -2175,7 +2184,25 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       switch (outcome.kind) {
         case "merged":
           state.upsertWorker({ ...w, state: "done", ended_at: iso() });
-          await forge.setBoardStatus(w.issue, "done");
+          if (state.parkRow("forge") != null) {
+            state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
+          } else {
+            try {
+              await forge.setBoardStatus(w.issue, "done");
+            } catch (e) {
+              const rollbackId = state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
+              rollbacks.push(
+                await handleRollbackFailure(
+                  forge,
+                  state,
+                  cfg,
+                  { id: rollbackId, issue: w.issue, target: "done", reason: MERGED_BOARD_DONE_REASON, attempts: 0 },
+                  e,
+                  iso,
+                ),
+              );
+            }
+          }
           state.appendEvent("merged", { worker: w.name, issue: w.issue, pr, headOid: outcome.headOid });
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
           break;

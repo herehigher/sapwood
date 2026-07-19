@@ -967,8 +967,138 @@ test("tick DRIVE: merged -> worker done, board set to done, driven records it", 
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.equal(st.getWorker("lane-a")?.state, "done");
   assert.deepEqual(forge.boardSet, [[2, "done"]]);
+  assert.equal(st.pendingRollbacks().length, 0);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged"]).length, 1);
   assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
   st.close();
+});
+
+test("#250 merged Done write failure is durable and contained, then drains on the next healthy tick", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  let failDone = true;
+  forge.setBoardStatus = async (issue, status) => {
+    if (failDone) throw new Error("transient board failure");
+    forge.boardSet.push([issue, status]);
+  };
+
+  const first = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-a")?.state, "done");
+  assert.deepEqual(first.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(first.rollbacks, [{ kind: "retrying", issue: 2, attempts: 1, reason: "merged-board-done" }]);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged"]).length, 1);
+  assert.deepEqual(
+    st.pendingRollbacks().map(({ issue, target, reason, attempts }) => ({ issue, target, reason, attempts })),
+    [{ issue: 2, target: "done", reason: "merged-board-done", attempts: 1 }],
+  );
+
+  failDone = false;
+  const second = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(second.rollbacks, [{ kind: "recovered", issue: 2, target: "done", reason: "merged-board-done" }]);
+  assert.deepEqual(forge.boardSet, [[2, "done"]]);
+  assert.equal(st.pendingRollbacks().length, 0);
+  st.close();
+});
+
+test("#250 merged Done write honors the #31 retry cap and escalates with evidence", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  forge.setBoardStatus = async () => {
+    throw new Error("board permanently unavailable");
+  };
+  const cfg = mkCfg({ recovery: { rollbackRetryCap: 2 } });
+
+  const first = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(first.rollbacks, [{ kind: "retrying", issue: 2, attempts: 1, reason: "merged-board-done" }]);
+  const second = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(second.rollbacks, [{ kind: "escalated", issue: 2, attempts: 2, reason: "merged-board-done" }]);
+  assert.equal(st.pendingRollbacks().length, 0);
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  const escalated = st.eventsSince("1970-01-01T00:00:00.000Z", ["rollback-escalated"]);
+  assert.equal(escalated.length, 1);
+  assert.match(JSON.stringify(escalated[0]?.payload), /board permanently unavailable/);
+  st.close();
+});
+
+test("#250 merge during a forge park queues Done at attempts 0, then drains after the park clears", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  let boardAttempts = 0;
+  forge.setBoardStatus = async (issue, status) => {
+    boardAttempts++;
+    forge.boardSet.push([issue, status]);
+  };
+  st.enterPark("forge", "forge down", 2, "2026-07-14T00:00:00Z");
+  const cfg = mkCfg({ recovery: { rollbackRetryCap: 1 } });
+
+  const merged = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg,
+    mergeGate: gate,
+    now: () => new Date("2026-07-14T00:00:01Z"),
+  });
+  assert.deepEqual(merged.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(merged.rollbacks, []);
+  assert.equal(boardAttempts, 0);
+  assert.deepEqual(
+    st.pendingRollbacks().map(({ issue, target, reason, attempts }) => ({ issue, target, reason, attempts })),
+    [{ issue: 2, target: "done", reason: "merged-board-done", attempts: 0 }],
+  );
+
+  st.clearPark("forge");
+  const recovered = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(recovered.rollbacks, [{ kind: "recovered", issue: 2, target: "done", reason: "merged-board-done" }]);
+  assert.equal(boardAttempts, 1);
+  assert.deepEqual(forge.boardSet, [[2, "done"]]);
+  assert.equal(st.pendingRollbacks().length, 0);
+  st.close();
+});
+
+test("#250 crash window after terminal upsert but before pending persist remains bounded visibility drift", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-merged-board-crash-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const beforeCrash = new State(dbPath);
+    beforeCrash.upsertWorker({
+      name: "lane-a",
+      issue: 2,
+      session_id: "s-lane-a",
+      state: "done",
+      started_at: "2026-07-14T00:00:00Z",
+      ended_at: "2026-07-14T00:01:00Z",
+      pr: 55,
+    });
+    beforeCrash.close();
+
+    const afterRestart = new State(dbPath);
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    const result = await tick({ forge, state: afterRestart, supervisor: sup, cfg: mkCfg() });
+    assert.equal(afterRestart.getWorker("lane-a")?.state, "done");
+    assert.equal(afterRestart.pendingRollbacks().length, 0);
+    assert.deepEqual(forge.boardSet, []);
+    assert.deepEqual(result.dispatched, []);
+    afterRestart.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("tick DRIVE: needs-human -> worker failed + needs-human label", async () => {
