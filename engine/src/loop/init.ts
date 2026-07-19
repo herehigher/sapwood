@@ -51,7 +51,7 @@ export interface LabelSpec {
 /** The label taxonomy the loop depends on, derived from config (no literals hidden in code). */
 export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
   const l = cfg.labels;
-  return [
+  const base: LabelSpec[] = [
     ...taxonomyLabels(l.prefix),
     { name: l.inProgress, color: "0e8a16", description: "Claimed by a worker (in flight)" },
     { name: l.needsHuman, color: "5319e7", description: "Escalated — stop autonomy, ask a human" },
@@ -64,6 +64,25 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     // cleared by the engine at round close (never by a session — see removeRoundPoolLabel).
     { name: l.roundPool, color: "5319e7", description: "In this round's dispatch-eligible pool" },
   ];
+  // #248 review round 1 (G2): the shipped `escalation.holdLabels` default (sapwood:hold) is
+  // otherwise unusable on a clean repo — nothing ever creates the GitHub label itself, so a
+  // human trying to apply it from the PR UI finds no such label to pick. Provisioning the REPO
+  // label here is not "writing a hold" (write-side asymmetry, #248's own doctrine, is about the
+  // engine applying a hold TO an issue/PR — creating the label definition itself is the same
+  // one-time repo-setup act `sapwood init` already does for needsHuman/blocked/etc above).
+  // Deduplicated case-insensitively against `base` (and against itself) — a `holdLabels` entry
+  // that happens to equal a taxonomy label name (config load's own collision guard only checks
+  // it against OTHER protected labels/humanLabels, not the fixed type:*/prio:* taxonomy) must
+  // not produce two LabelSpec rows with the same name and different color/description.
+  const haveNames = new Set(base.map((spec) => normalizeLabel(spec.name)));
+  const holdSpecs: LabelSpec[] = [];
+  for (const name of cfg.escalation.holdLabels) {
+    const key = normalizeLabel(name);
+    if (haveNames.has(key)) continue;
+    haveNames.add(key);
+    holdSpecs.push({ name, color: "fbca04", description: "Human hold — WAIT tier, self-assigned while reviewing (#248)" });
+  }
+  return [...base, ...holdSpecs];
 }
 
 // ---- gh-backed steps (integration-level; thin) ----------------------------------

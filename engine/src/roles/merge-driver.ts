@@ -20,7 +20,7 @@
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
-import { labelsInclude, labelsIncludeAnySubstring } from "../forge/labels.js";
+import { labelsInclude, labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { ReviewAction, Reviewer, ReviewFailoverTransition, ReviewFallbackLock, ReviewTriggerPin } from "./reviewer.js";
 import { changesRequestedOnHead, NO_FALLBACK_LOCK, resolveReviewVerdict } from "./reviewer.js";
 
@@ -77,7 +77,11 @@ export function deriveGate(input: {
   humanLabels: readonly string[];
   /** #248: cfg.escalation.holdLabels — the WAIT-tier human hold (see this function's own doc
    *  above for the precedence rationale). Checked on the SAME PR-label list `humanLabels` reads
-   *  (`data.labels` at the call site) — hold is a PR-level signal, never an issue-level one. */
+   *  (`data.labels` at the call site) — hold is a PR-level signal, never an issue-level one.
+   *  #248 review round 1 (G3): matched by EXACT case-insensitive identity (`labelsIncludeAny`),
+   *  never `labelsIncludeAnySubstring` — hold labels are configured NAMES, not risk-label
+   *  substrings; a substring match would let e.g. `holdLabels: ["sapwood"]` hold every
+   *  `sapwood:`-prefixed PR, or an accidentally-empty entry hold every PR unconditionally. */
   holdLabels: readonly string[];
   /** #246: cfg.lanes.prFixCap — the FIXABLE gate's static enable switch (see this function's
    *  own doc). NOT the per-lane fix_rounds counter (conductor.ts's driveDecision owns that). */
@@ -88,8 +92,8 @@ export function deriveGate(input: {
   if (labelsIncludeAnySubstring(input.labels, input.humanLabels)) return "HUMAN";
   // #248: hold precedes review signals AND FIXABLE (both live in the switch below) — checked
   // here, after humanLabels (escalation wins over a simultaneous hold) and before any review
-  // verdict is consulted at all.
-  if (labelsIncludeAnySubstring(input.labels, input.holdLabels)) return "WAIT";
+  // verdict is consulted at all. Exact match (G3) — see holdLabels' own doc above.
+  if (labelsIncludeAny(input.labels, input.holdLabels)) return "WAIT";
   const fixableEnabled = input.prFixCap > 0;
   switch (input.reviewAction) {
     case "REVIEW_UNAVAILABLE":
@@ -442,7 +446,9 @@ export class MergeDriver {
         escalateAfterSec: cfg.reviewer.escalateAfterSec,
         needsHumanLabelPresent: labelsInclude(data.labels, cfg.labels.needsHuman),
         // #248: same PR-label list humanLabels/holdLabels both read in deriveGate below.
-        holdLabelPresent: labelsIncludeAnySubstring(data.labels, cfg.escalation.holdLabels),
+        // #248 review round 1 (G3): exact match (labelsIncludeAny), same rationale as deriveGate's
+        // own holdLabels check above — never labelsIncludeAnySubstring for a configured-NAME list.
+        holdLabelPresent: labelsIncludeAny(data.labels, cfg.escalation.holdLabels),
         fallbackConfigured: (this.deps.fallbackReviewers?.length ?? 0) > 0,
         failoverAfterSec: cfg.reviewer.failoverAfterSec,
       });

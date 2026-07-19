@@ -184,6 +184,44 @@ test("deriveGate (#248): no hold label configured (empty holdLabels) never fires
   assert.equal(deriveGate(gateInput({ labels: ["hold"], holdLabels: [] })), "MERGE"); // "hold" text present but nothing configured to match it
 });
 
+test("deriveGate (#248 review round 1, G3 hazard 1 — substring): holdLabels matches by EXACT identity, never substring — a short/generic entry does NOT hold every label sharing that substring", () => {
+  // A single-word holdLabels entry like "sapwood" must NOT hold every sapwood:-prefixed PR —
+  // only labelsIncludeAnySubstring (humanLabels' historical semantics) would do that.
+  assert.equal(deriveGate(gateInput({ labels: ["sapwood:hold"], holdLabels: ["sapwood"] })), "MERGE");
+  // Sanity: the SAME PR label matched by its OWN full, exact name still holds.
+  assert.equal(deriveGate(gateInput({ labels: ["sapwood:hold"], holdLabels: ["sapwood:hold"] })), "WAIT");
+});
+
+test("deriveGate (#248 review round 1, G3 hazard 2 — empty entry): an empty/whitespace holdLabels entry never holds every PR — config load rejects it, but the pure function itself is safe if ever called with one directly", () => {
+  assert.equal(deriveGate(gateInput({ labels: ["type:feature"], holdLabels: [""] })), "MERGE");
+  assert.equal(deriveGate(gateInput({ labels: [], holdLabels: [""] })), "MERGE");
+});
+
+test("#248 review round 1 (G3): reviewSilenceDuration's holdLabelPresent input is exact-match at its OWN call site too (MergeDriver.driveOne) — a substring-only entry never suppresses the silence clock", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "WAIT_REVIEW", headOid: null };
+  const driver = new MergeDriver({
+    forge,
+    reviewer,
+    cfg: mkCfg({
+      reviewer: { escalateAfterSec: 60 },
+      labels: { needsHuman: "needs-human" },
+      escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood"] }, // deliberately a substring of the PR's real label below
+    }),
+    now: () => new Date("2026-07-15T00:02:00.000Z"),
+  });
+  const pin = { head: "HEAD", at: "2026-07-15T00:00:00.000Z" };
+  forge.reviewData = { ...forge.reviewData, labels: ["sapwood:hold"] }; // NOT exactly "sapwood" — must not match
+  const outcome = await driver.driveOne(7, 46, pin, noopRecord);
+  assert.deepEqual(outcome, {
+    kind: "queued",
+    pr: 7,
+    reason: "gate-pending:WAIT_REVIEW",
+    reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 }, // fires — the misconfigured substring never suppressed it
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────────────────
 // 3) MergeDriver.driveOne — end-to-end with fakes (no real gh calls)
 // ─────────────────────────────────────────────────────────────────────────────────────────

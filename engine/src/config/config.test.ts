@@ -102,6 +102,14 @@ test("#248: escalation.holdLabels colliding with escalation.humanLabels (or any 
   assert.doesNotThrow(() => parseConfig(`${base}escalation: { holdLabels: [hold] }`));
 });
 
+test("#248 review round 1 (G3): escalation.holdLabels rejects empty/whitespace-only entries, and trims real ones — hold labels are matched by exact identity, so a meaningless entry is a config error, not silently inert", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(() => parseConfig(`${base}escalation: { holdLabels: [""] }`), /escalation\.holdLabels/i);
+  assert.throws(() => parseConfig(`${base}escalation: { holdLabels: ["   "] }`), /escalation\.holdLabels/i);
+  const trimmed = parseConfig(`${base}escalation: { holdLabels: ["  reviewing  "] }`);
+  assert.deepEqual(trimmed.escalation.holdLabels, ["reviewing"]);
+});
+
 test("#237: notify.mentions defaults to [board.owner] when omitted; an explicit array is used verbatim", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
   assert.deepEqual(cfg.notify.mentions, ["acme"]);

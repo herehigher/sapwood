@@ -879,8 +879,13 @@ const ConfigSchemaRaw = z
         // ESCALATE tier. Optional here for the same "tell unset apart from explicitly set"
         // reason humanLabels is optional above; resolveLabelDefaults below defaults it to
         // `[defaults.hold]` (labels.prefix-derived) when omitted. An explicit array passes
-        // through verbatim.
-        holdLabels: z.array(z.string()).optional(),
+        // through verbatim. #248 review round 1 (G3): each entry is trimmed and must be
+        // non-empty — unlike `humanLabels` (matched by substring, historical/unchanged), a
+        // hold label is matched by EXACT identity (`labelsIncludeAny`), where an empty or
+        // whitespace-only entry would be a config footgun (`labelsInclude([...], "")` never
+        // matches, so it wouldn't silently hold everything — but it also could never be a
+        // meaningful label name, so it's rejected at load rather than silently inert).
+        holdLabels: z.array(z.string().trim().min(1, "escalation.holdLabels entries must be non-empty label names")).optional(),
       })
       .strict()
       .default({}),
