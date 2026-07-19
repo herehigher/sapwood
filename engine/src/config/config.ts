@@ -55,6 +55,14 @@ const Lanes = z
     // reviews it — quota is retro FEEDBACK GRANULARITY, the trade-off this knob actually tunes.
     roundDispatchCap: z.number().int().positive().default(6),
     reserveCap: z.number().int().nonnegative().default(1),
+    // #246: the FIXABLE gate's fix_rounds cap (0day LOOP_PR_FIX_CAP) — deriveGate
+    // (merge-driver.ts) folds HANDLE_THREADS/CI_RED straight to its pre-#246 behavior
+    // (HUMAN/WAIT) whenever this is 0, so an operator who wants zero automatic fix legs gets
+    // BYTE-FOR-BYTE today's behavior, not a differently-shaped escalation. Above 0, driveDecision
+    // (conductor.ts) dispatches a fix leg (startFixLeg) while a lane's fix_rounds stays under the
+    // cap; reaching it escalates needs-human for adjudication (#147's gated reentry is the
+    // post-adjudication channel back in). Accepted at parse time since #147 (this was the
+    // "reserved, not yet wired" `prFixCap` key); #246 is the first real consumer.
     prFixCap: z.number().int().nonnegative().default(2),
     frictionMin: z.number().nonnegative().default(0),
     // #147: sapwood-native (no 0day LOOP_* counterpart) — bounds the GATED RECLAIM phase

@@ -1289,17 +1289,16 @@ export class State {
    *  the engine provably applied the label; a row whose label write failed (or that predates
    *  the marker) is permanently invisible here (fail-closed, manual drive as before #147).
    *
-   *  #245 NARROWED SEMANTICS (fix-loop): once the FIXABLE gate (sibling issue #246) is wired in,
-   *  ordinary review findings (HANDLE_THREADS) no longer escalate straight to `failed`+pr at
-   *  all — they route to a `fixing` leg instead (this row's `state` briefly leaves `driving`
-   *  entirely, see WorkerState's doc and fixingWorkers()). The ONLY producer of a `failed`+pr
-   *  row left standing is the fix_rounds CAP escalation (#246: driveDecision's FIXABLE-at-cap ->
-   *  ESCALATE branch, conductor.ts) — a lane that has exhausted its rework-round budget without
-   *  a clean review. Findings no longer masquerade as `failed`; a `failed`+pr row reaching this
-   *  query means "a human's real judgment call is needed", never "the producer left work
-   *  unaddressed". (This module's own deriveGate/driveOne still fold HANDLE_THREADS to HUMAN
-   *  directly — that gate rewrite is #246's delivery, not this one's; this comment states the
-   *  end-state invariant this table's shape is designed to hold once it lands.) */
+   *  #245/#246 NARROWED SEMANTICS (fix-loop, #246 landed): with `cfg.lanes.prFixCap > 0`,
+   *  ordinary review findings (HANDLE_THREADS) and CI-red no longer escalate straight to
+   *  `failed`+pr at all — they route to a `fixing` leg instead (this row's `state` briefly
+   *  leaves `driving` entirely, see WorkerState's doc and fixingWorkers()). The ONLY producer of
+   *  a `failed`+pr row left standing (besides prFixCap === 0's byte-for-byte pre-#246 fold,
+   *  which behaves exactly as before this comment) is the fix_rounds CAP escalation
+   *  (conductor.ts's DRIVE loop: driveDecision's FIXABLE-at-cap -> ESCALATE branch) — a lane
+   *  that has exhausted its rework-round budget without a clean review. Findings no longer
+   *  masquerade as `failed`; a `failed`+pr row reaching this query means "a human's real
+   *  judgment call is needed", never "the producer left work unaddressed". */
   gatedFailedWorkers(): WorkerRow[] {
     return this.db
       .prepare(

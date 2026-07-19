@@ -729,12 +729,13 @@ test("parsePRStatus: clean mergeable PR with passing checks", () => {
       statusCheckRollup: [{ conclusion: "SUCCESS" }],
     }),
   );
-  assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true });
+  assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
 });
 
-test("parsePRStatus: an empty rollup fails closed (checks may not be created yet)", () => {
+test("parsePRStatus: an empty rollup fails closed (checks may not be created yet), and is NOT red (#246 — no checks reported is pending, not failed)", () => {
   const s = parsePRStatus(JSON.stringify({ number: 1, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] }));
   assert.equal(s.ciGreen, false); // genuinely CI-less repos opt in via ci.requireChecks (M3)
+  assert.equal(s.ciRed, false);
 });
 
 test("parsePRStatus: a queued/in-progress check (null conclusion) is not green", () => {
@@ -748,6 +749,7 @@ test("parsePRStatus: a queued/in-progress check (null conclusion) is not green",
     }),
   );
   assert.equal(s.ciGreen, false);
+  assert.equal(s.ciRed, false); // #246: pending (null conclusion), not failed — must not read as CI_RED
 });
 
 test("parsePRStatus: SKIPPED/NEUTRAL count as passing", () => {
@@ -801,11 +803,49 @@ test("parsePRStatus: a failing check is not green", () => {
   );
   assert.equal(s.ciGreen, false);
   assert.equal(s.mergeable, "CONFLICTING");
+  assert.equal(s.ciRed, true); // #246: a completed FAILURE conclusion is genuinely red
 });
 
 test("parsePRStatus: unrecognized mergeable value normalizes to UNKNOWN (queue, not escalate)", () => {
   const s = parsePRStatus(JSON.stringify({ number: 3, headRefOid: "abc", state: "OPEN", mergeable: "UNKNOWN", statusCheckRollup: [] }));
   assert.equal(s.mergeable, "UNKNOWN");
+});
+
+test("parsePRStatus (#246): TIMED_OUT/STARTUP_FAILURE/ERROR conclusions are red; CANCELLED/ACTION_REQUIRED/STALE are NOT (ambiguous, never auto-dispatch a fix leg on them)", () => {
+  const red = (conclusion: string) =>
+    parsePRStatus(
+      JSON.stringify({ number: 9, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [{ conclusion }] }),
+    ).ciRed;
+  assert.equal(red("TIMED_OUT"), true);
+  assert.equal(red("STARTUP_FAILURE"), true);
+  assert.equal(red("ERROR"), true);
+  assert.equal(red("CANCELLED"), false);
+  assert.equal(red("ACTION_REQUIRED"), false);
+  assert.equal(red("STALE"), false);
+});
+
+test("parsePRStatus (#246): legacy StatusContext FAILURE/ERROR state is red; PENDING/EXPECTED are not", () => {
+  const red = (state: string) =>
+    parsePRStatus(JSON.stringify({ number: 10, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [{ state }] }))
+      .ciRed;
+  assert.equal(red("FAILURE"), true);
+  assert.equal(red("ERROR"), true);
+  assert.equal(red("PENDING"), false);
+  assert.equal(red("EXPECTED"), false);
+});
+
+test("parsePRStatus (#246): one red check among otherwise-passing ones is still red (mixed rollup)", () => {
+  const s = parsePRStatus(
+    JSON.stringify({
+      number: 11,
+      headRefOid: "abc",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: "FAILURE" }, { conclusion: "SKIPPED" }],
+    }),
+  );
+  assert.equal(s.ciRed, true);
+  assert.equal(s.ciGreen, false);
 });
 
 // ── #13 review-gate data: parsePRReviewView / parsePRReactions / parseUnresolvedThreads ──
