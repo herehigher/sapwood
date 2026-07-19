@@ -80,6 +80,24 @@ test("requiredLabels derives fixed taxonomy names from labels.prefix", () => {
   assert.ok(bareNames.includes("needs-human"));
 });
 
+test("requiredLabels (#248 review round 1, G2): provisions the configured hold label(s) — the shipped default is otherwise unusable on a clean repo", () => {
+  const names = requiredLabels(cfg).map((l) => l.name);
+  assert.ok(names.includes("sapwood:hold"));
+
+  const custom = parseConfig(
+    "board: { owner: acme, repo: widgets, projectNumber: 7 }\nescalation: { holdLabels: [reviewing, do-not-merge] }",
+  );
+  const customNames = requiredLabels(custom).map((l) => l.name);
+  assert.ok(customNames.includes("reviewing") && customNames.includes("do-not-merge"));
+});
+
+test("requiredLabels (#248 review round 1, G2): dedupes a holdLabels entry against the rest of the taxonomy case-insensitively — never two LabelSpec rows for the same name", () => {
+  const custom = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }\nescalation: { holdLabels: [SAPWOOD:TYPE:FEATURE] }");
+  const specs = requiredLabels(custom);
+  const matches = specs.filter((l) => l.name.toLowerCase() === "sapwood:type:feature");
+  assert.equal(matches.length, 1, "a hold label colliding with an existing taxonomy name produces exactly one LabelSpec, not a duplicate");
+});
+
 test("preflight throws actionably when not logged in", async () => {
   await assert.rejects(
     () => preflight(async () => "You are not logged in to any GitHub hosts."),

@@ -69,6 +69,7 @@ test("mergeDecision (sapwood extension beyond 0day parity): REVIEW_UNAVAILABLE q
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 const HUMAN_LABELS = ["needs-human", "blocked"];
+const HOLD_LABELS = ["hold"];
 const gateInput = (over: Partial<Parameters<typeof deriveGate>[0]> = {}) => ({
   ciGreen: true,
   ciRed: false,
@@ -77,6 +78,7 @@ const gateInput = (over: Partial<Parameters<typeof deriveGate>[0]> = {}) => ({
   prState: "OPEN" as const,
   labels: [] as string[],
   humanLabels: HUMAN_LABELS,
+  holdLabels: HOLD_LABELS,
   prFixCap: 2,
   ...over,
 });
@@ -149,6 +151,75 @@ test("deriveGate: a configured human-triage label always wins, even with MERGE_O
   assert.equal(deriveGate(gateInput({ labels: ["blocked", "type:feature"] })), "HUMAN");
   assert.equal(deriveGate(gateInput({ labels: ["Needs-Human"] })), "HUMAN");
   assert.equal(mergeDecision("MERGE_OK", "Needs-Human", "OPEN", false, HUMAN_LABELS), "ESCALATE");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// #248: deriveGate — the hold (WAIT-tier) label, three-tier escalation model
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+test("deriveGate (#248): a hold label -> WAIT, even with MERGE_OK + CI green", () => {
+  assert.equal(deriveGate(gateInput({ labels: ["hold"] })), "WAIT");
+  assert.equal(deriveGate(gateInput({ labels: ["Hold", "type:feature"] })), "WAIT"); // case-insensitive, like humanLabels
+});
+
+test("deriveGate (#248): hold precedes review signals AND FIXABLE — WAIT regardless of the underlying verdict", () => {
+  assert.equal(deriveGate(gateInput({ labels: ["hold"], reviewAction: "WAIT_REVIEW" })), "WAIT");
+  assert.equal(deriveGate(gateInput({ labels: ["hold"], reviewAction: "HANDLE_THREADS" })), "WAIT"); // never FIXABLE
+  assert.equal(deriveGate(gateInput({ labels: ["hold"], ciGreen: false, ciRed: true })), "WAIT"); // never FIXABLE (CI_RED path)
+  assert.equal(deriveGate(gateInput({ labels: ["hold"], reviewAction: "REVIEW_UNAVAILABLE" })), "WAIT");
+});
+
+test("deriveGate (#248): hold + needs-human simultaneously -> HUMAN wins (escalation semantics, fail-safe)", () => {
+  assert.equal(deriveGate(gateInput({ labels: ["hold", "needs-human"] })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ labels: ["hold", "blocked"] })), "HUMAN");
+});
+
+test("deriveGate (#248): hold still yields to the prior fail-safe checks — draft/non-OPEN outrank it too", () => {
+  assert.equal(deriveGate(gateInput({ labels: ["hold"], isDraft: true })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ labels: ["hold"], prState: "CLOSED" })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ labels: ["hold"], prState: "MERGED" })), "HUMAN");
+});
+
+test("deriveGate (#248): no hold label configured (empty holdLabels) never fires WAIT-via-hold — sanity that hold is opt-in, not a hidden default", () => {
+  assert.equal(deriveGate(gateInput({ labels: ["hold"], holdLabels: [] })), "MERGE"); // "hold" text present but nothing configured to match it
+});
+
+test("deriveGate (#248 review round 1, G3 hazard 1 — substring): holdLabels matches by EXACT identity, never substring — a short/generic entry does NOT hold every label sharing that substring", () => {
+  // A single-word holdLabels entry like "sapwood" must NOT hold every sapwood:-prefixed PR —
+  // only labelsIncludeAnySubstring (humanLabels' historical semantics) would do that.
+  assert.equal(deriveGate(gateInput({ labels: ["sapwood:hold"], holdLabels: ["sapwood"] })), "MERGE");
+  // Sanity: the SAME PR label matched by its OWN full, exact name still holds.
+  assert.equal(deriveGate(gateInput({ labels: ["sapwood:hold"], holdLabels: ["sapwood:hold"] })), "WAIT");
+});
+
+test("deriveGate (#248 review round 1, G3 hazard 2 — empty entry): an empty/whitespace holdLabels entry never holds every PR — config load rejects it, but the pure function itself is safe if ever called with one directly", () => {
+  assert.equal(deriveGate(gateInput({ labels: ["type:feature"], holdLabels: [""] })), "MERGE");
+  assert.equal(deriveGate(gateInput({ labels: [], holdLabels: [""] })), "MERGE");
+});
+
+test("#248 review round 1 (G3): reviewSilenceDuration's holdLabelPresent input is exact-match at its OWN call site too (MergeDriver.driveOne) — a substring-only entry never suppresses the silence clock", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "WAIT_REVIEW", headOid: null };
+  const driver = new MergeDriver({
+    forge,
+    reviewer,
+    cfg: mkCfg({
+      reviewer: { escalateAfterSec: 60 },
+      labels: { needsHuman: "needs-human" },
+      escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood"] }, // deliberately a substring of the PR's real label below
+    }),
+    now: () => new Date("2026-07-15T00:02:00.000Z"),
+  });
+  const pin = { head: "HEAD", at: "2026-07-15T00:00:00.000Z" };
+  forge.reviewData = { ...forge.reviewData, labels: ["sapwood:hold"] }; // NOT exactly "sapwood" — must not match
+  const outcome = await driver.driveOne(7, 46, pin, noopRecord);
+  assert.deepEqual(outcome, {
+    kind: "queued",
+    pr: 7,
+    reason: "gate-pending:WAIT_REVIEW",
+    reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 }, // fires — the misconfigured substring never suppressed it
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -304,6 +375,7 @@ test("#170 reviewSilenceDuration: non-decisive age, label latch, and failover wi
     now: new Date("2026-07-15T00:00:00.000Z"),
     escalateAfterSec: 86400,
     needsHumanLabelPresent: false,
+    holdLabelPresent: false,
     fallbackConfigured: false,
     failoverAfterSec: 1200,
   };
@@ -333,6 +405,44 @@ test("#170 reviewSilenceDuration: non-decisive age, label latch, and failover wi
     }),
     1200,
   );
+});
+
+test("#248 reviewSilenceDuration: a hold label provably suppresses the silence escalation, exactly like needsHumanLabelPresent", () => {
+  const base = {
+    action: "WAIT_REVIEW" as ReviewAction,
+    triggerPin: { head: "HEAD", at: "2026-07-14T00:00:00.000Z" },
+    now: new Date("2026-07-15T00:00:00.000Z"), // 86400s silence — well past escalateAfterSec
+    escalateAfterSec: 86400,
+    needsHumanLabelPresent: false,
+    holdLabelPresent: false,
+    fallbackConfigured: false,
+    failoverAfterSec: 1200,
+  };
+  assert.equal(reviewSilenceDuration(base), 86400); // sanity: fires without a hold
+  assert.equal(reviewSilenceDuration({ ...base, holdLabelPresent: true }), null); // suppressed while held
+});
+
+test("#248 reviewSilenceDuration: clock resumes on hold removal using the SAME trigger pin (no reset, no burst — a single fresh evaluation)", () => {
+  const base = {
+    action: "WAIT_REVIEW" as ReviewAction,
+    triggerPin: { head: "HEAD", at: "2026-07-14T00:00:00.000Z" },
+    now: new Date("2026-07-15T00:00:00.000Z"),
+    escalateAfterSec: 86400,
+    needsHumanLabelPresent: false,
+    holdLabelPresent: true,
+    fallbackConfigured: false,
+    failoverAfterSec: 1200,
+  };
+  // Held: suppressed across repeated calls (pure function, no hidden accumulation of "missed"
+  // escalations — calling it 3 times while held is identical to calling it once).
+  assert.equal(reviewSilenceDuration(base), null);
+  assert.equal(reviewSilenceDuration(base), null);
+  assert.equal(reviewSilenceDuration(base), null);
+  // Removed: the NEXT call resumes off the unchanged pin — the full elapsed silence (including
+  // the time spent held) is what fires, not a re-started/zeroed count. This is the accepted,
+  // documented tick-scale race window (docs/PLAN.md's escalation-model section): a SINGLE
+  // decisive evaluation the instant the hold lifts, never a delayed or repeated one.
+  assert.equal(reviewSilenceDuration({ ...base, holdLabelPresent: false }), 86400);
 });
 
 test("#170 MergeDriver: an aged silent current-head review signals once; a fresh head resets the clock", async () => {
@@ -371,6 +481,51 @@ test("#170 MergeDriver: an aged silent current-head review signals once; a fresh
   assert.equal(fresh.kind, "queued");
   assert.equal(fresh.reviewSilenceEscalation, undefined);
   assert.deepEqual(recorded, ["FRESH", "2026-07-15T00:02:00.000Z"]);
+});
+
+test("MergeDriver.driveOne (#248): a hold label on the PR -> queued (WAIT), even with MERGE_OK + CI green — no merge, and the engine writes nothing", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["sapwood:hold"] };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "queued");
+  assert.deepEqual(forge.merged, []);
+  assert.deepEqual(forge.labelsAdded, []); // engine never writes a hold label, and never escalates one either
+});
+
+test("MergeDriver.driveOne (#248): #170 silence escalation is suppressed while a hold label stands on the PR, and resumes (single fresh evaluation) once removed", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "WAIT_REVIEW", headOid: null };
+  const driver = new MergeDriver({
+    forge,
+    reviewer,
+    cfg: mkCfg({
+      reviewer: { escalateAfterSec: 60 },
+      labels: { needsHuman: "needs-human" },
+      escalation: { humanLabels: HUMAN_LABELS, holdLabels: HOLD_LABELS },
+    }),
+    now: () => new Date("2026-07-15T00:02:00.000Z"),
+  });
+  const pin = { head: "HEAD", at: "2026-07-15T00:00:00.000Z" };
+  forge.reviewData = { ...forge.reviewData, labels: ["hold"] };
+
+  // Held: the silence clock never fires, and — because the gate itself is now WAIT-via-hold —
+  // the outcome is queued exactly like the ordinary WAIT_REVIEW path, just with no signal.
+  const held = await driver.driveOne(7, 46, pin, noopRecord);
+  assert.equal(held.kind, "queued");
+  assert.equal(held.reviewSilenceEscalation, undefined);
+
+  // Hold removed (same pin, same elapsed 120s past the 60s threshold): the very next call
+  // resumes and fires — a single fresh evaluation, not a burst of pent-up escalations.
+  forge.reviewData = { ...forge.reviewData, labels: [] };
+  const resumed = await driver.driveOne(7, 46, pin, noopRecord);
+  assert.deepEqual(resumed, {
+    kind: "queued",
+    pr: 7,
+    reason: "gate-pending:WAIT_REVIEW",
+    reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 },
+  });
 });
 
 test("MergeDriver.driveOne: gates pass (CI green + MERGE_OK) -> merges with the PINNED head oid", async () => {
