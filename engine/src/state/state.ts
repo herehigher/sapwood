@@ -973,7 +973,32 @@ export interface ContextManifestKey {
 
 /** The same (round, phase, role, session, attempt) 5-tuple ContextManifestKey/InputManifestRow
  *  use — see the schema v15->v16 migration comment for why the journal reuses it rather than
- *  inventing its own identity shape. */
+ *  inventing its own identity shape.
+ *
+ *  #253 review round 2 (Codex sol-high, H2): the SHAPE is shared, but not every mint() caller
+ *  populates it with a value that actually corresponds to a real ContextManifestKey/
+ *  InputManifestRow for the SAME session. Two production callers (proxy/mint.ts's
+ *  createProxyMint is only ever given what its caller supplies) use fixed SENTINEL values,
+ *  documented at their own construction sites:
+ *    - cli.ts's `buildTickFixLegResume` (tick-driver fix-loop mint): `roundId: 0, phase: "tick"`
+ *      — the tick driver has no round concept at all, so there is no real round to name.
+ *    - cli.ts's `runRoundsEngine` RoleRunner-wide `defaultProxy` (every peripheral role session):
+ *      `roundId: 0, phase: "peripheral"` — one RoleRunner instance is shared across the WHOLE
+ *      run's every round, so no single round id is correct for it.
+ *  Only round.ts's `buildFixLegResume` (the rounds driver's per-round fix-loop mint) supplies a
+ *  REAL `roundId` (the round actually in flight) and phase ("executing", the only phase a fix
+ *  leg is ever dispatched from).
+ *  `attempt` is ALWAYS `1` on every current caller, in every case — a fix leg's own resume
+ *  attempt is not tracked as a distinct ordinal here (proxy/mint.ts's createProxyMint doc:
+ *  harmless for journal UNIQUENESS, since `session` — a fresh name per dispatch/resume — already
+ *  disambiguates attempts; but it means `attempt` in this tuple is never a real retry ordinal for
+ *  ANY current caller, unlike ContextManifestKey.attempt).
+ *  Net effect: this tuple is a durable AUDIT/observability key for the proxy's own journal (what
+ *  was called, by which role/session, with what result) — never assume it joins cleanly onto a
+ *  real context_manifests or input_manifests row for the sentinel-identity cases above. Whether a
+ *  fix leg needs its own tracked attempt ordinal (and whether the tick-driver/RoleRunner-wide
+ *  sentinels need a real identity) is evaluated as a live-run finding (#253 item 3), not decided
+ *  here. */
 export interface ForgeProxyIdentity {
   roundId: number;
   phase: string;

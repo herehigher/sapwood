@@ -2390,21 +2390,37 @@ test("buildFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefi
   }
 });
 
-test("buildFixLegResume (#253): cfg.proxy.enabled: true but NO renderFixPrompt supplied -> undefined (round.ts's own skeleton tests/callers never touch #246's FIXABLE path)", () => {
+test("buildFixLegResume (#253): cfg.proxy.enabled: true, shadow: false, but NO renderFixPrompt supplied -> undefined (round.ts's own skeleton tests/callers never touch #246's FIXABLE path)", () => {
   const state = new State(":memory:");
   try {
-    const result = buildFixLegResume({ cfg: mkCfg({ proxy: { enabled: true } }), state }, fakeProxyForge(), 1);
+    const result = buildFixLegResume({ cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state }, fakeProxyForge(), 1);
     assert.equal(result, undefined);
   } finally {
     state.close();
   }
 });
 
-test("buildFixLegResume (#253): proxy.enabled: true + renderFixPrompt -> a real fixLegResume whose mintProxy threads the given roundId/phase='executing' into the minted session's own journal identity", async () => {
+test("buildFixLegResume (#253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> undefined even WITH renderFixPrompt supplied — shadow gates production ATTACHMENT, not per-consumer effects", () => {
+  const state = new State(":memory:");
+  try {
+    const cfg = mkCfg({ proxy: { enabled: true } }); // shadow defaults true
+    assert.equal(cfg.proxy.shadow, true);
+    const result = buildFixLegResume({ cfg, state, renderFixPrompt: (i, p) => `fix #${i} for PR #${p}` }, fakeProxyForge(), 1);
+    assert.equal(result, undefined, "shadow mode: the machinery stays mintable for a scoped harness, but never attached in production");
+  } finally {
+    state.close();
+  }
+});
+
+test("buildFixLegResume (#253): proxy.enabled: true, shadow: false (the go-live flip) + renderFixPrompt -> a real fixLegResume whose mintProxy threads the given roundId/phase='executing' into the minted session's own journal identity", async () => {
   const state = new State(":memory:");
   try {
     const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
-    const result = buildFixLegResume({ cfg: mkCfg({ proxy: { enabled: true } }), state, renderFixPrompt }, fakeProxyForge(), 42);
+    const result = buildFixLegResume(
+      { cfg: mkCfg({ proxy: { enabled: true, shadow: false } }), state, renderFixPrompt },
+      fakeProxyForge(),
+      42,
+    );
     assert.ok(result, "expected a real fixLegResume");
     assert.equal(result.renderFixPrompt(7, 9), "fix #7 for PR #9");
     const handle = await result.mintProxy({ role: "worker", session: "lane-99-abc" });
@@ -2447,7 +2463,7 @@ class CapturingResumeSupervisor extends FakeSupervisor {
   }
 }
 
-test("runRounds (#253): cfg.proxy.enabled: true wires a REAL fixLegResume into the executing phase — a FIXABLE gate dispatches a fix leg whose supervisor.resume() carries a working proxy mint", async () => {
+test("runRounds (#253): cfg.proxy.enabled: true, shadow: false (the go-live flip) wires a REAL fixLegResume into the executing phase — a FIXABLE gate dispatches a fix leg whose supervisor.resume() carries a working proxy mint", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
   forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
@@ -2468,7 +2484,7 @@ test("runRounds (#253): cfg.proxy.enabled: true wires a REAL fixLegResume into t
     // dispatch (#246 review round 1, C2's own admission-gate contract). A cap of 1 here would
     // wedge every FIXUP attempt on "fix-leg-admission-blocked:paused" forever — not a #253 bug,
     // just the wrong fixture for THIS test's own question (proving resume() gets a real proxy).
-    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 10 }, proxy: { enabled: true } }),
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 10 }, proxy: { enabled: true, shadow: false } }),
     renderFixPrompt,
     peripherals: allPeripherals(log),
   });
@@ -2491,6 +2507,40 @@ test("runRounds (#253): cfg.proxy.enabled: true wires a REAL fixLegResume into t
     await handle.stop();
   }
   deps.state.close();
+});
+
+test("runRounds (#253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> fixLegResume is NEVER attached — a FIXABLE gate degrades EXACTLY like the fully-disabled case, never dispatching a fix leg", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new CapturingResumeSupervisor();
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
+  const gate = new ScriptedMergeGate([{ kind: "fixable", pr: 1, reason: "ci-red" }]);
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
+  const cfg = mkCfg({ lanes: { max: 1, roundDispatchCap: 10 }, proxy: { enabled: true } });
+  assert.equal(cfg.proxy.shadow, true, "shadow defaults true once enabled");
+  const deps = baseDeps({
+    forge,
+    state,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
+    cfg,
+    renderFixPrompt, // supplied, same as a real cli.ts caller would — proves shadow alone blocks attachment
+    peripherals: allPeripherals(log),
+  });
+  const stopSafety = boundedStopOnPhase(deps, 20);
+  await runRounds(deps);
+  stopSafety();
+  assert.equal(sup.resumeCalls.length, 0, "shadow mode: no fix leg was ever dispatched, even with renderFixPrompt supplied");
+  assert.ok(
+    events.some(([kind]) => kind === "fix-leg-dispatch-unconfigured"),
+    "degrades identically to proxy.enabled: false — the shadow guarantee is structural (no attachment), not a suppressed effect",
+  );
+  state.close();
 });
 
 test("runRounds (#253): cfg.proxy.enabled: false (the default) -> no fixLegResume is ever built — a FIXABLE gate still degrades to the pre-#246 needs-human escalation exactly as before, unchanged", async () => {

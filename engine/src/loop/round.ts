@@ -107,34 +107,59 @@ export interface RoundDeps {
   /** #253: pure renderFixPrompt for a FIXABLE gate's fix-loop continuation — worker.ts's
    *  buildRenderFixPrompt(cfg) output, cli.ts's real caller always supplies it (already eagerly
    *  validated at startup, same as renderPrompt/probeLlmReachable above). Paired with
-   *  cfg.proxy.enabled, NOT a separate on/off of its own: buildFixLegResume below only builds a
-   *  real TickDeps.fixLegResume when BOTH this field is set AND cfg.proxy.enabled is true; with
-   *  proxy.enabled false (the default) a FIXABLE gate still degrades to the pre-#246 needs-human
-   *  escalation exactly as before (#246 C1), unchanged. Omitted -> round.ts's own skeleton tests
-   *  (which never exercise #246's FIXABLE path) keep compiling and behaving identically. */
+   *  `cfg.proxy.enabled && !cfg.proxy.shadow` — buildFixLegResume below only builds a real
+   *  TickDeps.fixLegResume in that exact state (see its own doc for the full three-state
+   *  rationale); with `proxy.enabled: false` OR `shadow: true` (the default once enabled) a
+   *  FIXABLE gate still degrades to the pre-#246 needs-human escalation exactly as before (#246
+   *  C1), unchanged. Omitted -> round.ts's own skeleton tests (which never exercise #246's
+   *  FIXABLE path) keep compiling and behaving identically. */
   renderFixPrompt?: (issueNumber: number, pr: number) => string;
 }
 
 /** #253: builds this round's TickDeps.fixLegResume — the fix-loop worker leg's
- *  renderFixPrompt+mintProxy pair (conductor.ts's FixLegResumeDeps) — or `undefined` when the
- *  proxy is off (cfg.proxy.enabled: false, the default) or no renderFixPrompt was supplied
- *  (RoundDeps.renderFixPrompt's own doc). `forge` is the round's own (possibly milestone/pool-
- *  scoped) forge — #234/#244's own doc establishes the proxy's read surface has no round/pool
- *  scoping concept of its own (RoundScopedForge/PoolScopedForge both plain-passthrough every
- *  proxy-tool method), so this is behaviorally identical to the raw forge either way. `roundId`
- *  becomes this mint's fixed audit identity for every session it mints this round (proxy/
- *  mint.test.ts's own journal-identity contract); `phase` is fixed to "executing" — the ONLY
- *  phase a fix leg is ever dispatched from (conductor.ts's DRIVE section, itself only reached
- *  from the executing-phase's own tick() calls). Exported for direct testing: the full FIXABLE
- *  -> startFixLeg -> resume() path needs a scripted MergeGate + supervisor to exercise
- *  end-to-end (round.test.ts's own integration test), but this construction/gating logic is
- *  unit-testable on its own without any of that. */
+ *  renderFixPrompt+mintProxy pair (conductor.ts's FixLegResumeDeps) — or `undefined` when no
+ *  renderFixPrompt was supplied (RoundDeps.renderFixPrompt's own doc) or the proxy isn't in its
+ *  PRODUCTION-ATTACH state.
+ *
+ *  #253 review round 2 (Codex sol-high, H1 — PM-narrowed three-state ruling): `cfg.proxy.shadow`
+ *  gates PRODUCTION ATTACHMENT here, not per-consumer effect-suppression (building effect-
+ *  suppression into every forge write this fix leg's output could reach — updateIssueBody,
+ *  addLabel, commits — would be over-machinery for a transitional validation mode).
+ *    1. `enabled: false` (default): this always returns `undefined`. Unchanged.
+ *    2. `enabled: true, shadow: true` (the default once enabled): STILL returns `undefined` — NO
+ *       fix leg in a live `sapwood run` ever gets a real mint. The machinery stays constructible
+ *       (this function, `createProxyMint` directly) for a scoped harness — that's how the
+ *       owner's live shadow bring-up (#253 item 2/3) exercises it — but no production session
+ *       holds a handle, so no fix leg's forge writes can be proxy-informed. Structural, not a
+ *       per-call check.
+ *    3. `enabled: true, shadow: false`: the deliberate go-live flip — returns a real, mintable
+ *       fixLegResume, exactly as this function did before this ruling.
+ *  A FIXABLE gate degrades to the pre-#246 needs-human escalation (#246 C1) in states 1 AND 2.
+ *
+ *  `forge` is the round's own (possibly milestone/pool-scoped) forge — #234/#244's own doc
+ *  establishes the proxy's read surface has no round/pool scoping concept of its own
+ *  (RoundScopedForge/PoolScopedForge both plain-passthrough every proxy-tool method), so this is
+ *  behaviorally identical to the raw forge either way. `roundId` becomes this mint's fixed audit
+ *  identity for every session it mints this round (proxy/mint.test.ts's own journal-identity
+ *  contract) — a REAL round id, unlike the tick driver's/RoleRunner-wide default's sentinel ones
+ *  (see buildTickFixLegResume's own doc); `phase` is fixed to "executing" — the ONLY phase a fix
+ *  leg is ever dispatched from (conductor.ts's DRIVE section, itself only reached from the
+ *  executing-phase's own tick() calls). A fix leg's own resume attempt is not separately tracked
+ *  here either (always `attempt: 1`, same sentinel-attempt stance as the tick driver) — true
+ *  per-attempt identity is live-run territory (#253 item 3), not plumbed in this PR.
+ *
+ *  Observable guarantee in states 1/2 (#253 review round 2, H4): no handle, no listener, no
+ *  bearer token, no journal write, no ProxyForge call, no argv change on any production fix leg.
+ *
+ *  Exported for direct testing: the full FIXABLE -> startFixLeg -> resume() path needs a
+ *  scripted MergeGate + supervisor to exercise end-to-end (round.test.ts's own integration
+ *  test), but this construction/gating logic is unit-testable on its own without any of that. */
 export function buildFixLegResume(
   deps: Pick<RoundDeps, "cfg" | "state" | "renderFixPrompt" | "now" | "log">,
   forge: ProxyForge,
   roundId: number,
 ): FixLegResumeDeps | undefined {
-  if (!deps.cfg.proxy.enabled || !deps.renderFixPrompt) return undefined;
+  if (!deps.cfg.proxy.enabled || deps.cfg.proxy.shadow || !deps.renderFixPrompt) return undefined;
   return {
     renderFixPrompt: deps.renderFixPrompt,
     mintProxy: createProxyMint({
@@ -759,9 +784,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
     ...(over.roundSpendUsd !== undefined ? { roundSpendUsd: over.roundSpendUsd } : {}),
     ...(over.dispatchCapOverride !== undefined ? { dispatchCapOverride: over.dispatchCapOverride } : {}),
-    // #253: this round's fix-loop mint (buildFixLegResume, gated on cfg.proxy.enabled +
-    // RoundDeps.renderFixPrompt) — see runExecuting's own construction site for the roundId/
-    // phase audit identity this carries.
+    // #253: this round's fix-loop mint (buildFixLegResume, gated on `cfg.proxy.enabled &&
+    // !cfg.proxy.shadow` + RoundDeps.renderFixPrompt) — see runExecuting's own construction site
+    // for the roundId/phase audit identity this carries.
     ...(over.fixLegResume !== undefined ? { fixLegResume: over.fixLegResume } : {}),
     // #154 (Codex P1, PR #160): the run-level spend stop must freeze a tick's OWN refill the
     // moment its reclaim phase banks the crossing spend — thunk evaluated inside tick(),
@@ -847,10 +872,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     let stopHit: RoundStopHit | undefined;
     // #253: this round's fix-loop mint, built ONCE per round (not per tick) — roundId is fixed
     // for the round's whole executing phase, so there is no reason to re-derive it on every
-    // wave/drain tick below. `undefined` (cfg.proxy.enabled: false, the default, or no
-    // RoundDeps.renderFixPrompt supplied) means TickDeps.fixLegResume stays entirely unset,
-    // exactly as before this issue — a FIXABLE gate still degrades to the pre-#246 needs-human
-    // escalation (#246 C1), unchanged.
+    // wave/drain tick below. `undefined` (cfg.proxy.enabled: false, OR shadow: true — the default
+    // once enabled, OR no RoundDeps.renderFixPrompt supplied) means TickDeps.fixLegResume stays
+    // entirely unset, exactly as before this issue — a FIXABLE gate still degrades to the
+    // pre-#246 needs-human escalation (#246 C1), unchanged. See buildFixLegResume's own doc for
+    // the three-state shadow-vs-attach ruling (#253 review round 2, H1).
     const fixLegResume = buildFixLegResume(deps, dispatchForge, round.round_id);
     const dispatchedNames: string[] = [];
     const inheritedActiveWorkers = freshBatch ? [] : deps.state.activeWorkers();

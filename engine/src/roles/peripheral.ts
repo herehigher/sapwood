@@ -235,8 +235,16 @@ export interface RoleRunnerDeps {
    *  engine's real startup wiring (cli.ts) supplies ONE mint HERE, shared across every
    *  peripheral phase/round this RoleRunner instance ever runs. A per-call `opts.proxy` still
    *  WINS when a caller supplies one (see run()'s `proxyOpt` fallback below) — this is a
-   *  fallback, never a silent override. Omitted (cfg.proxy.enabled: false, the default) ->
-   *  today's behavior, unchanged: no session anywhere gets a proxy attached. */
+   *  fallback, never a silent override.
+   *
+   *  cli.ts only ever CONSTRUCTS this field (and passes it here) in the proxy's production-
+   *  attach state — `cfg.proxy.enabled: true, shadow: false` (#253 review round 2, H1's
+   *  three-state ruling: `enabled: false` never constructs one; `enabled: true, shadow: true`,
+   *  the default once enabled, ALSO never constructs one — the machinery stays mintable for a
+   *  scoped harness, but no production session holds a handle). peripheral.ts itself has no
+   *  opinion on `shadow` at all — this field is simply present or absent, the same "omitted =
+   *  today's behavior, unchanged: no session anywhere gets a proxy attached" contract regardless
+   *  of WHY the caller omitted it. */
   defaultProxy?: RoleSessionOpts["proxy"];
 }
 

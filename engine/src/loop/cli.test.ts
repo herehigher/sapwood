@@ -1270,7 +1270,7 @@ function fakeProxyForgeForCli(): ProxyForge {
   };
 }
 
-test("buildTickFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefined — byte-for-byte today's behavior (fixLegResume stays entirely unset)", () => {
+test("buildTickFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefined — fixLegResume stays entirely unset (no handle, no listener, no journal write, no argv change)", () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" } });
   const state = new State(":memory:");
   try {
@@ -1282,10 +1282,27 @@ test("buildTickFixLegResume (#253): cfg.proxy.enabled: false (the default) -> un
   }
 });
 
-test("buildTickFixLegResume (#253): cfg.proxy.enabled: true -> a real fixLegResume whose mintProxy carries round 0 / phase 'tick' as its fixed audit identity", async () => {
+test("buildTickFixLegResume (#253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> undefined — shadow gates production ATTACHMENT, never a per-consumer effect", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" }, proxy: { enabled: true } });
+  assert.equal(cfg.proxy.shadow, true);
+  const state = new State(":memory:");
+  try {
+    const forge = fakeProxyForgeForCli() as unknown as IForge;
+    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`);
+    assert.equal(
+      result,
+      undefined,
+      "shadow mode: the tick driver never attaches a fixLegResume, even though the machinery stays mintable directly",
+    );
+  } finally {
+    state.close();
+  }
+});
+
+test("buildTickFixLegResume (#253): cfg.proxy.enabled: true, shadow: false (the go-live flip) -> a real fixLegResume whose mintProxy carries round 0 / phase 'tick' as its fixed audit identity", async () => {
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" },
-    proxy: { enabled: true },
+    proxy: { enabled: true, shadow: false },
   });
   const state = new State(":memory:");
   try {

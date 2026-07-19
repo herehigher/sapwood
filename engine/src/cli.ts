@@ -793,14 +793,36 @@ function findOpenPrForIssue(forge: IForge, issue: number): Promise<number | null
 }
 
 /** #253: builds the tick-driver's TickDeps.fixLegResume — round 0 / phase "tick" is this
- *  driver's fixed audit identity for the proxy's own journal rows (every session `mintProxy`
- *  mints this run carries this identity — proxy/mint.test.ts's own journal-identity contract),
- *  never a real round: the tick driver (#106's explicit escape hatch, driver.ts's runDriver) has
- *  no round concept at all, unlike the round orchestrator's own per-round audit identity
- *  (round.ts's buildFixLegResume, threaded through RoundDeps.renderFixPrompt instead). Returns
- *  `undefined` when cfg.proxy.enabled is false (the default) — TickDeps.fixLegResume then stays
- *  entirely unset, byte-for-byte today's behavior: a FIXABLE gate degrades to the pre-#246
- *  needs-human escalation (#246 C1), unchanged. Exported for direct testing. */
+ *  driver's fixed SENTINEL audit identity (never a real round: the tick driver, #106's explicit
+ *  escape hatch, has no round concept at all) for the proxy's own journal rows. This identity is
+ *  informational only — it does NOT double as the (round, phase, attempt) tuple #231's context-
+ *  manifest schema uses for a REAL role/worker session (a fix-leg's own resume attempt isn't
+ *  separately tracked here either, always `attempt: 1` — see proxy/mint.ts's createProxyMint doc
+ *  for why that's harmless for journal uniqueness). Evaluating whether a fix leg needs its own
+ *  tracked attempt ordinal is live-run territory (#253 item 3), not plumbed here.
+ *
+ *  #253 review round 2 (Codex sol-high, H1 — PM-narrowed three-state ruling): `shadow` gates
+ *  PRODUCTION ATTACHMENT, not per-consumer effect-suppression.
+ *    1. `enabled: false` (default): nothing constructed. Unchanged.
+ *    2. `enabled: true, shadow: true` (the default once enabled): this function still returns
+ *       `undefined` — NO production attachment. The proxy machinery stays constructible/mintable
+ *       (this function, `createProxyMint`, round.ts's `buildFixLegResume` are all still callable
+ *       directly by a scoped harness — that's how the owner's live shadow bring-up run (#253
+ *       item 2/3) exercises it) but no LIVE `sapwood run` session ever holds a handle, so no
+ *       session's output can be proxy-informed. The shadow guarantee is structural, not a
+ *       per-call effect check.
+ *    3. `enabled: true, shadow: false`: full production attachment — the deliberate go-live flip,
+ *       taken only after the shadow bring-up validates the proxy.
+ *  A FIXABLE gate degrades to the pre-#246 needs-human escalation (#246 C1) in states 1 AND 2,
+ *  unchanged from before this issue — only state 3 makes FIXUP dispatch itself live.
+ *
+ *  Observable guarantee in states 1/2 (#253 review round 2, H4 — narrowed from an overreaching
+ *  "byte-for-byte" claim): no proxy handle, no HTTP listener, no bearer token, no forge_proxy_
+ *  journal write, no ProxyForge call, no argv change (`--mcp-config`/widened `--allowedTools`) on
+ *  ANY production session. The module graph still loads and this function still runs (returning
+ *  `undefined`) — that in-memory branch evaluation is not itself an observable effect.
+ *
+ *  Exported for direct testing. */
 export function buildTickFixLegResume(
   cfg: SapwoodConfig,
   forge: IForge,
@@ -808,7 +830,7 @@ export function buildTickFixLegResume(
   renderFixPrompt: (issueNumber: number, pr: number) => string,
   log?: (message: string) => void,
 ): FixLegResumeDeps | undefined {
-  if (!cfg.proxy.enabled) return undefined;
+  if (!cfg.proxy.enabled || cfg.proxy.shadow) return undefined;
   return {
     renderFixPrompt,
     mintProxy: createProxyMint({ cfg, forge, state, roundId: 0, phase: "tick", ...(log !== undefined ? { log } : {}) }),
@@ -836,8 +858,10 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);
-  // #253: the tick driver's TickDeps.fixLegResume — undefined (byte-for-byte today's behavior)
-  // when cfg.proxy.enabled is false, the default. See buildTickFixLegResume's own doc.
+  // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
+  // write/argv change on any production session — see buildTickFixLegResume's own doc for the
+  // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
+  // true, shadow: false).
   const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, log);
   const reviewer = makeReviewer(cfg);
   // #54: the ordered reviewer-failover chain (cfg.reviewer.fallback) — empty by default, in
@@ -955,14 +979,23 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   });
   // #253: a default forge MCP proxy mint, shared by every peripheral role session this
   // RoleRunner instance ever runs across the whole `sapwood run` (round 0 / phase "peripheral"
-  // is its own fixed audit identity — peripheral role sessions have no single round at
-  // RoleRunner-construction time, unlike the round-scoped fix-loop mint below, which is built
-  // fresh per round). A per-session RoleSessionOpts.proxy (none of round-defaults.ts's stubs
-  // supply one today) would still win — see peripheral.ts's RoleRunnerDeps.defaultProxy doc.
-  // Undefined (cfg.proxy.enabled: false, the default) -> today's behavior, unchanged.
-  const defaultProxy = cfg.proxy.enabled
-    ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", log }) }
-    : undefined;
+  // is its own fixed SENTINEL audit identity, informational only — see buildTickFixLegResume's
+  // own doc for why this never claims a real (round, phase, attempt) tuple; peripheral role
+  // sessions have no single round at RoleRunner-construction time, unlike the round-scoped
+  // fix-loop mint below, which is built fresh per round). A per-session RoleSessionOpts.proxy
+  // (none of round-defaults.ts's stubs supply one today) would still win — see peripheral.ts's
+  // RoleRunnerDeps.defaultProxy doc.
+  //
+  // #253 review round 2 (H1, PM-narrowed three-state ruling — see buildTickFixLegResume's own
+  // doc for the full rationale): `enabled && !shadow` gates PRODUCTION ATTACHMENT here too — with
+  // `shadow: true` (the default once enabled), NO RoleRunner ever gets a defaultProxy, so no
+  // peripheral session anywhere holds a handle; the shadow guarantee is structural rather than a
+  // per-consumer effect check. Only `enabled: true, shadow: false` (the deliberate go-live flip)
+  // constructs one. `enabled: false` (the default): unchanged, today's behavior.
+  const defaultProxy =
+    cfg.proxy.enabled && !cfg.proxy.shadow
+      ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", log }) }
+      : undefined;
   const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, ...(defaultProxy !== undefined ? { defaultProxy } : {}) });
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, log });
   const stop = resolveStopConfig(argv, cfg);

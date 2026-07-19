@@ -372,9 +372,13 @@ reviewer:
 #                              # "Exceeded USD budget" and keeps the engine parked.
 
 # #234/#244: engine-hosted, read-only forge MCP proxy for role sessions and worker legs
-# (supersedes #217). Ships OFF (enabled: false) and, once enabled, shadow-mode-first (shadow:
-# true — calls + journals are fully live, but no consumer may act on a session's output; no
-# shipped caller attaches a proxy in this repo's own dispatch path yet, see #234's scope ruling).
+# (supersedes #217). #253: engine startup now reads BOTH flags as a three-state model —
+# enabled: false is fully inert; enabled: true, shadow: true (default once enabled) makes the
+# proxy constructible/mintable for a scoped shadow bring-up run, but ATTACHES it to zero
+# production sessions (no live fix-loop worker leg, no peripheral role session ever gets a
+# handle — the shadow guarantee is structural, not a per-call effect check); enabled: true,
+# shadow: false is the deliberate go-live flip that attaches a real handle everywhere. Ordinary
+# (non-fix-loop) worker dispatch remains unwired regardless of shadow (out of #253's scope).
 # Credentials never leave the engine process: a session gets a role-scoped subset of a fixed tool
 # set over a bearer-token-authenticated local HTTP server, minted per session, revoked at
 # teardown — issue-oriented tools (issue_details/issue_comments/issue_relations/search_issues,
