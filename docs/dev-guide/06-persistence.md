@@ -1,6 +1,61 @@
 # 06 — Persistence layer (SQLite)
 
-This describes the final schema after every migration in `engine/src/state/state.ts`; it is not migration history. It is a maintainer deep dive: read it before changing state, recovery, or accounting code — a contributor whose change doesn't touch durable state only needs the crash-consistency rules at the end.
+This describes the final schema after every migration in `engine/src/state/state.ts`; it is not migration history. It is a maintainer deep dive: read it before changing state, recovery, or accounting code — a contributor whose change doesn't touch durable state only needs the principles below and the crash-consistency rules at the end.
+
+## Principles & boundary — what belongs in SQLite
+
+sapwood has three sources of truth, partitioned by what kind of fact it is:
+
+- **GitHub** — the truth about *project progress* (board status, labels, issues,
+  PRs). The work queue lives there; SQLite never becomes a parallel task
+  database.
+- **SQLite** — the truth about *the engine's own actions*: what it dispatched,
+  observed, decided, and spent, so it can recover, be audited, and never repeat
+  an external write.
+- **Repository docs** — the truth about *durable knowledge*: goals, decisions,
+  designs, and usage (what is true now, including designed-but-unbuilt).
+
+SQLite may hold a *cursor or reconciled view* of another source's facts (board
+rollback intents, review-trigger pins), never a competing authority.
+
+**Admission test** — a fact goes into SQLite only if the engine needs it to:
+
+1. **Recover** — survive a restart and continue correctly (lane lifecycle,
+   round phase cursors, resume/re-entry counters). If losing the row loses
+   only convenience, it is a cache: nullable and explicitly non-authoritative
+   (the `workers` telemetry columns).
+2. **Audit** — prove what it did (`events`, `spend_ledger`, the proxy
+   journal). These are append-only and never updated.
+3. **Guarantee exactly-once external writes** — write-ahead intent plus an
+   idempotency key (`pending_rollbacks`, `pending_thread_writes`, bundle
+   hashes).
+
+**Exclusion boundary — the medium is decided by ownership, not by shape.**
+Whoever owns a fact determines where it lives:
+
+- **Humans own the controls** → files (`data/KILL_SWITCH`, `data/PAUSE`):
+  operable with `touch`/`rm`, readable with `ls`, and available even when the
+  database is locked or corrupt.
+- **The wrapper owns session evidence** → sentinel files
+  (`.running`/`.done`/`.failed`/`.handoff`) and the heartbeat: the wrapper
+  must be able to record how a session ended even when the engine is dead,
+  and the evidence must survive an engine/database failure independently.
+  Startup reconciliation reads files and corrects database rows — file →
+  database, never the reverse. Absorbing sentinels into SQLite would merge
+  the two failure domains, break the single-writer model (the conductor is
+  the only writer), and hand worker-side processes a write path into engine
+  state — three losses for one storage-inventory "simplification".
+- **The engine owns its own records** → SQLite rows, including the
+  engine-owned singletons (`engine_session`, `ceiling_breach`, `park_state`)
+  that are shaped like flags but written and read only by the engine.
+- **Large streams** (session JSONL, proxy bundle bodies) → files; the
+  database stores an index, pointer, or content hash.
+- **Secrets** (proxy bearer tokens, forge credentials) → nowhere durable;
+  process memory only.
+
+When reviewing a change that adds persistence, apply the admission test and
+the ownership rule before reading further; a new table or file that fails
+them is a design smell regardless of how convenient it is.
 
 ## Engine choice & files
 
