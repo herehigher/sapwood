@@ -325,6 +325,33 @@ export interface IForge {
    *  read — a monorepo PR can carry far more than a handful of check runs). `total` is the
    *  sub-connection's own `totalCount` — the proxy's `pr_checks` tool. */
   getPRChecks(pr: number, cap: number): Promise<PRChecksPage>;
+  /** #247: post a reply comment on ONE review thread (GraphQL `addPullRequestReviewThreadReply`,
+   *  `threadId` a `PullRequestReviewThread` node id — the SAME opaque id `getPRReviewThreads`'
+   *  `ReviewThreadItem.id` already carries). The fix-loop's ONLY write path for a fix leg's
+   *  reply — the leg itself never calls this; the ENGINE calls it from validated structured
+   *  output (issue #247's paradigm: producer never touches the forge, #218). Never mutates
+   *  thread resolution — see resolveReviewThread for that, a deliberately separate call so a
+   *  `disputed` entry can reply without ever resolving. */
+  replyToReviewThread(threadId: string, body: string): Promise<void>;
+  /** #247: mark ONE review thread resolved (GraphQL `resolveReviewThread`). Bookkeeping /
+   *  courtesy-to-reviewer only — issue #247's Why: "gate integrity does NOT rest on thread
+   *  state... the fresh review is the gate", so resolving every thread on a PR can never by
+   *  itself flip the merge verdict (unresolvedThreads is re-derived live from GitHub on every
+   *  gate② read, via countUnresolvedThreads — this call changes what that NEXT read sees, it
+   *  does not touch any cached/decided verdict). Called ONLY for an `addressed` structured-output
+   *  entry — never for `disputed` (that thread stays open on purpose, routed to human
+   *  adjudication if the fix-loop's round cap is reached, sibling issue #246). */
+  resolveReviewThread(threadId: string): Promise<void>;
+  /** #247 F2(b) (Codex sol-high PR #265 review round 2, P1): a review thread's OWN newest `cap`
+   *  comment bodies (GraphQL `last:`, not `first:`) — fix-response.ts's reply-idempotency marker
+   *  check (D3) needs to see the reply it JUST posted, which is by definition the newest comment
+   *  on the thread; `getPRReviewThreads`' own `first: cap` default-view read exists for a
+   *  different reason (issue #244's completeness contract keeps the OLDEST comments as read
+   *  context) and would hide the marker behind a long thread. Deliberately its own read, scoped
+   *  to ONE thread by its opaque node id (no PR/owner/repo variable — same out-of-repo-scope-by-
+   *  construction shape reply/resolve already have) rather than a param bolted onto the existing
+   *  read. */
+  getReviewThreadCommentsTail(threadId: string, cap: number): Promise<string[]>;
 }
 
 /** #234: one issue's core metadata — see IForge.getIssueMeta's doc. */
@@ -1030,9 +1057,100 @@ export class GithubForge implements IForge {
     return parsePRChecksPage(out);
   }
 
+  /** #247: reply to a review thread — see IForge.replyToReviewThread's doc. `threadId` is an
+   *  opaque GraphQL node id (never owner/repo/pr-addressable), so this mutation carries no
+   *  `owner`/`repo`/`number` variable at all — the SAME out-of-repo-scope-by-construction shape
+   *  the proxy's own tool schemas rely on (no field exists to redirect scope through). */
+  async replyToReviewThread(threadId: string, body: string): Promise<void> {
+    await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${ADD_REVIEW_THREAD_REPLY_MUTATION}`,
+      "-f",
+      `threadId=${threadId}`,
+      "-f",
+      `body=${body}`,
+    ]);
+  }
+
+  /** #247: resolve a review thread — see IForge.resolveReviewThread's doc. */
+  async resolveReviewThread(threadId: string): Promise<void> {
+    await this.gh(["api", "graphql", "-f", `query=${RESOLVE_REVIEW_THREAD_MUTATION}`, "-f", `threadId=${threadId}`]);
+  }
+
+  /** #247 F2(b): the newest `cap` comment bodies on ONE review thread — see
+   *  IForge.getReviewThreadCommentsTail's doc for why this exists as its own read. */
+  async getReviewThreadCommentsTail(threadId: string, cap: number): Promise<string[]> {
+    const out = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${REVIEW_THREAD_COMMENTS_TAIL_QUERY}`,
+      "-f",
+      `threadId=${threadId}`,
+      "-F",
+      `cap=${cap}`,
+    ]);
+    return parseReviewThreadCommentsTail(out);
+  }
+
   private repo(): string {
     return this.cfg.board.repo;
   }
+}
+
+/** #247: `addPullRequestReviewThreadReply` — posts ONE reply comment on an existing review
+ *  thread (distinct from a fresh top-level review; this attaches to the thread's own comment
+ *  chain, the same UI surface a human's "Reply" button posts to). See
+ *  IForge.replyToReviewThread's doc for the write-boundary rationale. */
+export const ADD_REVIEW_THREAD_REPLY_MUTATION = `
+mutation($threadId: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
+    comment { id }
+  }
+}`;
+
+/** #247: `resolveReviewThread` — marks a thread resolved. See IForge.resolveReviewThread's doc
+ *  for why this can never by itself flip a merge verdict. */
+export const RESOLVE_REVIEW_THREAD_MUTATION = `
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}`;
+
+/** #247 F2(b) (Codex sol-high PR #265 review round 2, P1): a review thread's OWN newest `cap`
+ *  comments, via GraphQL's `node(id:)` root field (a review thread id is a globally-addressable
+ *  node — no PR/owner/repo variable needed at all, same out-of-repo-scope-by-construction shape
+ *  ADD_REVIEW_THREAD_REPLY_MUTATION/RESOLVE_REVIEW_THREAD_MUTATION already have). `last: $cap`
+ *  (not `first:`) is the point: fix-response.ts's crash-safety marker check needs to see the
+ *  reply it JUST posted, which is by definition the NEWEST comment on the thread — the proxy's
+ *  own `pr_review_threads` tool fetches `first: cap` for an unrelated reason (issue #244's
+ *  default-view completeness contract keeps the OLDEST comments as read context), so it cannot
+ *  be reused here without risking exactly the marker-hidden-behind-a-long-thread failure this
+ *  query exists to avoid. */
+export const REVIEW_THREAD_COMMENTS_TAIL_QUERY = `
+query($threadId: ID!, $cap: Int!) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(last: $cap) {
+        nodes { body }
+      }
+    }
+  }
+}`;
+
+/** Parses REVIEW_THREAD_COMMENTS_TAIL_QUERY's response into a plain array of comment bodies,
+ *  oldest-of-the-tail-first (GraphQL's own connection order) — malformed/absent shape (a stale
+ *  threadId that no longer resolves to a PullRequestReviewThread, say) degrades to an empty
+ *  array rather than throwing; the caller (replyAlreadyPosted) treats "no comments visible" the
+ *  same as "marker not found", which is the correct, fail-toward-safe reading either way (a
+ *  vanished thread can't have posted-then-lost a reply the code just tried to post). */
+export function parseReviewThreadCommentsTail(json: string): string[] {
+  const d = JSON.parse(json) as { data?: { node?: { comments?: { nodes?: { body?: string }[] } } } };
+  const nodes = d.data?.node?.comments?.nodes ?? [];
+  return nodes.map((n) => n.body ?? "");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

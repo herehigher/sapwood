@@ -15,6 +15,7 @@ import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer } from "../roles/reviewer.js";
 import { WorkerSupervisor } from "../roles/worker.js";
 import { State, type WorkerRow } from "../state/state.js";
+import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import {
   budgetExceeded,
   capHitEscalationNote,
@@ -188,6 +189,44 @@ class FakeForge implements IForge {
   }
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     return [];
+  }
+  // #247: fix-leg thread-response writes — recorded for tests to assert the exact call
+  // sequence (fix-response.ts's attemptThreadWrite).
+  threadReplies: Array<[string, string]> = [];
+  threadResolves: string[] = [];
+  /** #247 D5: simulates a transient forge failure on the reply half so a pending row survives
+   *  a FIX RESPONSE RETRY attempt — proves DRIVE skips a lane that STILL has a pending write. */
+  throwOnReplyToReviewThread = false;
+  async replyToReviewThread(threadId: string, body: string): Promise<void> {
+    if (this.throwOnReplyToReviewThread) throw new Error("simulated forge failure");
+    this.threadReplies.push([threadId, body]);
+  }
+  async resolveReviewThread(threadId: string): Promise<void> {
+    this.threadResolves.push(threadId);
+    this.prReviewData = { ...this.prReviewData, unresolvedThreads: Math.max(0, this.prReviewData.unresolvedThreads - 1) };
+  }
+  /** #247 D3/F2(b): attemptThreadWrite's crash-safety marker check reads this back before every
+   *  reply-post attempt — simulate GitHub's own live state from every reply already recorded
+   *  above (single global bucket by threadId). */
+  async getReviewThreadCommentsTail(threadId: string, cap: number): Promise<string[]> {
+    return this.threadReplies
+      .filter(([tid]) => tid === threadId)
+      .map(([, body]) => body)
+      .slice(-cap);
+  }
+  async getPRReviewThreads(_pr: number, _commentsCap: number) {
+    const byThread: Record<string, string[]> = {};
+    for (const [tid, body] of this.threadReplies) {
+      byThread[tid] ??= [];
+      byThread[tid].push(body);
+    }
+    const threads = Object.entries(byThread).map(([id, bodies]) => ({
+      id,
+      isResolved: false,
+      commentsComplete: true,
+      comments: bodies.map((body) => ({ author: "worker", body, createdAt: "t" })),
+    }));
+    return { threads, pageCapped: false };
   }
 }
 
@@ -4558,6 +4597,216 @@ test("tick FIXING RECLAIM: a fixing lane reaching DONE+PR (pushed a fix) lands b
   assert.equal(row.review_triggered_at, null);
   assert.equal(r.fixingReclaimed.length, 1);
   assert.equal(r.fixingReclaimed[0]!.kind, "done");
+  st.close();
+});
+
+// #247: structured review-thread responses harvested from a fixing lane's terminal DONE
+// reclaim, enqueued to the durable pending_thread_writes queue, and executed (idempotently)
+// by the SAME tick's FIX RESPONSE RETRY phase.
+const sapwoodResult = (metadata: Record<string, unknown>): string =>
+  `${RESULT_BLOCK_START}\n${JSON.stringify(metadata)}\n${RESULT_BLOCK_END}`;
+
+/** Seeds (a) the `fix-leg-started` event computeFixResponseHarvest's fixLegJournalCursor reads
+ *  back (D2/F1 leg-bound scoping — `fixRounds` defaults to 0, matching seedFixing's own default
+ *  when `over.fix_rounds` is never set; `journalCursor` is the monotonic row id captured BEFORE
+ *  this same journal row below is appended, exactly like conductor.ts's startFixLeg does) and
+ *  (b) the journal row itself — the SAME, PR-bound `pr_review_threads` response the fixing
+ *  lane's session was actually served (State.listForgeProxyJournalForSession). */
+function seedJournaledThreads(st: State, session: string, issue: number, pr: number, threadIds: string[], fixRounds = 0): void {
+  const journalCursor = st.maxForgeProxyJournalId(session);
+  st.appendEvent("fix-leg-started", { worker: session, issue, pr, fixRounds, journalCursor, at: "2026-07-18T23:59:59Z" });
+  const id = st.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session, attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: JSON.stringify({ pr }),
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T00:00:00Z",
+  });
+  st.recordForgeProxyJournalResponse(id, {
+    responseCanonical: JSON.stringify({ pr, threads: threadIds.map((tid) => ({ id: tid })) }),
+    contentHash: "h",
+    truncated: false,
+    fetchedAt: "2026-07-19T00:00:00Z",
+  });
+}
+
+test("tick FIXING RECLAIM (#247): a fixing lane's valid structured threadResponses output is harvested and enqueued to pending_thread_writes — never executed synchronously", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixing(st, "lane-fix", 3, 30);
+  seedJournaledThreads(st, "lane-fix", 3, 30, ["T1", "T2"]);
+  const resultText = sapwoodResult({
+    threadResponses: [
+      { threadId: "T1", reply: "fixed as suggested", resolution: "addressed" },
+      { threadId: "T2", reply: "disagree, see PR description", resolution: "disputed" },
+    ],
+  });
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getWorker("lane-fix")?.state, "driving");
+  // Harvested and queued this SAME tick (before FIX RESPONSE RETRY next runs) — but the forge
+  // reply/resolve calls happen on drain, never synchronously inside the harvest itself; by the
+  // time this tick RETURNS the queue has already been drained once too (FIX RESPONSE RETRY runs
+  // before RECLAIM in tick() — the harvest lands AFTER this tick's own retry pass, so the new
+  // rows are picked up on the FOLLOWING tick).
+  const pending = st.pendingThreadWrites();
+  assert.equal(pending.length, 2);
+  assert.deepEqual(pending.map((p) => [p.threadId, p.resolution]).sort(), [
+    ["T1", "addressed"],
+    ["T2", "disputed"],
+  ]);
+  assert.equal(forge.threadReplies.length, 0, "not yet executed — queued for the NEXT tick's FIX RESPONSE RETRY");
+
+  // The next tick drains the queue: reply+resolve for T1 (addressed), reply-only for T2 (disputed).
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(forge.threadReplies.sort(), [
+    ["T1", "fixed as suggested\n\n<!-- sapwood:fix-reply:lane-fix#30#0:T1 -->"],
+    ["T2", "disagree, see PR description\n\n<!-- sapwood:fix-reply:lane-fix#30#0:T2 -->"],
+  ]);
+  assert.deepEqual(forge.threadResolves, ["T1"], "only the addressed thread is resolved — disputed never calls resolveReviewThread");
+  assert.deepEqual(st.pendingThreadWrites(), [], "fully drained");
+  assert.equal(r2.fixResponses.length, 2);
+  assert.ok(r.fixingReclaimed.length === 1 && r.fixingReclaimed[0]!.kind === "done");
+  st.close();
+});
+
+test("tick FIXING RECLAIM (#247): a fabricated threadId (never journaled to this leg) fails the WHOLE output closed — nothing enqueued, disputed-still-blocks posture preserved", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixing(st, "lane-fix", 3, 30);
+  seedJournaledThreads(st, "lane-fix", 3, 30, ["T1"]); // only T1 was ever served to this leg
+  const resultText = sapwoodResult({
+    threadResponses: [{ threadId: "GHOST", reply: "fabricated", resolution: "addressed" }],
+  });
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(st.pendingThreadWrites(), [], "fail-closed — no partial execution");
+  st.close();
+});
+
+test("tick FIXING RECLAIM (#247): malformed/missing structured output degrades visibly (no throw, no crash mid-reclaim) — the lane still lands in driving normally", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedFixing(st, "lane-fix", 3, 30);
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30 }; // no resultText at all
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getWorker("lane-fix")?.state, "driving", "the fix leg's OWN terminal transition is unaffected by invalid/absent output");
+  assert.deepEqual(st.pendingThreadWrites(), []);
+  assert.equal(r.fixingReclaimed.length, 1);
+  st.close();
+});
+
+test("issue #247 AC (D8, real path): an all-disputed structured output resolves NOTHING via the forge — every thread stays open, and the REAL MergeDriver/CodexReviewer gate (not a fake counter) still reports HANDLE_THREADS", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.prReviewData = { ...forge.prReviewData, unresolvedThreads: 2, headOid: "H1", reviews: [] };
+  forge.prStatus = { number: 30, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  const sup = new FakeSupervisor();
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
+  seedFixing(st, "lane-fix", 3, 30);
+  seedJournaledThreads(st, "lane-fix", 3, 30, ["T1", "T2"]);
+  const resultText = sapwoodResult({
+    threadResponses: [
+      { threadId: "T1", reply: "disagree 1", resolution: "disputed" },
+      { threadId: "T2", reply: "disagree 2", resolution: "disputed" },
+    ],
+  });
+  sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30, resultText };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // harvest + enqueue
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // drain (replies only)
+  assert.equal(forge.threadResolves.length, 0, "an all-disputed batch never calls resolveReviewThread");
+  assert.equal(forge.prReviewData.unresolvedThreads, 2, "still open — resolution never touched");
+  // Nothing pending anymore -> a THIRD tick actually drives gate② for real.
+  const r3 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.getWorker("lane-fix")?.pr, 30);
+  const laneOutcome = r3.driven.find((d) => d.worker === "lane-fix");
+  assert.ok(
+    laneOutcome && laneOutcome.kind !== "merged" && "reason" in laneOutcome && laneOutcome.reason.includes("HANDLE_THREADS"),
+    `the REAL gate still reports the 2 standing unresolved threads via HANDLE_THREADS — disputed-still-blocks holds through the actual reviewer/merge-driver code path, not a pure function call (got ${JSON.stringify(laneOutcome)})`,
+  );
+  st.close();
+});
+
+// ── #247 D5: a driving lane with a pending thread write is skipped entirely by DRIVE ───────
+
+test("tick DRIVE (#247 D5): a driving lane with a STILL-pending thread write is skipped by DRIVE entirely (never calls driveOne) — re-evaluated once the queue drains", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.throwOnReplyToReviewThread = true; // the FIX RESPONSE RETRY attempt this tick fails, row stays pending
+  const sup = new FakeSupervisor();
+  const gate = new FakeMergeGate();
+  seedDriving(st, "lane-fix", 3, 30);
+  st.enqueueThreadWrite(
+    {
+      worker: "lane-fix",
+      issue: 3,
+      pr: 30,
+      threadId: "T1",
+      reply: "fixed",
+      resolution: "addressed",
+      batchKey: "lane-fix#30#1",
+      fixRounds: 1,
+    },
+    "2026-07-19T00:00:00Z",
+  );
+
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0, "driveOne must NEVER be called for a lane with a pending thread write");
+  assert.deepEqual(r.driven, [{ kind: "thread-writes-pending", worker: "lane-fix", issue: 3, pr: 30 }]);
+  assert.equal(st.pendingThreadWrites().length, 1, "the retry failed (simulated forge error) — the row is still pending");
+
+  // The forge recovers; the next tick's FIX RESPONSE RETRY succeeds, draining the queue —
+  // DRIVE then picks the lane back up normally.
+  forge.throwOnReplyToReviewThread = false;
+  gate.outcomes[30] = { kind: "merged", pr: 30, headOid: "H1" };
+  const r2 = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(st.pendingThreadWrites(), []);
+  assert.equal(gate.calls.length, 1, "the queue drained -> DRIVE evaluates the lane normally this tick");
+  assert.equal(r2.driven[0]?.kind, "merged");
+  st.close();
+});
+
+test("issue #247 AC (D8, real path): resolving a thread via the queue never buys MERGE_OK absent a fresh review — verified through the REAL MergeDriver/CodexReviewer gate, not a pure deriveReviewAction call", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.prReviewData = { ...forge.prReviewData, unresolvedThreads: 1, headOid: "H1", reviews: [] };
+  forge.prStatus = { number: 30, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  const sup = new FakeSupervisor();
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
+  seedDriving(st, "lane-fix", 3, 30);
+  st.enqueueThreadWrite(
+    {
+      worker: "lane-fix",
+      issue: 3,
+      pr: 30,
+      threadId: "T1",
+      reply: "fixed",
+      resolution: "addressed",
+      batchKey: "lane-fix#30#1",
+      fixRounds: 1,
+    },
+    "2026-07-19T00:00:00Z",
+  );
+
+  // ONE tick: FIX RESPONSE RETRY (runs before DRIVE) drains the queue — the FakeForge's
+  // resolveReviewThread simulates a real GraphQL resolveReviewThread mutation by decrementing
+  // unresolvedThreads — then DRIVE, seeing nothing pending anymore, evaluates gate② for real.
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(st.pendingThreadWrites(), []);
+  assert.equal(forge.prReviewData.unresolvedThreads, 0, "the thread IS now resolved on the (fake) forge");
+  assert.notEqual(
+    r.driven[0]?.kind,
+    "merged",
+    "resolving the thread alone never buys MERGE_OK — no fresh accepted review exists on this head, verified via the real gate",
+  );
   st.close();
 });
 

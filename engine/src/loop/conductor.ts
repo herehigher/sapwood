@@ -29,6 +29,7 @@ import {
   probeBackoffSec,
   probeDue,
 } from "./env-failure.js";
+import { attemptThreadWrite, computeFixResponseHarvest, type FixResponseWriteOutcome } from "./fix-response.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -366,10 +367,15 @@ export async function startFixLeg(
   const pr = w.pr;
   const prompt = deps.renderFixPrompt(w.issue, pr);
   const issue: Issue = { number: w.issue, title: "", labels: [] };
+  // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE resume() — the child
+  // cannot make its first tool call before this line runs, so this row id can never postdate
+  // it (unlike a wall-clock timestamp recorded AFTER resume() confirms the spawn, round 1's own
+  // defect). See fix-response.ts's fixLegJournalCursor for the full rationale.
+  const journalCursor = deps.state.maxForgeProxyJournalId(w.name);
   const result = await deps.supervisor.resume(issue, w.name, { prompt, sessionId: w.session_id, proxy });
   const fixRounds = (w.fix_rounds ?? 0) + 1;
   deps.state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
-  deps.state.appendEvent("fix-leg-started", { worker: w.name, issue: w.issue, pr, fixRounds, at: now().toISOString() });
+  deps.state.appendEvent("fix-leg-started", { worker: w.name, issue: w.issue, pr, fixRounds, journalCursor, at: now().toISOString() });
   return result;
 }
 
@@ -426,6 +432,16 @@ export interface LaneProbe {
    *  for probe fixtures that predate #168 — classifyEnvFailure treats undefined/"" as no match
    *  (an ordinary task failure), never a park. */
   failureText?: string;
+  /** #247: a DONE lane's own final-message text (worker.ts's parseResultText, the SAME
+   *  stream-json `result` field read every peripheral role's structured-output validator
+   *  already consumes via RoleSessionResult.resultText) — a fix leg's structured
+   *  threadResponses block lives here. undefined for a non-DONE lane, or for probe fixtures
+   *  that predate #247 — reclaimTerminalLane treats undefined/"" as "no structured output",
+   *  the harvest fails closed (validateFixResponseOutput's own "no block found" case), never a
+   *  guess. Populated unconditionally for every DONE lane (not just `fixing` ones) — same
+   *  "cheap, existing capture, just a new read" stance failureText already takes; an ordinary
+   *  worker's DONE result text is simply never consumed by anything. */
+  resultText?: string;
 }
 
 /** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
@@ -512,6 +528,12 @@ export type DrivenOutcome =
   | { kind: "needs-human"; worker: string; issue: number; pr: number; reason: string }
   | { kind: "queued"; worker: string; issue: number; pr: number; reason: string }
   | { kind: "stopped"; worker: string; issue: number; pr: number; reason: string }
+  // #247 D5: gate①/gate② deliberately SKIPPED this tick — the lane has a pending thread write
+  // still queued/retrying (fix-response.ts). Distinct from "queued" (that's driveOne's own
+  // WAIT_REVIEW/HANDLE_THREADS verdict) — this lane was never even driven. Checked BEFORE the
+  // FIXABLE gate below can even be evaluated (#246) — a lane with pending writes must not reach
+  // FIXUP either, for the same fix-round-burn reason it must not reach an ordinary driveOne call.
+  | { kind: "thread-writes-pending"; worker: string; issue: number; pr: number }
   // #246: a FIXABLE gate that dispatched a fix leg this tick (driveDecision -> "FIXUP") — the
   // lane leaves `driving` for `fixing` (startFixLeg's own transition); distinct from "queued" so
   // dispatch activity is observable in TickResult without a separate query.
@@ -604,6 +626,10 @@ export interface TickResult {
    *  process (same shape as an ordinary `running`-lane reclaim outcome; see the FIXING RECLAIM
    *  phase in tick()). Empty when there were no `fixing` lanes this tick. */
   fixingReclaimed: ReclaimOutcome[];
+  /** #247: every pending fix-thread write (persisted this tick or a prior one) attempted this
+   *  tick — recorded / resolved / still-retrying / escalated-to-needs-human. Empty when nothing
+   *  was pending and no fixing lane's terminal reclaim enqueued anything new this tick. */
+  fixResponses: FixResponseWriteOutcome[];
 }
 
 export interface TickDeps {
@@ -1156,11 +1182,31 @@ async function reclaimTerminalLane(
     // a thrown label write skipped recordSpend with the worker already terminal.
     const doneAt = iso();
     if (next === "DRIVING") {
+      // #247 D4 (Codex sol-high PR #265 review round 1, P1): a `fixing` lane's structured
+      // threadResponses output is computed PURELY/READ-ONLY here — BEFORE the terminal state
+      // write — so its outcome (a validated batch, or an invalid-output descriptor) can be
+      // committed in the SAME atomic transaction as the terminal `driving` row + spend below.
+      // A crash between "settled to driving" and "batch enqueued" is thereby impossible: either
+      // everything lands together, or the row stays `fixing` and is retried next tick (re-
+      // deriving the identical batch from the same resultText/journal — never a lost or partial
+      // batch). `w.state` is read BEFORE settleTerminalWorker's own write below overwrites it
+      // (same "read w.state as it stood on entry" stance fixingPinClear already takes).
+      const fixResponse =
+        w.state === "fixing"
+          ? computeFixResponseHarvest(state, {
+              worker: w.name,
+              issue: w.issue,
+              fixRounds: w.fix_rounds ?? 0,
+              prNumber: p.prNumber ?? w.pr ?? null,
+              resultText: p.resultText ?? "",
+            })
+          : undefined;
       // PR produced: hold the lane in `driving` (it still occupies a lane until the #13 review
       // gate resolves it). No requeue, no human escalation.
       state.settleTerminalWorker(
         { ...w, state: "driving", ended_at: doneAt, pr: p.prNumber ?? w.pr ?? null, ...fixingPinClear },
         { worker: w.name, issue: w.issue, usd: costUsd, at: doneAt, models: modelUsage },
+        fixResponse,
       );
     } else {
       // ESCALATE_NOPR: done but no PR -> nothing to drive; free the lane, escalate to human.
@@ -1382,6 +1428,14 @@ async function reconcileDrivingFixIntents(
   for (const w of state.drivingWorkers()) {
     const intent = supervisor.resumeIntentState(w.name, w.issue);
     if (intent === "confirmed") {
+      // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE this reconciliation
+      // acts on the row at all (before even requestHandoff) — an adopted child's own resume()
+      // call already happened in a NOW-CRASHED process, so there is no "before resume()" moment
+      // left to observe directly; this is the earliest point THIS process can still capture one.
+      // Superseded harmlessly once the eventual drain+fresh-resume produces its own, later
+      // (and by construction >=) cursor on the "fix-leg-resumed" event — fixLegJournalCursor
+      // picks whichever of the three cursor-bearing events is NEWEST for (worker, fixRounds).
+      const journalCursor = state.maxForgeProxyJournalId(w.name);
       // Never trust the adopted child's proxy channel across a crash (see doc above) — drain it
       // gracefully now rather than let it keep running against a dead evidence channel. Ordered
       // FIRST (B3): durable + idempotent, so a crash before the upsert below just re-enters this
@@ -1391,7 +1445,7 @@ async function reconcileDrivingFixIntents(
       supervisor.clearStaleFixEntrySentinel(w.name);
       const fixRounds = (w.fix_rounds ?? 0) + 1;
       state.upsertWorker({ ...w, state: "fixing", ended_at: null, fix_rounds: fixRounds });
-      state.appendEvent("fix-leg-adopted", { worker: w.name, issue: w.issue, fixRounds });
+      state.appendEvent("fix-leg-adopted", { worker: w.name, issue: w.issue, fixRounds, journalCursor });
     } else if (intent === "unconfirmed") {
       // B4: label FIRST; a failed write must NOT terminalize the row — leave it `driving` and
       // retry the whole escalation next tick (never a permanently-stranded failed+unlabeled row).
@@ -1563,6 +1617,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       gatedReclaimed: [],
       resumed,
       fixingReclaimed: [],
+      fixResponses: [],
     };
   }
 
@@ -1601,6 +1656,19 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   for (const pending of state.pendingRollbacks()) {
     if (forgeParkedThisTick && pending.reason === ENV_FAILURE_REQUEUE_REASON) continue; // suspended
     rollbacks.push(await attemptRollback(forge, state, cfg, pending, iso));
+  }
+
+  // ── FIX RESPONSE RETRY (#247): same "drain every durably-persisted recovery-path write
+  //   before this tick does anything else" convention as ROLLBACK RETRY above, for the
+  //   fix-loop's own thread-write queue (fix-response.ts's attemptThreadWrite — reply/resolve
+  //   GraphQL calls, never a board mutation). Never throws; a still-failing forge only bumps
+  //   the retry count or escalates. Not suspended by a forge park episode the way env-failure
+  //   requeues are (#168's SUSPENSION doesn't apply: a resolve/reply failure here has no
+  //   "the issue did nothing wrong, hold it open forever" contract — it is bounded-retry-then-
+  //   escalate like every OTHER pending rollback).
+  const fixResponses: FixResponseWriteOutcome[] = [];
+  for (const pending of state.pendingThreadWrites()) {
+    fixResponses.push(await attemptThreadWrite(forge, state, cfg, pending, iso));
   }
   const reclaimed: ReclaimOutcome[] = [];
 
@@ -1944,6 +2012,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // #69: no per-lane kill-switch re-check here — an active switch never reaches this loop
     // at all (the global gate at the top of tick() returns first). See the gate's comment for
     // the accepted mid-tick trade-off.
+    // #247 D5 (Codex sol-high PR #265 review round 1, P2): every lane with a pending thread
+    // write, fetched ONCE before the loop (not per-lane — state.pendingThreadWrites() is a
+    // single small table scan, cheaper than re-querying inside the loop). A `fixing` lane that
+    // just landed back in `driving` this SAME tick may still have replies/resolves queued but
+    // not yet executed (the FIX RESPONSE RETRY phase ran BEFORE this tick's RECLAIM, so a batch
+    // enqueued during RECLAIM waits for the NEXT tick's retry phase) — driving it through
+    // gate② NOW would evaluate against a STALE live view (GitHub still shows the thread
+    // unresolved) and, once #246's FIXABLE gate is wired, could burn a fix round or hit its cap
+    // for work the engine simply hasn't gotten to yet.
+    const pendingThreadWriteWorkers = new Set(state.pendingThreadWrites().map((r) => r.worker));
     for (const w of state.drivingWorkers()) {
       if (w.pr == null) {
         // Fail-safe: a driving lane MUST carry a PR number (set at the reclaim transition
@@ -1956,6 +2034,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       const pr = w.pr;
+      if (pendingThreadWriteWorkers.has(w.name)) {
+        // Skip gate①/gate② entirely THIS tick — never touches the review-trigger pin, never
+        // calls gate.driveOne. The lane stays `driving`; the NEXT tick's FIX RESPONSE RETRY
+        // phase (or a later one, if it's still retrying) drains the queue, and DRIVE picks the
+        // lane back up automatically once nothing is pending for it.
+        state.appendEvent("drive-thread-writes-pending", { worker: w.name, issue: w.issue, pr });
+        driven.push({ kind: "thread-writes-pending", worker: w.name, issue: w.issue, pr });
+        continue;
+      }
       // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
       // that knows the LIVE current head) — tick() just threads the lane's State-recorded pin
       // in and wires driveOne's recordTrigger callback straight back into State. #54: same
@@ -2463,6 +2550,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         continue;
       }
       const fixPrompt = deps.fixLegResume.renderFixPrompt(w.issue, pr);
+      // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE resume() — this is
+      // a genuinely FRESH mint/spawn (unlike the ADOPT branch above), so the same "child cannot
+      // call before this line runs" guarantee startFixLeg's own capture relies on holds here too.
+      const journalCursor = state.maxForgeProxyJournalId(w.name);
       let fixResult: { name: string; sessionId: string };
       try {
         fixResult = await supervisor.resume(issue, w.name, {
@@ -2491,7 +2582,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         resume_attempts: fixAttempt,
         fixing_handoff: 0,
       });
-      state.appendEvent("fix-leg-resumed", { worker: w.name, issue: w.issue, pr, attempt: fixAttempt });
+      // fixRounds: this is a CONTINUATION of the same fix round (only resume_attempts bumps
+      // above, never fix_rounds) — carried so fixLegJournalCursor can match this event against
+      // the SAME (worker, fixRounds) key the round's original fix-leg-started event used.
+      state.appendEvent("fix-leg-resumed", {
+        worker: w.name,
+        issue: w.issue,
+        pr,
+        attempt: fixAttempt,
+        fixRounds: w.fix_rounds ?? 0,
+        journalCursor,
+      });
       resumed.push({ kind: "resumed", worker: w.name, issue: w.issue, attempt: fixAttempt });
       resumeLanesUsed++;
       continue;
@@ -2671,5 +2772,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     gatedReclaimed,
     resumed,
     fixingReclaimed,
+    fixResponses,
   };
 }

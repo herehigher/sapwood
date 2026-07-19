@@ -765,7 +765,7 @@ function formatTickSummary(result: TickResult): string {
   return (
     `[sapwood:tick] reclaimed=${result.reclaimed.length} fixingReclaimed=${result.fixingReclaimed.length} ` +
     `dispatched=${result.dispatched.length} driven=${result.driven.length} resumed=${result.resumed.length} ` +
-    `rollbacks=${result.rollbacks.length} gatedReclaimed=${result.gatedReclaimed.length} ` +
+    `rollbacks=${result.rollbacks.length} fixResponses=${result.fixResponses.length} gatedReclaimed=${result.gatedReclaimed.length} ` +
     `drainRequested=${result.drainRequested.length} escalated=${result.escalated.length} ceilingBreached=${result.ceilingBreached}`
   );
 }

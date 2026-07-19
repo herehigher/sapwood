@@ -574,6 +574,55 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   (db) => {
     db.exec(`ALTER TABLE workers ADD COLUMN fixing_handoff INTEGER NOT NULL DEFAULT 0;`);
   },
+  // 20 -> 21: fix-leg structured thread-response write queue (#247). A fix leg's structured
+  // output validates against the SAME journaled `pr_review_threads` response it was served
+  // (proxy/journal.ts, #234/#244 — no TOCTOU between what the leg saw and what the engine acts
+  // on), then each per-thread {reply, resolution} decision is persisted HERE before any forge
+  // write is attempted — the same write-ahead-durable-queue shape pending_rollbacks established
+  // (#31 — see the schema v3->v4 migration comment): a reply/resolve GraphQL mutation can fail
+  // transiently, and the retry must survive an engine crash/restart rather than depend on the
+  // fix-leg session ever running again (it already exited by the time this row is read back).
+  // `reply_posted`/`resolved` are TWO INDEPENDENT completion flags (never a single status
+  // column) so a reply that posted successfully is NEVER re-attempted even when that SAME
+  // thread's resolve call keeps failing on later ticks — the exact idempotency issue #247's AC
+  // names ("a failed resolve retries next tick; replies are never double-posted"). A `disputed`
+  // row has no resolve step at all — conductor.ts's attemptThreadWrite (fix-response.ts) clears
+  // it the instant reply_posted=1. `pr` is carried on the row (not re-derived from `worker` at
+  // drain time) because the worker row itself may already be long gone from `fixing`/`driving`
+  // by the time a later tick retries — the row is a self-contained write intent, same
+  // independence pending_rollbacks' own (issue, target, reason) triple has from the worker table.
+  //
+  // AMENDED (branch-local, unmerged — Codex sol-high PR #265 review round 1, D4/D6): `batch_key`
+  // + `fix_rounds` added to the SAME v21 table rather than stacking a v22 on top of a migration
+  // that hasn't shipped yet. `batch_key` (fix-response.ts's fixResponseBatchKey — `<worker>#
+  // <fixRounds>`) identifies the WHOLE validated batch one fix round produced; the UNIQUE index
+  // on (batch_key, thread_id) makes State.enqueueThreadWrite's `INSERT OR IGNORE` an idempotent
+  // no-op on a duplicate insert (D4's crash-rerun-of-settle safety net — belt-and-suspenders
+  // alongside settleTerminalWorker's own atomic commit). `fix_rounds` is carried per-row (not
+  // just embedded in batch_key) so it survives as its own queryable provenance field without a
+  // caller needing to parse it back out of the key — issue #247 AC's "every executed write
+  // journaled with leg/round provenance".
+  (db) => {
+    db.exec(`
+      CREATE TABLE pending_thread_writes (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        worker          TEXT NOT NULL,
+        issue           INTEGER NOT NULL,
+        pr              INTEGER NOT NULL,
+        thread_id       TEXT NOT NULL,
+        reply           TEXT NOT NULL,
+        resolution      TEXT NOT NULL CHECK (resolution IN ('addressed', 'disputed')),
+        reply_posted    INTEGER NOT NULL DEFAULT 0,
+        resolved        INTEGER NOT NULL DEFAULT 0,
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        batch_key       TEXT NOT NULL DEFAULT '',
+        fix_rounds      INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        last_attempt_at TEXT
+      );
+      CREATE UNIQUE INDEX pending_thread_writes_batch_thread ON pending_thread_writes (batch_key, thread_id);
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -826,6 +875,62 @@ export interface PendingRollback {
   created_at: string;
   last_attempt_at: string | null;
 }
+
+/** A durably-persisted fix-leg thread-response write still awaiting success or escalation
+ *  (#247 — see the schema v20->v21 migration comment). One row per THREAD (a fix leg's
+ *  structured output may validate several threadResponses entries at once; each becomes its
+ *  own independent row, so one thread's forge failure never blocks another's retry). */
+export interface PendingThreadWrite {
+  id: number;
+  worker: string;
+  issue: number;
+  pr: number;
+  threadId: string;
+  reply: string;
+  resolution: "addressed" | "disputed";
+  replyPosted: boolean;
+  resolved: boolean;
+  attempts: number;
+  /** The fix round's batch key (`<worker>#<fixRounds>`, fix-response.ts's fixResponseBatchKey)
+   *  — provenance (issue #247 AC) + the (batch_key, thread_id) de-dup key. */
+  batchKey: string;
+  /** The lane's fix_rounds counter AT ENQUEUE TIME — provenance (issue #247 AC): which fix
+   *  round produced this write. */
+  fixRounds: number;
+  createdAt: string;
+  lastAttemptAt: string | null;
+}
+
+/** #247 D4/D6: the two shapes State.settleTerminalWorker's `fixResponse` param accepts —
+ *  either a validated batch ready to enqueue (every write executed atomically alongside the
+ *  terminal state transition) or an invalid-output descriptor (nothing enqueued, an event
+ *  records why). Both are computed PURELY/READ-ONLY by fix-response.ts's
+ *  computeFixResponseHarvest, before the transaction that commits them. */
+export interface FixResponseSettleWrite {
+  threadId: string;
+  reply: string;
+  resolution: "addressed" | "disputed";
+}
+
+export interface FixResponseSettleBatch {
+  worker: string;
+  issue: number;
+  pr: number;
+  fixRounds: number;
+  batchKey: string;
+  writes: FixResponseSettleWrite[];
+}
+
+export interface FixResponseSettleInvalid {
+  worker: string;
+  issue: number;
+  pr: number | null;
+  reason: string;
+}
+
+export type FixResponseSettleOutcome =
+  | { kind: "batch"; batch: FixResponseSettleBatch }
+  | { kind: "invalid"; invalid: FixResponseSettleInvalid };
 
 export type EnvFailureSource = "llm" | "forge";
 
@@ -1284,15 +1389,57 @@ export class State {
    *  either both land or neither does, so a lane is always either still reclaimable (retry next
    *  tick) or (terminal AND spend ledgered) — never terminal-without-spend. Callers must do any
    *  forge label/board write AFTER this call, never between the two writes it bundles — a lost
-   *  label is cosmetic, a lost ledger row is money (issue #223's ordering rule). */
+   *  label is cosmetic, a lost ledger row is money (issue #223's ordering rule).
+   *
+   *  #247 D4 (Codex sol-high PR #265 review round 1, P1): the OPTIONAL `fixResponse` param folds
+   *  a `fixing` lane's harvested structured output into this SAME transaction — a validated
+   *  batch's entire pending_thread_writes insert set + its `fix-response-queued` receipt event,
+   *  or an invalid output's `fix-response-invalid` event, land atomically with the terminal
+   *  `driving` state write. Before this, harvesting ran as a SEPARATE call after
+   *  settleTerminalWorker returned — a crash in between could lose a validated batch entirely
+   *  (the leg already exited; nothing re-runs it), or (less likely but still possible) leave a
+   *  partially-inserted batch. The caller (conductor.ts's reclaimTerminalLane, via
+   *  fix-response.ts's computeFixResponseHarvest) computes `fixResponse` PURELY/READ-ONLY BEFORE
+   *  calling this — the only writes for it happen here, inside the one transaction. */
   settleTerminalWorker(
     row: WorkerRow,
     spend: { worker: string; issue: number; usd: number; at: string; models?: ModelUsageEntry[] },
+    fixResponse?: FixResponseSettleOutcome,
   ): void {
     this.db.exec("BEGIN");
     try {
       this.upsertWorker(row);
       this.recordSpend(spend.worker, spend.issue, spend.usd, spend.at, spend.models ?? []);
+      if (fixResponse) {
+        if (fixResponse.kind === "invalid") {
+          this.appendEvent("fix-response-invalid", { ...fixResponse.invalid });
+        } else {
+          const { batch } = fixResponse;
+          for (const w of batch.writes) {
+            this.enqueueThreadWrite(
+              {
+                worker: batch.worker,
+                issue: batch.issue,
+                pr: batch.pr,
+                threadId: w.threadId,
+                reply: w.reply,
+                resolution: w.resolution,
+                batchKey: batch.batchKey,
+                fixRounds: batch.fixRounds,
+              },
+              spend.at,
+            );
+          }
+          this.appendEvent("fix-response-queued", {
+            worker: batch.worker,
+            issue: batch.issue,
+            pr: batch.pr,
+            batchKey: batch.batchKey,
+            fixRounds: batch.fixRounds,
+            count: batch.writes.length,
+          });
+        }
+      }
       this.db.exec("COMMIT");
     } catch (e) {
       this.db.exec("ROLLBACK");
@@ -1595,6 +1742,103 @@ export class State {
    *  conductor escalated to needs-human instead. Either way, stop retrying. */
   clearPendingRollback(id: number): void {
     this.db.prepare("DELETE FROM pending_rollbacks WHERE id = ?").run(id);
+  }
+
+  // ── Fix-leg thread-response write queue (#247) ──────────────────────────────────────────
+
+  /** Persist one pending thread write BEFORE any forge call is attempted (write-ahead, same
+   *  rationale as addPendingRollback) — the row IS "attempt 0"; the immediately-following
+   *  attempt is recorded via markThreadReplyPosted/markThreadResolved/bumpThreadWriteAttempt,
+   *  never a second insert. `INSERT OR IGNORE` on the (batch_key, thread_id) unique index (D4):
+   *  a duplicate insert for the SAME fix round's SAME thread is a silent no-op rather than a
+   *  constraint-violation throw — belt-and-suspenders alongside settleTerminalWorker's own
+   *  atomic commit (which already makes a genuine duplicate batch practically unreachable).
+   *  Returns the row id, or 0 when the insert was ignored (a caller that needs the id back
+   *  should not rely on this in that case — no production call site does). */
+  enqueueThreadWrite(
+    input: {
+      worker: string;
+      issue: number;
+      pr: number;
+      threadId: string;
+      reply: string;
+      resolution: "addressed" | "disputed";
+      batchKey: string;
+      fixRounds: number;
+    },
+    at: string,
+  ): number {
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO pending_thread_writes
+           (worker, issue, pr, thread_id, reply, resolution, batch_key, fix_rounds, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.worker, input.issue, input.pr, input.threadId, input.reply, input.resolution, input.batchKey, input.fixRounds, at);
+    return Number(res.lastInsertRowid);
+  }
+
+  /** Every thread write still awaiting completion or escalation, oldest first (retry order). */
+  pendingThreadWrites(): PendingThreadWrite[] {
+    const rows = this.db.prepare("SELECT * FROM pending_thread_writes ORDER BY id").all() as unknown as RawPendingThreadWrite[];
+    return rows.map(mapPendingThreadWrite);
+  }
+
+  /** The reply half completed — never re-attempted after this, regardless of how the resolve
+   *  half (if any) fares afterward. */
+  markThreadReplyPosted(id: number, at: string): void {
+    this.db.prepare("UPDATE pending_thread_writes SET reply_posted = 1, last_attempt_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** The resolve half completed (`addressed` rows only — a `disputed` row never calls this). */
+  markThreadResolved(id: number, at: string): void {
+    this.db.prepare("UPDATE pending_thread_writes SET resolved = 1, last_attempt_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Record one more failed attempt (attempts++, last_attempt_at refreshed) — the row stays,
+   *  to be retried again next tick. */
+  bumpThreadWriteAttempt(id: number, at: string): void {
+    this.db.prepare("UPDATE pending_thread_writes SET attempts = attempts + 1, last_attempt_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Resolved — either every remaining half succeeded, or attempts hit the bounded retry cap
+   *  and the conductor escalated to needs-human instead. Either way, stop retrying. */
+  clearThreadWrite(id: number): void {
+    this.db.prepare("DELETE FROM pending_thread_writes WHERE id = ?").run(id);
+  }
+
+  /** #247 F3 (Codex sol-high PR #265 review round 2, P2): markThreadReplyPosted + its
+   *  fix-thread-reply-posted receipt event, committed in ONE transaction — as two separate
+   *  writes, a crash between them could leave the reply durably marked posted with NO receipt
+   *  event ever recorded (or vice versa), losing the "every executed write journaled with
+   *  leg/round provenance" AC's own promise for that write. `receipt` is fix-response.ts's
+   *  provenance() payload — accepted as an opaque object so this method stays agnostic of the
+   *  fix-response shape (state.ts owns no fix-response-specific types beyond FixResponseSettle*). */
+  completeThreadReply(id: number, at: string, receipt: Record<string, unknown>): void {
+    this.db.exec("BEGIN");
+    try {
+      this.markThreadReplyPosted(id, at);
+      this.appendEvent("fix-thread-reply-posted", receipt);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** #247 F3: markThreadResolved + clearThreadWrite + the fix-thread-resolved receipt event, all
+   *  in ONE transaction — same rationale as completeThreadReply above, for the resolve half. */
+  completeThreadResolve(id: number, at: string, receipt: Record<string, unknown>): void {
+    this.db.exec("BEGIN");
+    try {
+      this.markThreadResolved(id, at);
+      this.clearThreadWrite(id);
+      this.appendEvent("fix-thread-resolved", receipt);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
 
   // ── Rounds ledger (#86) ─────────────────────────────────────────────────────────────────
@@ -2011,6 +2255,51 @@ export class State {
     return rows.map(mapForgeProxyJournalRow);
   }
 
+  /** #247: every journal row for a SESSION NAME alone (no round/phase/role/attempt filter) — a
+   *  fix leg's terminal-reclaim harvest (conductor.ts's reclaimTerminalLane) needs "every
+   *  pr_review_threads response this lane's session ever saw" without depending on which
+   *  literal `phase`/`attempt` string the caller who minted its proxy used (proxy/mint.ts's
+   *  ForgeProxyIdentity.session is the lane name itself, generated fresh per dispatch/resume —
+   *  never reused across lanes — so filtering by session alone is exact, not an approximation).
+   *  Kept as its own query rather than widening listForgeProxyJournal's signature: that method's
+   *  round/phase/role/attempt-scoped contract is exactly what its existing callers (the
+   *  budget/completeness readers) need and must keep.
+   *
+   *  `afterId` (D2, Codex sol-high PR #265 review round 1, P1; replaced with a monotonic ROW ID
+   *  cursor in review round 2, F1 — a wall-clock `requestedAt` cutoff admitted an equal-
+   *  timestamp prior-leg row, and a cursor captured AFTER resume() confirmed the spawn could
+   *  postdate a fast child's genuinely-first tool call): a lane's SESSION NAME persists across
+   *  every fix round on it (startFixLeg reuses the same worker row/lane), so session alone would
+   *  conflate every round's journal rows together — an EARLIER round's threadId could then
+   *  validate a LATER round's structured output. When supplied, only rows with `id > afterId`
+   *  are returned (fix-response.ts's fixLegJournalCursor supplies the round's own captured
+   *  pre-resume cursor — State.maxForgeProxyJournalId, read BEFORE that round's resume() call
+   *  ever runs, so it can never postdate the round's own first journal row) — omit it for the
+   *  pre-#247-D2 unscoped read (no production caller does; kept optional so existing tests of
+   *  the session-only contract keep working unchanged). */
+  listForgeProxyJournalForSession(session: string, afterId?: number): ForgeProxyJournalRow[] {
+    const rows = (afterId !== undefined
+      ? this.db.prepare("SELECT * FROM forge_proxy_journal WHERE session = ? AND id > ? ORDER BY id").all(session, afterId)
+      : this.db
+          .prepare("SELECT * FROM forge_proxy_journal WHERE session = ? ORDER BY id")
+          .all(session)) as unknown as RawForgeProxyJournalRow[];
+    return rows.map(mapForgeProxyJournalRow);
+  }
+
+  /** #247 F1: the current max journal row id for `session` — read BEFORE a fix leg's resume()
+   *  call ever runs (conductor.ts's startFixLeg / the fixing-continuation resume / the
+   *  reconcileDrivingFixIntents adoption path), so it can never postdate that leg's own first
+   *  journal row (unlike a wall-clock timestamp captured AFTER resume() confirms the spawn). 0
+   *  when the session has no journal rows yet — a valid cursor (not "no cursor"; the caller's
+   *  own event-payload lookup is what distinguishes "found a 0 cursor" from "found no cursor-
+   *  bearing event at all"). */
+  maxForgeProxyJournalId(session: string): number {
+    const row = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS maxId FROM forge_proxy_journal WHERE session = ?").get(session) as {
+      maxId: number;
+    };
+    return row.maxId;
+  }
+
   /** Cumulative call count + response bytes already ledgered for this session attempt — the
    *  budget-exhaustion check meters against this (issue #234's Budget: "meter call count +
    *  response bytes against the round ledger machinery" — this table IS that ledger for the
@@ -2155,5 +2444,41 @@ function mapForgeProxyJournalRow(r: RawForgeProxyJournalRow): ForgeProxyJournalR
     requestedAt: r.requested_at,
     fetchedAt: r.fetched_at,
     deliveredAt: r.delivered_at,
+  };
+}
+
+interface RawPendingThreadWrite {
+  id: number;
+  worker: string;
+  issue: number;
+  pr: number;
+  thread_id: string;
+  reply: string;
+  resolution: "addressed" | "disputed";
+  reply_posted: number;
+  resolved: number;
+  attempts: number;
+  batch_key: string;
+  fix_rounds: number;
+  created_at: string;
+  last_attempt_at: string | null;
+}
+
+function mapPendingThreadWrite(r: RawPendingThreadWrite): PendingThreadWrite {
+  return {
+    id: r.id,
+    worker: r.worker,
+    issue: r.issue,
+    pr: r.pr,
+    threadId: r.thread_id,
+    reply: r.reply,
+    resolution: r.resolution,
+    replyPosted: r.reply_posted === 1,
+    resolved: r.resolved === 1,
+    attempts: r.attempts,
+    batchKey: r.batch_key,
+    fixRounds: r.fix_rounds,
+    createdAt: r.created_at,
+    lastAttemptAt: r.last_attempt_at,
   };
 }
