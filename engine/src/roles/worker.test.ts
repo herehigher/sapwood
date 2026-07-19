@@ -1309,7 +1309,10 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
   try {
     const hook = mkHook(dir);
     const worktreeRoot = join(dir, "worktrees");
-    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "root.seen.tmp")}"\nmv "${join(dir, "root.seen.tmp")}" "${join(dir, "root.seen")}"\nexit 0\n`);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "root.seen.tmp")}"\nmv "${join(dir, "root.seen.tmp")}" "${join(dir, "root.seen")}"\nexit 0\n`,
+    );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "hard" } });
     const s = new WorkerSupervisor({
       cfg: scfg,
@@ -2901,7 +2904,10 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
     const hook = mkHook(dir);
     // stub records its argv so we can inspect exactly what -p carried (same trick as the
     // #26 inline-settings test above).
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
+    );
     const s = new WorkerSupervisor({
       cfg: scfg,
       stateDir: dir,
@@ -3428,7 +3434,10 @@ const RESULT_LINE =
 test("resume: a proxy opt mints a handle, widens --allowedTools with the handle's own tool names, and injects --mcp-config inline JSON", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
+    const { s, name } = await mkHandoffLane(
+      dir,
+      `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
+    );
     const { calls, handle } = fakeWorkerProxyHandle();
     const resumed = await s.resume({ number: 9, title: "t", labels: [] }, name, {
       proxy: {
@@ -3460,7 +3469,10 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
 test("resume: opts.prompt REPLACES the ordinary issue-rendered prompt — the fix leg's own fix instruction — and is the exact string passed to claude -p", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
+    const { s, name } = await mkHandoffLane(
+      dir,
+      `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
+    );
     await s.resume({ number: 9, title: "t", labels: [] }, name, { prompt: "fix-leg: address PR #42's review findings" });
     await waitForFile(join(dir, "args.seen"), "prompt-override resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
@@ -3476,7 +3488,10 @@ test("resume: opts.prompt REPLACES the ordinary issue-rendered prompt — the fi
 test("resume: no proxy/prompt opt -> byte-identical to pre-#245 behavior (renderPrompt output, no --mcp-config)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
+    const { s, name } = await mkHandoffLane(
+      dir,
+      `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
+    );
     await s.resume({ number: 9, title: "t", labels: [] }, name);
     await waitForFile(join(dir, "args.seen"), "ordinary resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
