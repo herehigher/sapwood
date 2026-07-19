@@ -230,9 +230,10 @@ function freshTrustedThumbCount(): number {
  * Codex's clean verdict is sometimes a plain conversation COMMENT ("Codex Review: Didn't find
  * any major issues") with NO review object (post-#55 P2). #273 requires every such comment to
  * carry exactly one distinct, matching OID assertion. A single-pass classifier quarantines
- * quoted lines without rewriting them; BOTH phrase and OID parsing see only clean lines.
+ * quoted lines without rewriting them; BOTH phrase and OID parsing see only clean lines. The
+ * verdict phrase must occupy its whole line (apart from whitespace/emphasis decoration).
  */
-const CLEAN_VERDICT_RE = /didn't find any major issues/i;
+const CLEAN_VERDICT_RE = /^[\s*_]*Codex Review: Didn't find any major issues\.?[\s*_]*$/i;
 const REVIEWED_HEAD_OID_RE = /^Reviewed head OID: (\S+)\s*$/;
 
 function cleanReviewCommentLines(body: string): string[] {
@@ -309,7 +310,7 @@ function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: st
       trustedLogin(normalizeLogin(c.login)) &&
       Number.isFinite(createdAt) &&
       createdAt > cutoff &&
-      cleanLines.some((line) => CLEAN_VERDICT_RE.test(line)) &&
+      cleanLines.some((line) => !line.includes("`") && CLEAN_VERDICT_RE.test(line)) &&
       oidMatches
     );
   }).length;

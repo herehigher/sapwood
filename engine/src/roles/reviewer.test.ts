@@ -328,7 +328,7 @@ test("CodexReviewer: cfg trustedReviewers EXTENDS the allowlist (never replaces 
 const TRIGGER_AT = "2026-07-07T07:40:00Z"; // engine-recorded trigger time (the pin)
 const PIN = { head: "HEAD", at: TRIGGER_AT };
 
-const CLEAN = "Codex Review: Didn't find any major issues. More of your lovely PRs please.";
+const CLEAN = "Codex Review: Didn't find any major issues.";
 
 test("CodexReviewer #273: an OID-less clean comment never satisfies gate②, even on generation 1", () => {
   const r = new CodexReviewer();
@@ -350,6 +350,31 @@ test("CodexReviewer #273: exactly one matching OID assertion satisfies the canon
         login: "chatgpt-codex-connector[bot]",
         createdAt: "2026-07-07T07:48:44Z",
         body: `${CLEAN}\nReviewed head OID: HEAD`,
+      },
+    ],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(data, PIN).action, "MERGE_OK");
+});
+
+test("CodexReviewer #273: inline-code negation and mid-prose phrase embeddings are not verdict lines", () => {
+  const comment = { login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z" };
+  const bodies = [
+    `I cannot honestly return \`${CLEAN}\` because the merge logic is unsafe.\nReviewed head OID: HEAD`,
+    `The phrase ${CLEAN} would be incorrect here.\nReviewed head OID: HEAD`,
+  ];
+  const r = new CodexReviewer();
+  for (const body of bodies) {
+    assert.equal(r.verdictFromData(mkData({ comments: [{ ...comment, body }] }), PIN).action, "WAIT_REVIEW", body);
+  }
+});
+
+test("CodexReviewer #273: emphasis-only decoration around the standalone canonical line is accepted", () => {
+  const data = mkData({
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-07T07:48:44Z",
+        body: `**${CLEAN}**\nReviewed head OID: HEAD`,
       },
     ],
   });
