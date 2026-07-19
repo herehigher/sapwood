@@ -1030,7 +1030,7 @@ test("#250 merged Done write honors the #31 retry cap and escalates with evidenc
   st.close();
 });
 
-test("#250 forge park suspends merged Done rows without a write or attempt bump", async () => {
+test("#250 merge during a forge park queues Done at attempts 0, then drains after the park clears", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -1039,27 +1039,35 @@ test("#250 forge park suspends merged Done rows without a write or attempt bump"
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
   let boardAttempts = 0;
-  forge.setBoardStatus = async () => {
+  forge.setBoardStatus = async (issue, status) => {
     boardAttempts++;
-    throw new Error("forge down");
+    forge.boardSet.push([issue, status]);
   };
-  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   st.enterPark("forge", "forge down", 2, "2026-07-14T00:00:00Z");
-  forge.listOpenIssueNumbers = async () => {
-    throw new Error("still down");
-  };
+  const cfg = mkCfg({ recovery: { rollbackRetryCap: 1 } });
 
-  const parked = await tick({
+  const merged = await tick({
     forge,
     state: st,
     supervisor: sup,
-    cfg: mkCfg(),
+    cfg,
     mergeGate: gate,
     now: () => new Date("2026-07-14T00:00:01Z"),
   });
-  assert.deepEqual(parked.rollbacks, []);
+  assert.deepEqual(merged.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(merged.rollbacks, []);
+  assert.equal(boardAttempts, 0);
+  assert.deepEqual(
+    st.pendingRollbacks().map(({ issue, target, reason, attempts }) => ({ issue, target, reason, attempts })),
+    [{ issue: 2, target: "done", reason: "merged-board-done", attempts: 0 }],
+  );
+
+  st.clearPark("forge");
+  const recovered = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(recovered.rollbacks, [{ kind: "recovered", issue: 2, target: "done", reason: "merged-board-done" }]);
   assert.equal(boardAttempts, 1);
-  assert.equal(st.pendingRollbacks()[0]?.attempts, 1);
+  assert.deepEqual(forge.boardSet, [[2, "done"]]);
+  assert.equal(st.pendingRollbacks().length, 0);
   st.close();
 });
 

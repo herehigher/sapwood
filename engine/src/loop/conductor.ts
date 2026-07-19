@@ -2184,20 +2184,24 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       switch (outcome.kind) {
         case "merged":
           state.upsertWorker({ ...w, state: "done", ended_at: iso() });
-          try {
-            await forge.setBoardStatus(w.issue, "done");
-          } catch (e) {
-            const rollbackId = state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
-            rollbacks.push(
-              await handleRollbackFailure(
-                forge,
-                state,
-                cfg,
-                { id: rollbackId, issue: w.issue, target: "done", reason: MERGED_BOARD_DONE_REASON, attempts: 0 },
-                e,
-                iso,
-              ),
-            );
+          if (state.parkRow("forge") != null) {
+            state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
+          } else {
+            try {
+              await forge.setBoardStatus(w.issue, "done");
+            } catch (e) {
+              const rollbackId = state.addPendingRollback(w.issue, "done", MERGED_BOARD_DONE_REASON, iso());
+              rollbacks.push(
+                await handleRollbackFailure(
+                  forge,
+                  state,
+                  cfg,
+                  { id: rollbackId, issue: w.issue, target: "done", reason: MERGED_BOARD_DONE_REASON, attempts: 0 },
+                  e,
+                  iso,
+                ),
+              );
+            }
           }
           state.appendEvent("merged", { worker: w.name, issue: w.issue, pr, headOid: outcome.headOid });
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
