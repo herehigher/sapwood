@@ -576,6 +576,20 @@ const mkStub = (dir: string, body: string): string => {
   chmodSync(p, 0o755);
   return p;
 };
+const waitFor = async (predicate: () => boolean, message: string): Promise<void> => {
+  for (let i = 0; i < 400 && !predicate(); i++) await sleep(20);
+  assert.ok(predicate(), message);
+};
+const waitForFile = (path: string, message = `timed out waiting for ${path}`): Promise<void> => waitFor(() => existsSync(path), message);
+const waitForHeartbeatTick = async (path: string): Promise<void> => {
+  rmSync(path, { force: true });
+  await waitForFile(path, "heartbeat tick did not recreate its marker");
+};
+const longRunningStub = (dir: string, beforeReady = "", readyName = "stub-ready"): { bin: string; ready: string } => {
+  const ready = join(dir, readyName);
+  const bin = mkStub(dir, `#!/usr/bin/env bash\n${beforeReady}touch "${ready}"\nwhile true; do sleep 1; done\n`);
+  return { bin, ready };
+};
 const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001,"model":"claude-stub","usage":{"input_tokens":12,"output_tokens":34}}'\nexit 0\n`;
 
 // A present (dummy) guard hook so hard-mode dispatch doesn't fail closed; the stub `claude`
@@ -799,10 +813,10 @@ test("probe: #13 findOpenPr returning null -> hasPr false, prNumber undefined (n
 test("probe: costUsd is 0 while a lane is still running (no terminal sentinel yet)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir);
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 4, title: "t", labels: [] });
-    await sleep(100);
+    await waitForFile(ready);
     const probe = await s.probe(name);
     assert.equal(probe.done, false);
     assert.equal(probe.costUsd, 0);
@@ -858,11 +872,11 @@ test("dispatch rejects a name already in use (no concurrent same-name clobber)",
 test("reclaim kills a stubborn (ignores TERM) claude subtree via SIGKILL", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    // Stubborn stub: ignore TERM, sleep long -> only a process-group KILL stops it.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 60\n`);
+    // Stubborn stub: ignore TERM -> only a process-group KILL stops it.
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 2, title: "t", labels: [] });
-    await sleep(100); // let it start
+    await waitForFile(ready, "stub installed its TERM trap before reclaim");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
     await s.reclaim(name);
@@ -879,10 +893,10 @@ test("requestHandoff -> graceful SIGTERM -> .handoff sentinel (resumable, not ki
   try {
     // A COOPERATIVE worker: catches SIGTERM and exits 0 (it checkpointed/committed). Only a
     // clean exit-0 after a handoff request counts as a resumable .handoff.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
-    await sleep(600); // let bash install its TERM trap before we drain (else it dies by default)
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
     assert.equal(s.requestHandoff(name), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff sentinel written on cooperative drain");
@@ -903,10 +917,10 @@ test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Code
     // becomes a no-op) and create supervisor #2 over the SAME stateDir. #2 has no in-memory
     // handle, only the persisted running.json — the ceiling drain must still reach the
     // process group via the persisted pid instead of silently no-opping.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     const s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 8, title: "t", labels: [] });
-    await sleep(600); // let bash install its TERM trap
+    await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
     s1.dispose(); // "restart": the new supervisor knows this lane only from disk
@@ -925,10 +939,10 @@ test("requestHandoff reaches a RESTARTED-engine lane via the persisted pid (Code
 test("requestHandoff, worker dies by signal (no clean wrap-up), and no worktree exists on disk -> STILL .handoff, never .failed (#60 supersedes Codex R3 P2: the real CLI never exits 0 on SIGTERM, so gating .handoff on code===0 made it unreachable; the supervisor now guarantees resumability itself, tag-agnostic to exit code)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`); // no TERM trap -> SIGTERM kills it (code null)
+    const { bin, ready } = longRunningStub(dir); // no TERM trap -> SIGTERM kills it (code null)
     const s = sup(dir, bin); // no worktreeRoot override -> the lane's worktree path never exists
     const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
-    await sleep(200);
+    await waitForFile(ready, "stub reached its running state before handoff");
     s.requestHandoff(name);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handoff-requested + signal-killed is .handoff, not .failed");
@@ -969,7 +983,7 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
         `  echo '${firstLine}'`,
         `  echo '${firstResult}'`,
         "fi",
-        "sleep 30",
+        "while true; do sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -1104,6 +1118,7 @@ test("resume: spawn error removes the unconfirmed intent and leaves handoff retr
 test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the resumed run's terminal cost is probed normally", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
+    const ready = join(dir, "stub-ready");
     // Cooperative stub: a fresh dispatch sleeps and hands off cleanly on TERM. A --resume
     // invocation instead prints ONE more (higher, "cumulative") result line and exits 0 —
     // standing in for claude continuing the same session after --resume.
@@ -1116,13 +1131,14 @@ test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the 
         "  exit 0",
         "fi",
         "trap 'exit 0' TERM",
-        "sleep 30",
+        `touch "${ready}"`,
+        "while true; do sleep 1; done",
         "",
       ].join("\n"),
     );
     const s = sup(dir, bin);
     const { name, sessionId } = await s.dispatch({ number: 3, title: "t", labels: [] });
-    await sleep(600); // let bash install its TERM trap before draining
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
     assert.equal(s.requestHandoff(name), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handed off before resuming");
@@ -1149,23 +1165,26 @@ test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktr
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
     const worktreeRoot = join(dir, "worktrees");
+    const ready = join(dir, "stub-ready");
     const bin = mkStub(
       dir,
       [
         "#!/usr/bin/env bash",
         'if [[ "$*" == *"--resume"* ]]; then',
-        `  echo "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "resume-root.seen")}"`,
+        `  echo "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "resume-root.seen.tmp")}"`,
+        `  mv "${join(dir, "resume-root.seen.tmp")}" "${join(dir, "resume-root.seen")}"`,
         '  echo \'{"type":"result","subtype":"success","total_cost_usd":0.05,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}\'',
         "  exit 0",
         "fi",
         "trap 'exit 0' TERM",
-        "sleep 30",
+        `touch "${ready}"`,
+        "while true; do sleep 1; done",
         "",
       ].join("\n"),
     );
     const s = sup(dir, bin, false, worktreeRoot);
     const { name } = await s.dispatch({ number: 4, title: "t", labels: [] });
-    await sleep(600);
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
     assert.equal(s.requestHandoff(name), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     await s.resume({ number: 4, title: "t", labels: [] }, name);
@@ -1180,10 +1199,10 @@ test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktr
 test("resume: fails closed in hard mode when the guard hook is missing (no unguarded resume)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     const s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
-    await sleep(600);
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
     s.requestHandoff(name);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     // A supervisor whose guard hook path doesn't exist, same as dispatch()'s hard-mode guard.
@@ -1290,7 +1309,7 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
   try {
     const hook = mkHook(dir);
     const worktreeRoot = join(dir, "worktrees");
-    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "root.seen")}"\nexit 0\n`);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "root.seen.tmp")}"\nmv "${join(dir, "root.seen.tmp")}" "${join(dir, "root.seen")}"\nexit 0\n`);
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "hard" } });
     const s = new WorkerSupervisor({
       cfg: scfg,
@@ -1347,19 +1366,23 @@ test("dispatch rejects (and cleans up) when claude can't spawn — bad CLAUDE_BI
 test("enforces worker timeout: a run past timeoutSec is killed and marked failed (Codex R2 P1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // ignores TERM -> needs the KILL
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> needs the KILL
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
+    let fakeNowMs = Date.now();
     const s = new WorkerSupervisor({
       cfg: tcfg,
       stateDir: dir,
       claudeBin: bin,
       hasOpenPr: async () => false,
       renderPrompt: () => "p",
-      heartbeatMs: 100,
+      heartbeatMs: 20,
       guardHookPath: mkHook(dir),
+      now: () => new Date(fakeNowMs),
     });
     const { name } = await s.dispatch({ number: 5, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM trap before timeout");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
+    fakeNowMs += (tcfg.worker.timeoutSec + 1) * 1000;
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.failed.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.failed.json`)), "timed-out worker marked failed");
     for (let i = 0; i < 400 && alive(pid); i++) await sleep(20);
@@ -1383,7 +1406,7 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
       [
         `#!/usr/bin/env bash`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `sleep 30`,
+        `while true; do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1412,9 +1435,7 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "soft-budget crossing led to a graceful .handoff");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)), "never a hard-kill .failed for a budget-triggered handoff");
-    // Give any further heartbeat ticks a moment to prove the guard actually holds, not just
-    // that the first tick happened to be the last one before exit.
-    await sleep(150);
+    // The terminal sentinel means onExit cleared the heartbeat interval, so the count is final.
     assert.equal(handoffCalls, 1, "requestHandoff fired exactly once for the soft-budget crossing");
     s.dispose();
   } finally {
@@ -1429,15 +1450,8 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
     // comfortably under a $2 budget. Priced (WRONGLY) at the input rate ($5/MTok) it would be
     // ~$5.00 and cross the budget on the very first heartbeat tick -- exactly the cache-heavy
     // over-trigger failure mode #33 flags.
-    const bin = mkStub(
-      dir,
-      [
-        `#!/usr/bin/env bash`,
-        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":1000000}}}'`,
-        `sleep 30`,
-        ``,
-      ].join("\n"),
-    );
+    const usageLine = `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":1000000}}}`;
+    const { bin, ready } = longRunningStub(dir, `echo '${usageLine}'\n`);
     const tcfg = ConfigSchema.parse({
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { budgetUsdSoft: 2 },
@@ -1452,9 +1466,9 @@ test("#33: a cache-heavy stream under budget does NOT trigger a handoff -- cache
       guardHookPath: mkHook(dir),
     });
     const { name } = await s.dispatch({ number: 34, title: "t", labels: [] });
-    // Let several heartbeat ticks pass -- long enough that a wrongly-priced estimate would
-    // already have crossed budget and triggered a handoff by now.
-    await sleep(400);
+    await waitForFile(ready, "cache-heavy usage was flushed before checking the budget");
+    assert.ok(readFileSync(join(dir, `${name}.jsonl`), "utf8").includes(usageLine));
+    await waitForHeartbeatTick(join(dir, `${name}.heartbeat`));
     assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "cache-heavy run under budget must NOT hand off");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
     await s.reclaim(name);
@@ -1489,7 +1503,7 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       [
         `#!/usr/bin/env bash`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `sleep 30`,
+        `while true; do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1529,16 +1543,18 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
     );
     const preExisting = `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n`;
     writeFileSync(join(dir, `${name}.jsonl`), preExisting);
-    // The resumed stub: quiet for ~1s (many heartbeat ticks at 50ms — the must-NOT-trigger
-    // window), then emits NEW usage that crosses the budget again, then sleeps with no TERM
-    // trap (the real CLI shape) so the budget-triggered SIGTERM ends it -> .handoff.
+    // The resumed stub waits for the test to prove a heartbeat checked the pre-existing spend,
+    // then emits NEW usage that crosses the budget again.
+    const ready = join(dir, "stub-ready");
+    const emitNewUsage = join(dir, "emit-new-usage");
     const bin = mkStub(
       dir,
       [
         `#!/usr/bin/env bash`,
-        `sleep 1`,
+        `touch "${ready}"`,
+        `while [ ! -f "${emitNewUsage}" ]; do sleep 0.02; done`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `sleep 30`,
+        `while true; do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1556,11 +1572,11 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
       guardHookPath: mkHook(dir),
     });
     await s.resume({ number: 33, title: "t", labels: [] }, name);
-    // Must-NOT window: ~10 heartbeat ticks pass while the jsonl holds only pre-handoff usage.
-    await sleep(500);
+    await waitForFile(ready, "resumed stub reached its pre-new-usage wait");
+    await waitForHeartbeatTick(join(dir, `${name}.heartbeat`));
     assert.ok(!existsSync(join(dir, `${name}.handoff.json`)), "pre-handoff spend alone must NOT re-trigger a handoff after resume");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
-    // Then the stub's NEW post-resume usage lands and crosses the budget again -> handoff.
+    writeFileSync(emitNewUsage, "");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "new post-resume spend crossing the budget triggers a fresh graceful handoff");
     assert.ok(!existsSync(join(dir, `${name}.failed.json`)));
@@ -1581,7 +1597,7 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
         `#!/usr/bin/env bash`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":2000}}}'`,
-        `sleep 30`,
+        `while true; do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1630,7 +1646,7 @@ test("#155: contextTokens is deliberately NON-monotonic — a later, smaller ass
         `while [ ! -f "${marker}" ]; do sleep 0.02; done`,
         // Small second turn (post-compaction context is much smaller).
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":500,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `sleep 30`,
+        `while true; do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1677,7 +1693,7 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
         `while [ ! -f "${marker}" ]; do sleep 0.02; done`,
         // New post-resume usage: opus 200in+0out -> $0.001.
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `sleep 30`,
+        `while true; do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1966,10 +1982,10 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n"); // WIP at kill time
 
     // The empirically-confirmed real CLI shape (#60): no SIGTERM trap -> dies by signal.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir);
     const s = sup(dir, bin, false, worktreeRoot);
     const { name: laneName, sessionId } = await s.dispatch({ number: 69, title: "t", labels: [] }, name);
-    await sleep(200);
+    await waitForFile(ready, "stub reached its running state before drain");
     assert.equal(s.requestHandoff(laneName), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), ".handoff written despite a signal-killed exit");
@@ -2095,7 +2111,7 @@ test("#69: reclaim RETAINS a worktree with a file written after dispatch (possib
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(join(worktreePath, "src"), { recursive: true });
 
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin } = longRunningStub(dir);
     const s = sup(dir, bin, false, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 70, title: "t", labels: [] }, name);
     await sleep(50); // ensure the WIP write lands strictly after the recorded lane start
@@ -2122,10 +2138,10 @@ test("#69: reclaim DELETES a clean worktree (no file touched since dispatch) —
     writeFileSync(join(worktreePath, "checked-out.txt"), "pre-existing\n"); // pre-dispatch content
     await sleep(20); // strictly before the lane's recorded start
 
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir);
     const s = sup(dir, bin, false, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 71, title: "t", labels: [] }, name);
-    await sleep(100);
+    await waitForFile(ready);
 
     const r = await s.reclaim(laneName);
     assert.equal(r.worktreeRetained, false);
@@ -2140,10 +2156,10 @@ test("#69: reclaim DELETES a clean worktree (no file touched since dispatch) —
 test("#69: reclaim of a lane with NO worktree on disk -> nothing retained, nothing to report", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir);
     const s = sup(dir, bin); // default worktreeRoot -> the lane's worktree path never exists
     const { name } = await s.dispatch({ number: 72, title: "t", labels: [] });
-    await sleep(100);
+    await waitForFile(ready);
     const r = await s.reclaim(name);
     assert.deepEqual(r, { worktreePath: null, worktreeRetained: false });
     s.dispose();
@@ -2160,7 +2176,7 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(worktreePath, { recursive: true });
 
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin } = longRunningStub(dir);
     const s1 = sup(dir, bin, false, worktreeRoot);
     const { name: laneName } = await s1.dispatch({ number: 73, title: "t", labels: [] }, name);
     await sleep(50);
@@ -2183,6 +2199,7 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
   try {
     const name = "lane-69-resume-wip";
+    const ready = join(dir, "stub-ready");
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(worktreePath, { recursive: true });
 
@@ -2196,7 +2213,8 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
         "  exit 0",
         "fi",
         "trap 'exit 0' TERM",
-        "sleep 30",
+        `touch "${ready}"`,
+        "while true; do sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -2205,7 +2223,7 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
     await sleep(50);
     // Pre-handoff WIP: written DURING the first run, mtime after first dispatch.
     writeFileSync(join(worktreePath, "wip.txt"), "pre-handoff uncommitted work\n");
-    await sleep(600); // let the TERM trap install
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
     assert.equal(s.requestHandoff(laneName), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${laneName}.handoff.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${laneName}.handoff.json`)), "handed off");
@@ -2242,7 +2260,7 @@ test("#69 (fable P2b): a file whose mtime is BACKDATED before dispatch still rea
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(worktreePath, { recursive: true });
 
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin } = longRunningStub(dir);
     const s = sup(dir, bin, false, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 75, title: "t", labels: [] }, name);
     await sleep(50);
@@ -2270,7 +2288,7 @@ test("#69 (Codex PR #72 round-2): a WIP entry whose mtime EQUALS dispatched_at e
     const worktreePath = join(worktreeRoot, name);
     mkdirSync(worktreePath, { recursive: true });
 
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin } = longRunningStub(dir);
     const s = sup(dir, bin, false, worktreeRoot);
     const { name: laneName } = await s.dispatch({ number: 76, title: "t", labels: [] }, name);
     await sleep(50);
@@ -2316,10 +2334,10 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted work\n"); // WIP at kill time
 
     // No TERM trap -> the real CLI's empirically-confirmed shape (#60): dies by signal.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir);
     const s1 = sup(dir, bin, false, worktreeRoot);
     const { name: laneName, sessionId } = await s1.dispatch({ number: 63, title: "t", labels: [] }, name);
-    await sleep(200);
+    await waitForFile(ready, "stub reached its running state before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     assert.equal(alive(pid), true);
     s1.dispose(); // "restart": s2 has no in-memory lane handle for this name — only the persisted file
@@ -2353,10 +2371,10 @@ test("#63/#69: detached handoff-requested lane confirmed dead -> probe() writes 
 test("#63: a SECOND engine restart before death is confirmed still finalizes — the persisted running.json handoff_requested field survives even though the fresh instance's in-memory set is empty", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nsleep 30\n`); // no trap -> dies on SIGTERM
+    const { bin, ready } = longRunningStub(dir); // no trap -> dies on SIGTERM
     const s1 = sup(dir, bin);
     const { name: laneName } = await s1.dispatch({ number: 64, title: "t", labels: [] });
-    await sleep(200);
+    await waitForFile(ready, "stub reached its running state before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     s1.dispose(); // restart #1: engine forgets the in-process lane
 
@@ -2390,10 +2408,10 @@ test("#169: persisted handoff_requested closes the write-before-signal crash win
   let s1: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 169, title: "t", labels: [] });
-    await sleep(600); // let bash install its TERM trap before simulating the crash window
+    await waitForFile(ready, "stub installed its TERM trap before simulating the crash window");
     const runningPath = join(dir, `${name}.running.json`);
     const running = JSON.parse(readFileSync(runningPath, "utf8")) as Record<string, unknown> & { wrapper_pid: number };
     const pid = running.wrapper_pid;
@@ -2462,10 +2480,10 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
 
     // Ignores TERM -> survives requestHandoff's SIGTERM; only reclaim()'s SIGKILL stops it —
     // mirroring the "reclaim kills a stubborn claude subtree via SIGKILL" pattern above.
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n");
     const s1 = sup(dir, bin, false, worktreeRoot);
     const { name: laneName } = await s1.dispatch({ number: 65, title: "t", labels: [] }, name);
-    await sleep(200);
+    await waitForFile(ready, "stub installed its TERM trap before engine restart");
     writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n"); // post-dispatch WIP -> dirty
     const pid = JSON.parse(readFileSync(join(dir, `${laneName}.running.json`), "utf8")).wrapper_pid as number;
     s1.dispose();
@@ -2496,10 +2514,10 @@ test("#63/#69: a lane already reclaim()'d must never also be finalized as .hando
 test("#63 F1: a failure persisting handoff_requested onto running.json is swallowed — requestHandoff still returns true and the SIGTERM still lands (Codex second-opinion review, PR #67: it's called unguarded from the conductor's CEILING drain loop, which must never abort mid-tick)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     const s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 66, title: "t", labels: [] });
-    await sleep(600); // let bash install its TERM trap
+    await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
@@ -2534,10 +2552,10 @@ test("#63 F1: a failure persisting handoff_requested onto running.json is swallo
 test("#63 P2: requestHandoff's detached branch persists handoff_requested BEFORE sending the SIGTERM, not after (Codex second-opinion review, PR #67 — closes the gap where the engine could die between 'signal sent' and 'flag persisted', losing the very record the flag exists to survive)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap 'exit 0' TERM\nsleep 30\n`);
+    const { bin, ready } = longRunningStub(dir, "trap 'exit 0' TERM\n");
     const s1 = sup(dir, bin);
     const { name } = await s1.dispatch({ number: 67, title: "t", labels: [] });
-    await sleep(600); // let bash install its TERM trap
+    await waitForFile(ready, "stub installed its TERM trap before engine restart");
     const pid = JSON.parse(readFileSync(join(dir, `${name}.running.json`), "utf8")).wrapper_pid as number;
     s1.dispose(); // "restart": s2 only knows this lane via the persisted running.json
 
@@ -2882,7 +2900,7 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
     const hook = mkHook(dir);
     // stub records its argv so we can inspect exactly what -p carried (same trick as the
     // #26 inline-settings test above).
-    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\nexit 0\n`);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`);
     const s = new WorkerSupervisor({
       cfg: scfg,
       stateDir: dir,
@@ -2947,7 +2965,7 @@ test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handl
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
       cfg,
@@ -2991,7 +3009,7 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
       cfg,
@@ -3119,6 +3137,7 @@ test("dispatch: a spawn failure on a credentialFree leg (mint succeeded, spawn f
 // (WorkerProxyOpts.credentialFree).
 test("dispatch: credentialFree opt strips forge/git credential env vars and severs gh/git's own credential-lookup paths for a worker leg — same denylist as peripheral.ts's #218 regression, NOT a claim of full isolation (see workerCredentialFreeEnv's doc)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const release = join(dir, "release-stub");
   const poisoned = {
     GH_TOKEN: "poison-gh-token",
     GITHUB_TOKEN: "poison-github-token",
@@ -3137,12 +3156,7 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
-      // #244 (Codex sol-high PR #260 review round 2, P2): a brief sleep AFTER writing env.seen,
-      // BEFORE exiting — without it, the process can fully exit (triggering onExit's own
-      // GH_CONFIG_DIR cleanup) before the test ever gets to assert the directory's PRE-cleanup
-      // shape, racing the two concerns (mid-run existence vs. post-exit removal) against each
-      // other. This gives a deterministic window for the former before the latter can happen.
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen")}"\nsleep 1\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
       cfg,
@@ -3196,6 +3210,7 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
     assert.match(allowedTools, /Bash\(git \*\)/, "git stays — its own credential path is what's severed, not the tool grant");
     // #244 (Codex sol-high PR #260 review round 2, P2): the per-lane GH_CONFIG_DIR scratch
     // directory is cleaned up once the lane exits — never left behind as directory litter.
+    writeFileSync(release, "");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
     assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory must be removed once the lane exits (onExit)");
@@ -3336,7 +3351,7 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
-      `#!/usr/bin/env bash\necho "$GH_TOKEN" > "${join(dir, "token.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+      `#!/usr/bin/env bash\necho "$GH_TOKEN" > "${join(dir, "token.seen.tmp")}"\nmv "${join(dir, "token.seen.tmp")}" "${join(dir, "token.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
     const s = new WorkerSupervisor({
       cfg,
@@ -3375,9 +3390,19 @@ async function mkHandoffLane(
   postResumeBody: string,
 ): Promise<{ s: WorkerSupervisor; name: string; sessionId: string; hook: string }> {
   const hook = mkHook(dir);
+  const ready = join(dir, "stub-ready");
   const bin = mkStub(
     dir,
-    ["#!/usr/bin/env bash", 'if [[ "$*" == *"--resume"* ]]; then', postResumeBody, "fi", "trap 'exit 0' TERM", "sleep 30", ""].join("\n"),
+    [
+      "#!/usr/bin/env bash",
+      'if [[ "$*" == *"--resume"* ]]; then',
+      postResumeBody,
+      "fi",
+      "trap 'exit 0' TERM",
+      `touch "${ready}"`,
+      "while true; do sleep 1; done",
+      "",
+    ].join("\n"),
   );
   const s = new WorkerSupervisor({
     cfg,
@@ -3389,7 +3414,7 @@ async function mkHandoffLane(
     guardHookPath: hook,
   });
   const { name, sessionId } = await s.dispatch({ number: 9, title: "t", labels: [] });
-  await sleep(600); // let bash install its TERM trap before draining
+  await waitForFile(ready, "stub installed its TERM trap before handoff");
   assert.equal(s.requestHandoff(name), true);
   for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
   assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handed off before resuming");
@@ -3402,7 +3427,7 @@ const RESULT_LINE =
 test("resume: a proxy opt mints a handle, widens --allowedTools with the handle's own tool names, and injects --mcp-config inline JSON", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
+    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
     const { calls, handle } = fakeWorkerProxyHandle();
     const resumed = await s.resume({ number: 9, title: "t", labels: [] }, name, {
       proxy: {
@@ -3434,7 +3459,7 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
 test("resume: opts.prompt REPLACES the ordinary issue-rendered prompt — the fix leg's own fix instruction — and is the exact string passed to claude -p", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
+    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
     await s.resume({ number: 9, title: "t", labels: [] }, name, { prompt: "fix-leg: address PR #42's review findings" });
     for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
     const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
@@ -3450,7 +3475,7 @@ test("resume: opts.prompt REPLACES the ordinary issue-rendered prompt — the fi
 test("resume: no proxy/prompt opt -> byte-identical to pre-#245 behavior (renderPrompt output, no --mcp-config)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
-    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
+    const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
     await s.resume({ number: 9, title: "t", labels: [] }, name);
     for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
     const args = readFileSync(join(dir, "args.seen"), "utf8");
@@ -3512,15 +3537,13 @@ test("resume: credentialFree + mint FAILURE refuses the resume outright (fail-cl
 
 test("resume: credentialFree strips forge/git credential env vars and narrows --allowedTools (drops Bash(gh *), keeps Bash(git *)) for the resumed leg", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const release = join(dir, "release-resumed-stub");
   const previousGhToken = process.env.GH_TOKEN;
   try {
     process.env.GH_TOKEN = "poison-gh-token";
-    // #244/#245 review pattern: a brief sleep AFTER writing env.seen, BEFORE exiting — without
-    // it, the process can fully exit (triggering onExit's own GH_CONFIG_DIR cleanup) before the
-    // test ever gets to assert the directory's PRE-cleanup shape.
     const { s, name } = await mkHandoffLane(
       dir,
-      `  printf '%s\\n' "$@" > "${join(dir, "args.seen")}"\n  env > "${join(dir, "env.seen")}"\n  sleep 1\n  ${RESULT_LINE}`,
+      `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  env > "${join(dir, "env.seen.tmp")}"\n  mv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\n  for _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\n  ${RESULT_LINE}`,
     );
     const { handle } = fakeWorkerProxyHandle();
     await s.resume({ number: 9, title: "t", labels: [] }, name, { proxy: { mint: async () => handle as never, credentialFree: true } });
@@ -3538,6 +3561,7 @@ test("resume: credentialFree strips forge/git credential env vars and narrows --
     const allowedTools = args.trim().split("\n")[allowedToolsIdx + 1]!;
     assert.doesNotMatch(allowedTools, /Bash\(gh \*\)/);
     assert.match(allowedTools, /Bash\(git \*\)/);
+    writeFileSync(release, "");
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
     assert.ok(!existsSync(ghConfigDir), "GH_CONFIG_DIR scratch directory is cleaned up once the lane exits");
@@ -3554,11 +3578,19 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
   const state = new State(":memory:");
   try {
     const hook = mkHook(dir);
+    const ready = join(dir, "stub-ready");
     const bin = mkStub(
       dir,
-      ["#!/usr/bin/env bash", 'if [[ "$*" == *"--resume"* ]]; then', `  ${RESULT_LINE}`, "fi", "trap 'exit 0' TERM", "sleep 30", ""].join(
-        "\n",
-      ),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  ${RESULT_LINE}`,
+        "fi",
+        "trap 'exit 0' TERM",
+        `touch "${ready}"`,
+        "while true; do sleep 1; done",
+        "",
+      ].join("\n"),
     );
     const s = new WorkerSupervisor({
       cfg,
@@ -3571,7 +3603,7 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
       state,
     });
     const { name: name1 } = await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-resume-mintfail-1");
-    await sleep(600);
+    await waitForFile(ready, "first stub installed its TERM trap before handoff");
     s.requestHandoff(name1);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name1}.handoff.json`)); i++) await sleep(20);
     await s.resume({ number: 1, title: "t", labels: [] }, name1, {
@@ -3582,8 +3614,9 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
       },
     });
 
+    rmSync(ready, { force: true });
     const { name: name2 } = await s.dispatch({ number: 2, title: "t", labels: [] }, "lane-resume-mintfail-2");
-    await sleep(600);
+    await waitForFile(ready, "second stub installed its TERM trap before handoff");
     s.requestHandoff(name2);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name2}.handoff.json`)); i++) await sleep(20);
     await assert.rejects(() =>
@@ -3628,7 +3661,8 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
       [
         "#!/usr/bin/env bash",
         'if [[ "$*" == *"--resume"* ]]; then',
-        `  printf '%s\\n' "$@" > "${join(dir, "fix-args.seen")}"`,
+        `  printf '%s\\n' "$@" > "${join(dir, "fix-args.seen.tmp")}"`,
+        `  mv "${join(dir, "fix-args.seen.tmp")}" "${join(dir, "fix-args.seen")}"`,
         RESULT_LINE,
         "fi",
         `echo '{"type":"result","subtype":"success","total_cost_usd":0.001,"model":"claude-stub","usage":{"input_tokens":1,"output_tokens":1}}'`,
@@ -3772,7 +3806,14 @@ test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on sp
     const hook = mkHook(dir);
     const bin = mkStub(
       dir,
-      ["#!/usr/bin/env bash", 'if [[ "$*" == *"--resume"* ]]; then', "  trap 'exit 0' TERM", "  sleep 30", "fi", RESULT_LINE].join("\n"),
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        "  trap 'exit 0' TERM",
+        "  while true; do sleep 1; done",
+        "fi",
+        RESULT_LINE,
+      ].join("\n"),
     );
     const s = new WorkerSupervisor({
       cfg,
