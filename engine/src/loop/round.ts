@@ -21,8 +21,10 @@
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
+import type { ProxyForge } from "../proxy/mcp-server.js";
+import { createProxyMint } from "../proxy/mint.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
-import { type MergeGate, type Supervisor, type TickDeps, type TickResult, tick } from "./conductor.js";
+import { type FixLegResumeDeps, type MergeGate, type Supervisor, type TickDeps, type TickResult, tick } from "./conductor.js";
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
 
@@ -102,6 +104,49 @@ export interface RoundDeps {
    *  fires regardless). cli.ts wires the real implementation (worker.ts's probeLlmPing) for a
    *  live `sapwood run`; tests inject a fake or leave it unset. */
   probeLlmReachable?: () => Promise<boolean | { ok: boolean; detail?: string }>;
+  /** #253: pure renderFixPrompt for a FIXABLE gate's fix-loop continuation — worker.ts's
+   *  buildRenderFixPrompt(cfg) output, cli.ts's real caller always supplies it (already eagerly
+   *  validated at startup, same as renderPrompt/probeLlmReachable above). Paired with
+   *  cfg.proxy.enabled, NOT a separate on/off of its own: buildFixLegResume below only builds a
+   *  real TickDeps.fixLegResume when BOTH this field is set AND cfg.proxy.enabled is true; with
+   *  proxy.enabled false (the default) a FIXABLE gate still degrades to the pre-#246 needs-human
+   *  escalation exactly as before (#246 C1), unchanged. Omitted -> round.ts's own skeleton tests
+   *  (which never exercise #246's FIXABLE path) keep compiling and behaving identically. */
+  renderFixPrompt?: (issueNumber: number, pr: number) => string;
+}
+
+/** #253: builds this round's TickDeps.fixLegResume — the fix-loop worker leg's
+ *  renderFixPrompt+mintProxy pair (conductor.ts's FixLegResumeDeps) — or `undefined` when the
+ *  proxy is off (cfg.proxy.enabled: false, the default) or no renderFixPrompt was supplied
+ *  (RoundDeps.renderFixPrompt's own doc). `forge` is the round's own (possibly milestone/pool-
+ *  scoped) forge — #234/#244's own doc establishes the proxy's read surface has no round/pool
+ *  scoping concept of its own (RoundScopedForge/PoolScopedForge both plain-passthrough every
+ *  proxy-tool method), so this is behaviorally identical to the raw forge either way. `roundId`
+ *  becomes this mint's fixed audit identity for every session it mints this round (proxy/
+ *  mint.test.ts's own journal-identity contract); `phase` is fixed to "executing" — the ONLY
+ *  phase a fix leg is ever dispatched from (conductor.ts's DRIVE section, itself only reached
+ *  from the executing-phase's own tick() calls). Exported for direct testing: the full FIXABLE
+ *  -> startFixLeg -> resume() path needs a scripted MergeGate + supervisor to exercise
+ *  end-to-end (round.test.ts's own integration test), but this construction/gating logic is
+ *  unit-testable on its own without any of that. */
+export function buildFixLegResume(
+  deps: Pick<RoundDeps, "cfg" | "state" | "renderFixPrompt" | "now" | "log">,
+  forge: ProxyForge,
+  roundId: number,
+): FixLegResumeDeps | undefined {
+  if (!deps.cfg.proxy.enabled || !deps.renderFixPrompt) return undefined;
+  return {
+    renderFixPrompt: deps.renderFixPrompt,
+    mintProxy: createProxyMint({
+      cfg: deps.cfg,
+      forge,
+      state: deps.state,
+      roundId,
+      phase: "executing",
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      ...(deps.log !== undefined ? { log: deps.log } : {}),
+    }),
+  };
 }
 
 export interface RoundsResult {
@@ -699,6 +744,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     forceDispatchPause?: boolean;
     roundSpendUsd?: () => number;
     dispatchCapOverride?: number;
+    fixLegResume?: FixLegResumeDeps;
   }): TickDeps => ({
     forge: over.forge,
     state: deps.state,
@@ -713,6 +759,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
     ...(over.roundSpendUsd !== undefined ? { roundSpendUsd: over.roundSpendUsd } : {}),
     ...(over.dispatchCapOverride !== undefined ? { dispatchCapOverride: over.dispatchCapOverride } : {}),
+    // #253: this round's fix-loop mint (buildFixLegResume, gated on cfg.proxy.enabled +
+    // RoundDeps.renderFixPrompt) — see runExecuting's own construction site for the roundId/
+    // phase audit identity this carries.
+    ...(over.fixLegResume !== undefined ? { fixLegResume: over.fixLegResume } : {}),
     // #154 (Codex P1, PR #160): the run-level spend stop must freeze a tick's OWN refill the
     // moment its reclaim phase banks the crossing spend — thunk evaluated inside tick(),
     // post-reclaim (see TickDeps.runSpendStopCrossed). Only wired when the stop is configured.
@@ -795,6 +845,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
   const runExecuting = async (round: RoundRow, freshBatch: boolean): Promise<number> => {
     let stopHit: RoundStopHit | undefined;
+    // #253: this round's fix-loop mint, built ONCE per round (not per tick) — roundId is fixed
+    // for the round's whole executing phase, so there is no reason to re-derive it on every
+    // wave/drain tick below. `undefined` (cfg.proxy.enabled: false, the default, or no
+    // RoundDeps.renderFixPrompt supplied) means TickDeps.fixLegResume stays entirely unset,
+    // exactly as before this issue — a FIXABLE gate still degrades to the pre-#246 needs-human
+    // escalation (#246 C1), unchanged.
+    const fixLegResume = buildFixLegResume(deps, dispatchForge, round.round_id);
     const dispatchedNames: string[] = [];
     const inheritedActiveWorkers = freshBatch ? [] : deps.state.activeWorkers();
     const inheritedActiveCount = inheritedActiveWorkers.length;
@@ -878,6 +935,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           forceDispatchPause: freshBatch && !attempt,
           roundSpendUsd: () => spentSoFar(),
           dispatchCapOverride: attempt ? remaining : 0,
+          ...(fixLegResume !== undefined ? { fixLegResume } : {}),
         }),
       );
       if (batchResult) {
@@ -916,6 +974,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           // same-tick reclaim that crosses cost.roundBudgetUsd blocks the same tick's refill.
           roundSpendUsd: () => spentSoFar(),
           dispatchCapOverride: attempt ? remaining : 0,
+          ...(fixLegResume !== undefined ? { fixLegResume } : {}),
         }),
       );
       if (tickResult) {

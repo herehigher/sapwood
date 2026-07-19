@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   applyMilestoneOverride,
   assertStopMilestoneExists,
+  buildTickFixLegResume,
   computeDryRunPreview,
   formatDryRunPreview,
   formatStatus,
@@ -23,7 +24,8 @@ import {
   type StatusSnapshot,
 } from "../cli.js";
 import { ConfigSchema, parseConfig } from "../config/config.js";
-import type { Issue } from "../forge/forge.js";
+import type { IForge, Issue } from "../forge/forge.js";
+import type { ProxyForge } from "../proxy/mcp-server.js";
 import { SCHEMA_VERSION, State } from "../state/state.js";
 
 test("--version prints package version and exits 0", () => {
@@ -1246,5 +1248,72 @@ test("status: DB schema OLDER than this engine -> clear 'run the engine to migra
     check.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #253: buildTickFixLegResume — the tick driver's TickDeps.fixLegResume construction ─────
+
+function fakeProxyForgeForCli(): ProxyForge {
+  return {
+    getIssueMeta: async () => ({ number: 1, title: "t", state: "OPEN", labels: [], updatedAt: "2026-07-17T00:00:00Z" }),
+    getIssueBody: async () => "",
+    getIssueComments: async () => [],
+    getIssueRelations: async () => ({ linkedPRs: [], crossReferences: [], truncated: false }),
+    searchIssues: async () => [],
+    getPRDetails: async () => ({ number: 1, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" }),
+    getPRReviews: async () => ({ reviews: [], total: 0 }),
+    getPRReviewThreads: async () => ({
+      threads: [{ id: "T1", isResolved: false, comments: [], commentsComplete: true }],
+      pageCapped: false,
+    }),
+    getPRChecks: async () => ({ checks: [], total: 0 }),
+  };
+}
+
+test("buildTickFixLegResume (#253): cfg.proxy.enabled: false (the default) -> undefined — byte-for-byte today's behavior (fixLegResume stays entirely unset)", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" } });
+  const state = new State(":memory:");
+  try {
+    const forge = fakeProxyForgeForCli() as unknown as IForge;
+    const result = buildTickFixLegResume(cfg, forge, state, (i, p) => `fix #${i} for PR #${p}`);
+    assert.equal(result, undefined);
+  } finally {
+    state.close();
+  }
+});
+
+test("buildTickFixLegResume (#253): cfg.proxy.enabled: true -> a real fixLegResume whose mintProxy carries round 0 / phase 'tick' as its fixed audit identity", async () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4, ownerKind: "user" },
+    proxy: { enabled: true },
+  });
+  const state = new State(":memory:");
+  try {
+    const forge = fakeProxyForgeForCli() as unknown as IForge;
+    const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
+    const result = buildTickFixLegResume(cfg, forge, state, renderFixPrompt);
+    assert.ok(result, "expected a real fixLegResume");
+    assert.equal(result.renderFixPrompt(3, 4), "fix #3 for PR #4");
+    const handle = await result.mintProxy({ role: "worker", session: "lane-7-abc" });
+    try {
+      const res = await fetch(handle.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${handle.token}` },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "pr_review_threads", arguments: { pr: 1 } },
+        }),
+      });
+      const json = (await res.json()) as { result: { isError: boolean } };
+      assert.equal(json.result.isError, false);
+      const rows = state.listForgeProxyJournal({ roundId: 0, phase: "tick", role: "worker", session: "lane-7-abc", attempt: 1 });
+      assert.equal(rows.length, 1, "round 0 / phase 'tick' is this driver's fixed audit identity — proof it was actually threaded through");
+    } finally {
+      await handle.stop();
+    }
+  } finally {
+    state.close();
   }
 });
