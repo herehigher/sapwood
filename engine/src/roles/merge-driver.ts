@@ -133,29 +133,28 @@ const BASH_DEFAULT_HUMAN_LABELS = ["risk", "fund", "needs-human", "blocked"] as 
  * Port of 0day's loop_merge_driver.sh `merge_decision` — the FINAL fail-safe check evaluated
  * immediately before the actual merge call, re-derived from FRESH action/labels/state (defense
  * in depth: independent of, and evaluated later than, deriveGate above). Pure, zero-dep.
- * Parity-tested row-for-row against 0day's test_loop_merge_driver.sh (merge-driver.test.ts).
+ * Based on 0day's test_loop_merge_driver.sh, with #273's stricter OID-bound reaction rule.
  *
  *  - MERGE_OK: an automatic-merge candidate (gate② already guaranteed a fresh non-author review
  *    of the current head — this function does not re-derive that freshness).
- *  - APPROVED_PR_LEVEL: a bare PR-level 👍 candidate ONLY when `trustedApproval` is true (a
- *    fresh 👍 from a configured trusted/bot reviewer login, computed by the caller); anyone
- *    else's 👍 (indistinguishable human-vs-worker) -> ESCALATE.
+ *  - APPROVED_PR_LEVEL: legacy bare PR-level 👍 action, always escalated because reactions
+ *    cannot bind to a commit OID (#273). `trustedApproval` remains API-compatible only.
  *  - WAIT_*: passive wait (poll again later).
  *  - anything else (CI_RED / HANDLE_THREADS / DRAFT_HUMAN / empty / unknown): ESCALATE
  *    (fail-safe — never auto-merge/auto-wait on an unrecognized signal).
- *  - state must be OPEN; any configured human-triage label -> ESCALATE, even with a trusted 👍.
+ *  - state must be OPEN; any configured human-triage label -> ESCALATE.
  */
 export function mergeDecision(
   action: string,
   labelsCsv: string,
   state: string = "OPEN",
-  trustedApproval: boolean = false,
+  _trustedApproval: boolean = false,
   humanLabels: readonly string[] = BASH_DEFAULT_HUMAN_LABELS,
 ): "MERGE" | "WAIT" | "ESCALATE" {
   if (action === "MERGE_OK") {
     // automatic-merge candidate — fall through to the state/label guards below
   } else if (action === "APPROVED_PR_LEVEL") {
-    if (!trustedApproval) return "ESCALATE";
+    return "ESCALATE";
   } else if (action.startsWith("WAIT_") || action === "REVIEW_UNAVAILABLE") {
     // REVIEW_UNAVAILABLE (sapwood extension, #13): a rate-limited/timed-out review query is an
     // infrastructure hiccup, not a finding — queue (retry later), never escalate to human
@@ -374,8 +373,8 @@ export class MergeDriver {
     // #55 P1-B: the head is now KNOWN (both reads agree) — this is the one place that can
     // correctly decide whether the recorded trigger pin still applies. A mismatch covers BOTH
     // "never triggered" (triggerPin.head === null) and "triggered, but the PR was pushed since"
-    // (triggerPin.head !== the live head) — either way, a stale/absent pin means gate②'s thumb
-    // path must not evaluate against this head yet: post a fresh trigger, record it, and queue
+    // (triggerPin.head !== the live head) — either way, a stale/absent pin means gate②'s
+    // OID-bound comment path must not evaluate against this head yet: post a fresh trigger, record it, and queue
     // this tick rather than deriving a verdict a push may have invalidated mid-flight.
     if (triggerPin.head !== status.headOid) {
       try {
@@ -403,7 +402,7 @@ export class MergeDriver {
         // must QUEUE — the conductor's tick calls driveOne unguarded, so a throw here would
         // crash the whole tick loop. Retried next tick. If the trigger comment DID post but the
         // pin write failed, the retry re-posts a duplicate trigger comment (harmless) rather
-        // than ever counting thumbs against an unrecorded pin — fail-closed either way.
+        // than ever counting comments against an unrecorded pin — fail-closed either way.
         return { kind: "queued", pr, reason: `review-trigger-failed: ${String(e)}` };
       }
       return { kind: "queued", pr, reason: "review-triggered" };

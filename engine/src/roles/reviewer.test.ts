@@ -322,32 +322,38 @@ test("CodexReviewer: cfg trustedReviewers EXTENDS the allowlist (never replaces 
   assert.equal(r.verdictFromData(mkData({ reviews: [mkReview("still-random", "HEAD", "COMMENTED")] })).action, "WAIT_REVIEW");
 });
 
-// ── Thumb (👍) verdicts — the live #46 wedge: Codex's clean verdict is comment+reaction, NO
-// formal review object; the engine sat at WAIT_REVIEW forever until this path was wired.
-// PR #55 P1-B: the freshness cutoff is the ENGINE-recorded trigger pin (ReviewTriggerPin), not
-// a git commit timestamp — a thumb only counts when it postdates `pin.at` AND `pin.head`
-// still equals the CURRENT head. PR #55 P1-A: the reacting login must never be the PR author,
-// even if the author is itself in the trusted set. ──
+// #273 supersedes #55's thumb path: reactions never satisfy gate② because they cannot carry an
+// OID. A clean comment must be trusted, post-pin, and assert exactly the current head OID.
 
 const TRIGGER_AT = "2026-07-07T07:40:00Z"; // engine-recorded trigger time (the pin)
 const PIN = { head: "HEAD", at: TRIGGER_AT };
 
-// Post-#55 P2: Codex's clean verdict can ALSO be a plain conversation comment — no review
-// object, no +1 reaction. Same rules: trusted non-author login, engine-pin freshness.
-
 const CLEAN = "Codex Review: Didn't find any major issues. More of your lovely PRs please.";
 
-test("CodexReviewer: comment-ONLY clean verdict (no review, no 👍) -> MERGE_OK — post-#55 P2 wedge shape", () => {
+test("CodexReviewer #273: an OID-less clean comment never satisfies gate②, even on generation 1", () => {
   const r = new CodexReviewer();
   const data = mkData({
     comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
   });
   assert.deepEqual(r.verdictFromData(data, PIN), {
-    action: "MERGE_OK",
+    action: "WAIT_REVIEW",
     headOid: "HEAD",
-    generationResponded: true,
-    coverageEstablished: true,
+    generationResponded: false,
+    coverageEstablished: false,
   });
+});
+
+test("CodexReviewer #273: exactly one matching OID assertion satisfies the canonical clean-comment path", () => {
+  const data = mkData({
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-07T07:48:44Z",
+        body: `${CLEAN}\nReviewed head OID: HEAD`,
+      },
+    ],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(data, PIN).action, "MERGE_OK");
 });
 
 test("CodexReviewer #273: delayed prior-generation clean comment cannot satisfy an ambiguous H2 pin; an H2-quoting response can", () => {
@@ -407,6 +413,34 @@ test("CodexReviewer #273: quoted OID prose cannot spoof an assertion", () => {
   assert.equal(new CodexReviewer().verdictFromData(data, { head: "H2", at: "2026-07-07T08:00:00Z", generation: 2 }).action, "WAIT_REVIEW");
 });
 
+test("CodexReviewer #273: verdict text and OID inside fenced or HTML-comment content are discarded", () => {
+  const quotedBodies = [
+    `Prose outside.\n\`\`\`text\n${CLEAN}\nReviewed head OID: HEAD\n\`\`\``,
+    `Prose outside.\n~~~text\n${CLEAN}\nReviewed head OID: HEAD\n~~~`,
+    `Prose outside.\n<!--\n${CLEAN}\nReviewed head OID: HEAD\n-->`,
+    `Prose outside.\n\`\`\`text\n${CLEAN}\nReviewed head OID: HEAD`,
+    `Prose outside.\n<!-- ${CLEAN}\nReviewed head OID: HEAD`,
+  ];
+  const r = new CodexReviewer();
+  for (const body of quotedBodies) {
+    const data = mkData({ comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body }] });
+    assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW", body);
+  }
+});
+
+test("CodexReviewer #273: an incidental fenced snippet does not hide a normal OID-bound verdict", () => {
+  const data = mkData({
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-07T07:48:44Z",
+        body: `Incidental example:\n\`\`\`ts\nconst reviewed = true;\n\`\`\`\n${CLEAN}\nReviewed head OID: HEAD`,
+      },
+    ],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(data, PIN).action, "MERGE_OK");
+});
+
 test("CodexReviewer #273: conflicting OID assertions are discarded; repeated one-value assertions are accepted", () => {
   const base = {
     login: "chatgpt-codex-connector[bot]",
@@ -448,7 +482,7 @@ test("CodexReviewer #273: an explicitly stated mismatching OID discards a clean 
 test("CodexReviewer: clean comment BEFORE the trigger pin is stale -> WAIT_REVIEW", () => {
   const r = new CodexReviewer();
   const data = mkData({
-    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:39:59Z", body: CLEAN }],
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:39:59Z", body: `${CLEAN}\nReviewed head OID: HEAD` }],
   });
   assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
 });
@@ -456,7 +490,7 @@ test("CodexReviewer: clean comment BEFORE the trigger pin is stale -> WAIT_REVIE
 test("CodexReviewer: an UNTRUSTED account posting the clean phrase never satisfies gate②", () => {
   const r = new CodexReviewer();
   const data = mkData({
-    comments: [{ login: "random-account", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
+    comments: [{ login: "random-account", createdAt: "2026-07-07T07:48:44Z", body: `${CLEAN}\nReviewed head OID: HEAD` }],
   });
   assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
 });
@@ -465,7 +499,7 @@ test("CodexReviewer: the PR AUTHOR posting the clean phrase never counts (produc
   const r = new CodexReviewer();
   const data = mkData({
     author: "chatgpt-codex-connector",
-    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: `${CLEAN}\nReviewed head OID: HEAD` }],
   });
   assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
 });
@@ -473,7 +507,13 @@ test("CodexReviewer: the PR AUTHOR posting the clean phrase never counts (produc
 test("CodexReviewer: a trusted comment WITHOUT the clean phrase keeps waiting (narrow match, fail-closed)", () => {
   const r = new CodexReviewer();
   const data = mkData({
-    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: "Codex Review: still looking 👀" }],
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-07T07:48:44Z",
+        body: "Codex Review: still looking 👀\nReviewed head OID: HEAD",
+      },
+    ],
   });
   assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
 });
@@ -482,7 +522,7 @@ test("CodexReviewer: clean comment + unresolved threads -> HANDLE_THREADS (findi
   const r = new CodexReviewer();
   const data = mkData({
     unresolvedThreads: 1,
-    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: `${CLEAN}\nReviewed head OID: HEAD` }],
   });
   assert.equal(r.verdictFromData(data, PIN).action, "HANDLE_THREADS");
 });
@@ -531,16 +571,16 @@ test("CodexReviewer #273: a third-party CHANGES_REQUESTED responds but never est
   assert.equal(verdict.coverageEstablished, false);
 });
 
-test("CodexReviewer: comment+👍 verdict (NO formal review) -> MERGE_OK — the live #46 wedge shape", () => {
+test("CodexReviewer #273: a trusted fresh 👍 never satisfies gate②", () => {
   const r = new CodexReviewer();
   const data = mkData({
     reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
   });
   assert.deepEqual(r.verdictFromData(data, PIN), {
-    action: "MERGE_OK",
+    action: "WAIT_REVIEW",
     headOid: "HEAD",
-    generationResponded: true,
-    coverageEstablished: true,
+    generationResponded: false,
+    coverageEstablished: false,
   });
 });
 
@@ -595,16 +635,16 @@ test("SameModelTrustedReviewer: the PR AUTHOR's own 👍 never counts, even when
   assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
 });
 
-test("SameModelTrustedReviewer: a DIFFERENT trusted login's 👍 still counts (author-exclusion doesn't over-block)", () => {
+test("SameModelTrustedReviewer #273: a different trusted login's 👍 still cannot bind to an OID", () => {
   const r = new SameModelTrustedReviewer(["producer-bot", "trusted-reviewer-bot"]);
   const data = mkData({
     author: "producer-bot",
     reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "trusted-reviewer-bot" }],
   });
-  assert.equal(r.verdictFromData(data, PIN).action, "MERGE_OK");
+  assert.equal(r.verdictFromData(data, PIN).action, "WAIT_REVIEW");
 });
 
-test("CodexReviewer: unresolved threads outrank a fresh trusted 👍 (findings first)", () => {
+test("CodexReviewer #273: an ignored trusted 👍 cannot soften unresolved threads", () => {
   const r = new CodexReviewer();
   const data = mkData({
     unresolvedThreads: 1,

@@ -1,6 +1,6 @@
 // merge-driver.ts tests:
-//  1. mergeDecision parity suite — a row-for-row TS port of 0day's
-//     ops/loop/test_loop_merge_driver.sh (source: /0day/ops/loop/test_loop_merge_driver.sh).
+//  1. mergeDecision parity suite — a TS port of 0day's matrix, with #273's stricter
+//     OID-bound rejection of the legacy bare-reaction action.
 //  2. deriveGate — the scheduling-gate glue (gate①/gate②/labels/state -> MERGE/WAIT/HUMAN).
 //  3. MergeDriver.driveOne — end-to-end with a fake IForge + fake Reviewer (no real gh calls).
 import assert from "node:assert/strict";
@@ -21,10 +21,10 @@ test("mergeDecision parity: MERGE_OK + OPEN + clean label -> MERGE (trustedAppro
   assert.equal(mergeDecision("MERGE_OK", "", "OPEN"), "MERGE");
 });
 
-test("mergeDecision parity: APPROVED_PR_LEVEL (bare 👍) — only a trusted fresh 👍 auto-merges", () => {
-  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", true), "MERGE"); // Codex-bot fresh 👍
-  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "type:ops,infra", "OPEN", true), "MERGE");
-  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", false), "ESCALATE"); // self-👍 only
+test("mergeDecision #273: APPROVED_PR_LEVEL (bare 👍) always fails closed because it has no OID", () => {
+  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", true), "ESCALATE");
+  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "type:ops,infra", "OPEN", true), "ESCALATE");
+  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", false), "ESCALATE");
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", ""), "ESCALATE"); // default trustedApproval=false
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "risk:fund-path", "OPEN", true), "ESCALATE"); // trusted 👍 but risk label still blocks
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "MERGED", true), "ESCALATE"); // trusted 👍 but non-OPEN still blocks

@@ -35,14 +35,16 @@ export interface ReviewVerdict {
 }
 
 /**
- * Fresh (post-cutoff) PR-level `+1` reactions — 0day pr_gate.sh's `fresh_thumb_count`.
+ * Legacy timestamp classifier for PR-level `+1` reactions — 0day pr_gate.sh's
+ * `fresh_thumb_count`. #273 deliberately removed reactions from gate② because they cannot
+ * carry a commit OID; this exported helper remains only for compatibility and unit coverage.
  * A reaction created at/before `cutoffIso` is stale: it predates the engine's review trigger,
  * so it cannot have been a response to it (#92, #55 P1-B). Compared NUMERICALLY (epoch ms),
  * not lexicographically (round-2 P2): the engine pin carries millisecond precision
  * (`...00.999Z`) while GitHub reaction timestamps are second-granularity (`...00Z`), and as
  * raw strings `"...00Z" > "...00.999Z"` — a same-second reaction that actually PREDATES the
  * trigger would have counted as fresh. Numeric compare truncates that same-second reaction to
- * `.000` and rejects it (fail-closed; the genuine thumb arrives minutes after the trigger).
+ * `.000` and classifies it as stale.
  * An unparseable cutoff or createdAt never counts (fail-closed).
  */
 export function freshThumbCount(reactions: { content: string; createdAt: string }[], cutoffIso: string): number {
@@ -89,10 +91,8 @@ export function changesRequestedOnHead(reviews: PRReview[], headOid: string, prA
 export interface ReviewSignals {
   hasEyesReaction: boolean;
   freshApprovingReviews: number;
-  /** Fresh `+1` reactions from TRUSTED reviewer logins only (see verdictFrom): Codex's
-   *  "done, no findings" verdict often arrives as comment+👍 with NO formal review object —
-   *  the live #46 run wedged at WAIT_REVIEW because this signal wasn't wired (the ported
-   *  freshThumbCount helper existed but nothing consumed it). */
+  /** Legacy field name: OID-bound clean comments from trusted reviewers. Reactions never
+   *  satisfy gate② because they cannot state which commit was reviewed (#273). */
   freshTrustedThumbs: number;
   unresolvedThreads: number;
   /** A standing CHANGES_REQUESTED on the current head (see changesRequestedOnHead). */
@@ -112,12 +112,12 @@ export function deriveReviewAction(s: ReviewSignals): ReviewAction {
   return "WAIT_REVIEW"; // covers both "👀 in progress" and "nothing yet" — both mean keep polling
 }
 
-/** The ENGINE-recorded review-trigger pin (PR #55 P1-B) — the thumb-verdict freshness cutoff.
+/** The ENGINE-recorded review-trigger pin (PR #55 P1-B) — the artifact freshness cutoff.
  *  Sourced from state.ts's workers.review_triggered_head/at, threaded in by merge-driver.ts's
  *  driveOne (which is the only place that knows BOTH the pin and the live current head). `head`
  *  is the head oid the LAST trigger was posted for; `at` is the engine wall-clock ISO timestamp
- *  it was posted at. Either null means "no trigger recorded for this lane yet" — thumbs must
- *  never count in that case (fail-closed), matching a lane whose first trigger hasn't fired. */
+ *  it was posted at. Either null means "no trigger recorded for this lane yet" — comments
+ *  cannot count in that case (fail-closed), matching a lane whose first trigger hasn't fired. */
 export interface ReviewTriggerPin {
   head: string | null;
   at: string | null;
@@ -150,7 +150,7 @@ export interface Reviewer {
    *  every call against the LIVE current head — never a cached one; a review of a stale head
    *  counts as no review, #101, since freshHeadReviewCount filters on data.headOid). `pin` (#55
    *  P1-B) is the engine-recorded trigger pin for this lane; omitted/undefined behaves like
-   *  {head: null, at: null} — no thumb can count (fail-closed), same as a lane never triggered. */
+   *  {head: null, at: null} — no comment can count (fail-closed), same as a lane never triggered. */
   verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict;
 }
 
@@ -218,41 +218,48 @@ export function buildReviewTriggerComment(
  * threads always block — the filter can only shrink what approves, never what blocks.
  */
 /**
- * Trusted-thumb verdict signal: `+1` reactions count ONLY when (a) the reacting login is NOT
- * the PR author, even when the author's login is itself in the trusted set (Codex PR #55 P1-A:
- * producer != reviewer — an author's own 👍 must never be gate②-satisfying, formal reviews
- * already exclude data.author via freshHeadReviewCount and this path must match); (b) the login
- * passes the same identity filter as countable reviews (a random account's 👍 must never satisfy
- * gate② — same P1 class as PR #42's reviewer-identity finding); and (c) the reaction is newer
- * than the ENGINE-recorded trigger time (`pin.at`) for the SAME head the trigger was posted
- * against (`pin.head === data.headOid`) — PR #55 P1-B: a commit's own committedDate is not
- * push-bound (forgeable via GIT_COMMITTER_DATE / cherry-picks, and doesn't move on a later
- * push), so the freshness cutoff is the engine's own trigger clock, not anything read off git.
- * No pin, or a pin for a different head, ⇒ 0, fail-closed (no trigger recorded for this head
- * yet ⇒ no thumb can have been a response to it).
+ * #273 supersedes the #55 trusted-thumb path: a reaction has no body in which to assert the
+ * reviewed commit OID, so it is never a gate② artifact. Keep this seam explicitly returning
+ * zero so no reviewer mode can accidentally resurrect reaction-based approval.
  */
-function freshTrustedThumbCount(data: PRReviewData, trustedLogin?: (login: string) => boolean, pin?: ReviewTriggerPin): number {
-  if (!trustedLogin || !pin?.at || pin.head !== data.headOid || (pin.generation ?? 1) > 1) return 0;
-  const author = normalizeLogin(data.author);
-  const trusted = data.reactions.filter((r) => normalizeLogin(r.login) !== author && trustedLogin(normalizeLogin(r.login)));
-  return freshThumbCount(trusted, pin.at);
+function freshTrustedThumbCount(): number {
+  return 0;
 }
 
 /**
  * Codex's clean verdict is sometimes a plain conversation COMMENT ("Codex Review: Didn't find
- * any major issues") with NO review object and NO +1 reaction (post-#55 P2) — count it under
- * the exact same rules as trusted thumbs: trusted non-author login only, and created after the
- * ENGINE-recorded trigger pin for the CURRENT head. The phrase match is deliberately narrow
- * (Codex's canonical clean phrasing); an unmatched comment simply keeps waiting — fail-closed.
- * Identity-gating makes the text non-spoofable: only the trusted bot's own comments are read.
+ * any major issues") with NO review object (post-#55 P2). #273 requires every such comment to
+ * carry exactly one distinct, matching OID assertion. Quoted material is stripped before BOTH
+ * phrase and OID parsing so examples, fences, and HTML comments cannot impersonate a verdict.
  */
 const CLEAN_VERDICT_RE = /didn't find any major issues/i;
 const REVIEWED_HEAD_OID_RE = /^Reviewed head OID: (\S+)\s*$/;
 
-function assertedHeadOids(body: string): Set<string> {
+function sanitizeReviewCommentBody(body: string): string {
+  const withoutHtmlComments = body.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+  const residue: string[] = [];
+  let fence: { char: "`" | "~"; length: number } | null = null;
+  for (const line of withoutHtmlComments.split(/\r?\n/)) {
+    const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence !== null) {
+      const marker = fenceMatch?.[1];
+      if (marker?.startsWith(fence.char) && marker.length >= fence.length && fenceMatch?.[2]?.trim() === "") fence = null;
+      continue;
+    }
+    const marker = fenceMatch?.[1];
+    if (marker) {
+      fence = { char: marker[0] as "`" | "~", length: marker.length };
+      continue;
+    }
+    if (/^\s*>/.test(line)) continue;
+    residue.push(line);
+  }
+  return residue.join("\n");
+}
+
+function assertedHeadOids(sanitizedBody: string): Set<string> {
   const values = new Set<string>();
-  for (const line of body.split(/\r?\n/)) {
-    if (line.startsWith(">")) continue;
+  for (const line of sanitizedBody.split(/\r?\n/)) {
     const match = REVIEWED_HEAD_OID_RE.exec(line);
     if (match?.[1]) values.add(match[1]);
   }
@@ -266,15 +273,16 @@ function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: st
   const author = normalizeLogin(data.author);
   return (data.comments ?? []).filter((c) => {
     const createdAt = Date.parse(c.createdAt);
-    const statedOids = assertedHeadOids(c.body);
+    const sanitizedBody = sanitizeReviewCommentBody(c.body);
+    const statedOids = assertedHeadOids(sanitizedBody);
     const oidMatches = statedOids.size === 1 && statedOids.has(data.headOid);
     return (
       normalizeLogin(c.login) !== author &&
       trustedLogin(normalizeLogin(c.login)) &&
       Number.isFinite(createdAt) &&
       createdAt > cutoff &&
-      CLEAN_VERDICT_RE.test(c.body) &&
-      (statedOids.size > 0 ? oidMatches : (pin.generation ?? 1) <= 1)
+      CLEAN_VERDICT_RE.test(sanitizedBody) &&
+      oidMatches
     );
   }).length;
 }
@@ -288,14 +296,12 @@ function verdictFrom(
 ): ReviewVerdict {
   const countable = countableReview ? data.reviews.filter(countableReview) : data.reviews;
   const fresh = freshHeadReviewCount(countable, data.headOid, data.author, acceptStates);
-  const freshTrustedSignals =
-    freshTrustedThumbCount(data, trustedReactionLogin, pin) + freshTrustedCleanComments(data, trustedReactionLogin, pin);
+  const freshTrustedSignals = freshTrustedThumbCount() + freshTrustedCleanComments(data, trustedReactionLogin, pin);
   const currentHeadChangesRequested = changesRequestedOnHead(data.reviews, data.headOid, data.author);
   const action = deriveReviewAction({
     hasEyesReaction: data.reactions.some((r) => r.content === "eyes"),
     freshApprovingReviews: fresh,
-    // Thumbs and comment-shaped clean verdicts share one signal: both are "the trusted
-    // reviewer said done-no-findings" under identical identity/pin rules.
+    // Legacy field name; only OID-bound clean comments reach this signal (#273).
     freshTrustedThumbs: freshTrustedSignals,
     unresolvedThreads: data.unresolvedThreads,
     changesRequestedOnHead: currentHeadChangesRequested,
@@ -396,7 +402,7 @@ export class SameModelTrustedReviewer implements Reviewer {
     const trusted = this.trustedLogins.map(normalizeLogin);
     // Filter what can APPROVE only — blocking signals (change requests, threads) intentionally
     // still see every review (verdictFrom's contract).
-    // Thumbs count here too, from the same trusted list — mode symmetry with CodexReviewer.
+    // OID-bound clean comments count here too, from the same trusted list.
     return verdictFrom(
       data,
       SameModelTrustedReviewer.ACCEPT,
