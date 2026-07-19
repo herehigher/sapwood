@@ -812,9 +812,12 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // see runRoundsEngine below, which has the same gap for the identical reason), and no
   // production caller anywhere in this repo yet mints a REAL forge-MCP proxy for the ordinary
   // coding-worker dispatch either — wiring a live mint chain is a pre-existing, separate gap,
-  // not #246's. Until it's wired, a FIXABLE gate here just stays `driving`
-  // (`fix-leg-dispatch-unconfigured` event), retried every tick, same "skip, don't corrupt"
-  // fail-closed stance as every other unconfigured optional dep in this file.
+  // tracked as #253, not #246's. #246 review round 1 (C1): with prFixCap > 0 (the default) and
+  // no fixLegResume wired, a FIXABLE gate DEGRADES to the exact pre-#246 needs-human escalation
+  // (visible, actionable) rather than silently staying `driving` forever — see
+  // conductor.ts's escalateNeedsHuman/`fix-leg-dispatch-unconfigured` event for the degrade path.
+  // Never a silent retry-loop; #253 only needs to attach a real mintProxy to make FIXUP dispatch
+  // itself live.
   buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);

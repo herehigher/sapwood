@@ -278,6 +278,34 @@ export function driveDecision(gate: string, fixRounds: number, cap: number, over
   }
 }
 
+/** #246 review round 1 (C2, Codex sol-high PR #264): the new-LEG admission gate a FIXUP
+ *  dispatch (startFixLeg -> supervisor.resume, a fresh PAID Claude worker leg) must pass —
+ *  the SAME set of conditions that already block RESUME/DISPATCH from spawning one (this
+ *  module's own `resumeSpendPaused` / the DISPATCH gate's skip reasons): pause, an engine-wide
+ *  ceiling breach (draining, not admitting new work), an active environment park, the per-round
+ *  spend budget, and the run-level spend stop condition. Without this, a wind-down could start a
+ *  BRAND NEW fix leg instead of draining, defeating the very safety boundaries those phases
+ *  enforce for ordinary dispatch. Pure/testable; the specific reason returned is for the event/
+ *  driven-outcome payload only — every true input blocks equally (first-match-wins is just a
+ *  deterministic pick among possibly-simultaneous reasons, same style as DispatchOutcome's own
+ *  "skipped" reasons). `null` = admission granted. Distinct from `driveDecision` above, which
+ *  gates the FIXUP-vs-ESCALATE *scheduling* decision (fix_rounds vs cap) — this gates the spawn
+ *  itself, called only once `driveDecision` has already said "FIXUP". */
+export function fixLegAdmissionBlockReason(input: {
+  paused: boolean;
+  ceilingBreached: boolean;
+  parkActive: boolean;
+  overBudget: boolean;
+  runSpendStop: boolean;
+}): string | null {
+  if (input.paused) return "paused";
+  if (input.ceilingBreached) return "ceiling";
+  if (input.parkActive) return "park";
+  if (input.overBudget) return "over-budget";
+  if (input.runSpendStop) return "run-spend-stop";
+  return null;
+}
+
 /** #245: the fix-loop's dependency seam — deliberately narrower than the full TickDeps a caller
  *  (this module's own tick(), or #246's future FIXUP-dispatch branch inside it) already holds,
  *  so a caller can pass a `Pick`-shaped subset without constructing a whole fake tick(). */
@@ -1377,6 +1405,65 @@ async function reconcileDrivingFixIntents(
   }
 }
 
+/** #147 P2 + #246 review round 1 (C1): the SHARED needs-human escalation for a `driving` lane —
+ *  label write FIRST (recorded durably via `gated_escalation_labeled` so GATED RECLAIM's
+ *  absence-is-a-human-act invariant holds even on a failed write), THEN the terminal upsert,
+ *  THEN (only for a lane that's already been through GATED RECLAIM once) the attempt-trail
+ *  comment. Extracted so BOTH the plain gate===HUMAN case and #246's own "FIXABLE but the fix
+ *  loop isn't wired" degrade (C1 below) go through byte-for-byte the SAME escalation — an
+ *  unconfigured fix loop must never silently retry forever where the pre-#246 gate would have
+ *  visibly escalated to a human; it degrades to the EXACT same visible escalation instead,
+ *  never a parallel path. */
+async function escalateNeedsHuman(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  pr: number,
+  reason: string,
+  iso: () => string,
+): Promise<DrivenOutcome> {
+  let labeled = 1;
+  let labelError: string | null = null;
+  try {
+    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+  } catch (e) {
+    labeled = 0;
+    labelError = String(e);
+  }
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
+  state.appendEvent("drive-needs-human", {
+    worker: w.name,
+    issue: w.issue,
+    pr,
+    reason,
+    labeled,
+    ...(labelError != null ? { labelError } : {}),
+  });
+  // #147: gated_reentry_attempts > 0 means this lane was reclaimed by GATED RECLAIM at least
+  // once (a human removed needs-human believing the finding was fixed) and STILL escalated —
+  // leave the attempt trail on the issue so a repeat escalation isn't indistinguishable from
+  // the very first one. Never fires for a first-time escalation (attempts is 0 for every lane
+  // that's never been through GATED RECLAIM, including #246's own fixLegResume-unwired degrade).
+  const gatedAttempts = w.gated_reentry_attempts ?? 0;
+  if (gatedAttempts > 0) {
+    const cap = cfg.lanes.gatedReentryCap;
+    await forge
+      .addIssueComment(
+        w.issue,
+        `sapwood: gated-PR reentry attempt ${gatedAttempts}/${cap} for PR #${pr} ` +
+          `re-escalated \`${cfg.labels.needsHuman}\` — ${reason}. ` +
+          (gatedAttempts >= cap
+            ? // #167 review (Codex P2+P3): cap reached — see capHitEscalationNote's own doc
+              // comment for why this is a helper, not inline text.
+              capHitEscalationNote(cfg)
+            : `Remove \`${cfg.labels.needsHuman}\` again once it's addressed to retry.`),
+      )
+      .catch(() => {});
+  }
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now ?? (() => new Date());
@@ -1823,6 +1910,29 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // same as the later read) — evaluating it again here, right where DRIVE needs it, is safe;
   // nothing in between mutates the round ledger.
   const driveOverBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
+  // #246 review round 1 (C2): a FIXUP dispatch is a fresh paid worker leg — it must observe the
+  // SAME admission gates RESUME/DISPATCH do (pause / ceiling / park / run-spend-stop), not just
+  // the round budget above. `ceilingReasons`/`ceilingBreached` and `parkedBeforeProbes` are
+  // HOISTED here from their pre-#246 position (the CEILING/PARK sections below) rather than
+  // re-derived: `evaluateCeiling` is pure, but `state.engineSessionStart` (which it feeds into)
+  // WRITES on every call (advances last_tick_at, resets started_at past the stale gap) — calling
+  // it a second time later this same tick would double that write. Computing it ONCE, here, and
+  // having the CEILING section below reuse these same bindings preserves byte-for-byte semantics
+  // for everything downstream (the drain call, `state.clearCeilingBreach()`, the PARK section's
+  // `!ceilingBreached` gate) while making the value available to DRIVE too. `state.isParked()` is
+  // a cheap read with no side effects, so `parkedBeforeProbes` is simply computed earlier — same
+  // value either way, RECLAIM/GATED RECLAIM/DRIVE never write park state.
+  const nowDate = now();
+  const ceilingReasons = evaluateCeiling({
+    dailySpendUsd: state.dailySpendUsd(nowDate),
+    dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+    wallClockElapsedSec:
+      (nowDate.getTime() - state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec ?? 0)).getTime()) / 1000,
+    maxWallClockSec: cfg.cost.maxWallClockSec,
+  });
+  const ceilingBreached = ceilingReasons.length > 0;
+  const parkedBeforeProbes = state.isParked();
+  const driveRunSpendStop = deps.runSpendStopCrossed?.() ?? false;
   if (gate) {
     // #69: no per-lane kill-switch re-check here — an active switch never reaches this loop
     // at all (the global gate at the top of tick() returns first). See the gate's comment for
@@ -1920,60 +2030,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.appendEvent("merged", { worker: w.name, issue: w.issue, pr, headOid: outcome.headOid });
           driven.push({ kind: "merged", worker: w.name, issue: w.issue, pr });
           break;
-        case "needs-human": {
+        case "needs-human":
           // #147 P2 (Codex PR #151): the label write goes FIRST, and its success is recorded
           // durably on the terminal row (gated_escalation_labeled) — because GATED RECLAIM's
           // re-entry signal is "the needs-human label is ABSENT", absence is only evidence of a
-          // human act if the engine provably APPLIED the label. The old order (upsert failed,
-          // then an unguarded addLabel) let a transient label failure leave a failed+PR row
-          // with no label, which the next tick would read as an explicit human removal —
-          // automation re-admitting itself with no human in the loop. A failed label write is
-          // contained (the escalation itself — terminal transition + structured event — always
-          // lands, same #69 P2a stance as the drain path) and marks the row labeled=0:
-          // permanently invisible to GATED RECLAIM (fail-closed — the pre-#147 manual-drive
-          // situation, no regression), with the error in the event payload, never a silent
-          // swallow.
-          let labeled = 1;
-          let labelError: string | null = null;
-          try {
-            await forge.addLabel(w.issue, cfg.labels.needsHuman);
-          } catch (e) {
-            labeled = 0;
-            labelError = String(e);
-          }
-          state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
-          state.appendEvent("drive-needs-human", {
-            worker: w.name,
-            issue: w.issue,
-            pr,
-            reason: outcome.reason,
-            labeled,
-            ...(labelError != null ? { labelError } : {}),
-          });
-          // #147: gated_reentry_attempts > 0 means this lane was reclaimed by GATED RECLAIM at
-          // least once (a human removed needs-human believing the finding was fixed) and STILL
-          // escalated — leave the attempt trail on the issue so a repeat escalation isn't
-          // indistinguishable from the very first one. Never fires for a first-time escalation
-          // (attempts is 0 for every lane that's never been through GATED RECLAIM).
-          const gatedAttempts = w.gated_reentry_attempts ?? 0;
-          if (gatedAttempts > 0) {
-            const cap = cfg.lanes.gatedReentryCap;
-            await forge
-              .addIssueComment(
-                w.issue,
-                `sapwood: gated-PR reentry attempt ${gatedAttempts}/${cap} for PR #${pr} ` +
-                  `re-escalated \`${cfg.labels.needsHuman}\` — ${outcome.reason}. ` +
-                  (gatedAttempts >= cap
-                    ? // #167 review (Codex P2+P3): cap reached — see capHitEscalationNote's
-                      // doc comment for why this is a helper, not inline text.
-                      capHitEscalationNote(cfg)
-                    : `Remove \`${cfg.labels.needsHuman}\` again once it's addressed to retry.`),
-              )
-              .catch(() => {});
-          }
-          driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: outcome.reason });
+          // human act if the engine provably APPLIED the label. See escalateNeedsHuman's own doc
+          // (shared with #246's fixLegResume-unwired degrade, C1) for the full rationale.
+          driven.push(await escalateNeedsHuman(forge, state, cfg, w, pr, outcome.reason, iso));
           break;
-        }
         case "queued":
           // Stays driving — retried next tick. Covers gate-pending (WAIT), a review-unavailable
           // (rate-limit/timeout) signal (#13 requires the latter to queue, never skip/soften
@@ -2000,11 +2064,38 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget);
           if (action === "FIXUP") {
             if (!deps.fixLegResume) {
-              // Fail-closed, same "skip, don't corrupt" stance an unconfigured mergeGate takes
-              // for driving lanes generally (and the RESUME phase's own fixing_handoff check
-              // below) — stays driving, retried next tick once this is wired.
-              state.appendEvent("fix-leg-dispatch-unconfigured", { worker: w.name, issue: w.issue, pr });
-              driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "fix-leg-unconfigured" });
+              // #246 review round 1 (C1, PM-narrowed): an unwired fix loop must DEGRADE to the
+              // exact pre-#246 escalation (visible needs-human), never a silent retry-forever —
+              // with the default prFixCap > 0 and no production caller wiring fixLegResume yet
+              // (a documented, separate #253 startup-wiring gap), the OLD behavior here was
+              // "stays driving, queued" every tick: a findings PR would silently loop forever
+              // instead of the pre-#246 HANDLE_THREADS -> HUMAN escalation an operator could
+              // actually see and act on. Wiring a real mintProxy into cli.ts/round.ts is
+              // explicitly OUT of scope for this PR (#253's own deliverable) — this only makes
+              // today's unwired default fail-SAFE and VISIBLE instead of fail-silent.
+              const reason = `fix-loop-unwired:${outcome.reason}`;
+              state.appendEvent("fix-leg-dispatch-unconfigured", { worker: w.name, issue: w.issue, pr, reason });
+              driven.push(await escalateNeedsHuman(forge, state, cfg, w, pr, reason, iso));
+              break;
+            }
+            // #246 review round 1 (C2): a FIXUP dispatch spawns a FRESH paid Claude worker leg
+            // (startFixLeg -> supervisor.resume) — it must pass the SAME new-leg admission gate
+            // RESUME/DISPATCH do (pause / ceiling breach / environment park / run-spend-stop),
+            // not just the round budget driveDecision already folded in above. A wind-down must
+            // drain, never start a brand-new fix leg instead. Blocked -> stays driving, retried
+            // next tick (transient); the gate derivation itself already ran (this only gates the
+            // spawn).
+            const admissionBlock = fixLegAdmissionBlockReason({
+              paused,
+              ceilingBreached,
+              parkActive: parkedBeforeProbes,
+              overBudget: driveOverBudget,
+              runSpendStop: driveRunSpendStop,
+            });
+            if (admissionBlock != null) {
+              const reason = `fix-leg-admission-blocked:${admissionBlock}`;
+              state.appendEvent("fix-leg-dispatch-blocked", { worker: w.name, issue: w.issue, pr, blockReason: admissionBlock });
+              driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason });
               break;
             }
             try {
@@ -2048,14 +2139,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "fix-rounds-cap-label-failed" });
             break;
           }
-          await forge
-            .addIssueComment(
+          // #246 review round 1 (C3): the escalation COMMENT gets the same treatment as the
+          // label — the issue's own AC ("label AND comment land before the terminal upsert")
+          // means a transient comment-post failure must not be silently swallowed by a bare
+          // `.catch(() => {})` right before a terminal upsert that would otherwise permanently
+          // lose the adjudication context (which findings remain, rounds spent). On failure,
+          // leave the row `driving` (no upsert, no latch) and retry the WHOLE branch next tick.
+          // No durable idempotency marker (PM ruling): a re-attempt re-posts the label (harmless
+          // — GitHub's addLabel is idempotent) and, if the FIRST comment actually landed but a
+          // crash struck before this function returned, also re-posts the comment — a harmless
+          // duplicate re-poke, not a correctness issue, so no new dedup machinery for it.
+          try {
+            await forge.addIssueComment(
               w.issue,
               `sapwood: fix-round cap (${cap}) reached for PR #${pr} — ${fixRounds} round(s) spent, ` +
                 `standing disagreement unresolved (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
                 `adjudication: review the disagreement, then remove the label once resolved to reclaim the PR (#147 gated reentry).`,
-            )
-            .catch(() => {}); // best-effort courtesy note, same stance every other DRIVE comment takes
+            );
+          } catch (e) {
+            state.appendEvent("fix-rounds-cap-comment-failed", { worker: w.name, issue: w.issue, pr, error: String(e) });
+            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "fix-rounds-cap-comment-failed" });
+            break;
+          }
           state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
           state.appendEvent("fix-rounds-capped", { worker: w.name, issue: w.issue, pr, fixRounds, cap });
           driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `fix-rounds-cap:${fixRounds}/${cap}` });
@@ -2074,16 +2179,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   completion (stream-json carries no in-flight cost), so still-running lanes contribute
   //   nothing until they finish and the cap trips on the completion that crosses it. Max
   //   overshoot ≈ concurrent lanes × per-worker spend — bounded in practice by
-  //   lanes.roundDispatchCap (default 2) × worker.budgetUsdSoft, plus the wall-clock tier. ──
-  const nowDate = now();
-  const ceilingReasons = evaluateCeiling({
-    dailySpendUsd: state.dailySpendUsd(nowDate),
-    dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
-    wallClockElapsedSec:
-      (nowDate.getTime() - state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec ?? 0)).getTime()) / 1000,
-    maxWallClockSec: cfg.cost.maxWallClockSec,
-  });
-  const ceilingBreached = ceilingReasons.length > 0;
+  //   lanes.roundDispatchCap (default 2) × worker.budgetUsdSoft, plus the wall-clock tier.
+  //   #246 review round 1 (C2): `nowDate`/`ceilingReasons`/`ceilingBreached` are now HOISTED
+  //   above the DRIVE loop (so a FIXUP dispatch can observe the same breach this tick) — see
+  //   that hoist's own comment for why (engineSessionStart's write must only run once/tick). ──
   let drainRequested: string[] = [];
   let escalated: string[] = [];
   if (ceilingBreached) {
@@ -2119,7 +2218,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   let canaryBudget = 0;
   // #168 P2-B: parked-ness is ALSO captured before the probes run — see the dispatch gate
   // below: a recovery observed by THIS tick's probes takes effect NEXT tick, never this one.
-  const parkedBeforeProbes = state.isParked();
+  // #246 review round 1 (C2): `parkedBeforeProbes` is now hoisted above the DRIVE loop (a cheap,
+  // side-effect-free read — same value either way) so a FIXUP dispatch can observe it too.
   {
     const forgeEpisode = state.parkRow("forge");
     if (forgeEpisode) {

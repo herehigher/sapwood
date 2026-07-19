@@ -134,7 +134,13 @@ class FakeForge implements IForge {
   async addPRComment(pr: number, body: string): Promise<void> {
     this.prComments.push([pr, body]);
   }
+  /** #246 review round 1 (C3): lets a test simulate a transient issue-comment-post failure
+   *  independent of `throwOnAddLabel` — proves a comment failure is handled with the SAME care
+   *  as a label failure, not a bare best-effort `.catch(() => {})` right before a terminal
+   *  upsert that would otherwise permanently lose the adjudication context. */
+  throwOnAddIssueComment = false;
   async addIssueComment(n: number, body: string): Promise<void> {
+    if (this.throwOnAddIssueComment) throw new Error("simulated forge failure");
     this.issueComments.push([n, body]);
   }
   async getIssueBody(): Promise<string> {
@@ -1003,7 +1009,7 @@ test("tick DRIVE (#246): fixable + under cap + fixLegResume configured -> dispat
   st.close();
 });
 
-test("tick DRIVE (#246): fixable but NO fixLegResume dep configured -> stays driving, queued (fail-closed, never corrupts the lane)", async () => {
+test("tick DRIVE (#246 review round 1, C1): fixable but NO fixLegResume dep configured -> DEGRADES to the pre-#246 needs-human escalation (visible, actionable), never a silent retry-forever", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -1012,10 +1018,163 @@ test("tick DRIVE (#246): fixable but NO fixLegResume dep configured -> stays dri
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate }); // no fixLegResume
   const row = st.getWorker("lane-a")!;
+  // Same terminal shape the plain gate===HUMAN case produces (escalateNeedsHuman, shared code):
+  // failed + pr retained + label applied + gated_escalation_labeled=1 — an operator sees
+  // needs-human on the issue exactly like pre-#246, not a lane silently stuck in `driving`.
+  assert.equal(row.state, "failed");
+  assert.equal(row.pr, 55);
+  assert.equal(row.fix_rounds ?? 0, 0);
+  assert.equal(row.gated_escalation_labeled, 1);
+  assert.deepEqual(sup.resumeCalls, []);
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  assert.equal(r.driven.length, 1);
+  assert.equal(r.driven[0]!.kind, "needs-human");
+  assert.match((r.driven[0] as { reason: string }).reason, /fix-loop-unwired/);
+  assert.match((r.driven[0] as { reason: string }).reason, /HANDLE_THREADS/);
+  st.close();
+});
+
+test("tick DRIVE (#246 review round 1, C1): the fixLegResume-unwired degrade's label-write failure STILL terminalizes (escalateNeedsHuman's shared, pre-#246/#147 stance) — labeled=0 marks it fail-closed-invisible to GATED RECLAIM, same as the plain HUMAN-gate case (NOT the newer stay-driving fallback the fix-rounds-cap path owns)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.throwOnAddLabel = true;
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.gated_escalation_labeled, 0);
+  assert.equal(r.driven[0]!.kind, "needs-human");
+  st.close();
+});
+
+// ── #246 review round 1 (C2, Codex sol-high PR #264): FIXUP dispatch must pass the SAME
+// new-leg admission gate RESUME/DISPATCH do (paused / ceiling / park / round-budget /
+// run-spend-stop) — a wind-down must drain, never start a brand-new fix leg. Round-budget's own
+// coverage is the pre-existing "fixable + round budget exceeded" test above (that one exercises
+// driveDecision's OWN overBudget-escalate path, not this admission gate — see its own comment).
+// ──────────────────────────────────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#246 C2): paused (forceDispatchPause) blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    forceDispatchPause: true,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-a")!;
   assert.equal(row.state, "driving");
   assert.equal(row.fix_rounds ?? 0, 0);
   assert.deepEqual(sup.resumeCalls, []);
-  assert.deepEqual(r.driven, [{ kind: "queued", worker: "lane-a", issue: 2, pr: 55, reason: "fix-leg-unconfigured" }]);
+  assert.equal(r.driven[0]!.kind, "queued");
+  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:paused/);
+  st.close();
+});
+
+test("tick DRIVE (#246 C2): an engine-wide ceiling breach (daily budget) blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  st.recordSpend("lane-earlier", 99, 500, new Date().toISOString()); // already over a tiny daily cap
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg({ cost: { dailyBudgetUsd: 10 } }),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "driving");
+  assert.deepEqual(sup.resumeCalls, []);
+  assert.equal(r.ceilingBreached, true); // the real CEILING phase still breaches/drains as normal
+  assert.equal(r.driven[0]!.kind, "queued");
+  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:ceiling/);
+  st.close();
+});
+
+test("tick DRIVE (#246 C2): an active environment park blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  st.enterPark("forge", "could not resolve host", 1, new Date().toISOString());
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "driving");
+  assert.deepEqual(sup.resumeCalls, []);
+  assert.equal(r.driven[0]!.kind, "queued");
+  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:park/);
+  st.close();
+});
+
+test("tick DRIVE (#246 C2): a run-level spend stop blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    runSpendStopCrossed: () => true,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "driving");
+  assert.deepEqual(sup.resumeCalls, []);
+  assert.equal(r.driven[0]!.kind, "queued");
+  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:run-spend-stop/);
+  st.close();
+});
+
+test("tick DRIVE (#246 C2): with EVERY admission gate clear and fixLegResume configured, a FIXUP dispatch proceeds normally (admission check is not a permanent regression)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "fixing");
+  assert.equal(row.fix_rounds, 1);
+  assert.equal(sup.resumeCalls.length, 1);
+  assert.equal(r.driven[0]!.kind, "fixup");
   st.close();
 });
 
@@ -1104,6 +1263,29 @@ test("tick DRIVE (#246): fix_rounds cap reached but the needs-human label write 
   assert.deepEqual(forge.issueComments, [], "no comment posted without a successful label — nothing to escalate yet");
   assert.equal(r.driven[0]!.kind, "queued");
   assert.match((r.driven[0] as { reason: string }).reason, /fix-rounds-cap-label-failed/);
+  st.close();
+});
+
+test("tick DRIVE (#246 review round 1, C3): fix_rounds cap reached, LABEL succeeds but the escalation COMMENT fails -> stays driving (no terminal upsert, no latch) — retried next tick, the comment is never silently swallowed before a terminal transition", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  forge.throwOnAddIssueComment = true;
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const row = st.getWorker("lane-a")!;
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]], "the label write itself DID succeed");
+  assert.equal(
+    row.state,
+    "driving",
+    "no terminal upsert without the comment landing — retried whole, including a harmless re-label, next tick",
+  );
+  assert.equal(row.fix_rounds, 2);
+  assert.equal(row.gated_escalation_labeled ?? 0, 0, "never latched — this row was never terminalized");
+  assert.equal(r.driven[0]!.kind, "queued");
+  assert.match((r.driven[0] as { reason: string }).reason, /fix-rounds-cap-comment-failed/);
   st.close();
 });
 

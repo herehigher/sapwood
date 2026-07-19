@@ -274,6 +274,19 @@ export class MergeDriver {
       return { kind: "merged", pr, headOid: status.headOid };
     }
 
+    // #246 review round 1 (C4, Codex sol-high PR #264 round 2): the two reads can disagree on
+    // STATE too, not just head — e.g. status.state CLOSED (fresh) racing data.state OPEN
+    // (stale, read moments before the close), same headOid (closing a PR never moves its head,
+    // so the head-agreement check below cannot catch this class). Only `data.state` feeds
+    // deriveGate's `prState` input; deriving a gate from a STALE "OPEN" would let FIXABLE (or
+    // even MERGE) proceed against a PR that the fresher read already knows is CLOSED. Split
+    // state observation -> queue and re-read next tick, the same "never derive a gate from mixed
+    // reads" stance the head-mismatch check takes. A genuinely COHERENT CLOSED (both reads
+    // agree) still falls through unchanged to deriveGate's own `prState !== OPEN` -> HUMAN rule.
+    if (status.state !== data.state) {
+      return { kind: "queued", pr, reason: `gate-state-mismatch: ci-state=${status.state} review-state=${data.state}` };
+    }
+
     // Both gate inputs MUST observe the SAME head (Codex PR #42 P1): the two reads above can
     // race a push — the CI read seeing old-green commit A while the review read sees
     // newly-reviewed commit B whose CI hasn't run would otherwise merge B on A's CI result.

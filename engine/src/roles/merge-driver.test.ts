@@ -124,6 +124,17 @@ test("deriveGate (#246): FIXABLE still yields to prior fail-safe checks — draf
   assert.equal(deriveGate(gateInput({ reviewAction: "HANDLE_THREADS", labels: ["needs-human"] })), "HUMAN");
 });
 
+test("deriveGate (#246 review round 1, C5): the CI_RED branch (MERGE_OK + ciGreen:false + ciRed:true) ALSO yields to every prior fail-safe check — draft/non-OPEN/human-label all outrank it, same precedence as the HANDLE_THREADS branch above", () => {
+  const ciRedInput = { ciGreen: false, ciRed: true, reviewAction: "MERGE_OK" as ReviewAction };
+  assert.equal(deriveGate(gateInput({ ...ciRedInput, isDraft: true })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ ...ciRedInput, prState: "CLOSED" })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ ...ciRedInput, prState: "MERGED" })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ ...ciRedInput, labels: ["needs-human"] })), "HUMAN");
+  assert.equal(deriveGate(gateInput({ ...ciRedInput, labels: ["blocked", "type:feature"] })), "HUMAN");
+  // Sanity: with none of those present, it's genuinely FIXABLE (not accidentally HUMAN).
+  assert.equal(deriveGate(gateInput(ciRedInput)), "FIXABLE");
+});
+
 test("deriveGate: a draft PR is always HUMAN, even with MERGE_OK + CI green", () => {
   assert.equal(deriveGate(gateInput({ isDraft: true })), "HUMAN");
 });
@@ -381,6 +392,39 @@ test("MergeDriver.driveOne: SPLIT-HEAD observation (CI read saw one head, review
   assert.equal(outcome.kind, "queued");
   assert.match((outcome as { reason: string }).reason, /gate-head-mismatch/);
   assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne (#246 review round 1, C4): SPLIT-STATE observation (CI read saw CLOSED, review read a stale OPEN, SAME head) -> queued, never derives a gate from the stale read", async () => {
+  const forge = new FakeForge();
+  // Closing a PR doesn't move its head — the head-agreement check alone can't catch this class.
+  // reviewData.state predates the close (a moment-earlier read); status.state is fresh.
+  forge.status = { ...forge.status, state: "CLOSED" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /gate-state-mismatch/);
+  assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne (#246 review round 1, C4): a COHERENT CLOSED (both reads agree) still falls through unchanged to deriveGate's own needs-human rule — the new check only catches DISAGREEMENT", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, state: "CLOSED" };
+  forge.reviewData = { ...forge.reviewData, state: "CLOSED" };
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "needs-human");
+  assert.deepEqual(forge.merged, []);
+});
+
+test("MergeDriver.driveOne (#246 review round 1, C4): SPLIT-STATE also blocks a FIXABLE (HANDLE_THREADS) verdict against a stale-OPEN, actually-CLOSED PR — never dispatches a fix leg against a closed PR", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  reviewer.verdict = { action: "HANDLE_THREADS", headOid: "HEAD" };
+  forge.status = { ...forge.status, state: "CLOSED" };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /gate-state-mismatch/);
 });
 
 test("MergeDriver.driveOne: PR already MERGED (by a human) -> merged outcome, not needs-human (Codex PR #42 P2)", async () => {
