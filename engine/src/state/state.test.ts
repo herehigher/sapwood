@@ -1752,11 +1752,11 @@ test("migration v20->v21: a populated v20 DB opens with data intact, an empty pe
 test("pending_thread_writes (#247): enqueue/markThreadReplyPosted/markThreadResolved/bumpThreadWriteAttempt/clearThreadWrite round-trip, oldest-first", () => {
   const s = mem();
   const id1 = s.enqueueThreadWrite(
-    { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed" },
+    { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed", batchKey: "lane-a#1", fixRounds: 1 },
     "2026-07-19T00:00:00Z",
   );
   const id2 = s.enqueueThreadWrite(
-    { worker: "lane-a", issue: 1, pr: 10, threadId: "T2", reply: "disagree", resolution: "disputed" },
+    { worker: "lane-a", issue: 1, pr: 10, threadId: "T2", reply: "disagree", resolution: "disputed", batchKey: "lane-a#1", fixRounds: 1 },
     "2026-07-19T00:00:01Z",
   );
   let rows = s.pendingThreadWrites();
@@ -1771,6 +1771,8 @@ test("pending_thread_writes (#247): enqueue/markThreadReplyPosted/markThreadReso
   assert.equal(rows[0]!.attempts, 0);
   assert.equal(rows[0]!.lastAttemptAt, null);
   assert.equal(rows[0]!.resolution, "addressed");
+  assert.equal(rows[0]!.batchKey, "lane-a#1");
+  assert.equal(rows[0]!.fixRounds, 1);
   assert.equal(rows[1]!.resolution, "disputed");
 
   s.markThreadReplyPosted(id1, "2026-07-19T00:01:00Z");
@@ -1796,7 +1798,7 @@ test("pending_thread_writes persists across close/reopen (an engine restart mid-
     const dbPath = join(dir, "sapwood.sqlite");
     const s = new State(dbPath);
     const id = s.enqueueThreadWrite(
-      { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed" },
+      { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed", batchKey: "lane-a#1", fixRounds: 1 },
       "2026-07-19T00:00:00Z",
     );
     s.markThreadReplyPosted(id, "2026-07-19T00:01:00Z");
@@ -1810,6 +1812,168 @@ test("pending_thread_writes persists across close/reopen (an engine restart mid-
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("enqueueThreadWrite (#247 D4): INSERT OR IGNORE on the (batch_key, thread_id) unique index — a duplicate insert for the SAME batch+thread is a silent no-op, never a second row", () => {
+  const s = mem();
+  s.enqueueThreadWrite(
+    { worker: "lane-a", issue: 1, pr: 10, threadId: "T1", reply: "fixed", resolution: "addressed", batchKey: "lane-a#1", fixRounds: 1 },
+    "2026-07-19T00:00:00Z",
+  );
+  // Same batch_key + thread_id, different reply text — simulates a crash-rerun re-deriving the
+  // identical batch (or, defensively, a duplicate settle somehow re-attempted).
+  s.enqueueThreadWrite(
+    {
+      worker: "lane-a",
+      issue: 1,
+      pr: 10,
+      threadId: "T1",
+      reply: "fixed (rerun)",
+      resolution: "addressed",
+      batchKey: "lane-a#1",
+      fixRounds: 1,
+    },
+    "2026-07-19T00:00:01Z",
+  );
+  const rows = s.pendingThreadWrites();
+  assert.equal(rows.length, 1, "the duplicate insert was ignored — never a second row for the same (batch_key, thread_id)");
+  assert.equal(rows[0]!.reply, "fixed", "the FIRST insert's data wins — OR IGNORE never overwrites");
+  s.close();
+});
+
+test("enqueueThreadWrite: the SAME thread_id under a DIFFERENT batch_key (a later fix round re-addressing the same thread) is a distinct row", () => {
+  const s = mem();
+  s.enqueueThreadWrite(
+    {
+      worker: "lane-a",
+      issue: 1,
+      pr: 10,
+      threadId: "T1",
+      reply: "round 1 fix",
+      resolution: "addressed",
+      batchKey: "lane-a#1",
+      fixRounds: 1,
+    },
+    "2026-07-19T00:00:00Z",
+  );
+  s.enqueueThreadWrite(
+    {
+      worker: "lane-a",
+      issue: 1,
+      pr: 10,
+      threadId: "T1",
+      reply: "round 2 fix",
+      resolution: "addressed",
+      batchKey: "lane-a#2",
+      fixRounds: 2,
+    },
+    "2026-07-19T00:00:01Z",
+  );
+  assert.equal(s.pendingThreadWrites().length, 2);
+  s.close();
+});
+
+// ── settleTerminalWorker's fixResponse param (#247 D4): atomicity ──────────────────────────
+
+test("settleTerminalWorker (D4): a validated batch's worker row + spend + EVERY pending_thread_writes row + the fix-response-queued event land in ONE transaction", () => {
+  const s = mem();
+  s.settleTerminalWorker(
+    { name: "lane-fix", issue: 9, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 30 },
+    { worker: "lane-fix", issue: 9, usd: 0.05, at: "2026-07-19T00:00:00Z" },
+    {
+      kind: "batch",
+      batch: {
+        worker: "lane-fix",
+        issue: 9,
+        pr: 30,
+        fixRounds: 1,
+        batchKey: "lane-fix#1",
+        writes: [
+          { threadId: "T1", reply: "fixed", resolution: "addressed" },
+          { threadId: "T2", reply: "disagree", resolution: "disputed" },
+        ],
+      },
+    },
+  );
+  assert.equal(s.getWorker("lane-fix")?.state, "driving");
+  assert.equal(s.spentUsdForWorker("lane-fix"), 0.05);
+  const rows = s.pendingThreadWrites();
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.threadId).sort(), ["T1", "T2"]);
+  for (const r of rows) {
+    assert.equal(r.batchKey, "lane-fix#1");
+    assert.equal(r.fixRounds, 1);
+  }
+  const events = s.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, { worker: "lane-fix", issue: 9, pr: 30, batchKey: "lane-fix#1", fixRounds: 1, count: 2 });
+  s.close();
+});
+
+test("settleTerminalWorker (D4): an invalid outcome commits the terminal state + spend + a fix-response-invalid event, and enqueues NOTHING", () => {
+  const s = mem();
+  s.settleTerminalWorker(
+    { name: "lane-fix", issue: 9, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 30 },
+    { worker: "lane-fix", issue: 9, usd: 0.02, at: "2026-07-19T00:00:00Z" },
+    { kind: "invalid", invalid: { worker: "lane-fix", issue: 9, pr: 30, reason: "no structured output block found" } },
+  );
+  assert.equal(s.getWorker("lane-fix")?.state, "driving");
+  assert.equal(s.spentUsdForWorker("lane-fix"), 0.02);
+  assert.deepEqual(s.pendingThreadWrites(), []);
+  const events = s.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-invalid"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, { worker: "lane-fix", issue: 9, pr: 30, reason: "no structured output block found" });
+  s.close();
+});
+
+test("settleTerminalWorker (D4): omitting fixResponse entirely behaves byte-identically to the pre-#247 two-arg call — no event, no queue row", () => {
+  const s = mem();
+  s.settleTerminalWorker(
+    { name: "lane-a", issue: 1, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 10 },
+    { worker: "lane-a", issue: 1, usd: 0.01, at: "2026-07-19T00:00:00Z" },
+  );
+  assert.equal(s.getWorker("lane-a")?.state, "driving");
+  assert.deepEqual(s.pendingThreadWrites(), []);
+  assert.deepEqual(s.eventsSince("1970-01-01T00:00:00.000Z", ["fix-response-queued", "fix-response-invalid"]), []);
+  s.close();
+});
+
+test("settleTerminalWorker (D4 crash-ordering): a thrown mid-batch enqueue rolls back the ENTIRE transaction — the terminal state write, spend, and every OTHER write in the batch never land either (never a partial batch)", () => {
+  const s = mem();
+  const originalEnqueue = s.enqueueThreadWrite.bind(s);
+  let calls = 0;
+  s.enqueueThreadWrite = ((input: Parameters<typeof originalEnqueue>[0], at: string) => {
+    calls++;
+    if (calls === 2) throw new Error("simulated crash mid-batch");
+    return originalEnqueue(input, at);
+  }) as typeof s.enqueueThreadWrite;
+
+  assert.throws(() =>
+    s.settleTerminalWorker(
+      { name: "lane-fix", issue: 9, session_id: "s", state: "driving", started_at: "t", ended_at: "t2", pr: 30 },
+      { worker: "lane-fix", issue: 9, usd: 0.05, at: "2026-07-19T00:00:00Z" },
+      {
+        kind: "batch",
+        batch: {
+          worker: "lane-fix",
+          issue: 9,
+          pr: 30,
+          fixRounds: 1,
+          batchKey: "lane-fix#1",
+          writes: [
+            { threadId: "T1", reply: "fixed", resolution: "addressed" },
+            { threadId: "T2", reply: "disagree", resolution: "disputed" }, // this insert throws
+          ],
+        },
+      },
+    ),
+  );
+  // Nothing landed: not the terminal state transition, not the spend, not even T1's own row
+  // (which was inserted BEFORE the throw, inside the same still-open transaction).
+  assert.equal(s.getWorker("lane-fix"), undefined, "the worker row was never upserted — the whole transaction rolled back");
+  assert.equal(s.spentUsdForWorker("lane-fix"), 0);
+  assert.deepEqual(s.pendingThreadWrites(), [], "T1's row, inserted before the throw, is ALSO gone — never a partial batch");
+  s.close();
 });
 
 test("listForgeProxyJournalForSession (#247): every row for a session name alone, regardless of round/phase/attempt — the fix-leg harvest's no-TOCTOU read", () => {
@@ -1857,6 +2021,54 @@ test("listForgeProxyJournalForSession (#247): every row for a session name alone
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.identity.session, "lane-fix");
   assert.equal(rows[0]!.responseCanonical, JSON.stringify({ threads: [{ id: "T1" }] }));
+  s.close();
+});
+
+test("listForgeProxyJournalForSession (#247 D2): a sinceIso cutoff excludes rows requested BEFORE it — the per-fix-round leg-bound scoping fixLegJournalCursor relies on", () => {
+  const s = mem();
+  const earlyId = s.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 1,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T00:00:00Z", // round 1 — before the cutoff
+  });
+  s.recordForgeProxyJournalResponse(earlyId, {
+    responseCanonical: JSON.stringify({ threads: [{ id: "EARLY" }] }),
+    contentHash: "h1",
+    truncated: false,
+    fetchedAt: "2026-07-19T00:00:00Z",
+  });
+  const lateId = s.appendForgeProxyJournalIntent({
+    identity: { roundId: 1, phase: "fixing", role: "worker", session: "lane-fix", attempt: 1 },
+    seq: 2,
+    tool: "pr_review_threads",
+    proxyVersion: "1",
+    argsCanonical: "{}",
+    scopeCanonical: "{}",
+    capsCanonical: "{}",
+    budgetRemainingCalls: 10,
+    budgetRemainingBytes: 1000,
+    requestedAt: "2026-07-19T02:00:00Z", // round 2 — at/after the cutoff
+  });
+  s.recordForgeProxyJournalResponse(lateId, {
+    responseCanonical: JSON.stringify({ threads: [{ id: "LATE" }] }),
+    contentHash: "h2",
+    truncated: false,
+    fetchedAt: "2026-07-19T02:00:00Z",
+  });
+
+  const unscoped = s.listForgeProxyJournalForSession("lane-fix");
+  assert.equal(unscoped.length, 2, "omitting sinceIso keeps the pre-D2 unscoped read unchanged");
+
+  const scoped = s.listForgeProxyJournalForSession("lane-fix", "2026-07-19T02:00:00Z");
+  assert.equal(scoped.length, 1);
+  assert.equal(scoped[0]!.responseCanonical, JSON.stringify({ threads: [{ id: "LATE" }] }));
   s.close();
 });
 
