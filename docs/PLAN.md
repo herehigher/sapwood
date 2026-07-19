@@ -341,10 +341,15 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   `HANDLE_THREADS` findings, or `CI_RED` alongside a decisive verdict — whenever the fix
   loop is enabled (`prFixCap > 0`; at `0` it folds straight to `HUMAN`, byte-for-byte the
   pre-#246 behavior); `driveDecision` then turns `FIXABLE` into `FIXUP` (dispatch a fix leg
-  via `startFixLeg`) while `fix_rounds < cap`, or `ESCALATE` once the cap is exhausted or
-  the round count is malformed/over-budget — the same `needs-human` escalation the cap-out
-  path always used, which #147's GATED RECLAIM below can then reclaim once a human clears
-  the label. The fix leg pulls its own PR's review findings via the PR-facing forge MCP
+  via `startFixLeg`, itself gated by the same pause/ceiling/park/run-spend-stop admission
+  checks RESUME/DISPATCH already pass — a blocked admission is a transient `queued` retry
+  next tick, not an escalation) while `fix_rounds < cap`, or `ESCALATE` when the cap is
+  exhausted, the round count is malformed, or this tick is over the round budget. Of those
+  three, only cap-exhaustion and the malformed-count fail-safe are terminal — they escalate
+  to `needs-human`, the same escalation #147's GATED RECLAIM below can then reclaim once a
+  human clears the label; an over-budget tick is, like a blocked admission, just a transient
+  `queued` retry, costing zero fix-round budget. The fix leg pulls its own PR's review
+  findings via the PR-facing forge MCP
   proxy tools (#244, attached to `resume()` too) rather than having them relayed through its
   prompt — no prompt-injection transport, no forge credentials handed to the leg — and, per
   #247, can act on individual review threads directly: the engine executes structured
@@ -573,10 +578,12 @@ shipped 2026-07-19):** `enabled: false` (default) stays fully inert — no proxy
 ever constructed. `enabled: true, shadow: true` (the default once enabled) makes the
 proxy mintable and journaled but attaches no real handle to any live session — the
 machinery is real, production dispatch isn't. Only `enabled: true, shadow: false` is the
-deliberate go-live flip: both live drivers (`RoleRunner`'s peripheral sessions and the
-fix loop's worker legs) then attach a real handle via `defaultProxy`. #253 wired those
-real consumers and ran + verified a live shadow bring-up validating the proxy; production
-ships shadow-first by default, and the flip to live is a deliberate config change, not an
+deliberate go-live flip: both live drivers then attach a real handle — a real
+`TickDeps.fixLegResume` (`mintProxy` + `renderFixPrompt`) to the fix loop's worker leg,
+and a real `RoleRunner` `defaultProxy` to every peripheral role session — two distinct
+seams, not one shared mechanism. #253 wired both real consumers and ran + verified a live
+shadow bring-up validating the proxy; production ships shadow-first by default, and the
+flip to live is a deliberate config change, not an
 automatic consequence of shipping. The criterion drove the *design*; see
 [`configuration.md`](configuration.md#proxy) for the full three-state contract. The same
 2026-07-17 M8 round cut two further
