@@ -53,6 +53,7 @@ test("upsert refreshes ALL fields on name reuse (resume / reassigned lane)", () 
     state: "done",
     started_at: "2026-06-27T00:00:00Z",
     ended_at: "2026-06-27T00:30:00Z",
+    review_covered_head: "OLD_HEAD",
   });
   // lane name reused for a different issue + fresh session
   s.upsertWorker({
@@ -68,6 +69,7 @@ test("upsert refreshes ALL fields on name reuse (resume / reassigned lane)", () 
   assert.equal(row?.session_id, "uuid-B");
   assert.equal(row?.started_at, "2026-06-27T02:00:00Z");
   assert.equal(row?.ended_at, null);
+  assert.equal(row?.review_covered_head, null);
   s.close();
 });
 
@@ -291,6 +293,7 @@ test("worker.review_triggered_head/at round-trip: default null, persisted via re
   assert.equal(after?.review_triggered_at, "2026-07-07T08:00:00.000Z");
   assert.equal(after?.review_trigger_generation, 1);
   assert.equal(after?.review_trigger_in_flight, 1);
+  assert.equal(after?.review_covered_head, null);
   assert.equal(after?.pr, 42); // untouched by recordReviewTrigger
   assert.equal(after?.state, "driving");
 
@@ -318,11 +321,26 @@ test("#273 review pin metadata persists ambiguity/delta state and a decisive ver
   assert.equal(row.review_delta_chain, 1);
   assert.equal(row.review_trigger_in_flight, 1);
 
-  s.recordReviewVerdict("a", "H1", 1);
+  s.recordReviewVerdict("a", "H1", 1, true);
   assert.equal(s.getWorker("a")?.review_trigger_in_flight, 1, "stale generation cannot close H2");
-  s.recordReviewVerdict("a", "H2", 2);
+  assert.equal(s.getWorker("a")?.review_covered_head, null, "stale generation cannot establish coverage");
+  s.recordReviewVerdict("a", "H2", 2, false);
   row = s.getWorker("a")!;
   assert.equal(row.review_trigger_in_flight, 0);
+  assert.equal(row.review_covered_head, null, "an attributable but untrusted blocker does not establish coverage");
+  s.recordReviewVerdict("a", "H2", 2, true);
+  assert.equal(s.getWorker("a")?.review_covered_head, "H2", "a later trusted response upgrades coverage after in-flight closed");
+  s.recordReviewTrigger("a", "H3", "2026-07-07T10:00:00Z", {
+    generation: 3,
+    ambiguous: false,
+    deltaChain: 0,
+    inFlight: true,
+  });
+  row = s.getWorker("a")!;
+  s.recordReviewVerdict("a", "H3", 3, true);
+  assert.equal(s.getWorker("a")?.review_covered_head, "H3");
+  s.upsertWorker({ ...row, state: "fixing" });
+  assert.equal(s.getWorker("a")?.review_covered_head, "H3", "a stale same-session upsert cannot erase newly recorded coverage");
   s.close();
 });
 
@@ -1797,6 +1815,7 @@ test("migration v21->v22: an existing trigger pin becomes generation 1 and conse
     assert.equal(row.review_trigger_ambiguous, 0);
     assert.equal(row.review_delta_chain, 0);
     assert.equal(row.review_trigger_in_flight, 1);
+    assert.equal(row.review_covered_head, null);
     assert.equal(s.userVersion(), SCHEMA_VERSION);
     s.close();
   } finally {

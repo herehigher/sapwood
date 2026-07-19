@@ -30,6 +30,8 @@ export interface ReviewVerdict {
   headOid: string | null;
   /** True only when an artifact can be attributed to the current trigger generation. */
   generationResponded?: boolean;
+  /** True only when a trusted response establishes review coverage through this head. */
+  coverageEstablished?: boolean;
 }
 
 /**
@@ -123,6 +125,8 @@ export interface ReviewTriggerPin {
   ambiguous?: boolean;
   deltaChain?: number;
   inFlight?: boolean;
+  /** Latest head with generation-attributable trusted review coverage. */
+  coveredHead?: string | null;
 }
 
 export interface ReviewTriggerContext {
@@ -228,7 +232,7 @@ export function buildReviewTriggerComment(
  * yet ⇒ no thumb can have been a response to it).
  */
 function freshTrustedThumbCount(data: PRReviewData, trustedLogin?: (login: string) => boolean, pin?: ReviewTriggerPin): number {
-  if (!trustedLogin || !pin?.at || pin.head !== data.headOid || pin.ambiguous) return 0;
+  if (!trustedLogin || !pin?.at || pin.head !== data.headOid || (pin.generation ?? 1) > 1) return 0;
   const author = normalizeLogin(data.author);
   const trusted = data.reactions.filter((r) => normalizeLogin(r.login) !== author && trustedLogin(normalizeLogin(r.login)));
   return freshThumbCount(trusted, pin.at);
@@ -243,7 +247,18 @@ function freshTrustedThumbCount(data: PRReviewData, trustedLogin?: (login: strin
  * Identity-gating makes the text non-spoofable: only the trusted bot's own comments are read.
  */
 const CLEAN_VERDICT_RE = /didn't find any major issues/i;
-const REVIEWED_HEAD_OID_RE = /\breviewed head oid\s*:\s*`?([^\s`]+)/i;
+const REVIEWED_HEAD_OID_RE = /^Reviewed head OID: (\S+)\s*$/;
+
+function assertedHeadOids(body: string): Set<string> {
+  const values = new Set<string>();
+  for (const line of body.split(/\r?\n/)) {
+    if (line.startsWith(">")) continue;
+    const match = REVIEWED_HEAD_OID_RE.exec(line);
+    if (match?.[1]) values.add(match[1]);
+  }
+  return values;
+}
+
 function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: string) => boolean, pin?: ReviewTriggerPin): number {
   if (!trustedLogin || !pin?.at || pin.head !== data.headOid) return 0;
   const cutoff = Date.parse(pin.at);
@@ -251,14 +266,15 @@ function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: st
   const author = normalizeLogin(data.author);
   return (data.comments ?? []).filter((c) => {
     const createdAt = Date.parse(c.createdAt);
-    const statedOid = REVIEWED_HEAD_OID_RE.exec(c.body)?.[1];
+    const statedOids = assertedHeadOids(c.body);
+    const oidMatches = statedOids.size === 1 && statedOids.has(data.headOid);
     return (
       normalizeLogin(c.login) !== author &&
       trustedLogin(normalizeLogin(c.login)) &&
       Number.isFinite(createdAt) &&
       createdAt > cutoff &&
       CLEAN_VERDICT_RE.test(c.body) &&
-      (statedOid !== undefined ? statedOid === data.headOid : !pin.ambiguous)
+      (statedOids.size > 0 ? oidMatches : (pin.generation ?? 1) <= 1)
     );
   }).length;
 }
@@ -296,6 +312,7 @@ function verdictFrom(
     action,
     headOid: data.headOid,
     generationResponded: currentGenerationFormalResponse || currentHeadChangesRequested || freshTrustedSignals > 0,
+    coverageEstablished: currentGenerationFormalResponse || freshTrustedSignals > 0,
   };
 }
 
@@ -353,10 +370,10 @@ export class HumanReviewer implements Reviewer {
     // No-op: nothing to ping. A human reviews on their own schedule.
   }
 
-  verdictFromData(data: PRReviewData): ReviewVerdict {
+  verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict {
     // No trustedReactionLogin passed -> freshTrustedThumbCount always 0; the pin is irrelevant
-    // to human mode (a human's approval is a real review, never a 👍) so it's not accepted here.
-    return verdictFrom(data, HumanReviewer.ACCEPT);
+    // to human thumbs, but still attributes formal-review coverage to the current generation.
+    return verdictFrom(data, HumanReviewer.ACCEPT, undefined, undefined, pin);
   }
 }
 

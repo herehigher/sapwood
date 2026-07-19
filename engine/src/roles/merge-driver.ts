@@ -293,7 +293,7 @@ export class MergeDriver {
      *  gate② counts only post-re-entry review signals. Optional — every pre-#147 caller (and
      *  every non-reentered lane) omits it: byte-for-byte the old behavior. */
     reentered?: boolean,
-    recordVerdict?: (head: string, generation: number) => void,
+    recordVerdict?: (head: string, generation: number, coverageEstablished: boolean) => void,
   ): Promise<DriveOutcome> {
     const { forge, reviewer, cfg } = this.deps;
 
@@ -388,7 +388,7 @@ export class MergeDriver {
         }
         const priorHead = triggerPin.head;
         const priorDeltaChain = triggerPin.deltaChain ?? 0;
-        const deltaScoped = priorHead != null && priorDeltaChain < cfg.reviewer.deltaChainMax;
+        const deltaScoped = priorHead != null && priorHead === triggerPin.coveredHead && priorDeltaChain < cfg.reviewer.deltaChainMax;
         const generation = (triggerPin.generation ?? 0) + 1;
         const ambiguous = priorHead != null && triggerPin.inFlight !== false;
         const deltaChain = deltaScoped ? priorDeltaChain + 1 : 0;
@@ -470,8 +470,8 @@ export class MergeDriver {
     });
     const verdict = resolved.verdict;
 
-    if (verdict.generationResponded === true && triggerPin.inFlight !== false) {
-      recordVerdict?.(data.headOid, triggerPin.generation ?? 0);
+    if (verdict.generationResponded === true) {
+      recordVerdict?.(data.headOid, triggerPin.generation ?? 0, verdict.coverageEstablished === true);
     }
 
     // Persist the lock only when it actually changed — which, post-R2, is only ever "a

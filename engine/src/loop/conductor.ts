@@ -569,7 +569,7 @@ export interface MergeGate {
      *  (see MergeDriver.driveOne), so the stale pre-escalation review can't satisfy the
      *  re-driven gate②. Optional — pre-#147 fakes still satisfy this type. */
     reentered?: boolean,
-    recordVerdict?: (head: string, generation: number) => void,
+    recordVerdict?: (head: string, generation: number, coverageEstablished: boolean) => void,
   ): Promise<DriveOutcome>;
 }
 
@@ -2133,6 +2133,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           ambiguous: (w.review_trigger_ambiguous ?? 0) === 1,
           deltaChain: w.review_delta_chain ?? 0,
           inFlight: (w.review_trigger_in_flight ?? 0) === 1,
+          coveredHead: w.review_covered_head ?? null,
         },
         (head, at, meta) => state.recordReviewTrigger(w.name, head, at, meta),
         {
@@ -2143,7 +2144,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // pre-escalation review still sitting on the (unchanged) head — driveOne filters to
         // post-re-entry review signals when this is set.
         (w.gated_reentry_attempts ?? 0) > 0,
-        (head, generation) => state.recordReviewVerdict(w.name, head, generation),
+        (head, generation, coverageEstablished) => state.recordReviewVerdict(w.name, head, generation, coverageEstablished),
       );
       // #54: announce a reviewer-failover switch/revert — structured event + PR comment.
       // driveOne reports the signal STATELESSLY every tick it holds (resolveReviewVerdict is
