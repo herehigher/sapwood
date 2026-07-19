@@ -1,16 +1,16 @@
 # 06 — Persistence layer (SQLite)
 
-This describes the final schema after every migration in `engine/src/state/state.ts`; it is not migration history.
+This describes the final schema after every migration in `engine/src/state/state.ts`; it is not migration history. It is a maintainer deep dive: read it before changing state, recovery, or accounting code — a contributor whose change doesn't touch durable state only needs the crash-consistency rules at the end.
 
 ## Engine choice & files
 
-`State` uses Node's built-in `node:sqlite`, so the engine has no SQLite npm or native-build dependency. Its default database is `data/sapwood.sqlite`; SQLite may maintain adjacent `data/sapwood.sqlite-wal` and `data/sapwood.sqlite-shm` files. Writable opens set WAL mode and run migrations; the conductor remains the serial writer while status readers can proceed concurrently (`State` constructor, `engine/src/state/state.ts:1114`).
+`State` uses Node's built-in `node:sqlite`, so the engine has no SQLite npm or native-build dependency. Its default database is `data/sapwood.sqlite`; SQLite may maintain adjacent `data/sapwood.sqlite-wal` and `data/sapwood.sqlite-shm` files. Writable opens set WAL mode and run migrations; the conductor remains the serial writer while status readers can proceed concurrently (`State` constructor, `engine/src/state/state.ts`).
 
-`State(path, { readOnly: true })` opens query-only and performs no migration; the CLI status caller checks the on-disk version before interpreting rows. On a filesystem where a WAL reader cannot create coordination files, `openReadOnly()` falls back to an immutable main-file snapshot and warns that live WAL rows may be absent (`engine/src/state/state.ts:649`, `engine/src/cli.ts`).
+`State(path, { readOnly: true })` opens query-only and performs no migration; the CLI status caller checks the on-disk version before interpreting rows. On a filesystem where a WAL reader cannot create coordination files, `openReadOnly()` falls back to an immutable main-file snapshot and warns that live WAL rows may be absent (`engine/src/state/state.ts`, `engine/src/cli.ts`).
 
 ## Schema version & migrations
 
-`MIGRATIONS` is an ordered array at `engine/src/state/state.ts:32`; array index N upgrades SQLite `PRAGMA user_version` from N to N+1. `SCHEMA_VERSION` is exactly `MIGRATIONS.length` (`engine/src/state/state.ts:628`) and is currently **21**.
+`MIGRATIONS` is an ordered array at `engine/src/state/state.ts`; array index N upgrades SQLite `PRAGMA user_version` from N to N+1. `SCHEMA_VERSION` is exactly `MIGRATIONS.length` (`engine/src/state/state.ts`) and is currently **21**.
 
 Migrations are forward-only and transactional. Never edit a migration that may have shipped: append a function, preserve existing data, add/update a real upgrade test in `engine/src/state/state.test.ts`, and review the crash/restart and read-only-version behavior. `input_manifest_new` appears only inside a table-rebuild migration and is renamed back; it is not a final table.
 
@@ -28,7 +28,7 @@ The conductor writes transitions through `upsertWorker()`, trigger/fallback/tele
 
 Append-only ordered engine history: autoincrement `id`, ISO `ts`, string `kind`, and JSON-text `payload`, with an index on `kind`. `State.appendEvent()` writes `{kind,payload}` with the current timestamp; conductor, rounds, role apply/degrade paths, reconciliation, proxy/response settlement, retro, artifacts, and dashboard-facing readers consume ordered rows.
 
-Payloads are event-specific JSON objects. Stable conventions are identifiers such as `worker`, `issue`, `pr`, and `round_id`, plus transition/outcome fields such as `next`, `reason`, or `mode`. Consumers must validate the payload shape they use; `eventsSince()`/`eventsAfterId()` only parse JSON and preserve ID order. Rows live for the database lifetime and provide replay/audit input (`appendEvent`, line 1335; `eventsAfterId`, line 1969).
+Payloads are event-specific JSON objects. Stable conventions are identifiers such as `worker`, `issue`, `pr`, and `round_id`, plus transition/outcome fields such as `next`, `reason`, or `mode`. Consumers must validate the payload shape they use; `eventsSince()`/`eventsAfterId()` only parse JSON and preserve ID order. Rows live for the database lifetime and provide replay/audit input (`appendEvent`; `eventsAfterId`).
 
 #### `spend_ledger`
 

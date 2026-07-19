@@ -35,6 +35,13 @@ Tests are colocated with their modules as `*.test.ts`.
 | `state/` | SQLite schema and state API (`state.ts`) plus sentinel-delimited structured-output parsing (`structured-output.ts`). |
 | `util/` | Small shared utilities; currently Markdown-safe truncation/rendering in `markdown.ts`. |
 
+Outside `src/`, the engine package also carries `engine/prompts/` (shipped role
+prompts, init templates, and issue templates — the non-TypeScript behavior
+surface; see [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md)),
+`engine/pricing.yaml` (the token-pricing table read by `config/pricing.ts`), and
+`engine/scripts/` (developer utilities, currently a retro-digest dry-run). The
+repo root's `.nvmrc` pins the Node major for version managers.
+
 ## commands/ — Claude Code plugin surface
 
 `commands/sapwood-run.md` invokes `engine/src/cli.ts run` through the plugin's own `tsx`, preserving the target repository as the working directory. `commands/sapwood-status.md` similarly invokes `status` and reads SQLite without starting an engine. `commands/sapwood-stop.md` manages `data/KILL_SWITCH` and `data/PAUSE` directly; there is no separate CLI `stop` subcommand.
@@ -64,14 +71,16 @@ Tests are colocated with their modules as `*.test.ts`.
 | Config schema/defaults/load order | `engine/src/config/config.ts` |
 | Gate logic and final merge fail-safe | `engine/src/roles/merge-driver.ts` (`deriveGate`, `mergeDecision`) |
 | Reviewer identity/freshness/fallback | `engine/src/roles/reviewer.ts` |
-| Database schema | `engine/src/state/state.ts` (`MIGRATIONS`, line 32) |
-| Tick ordering and lane transitions | `engine/src/loop/conductor.ts` (`tick`, line 1556) |
-| Round phases and scoping | `engine/src/loop/round.ts` (`runRounds`, line 546) |
+| Database schema | `engine/src/state/state.ts` (`MIGRATIONS`) |
+| Tick ordering and lane transitions | `engine/src/loop/conductor.ts` (`tick`) |
+| Round phases and scoping | `engine/src/loop/round.ts` (`runRounds`) |
 | Worker prompt assembly and session context | `engine/src/roles/worker.ts`, `engine/src/roles/context-manifest.ts` |
-| Peripheral role runner | `engine/src/roles/peripheral.ts` (`RoleRunner`, line 381) |
+| Peripheral role runner | `engine/src/roles/peripheral.ts` (`RoleRunner`) |
 | Plan-review output validation | `engine/src/roles/plan-review.ts` |
 | Label names and matching | `engine/src/forge/labels.ts` |
 | Raw GitHub parsing and calls | `engine/src/forge/forge.ts`, `engine/src/forge/gh.ts` |
 | Guard decisions and hook adapter | `engine/src/guard/guard.ts`, `engine/src/guard/guard-hook.ts` |
 | Forge proxy access and audit | `engine/src/proxy/access.ts`, `engine/src/proxy/journal.ts` |
 | CLI/plugin mapping | `engine/src/cli.ts`, `commands/*.md` |
+| Role prompt text and templates | `engine/prompts/` (overrides: each role's `promptFile` config key) |
+| Token pricing table | `engine/pricing.yaml`, `engine/src/config/pricing.ts` |

@@ -63,6 +63,30 @@ node --import tsx engine/src/cli.ts run --once
 
 To exercise drain behavior safely, create `data/KILL_SWITCH` before the tick. The tick observes the switch and does not dispatch or merge; remove it only when the test is complete (`commands/sapwood-stop.md`, `engine/src/loop/conductor.ts`).
 
+## Debugging a failed run
+
+When a run misbehaves, the evidence trail is layered — read it in this order:
+
+1. **`node --import tsx engine/src/cli.ts status`** — lane states, PRs in the
+   gate, spend vs. ceiling, kill-switch/pause; works read-only with no engine
+   running.
+2. **`data/logs/sapwood.log`** — the engine's own diagnostic log
+   (`engine/src/loop/logger.ts`).
+3. **The `events` table** — the append-only decision history
+   (`sqlite3 data/sapwood.sqlite "SELECT ts,kind,payload FROM events ORDER BY id DESC LIMIT 40"`);
+   dispatch, gate outcomes, degrades, escalations, and reconciliation all land
+   here with reasons.
+4. **Per-session evidence** — `data/sessions/state/<lane>/` (workers) and
+   `data/sessions/roles/` (peripherals): the JSONL stream is the session
+   transcript; sentinel files (`.running`/`.done`/`.failed`/`.handoff`) are the
+   wrapper's ground truth about how it ended, independent of the model's
+   self-report.
+5. **A retained worktree** — a failed/held lane's worktree is kept for
+   inspection; its branch and dirty state show exactly what the worker left.
+
+Operator-facing failure semantics (`needs-human` reasons, park/probe, degrade
+paths) are in [Troubleshooting](../troubleshooting.md).
+
 ## Resetting local state
 
 Stop the local engine before deleting runtime files. All of the following are generated under `data/` and can be removed between isolated development runs, but deletion is irreversible and changes recovery behavior:

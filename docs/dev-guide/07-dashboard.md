@@ -20,20 +20,8 @@ No frontend framework, state library, chart library, API implementation, or pack
 
 ## TODO
 
-- TODO: dashboard npm workspace and build scripts.
-- TODO: local read-only data server.
-- TODO: versioned state, event, spend, round, config, and bounded-log API routes.
-- TODO: loop/round hero and stage nodes.
-- TODO: lane board with live estimated cost/context and settled cost.
-- TODO: activity feed with accessible event copy.
-- TODO: needs-attention strip.
-- TODO: daily/round cost meter and phase/model cost strip.
-- TODO: read-only resolved-config drawer.
-- TODO: replay player with play, pause, speed, and round scrubber.
-- TODO: complete replay fixture/demo bundle.
-- TODO: empty, stale-engine, paused, parked, stopped, and schema-mismatch states.
-- TODO: optional sentinel control routes with server-side origin and configuration checks.
-- TODO: launcher command and dead-engine launch guidance.
-- TODO: dashboard tests, accessibility checks, and performance verification.
-
-The root `README.md` roadmap is the milestone-level status view.
+The entire implementation is TODO: the workspace, the read-only data server and
+its API routes, every panel, replay, the launcher command, and the dashboard's
+own tests. The authoritative feature-by-feature specification is
+[frontend-design.md](../frontend-design.md) — this guide deliberately does not
+mirror it. The root `README.md` roadmap is the milestone-level status view.
