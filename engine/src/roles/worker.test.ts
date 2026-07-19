@@ -587,7 +587,7 @@ const waitForHeartbeatTick = async (path: string): Promise<void> => {
 };
 const longRunningStub = (dir: string, beforeReady = "", readyName = "stub-ready"): { bin: string; ready: string } => {
   const ready = join(dir, readyName);
-  const bin = mkStub(dir, `#!/usr/bin/env bash\n${beforeReady}touch "${ready}"\nwhile true; do sleep 1; done\n`);
+  const bin = mkStub(dir, `#!/usr/bin/env bash\n${beforeReady}touch "${ready}"\nfor _ in $(seq 1 600); do sleep 1; done\n`);
   return { bin, ready };
 };
 const FAST_STUB = `#!/usr/bin/env bash\necho '{"type":"result","subtype":"success","total_cost_usd":0.0001,"model":"claude-stub","usage":{"input_tokens":12,"output_tokens":34}}'\nexit 0\n`;
@@ -983,7 +983,7 @@ test("#172: resumed no-result SIGTERM ignores leg 1's result and ledgers its bas
         `  echo '${firstLine}'`,
         `  echo '${firstResult}'`,
         "fi",
-        "while true; do sleep 1; done",
+        "for _ in $(seq 1 600); do sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -1132,7 +1132,7 @@ test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the 
         "fi",
         "trap 'exit 0' TERM",
         `touch "${ready}"`,
-        "while true; do sleep 1; done",
+        "for _ in $(seq 1 600); do sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -1178,7 +1178,7 @@ test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktr
         "fi",
         "trap 'exit 0' TERM",
         `touch "${ready}"`,
-        "while true; do sleep 1; done",
+        "for _ in $(seq 1 600); do sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -1188,7 +1188,7 @@ test("resume: also sets SAPWOOD_WORKTREE_ROOT to the same lane's resolved worktr
     assert.equal(s.requestHandoff(name), true);
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
     await s.resume({ number: 4, title: "t", labels: [] }, name);
-    for (let i = 0; i < 400 && !existsSync(join(dir, "resume-root.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "resume-root.seen"), "resumed worktree root was not published");
     assert.equal(readFileSync(join(dir, "resume-root.seen"), "utf8").trim(), join(worktreeRoot, name));
     s.dispose();
   } finally {
@@ -1269,7 +1269,7 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     // retain forge credentials so they can push branches and open PRs through the guard.
     const bin = mkStub(
       dir,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho "$GH_TOKEN" > "${join(dir, "token.seen")}"\necho "$SAPWOOD_GUARD_MODE" > "${join(dir, "mode.seen")}"\nexit 0\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho "$GH_TOKEN" > "${join(dir, "token.seen.tmp")}"\nmv "${join(dir, "token.seen.tmp")}" "${join(dir, "token.seen")}"\necho "$SAPWOOD_GUARD_MODE" > "${join(dir, "mode.seen.tmp")}"\nmv "${join(dir, "mode.seen.tmp")}" "${join(dir, "mode.seen")}"\nexit 0\n`,
     );
     const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
     const s = new WorkerSupervisor({
@@ -1285,7 +1285,7 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     assert.ok(!existsSync(join(dir, `${name}.settings.json`)), "no mutable settings file written");
     // mode.seen is the stub's LAST write — waiting on it guarantees args.seen exists too
     // (waiting on args.seen could race the second write on a slow FS). (Codex #26 R6 P3.)
-    for (let i = 0; i < 400 && !existsSync(join(dir, "mode.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "mode.seen"), "guard env marker was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.match(args, /--settings/);
     assert.match(args, /guard-hook\.js/); // the inline JSON carries the hook command
@@ -1322,7 +1322,7 @@ test("dispatch sets SAPWOOD_WORKTREE_ROOT to the resolved absolute worktree path
       guardHookPath: hook,
     });
     const { name } = await s.dispatch({ number: 9, title: "t", labels: [] });
-    for (let i = 0; i < 400 && !existsSync(join(dir, "root.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "root.seen"), "worker worktree root was not published");
     assert.equal(readFileSync(join(dir, "root.seen"), "utf8").trim(), join(worktreeRoot, name));
     s.dispose();
   } finally {
@@ -1406,7 +1406,7 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
       [
         `#!/usr/bin/env bash`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `while true; do sleep 1; done`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1503,7 +1503,7 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
       [
         `#!/usr/bin/env bash`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `while true; do sleep 1; done`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1554,7 +1554,7 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
         `touch "${ready}"`,
         `while [ ! -f "${emitNewUsage}" ]; do sleep 0.02; done`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `while true; do sleep 1; done`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1597,7 +1597,7 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
         `#!/usr/bin/env bash`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":2000}}}'`,
-        `while true; do sleep 1; done`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1646,7 +1646,7 @@ test("#155: contextTokens is deliberately NON-monotonic — a later, smaller ass
         `while [ ! -f "${marker}" ]; do sleep 0.02; done`,
         // Small second turn (post-compaction context is much smaller).
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":500,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `while true; do sleep 1; done`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -1693,7 +1693,7 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
         `while [ ! -f "${marker}" ]; do sleep 0.02; done`,
         // New post-resume usage: opus 200in+0out -> $0.001.
         `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `while true; do sleep 1; done`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
         ``,
       ].join("\n"),
     );
@@ -2065,7 +2065,7 @@ test("#69: timeout still tags .failed even if a handoff was already requested (t
     // .handoff (handoffRequested, not timedOut) instead of .failed. A non-terminating loop
     // removes that window entirely: the stub can only ever end via the timeout path's SIGKILL.
     const trapReady = join(dir, "trap-ready");
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nwhile true; do sleep 1; done\n`);
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\ntouch "${trapReady}"\nfor _ in $(seq 1 600); do sleep 1; done\n`);
     const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } });
     let fakeNowMs = Date.now();
     const s = new WorkerSupervisor({
@@ -2214,7 +2214,7 @@ test("#69 (fable P1): a RESUMED lane that crashes does NOT lose pre-handoff WIP 
         "fi",
         "trap 'exit 0' TERM",
         `touch "${ready}"`,
-        "while true; do sleep 1; done",
+        "for _ in $(seq 1 600); do sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -2911,7 +2911,7 @@ test("buildRenderPrompt: end-to-end — the dispatched worker's -p prompt equals
       guardHookPath: hook,
     });
     await s.dispatch({ number: 74, title: "File-based worker prompt", labels: [], body: "wire promptFile through renderPrompt" });
-    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "args.seen"), "rendered-prompt argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     const expected = renderPromptTemplate(readFileSync(templatePath, "utf8"), {
       number: 74,
@@ -2986,7 +2986,7 @@ test("dispatch: a proxy opt mints a handle, widens --allowedTools with the handl
         },
       },
     });
-    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "args.seen"), "proxy dispatch argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.match(args, /mcp__forge__pr_details/);
     assert.match(args, /--mcp-config/);
@@ -3021,7 +3021,7 @@ test("dispatch: no proxy opt (every ordinary caller today) -> no --mcp-config fl
       guardHookPath: hook,
     });
     await s.dispatch({ number: 1, title: "t", labels: [] });
-    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "args.seen"), "ordinary dispatch argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.doesNotMatch(args, /--mcp-config/);
     assert.doesNotMatch(args, /mcp__forge__/);
@@ -3171,7 +3171,7 @@ test("dispatch: credentialFree opt strips forge/git credential env vars and seve
     const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, {
       proxy: { mint: async () => handle as never, credentialFree: true },
     });
-    for (let i = 0; i < 400 && !existsSync(join(dir, "env.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "env.seen"), "credential-free dispatch env was not published");
     const envText = readFileSync(join(dir, "env.seen"), "utf8");
     for (const key of [
       "GH_TOKEN",
@@ -3364,7 +3364,7 @@ test("dispatch: a proxy attached WITHOUT credentialFree keeps today's env inheri
     });
     const { handle } = fakeWorkerProxyHandle();
     await s.dispatch({ number: 1, title: "t", labels: [] }, undefined, { proxy: { mint: async () => handle as never } });
-    for (let i = 0; i < 400 && !existsSync(join(dir, "token.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "token.seen"), "inherited worker token was not published");
     assert.equal(readFileSync(join(dir, "token.seen"), "utf8").trim(), "worker-forge-token");
     s.dispose();
   } finally {
@@ -3400,7 +3400,7 @@ async function mkHandoffLane(
       "fi",
       "trap 'exit 0' TERM",
       `touch "${ready}"`,
-      "while true; do sleep 1; done",
+      "for _ in $(seq 1 600); do sleep 1; done",
       "",
     ].join("\n"),
   );
@@ -3440,7 +3440,7 @@ test("resume: a proxy opt mints a handle, widens --allowedTools with the handle'
       },
     });
     assert.equal(resumed.name, name);
-    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "args.seen"), "proxy resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.match(args, /mcp__forge__pr_details/);
     assert.match(args, /--mcp-config/);
@@ -3461,7 +3461,7 @@ test("resume: opts.prompt REPLACES the ordinary issue-rendered prompt — the fi
   try {
     const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
     await s.resume({ number: 9, title: "t", labels: [] }, name, { prompt: "fix-leg: address PR #42's review findings" });
-    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "args.seen"), "prompt-override resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
     const promptIdx = args.indexOf("-p");
     assert.equal(args[promptIdx + 1], "fix-leg: address PR #42's review findings");
@@ -3477,7 +3477,7 @@ test("resume: no proxy/prompt opt -> byte-identical to pre-#245 behavior (render
   try {
     const { s, name } = await mkHandoffLane(dir, `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`);
     await s.resume({ number: 9, title: "t", labels: [] }, name);
-    for (let i = 0; i < 400 && !existsSync(join(dir, "args.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "args.seen"), "ordinary resume argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8");
     assert.doesNotMatch(args, /--mcp-config/);
     assert.doesNotMatch(args, /mcp__forge__/);
@@ -3547,7 +3547,7 @@ test("resume: credentialFree strips forge/git credential env vars and narrows --
     );
     const { handle } = fakeWorkerProxyHandle();
     await s.resume({ number: 9, title: "t", labels: [] }, name, { proxy: { mint: async () => handle as never, credentialFree: true } });
-    for (let i = 0; i < 400 && !existsSync(join(dir, "env.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "env.seen"), "credential-free resume env was not published");
     const envText = readFileSync(join(dir, "env.seen"), "utf8");
     assert.ok(!envText.includes("GH_TOKEN=poison-gh-token"), "GH_TOKEN must not leak into a credentialFree resumed leg's env");
     const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="));
@@ -3588,7 +3588,7 @@ test("resume: a mint failure records a durable 'proxy-mint-failed' event (Worker
         "fi",
         "trap 'exit 0' TERM",
         `touch "${ready}"`,
-        "while true; do sleep 1; done",
+        "for _ in $(seq 1 600); do sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -3697,7 +3697,7 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
     assert.equal(resumed.name, name);
     assert.equal(resumed.sessionId, sessionId, "SAME session — a fix leg continues the original conversation, never --fork-session");
 
-    for (let i = 0; i < 400 && !existsSync(join(dir, "fix-args.seen")); i++) await sleep(20);
+    await waitForFile(join(dir, "fix-args.seen"), "fix-leg argv was not published");
     const args = readFileSync(join(dir, "fix-args.seen"), "utf8").trim().split("\n");
     const promptIdx = args.indexOf("-p");
     assert.equal(args[promptIdx + 1], "fix-leg: address PR #77's review findings");
@@ -3810,7 +3810,7 @@ test("resume: FIX-LEG ENTRY consumes the stale prior-leg terminal sentinel on sp
         "#!/usr/bin/env bash",
         'if [[ "$*" == *"--resume"* ]]; then',
         "  trap 'exit 0' TERM",
-        "  while true; do sleep 1; done",
+        "  for _ in $(seq 1 600); do sleep 1; done",
         "fi",
         RESULT_LINE,
       ].join("\n"),
