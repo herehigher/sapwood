@@ -37,7 +37,15 @@ function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
   const comments: PRComment[] = [{ login: "a", createdAt: "2026-07-01T00:00:00Z", body: "a comment" }];
   const relations: IssueRelations = { linkedPRs: [], crossReferences: [], truncated: false };
   const results: IssueSearchResult[] = [{ number: 1, title: "an issue", state: "OPEN", labels: [], updatedAt: "2026-07-17T00:00:00Z" }];
-  const prDetails: PRDetails = { number: 1, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" };
+  const prDetails: PRDetails = {
+    number: 1,
+    headOid: "abc",
+    baseRefName: "develop",
+    state: "OPEN",
+    draft: false,
+    labels: [],
+    mergeable: "MERGEABLE",
+  };
   const reviews: PRReviewItem[] = [{ author: "codex", commitOid: "abc", state: "APPROVED", body: "LGTM" }];
   const threads: ReviewThreadItem[] = [{ id: "T1", isResolved: false, comments: [], commentsComplete: true }];
   const checks: PRCheckItem[] = [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null }];
@@ -336,6 +344,9 @@ test("tools/call: pr_details/pr_reviews/pr_review_threads/pr_checks succeed and 
     ] as const) {
       const { body } = await callTool(h.url, h.token, name, args);
       assert.equal(body.result.isError, false, `${name} should succeed`);
+      if (name === "pr_details") {
+        assert.equal(JSON.parse(body.result.content[0].text).baseRefName, "develop");
+      }
     }
     const rows = state.listForgeProxyJournal({
       roundId: 1,

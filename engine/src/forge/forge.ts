@@ -400,6 +400,7 @@ export interface IssueSearchResult {
 export interface PRDetails {
   number: number;
   headOid: string;
+  baseRefName: string;
   state: "OPEN" | "CLOSED" | "MERGED";
   draft: boolean;
   labels: string[];
@@ -988,7 +989,7 @@ export class GithubForge implements IForge {
       "--repo",
       `${this.cfg.board.owner}/${this.repo()}`,
       "--json",
-      "number,headRefOid,state,isDraft,labels,mergeable",
+      "number,headRefOid,baseRefName,state,isDraft,labels,mergeable",
     ]);
     return parsePRDetails(out);
   }
@@ -1936,11 +1937,12 @@ export function parseSearchIssues(json: string): IssueSearchResult[] {
 // IForge methods above. Same impure-gh-call/pure-parse split as everywhere else in this file.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Pure parse of `gh pr view --json number,headRefOid,state,isDraft,labels,mergeable`. */
+/** Pure parse of `gh pr view --json number,headRefOid,baseRefName,state,isDraft,labels,mergeable`. */
 export function parsePRDetails(json: string): PRDetails {
   const d = JSON.parse(json) as {
     number: number;
     headRefOid: string;
+    baseRefName?: string;
     state: string;
     isDraft: boolean;
     labels?: { name: string }[];
@@ -1949,6 +1951,7 @@ export function parsePRDetails(json: string): PRDetails {
   return {
     number: d.number,
     headOid: d.headRefOid,
+    baseRefName: typeof d.baseRefName === "string" ? d.baseRefName : "",
     state: d.state === "CLOSED" || d.state === "MERGED" ? d.state : "OPEN",
     draft: d.isDraft,
     labels: (d.labels ?? []).map((l) => l.name),

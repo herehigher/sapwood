@@ -23,7 +23,15 @@ function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
   const comments: PRComment[] = [];
   const relations: IssueRelations = { linkedPRs: [], crossReferences: [], truncated: false };
   const results: IssueSearchResult[] = [];
-  const prDetails: PRDetails = { number: 1, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" };
+  const prDetails: PRDetails = {
+    number: 1,
+    headOid: "abc",
+    baseRefName: "develop",
+    state: "OPEN",
+    draft: false,
+    labels: [],
+    mergeable: "MERGEABLE",
+  };
   const reviews: PRReviewItem[] = [];
   const threads: ReviewThreadItem[] = [
     {

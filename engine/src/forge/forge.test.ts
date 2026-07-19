@@ -1723,10 +1723,11 @@ test("searchIssues: an ADVERSARIAL query shaped like a flag (--repo=x/y, --limit
 // GraphQL reads (never the previous unbounded `gh pr view --json ...`).
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("parsePRDetails: parses gh pr view --json number,headRefOid,state,isDraft,labels,mergeable", () => {
+test("parsePRDetails: parses gh pr view --json number,headRefOid,baseRefName,state,isDraft,labels,mergeable", () => {
   const json = JSON.stringify({
     number: 42,
     headRefOid: "abc123",
+    baseRefName: "develop",
     state: "OPEN",
     isDraft: true,
     labels: [{ name: "type:feature" }],
@@ -1735,6 +1736,7 @@ test("parsePRDetails: parses gh pr view --json number,headRefOid,state,isDraft,l
   assert.deepEqual(parsePRDetails(json), {
     number: 42,
     headOid: "abc123",
+    baseRefName: "develop",
     state: "OPEN",
     draft: true,
     labels: ["type:feature"],
@@ -1749,10 +1751,11 @@ test("parsePRDetails: CLOSED/MERGED pass through, an unrecognized state normaliz
   assert.equal(parsePRDetails(JSON.stringify(merged)).state, "MERGED");
 });
 
-test("parsePRDetails: mergeable normalizes an unrecognized value to UNKNOWN, no labels -> []", () => {
+test("parsePRDetails: mergeable normalizes an unrecognized value to UNKNOWN; missing labels/baseRefName degrade to []/empty", () => {
   const d = parsePRDetails(JSON.stringify({ number: 1, headRefOid: "x", state: "OPEN", isDraft: false, mergeable: "WEIRD" }));
   assert.equal(d.mergeable, "UNKNOWN");
   assert.deepEqual(d.labels, []);
+  assert.equal(d.baseRefName, "");
 });
 
 test("getPRDetails: scoped to owner/repo, requests the right --json fields", async () => {
@@ -1761,12 +1764,20 @@ test("getPRDetails: scoped to owner/repo, requests the right --json fields", asy
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    return JSON.stringify({ number: 1, headRefOid: "x", state: "OPEN", isDraft: false, labels: [], mergeable: "MERGEABLE" });
+    return JSON.stringify({
+      number: 1,
+      headRefOid: "x",
+      baseRefName: "develop",
+      state: "OPEN",
+      isDraft: false,
+      labels: [],
+      mergeable: "MERGEABLE",
+    });
   };
   await forge.getPRDetails(1);
   assert.deepEqual(seen[0]!.slice(0, 2), ["pr", "view"]);
   assert.ok(seen[0]!.includes("--repo") && seen[0]!.includes("o/r"));
-  assert.ok(seen[0]!.some((a) => a === "number,headRefOid,state,isDraft,labels,mergeable"));
+  assert.ok(seen[0]!.some((a) => a === "number,headRefOid,baseRefName,state,isDraft,labels,mergeable"));
 });
 
 test("parsePRReviewsPage: parses author/commitOid/state/body/submittedAt verbatim + totalCount, missing fields degrade to defaults", () => {
