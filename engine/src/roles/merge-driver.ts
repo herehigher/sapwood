@@ -277,7 +277,11 @@ export class MergeDriver {
     pr: number,
     issue: number,
     triggerPin: ReviewTriggerPin,
-    recordTrigger: (head: string, at: string) => void,
+    recordTrigger: (
+      head: string,
+      at: string,
+      meta?: { generation: number; ambiguous: boolean; deltaChain: number; inFlight: boolean },
+    ) => void,
     fallback?: { lock: ReviewFallbackLock; recordFallback: (lock: ReviewFallbackLock) => void },
     /** #147 P1 (Codex PR #151): true when this lane re-entered DRIVE via the conductor's GATED
      *  RECLAIM phase (gated_reentry_attempts > 0). A re-entered lane's head usually has NOT
@@ -289,6 +293,7 @@ export class MergeDriver {
      *  gate② counts only post-re-entry review signals. Optional — every pre-#147 caller (and
      *  every non-reentered lane) omits it: byte-for-byte the old behavior. */
     reentered?: boolean,
+    recordVerdict?: (head: string, generation: number) => void,
   ): Promise<DriveOutcome> {
     const { forge, reviewer, cfg } = this.deps;
 
@@ -381,9 +386,18 @@ export class MergeDriver {
         if (fallback && fallback.lock.head != null && fallback.lock.head !== status.headOid) {
           fallback.recordFallback(NO_FALLBACK_LOCK);
         }
-        await reviewer.triggerReview(forge, pr, issue);
+        const priorHead = triggerPin.head;
+        const priorDeltaChain = triggerPin.deltaChain ?? 0;
+        const deltaScoped = priorHead != null && priorDeltaChain < cfg.reviewer.deltaChainMax;
+        const generation = (triggerPin.generation ?? 0) + 1;
+        const ambiguous = priorHead != null && triggerPin.inFlight !== false;
+        const deltaChain = deltaScoped ? priorDeltaChain + 1 : 0;
+        await reviewer.triggerReview(forge, pr, issue, {
+          head: status.headOid,
+          baseHead: deltaScoped ? priorHead : null,
+        });
         const now = this.deps.now ?? (() => new Date());
-        recordTrigger(status.headOid, now().toISOString());
+        recordTrigger(status.headOid, now().toISOString(), { generation, ambiguous, deltaChain, inFlight: true });
       } catch (e) {
         // never-throws contract (round-2 P2): a transient comment-post (or pin-write) failure
         // must QUEUE — the conductor's tick calls driveOne unguarded, so a throw here would
@@ -455,6 +469,10 @@ export class MergeDriver {
       lock: fallback?.lock ?? NO_FALLBACK_LOCK,
     });
     const verdict = resolved.verdict;
+
+    if (verdict.generationResponded === true && triggerPin.inFlight !== false) {
+      recordVerdict?.(data.headOid, triggerPin.generation ?? 0);
+    }
 
     // Persist the lock only when it actually changed — which, post-R2, is only ever "a
     // fallback reached MERGE_OK on this head" (resolveReviewVerdict never clears; the head-

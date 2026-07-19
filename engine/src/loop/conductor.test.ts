@@ -1615,7 +1615,14 @@ test("tick DRIVE: driveOne is called every tick with the lane's issue number (#4
   for (const c of gate.calls) {
     assert.equal(c.pr, 55);
     assert.equal(c.issue, 2);
-    assert.deepEqual(c.triggerPin, { head: null, at: null });
+    assert.deepEqual(c.triggerPin, {
+      head: null,
+      at: null,
+      generation: 0,
+      ambiguous: false,
+      deltaChain: 0,
+      inFlight: false,
+    });
   }
   st.close();
 });
@@ -1635,7 +1642,14 @@ test("tick DRIVE: driveOne's recordTrigger callback persists the pin into State,
 
   gate.recordOnCall = null; // 2nd tick: driveOne doesn't re-record (simulating a matched pin)
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-  assert.deepEqual(gate.calls[1]!.triggerPin, { head: "HEAD1", at: "2026-07-07T08:00:00.000Z" }); // read back
+  assert.deepEqual(gate.calls[1]!.triggerPin, {
+    head: "HEAD1",
+    at: "2026-07-07T08:00:00.000Z",
+    generation: 1,
+    ambiguous: false,
+    deltaChain: 0,
+    inFlight: true,
+  }); // read back
   st.close();
 });
 

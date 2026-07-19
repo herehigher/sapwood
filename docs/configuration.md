@@ -296,6 +296,7 @@ Gate② — who reviews a PR before it can merge.
 |---|---|---|
 | `mode` | `different-model-codex` | The reviewer kind: `different-model-codex` (0day-style fresh non-author Codex review), `same-model-trusted` (allowlisted reviewers only), or `human` (any non-author approval). |
 | `triggerCommand` | `"@codex review"` | The PR-comment text posted to request a review (`different-model-codex` mode). Non-empty string; rejected empty at parse. |
+| `deltaChainMax` | `3` | Maximum consecutive `X..Y` delta-scoped re-reviews. The next head move requests a full-PR review and resets the chain. Positive integer. |
 | `trustedReviewers` | `[]` | Allowlisted reviewer logins, used by `same-model-trusted`. |
 | `fallback` | `[]` | Ordered, opt-in list of reviewer modes to fail over to when the primary is unavailable past `failoverAfterSec`. Each entry keeps its own mode semantics (identity allowlist for bot modes, any-non-author-approval for `human`). Empty (the default) is byte-for-byte pre-failover behavior: an unavailable primary queues the PR forever, no silent degradation. `same-model-trusted` in `fallback` with an empty `trustedReviewers` is rejected at parse — it could never produce a verdict, so the failover would be silently inert. |
 | `failoverAfterSec` | `1200` (20min) | How long the primary reviewer may stay non-decisive before gate② hands off to the first fallback entry that itself reaches a decisive verdict. Irrelevant when `fallback` is empty. |

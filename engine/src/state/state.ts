@@ -623,6 +623,19 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       CREATE UNIQUE INDEX pending_thread_writes_batch_thread ON pending_thread_writes (batch_key, thread_id);
     `);
   },
+  // 21 -> 22: OID-bound review-trigger generations (#273). These fields extend the existing
+  // per-lane trigger pin: no companion table or timestamp-keyed artifact identity.
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN review_trigger_generation INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE workers ADD COLUMN review_trigger_ambiguous INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE workers ADD COLUMN review_delta_chain INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE workers ADD COLUMN review_trigger_in_flight INTEGER NOT NULL DEFAULT 0;
+      UPDATE workers
+      SET review_trigger_generation = 1, review_trigger_in_flight = 1
+      WHERE review_triggered_head IS NOT NULL;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -713,6 +726,14 @@ export interface WorkerRow {
    *  (that was the P1-B bug: committedDate is forgeable via GIT_COMMITTER_DATE / cherry-picks
    *  and isn't tied to when the commit actually became the PR's head). */
   review_triggered_at?: string | null;
+  /** Monotonic generation of this lane's trigger pin. */
+  review_trigger_generation?: number;
+  /** 1 when OID-less artifacts cannot be assigned safely to this generation. */
+  review_trigger_ambiguous?: number;
+  /** Consecutive delta-scoped re-triggers since the last full-PR trigger. */
+  review_delta_chain?: number;
+  /** 1 until a decisive verdict is observed for this generation. */
+  review_trigger_in_flight?: number;
   /** The head oid a FALLBACK reviewer's MERGE_OK was obtained on (#54) — ADVISORY episode
    *  marker, re-validated + re-verified against live PR data at every use (see the schema
    *  v6->v7 migration comment). NULL/undefined means no episode (the lane is on the primary
@@ -1158,10 +1179,12 @@ export class State {
       .prepare(
         `INSERT INTO workers
            (name, issue, session_id, state, started_at, ended_at, pr, review_triggered,
-            review_triggered_head, review_triggered_at, review_fallback_head, review_fallback_kind,
+            review_triggered_head, review_triggered_at, review_trigger_generation,
+            review_trigger_ambiguous, review_delta_chain, review_trigger_in_flight,
+            review_fallback_head, review_fallback_kind,
             gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled,
             resume_attempts, resume_capped, fix_rounds, fixing_handoff)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -1169,6 +1192,10 @@ export class State {
            review_triggered = excluded.review_triggered,
            review_triggered_head = excluded.review_triggered_head,
            review_triggered_at = excluded.review_triggered_at,
+           review_trigger_generation = excluded.review_trigger_generation,
+           review_trigger_ambiguous = excluded.review_trigger_ambiguous,
+           review_delta_chain = excluded.review_delta_chain,
+           review_trigger_in_flight = excluded.review_trigger_in_flight,
            review_fallback_head = excluded.review_fallback_head,
            review_fallback_kind = excluded.review_fallback_kind,
            gated_reentry_attempts = excluded.gated_reentry_attempts,
@@ -1190,6 +1217,10 @@ export class State {
         row.review_triggered ?? 0,
         row.review_triggered_head ?? null,
         row.review_triggered_at ?? null,
+        row.review_trigger_generation ?? 0,
+        row.review_trigger_ambiguous ?? 0,
+        row.review_delta_chain ?? 0,
+        row.review_trigger_in_flight ?? (row.review_triggered_head ? 1 : 0),
         row.review_fallback_head ?? null,
         row.review_fallback_kind ?? null,
         row.gated_reentry_attempts ?? 0,
@@ -1207,8 +1238,31 @@ export class State {
    *  the instant a fresh `@codex review` trigger is posted for a NEW head. A worker/producer
    *  has no path to this method (no reference to State) and posting extra comments themselves
    *  cannot move this pin — it is written exclusively by the engine's own gate loop. */
-  recordReviewTrigger(name: string, head: string, at: string): void {
-    this.db.prepare("UPDATE workers SET review_triggered_head = ?, review_triggered_at = ? WHERE name = ?").run(head, at, name);
+  recordReviewTrigger(
+    name: string,
+    head: string,
+    at: string,
+    meta?: { generation: number; ambiguous: boolean; deltaChain: number; inFlight: boolean },
+  ): void {
+    const row = this.getWorker(name);
+    const generation = meta?.generation ?? (row?.review_trigger_generation ?? 0) + 1;
+    this.db
+      .prepare(
+        `UPDATE workers SET review_triggered_head = ?, review_triggered_at = ?,
+         review_trigger_generation = ?, review_trigger_ambiguous = ?, review_delta_chain = ?,
+         review_trigger_in_flight = ? WHERE name = ?`,
+      )
+      .run(head, at, generation, meta?.ambiguous ? 1 : 0, meta?.deltaChain ?? 0, meta?.inFlight === false ? 0 : 1, name);
+  }
+
+  /** Mark a decisive artifact observed for exactly this OID/generation; stale callbacks no-op. */
+  recordReviewVerdict(name: string, head: string, generation: number): void {
+    this.db
+      .prepare(
+        `UPDATE workers SET review_trigger_in_flight = 0
+         WHERE name = ? AND review_triggered_head = ? AND review_trigger_generation = ?`,
+      )
+      .run(name, head, generation);
   }
 
   /** Persist `name`'s lane's reviewer-failover episode marker (#54) — called from

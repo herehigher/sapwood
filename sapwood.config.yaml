@@ -110,6 +110,8 @@ reviewer:
   #                   Codex-shaped regardless (COMMENTED/APPROVED states, Codex-bot identity), so
   #                   a custom trigger with a different verdict format is out of scope here
   #                   (v1.x reviewer adapters).
+  # deltaChainMax: 3  # Consecutive X..Y re-review requests allowed before the next head move
+  #                   # requests a full-PR review and resets the delta chain.
   trustedReviewers: [] # allowlisted reviewer logins (public-repo hardening, v1.1)
   # fallback: ordered, opt-in reviewer failover (empty by default = queue forever, unchanged
   # behavior — falling back to a weaker trust mode is NEVER silent). Each entry keeps its own

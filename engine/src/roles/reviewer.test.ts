@@ -203,6 +203,25 @@ test("buildReviewTriggerComment: null plan -> an explicit fallback sentence, nev
   assert.match(body, /issue #46/);
 });
 
+test("buildReviewTriggerComment: first trigger requests the full PR diff and an exact reviewed-head OID statement", () => {
+  const body = buildReviewTriggerComment(46, "## Verification\nrun tests", "@codex review", undefined, {
+    head: "H1",
+    baseHead: null,
+  });
+  assert.match(body, /full PR diff at head H1/i);
+  assert.match(body, /Reviewed head OID: H1/);
+});
+
+test("buildReviewTriggerComment: a moved head requests only the X..Y delta but binds the verdict to Y", () => {
+  const body = buildReviewTriggerComment(46, "## Verification\nrun tests", "@codex review", undefined, {
+    head: "H2",
+    baseHead: "H1",
+  });
+  assert.match(body, /H1\.\.H2/);
+  assert.match(body, /verdict must bind to the new head H2/i);
+  assert.match(body, /Reviewed head OID: H2/);
+});
+
 // #156: reviewer.triggerCommand — the trigger text is now a parameter (default unchanged).
 test("buildReviewTriggerComment: default triggerCommand is byte-for-byte identical to today's hardcoded `@codex review`", () => {
   const body = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
@@ -274,7 +293,7 @@ const mkData = (over: Partial<PRReviewData> = {}): PRReviewData => ({
 test("CodexReviewer: a Codex-bot COMMENTED review on the current head is enough (Codex's normal review state)", () => {
   const r = new CodexReviewer();
   const data = mkData({ reviews: [mkReview("chatgpt-codex-connector[bot]", "HEAD", "COMMENTED")] });
-  assert.deepEqual(r.verdictFromData(data), { action: "MERGE_OK", headOid: "HEAD" });
+  assert.deepEqual(r.verdictFromData(data), { action: "MERGE_OK", headOid: "HEAD", generationResponded: false });
 });
 
 test("CodexReviewer: bot login matches with OR without the [bot] suffix (REST vs GraphQL forms)", () => {
@@ -318,7 +337,54 @@ test("CodexReviewer: comment-ONLY clean verdict (no review, no 👍) -> MERGE_OK
   const data = mkData({
     comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T07:48:44Z", body: CLEAN }],
   });
-  assert.deepEqual(r.verdictFromData(data, PIN), { action: "MERGE_OK", headOid: "HEAD" });
+  assert.deepEqual(r.verdictFromData(data, PIN), { action: "MERGE_OK", headOid: "HEAD", generationResponded: true });
+});
+
+test("CodexReviewer #273: delayed prior-generation clean comment cannot satisfy an ambiguous H2 pin; an H2-quoting response can", () => {
+  const r = new CodexReviewer();
+  const pin = { head: "H2", at: "2026-07-07T08:00:00Z", generation: 2, ambiguous: true };
+  const delayed = mkData({
+    headOid: "H2",
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-07T08:01:00Z", body: CLEAN }],
+  });
+  assert.equal(r.verdictFromData(delayed, pin).action, "WAIT_REVIEW");
+
+  const answered = {
+    ...delayed,
+    comments: [
+      ...delayed.comments!,
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-07T08:02:00Z",
+        body: `${CLEAN}\nReviewed head OID: H2`,
+      },
+    ],
+  };
+  assert.equal(r.verdictFromData(answered, pin).action, "MERGE_OK");
+});
+
+test("CodexReviewer #273: a +1 stays WAIT_REVIEW in an ambiguous generation", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    headOid: "H2",
+    reactions: [{ content: "+1", createdAt: "2026-07-07T08:01:00Z", login: "chatgpt-codex-connector[bot]" }],
+  });
+  assert.equal(r.verdictFromData(data, { head: "H2", at: "2026-07-07T08:00:00Z", generation: 2, ambiguous: true }).action, "WAIT_REVIEW");
+});
+
+test("CodexReviewer #273: an explicitly stated mismatching OID discards a clean comment even when the pin is unambiguous", () => {
+  const r = new CodexReviewer();
+  const data = mkData({
+    headOid: "H2",
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-07T08:01:00Z",
+        body: `${CLEAN}\nReviewed head OID: H1`,
+      },
+    ],
+  });
+  assert.equal(r.verdictFromData(data, { head: "H2", at: "2026-07-07T08:00:00Z", ambiguous: false }).action, "WAIT_REVIEW");
 });
 
 test("CodexReviewer: clean comment BEFORE the trigger pin is stale -> WAIT_REVIEW", () => {
@@ -363,12 +429,36 @@ test("CodexReviewer: clean comment + unresolved threads -> HANDLE_THREADS (findi
   assert.equal(r.verdictFromData(data, PIN).action, "HANDLE_THREADS");
 });
 
+test("CodexReviewer P1: stale unresolved threads alone do not attribute a response to the current trigger generation", () => {
+  const verdict = new CodexReviewer().verdictFromData(mkData({ unresolvedThreads: 2 }), PIN);
+  assert.equal(verdict.action, "HANDLE_THREADS");
+  assert.equal(verdict.generationResponded, false);
+});
+
+test("CodexReviewer P1: a countable current-head formal response after the pin closes the generation regardless of review state", () => {
+  const verdict = new CodexReviewer().verdictFromData(
+    mkData({
+      reviews: [
+        {
+          author: "chatgpt-codex-connector[bot]",
+          commitOid: "HEAD",
+          state: "DISMISSED",
+          submittedAt: "2026-07-07T07:41:00Z",
+        },
+      ],
+    }),
+    PIN,
+  );
+  assert.equal(verdict.action, "WAIT_REVIEW");
+  assert.equal(verdict.generationResponded, true);
+});
+
 test("CodexReviewer: comment+👍 verdict (NO formal review) -> MERGE_OK — the live #46 wedge shape", () => {
   const r = new CodexReviewer();
   const data = mkData({
     reactions: [{ content: "+1", createdAt: "2026-07-07T07:48:43Z", login: "chatgpt-codex-connector[bot]" }],
   });
-  assert.deepEqual(r.verdictFromData(data, PIN), { action: "MERGE_OK", headOid: "HEAD" });
+  assert.deepEqual(r.verdictFromData(data, PIN), { action: "MERGE_OK", headOid: "HEAD", generationResponded: true });
 });
 
 test("CodexReviewer: a RANDOM account's 👍 never satisfies gate② (identity is part of the gate)", () => {
@@ -800,7 +890,7 @@ test("resolveReviewVerdict: threshold crossed -> the first fallback with a decis
     failoverAfterSec: FAILOVER_AFTER_SEC,
     lock: NO_FALLBACK_LOCK,
   });
-  assert.deepEqual(result.verdict, { action: "MERGE_OK", headOid: HEAD });
+  assert.deepEqual(result.verdict, { action: "MERGE_OK", headOid: HEAD, generationResponded: false });
   assert.equal(result.sourceKind, "same-model-trusted");
   assert.deepEqual(result.lock, { head: HEAD, kind: "same-model-trusted" });
   assert.deepEqual(result.transition, { kind: "switch", mode: "same-model-trusted", head: HEAD });
@@ -900,7 +990,7 @@ test("resolveReviewVerdict R2: lock survives primary non-decisiveness — honore
     failoverAfterSec: FAILOVER_AFTER_SEC,
     lock,
   });
-  assert.deepEqual(result.verdict, { action: "MERGE_OK", headOid: HEAD });
+  assert.deepEqual(result.verdict, { action: "MERGE_OK", headOid: HEAD, generationResponded: false });
   assert.equal(result.sourceKind, "same-model-trusted");
   assert.deepEqual(result.lock, lock); // unchanged
 });

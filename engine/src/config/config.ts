@@ -174,6 +174,9 @@ const Reviewer = z
     // (COMMENTED/APPROVED states, Codex-bot identity); a custom trigger with a different verdict
     // format is out of scope here (v1.x reviewer adapters).
     triggerCommand: z.string().min(1).default("@codex review"),
+    // Bound consecutive X..Y delta re-reviews. Once this many deltas have been requested,
+    // the next head move requests the full PR diff and resets the chain.
+    deltaChainMax: z.number().int().positive().default(3),
     trustedReviewers: z.array(z.string()).default([]),
     // #54: EXPLICIT, ordered opt-in list of reviewer modes to fail over to when the primary
     // (reviewer.mode) is unavailable for longer than failoverAfterSec. Each entry keeps its OWN

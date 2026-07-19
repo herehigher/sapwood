@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision, reviewSilenceDuration } from "./merge-driver.js";
-import type { ReviewAction, Reviewer, ReviewVerdict } from "./reviewer.js";
+import type { ReviewAction, Reviewer, ReviewTriggerContext, ReviewVerdict } from "./reviewer.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -353,12 +353,14 @@ class FakeReviewer implements Reviewer {
   readonly kind = "different-model-codex" as const;
   triggered: number[] = [];
   triggeredWith: Array<[number, number]> = [];
+  triggerContexts: Array<ReviewTriggerContext | undefined> = [];
   triggerErr: Error | null = null;
-  verdict: ReviewVerdict = { action: "MERGE_OK", headOid: "HEAD" };
-  async triggerReview(_forge: IForge, pr: number, issue: number): Promise<void> {
+  verdict: ReviewVerdict = { action: "MERGE_OK", headOid: "HEAD", generationResponded: true };
+  async triggerReview(_forge: IForge, pr: number, issue: number, context?: ReviewTriggerContext): Promise<void> {
     if (this.triggerErr) throw this.triggerErr;
     this.triggered.push(pr);
     this.triggeredWith.push([pr, issue]);
+    this.triggerContexts.push(context);
   }
   verdictFromData(): ReviewVerdict {
     return this.verdict;
@@ -919,6 +921,7 @@ test("MergeDriver.driveOne: no trigger recorded yet (pin.head === null) -> posts
   const outcome = await driver.driveOne(7, 46, { head: null, at: null }, (h, a) => recorded.push([h, a]));
   assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
   assert.deepEqual(reviewer.triggeredWith, [[7, 46]]); // issue #46 threaded through
+  assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: null }]);
   assert.deepEqual(recorded, [["HEAD", "2026-07-07T08:00:00.000Z"]]);
   assert.deepEqual(forge.merged, []); // never gates/merges on the SAME tick as the trigger
 });
@@ -931,6 +934,25 @@ test("MergeDriver.driveOne: trigger pin recorded for a DIFFERENT (older) head ->
   const outcome = await driver.driveOne(7, 46, { head: "OLD_HEAD", at: "2026-07-07T07:00:00Z" }, (h, a) => recorded.push([h, a]));
   assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
   assert.deepEqual(recorded, [["HEAD", "2026-07-07T09:00:00.000Z"]]);
+  assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: "OLD_HEAD" }]);
+});
+
+test("MergeDriver.driveOne #273: after deltaChainMax consecutive deltas, the next head trigger is full-PR and resets the chain", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  const recorded: unknown[] = [];
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg({ reviewer: { deltaChainMax: 3 } }) });
+  const pin = {
+    head: "H3",
+    at: "2026-07-07T07:00:00Z",
+    generation: 4,
+    ambiguous: true,
+    deltaChain: 3,
+    inFlight: true,
+  };
+  await driver.driveOne(7, 46, pin, (_head, _at, meta) => recorded.push(meta));
+  assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: null }]);
+  assert.deepEqual(recorded, [{ generation: 5, ambiguous: true, deltaChain: 0, inFlight: true }]);
 });
 
 test("MergeDriver.driveOne (#270): mid-review conflict wins next tick; resolved push re-triggers and only the fresh-head review merges", async () => {
@@ -941,7 +963,7 @@ test("MergeDriver.driveOne (#270): mid-review conflict wins next tick; resolved 
     cfg: mkCfg(),
     now: () => new Date("2026-07-19T01:00:00Z"),
   });
-  const oldPin = { head: "HEAD", at: "2026-07-19T00:00:00Z" };
+  const oldPin = { head: "HEAD", at: "2026-07-19T00:00:00Z", generation: 1, ambiguous: false, deltaChain: 0, inFlight: true };
 
   assert.equal((await driver.driveOne(7, 46, oldPin, noopRecord)).kind, "queued", "review is initially pending");
   forge.status = { ...forge.status, mergeable: "CONFLICTING" };
@@ -955,15 +977,36 @@ test("MergeDriver.driveOne (#270): mid-review conflict wins next tick; resolved 
 
   forge.status = { ...forge.status, headOid: "RESOLVED", mergeable: "MERGEABLE", ciGreen: true };
   forge.reviewData = { ...forge.reviewData, headOid: "RESOLVED" };
-  const recorded: Array<[string, string]> = [];
-  assert.equal((await driver.driveOne(7, 46, oldPin, (h, at) => recorded.push([h, at]))).kind, "queued");
-  assert.deepEqual(recorded, [["RESOLVED", "2026-07-19T01:00:00.000Z"]], "resolved head receives a fresh trigger");
+  const recorded: Array<[string, string, unknown]> = [];
+  assert.equal((await driver.driveOne(7, 46, oldPin, (h, at, meta) => recorded.push([h, at, meta]))).kind, "queued");
+  assert.deepEqual(
+    recorded,
+    [["RESOLVED", "2026-07-19T01:00:00.000Z", { generation: 2, ambiguous: true, deltaChain: 1, inFlight: true }]],
+    "resolved head receives a fresh ambiguous delta trigger",
+  );
 
-  const newPin = { head: "RESOLVED", at: "2026-07-19T01:00:00.000Z" };
+  const newPin = {
+    head: "RESOLVED",
+    at: "2026-07-19T01:00:00.000Z",
+    generation: 2,
+    ambiguous: true,
+    deltaChain: 1,
+    inFlight: true,
+  };
+  forge.reviewData = {
+    ...forge.reviewData,
+    comments: [
+      {
+        login: `${CODEX_REVIEWER_LOGINS[0]}[bot]`,
+        createdAt: "2026-07-19T01:01:00Z",
+        body: "Codex Review: Didn't find any major issues.",
+      },
+    ],
+  };
   assert.equal(
     (await driver.driveOne(7, 46, newPin, noopRecord)).kind,
     "queued",
-    "the superseded old-head review cannot satisfy the resolved head",
+    "a delayed OID-less H1 response posted after the H2 trigger cannot satisfy the ambiguous H2 generation",
   );
   forge.reviewData = {
     ...forge.reviewData,
@@ -983,6 +1026,107 @@ test("MergeDriver.driveOne: pin matches the CURRENT head -> no re-trigger, proce
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.deepEqual(reviewer.triggered, []); // no fresh trigger posted
   assert.equal(outcome.kind, "merged"); // gate ran normally and merged
+});
+
+test("MergeDriver.driveOne #273: a decisive current-generation verdict closes the in-flight marker even while CI still waits", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, ciGreen: false };
+  const recorded: Array<[string, number]> = [];
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(
+    7,
+    46,
+    { ...ALREADY_TRIGGERED, generation: 4, inFlight: true },
+    noopRecord,
+    undefined,
+    false,
+    (head, generation) => recorded.push([head, generation]),
+  );
+  assert.equal(outcome.kind, "queued");
+  assert.deepEqual(recorded, [["HEAD", 4]]);
+});
+
+test("MergeDriver.driveOne P1: stale threads cannot close H2; H3 stays ambiguous and rejects a delayed OID-less H2 comment", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, headOid: "H2" };
+  forge.reviewData = { ...forge.reviewData, headOid: "H2", unresolvedThreads: 2 };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new CodexReviewer([]),
+    cfg: mkCfg(),
+    now: () => new Date("2026-07-19T02:00:00Z"),
+  });
+  const h2Pin = {
+    head: "H2",
+    at: "2026-07-19T01:00:00Z",
+    generation: 2,
+    ambiguous: false,
+    deltaChain: 1,
+    inFlight: true,
+  };
+  const closed: Array<[string, number]> = [];
+  assert.equal((await driver.driveOne(7, 46, h2Pin, noopRecord, undefined, false, (h, g) => closed.push([h, g]))).kind, "fixable");
+  assert.deepEqual(closed, [], "bare PR-wide threads are not a response attributable to trigger(H2)");
+
+  forge.status = { ...forge.status, headOid: "H3" };
+  forge.reviewData = { ...forge.reviewData, headOid: "H3", unresolvedThreads: 0 };
+  let h3Meta: { generation: number; ambiguous: boolean; deltaChain: number; inFlight: boolean } | undefined;
+  assert.equal((await driver.driveOne(7, 46, h2Pin, (_h, _at, meta) => (h3Meta = meta))).kind, "queued");
+  assert.equal(h3Meta?.ambiguous, true);
+
+  const h3Pin = { head: "H3", at: "2026-07-19T02:00:00.000Z", ...h3Meta };
+  forge.reviewData = {
+    ...forge.reviewData,
+    comments: [
+      {
+        login: `${CODEX_REVIEWER_LOGINS[0]}[bot]`,
+        createdAt: "2026-07-19T02:01:00Z",
+        body: "Codex Review: Didn't find any major issues.",
+      },
+    ],
+  };
+  const delayed = await driver.driveOne(7, 46, h3Pin, noopRecord);
+  assert.equal(delayed.kind, "queued");
+  assert.match((delayed as { reason: string }).reason, /WAIT_REVIEW/);
+});
+
+test("MergeDriver.driveOne P1: any countable formal H2 response after its pin closes in-flight, so trigger(H3) is unambiguous", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, headOid: "H2", ciGreen: false };
+  forge.reviewData = {
+    ...forge.reviewData,
+    headOid: "H2",
+    reviews: [
+      {
+        author: CODEX_REVIEWER_LOGINS[0],
+        commitOid: "H2",
+        state: "DISMISSED",
+        submittedAt: "2026-07-19T01:01:00Z",
+      },
+    ],
+  };
+  const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
+  const h2Pin = {
+    head: "H2",
+    at: "2026-07-19T01:00:00Z",
+    generation: 2,
+    ambiguous: false,
+    deltaChain: 1,
+    inFlight: true,
+  };
+  let h2Closed = false;
+  await driver.driveOne(7, 46, h2Pin, noopRecord, undefined, false, () => {
+    h2Closed = true;
+  });
+  assert.equal(h2Closed, true);
+
+  forge.status = { ...forge.status, headOid: "H3" };
+  forge.reviewData = { ...forge.reviewData, headOid: "H3", reviews: [] };
+  let h3Ambiguous: boolean | undefined;
+  await driver.driveOne(7, 46, { ...h2Pin, inFlight: false }, (_h, _at, meta) => {
+    h3Ambiguous = meta?.ambiguous;
+  });
+  assert.equal(h3Ambiguous, false);
 });
 
 test("MergeDriver.driveOne: a trigger-post failure (rate-limit/network) -> queued, never throws, and NO pin is recorded (round-2 P2)", async () => {

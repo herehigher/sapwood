@@ -28,6 +28,8 @@ export interface ReviewVerdict {
   action: ReviewAction;
   /** The head this verdict was computed against; null when REVIEW_UNAVAILABLE (no live data). */
   headOid: string | null;
+  /** True only when an artifact can be attributed to the current trigger generation. */
+  generationResponded?: boolean;
 }
 
 /**
@@ -117,6 +119,16 @@ export function deriveReviewAction(s: ReviewSignals): ReviewAction {
 export interface ReviewTriggerPin {
   head: string | null;
   at: string | null;
+  generation?: number;
+  ambiguous?: boolean;
+  deltaChain?: number;
+  inFlight?: boolean;
+}
+
+export interface ReviewTriggerContext {
+  head: string;
+  /** The prior trigger's OID for a delta-scoped review; null requests the full PR diff. */
+  baseHead: string | null;
 }
 
 /** The pluggable review-gate seam. Read-only + comment-only; no merge method (structural
@@ -129,7 +141,7 @@ export interface Reviewer {
    *  (same-model-trusted, human) — those wait for an out-of-band review to land. `issue` is the
    *  driving lane's issue number (#46, Decision #8): a reviewer that pings a bot uses it to pull
    *  the issue's verification plan into the trigger, so gate② re-checks the PR against it. */
-  triggerReview(forge: IForge, pr: number, issue: number): Promise<void>;
+  triggerReview(forge: IForge, pr: number, issue: number, context?: ReviewTriggerContext): Promise<void>;
   /** This tick's verdict from ALREADY-FETCHED review data (merge-driver.ts fetches it fresh
    *  every call against the LIVE current head — never a cached one; a review of a stale head
    *  counts as no review, #101, since freshHeadReviewCount filters on data.headOid). `pin` (#55
@@ -176,6 +188,7 @@ export function buildReviewTriggerComment(
   planText: string | null,
   triggerCommand: string = "@codex review",
   doctrine?: string | null,
+  context?: ReviewTriggerContext,
 ): string {
   const instruction = planText
     ? `Verify this PR against issue #${issue}'s verification plan below:\n\n${planText}`
@@ -184,7 +197,13 @@ export function buildReviewTriggerComment(
     doctrine && doctrine !== NO_DOCTRINE
       ? `\n\nThis repo's review doctrine — historical failure classes and adjudication guidance to keep in mind while reviewing:\n\n${doctrine}`
       : "";
-  return `${triggerCommand}\n\n${instruction}${doctrineBlock}`;
+  const scopeBlock = context
+    ? context.baseHead
+      ? `\n\nReview only the commit delta ${context.baseHead}..${context.head}. The verdict must bind to the new head ${context.head}.`
+      : `\n\nReview the full PR diff at head ${context.head}.`
+    : "";
+  const identityBlock = context ? `\n\nState the exact head OID you reviewed in your response as: Reviewed head OID: ${context.head}` : "";
+  return `${triggerCommand}\n\n${instruction}${doctrineBlock}${scopeBlock}${identityBlock}`;
 }
 
 /**
@@ -209,7 +228,7 @@ export function buildReviewTriggerComment(
  * yet ⇒ no thumb can have been a response to it).
  */
 function freshTrustedThumbCount(data: PRReviewData, trustedLogin?: (login: string) => boolean, pin?: ReviewTriggerPin): number {
-  if (!trustedLogin || !pin?.at || pin.head !== data.headOid) return 0;
+  if (!trustedLogin || !pin?.at || pin.head !== data.headOid || pin.ambiguous) return 0;
   const author = normalizeLogin(data.author);
   const trusted = data.reactions.filter((r) => normalizeLogin(r.login) !== author && trustedLogin(normalizeLogin(r.login)));
   return freshThumbCount(trusted, pin.at);
@@ -224,13 +243,24 @@ function freshTrustedThumbCount(data: PRReviewData, trustedLogin?: (login: strin
  * Identity-gating makes the text non-spoofable: only the trusted bot's own comments are read.
  */
 const CLEAN_VERDICT_RE = /didn't find any major issues/i;
+const REVIEWED_HEAD_OID_RE = /\breviewed head oid\s*:\s*`?([^\s`]+)/i;
 function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: string) => boolean, pin?: ReviewTriggerPin): number {
   if (!trustedLogin || !pin?.at || pin.head !== data.headOid) return 0;
+  const cutoff = Date.parse(pin.at);
+  if (!Number.isFinite(cutoff)) return 0;
   const author = normalizeLogin(data.author);
-  return (data.comments ?? []).filter(
-    (c) =>
-      normalizeLogin(c.login) !== author && trustedLogin(normalizeLogin(c.login)) && c.createdAt > pin.at! && CLEAN_VERDICT_RE.test(c.body),
-  ).length;
+  return (data.comments ?? []).filter((c) => {
+    const createdAt = Date.parse(c.createdAt);
+    const statedOid = REVIEWED_HEAD_OID_RE.exec(c.body)?.[1];
+    return (
+      normalizeLogin(c.login) !== author &&
+      trustedLogin(normalizeLogin(c.login)) &&
+      Number.isFinite(createdAt) &&
+      createdAt > cutoff &&
+      CLEAN_VERDICT_RE.test(c.body) &&
+      (statedOid !== undefined ? statedOid === data.headOid : !pin.ambiguous)
+    );
+  }).length;
 }
 
 function verdictFrom(
@@ -242,17 +272,31 @@ function verdictFrom(
 ): ReviewVerdict {
   const countable = countableReview ? data.reviews.filter(countableReview) : data.reviews;
   const fresh = freshHeadReviewCount(countable, data.headOid, data.author, acceptStates);
+  const freshTrustedSignals =
+    freshTrustedThumbCount(data, trustedReactionLogin, pin) + freshTrustedCleanComments(data, trustedReactionLogin, pin);
+  const currentHeadChangesRequested = changesRequestedOnHead(data.reviews, data.headOid, data.author);
   const action = deriveReviewAction({
     hasEyesReaction: data.reactions.some((r) => r.content === "eyes"),
     freshApprovingReviews: fresh,
     // Thumbs and comment-shaped clean verdicts share one signal: both are "the trusted
     // reviewer said done-no-findings" under identical identity/pin rules.
-    freshTrustedThumbs:
-      freshTrustedThumbCount(data, trustedReactionLogin, pin) + freshTrustedCleanComments(data, trustedReactionLogin, pin),
+    freshTrustedThumbs: freshTrustedSignals,
     unresolvedThreads: data.unresolvedThreads,
-    changesRequestedOnHead: changesRequestedOnHead(data.reviews, data.headOid, data.author),
+    changesRequestedOnHead: currentHeadChangesRequested,
   });
-  return { action, headOid: data.headOid };
+  const cutoff = pin?.at == null ? NaN : Date.parse(pin.at);
+  const currentGenerationFormalResponse =
+    pin?.head === data.headOid &&
+    Number.isFinite(cutoff) &&
+    countable.some((r) => {
+      const submittedAt = r.submittedAt == null ? NaN : Date.parse(r.submittedAt);
+      return r.commitOid === pin.head && r.author !== data.author && Number.isFinite(submittedAt) && submittedAt > cutoff;
+    });
+  return {
+    action,
+    headOid: data.headOid,
+    generationResponded: currentGenerationFormalResponse || currentHeadChangesRequested || freshTrustedSignals > 0,
+  };
 }
 
 /** Default reviewer (0day-style): triggers `@codex review`; an accepted verdict is a
@@ -280,13 +324,16 @@ export class CodexReviewer implements Reviewer {
     this.allowedLogins = [...CODEX_REVIEWER_LOGINS, ...extraTrustedLogins].map(normalizeLogin);
   }
 
-  async triggerReview(forge: IForge, pr: number, issue: number): Promise<void> {
+  async triggerReview(forge: IForge, pr: number, issue: number, context?: ReviewTriggerContext): Promise<void> {
     // A body-fetch hiccup (rate-limit/timeout) must not block the trigger itself — gate②
     // still has to fire; it just falls back to the explicit "no plan" text below rather than
     // silently retrying forever or skipping the comment (#46 Decision #8: the trigger always
     // posts, never a swallowed no-op).
     const body = await forge.getIssueBody(issue).catch(() => "");
-    await forge.addPRComment(pr, buildReviewTriggerComment(issue, extractVerificationPlan(body), this.triggerCommand, this.doctrine));
+    await forge.addPRComment(
+      pr,
+      buildReviewTriggerComment(issue, extractVerificationPlan(body), this.triggerCommand, this.doctrine, context),
+    );
   }
 
   verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict {
