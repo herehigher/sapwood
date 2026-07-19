@@ -270,6 +270,7 @@ class FakeForge implements IForge {
     unresolvedThreads: 0,
   };
   statusErr: Error | null = null;
+  statusSequence: PRStatus[] = [];
   mergeErr: Error | null = null;
 
   async detectOwnerKind(): Promise<"user"> {
@@ -290,7 +291,7 @@ class FakeForge implements IForge {
   }
   async getPRStatus(): Promise<PRStatus> {
     if (this.statusErr) throw this.statusErr;
-    return this.status;
+    return this.statusSequence.shift() ?? this.status;
   }
   async mergePR(pr: number, headOid: string): Promise<void> {
     if (this.mergeErr) throw this.mergeErr;
@@ -693,9 +694,19 @@ test("MergeDriver.driveOne: TOCTOU merge failure (head moved) -> queued for re-g
   assert.match((outcome as { reason: string }).reason, /merge-failed-retry/);
 });
 
-test("MergeDriver.driveOne: deterministic 'not mergeable' merge failure -> needs-human, no infinite retry (Codex PR #42 P2)", async () => {
+test("MergeDriver.driveOne (#270 F6): deterministic merge failure + fresh CONFLICTING -> queued for the normal conflict route", async () => {
   const forge = new FakeForge();
-  // Conflict surfaced between our status read (MERGEABLE) and the merge call.
+  forge.statusSequence = [forge.status, { ...forge.status, mergeable: "CONFLICTING" }];
+  forge.mergeErr = new Error("Pull Request is not mergeable");
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /merge-failed-conflict-recheck/);
+});
+
+test("MergeDriver.driveOne (#270 F6): deterministic merge failure + fresh MERGEABLE -> needs-human, no infinite retry", async () => {
+  const forge = new FakeForge();
+  forge.statusSequence = [forge.status, forge.status];
   forge.mergeErr = new Error("Pull Request is not mergeable");
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);

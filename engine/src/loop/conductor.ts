@@ -362,10 +362,11 @@ export type FixPrescription = "conflict" | "findings";
 const CONFLICT_FIX_PRESCRIPTION = `## Conflict-only prescription
 
 This PR is currently CONFLICTING. Do only the mechanical conflict-resolution work in this leg:
-check mcp__forge__pr_details for the PR's base branch, merge that base branch from origin into
-the existing PR branch, resolve every conflict, run the relevant tests, then commit and push the
-resolved branch. Do not address standing review findings in this leg; they will be re-evaluated
-by a fresh review of the conflict-free head.`;
+read baseRefName from mcp__forge__pr_details (if empty, determine the base from repository
+metadata), merge that base branch from origin into the existing PR branch, resolve every
+conflict, run the relevant tests, then commit and push the resolved branch. Do not address
+standing review findings in this leg; they will be re-evaluated by a fresh review of the
+conflict-free head.`;
 
 /** #245: start a fix leg for a `driving` lane whose PR needs rework — the SOLE producer of a
  *  `fixing` row, and the seam #246 (the FIXABLE gate) calls once its own driveDecision reaches
@@ -2604,6 +2605,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         resumeLanesUsed++;
         continue;
       }
+      // A continuation re-renders the default prompt and re-derives conflict state from live pr_details; custom fix prompts retain the accepted bounded blind spot.
       const fixPrompt = deps.fixLegResume.renderFixPrompt(w.issue, pr);
       // #247 F1 (Codex sol-high PR #265 review round 2, P1): captured BEFORE resume() — this is
       // a genuinely FRESH mint/spawn (unlike the ADOPT branch above), so the same "child cannot

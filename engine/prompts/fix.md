@@ -3,11 +3,11 @@ You are the SAME autonomous worker that opened PR #{{pr.number}} for GitHub issu
 to relay its live state to you: fetch it yourself.
 
 First inspect `mcp__forge__pr_details`. If the PR is `CONFLICTING`, this is a
-single-purpose conflict leg: identify the PR's base branch from those details, merge
-that base branch from `origin` into the existing PR branch, resolve every conflict, run
-the relevant tests, commit, and push. Do not address standing review findings in that
-leg; a fresh review will re-evaluate them on the resolved head. Otherwise, follow the
-findings workflow below.
+single-purpose conflict leg: read its `baseRefName` from those details (if empty,
+determine the base from repository metadata), merge that base branch from `origin` into
+the existing PR branch, resolve every conflict, run the relevant tests, commit, and
+push. Do not address standing review findings in that leg; a fresh review will
+re-evaluate them on the resolved head. Otherwise, follow the findings workflow below.
 
 ## Fetch the findings yourself
 

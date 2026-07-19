@@ -554,11 +554,19 @@ export class MergeDriver {
     } catch (e) {
       // A merge failure with MERGEABLE status is either the TOCTOU pin firing (GitHub 409
       // "Head branch was modified" — a push raced us; re-gate next tick) or a transient gh/
-      // network error. Both are safe to queue: the merge did not happen. Deterministic
-      // "not mergeable" errors (conflict surfaced between our status read and the merge
-      // call) must escalate instead of retrying forever.
+      // network error. Both are safe to queue: the merge did not happen. A deterministic
+      // failure gets one fresh status read: a newly-visible conflict/UNKNOWN queues for the
+      // next tick's normal conflict route; every other shape still escalates fail-closed.
       const msg = String(e);
       if (/not mergeable|merge conflict/i.test(msg)) {
+        try {
+          const freshStatus = await forge.getPRStatus(pr);
+          if (freshStatus.mergeable === "CONFLICTING" || freshStatus.mergeable === "UNKNOWN") {
+            return withSignals({ kind: "queued", pr, reason: `merge-failed-conflict-recheck: ${msg}` });
+          }
+        } catch {
+          // Fail closed below: inability to prove conflict/UNKNOWN is never an infinite retry.
+        }
         return withSignals({ kind: "needs-human", pr, reason: `merge-failed-deterministic: ${msg}` });
       }
       return withSignals({ kind: "queued", pr, reason: `merge-failed-retry: ${msg}` });

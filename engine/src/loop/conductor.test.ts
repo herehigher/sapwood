@@ -1066,7 +1066,7 @@ test("tick DRIVE (#270): conflict FIXABLE uses the existing lane/counter with a 
   const prompt = sup.resumeCalls[0]!.opts?.prompt ?? "";
   assert.match(prompt, /Conflict-only prescription/);
   assert.match(prompt, /merge that base branch from origin into\s+the existing PR branch/);
-  assert.match(prompt, /Do not address standing review findings/);
+  assert.match(prompt, /Do not address\s+standing review findings/);
   assert.equal(st.getWorker("lane-a")?.fix_rounds, 1, "shared #246 counter, no conflict-specific counter");
   assert.equal(r.driven[0]?.kind, "fixup");
   st.close();

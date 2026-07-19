@@ -448,8 +448,16 @@ test("capThreads: pageCapped is threaded through from the caller, independent of
 
 // ── fetch* response shaping ─────────────────────────────────────────────────────────────────
 
-test("fetchPRDetailsResponse: passes IForge.getPRDetails through verbatim", async () => {
-  const details: PRDetails = { number: 5, headOid: "abc", state: "OPEN", draft: false, labels: [], mergeable: "MERGEABLE" };
+test("fetchPRDetailsResponse: passes IForge.getPRDetails through verbatim, including baseRefName", async () => {
+  const details: PRDetails = {
+    number: 5,
+    headOid: "abc",
+    baseRefName: "develop",
+    state: "OPEN",
+    draft: false,
+    labels: [],
+    mergeable: "MERGEABLE",
+  };
   const forge = { getPRDetails: async () => details };
   assert.deepEqual(await fetchPRDetailsResponse(forge, 5), details);
 });
