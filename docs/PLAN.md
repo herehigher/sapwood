@@ -267,8 +267,13 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   row-for-row parity port** of `test_loop_merge_driver.sh`. Both gate reads must observe
   the **same head** (split observation → requeue). An already-**MERGED** PR resolves as
   done (the designed happy path of `produce-pr-and-stop`, where a human merges);
-  **CONFLICTING** → needs-human *before* any merge attempt; deterministic merge failures
-  escalate while transient/TOCTOU ones requeue. Two merge modes: **conductor-merges**
+  **CONFLICTING** → the FIXABLE fix lane (#270: conflict resolution is producer work —
+  sensed tick-periodically *before* the review trigger, so a born-conflicted PR with zero
+  check-suites never hangs waiting for CI, and a mid-review conflict supersedes the moot
+  review; `prFixCap: 0` folds to needs-human; a pre-merge CONFLICTING check stays as
+  defense in depth). Deterministic merge failures re-read mergeability — a freshly
+  surfaced conflict requeues into the fix lane, genuinely non-conflict deterministic
+  failures escalate, transient/TOCTOU ones requeue. Two merge modes: **conductor-merges**
   (default) and **produce-PR-and-stop** (gates report, never merges). The conductor is
   the *only* merger — structurally, `tick()` never calls `mergePR`; only
   `merge-driver.driveOne` does, and no worker can reach it.
@@ -325,9 +330,12 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   `merge-driver.js` artifacts (same vector class as the guard artifact, closed in #26 R3).
   Also **#39**: the hook's direct-invocation check now compares realpaths — symlink
   invocation can no longer silently no-op the guard.
-- **Rollback hardening (#31 → PR #44)** — recovery-path board mutations are persisted to
+- **Rollback hardening (#31 → PR #44; extended to the merged path by #250)** — recovery-path
+  board mutations, and since #250 the merged-path board **Done** write, are persisted to
   a `pending_rollbacks` table *before* being attempted and retried each tick until they
   succeed; bounded retries escalate to needs-human with a structured tick-result entry.
+  Merged-path rows honor #168 forge-park suspension (frozen during an outage, drained on
+  the first healthy tick — an open park is respected even at row creation).
   Invariant: a transient forge failure during recovery can no longer strand an issue
   In Progress with no worker row. No `.catch(() => {})` swallows remain in tick paths.
 - **The fix loop (#245/#246/#247, M9, shipped 2026-07-18/19):** review findings get one
