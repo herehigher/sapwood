@@ -62,6 +62,46 @@ test("omitted escalation derives from resolved custom labels, while an explicit 
   );
 });
 
+test("#248: escalation.holdLabels defaults to [<prefix>hold]; labels.prefix affects it the same way it affects humanLabels", () => {
+  const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
+  assert.deepEqual(cfg.escalation.holdLabels, ["sapwood:hold"]);
+
+  const custom = parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { prefix: "TEAM:" }');
+  assert.deepEqual(custom.escalation.holdLabels, ["team:hold"]);
+
+  const bare = parseConfig('board: { owner: a, repo: r, projectNumber: 1 }\nlabels: { prefix: "" }');
+  assert.deepEqual(bare.escalation.holdLabels, ["hold"]);
+});
+
+test("#248: an explicit escalation.holdLabels array is used verbatim, independent of humanLabels", () => {
+  const cfg = parseConfig(`
+board: { owner: a, repo: r, projectNumber: 1 }
+escalation: { holdLabels: [reviewing, Do-Not-Merge] }
+`);
+  assert.deepEqual(cfg.escalation.holdLabels, ["reviewing", "Do-Not-Merge"]);
+  assert.deepEqual(cfg.escalation.humanLabels, ["sapwood:needs-human", "sapwood:blocked"]); // unaffected
+});
+
+test("#248: escalation.holdLabels colliding with escalation.humanLabels (or any other protected label) is rejected — collapsing tiers loses the one-fact-one-bit property", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}escalation: { holdLabels: [sapwood:needs-human] }`),
+    /escalation\.holdLabels.*collides with labels\.needsHuman/is,
+  );
+  assert.throws(() => parseConfig(`${base}escalation: { holdLabels: [sapwood:blocked] }`), /escalation\.holdLabels.*collides with/is);
+  assert.throws(
+    () => parseConfig(`${base}labels: { roundPool: my-hold }\nescalation: { holdLabels: [my-hold] }`),
+    /escalation\.holdLabels.*collides with labels\.roundPool/is,
+  );
+  // Case-insensitive, same semantics as every other collision guard.
+  assert.throws(
+    () => parseConfig(`${base}escalation: { holdLabels: [SAPWOOD:NEEDS-HUMAN] }`),
+    /escalation\.holdLabels.*collides with labels\.needsHuman/is,
+  );
+  // Sanity: a genuinely distinct value is accepted.
+  assert.doesNotThrow(() => parseConfig(`${base}escalation: { holdLabels: [hold] }`));
+});
+
 test("#237: notify.mentions defaults to [board.owner] when omitted; an explicit array is used verbatim", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
   assert.deepEqual(cfg.notify.mentions, ["acme"]);

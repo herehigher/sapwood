@@ -21,7 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { labelsInclude, normalizeLabel, SAPWOOD_LABEL_PREFIX, workflowLabelDefaults } from "../forge/labels.js";
+import { holdLabelDefault, labelsInclude, normalizeLabel, SAPWOOD_LABEL_PREFIX, workflowLabelDefaults } from "../forge/labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 
 const Board = z
@@ -872,7 +872,16 @@ const ConfigSchemaRaw = z
     proxy: ProxyConfig.default({}),
     envFailure: EnvFailure.default({}),
     escalation: z
-      .object({ humanLabels: z.array(z.string()).optional() })
+      .object({
+        humanLabels: z.array(z.string()).optional(),
+        // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
+        // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written
+        // ESCALATE tier. Optional here for the same "tell unset apart from explicitly set"
+        // reason humanLabels is optional above; resolveLabelDefaults below defaults it to
+        // `[defaults.hold]` (labels.prefix-derived) when omitted. An explicit array passes
+        // through verbatim.
+        holdLabels: z.array(z.string()).optional(),
+      })
       .strict()
       .default({}),
     // #237: who a posted PO-dissent concern comment @-mentions (dissent.ts's postConcernIfNew).
@@ -918,7 +927,7 @@ export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doct
   goal: { file: string };
   doctrine: { file: string; maxChars: number; fileRaw?: string };
   labels: ReturnType<typeof workflowLabelDefaults> & { prefix: string };
-  escalation: { humanLabels: string[] };
+  escalation: { humanLabels: string[]; holdLabels: string[] };
   notify: { mentions: string[] };
 };
 
@@ -988,6 +997,11 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
   };
   cfg.labels = resolvedLabels;
   cfg.escalation.humanLabels ??= [resolvedLabels.needsHuman, resolvedLabels.blocked];
+  // #248: default the hold-label list the same way — derived from the SAME resolved prefix,
+  // never from `resolvedLabels` itself (there is no `labels.hold` field to override; see
+  // holdLabelDefault's own doc comment for why). An explicit array (set by the user) passes
+  // through verbatim, untouched here.
+  cfg.escalation.holdLabels ??= [holdLabelDefault(prefix)];
   // #237: default the dissent-comment mention list to the repo owner when unset — same
   // "explicit array passes through verbatim, omitted derives from another already-resolved
   // field" shape as escalation.humanLabels just above.
@@ -1041,6 +1055,27 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
       });
     }
   }
+  // #248: escalation.holdLabels (human-applied WAIT tier) must be DISTINCT from every
+  // engine-written/human-escalation label — collapsing them would let applying/removing one
+  // label silently double as the other tier's signal, losing the "one fact, one bit" property
+  // the three-tier model (hold/needs-human/blocked) depends on (see docs/PLAN.md's escalation-
+  // model section). Same collision-guard shape as labels.roundPool above, extended with
+  // labels.roundPool itself as one more protected value to check against.
+  const holdCollisionTargets: Array<[string, string]> = [...otherLabels, ["labels.roundPool", cfg.labels.roundPool]];
+  cfg.escalation.holdLabels.forEach((holdLabel, i) => {
+    for (const [key, value] of holdCollisionTargets) {
+      if (labelsInclude([value], holdLabel)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalation", "holdLabels", i],
+          message:
+            `escalation.holdLabels entry ("${holdLabel}") collides with ${key} ("${value}") — the ` +
+            `hold (WAIT) tier and the human-escalation tiers must be distinct labels, or removing/` +
+            `applying one would silently double as the other's signal; use a distinct value.`,
+        });
+      }
+    }
+  });
 });
 
 /** Parse + validate raw YAML/JSON text. Exported for testing without disk I/O. */

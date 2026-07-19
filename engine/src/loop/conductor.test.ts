@@ -3,7 +3,7 @@
 // the bash 0/1 sentinel/flag args, string[] for the CSV label args). If a row here
 // disagrees with the bash row it mirrors, that's a parity regression.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -2978,6 +2978,172 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// #248: the human hold label — WAIT-tier control handover, three-tier escalation model
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#248): a hold label on the PR suppresses drive to WAIT — no merge, no escalation, no dispatch; removing it resumes the ordinary gate path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-hold-round-trip-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const st = new State(path);
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    const cfg = mkCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["hold"] } });
+    const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg, now: () => new Date("2026-07-19T00:00:00.000Z") });
+
+    st.upsertWorker({
+      name: "lane-h",
+      issue: 50,
+      session_id: "s-lane-h",
+      state: "driving",
+      started_at: "t0",
+      ended_at: null,
+      pr: 600,
+      review_triggered_head: "H1",
+      review_triggered_at: "2026-07-18T00:00:00.000Z",
+    });
+    forge.prStatus = { number: 600, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+    forge.prReviewData = {
+      headOid: "H1",
+      author: "producer",
+      updatedAt: "2026-01-01T00:00:00Z",
+      isDraft: false,
+      labels: ["hold"],
+      state: "OPEN",
+      reactions: [],
+      // Would resolve MERGE_OK (and merge, CI green) if not for the hold — proves hold, not an
+      // incidental non-decisive verdict, is what's holding the lane.
+      reviews: [{ author: CODEX_REVIEWER_LOGINS[0], commitOid: "H1", state: "COMMENTED", submittedAt: "2026-07-19T00:00:30Z" }],
+      unresolvedThreads: 0,
+    };
+
+    const held1 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(held1.driven, [{ kind: "queued", worker: "lane-h", issue: 50, pr: 600, reason: "gate-pending:MERGE_OK" }]);
+    assert.equal(st.getWorker("lane-h")?.state, "driving"); // held, not escalated — lane keeps its slot
+    assert.equal(st.getWorker("lane-h")?.gated_reentry_attempts ?? 0, 0);
+
+    // A second tick while still held: same outcome, still zero writes of any kind.
+    const held2 = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(held2.driven, [{ kind: "queued", worker: "lane-h", issue: 50, pr: 600, reason: "gate-pending:MERGE_OK" }]);
+
+    // Zero-consumption AC: no gated-reentry attempt burned, no needs-human label/comment
+    // anywhere (issue OR PR), no merge, no dispatch — across the whole held window.
+    assert.equal(st.getWorker("lane-h")?.gated_reentry_attempts ?? 0, 0);
+    assert.deepEqual(forge.labelsAdded, []);
+    assert.deepEqual(forge.prLabelsAdded, []); // the engine never writes OR escalates a hold label
+    assert.deepEqual(forge.issueComments, []);
+    assert.deepEqual(forge.merged, []);
+    assert.equal(sup.dispatched.length, 0);
+    assert.deepEqual(
+      rawEventKinds(path).filter((k) => k === "review-silence-escalated" || k === "gated-reentry" || k === "gated-reentry-capped"),
+      [],
+    );
+
+    // The human removes the hold label — the very NEXT tick resumes the ordinary gate path
+    // (same lane, same PR, no re-dispatch) and merges.
+    forge.prReviewData = { ...forge.prReviewData, labels: [] };
+    const resumed = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+    assert.deepEqual(resumed.driven, [{ kind: "merged", worker: "lane-h", issue: 50, pr: 600 }]);
+    assert.equal(st.getWorker("lane-h")?.state, "done");
+    assert.deepEqual(forge.merged, [[600, "H1"]]);
+    assert.equal(sup.dispatched.length, 0); // no worker ever spawned across the whole round-trip
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick DRIVE (#248): hold + needs-human simultaneously on the SAME PR -> escalation wins (fail-safe) — the lane fails and needs-human is applied, not silently held", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["hold"] } });
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg });
+
+  st.upsertWorker({
+    name: "lane-both",
+    issue: 51,
+    session_id: "s-lane-both",
+    state: "driving",
+    started_at: "t0",
+    ended_at: null,
+    pr: 601,
+    review_triggered_head: "H1",
+    review_triggered_at: "2020-01-01T00:00:00Z",
+  });
+  forge.prStatus = { number: 601, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  forge.prReviewData = { ...forge.prReviewData, headOid: "H1", labels: ["hold", "needs-human"] };
+
+  const r = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-both", issue: 51, pr: 601, reason: "gate:HUMAN:WAIT_REVIEW" }]);
+  assert.equal(st.getWorker("lane-both")?.state, "failed");
+  st.close();
+});
+
+test("tick DRIVE (#248): a `fixing` lane is invisible to the hold check entirely — an in-flight fix leg is never interrupted, because DRIVE only ever iterates `driving` lanes", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ escalation: { humanLabels: ["needs-human", "blocked"], holdLabels: ["hold"] } });
+  const gate = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg });
+
+  st.upsertWorker({
+    name: "lane-fixing",
+    issue: 52,
+    session_id: "s-lane-fixing",
+    state: "fixing",
+    started_at: "t0",
+    ended_at: null,
+    pr: 602,
+    fix_rounds: 1,
+  });
+  // A hold on the PR the fix leg is working — irrelevant while the row is `fixing`: this is not
+  // a "driving" lane, so tick()'s DRIVE loop (deps.mergeGate.driveOne) never reads it at all.
+  // No probe override needed — DEFAULT_PROBE (still running: done:false, failed:false) is
+  // exactly the "in-flight, untouched" state this test wants.
+  forge.prReviewData = { ...forge.prReviewData, labels: ["hold"] };
+
+  const r = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.driven, []); // the fixing lane never appears in DRIVE's outcomes at all
+  assert.equal(st.getWorker("lane-fixing")?.state, "fixing"); // untouched — still mid fix-leg
+  assert.equal(st.getWorker("lane-fixing")?.fix_rounds, 1); // not bumped, not reset
+  assert.deepEqual(forge.labelsAdded, []);
+  assert.deepEqual(forge.prLabelsAdded, []);
+  st.close();
+});
+
+test("#248 grep-invariant (engine-wide): no forge.addLabel/addPRLabel call site in engine source ever references a hold label — write-side asymmetry is structural, not just a runtime behavior", () => {
+  const srcDir = new URL("../", import.meta.url);
+  const files = readdirSync(srcDir, { recursive: true }).filter(
+    (f): f is string => typeof f === "string" && f.endsWith(".ts") && !f.endsWith(".test.ts"),
+  );
+  // Sanity: the known call-site-heavy modules are present in the scan set, so an empty/broken
+  // glob can't make this test vacuously pass.
+  assert.ok(files.includes("loop/conductor.ts") && files.includes("roles/architect.ts") && files.includes("roles/plan-review.ts"));
+  let callSitesScanned = 0;
+  const writeCallRe = /\.(addLabel|addPRLabel)\(/g;
+  for (const f of files) {
+    const src = readFileSync(new URL(f, srcDir), "utf8");
+    let m: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: standard exec-loop idiom
+    while ((m = writeCallRe.exec(src))) {
+      callSitesScanned++;
+      // Look at the call's OWN statement only (start of the match to the next semicolon) — not
+      // the whole file — so an unrelated `hold` elsewhere (e.g. this exact holdLabels-consuming
+      // deriveGate call a few lines away in merge-driver.ts) can't false-positive.
+      const semi = src.indexOf(";", m.index);
+      const statement = src.slice(m.index, semi === -1 ? m.index + 200 : semi + 1);
+      assert.doesNotMatch(
+        statement,
+        /hold/i,
+        `${f}: an addLabel/addPRLabel call site must never reference a hold label — found: ${statement.trim()}`,
+      );
+    }
+  }
+  assert.ok(callSitesScanned >= 20, `expected many addLabel/addPRLabel call sites across the engine, saw ${callSitesScanned}`);
 });
 
 test("#147 round-4 P2 (Codex PR #151): needs-human removed but `blocked` (another escalation.humanLabels entry) still on the issue -> SKIP, no reclaim; clearing blocked too on a later tick -> RECLAIM proceeds", async () => {

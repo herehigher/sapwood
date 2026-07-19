@@ -49,6 +49,21 @@ export type Gate = "MERGE" | "WAIT" | "HUMAN" | "FIXABLE";
  * those states, unlike 0day's pr_gate.sh (which checks CI_RED before anything else). `ciGreen`
  * still wins over `ciRed` — a rollup only ever reports one or the other true (see
  * forge.ts's parsePRStatus), so this is belt-and-suspenders ordering, not a real conflict.
+ *
+ * #248: `holdLabels` — the human-applied WAIT-tier hold (three-tier escalation model: hold ≠
+ * needs-human ≠ blocked, see docs/PLAN.md's escalation-model section). Checked AFTER
+ * `humanLabels` but BEFORE the review-action switch (and therefore before FIXABLE, which lives
+ * inside that switch) — this precedence is deliberate, not incidental:
+ *  - `humanLabels` first means a simultaneous hold + needs-human/blocked resolves HUMAN, never
+ *    WAIT — escalation semantics win, fail-safe (a human-hold self-assignment must never mask a
+ *    standing escalation the SAME human, or a different one, already raised).
+ *  - `holdLabels` before the switch means a hold suppresses MERGE, FIXABLE, and the ordinary
+ *    WAIT_REVIEW path alike — while held, the lane takes no NEXT action of any kind (same
+ *    doctrine as the soft worker budget: never a mid-work interruption, only a gate on what
+ *    happens next). An IN-FLIGHT fix leg a prior tick already dispatched is never touched by
+ *    this — deriveGate only ever gates the NEXT drive decision, never a running leg.
+ *  - Write-side asymmetry is the audit trail: the engine never writes a hold label (only
+ *    `needsHuman` is engine-written) — see MergeDriver.driveOne's callers for the grep-proof.
  */
 export function deriveGate(input: {
   ciGreen: boolean;
@@ -60,6 +75,10 @@ export function deriveGate(input: {
   prState: PRStatus["state"];
   labels: string[];
   humanLabels: readonly string[];
+  /** #248: cfg.escalation.holdLabels — the WAIT-tier human hold (see this function's own doc
+   *  above for the precedence rationale). Checked on the SAME PR-label list `humanLabels` reads
+   *  (`data.labels` at the call site) — hold is a PR-level signal, never an issue-level one. */
+  holdLabels: readonly string[];
   /** #246: cfg.lanes.prFixCap — the FIXABLE gate's static enable switch (see this function's
    *  own doc). NOT the per-lane fix_rounds counter (conductor.ts's driveDecision owns that). */
   prFixCap: number;
@@ -67,6 +86,10 @@ export function deriveGate(input: {
   if (input.prState !== "OPEN") return "HUMAN"; // already merged/closed -> never touch
   if (input.isDraft) return "HUMAN"; // draft is human territory
   if (labelsIncludeAnySubstring(input.labels, input.humanLabels)) return "HUMAN";
+  // #248: hold precedes review signals AND FIXABLE (both live in the switch below) — checked
+  // here, after humanLabels (escalation wins over a simultaneous hold) and before any review
+  // verdict is consulted at all.
+  if (labelsIncludeAnySubstring(input.labels, input.holdLabels)) return "WAIT";
   const fixableEnabled = input.prFixCap > 0;
   switch (input.reviewAction) {
     case "REVIEW_UNAVAILABLE":
@@ -162,18 +185,33 @@ export type DriveOutcome = (
 };
 
 /** #170: pure aging decision. A configured failover gets its full evaluation window first;
- * afterward a still-non-decisive chain may call a human at its own (usually longer) bound. */
+ * afterward a still-non-decisive chain may call a human at its own (usually longer) bound.
+ *
+ * #248: `holdLabelPresent` suppresses this exactly like `needsHumanLabelPresent` already did —
+ * a human hold means "someone is already looking at this," so the silence clock must not
+ * escalate (write `needsHuman` + fire the event) while one stands. This is a PURE suppression:
+ * the function is stateless-per-call and carries no memory of ITS OWN prior suppressed
+ * evaluations, so the underlying `triggerPin.at` is untouched by a hold coming or going — once
+ * the hold is removed, the very next call "resumes" using the SAME pin, i.e. counting the
+ * elapsed time exactly as if the hold had never suppressed anything (zero new machinery: no
+ * separate "held-since"/paused-duration state is introduced to net the hold interval back out).
+ * The accepted, documented consequence (docs/PLAN.md's escalation-model section) is a
+ * tick-scale race: a hold held longer than `escalateAfterSec` can make the very next
+ * post-removal tick escalate immediately, one shot, using the full elapsed silence — never a
+ * "burst" of repeated escalations (the label-presence latch this shares with
+ * `needsHumanLabelPresent` still applies from that first escalation onward). */
 export function reviewSilenceDuration(input: {
   action: ReviewAction;
   triggerPin: ReviewTriggerPin;
   now: Date;
   escalateAfterSec: number;
   needsHumanLabelPresent: boolean;
+  holdLabelPresent: boolean;
   fallbackConfigured: boolean;
   failoverAfterSec: number;
 }): number | null {
   if (input.action !== "WAIT_REVIEW" && input.action !== "REVIEW_UNAVAILABLE") return null;
-  if (input.needsHumanLabelPresent || input.triggerPin.at == null) return null;
+  if (input.needsHumanLabelPresent || input.holdLabelPresent || input.triggerPin.at == null) return null;
   const triggeredAt = Date.parse(input.triggerPin.at);
   if (!Number.isFinite(triggeredAt)) return null;
   const silenceSec = Math.floor((input.now.getTime() - triggeredAt) / 1000);
@@ -403,6 +441,8 @@ export class MergeDriver {
         now: gateNow,
         escalateAfterSec: cfg.reviewer.escalateAfterSec,
         needsHumanLabelPresent: labelsInclude(data.labels, cfg.labels.needsHuman),
+        // #248: same PR-label list humanLabels/holdLabels both read in deriveGate below.
+        holdLabelPresent: labelsIncludeAnySubstring(data.labels, cfg.escalation.holdLabels),
         fallbackConfigured: (this.deps.fallbackReviewers?.length ?? 0) > 0,
         failoverAfterSec: cfg.reviewer.failoverAfterSec,
       });
@@ -421,6 +461,7 @@ export class MergeDriver {
       prState: data.state,
       labels: data.labels,
       humanLabels: cfg.escalation.humanLabels,
+      holdLabels: cfg.escalation.holdLabels,
       prFixCap: cfg.lanes.prFixCap,
     });
 

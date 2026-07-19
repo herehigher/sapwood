@@ -220,6 +220,18 @@ export type GatedReentryDecision = "RECLAIM" | "CAPPED" | "SKIP";
  *  - every hold cleared, `attempts >= cap` -> CAPPED (the cap was already spent on a prior
  *    reclaim that re-escalated; fail closed rather than retry forever — re-escalate + latch
  *    permanently).
+ *
+ * #248 (three-tier escalation model): `humanHoldPresent` here is ONLY `escalation.humanLabels`
+ * (needs-human/blocked) on the ISSUE — deliberately NOT extended to `escalation.holdLabels`.
+ * The two are orthogonal by construction: a `hold` label never produces a `failed` row (it makes
+ * `deriveGate` return WAIT, so `driveOne` yields "queued" and the lane simply stays `driving` —
+ * see merge-driver.ts's `deriveGate`), so a lane under hold never reaches `gatedFailedWorkers()`
+ * in the first place; this function is only ever consulted for a lane GATE② already escalated to
+ * `needs-human`. A hold applied to an already-escalated issue (before the human explicitly
+ * clears the escalation labels) has no effect here — it has nothing to gate, since the lane
+ * isn't `driving` yet to observe it — and takes effect the instant a genuine RECLAIM re-enters
+ * `driving` and the very next `driveOne` call reads the (still-present) hold off the PR, same as
+ * any other driving lane. No new machinery: hold composes with GATED RECLAIM for free.
  */
 export function gatedReentryDecision(humanHoldPresent: boolean, attempts: number, cap: number): GatedReentryDecision {
   if (humanHoldPresent) return "SKIP";
