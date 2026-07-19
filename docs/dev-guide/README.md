@@ -21,9 +21,13 @@ round (aligning → architecting → plan_review → executing → harvesting �
 driving the **conductor's tick loop** during execution; ticks dispatch one
 headless **worker** per Ready issue into an isolated worktree under a
 fail-closed **guard** hook, and reclaim finished lanes into the **merge gate**
-(CI + independent review + a bounded fix loop). All GitHub traffic crosses the
-**forge adapter**; sessions get read-only forge evidence through a per-session
-**MCP proxy**; everything durable lands in **SQLite state**.
+(CI + independent review + a bounded fix loop). The engine's own GitHub
+traffic crosses the **forge adapter**; producer workers push their branch and
+open their PR directly with `gh` from the worktree (the guarded boundary is
+approval/merge, not GitHub access), while judgment roles get read-only forge
+evidence through a per-session **MCP proxy**. The engine's own durable records
+land in **SQLite state**; wrapper evidence and human controls stay on the
+filesystem (see [06](06-persistence.md)).
 
 **The one invariant everything else hangs off:** producer ≠ reviewer ≠ merger.
 The worker that writes code never approves or merges it; the guard hook

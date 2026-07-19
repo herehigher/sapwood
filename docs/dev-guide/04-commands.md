@@ -1,6 +1,6 @@
 # 04 — Test & quality commands
 
-The suite uses colocated `node:test` files loaded through `tsx`. A static source count finds 1,998 `test()`/`it()` declarations, so “about 2,000 tests” is the useful scale; generated/subtest execution can differ. No timing guarantee is encoded in the repository, so runtime depends on the machine.
+The suite uses colocated `node:test` files loaded through `tsx`. The source carries roughly 1,900+ `test()`/`it()` declarations — "about 2,000 tests" is the useful scale; `npm test` reports the executed count, which differs from any static count (subtests, generated cases). No timing guarantee is encoded in the repository, so runtime depends on the machine.
 
 ## Command reference
 

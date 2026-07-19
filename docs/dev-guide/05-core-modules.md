@@ -20,7 +20,7 @@ The kill switch freezes dispatch and merges, requests graceful handoff, then per
 
 ## Worker lane (`roles/worker.ts`, `roles/context-manifest.ts`)
 
-`WorkerSupervisor` (`engine/src/roles/worker.ts`) is the only module that launches the Claude CLI. It assigns a fresh lane/session, creates a git worktree, supplies inline guard and optional MCP settings, streams JSONL under `data/sessions/state/`, writes heartbeat and atomic `.running`/`.done`/`.failed`/`.handoff` evidence, and kills the detached process group only for hard timeout/drain escalation. The wrapper, not the model, writes terminal sentinels; workers do not receive `data/` through `--add-dir`.
+`WorkerSupervisor` (`engine/src/roles/worker.ts`) is the module that launches producer worker sessions (peripheral role sessions are launched separately by `RoleRunner` in `peripheral.ts`). It assigns a fresh lane/session, creates a git worktree, supplies inline guard and optional MCP settings, streams JSONL under `data/sessions/state/`, writes heartbeat and atomic `.running`/`.done`/`.failed`/`.handoff` evidence, and kills the detached process group only for hard timeout/drain escalation. The wrapper, not the model, writes terminal sentinels; workers do not receive `data/` through `--add-dir`.
 
 Live token usage is estimated with `engine/src/config/pricing.ts`. Crossing `worker.budgetUsdSoft` requests graceful handoff: the session is asked to preserve WIP and exits through `.handoff`; it is never killed merely for crossing the soft budget. Resume reuses the lane, worktree, branch, and session lineage, with durable resume-intent markers and a configured cap.
 

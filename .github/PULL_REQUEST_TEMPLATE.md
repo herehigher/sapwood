@@ -20,5 +20,5 @@ Closes #
 ## Risk
 
 - [ ] This PR does **not** touch a human-merge-only path
-      ([list](docs/security.md#human-merge-only-paths)) — if it does, flag it
+      ([list](https://github.com/herehigher/sapwood/blob/main/docs/security.md#human-merge-only-paths)) — if it does, flag it
       here and expect a human merge regardless of review outcome

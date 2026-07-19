@@ -25,7 +25,10 @@ rollback intents, review-trigger pins), never a competing authority.
    only convenience, it is a cache: nullable and explicitly non-authoritative
    (the `workers` telemetry columns).
 2. **Audit** — prove what it did (`events`, `spend_ledger`, the proxy
-   journal). These are append-only and never updated.
+   journal). `events` and `spend_ledger` are append-only and never updated;
+   the proxy journal is append-per-call with a forward-only status cursor
+   (`intent → fetched/error → delivered`) that never rewrites recorded
+   evidence.
 3. **Guarantee exactly-once external writes** — write-ahead intent plus an
    idempotency key (`pending_rollbacks`, `pending_thread_writes`, bundle
    hashes).
@@ -40,11 +43,15 @@ Whoever owns a fact determines where it lives:
   (`.running`/`.done`/`.failed`/`.handoff`) and the heartbeat: the wrapper
   must be able to record how a session ended even when the engine is dead,
   and the evidence must survive an engine/database failure independently.
-  Startup reconciliation reads files and corrects database rows — file →
-  database, never the reverse. Absorbing sentinels into SQLite would merge
-  the two failure domains, break the single-writer model (the conductor is
-  the only writer), and hand worker-side processes a write path into engine
-  state — three losses for one storage-inventory "simplification".
+  The engine adopts this evidence at tick time (the supervisor probe) and
+  corrects its own database rows from it; the wrapper never reads or writes
+  the database. Each side writes only its own medium — on resume the engine
+  reads its `handoff` row and the supervisor writes fresh session sentinels,
+  but the engine never fabricates wrapper-owned terminal evidence. Absorbing
+  sentinels into SQLite would merge the two failure domains, break the
+  single-writer-process model, and hand worker-side processes a write path
+  into engine state — three losses for one storage-inventory
+  "simplification".
 - **The engine owns its own records** → SQLite rows, including the
   engine-owned singletons (`engine_session`, `ceiling_breach`, `park_state`)
   that are shaped like flags but written and read only by the engine.
@@ -59,7 +66,7 @@ them is a design smell regardless of how convenient it is.
 
 ## Engine choice & files
 
-`State` uses Node's built-in `node:sqlite`, so the engine has no SQLite npm or native-build dependency. Its default database is `data/sapwood.sqlite`; SQLite may maintain adjacent `data/sapwood.sqlite-wal` and `data/sapwood.sqlite-shm` files. Writable opens set WAL mode and run migrations; the conductor remains the serial writer while status readers can proceed concurrently (`State` constructor, `engine/src/state/state.ts`).
+`State` uses Node's built-in `node:sqlite`, so the engine has no SQLite npm or native-build dependency. Its default database is `data/sapwood.sqlite`; SQLite may maintain adjacent `data/sapwood.sqlite-wal` and `data/sapwood.sqlite-shm` files. Writable opens set WAL mode and run migrations; the single engine process is the serial writer (conductor, round driver, role runners, and proxy journal code all write through its one `State` handle) while status readers can proceed concurrently (`State` constructor, `engine/src/state/state.ts`).
 
 `State(path, { readOnly: true })` opens query-only and performs no migration; the CLI status caller checks the on-disk version before interpreting rows. On a filesystem where a WAL reader cannot create coordination files, `openReadOnly()` falls back to an immutable main-file snapshot and warns that live WAL rows may be absent (`engine/src/state/state.ts`, `engine/src/cli.ts`).
 

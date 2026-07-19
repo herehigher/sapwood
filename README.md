@@ -45,8 +45,8 @@ GitHub issue (Ready)
 
 ## Architecture
 
-<!-- ARCHITECTURE-DIAGRAM: the same diagram is maintained in
-     docs/dev-guide/README.md — keep the two in sync when editing. -->
+<!-- ARCHITECTURE-DIAGRAM: canonical home. docs/dev-guide/README.md links
+     here instead of duplicating — keep it single-source. -->
 
 ```mermaid
 flowchart LR
@@ -60,7 +60,7 @@ flowchart LR
   subgraph ENGINE["sapwood engine (TypeScript, Node ≥ 24)"]
     ROUND["Round driver (runRounds)<br/>aligning → architecting → plan_review →<br/>executing → harvesting → retro<br/>(loop/round.ts)"]
     CONDUCTOR["Conductor<br/>tick loop (loop/conductor.ts)"]
-    GATE["MergeDriver — gate②<br/>CI + independent review + FIXABLE<br/>(roles/merge-driver.ts)"]
+    GATE["MergeDriver — merge gate<br/>gate① CI + gate② review + FIXABLE<br/>(roles/merge-driver.ts)"]
     PERIPH["Peripheral roles<br/>architect · plan-review · PO triage · retro<br/>(roles/, retro/)"]
     STATE[("SQLite state<br/>lanes · events · spend ledger<br/>(state/state.ts)")]
     PROXY["Forge MCP proxy<br/>read-only, token-minted per session<br/>(proxy/)"]
@@ -78,7 +78,8 @@ flowchart LR
   ISSUES -->|Ready| CONDUCTOR
   ROUND -->|"drives ticks (executing phase)"| CONDUCTOR
   CONDUCTOR -->|dispatch| WORKER
-  WORKER -->|PR + sentinel files| PRS
+  WORKER -->|"push branch, open PR (gh)"| PRS
+  WORKER -.->|"sentinel files (local)"| CONDUCTOR
   CONDUCTOR --> GATE
   GATE -->|trigger review| REVIEWER
   REVIEWER -->|verdict| GATE

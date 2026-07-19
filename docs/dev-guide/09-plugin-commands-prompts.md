@@ -43,7 +43,9 @@ repo by `sapwood init`) and `issue-templates/`.
 - Prompts live **inside the engine package** so packaged installs ship them; a
   repo-root `prompts/` would be absent from installed plugins
   (`engine/src/roles/worker.ts`, `defaultPromptPath`).
-- Operators may override a role's prompt via its `promptFile` config key; a
+- Operators may override a role's prompt via its prompt-file config key —
+  `promptFile` on most roles, plus the sibling keys `worker.fixPromptFile`,
+  `roles.planReviewer.confirmPromptFile`, and `roles.po.poolPromptFile`; a
   relative path resolves against the config file's own directory, and a
   set-but-unreadable override fails rather than silently falling back
   (`engine/src/config/config.ts`).

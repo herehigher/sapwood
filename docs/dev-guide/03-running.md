@@ -76,7 +76,8 @@ When a run misbehaves, the evidence trail is layered — read it in this order:
    (`sqlite3 data/sapwood.sqlite "SELECT ts,kind,payload FROM events ORDER BY id DESC LIMIT 40"`);
    dispatch, gate outcomes, degrades, escalations, and reconciliation all land
    here with reasons.
-4. **Per-session evidence** — `data/sessions/state/<lane>/` (workers) and
+4. **Per-session evidence** — flat files under `data/sessions/state/` named
+   per lane (`<lane>.jsonl`, `<lane>.running.json`, terminal sentinels) and
    `data/sessions/roles/` (peripherals): the JSONL stream is the session
    transcript; sentinel files (`.running`/`.done`/`.failed`/`.handoff`) are the
    wrapper's ground truth about how it ended, independent of the model's
