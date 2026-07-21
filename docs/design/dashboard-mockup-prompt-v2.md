@@ -1,7 +1,7 @@
 # Dashboard 成品预期图 — v2（部件分解阶段）
 
 部件流：hero（冻结·26 号图）→ header（冻结·32 号图）→ lanes（冻结·37 号图）
-→ cost strip（出图中）→ activity feed / needs-attention / config drawer /
+→ cost strip（冻结·40 号图）→ activity feed / needs-attention / config drawer /
 侧栏 rail → 整页融合。
 
 本地工作文件，不提交。v1（整页提示词+首轮出图）见 `dashboard-mockup-prompt-v1.md`。
@@ -377,7 +377,7 @@ Same panel layout, light "spring" theme: canvas warm cream nudged slightly towar
 10. （v4.1 新增）水滴=issue、pull-request 字形=PR，两字形清晰可辨、
     全部编号前都带？
 
-# Cost strip 部件（v5 · 出图中）
+# Cost strip 部件（v5 · 冻结，基准 40 号图）
 
 §3 E 信息架构已定（phase+model 双桶、est/settled 斜纹语法、Config ▸ 入口），
 本轮只做数据核实 + 元素落地。**核实结论：零新引擎前置。**
@@ -468,6 +468,13 @@ Same two-panel layout, light "spring" theme: canvas warm cream nudged slightly t
 6. BY STAGE 占约 2/3 宽、BY MODEL 收窄右侧、无 token 数内联？
 7. 无 Config 链接残留？
 8. 全图零 rust 零红零绿？
+
+## 出图评审（2026-07-21，38/39/40 号图）
+
+40 号定为基准（8/8）；38 亚军（同样全对，线重更细——整页融合时的
+像素层备选）；39 淘汰：条画成带分隔线的分段盒，打穿"预算条一种语法：
+实心+斜纹、无分段"，BY MODEL 凭空分段。实施注记：**BY MODEL 条永不带
+刻度/分段**（中位刻度只属 stage 条）。
 
 ## 变更记录（浓缩：只留迭代理由，细节以各部件章节现行文本为准）
 
