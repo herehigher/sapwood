@@ -53,6 +53,7 @@ test("upsert refreshes ALL fields on name reuse (resume / reassigned lane)", () 
     state: "done",
     started_at: "2026-06-27T00:00:00Z",
     ended_at: "2026-06-27T00:30:00Z",
+    review_covered_head: "OLD_HEAD",
   });
   // lane name reused for a different issue + fresh session
   s.upsertWorker({
@@ -68,6 +69,7 @@ test("upsert refreshes ALL fields on name reuse (resume / reassigned lane)", () 
   assert.equal(row?.session_id, "uuid-B");
   assert.equal(row?.started_at, "2026-06-27T02:00:00Z");
   assert.equal(row?.ended_at, null);
+  assert.equal(row?.review_covered_head, null);
   s.close();
 });
 
@@ -289,6 +291,9 @@ test("worker.review_triggered_head/at round-trip: default null, persisted via re
   const after = s.getWorker("a");
   assert.equal(after?.review_triggered_head, "HEAD1");
   assert.equal(after?.review_triggered_at, "2026-07-07T08:00:00.000Z");
+  assert.equal(after?.review_trigger_generation, 1);
+  assert.equal(after?.review_trigger_in_flight, 1);
+  assert.equal(after?.review_covered_head, null);
   assert.equal(after?.pr, 42); // untouched by recordReviewTrigger
   assert.equal(after?.state, "driving");
 
@@ -297,6 +302,45 @@ test("worker.review_triggered_head/at round-trip: default null, persisted via re
   const after2 = s.getWorker("a");
   assert.equal(after2?.review_triggered_head, "HEAD2");
   assert.equal(after2?.review_triggered_at, "2026-07-07T09:00:00.000Z");
+  assert.equal(after2?.review_trigger_generation, 2);
+  s.close();
+});
+
+test("#273 review pin metadata persists ambiguity/delta state and a decisive verdict closes only the matching generation", () => {
+  const s = mem();
+  s.upsertWorker({ name: "a", issue: 1, session_id: "s1", state: "driving", started_at: "t", ended_at: null });
+  s.recordReviewTrigger("a", "H2", "2026-07-07T09:00:00Z", {
+    generation: 2,
+    ambiguous: true,
+    deltaChain: 1,
+    inFlight: true,
+  });
+  let row = s.getWorker("a")!;
+  assert.equal(row.review_trigger_generation, 2);
+  assert.equal(row.review_trigger_ambiguous, 1);
+  assert.equal(row.review_delta_chain, 1);
+  assert.equal(row.review_trigger_in_flight, 1);
+
+  s.recordReviewVerdict("a", "H1", 1, true);
+  assert.equal(s.getWorker("a")?.review_trigger_in_flight, 1, "stale generation cannot close H2");
+  assert.equal(s.getWorker("a")?.review_covered_head, null, "stale generation cannot establish coverage");
+  s.recordReviewVerdict("a", "H2", 2, false);
+  row = s.getWorker("a")!;
+  assert.equal(row.review_trigger_in_flight, 0);
+  assert.equal(row.review_covered_head, null, "an attributable but untrusted blocker does not establish coverage");
+  s.recordReviewVerdict("a", "H2", 2, true);
+  assert.equal(s.getWorker("a")?.review_covered_head, "H2", "a later trusted response upgrades coverage after in-flight closed");
+  s.recordReviewTrigger("a", "H3", "2026-07-07T10:00:00Z", {
+    generation: 3,
+    ambiguous: false,
+    deltaChain: 0,
+    inFlight: true,
+  });
+  row = s.getWorker("a")!;
+  s.recordReviewVerdict("a", "H3", 3, true);
+  assert.equal(s.getWorker("a")?.review_covered_head, "H3");
+  s.upsertWorker({ ...row, state: "fixing" });
+  assert.equal(s.getWorker("a")?.review_covered_head, "H3", "a stale same-session upsert cannot erase newly recorded coverage");
   s.close();
 });
 
@@ -1744,6 +1788,36 @@ test("migration v20->v21: a populated v20 DB opens with data intact, an empty pe
     assert.equal(s2.userVersion(), SCHEMA_VERSION);
     assert.deepEqual(s2.pendingThreadWrites(), []);
     s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration v21->v22: an existing trigger pin becomes generation 1 and conservatively remains in flight", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-v21-"));
+  const dbPath = join(dir, "state.sqlite");
+  try {
+    const raw = new DatabaseSync(dbPath);
+    for (let v = 0; v < 21; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 21");
+    raw
+      .prepare(
+        `INSERT INTO workers
+         (name, issue, session_id, state, started_at, review_triggered_head, review_triggered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("legacy-pin", 273, "s", "driving", "2026-07-19T00:00:00Z", "H1", "2026-07-19T00:01:00Z");
+    raw.close();
+
+    const s = new State(dbPath);
+    const row = s.getWorker("legacy-pin")!;
+    assert.equal(row.review_trigger_generation, 1);
+    assert.equal(row.review_trigger_ambiguous, 0);
+    assert.equal(row.review_delta_chain, 0);
+    assert.equal(row.review_trigger_in_flight, 1);
+    assert.equal(row.review_covered_head, null);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    s.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

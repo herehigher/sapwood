@@ -17,7 +17,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
-import type { ReviewFallbackLock } from "../roles/reviewer.js";
+import type { ReviewFallbackLock, ReviewTriggerPin } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
 import { UnresumableLaneError, type WorkerProxyOpts } from "../roles/worker.js";
 import type { BoardStatus, CategorizedTokenUsage, ModelUsageEntry, ParkRow, PendingRollback, State, WorkerRow } from "../state/state.js";
@@ -551,8 +551,12 @@ export interface MergeGate {
   driveOne(
     pr: number,
     issue: number,
-    triggerPin: { head: string | null; at: string | null },
-    recordTrigger: (head: string, at: string) => void,
+    triggerPin: ReviewTriggerPin,
+    recordTrigger: (
+      head: string,
+      at: string,
+      meta?: { generation: number; ambiguous: boolean; deltaChain: number; inFlight: boolean },
+    ) => void,
     /** #54: the lane's State-recorded reviewer-failover lock + a callback to persist a new one.
      *  Optional — a MergeGate fake that predates #54 (this whole test file) still satisfies
      *  this type without implementing it. */
@@ -565,6 +569,7 @@ export interface MergeGate {
      *  (see MergeDriver.driveOne), so the stale pre-escalation review can't satisfy the
      *  re-driven gate②. Optional — pre-#147 fakes still satisfy this type. */
     reentered?: boolean,
+    recordVerdict?: (head: string, generation: number, coverageEstablished: boolean) => void,
   ): Promise<DriveOutcome>;
 }
 
@@ -2121,8 +2126,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       const outcome = await gate.driveOne(
         pr,
         w.issue,
-        { head: w.review_triggered_head ?? null, at: w.review_triggered_at ?? null },
-        (head, at) => state.recordReviewTrigger(w.name, head, at),
+        {
+          head: w.review_triggered_head ?? null,
+          at: w.review_triggered_at ?? null,
+          generation: w.review_trigger_generation ?? 0,
+          ambiguous: (w.review_trigger_ambiguous ?? 0) === 1,
+          deltaChain: w.review_delta_chain ?? 0,
+          inFlight: (w.review_trigger_in_flight ?? 0) === 1,
+          coveredHead: w.review_covered_head ?? null,
+        },
+        (head, at, meta) => state.recordReviewTrigger(w.name, head, at, meta),
         {
           lock: { head: lockKind ? (w.review_fallback_head ?? null) : null, kind: lockKind },
           recordFallback: (lock) => state.recordReviewFallback(w.name, lock.head, lock.kind),
@@ -2131,6 +2144,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // pre-escalation review still sitting on the (unchanged) head — driveOne filters to
         // post-re-entry review signals when this is set.
         (w.gated_reentry_attempts ?? 0) > 0,
+        (head, generation, coverageEstablished) => state.recordReviewVerdict(w.name, head, generation, coverageEstablished),
       );
       // #54: announce a reviewer-failover switch/revert — structured event + PR comment.
       // driveOne reports the signal STATELESSLY every tick it holds (resolveReviewVerdict is

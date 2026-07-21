@@ -1,6 +1,6 @@
 // merge-driver.ts tests:
-//  1. mergeDecision parity suite — a row-for-row TS port of 0day's
-//     ops/loop/test_loop_merge_driver.sh (source: /0day/ops/loop/test_loop_merge_driver.sh).
+//  1. mergeDecision parity suite — a TS port of 0day's matrix, with #273's stricter
+//     OID-bound rejection of the legacy bare-reaction action.
 //  2. deriveGate — the scheduling-gate glue (gate①/gate②/labels/state -> MERGE/WAIT/HUMAN).
 //  3. MergeDriver.driveOne — end-to-end with a fake IForge + fake Reviewer (no real gh calls).
 import assert from "node:assert/strict";
@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { type DriveOutcome, deriveGate, MergeDriver, mergeDecision, reviewSilenceDuration } from "./merge-driver.js";
-import type { ReviewAction, Reviewer, ReviewVerdict } from "./reviewer.js";
+import type { ReviewAction, Reviewer, ReviewTriggerContext, ReviewVerdict } from "./reviewer.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -21,10 +21,10 @@ test("mergeDecision parity: MERGE_OK + OPEN + clean label -> MERGE (trustedAppro
   assert.equal(mergeDecision("MERGE_OK", "", "OPEN"), "MERGE");
 });
 
-test("mergeDecision parity: APPROVED_PR_LEVEL (bare 👍) — only a trusted fresh 👍 auto-merges", () => {
-  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", true), "MERGE"); // Codex-bot fresh 👍
-  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "type:ops,infra", "OPEN", true), "MERGE");
-  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", false), "ESCALATE"); // self-👍 only
+test("mergeDecision #273: APPROVED_PR_LEVEL (bare 👍) always fails closed because it has no OID", () => {
+  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", true), "ESCALATE");
+  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "type:ops,infra", "OPEN", true), "ESCALATE");
+  assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "OPEN", false), "ESCALATE");
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", ""), "ESCALATE"); // default trustedApproval=false
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "risk:fund-path", "OPEN", true), "ESCALATE"); // trusted 👍 but risk label still blocks
   assert.equal(mergeDecision("APPROVED_PR_LEVEL", "", "MERGED", true), "ESCALATE"); // trusted 👍 but non-OPEN still blocks
@@ -353,12 +353,14 @@ class FakeReviewer implements Reviewer {
   readonly kind = "different-model-codex" as const;
   triggered: number[] = [];
   triggeredWith: Array<[number, number]> = [];
+  triggerContexts: Array<ReviewTriggerContext | undefined> = [];
   triggerErr: Error | null = null;
-  verdict: ReviewVerdict = { action: "MERGE_OK", headOid: "HEAD" };
-  async triggerReview(_forge: IForge, pr: number, issue: number): Promise<void> {
+  verdict: ReviewVerdict = { action: "MERGE_OK", headOid: "HEAD", generationResponded: true, coverageEstablished: true };
+  async triggerReview(_forge: IForge, pr: number, issue: number, context?: ReviewTriggerContext): Promise<void> {
     if (this.triggerErr) throw this.triggerErr;
     this.triggered.push(pr);
     this.triggeredWith.push([pr, issue]);
+    this.triggerContexts.push(context);
   }
   verdictFromData(): ReviewVerdict {
     return this.verdict;
@@ -919,11 +921,12 @@ test("MergeDriver.driveOne: no trigger recorded yet (pin.head === null) -> posts
   const outcome = await driver.driveOne(7, 46, { head: null, at: null }, (h, a) => recorded.push([h, a]));
   assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
   assert.deepEqual(reviewer.triggeredWith, [[7, 46]]); // issue #46 threaded through
+  assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: null }]);
   assert.deepEqual(recorded, [["HEAD", "2026-07-07T08:00:00.000Z"]]);
   assert.deepEqual(forge.merged, []); // never gates/merges on the SAME tick as the trigger
 });
 
-test("MergeDriver.driveOne: trigger pin recorded for a DIFFERENT (older) head -> re-triggers on the NEW head, queues", async () => {
+test("MergeDriver.driveOne #273: unanswered prior head re-triggers with a full PR review, not an uncovered delta", async () => {
   const forge = new FakeForge(); // forge.status/reviewData default headOid: "HEAD"
   const reviewer = new FakeReviewer();
   const recorded: Array<[string, string]> = [];
@@ -931,6 +934,75 @@ test("MergeDriver.driveOne: trigger pin recorded for a DIFFERENT (older) head ->
   const outcome = await driver.driveOne(7, 46, { head: "OLD_HEAD", at: "2026-07-07T07:00:00Z" }, (h, a) => recorded.push([h, a]));
   assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
   assert.deepEqual(recorded, [["HEAD", "2026-07-07T09:00:00.000Z"]]);
+  assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: null }]);
+});
+
+test("MergeDriver.driveOne #273: a prior head with trusted recorded coverage permits a delta trigger", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+  await driver.driveOne(
+    7,
+    46,
+    { head: "OLD_HEAD", at: "2026-07-07T07:00:00Z", generation: 1, coveredHead: "OLD_HEAD", deltaChain: 0 },
+    noopRecord,
+  );
+  assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: "OLD_HEAD" }]);
+});
+
+test("MergeDriver.driveOne #273: third-party CHANGES_REQUESTED never buys delta coverage", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, headOid: "H1" };
+  forge.reviewData = {
+    ...forge.reviewData,
+    headOid: "H1",
+    reviews: [{ author: "random-account", commitOid: "H1", state: "CHANGES_REQUESTED", submittedAt: "2026-07-07T08:01:00Z" }],
+  };
+  const reviewer = new CodexReviewer([]);
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+  let covered = true;
+  await driver.driveOne(
+    7,
+    46,
+    { head: "H1", at: "2026-07-07T08:00:00Z", generation: 1, inFlight: true },
+    noopRecord,
+    undefined,
+    false,
+    (_head, _generation, coverageEstablished) => {
+      covered = coverageEstablished;
+    },
+  );
+  assert.equal(covered, false);
+
+  forge.status = { ...forge.status, headOid: "H2" };
+  forge.reviewData = { ...forge.reviewData, headOid: "H2", reviews: [] };
+  const triggerReviewer = new FakeReviewer();
+  await new MergeDriver({ forge, reviewer: triggerReviewer, cfg: mkCfg() }).driveOne(
+    7,
+    46,
+    { head: "H1", at: "2026-07-07T08:00:00Z", generation: 1, inFlight: false, coveredHead: null },
+    noopRecord,
+  );
+  assert.deepEqual(triggerReviewer.triggerContexts, [{ head: "H2", baseHead: null }]);
+});
+
+test("MergeDriver.driveOne #273: after deltaChainMax consecutive deltas, the next head trigger is full-PR and resets the chain", async () => {
+  const forge = new FakeForge();
+  const reviewer = new FakeReviewer();
+  const recorded: unknown[] = [];
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg({ reviewer: { deltaChainMax: 3 } }) });
+  const pin = {
+    head: "H3",
+    at: "2026-07-07T07:00:00Z",
+    generation: 4,
+    ambiguous: true,
+    deltaChain: 3,
+    inFlight: true,
+    coveredHead: "H3",
+  };
+  await driver.driveOne(7, 46, pin, (_head, _at, meta) => recorded.push(meta));
+  assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: null }]);
+  assert.deepEqual(recorded, [{ generation: 5, ambiguous: true, deltaChain: 0, inFlight: true }]);
 });
 
 test("MergeDriver.driveOne (#270): mid-review conflict wins next tick; resolved push re-triggers and only the fresh-head review merges", async () => {
@@ -941,7 +1013,7 @@ test("MergeDriver.driveOne (#270): mid-review conflict wins next tick; resolved 
     cfg: mkCfg(),
     now: () => new Date("2026-07-19T01:00:00Z"),
   });
-  const oldPin = { head: "HEAD", at: "2026-07-19T00:00:00Z" };
+  const oldPin = { head: "HEAD", at: "2026-07-19T00:00:00Z", generation: 1, ambiguous: false, deltaChain: 0, inFlight: true };
 
   assert.equal((await driver.driveOne(7, 46, oldPin, noopRecord)).kind, "queued", "review is initially pending");
   forge.status = { ...forge.status, mergeable: "CONFLICTING" };
@@ -955,15 +1027,36 @@ test("MergeDriver.driveOne (#270): mid-review conflict wins next tick; resolved 
 
   forge.status = { ...forge.status, headOid: "RESOLVED", mergeable: "MERGEABLE", ciGreen: true };
   forge.reviewData = { ...forge.reviewData, headOid: "RESOLVED" };
-  const recorded: Array<[string, string]> = [];
-  assert.equal((await driver.driveOne(7, 46, oldPin, (h, at) => recorded.push([h, at]))).kind, "queued");
-  assert.deepEqual(recorded, [["RESOLVED", "2026-07-19T01:00:00.000Z"]], "resolved head receives a fresh trigger");
+  const recorded: Array<[string, string, unknown]> = [];
+  assert.equal((await driver.driveOne(7, 46, oldPin, (h, at, meta) => recorded.push([h, at, meta]))).kind, "queued");
+  assert.deepEqual(
+    recorded,
+    [["RESOLVED", "2026-07-19T01:00:00.000Z", { generation: 2, ambiguous: true, deltaChain: 0, inFlight: true }]],
+    "a response that arrived only while conflict handling bypassed verdict recording establishes no coverage, so the next trigger is full",
+  );
 
-  const newPin = { head: "RESOLVED", at: "2026-07-19T01:00:00.000Z" };
+  const newPin = {
+    head: "RESOLVED",
+    at: "2026-07-19T01:00:00.000Z",
+    generation: 2,
+    ambiguous: true,
+    deltaChain: 0,
+    inFlight: true,
+  };
+  forge.reviewData = {
+    ...forge.reviewData,
+    comments: [
+      {
+        login: `${CODEX_REVIEWER_LOGINS[0]}[bot]`,
+        createdAt: "2026-07-19T01:01:00Z",
+        body: "Codex Review: Didn't find any major issues.",
+      },
+    ],
+  };
   assert.equal(
     (await driver.driveOne(7, 46, newPin, noopRecord)).kind,
     "queued",
-    "the superseded old-head review cannot satisfy the resolved head",
+    "a delayed OID-less H1 response posted after the H2 trigger cannot satisfy the ambiguous H2 generation",
   );
   forge.reviewData = {
     ...forge.reviewData,
@@ -983,6 +1076,180 @@ test("MergeDriver.driveOne: pin matches the CURRENT head -> no re-trigger, proce
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
   assert.deepEqual(reviewer.triggered, []); // no fresh trigger posted
   assert.equal(outcome.kind, "merged"); // gate ran normally and merged
+});
+
+test("MergeDriver.driveOne #273: a decisive current-generation verdict closes the in-flight marker even while CI still waits", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, ciGreen: false };
+  const recorded: Array<[string, number]> = [];
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(
+    7,
+    46,
+    { ...ALREADY_TRIGGERED, generation: 4, inFlight: true },
+    noopRecord,
+    undefined,
+    false,
+    (head, generation) => recorded.push([head, generation]),
+  );
+  assert.equal(outcome.kind, "queued");
+  assert.deepEqual(recorded, [["HEAD", 4]]);
+});
+
+test("MergeDriver.driveOne P1: stale threads cannot close H2; H3 stays ambiguous and rejects a delayed OID-less H2 comment", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, headOid: "H2" };
+  forge.reviewData = { ...forge.reviewData, headOid: "H2", unresolvedThreads: 2 };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new CodexReviewer([]),
+    cfg: mkCfg(),
+    now: () => new Date("2026-07-19T02:00:00Z"),
+  });
+  const h2Pin = {
+    head: "H2",
+    at: "2026-07-19T01:00:00Z",
+    generation: 2,
+    ambiguous: false,
+    deltaChain: 1,
+    inFlight: true,
+  };
+  const closed: Array<[string, number]> = [];
+  assert.equal((await driver.driveOne(7, 46, h2Pin, noopRecord, undefined, false, (h, g) => closed.push([h, g]))).kind, "fixable");
+  assert.deepEqual(closed, [], "bare PR-wide threads are not a response attributable to trigger(H2)");
+
+  forge.status = { ...forge.status, headOid: "H3" };
+  forge.reviewData = { ...forge.reviewData, headOid: "H3", unresolvedThreads: 0 };
+  let h3Meta: { generation: number; ambiguous: boolean; deltaChain: number; inFlight: boolean } | undefined;
+  assert.equal((await driver.driveOne(7, 46, h2Pin, (_h, _at, meta) => (h3Meta = meta))).kind, "queued");
+  assert.equal(h3Meta?.ambiguous, true);
+
+  const h3Pin = { head: "H3", at: "2026-07-19T02:00:00.000Z", ...h3Meta };
+  forge.reviewData = {
+    ...forge.reviewData,
+    comments: [
+      {
+        login: `${CODEX_REVIEWER_LOGINS[0]}[bot]`,
+        createdAt: "2026-07-19T02:01:00Z",
+        body: "Codex Review: Didn't find any major issues.",
+      },
+    ],
+  };
+  const delayed = await driver.driveOne(7, 46, h3Pin, noopRecord);
+  assert.equal(delayed.kind, "queued");
+  assert.match((delayed as { reason: string }).reason, /WAIT_REVIEW/);
+});
+
+test("MergeDriver.driveOne P1: a formal H2 response closes in-flight but generation 3 still rejects delayed OID-less artifacts", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, headOid: "H2", ciGreen: false };
+  forge.reviewData = {
+    ...forge.reviewData,
+    headOid: "H2",
+    reviews: [
+      {
+        author: CODEX_REVIEWER_LOGINS[0],
+        commitOid: "H2",
+        state: "DISMISSED",
+        submittedAt: "2026-07-19T01:01:00Z",
+      },
+    ],
+  };
+  const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
+  const h2Pin = {
+    head: "H2",
+    at: "2026-07-19T01:00:00Z",
+    generation: 2,
+    ambiguous: false,
+    deltaChain: 1,
+    inFlight: true,
+  };
+  let h2Closed = false;
+  let h2Covered = false;
+  await driver.driveOne(7, 46, h2Pin, noopRecord, undefined, false, (_head, _generation, coverage) => {
+    h2Closed = true;
+    h2Covered = coverage;
+  });
+  assert.equal(h2Closed, true);
+  assert.equal(h2Covered, true);
+
+  forge.status = { ...forge.status, headOid: "H3" };
+  forge.reviewData = { ...forge.reviewData, headOid: "H3", reviews: [] };
+  let h3Meta: { generation: number; ambiguous: boolean; deltaChain: number; inFlight: boolean } | undefined;
+  await driver.driveOne(7, 46, { ...h2Pin, inFlight: false, coveredHead: "H2" }, (_h, _at, meta) => {
+    h3Meta = meta;
+  });
+  assert.equal(h3Meta?.ambiguous, false);
+
+  forge.reviewData = {
+    ...forge.reviewData,
+    comments: [
+      {
+        login: `${CODEX_REVIEWER_LOGINS[0]}[bot]`,
+        createdAt: "2026-07-19T02:01:00Z",
+        body: "Codex Review: Didn't find any major issues.",
+      },
+    ],
+  };
+  const delayed = await driver.driveOne(7, 46, { head: "H3", at: "2026-07-19T02:00:00Z", ...h3Meta }, noopRecord);
+  assert.equal(delayed.kind, "queued");
+  assert.match((delayed as { reason: string }).reason, /WAIT_REVIEW/);
+});
+
+test("MergeDriver.driveOne #273: trusted coverage can land after another response already closed in-flight", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, headOid: "H2", ciGreen: false };
+  forge.reviewData = {
+    ...forge.reviewData,
+    headOid: "H2",
+    reviews: [
+      {
+        author: CODEX_REVIEWER_LOGINS[0],
+        commitOid: "H2",
+        state: "DISMISSED",
+        submittedAt: "2026-07-19T01:01:00Z",
+      },
+    ],
+  };
+  let recorded: [string, number, boolean] | undefined;
+  await new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() }).driveOne(
+    7,
+    46,
+    { head: "H2", at: "2026-07-19T01:00:00Z", generation: 2, inFlight: false },
+    noopRecord,
+    undefined,
+    false,
+    (head, generation, coverage) => {
+      recorded = [head, generation, coverage];
+    },
+  );
+  assert.deepEqual(recorded, ["H2", 2, true]);
+});
+
+test("MergeDriver.driveOne #273: pin-cleared re-entry preserves strict generation correlation", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, headOid: "H2" };
+  forge.reviewData = { ...forge.reviewData, headOid: "H2" };
+  const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg(), now: () => new Date("2026-07-19T03:00:00Z") });
+  let meta: { generation: number; ambiguous: boolean; deltaChain: number; inFlight: boolean } | undefined;
+  await driver.driveOne(7, 46, { head: null, at: null, generation: 2, coveredHead: "H1" }, (_h, _at, next) => {
+    meta = next;
+  });
+  assert.equal(meta?.generation, 3);
+
+  forge.reviewData = {
+    ...forge.reviewData,
+    comments: [
+      {
+        login: `${CODEX_REVIEWER_LOGINS[0]}[bot]`,
+        createdAt: "2026-07-19T03:01:00Z",
+        body: "Codex Review: Didn't find any major issues.",
+      },
+    ],
+  };
+  const outcome = await driver.driveOne(7, 46, { head: "H2", at: "2026-07-19T03:00:00Z", ...meta }, noopRecord, undefined, true);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /WAIT_REVIEW/);
 });
 
 test("MergeDriver.driveOne: a trigger-post failure (rate-limit/network) -> queued, never throws, and NO pin is recorded (round-2 P2)", async () => {

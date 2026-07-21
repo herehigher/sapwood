@@ -900,6 +900,7 @@ class FakeMergeGate implements MergeGate {
   /** When set, driveOne invokes the caller-supplied recordFallback with this lock (#54) —
    *  simulates resolveReviewVerdict returning a new lock. */
   recordFallbackOnCall: { head: string | null; kind: string | null } | null = null;
+  recordVerdictOnCall: [string, number, boolean] | null = null;
   async driveOne(
     pr: number,
     issue: number,
@@ -909,10 +910,13 @@ class FakeMergeGate implements MergeGate {
       lock: { head: string | null; kind: string | null };
       recordFallback: (lock: { head: string | null; kind: string | null }) => void;
     },
+    _reentered?: boolean,
+    recordVerdict?: (head: string, generation: number, coverageEstablished: boolean) => void,
   ): Promise<DriveOutcome> {
     this.calls.push({ pr, issue, triggerPin, fallbackLock: fallback?.lock });
     if (this.recordOnCall) recordTrigger(...this.recordOnCall);
     if (this.recordFallbackOnCall) fallback?.recordFallback(this.recordFallbackOnCall);
+    if (this.recordVerdictOnCall) recordVerdict?.(...this.recordVerdictOnCall);
     return this.outcomes[pr] ?? { ...this.defaultOutcome, pr };
   }
 }
@@ -1615,7 +1619,15 @@ test("tick DRIVE: driveOne is called every tick with the lane's issue number (#4
   for (const c of gate.calls) {
     assert.equal(c.pr, 55);
     assert.equal(c.issue, 2);
-    assert.deepEqual(c.triggerPin, { head: null, at: null });
+    assert.deepEqual(c.triggerPin, {
+      head: null,
+      at: null,
+      generation: 0,
+      ambiguous: false,
+      deltaChain: 0,
+      inFlight: false,
+      coveredHead: null,
+    });
   }
   st.close();
 });
@@ -1635,7 +1647,35 @@ test("tick DRIVE: driveOne's recordTrigger callback persists the pin into State,
 
   gate.recordOnCall = null; // 2nd tick: driveOne doesn't re-record (simulating a matched pin)
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-  assert.deepEqual(gate.calls[1]!.triggerPin, { head: "HEAD1", at: "2026-07-07T08:00:00.000Z" }); // read back
+  assert.deepEqual(gate.calls[1]!.triggerPin, {
+    head: "HEAD1",
+    at: "2026-07-07T08:00:00.000Z",
+    generation: 1,
+    ambiguous: false,
+    deltaChain: 0,
+    inFlight: true,
+    coveredHead: null,
+  }); // read back
+  st.close();
+});
+
+test("tick DRIVE #273: generation-attributable trusted verdict persists covered head through the conductor callback", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "waiting-ci" };
+  gate.recordOnCall = ["HEAD1", "2026-07-07T08:00:00.000Z"];
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+  gate.recordOnCall = null;
+  gate.recordVerdictOnCall = ["HEAD1", 1, true];
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.review_trigger_in_flight, 0);
+  assert.equal(row.review_covered_head, "HEAD1");
   st.close();
 });
 
@@ -3101,9 +3141,22 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
       pr: 170,
       review_triggered_head: "H1",
       review_triggered_at: "2026-07-15T00:00:00.000Z",
+      review_trigger_generation: 2,
     });
     forge.prStatus = { number: 170, headOid: "H1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
-    forge.prReviewData = { ...forge.prReviewData, headOid: "H1", labels: [], reviews: [] };
+    forge.prReviewData = {
+      ...forge.prReviewData,
+      headOid: "H1",
+      labels: [],
+      reviews: [],
+      comments: [
+        {
+          login: `${CODEX_REVIEWER_LOGINS[0]}[bot]`,
+          createdAt: "2026-07-15T00:01:00Z",
+          body: "Codex Review: Didn't find any major issues.",
+        },
+      ],
+    };
 
     const silent = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.equal(st.getWorker("lane-silent")?.state, "driving");
@@ -5001,7 +5054,11 @@ test("tick FIXING RECLAIM: a fixing lane reaching DONE+PR (pushed a fix) lands b
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  seedFixing(st, "lane-fix", 3, 30, { review_triggered_head: "OLD_HEAD", review_triggered_at: "2026-07-01T00:00:00Z" });
+  seedFixing(st, "lane-fix", 3, 30, {
+    review_triggered_head: "OLD_HEAD",
+    review_triggered_at: "2026-07-01T00:00:00Z",
+    review_trigger_generation: 2,
+  });
   sup.probes["lane-fix"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 30 };
   const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
   const row = st.getWorker("lane-fix")!;
@@ -5009,6 +5066,7 @@ test("tick FIXING RECLAIM: a fixing lane reaching DONE+PR (pushed a fix) lands b
   assert.equal(row.pr, 30);
   assert.equal(row.review_triggered_head, null, "pin cleared — DRIVE must treat this head as never-triggered");
   assert.equal(row.review_triggered_at, null);
+  assert.equal(row.review_trigger_generation, 2, "pin clear preserves the lane's strict-correlation generation history");
   assert.equal(r.fixingReclaimed.length, 1);
   assert.equal(r.fixingReclaimed[0]!.kind, "done");
   st.close();

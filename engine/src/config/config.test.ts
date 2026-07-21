@@ -261,8 +261,17 @@ test("rejects a non-finite budget ceiling (overflow must not disable the cap)", 
 test("#13/#170: reviewer/merge defaults — codex reviewer, conductor-merge, silence escalation", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.reviewer.mode, "different-model-codex");
+  assert.equal(cfg.reviewer.deltaChainMax, 3);
   assert.equal(cfg.reviewer.escalateAfterSec, 86400);
   assert.equal(cfg.merge.mode, "conductor-merge");
+});
+
+test("#273: reviewer.deltaChainMax defaults to 3 and accepts only positive integers", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.equal(parseConfig(`${base}reviewer: { deltaChainMax: 5 }`).reviewer.deltaChainMax, 5);
+  for (const value of [0, -1, 1.5]) {
+    assert.throws(() => parseConfig(`${base}reviewer: { deltaChainMax: ${value} }`), /deltaChainMax/i);
+  }
 });
 
 test("#170: reviewer.escalateAfterSec accepts a positive integer override", () => {
