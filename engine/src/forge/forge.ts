@@ -6,6 +6,7 @@
 // SECURITY: all subprocess calls go through gh.ts (execFile with an argv array — never
 // exec/shell:true). Issue text is treated as data, never interpolated into a shell.
 
+import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { gh } from "./gh.js";
@@ -1343,6 +1344,56 @@ export function hasVerificationPlan(body: string, labels: string[], verifyNaLabe
   return extractVerificationPlan(body) != null;
 }
 
+/** One parsed checkbox acceptance-criterion (#283, design #279 §5, owner ruling D4): `id` is
+ *  ordinal+hash — `<1-based position within THIS extraction>-<8 hex chars of sha256(text)>` —
+ *  stable WITHIN one snapshot (the same body, parsed once, always yields the same ids; two
+ *  criteria with identical text at different ordinals get different ids via the ordinal
+ *  prefix). IDs are NOT stable ACROSS a body edit — that is the point: a later re-extraction
+ *  of a CHANGED body is exactly what checkAcSnapshotDrift (ac-snapshot.ts) exists to prevent
+ *  from ever happening silently at review time. `text` is the trimmed line content after the
+ *  checkbox marker, verbatim. */
+export interface AcceptanceCriterion {
+  id: string;
+  text: string;
+}
+
+/** Matches one top-level markdown checkbox list item: `- [ ]`, `- [x]`, `- [X]`, optionally
+ *  indented up to 3 spaces (CommonMark's own list-item allowance). Anything else under the
+ *  heading (prose, a plain `- bullet` with no checkbox, a sub-bullet nested deeper) is not an
+ *  acceptance-criterion line and is silently skipped, not counted. */
+const CHECKBOX_LINE = /^ {0,3}-\s\[([ xX])\]\s+(.+)$/;
+
+/**
+ * Extract the checkbox acceptance-criteria list from an issue body (#283, design #279 §5, D4):
+ * every `- [ ]`/`- [x]` line under the FIRST-MATCHING `## Acceptance criteria`-shaped heading
+ * (reuses extractMarkdownSections' fence-safe, nesting-safe heading scan — the SAME engine
+ * extractVerificationPlan uses, but scoped to `acceptance` only, never `verification`, so a
+ * body with an Acceptance section and a SEPARATE Verification-plan section never pulls
+ * checkbox lines that live only in the latter). Returns `null` — never `[]` — for BOTH "no
+ * matching heading at all" and "heading present but zero checkbox lines under it": either way
+ * the issue carries no honest AC set, and `isDispatchable` below (and plan-review.ts's
+ * approve-claim re-check) both treat `null` identically, as "malformed/empty, not
+ * dispatchable" for a non-`verify:n/a` issue. Order-preserving; see AcceptanceCriterion's own
+ * doc for the id scheme.
+ */
+export function extractAcceptanceCriteria(body: string): AcceptanceCriterion[] | null {
+  const sections = extractMarkdownSections(body, /acceptance/);
+  if (sections.length === 0) return null;
+  const text = sections.join("\n\n");
+  const items: AcceptanceCriterion[] = [];
+  let ordinal = 0;
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const match = CHECKBOX_LINE.exec(line);
+    if (!match) continue;
+    ordinal += 1;
+    const itemText = match[2]!.trim();
+    const hash = createHash("sha256").update(itemText).digest("hex").slice(0, 8);
+    items.push({ id: `${ordinal}-${hash}`, text: itemText });
+  }
+  return items.length > 0 ? items : null;
+}
+
 /**
  * Pure match for GithubForge.findOpenPrForIssue. Selecting a lane's PR here decides gate②'s
  * MERGE TARGET, so ambiguity must never be guessed away (gate② PR #50 P2 #2 — a newer PR
@@ -1408,6 +1459,13 @@ type ReadyCfg = {
  * gate⓪'s dispatch rule (verifyNa's doc-gate path and a reviewed plan's path are now stricter
  * and mutually exclusive); `hasVerificationPlan` remains exported/tested unchanged as a
  * standalone "does a plan exist in some form" helper for any other caller.
+ *
+ * #283 (M10, E2, design #279 §5, D4): a non-`verifyNa` issue additionally requires a
+ * non-malformed, non-empty checkbox acceptance-criteria set (`extractAcceptanceCriteria(body)
+ * != null`) — the AC authority every per-AC verdict downstream (the future engine-agent
+ * reviewer, design #279 §5) is snapshotted from at dispatch time. A `verifyNa` issue is NOT
+ * held to this — the doc-gate path is for inherently unverifiable work, which has no
+ * checkbox-shaped AC set by design.
  */
 function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
@@ -1418,7 +1476,7 @@ function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): 
   // for a human to remove one of the two labels.
   if (labelsInclude(labels, l.verifyNa) && labelsInclude(labels, l.planApproved)) return false;
   if (labelsInclude(labels, l.verifyNa)) return true;
-  return extractVerificationPlan(body) != null && labelsInclude(labels, l.planApproved);
+  return extractVerificationPlan(body) != null && extractAcceptanceCriteria(body) != null && labelsInclude(labels, l.planApproved);
 }
 
 /** Ready-lane + OPEN + this repo + gate⓪-dispatchable (#88). The dispatch work-queue. */

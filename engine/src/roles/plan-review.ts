@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { extractVerificationPlan } from "../forge/forge.js";
+import { extractAcceptanceCriteria, extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
 import type { State } from "../state/state.js";
@@ -210,6 +210,15 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
     if (extractVerificationPlan(bodyToCheck) == null) {
       return { ok: false, reason: "approve claim's issue body has no verification/acceptance plan section" };
     }
+    // #283 (M10, E2, design #279 §5, D4): mandatory checkbox AC. `plan:approved` is the ONLY
+    // gate a non-verify:na issue passes through before dispatch (forge.ts's isDispatchable
+    // re-checks the SAME extractor), so an approve claim over a body with no honest `- [ ]`
+    // acceptance-criteria set must be rejected here too — same "approve claim must be true"
+    // doctrine as the verification-plan check above, just extended to the checkbox AC set the
+    // dispatch-time snapshot (ac-snapshot.ts) is built from.
+    if (extractAcceptanceCriteria(bodyToCheck) == null) {
+      return { ok: false, reason: "approve claim's issue body has no checkbox acceptance-criteria items (`- [ ] ...`)" };
+    }
   }
   return {
     ok: true,
@@ -243,6 +252,15 @@ export function validateDrafterOutput(text: string, expectedIssue: number): Draf
   }
   if (extractVerificationPlan(block.body) == null) {
     return { ok: false, reason: "drafted body has no verification/acceptance plan section" };
+  }
+  // #283 (M10, E2, design #279 §5, D4): the drafter's deliverable is re-reviewed by a fresh
+  // plan-review pass (never self-approved — plan-author != plan-approver), but a drafted body
+  // with no checkbox AC set would otherwise sail through THIS content check only to be rejected
+  // by validateReviewerOutput's own approve-time check (or, worse, by forge.ts's isDispatchable
+  // at actual dispatch time, much later) — failing here, at the drafter's own output, gives the
+  // fastest possible feedback loop.
+  if (extractAcceptanceCriteria(block.body) == null) {
+    return { ok: false, reason: "drafted body has no checkbox acceptance-criteria items (`- [ ] ...`)" };
   }
   return { ok: true, body: block.body };
 }

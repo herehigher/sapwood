@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
 // never edit a shipped migration, add a new one. user_version (a SQLite builtin) is the
@@ -636,6 +637,30 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       UPDATE workers
       SET review_trigger_generation = 1, review_trigger_in_flight = 1
       WHERE review_triggered_head IS NOT NULL;
+    `);
+  },
+  // 22 -> 23: the AC-authority dispatch snapshot (#283, design #279 §5, D4). One row per
+  // ISSUE (not per worker/lane, and not append-only like input_manifest/context_manifests) —
+  // `issue` is the primary key, upserted via State.recordAcSnapshot. This is deliberately the
+  // simplest possible shape: conductor.ts's DISPATCH loop guarantees at most one active lane per
+  // issue at a time (the inFlightIssues check), so a fresh dispatch of the SAME issue number
+  // always means the prior lane already terminated and its snapshot is no longer needed for
+  // review — an upsert-on-conflict is exactly right, no history table required. `body` is the
+  // FULL snapshotted issue-body text (never re-derived, never re-fetched — see ac-snapshot.ts's
+  // module doc for why review sessions must read THIS, not a live fetch); `body_hash` is
+  // `hashBody(body)`, stored alongside rather than re-computed on every drift check;
+  // `manifest_json` is the caller's already-extracted `AcceptanceCriterion[]`, opaque JSON
+  // (state.ts stores it, never interprets it — same convention as round_artifacts/
+  // context_manifests' own `json` columns).
+  (db) => {
+    db.exec(`
+      CREATE TABLE ac_snapshots (
+        issue          INTEGER PRIMARY KEY,
+        body_hash      TEXT NOT NULL,
+        body           TEXT NOT NULL,
+        manifest_json  TEXT NOT NULL,
+        snapshotted_at TEXT NOT NULL
+      );
     `);
   },
 ];
@@ -2234,6 +2259,50 @@ export class State {
       recordedAt: r.recorded_at,
       json: r.json,
     }));
+  }
+
+  // ── #283: AC-authority dispatch snapshot (ac_snapshots, migration 22->23) ───────────────
+
+  /** Persist ONE issue's pre-launch AC-authority snapshot (design #279 §5) — INSERT OR REPLACE
+   *  keyed by `snapshot.issue` alone (see the migration comment above for why upsert-by-issue,
+   *  not append-only, is the right shape). conductor.ts's DISPATCH loop calls this BEFORE
+   *  `supervisor.dispatch()` ever spawns the worker, inside the SAME try/catch that already
+   *  rolls the board claim back to Ready on a dispatch failure — a write failure here throws
+   *  and is caught by that SAME rollback path, so a snapshot-persistence hiccup can never leave
+   *  a worker running against an unrecorded AC set. `manifest` is stored as opaque JSON (never
+   *  interpreted here, same convention as round_artifacts/context_manifests). */
+  recordAcSnapshot(snapshot: AcSnapshot): void {
+    this.db
+      .prepare(
+        `INSERT INTO ac_snapshots (issue, body_hash, body, manifest_json, snapshotted_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(issue) DO UPDATE SET
+           body_hash = excluded.body_hash,
+           body = excluded.body,
+           manifest_json = excluded.manifest_json,
+           snapshotted_at = excluded.snapshotted_at`,
+      )
+      .run(snapshot.issue, snapshot.bodyHash, snapshot.body, JSON.stringify(snapshot.manifest), snapshot.snapshottedAt);
+  }
+
+  /** The read counterpart — conductor.ts's DRIVE loop consults this (never a live re-fetch) to
+   *  detect body drift before a driving lane ever reaches `gate.driveOne` (see
+   *  checkAcSnapshotDrift, ac-snapshot.ts). `null` when no snapshot was ever recorded for this
+   *  issue — either a lane dispatched before this migration shipped, or a caller that bypassed
+   *  the DISPATCH loop (e.g. a test seeding a worker row directly). The caller treats `null` as
+   *  "nothing to compare against", never as drift. */
+  getAcSnapshot(issue: number): AcSnapshot | null {
+    const row = this.db
+      .prepare("SELECT issue, body_hash, body, manifest_json, snapshotted_at FROM ac_snapshots WHERE issue = ?")
+      .get(issue) as { issue: number; body_hash: string; body: string; manifest_json: string; snapshotted_at: string } | undefined;
+    if (!row) return null;
+    return {
+      issue: row.issue,
+      bodyHash: row.body_hash,
+      body: row.body,
+      manifest: JSON.parse(row.manifest_json) as AcceptanceCriterion[],
+      snapshottedAt: row.snapshotted_at,
+    };
   }
 
   // ── #234: forge MCP proxy journal (forge_proxy_journal, migration 15->16) ───────────────

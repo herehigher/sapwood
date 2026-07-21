@@ -34,8 +34,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #237: intentional edit — po.md now documents the optional `concerns` dissent field.
   "po.md": "708e148423d5d4c6486031ed28c62239c791929457d97fb58f9156ce9d6d1ab5",
   "architect.md": "897b46fd4d8803ad7b25dc1ec467f29a56139af80ed8b7bb44fc42624441cbc5",
-  "plan-reviewer.md": "d95245c8236e41bf3b33431e2d5d4dcea516dd3ca2719fee3ecdb76244ffe9c7",
-  "plan-drafter.md": "3d65a3d7b198c4ac523da925c72f4fc3d552865461dbb2be6d06cc7b38a7a575",
+  // #283: intentional edit — mandatory checkbox acceptance-criteria language (design #279 §5).
+  "plan-reviewer.md": "ba26b2fe1a2bd8c807da46bcda279e331f9298cde01ff35221f4f163e23efc7b",
+  "plan-drafter.md": "9cf51940680400e7bb1dc98089c07b960d51fc56cd5698fa7ab692f25dc004da",
   "harvest.md": "c05f0751f6087666860f7568c4613a208dc85f4c5e92ee792f88fc3b5a20ae98",
   "retro.md": "d667893510d96a67e5e8041861daa2d6767e708acfeca2f98c498e09e6a21917",
   "po-pool.md": "20ccec5f8a073f7424651c195c7b85ea685bfe2c2bf49dc9420755e9b2d60b1d",
@@ -116,4 +117,18 @@ test("plan-drafter.md (#235 PR-B follow-up F1): the matrix grants plan-drafter R
   assert.ok(body.includes("plan-author ≠ plan-approver."), "the plan-author ≠ plan-approver boundary survives verbatim");
   assert.ok(body.toLowerCase().includes("never implement"), "the never-implement boundary survives");
   assert.ok(body.includes("producer ≠ plan-drafter."), "the core intent-prohibition heading survives verbatim");
+});
+
+// ── #283 (design #279 §5, D4): mandatory checkbox acceptance criteria ─────────────────────────
+
+test("plan-reviewer.md (#283): mandates literal `- [ ]` checkbox acceptance criteria — malformed/prose AC is named as not-dispatchable, not just a style nit", () => {
+  const body = readPrompt(defaultPlanReviewerPromptPath());
+  assert.ok(body.includes("- [ ]"), "shows the literal checkbox syntax");
+  assert.ok(body.toLowerCase().includes("not dispatchable"), "states the dispatch consequence explicitly");
+});
+
+test("plan-drafter.md (#283): mandates literal `- [ ]` checkbox acceptance criteria in whatever body it drafts", () => {
+  const body = readPrompt(defaultPlanDrafterPromptPath());
+  assert.ok(body.includes("- [ ] ...`"), "shows the literal checkbox syntax");
+  assert.ok(body.toLowerCase().includes("not dispatchable"), "states the dispatch consequence explicitly");
 });

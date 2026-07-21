@@ -18,6 +18,12 @@ Out of scope: <!-- Encouraged: name one adjacent thing this issue will not do. -
 
 ## Acceptance criteria
 
+<!-- Each line MUST be a literal `- [ ]` checkbox — the engine parses this exact format into
+     the acceptance-criteria set a worker is dispatched against and later reviewed on. Prose,
+     nested sub-bullets, or a plain `-` bullet with no checkbox do not count. Exempt ONLY if
+     this chore is inherently unverifiable and carries the `verify:n/a` label (doc-gate path,
+     see the Verification plan section below). -->
+
 - [ ] Concrete, checkable statement of what "done" looks like.
 
 ## Verification plan

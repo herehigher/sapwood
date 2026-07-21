@@ -2294,6 +2294,51 @@ test("listContextManifestsForRound: two attempts of the same phase are independe
   s.close();
 });
 
+// ── #283: AC-authority dispatch snapshot (ac_snapshots, migration 22->23) ──────────────────
+
+test("recordAcSnapshot/getAcSnapshot: round-trips one issue's snapshot exactly, null for an issue never snapshotted", () => {
+  const s = mem();
+  assert.equal(s.getAcSnapshot(7), null);
+  s.recordAcSnapshot({
+    issue: 7,
+    bodyHash: "abc123",
+    body: "## Acceptance criteria\n\n- [ ] one",
+    manifest: [{ id: "1-deadbeef", text: "one" }],
+    snapshottedAt: "2026-07-21T00:00:00Z",
+  });
+  const snap = s.getAcSnapshot(7);
+  assert.equal(snap?.bodyHash, "abc123");
+  assert.equal(snap?.body, "## Acceptance criteria\n\n- [ ] one");
+  assert.deepEqual(snap?.manifest, [{ id: "1-deadbeef", text: "one" }]);
+  assert.equal(snap?.snapshottedAt, "2026-07-21T00:00:00Z");
+  // A different issue is independent.
+  assert.equal(s.getAcSnapshot(8), null);
+  s.close();
+});
+
+test("recordAcSnapshot: re-recording the SAME issue upserts — never a second row (a fresh dispatch of a terminated lane's issue replaces the stale snapshot)", () => {
+  const s = mem();
+  s.recordAcSnapshot({
+    issue: 7,
+    bodyHash: "hash-v1",
+    body: "v1 body",
+    manifest: [],
+    snapshottedAt: "t0",
+  });
+  s.recordAcSnapshot({
+    issue: 7,
+    bodyHash: "hash-v2",
+    body: "v2 body",
+    manifest: [{ id: "1-cafebabe", text: "new criterion" }],
+    snapshottedAt: "t1",
+  });
+  const snap = s.getAcSnapshot(7);
+  assert.equal(snap?.bodyHash, "hash-v2");
+  assert.equal(snap?.body, "v2 body");
+  assert.equal(snap?.snapshottedAt, "t1");
+  s.close();
+});
+
 // ── #234: forge MCP proxy journal + frozen evidence bundles (migration 15->16) ─────────────
 
 test("migration v15->v16: a populated v15 DB opens with data intact, empty forge_proxy_journal/forge_proxy_bundles tables, user_version SCHEMA_VERSION, idempotent reopen", () => {

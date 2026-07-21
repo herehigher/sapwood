@@ -252,9 +252,10 @@ const lastComment = (forge: FakeForge, issue: number): string => {
   return posted[posted.length - 1]?.[1] ?? "";
 };
 
-// A body that satisfies extractVerificationPlan (the content invariant every "approve"/drafted
-// claim is re-checked against).
-const PLAN_BODY = "Some description.\n\n## Verification\n\nRun `npm test` and confirm green.";
+// A body that satisfies extractVerificationPlan AND extractAcceptanceCriteria (#283: BOTH are
+// the content invariants every "approve"/drafted claim is re-checked against).
+const PLAN_BODY =
+  "Some description.\n\n## Acceptance criteria\n\n- [ ] the criteria are met\n\n## Verification\n\nRun `npm test` and confirm green.";
 const NO_PLAN_BODY = "Some description with no verification section at all.";
 
 test("createPlanReviewStub: marker present -> returns it unchanged, no forge call, no session run (idempotence)", async () => {
@@ -427,7 +428,7 @@ test("createPlanReviewStub P1: after the drafter's body is applied, the NEXT rev
   forge.poolEligibleIssues = [{ number: 30, title: "t", labels: [ROUND_POOL_LABEL], body: "OLD PLAN — inadequate" }];
   forge.issueBodies[30] = "OLD PLAN — inadequate";
   const cfg = mkCfg({ roles: { planReviewer: { maxDraftCycles: 1 } } });
-  const NEW_BODY = "NEW PLAN — concrete criteria\n\n## Verification\n\nRun the new test suite.";
+  const NEW_BODY = "NEW PLAN — concrete criteria\n\n## Acceptance criteria\n\n- [ ] it works\n\n## Verification\n\nRun the new test suite.";
   const runner = new ScriptedRunner([
     { result: doneResult("reviewer-0", sapwoodResult({ decision: "draft_request", issue: 30 }, "criteria too vague")) },
     { result: doneResult("drafter-0", sapwoodResult({ issue: 30 }, NEW_BODY)) },
@@ -917,7 +918,7 @@ test("createPlanReviewStub (#214 gate② review delta P2): an approved-but-planl
   const round = state.startRound("2026-07-18T00:00:00.000Z");
   forge.poolEligibleIssues = [{ number: 220, title: "orphaned", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
   forge.issueBodies[220] = "This body used to have a plan but someone deleted the section.";
-  const NEW_BODY = "Repaired.\n\n## Verification\n\nRun the suite.";
+  const NEW_BODY = "Repaired.\n\n## Acceptance criteria\n\n- [ ] it works\n\n## Verification\n\nRun the suite.";
   const runner = new ScriptedRunner([
     { result: doneResult("drafter-220", sapwoodResult({ issue: 220 }, NEW_BODY)) },
     { result: doneResult("reviewer-220", sapwoodResult({ decision: "approve", issue: 220 })) },
@@ -952,7 +953,7 @@ test("createPlanReviewStub (#214): confirm 'invalidate' feeds the SAME draft-cyc
   // section's mere presence.
   forge.issueBodies[200] =
     "OLD PLAN referencing a file since renamed.\n\n## Verification\n\nRun `npm test` from the old (now-renamed) location.";
-  const NEW_BODY = "NEW PLAN\n\n## Verification\n\nRun the new suite.";
+  const NEW_BODY = "NEW PLAN\n\n## Acceptance criteria\n\n- [ ] it works\n\n## Verification\n\nRun the new suite.";
   const runner = new ScriptedRunner([
     { result: doneResult("confirm-200", sapwoodResult({ decision: "invalidate", issue: 200 }, "references a file since renamed on main")) },
     { result: doneResult("drafter-200", sapwoodResult({ issue: 200 }, NEW_BODY)) },
@@ -1000,7 +1001,15 @@ test("createPlanReviewStub (#214 gate② review P2): confirm 'invalidate' -> see
     // ordinary cycle shape — a seed only replaces cycle 0's REVIEWER session, never the
     // drafter that decision type triggers); the drafted body then feeds a REAL cycle-1
     // reviewer session, which is where this test's verify_na verdict actually lands.
-    { result: doneResult("drafter-201", sapwoodResult({ issue: 201 }, "Revised, but genuinely unverifiable.\n\n## Verification\n\nn/a")) },
+    {
+      result: doneResult(
+        "drafter-201",
+        sapwoodResult(
+          { issue: 201 },
+          "Revised, but genuinely unverifiable.\n\n## Acceptance criteria\n\n- [ ] n/a\n\n## Verification\n\nn/a",
+        ),
+      ),
+    },
     {
       result: doneResult(
         "reviewer-201",
@@ -1096,7 +1105,12 @@ test("createPlanReviewStub (#214 gate② review delta P2): verify_na write order
   forge.issueBodies[211] = PLAN_BODY;
   const runner = new ScriptedRunner([
     { result: doneResult("confirm-211", sapwoodResult({ decision: "invalidate", issue: 211 }, "moot now")) },
-    { result: doneResult("drafter-211", sapwoodResult({ issue: 211 }, "Revised.\n\n## Verification\n\nn/a")) },
+    {
+      result: doneResult(
+        "drafter-211",
+        sapwoodResult({ issue: 211 }, "Revised.\n\n## Acceptance criteria\n\n- [ ] n/a\n\n## Verification\n\nn/a"),
+      ),
+    },
     { result: doneResult("reviewer-211", sapwoodResult({ decision: "verify_na", issue: 211 }, "Turns out unverifiable.")) },
   ]);
   const deps: PlanReviewDeps = { forge, state, cfg, runner };

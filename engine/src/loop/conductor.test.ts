@@ -144,8 +144,12 @@ class FakeForge implements IForge {
     if (this.throwOnAddIssueComment) throw new Error("simulated forge failure");
     this.issueComments.push([n, body]);
   }
-  async getIssueBody(): Promise<string> {
-    return "";
+  // #283: per-issue live body map — mutable so a test can simulate a mid-flight edit between
+  // dispatch and a later DRIVE-phase drift check. Defaults to "" (byte-for-byte the pre-#283
+  // behavior for any test that never populates it).
+  issueBodies: Record<number, string> = {};
+  async getIssueBody(n: number): Promise<string> {
+    return this.issueBodies[n] ?? "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
   async updateIssueBody(issue: number, body: string): Promise<void> {
@@ -363,6 +367,89 @@ test("tick dispatch: a launch failure rolls the board back to Ready", async () =
   assert.equal(st.runningWorkers().length, 0);
   // The rollback succeeded on the first attempt -> no durable retry marker left behind.
   assert.equal(st.pendingRollbacks().length, 0);
+  st.close();
+});
+
+// ── #283 (M10, E2, design #279 §5): AC-authority dispatch snapshot ─────────────────────────
+
+test("tick dispatch: an AC snapshot is persisted BEFORE the worker ever spawns, from the SAME body getReadyIssues fetched", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  const body = "## Acceptance criteria\n\n- [ ] one\n- [ ] two\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  let snapshotSeenAtSpawn: ReturnType<State["getAcSnapshot"]> = null;
+  const originalDispatch = sup.dispatch.bind(sup);
+  sup.dispatch = async (issue: Issue) => {
+    // Proves ordering: by the moment the worker is spawned, the snapshot already exists.
+    snapshotSeenAtSpawn = st.getAcSnapshot(issue.number);
+    return originalDispatch(issue);
+  };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.ok(snapshotSeenAtSpawn, "the AC snapshot must already be persisted by the time dispatch() (the spawn) is called");
+  assert.equal(snapshotSeenAtSpawn!.body, body);
+  assert.equal(snapshotSeenAtSpawn!.manifest.length, 2);
+  // And it's still there (unchanged) after the tick completes.
+  const snap = st.getAcSnapshot(7);
+  assert.equal(snap?.body, body);
+  st.close();
+});
+
+test("tick dispatch: the snapshotted body survives a live mid-flight edit — later reads never see the edited text", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  const originalBody = "## Acceptance criteria\n\n- [ ] original criterion\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getAcSnapshot(7)?.body, originalBody);
+  // Simulate a human/producer editing the LIVE issue body after dispatch.
+  forge.issueBodies[7] = "## Acceptance criteria\n\n- [ ] EDITED criterion\n\n## Verification plan\nrun tests";
+  // The snapshot is never re-derived from a live read — it's whatever was recorded at dispatch.
+  assert.equal(st.getAcSnapshot(7)?.body, originalBody, "session input stays the SNAPSHOTTED body, never a live re-fetch");
+  st.close();
+});
+
+test("tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explaining comment, and driveOne is NEVER called (no silent re-extraction)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  // Dispatch normally so the AC snapshot lands through the real DISPATCH path.
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  forge.issueBodies[7] = originalBody;
+  const firstTick = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
+  assert.ok(dispatchedOutcome);
+  const workerName = (dispatchedOutcome as { worker: string }).worker;
+  // The worker finishes with a PR — promotes to `driving` on the NEXT tick's RECLAIM phase.
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  // A human (or the producer, who holds `gh issue edit`) edits the issue body mid-flight.
+  forge.issueBodies[7] = "## Acceptance criteria\n\n- [ ] one EDITED\n\n## Verification plan\nrun tests";
+  const gate = new FakeMergeGate();
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0, "driveOne must never be called once drift is detected");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"));
+  assert.ok(
+    forge.issueComments.some(([n, body]) => n === 7 && /changed since its dispatch-time AC snapshot/.test(body)),
+    "a drift-explaining comment is posted on the issue",
+  );
+  assert.equal(st.getWorker(workerName)?.state, "failed");
+  assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason.startsWith("ac-snapshot-drift")));
+  st.close();
+});
+
+test("tick DRIVE: a driving lane with NO recorded AC snapshot (predates #283) is never treated as drift — drives normally", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-legacy", 4);
+  sup.probes["lane-legacy"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 1, "no snapshot recorded for issue 4 -> not drift -> driveOne runs normally");
+  assert.equal(st.getWorker("lane-legacy")?.state, "driving");
   st.close();
 });
 

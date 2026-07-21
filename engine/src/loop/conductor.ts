@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
+import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock, ReviewTriggerPin } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
@@ -1580,6 +1581,69 @@ async function escalateNeedsHuman(
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
 }
 
+/** #283 (M10, E2, design #279 §5): review-time AC-snapshot drift check. Called for EVERY driving
+ *  lane, BEFORE `gate.driveOne` is ever invoked for it this tick — the fail-closed guarantee is
+ *  ordering: drift detection must happen before, not instead of or racing, the drive attempt, so
+ *  a drifted lane can NEVER reach `driveOne` (no silent re-extraction against a body the review
+ *  input was never meant to see). Returns `null` when the lane should drive normally this tick
+ *  (either no snapshot was ever recorded for this issue — a lane dispatched before this feature
+ *  shipped, never treated as drift — or the live body still hashes to the recorded snapshot).
+ *  A transient forge read failure queues (retried next tick) rather than escalating a human over
+ *  an infra blip, the same fail-safe stance every other forge hiccup in this loop takes. Actual
+ *  drift re-escalates `needsHuman` (renewed gate⓪ adjudication is design #279 §5's human path
+ *  back) with a comment naming what changed, mirroring escalateNeedsHuman's own label/upsert/
+ *  event shape but with an UNCONDITIONAL drift-explaining comment (not just on a repeat
+ *  gated-reentry, #279 §5's own AC). */
+async function checkAcDriftBeforeDrive(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  pr: number,
+  iso: () => string,
+): Promise<DrivenOutcome | null> {
+  const snapshot = state.getAcSnapshot(w.issue);
+  if (!snapshot) return null; // nothing recorded (pre-#283 lane) -> drive normally
+  let liveBody: string;
+  try {
+    liveBody = await forge.getIssueBody(w.issue);
+  } catch (e) {
+    return { kind: "queued", worker: w.name, issue: w.issue, pr, reason: `ac-drift-check-unavailable: ${String(e)}` };
+  }
+  const result = checkAcSnapshotDrift(liveBody, snapshot);
+  if (result.ok) return null; // no drift -> drive normally
+
+  let labeled = 1;
+  let labelError: string | null = null;
+  try {
+    await forge.addLabel(w.issue, cfg.labels.needsHuman);
+  } catch (e) {
+    labeled = 0;
+    labelError = String(e);
+  }
+  state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
+  state.appendEvent("ac-snapshot-drift", {
+    worker: w.name,
+    issue: w.issue,
+    pr,
+    reason: result.reason,
+    labeled,
+    ...(labelError != null ? { labelError } : {}),
+  });
+  await forge
+    .addIssueComment(
+      w.issue,
+      `sapwood: this issue's body changed after its acceptance-criteria snapshot was taken for ` +
+        `PR #${pr} (${result.reason}). Per design #279 §5, review is scoped to the SNAPSHOTTED ` +
+        `body, never a live re-fetch — a body edit after dispatch cannot silently re-author the ` +
+        `acceptance criteria this PR is being judged against. \`${cfg.labels.needsHuman}\` has ` +
+        `been applied — a human must re-adjudicate (a renewed gate⓪ pass): either restore the ` +
+        `original acceptance criteria/verification plan, or explicitly re-approve the new body.`,
+    )
+    .catch(() => {});
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `ac-snapshot-drift: ${result.reason}` };
+}
+
 export async function tick(deps: TickDeps): Promise<TickResult> {
   const { forge, state, supervisor, cfg } = deps;
   const now = deps.now ?? (() => new Date());
@@ -2110,6 +2174,15 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // lane back up automatically once nothing is pending for it.
         state.appendEvent("drive-thread-writes-pending", { worker: w.name, issue: w.issue, pr });
         driven.push({ kind: "thread-writes-pending", worker: w.name, issue: w.issue, pr });
+        continue;
+      }
+      // #283 (M10, E2, design #279 §5): AC-snapshot drift check — BEFORE gate.driveOne is ever
+      // called for this lane. See checkAcDriftBeforeDrive's own doc for the fail-closed ordering
+      // guarantee (drift routes to needsHuman and skips driveOne entirely this tick; a missing
+      // snapshot is not drift and drives normally).
+      const driftOutcome = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso);
+      if (driftOutcome) {
+        driven.push(driftOutcome);
         continue;
       }
       // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
@@ -2808,6 +2881,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       await forge.claimIssue(issue.number);
       let dispatchRes: { name: string; sessionId: string };
       try {
+        // #283 (M10, E2, design #279 §5): the AC-authority snapshot lands BEFORE the worker
+        // ever spawns — same fail-closed unit as the dispatch attempt itself (this try/catch):
+        // if persisting it throws, the catch below rolls the board claim back to Ready exactly
+        // like a supervisor.dispatch() failure would, so a snapshot-write hiccup can never leave
+        // a worker running against an unrecorded AC set. Built from the SAME `issue.body`
+        // getReadyIssues already fetched this tick for the dispatch decision — never a second,
+        // possibly-disagreeing live read.
+        state.recordAcSnapshot(buildAcSnapshot(issue.number, issue.body ?? "", iso()));
         dispatchRes = await supervisor.dispatch(issue);
       } catch (e) {
         state.appendEvent("dispatch-failed", { issue: issue.number, error: String(e) });

@@ -5,6 +5,7 @@ import {
   assemblePRReviewData,
   countUnresolvedThreads,
   ENGINE_COMMENT_MARKER,
+  extractAcceptanceCriteria,
   extractVerificationPlan,
   fetchAllReviewThreads,
   findItemId,
@@ -317,6 +318,95 @@ test("hasVerificationPlan and extractVerificationPlan agree on every case (share
   }
 });
 
+// ── extractAcceptanceCriteria (#283, design #279 §5, D4): checkbox AC lines -> (id, text) ────
+
+test("extractAcceptanceCriteria: parses `- [ ]` lines under Acceptance criteria into ordered (id, text) pairs", () => {
+  const body = "## Acceptance criteria\n\n- [ ] first thing\n- [ ] second thing\n\n## Verification plan\nrun tests";
+  const items = extractAcceptanceCriteria(body)!;
+  assert.equal(items.length, 2);
+  assert.equal(items[0]!.text, "first thing");
+  assert.equal(items[1]!.text, "second thing");
+  assert.match(items[0]!.id, /^1-[0-9a-f]{8}$/);
+  assert.match(items[1]!.id, /^2-[0-9a-f]{8}$/);
+});
+
+test("extractAcceptanceCriteria: both `- [ ]` and `- [x]`/`- [X]` are counted", () => {
+  const body = "## Acceptance criteria\n\n- [x] done already\n- [X] also done\n- [ ] still open";
+  const items = extractAcceptanceCriteria(body)!;
+  assert.deepEqual(
+    items.map((i) => i.text),
+    ["done already", "also done", "still open"],
+  );
+});
+
+test("extractAcceptanceCriteria: no Acceptance-criteria heading at all -> null (never [])", () => {
+  assert.equal(extractAcceptanceCriteria("## Verification plan\nrun tests"), null);
+  assert.equal(extractAcceptanceCriteria(""), null);
+});
+
+test("extractAcceptanceCriteria: heading present but zero checkbox lines under it (prose only) -> null, malformed/empty", () => {
+  assert.equal(extractAcceptanceCriteria("## Acceptance criteria\n\nJust some prose, no checkboxes.\n\n## Verification\nrun tests"), null);
+  assert.equal(extractAcceptanceCriteria("## Acceptance criteria\n\n- a plain bullet, no checkbox"), null);
+});
+
+test("extractAcceptanceCriteria: only counts lines under Acceptance criteria, never Verification-plan-only lines (distinct from extractVerificationPlan's combined heading match)", () => {
+  const body = "## Acceptance criteria\n\n- [ ] real AC\n\n## Verification plan\n\n- [ ] not an AC line, just a checklist step here";
+  const items = extractAcceptanceCriteria(body)!;
+  assert.equal(items.length, 1);
+  assert.equal(items[0]!.text, "real AC");
+});
+
+test("extractAcceptanceCriteria: fence-safety is inherited from extractMarkdownSections — a fenced pseudo-heading's checkboxes are never counted as a phantom section", () => {
+  const body = "```markdown\n## Acceptance criteria\n- [ ] fenced, not real\n```\n\nno real AC section here";
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+// ── #283 corpus test: id stability under reorder/edit WITHIN a snapshot ──────────────────────
+//
+// "Stable WITHIN a snapshot" means: extracting the SAME body twice always yields the SAME ids
+// (pure, deterministic — no external counter), and the id scheme's two components behave
+// predictably under a reorder/edit of the SOURCE body used to build a NEW extraction — the
+// ordinal component tracks POSITION (so a moved item's id changes), while the hash component
+// tracks CONTENT (so an untouched item's hash half survives a reorder around it, and an edited
+// item's hash half changes even at the same ordinal). Neither drift is ever silently absorbed
+// into a stale snapshot — see checkAcSnapshotDrift (ac-snapshot.ts) for the full-body-hash gate
+// that fires long before per-AC ids would ever need reconciling against a live re-extraction.
+test("extractAcceptanceCriteria corpus: re-extracting the identical body is fully deterministic (same ids, every time)", () => {
+  const body = "## Acceptance criteria\n\n- [ ] alpha\n- [ ] beta\n- [ ] gamma";
+  assert.deepEqual(extractAcceptanceCriteria(body), extractAcceptanceCriteria(body));
+});
+
+test("extractAcceptanceCriteria corpus: reordering criteria changes the ordinal half of the id but preserves the hash half for untouched text", () => {
+  const before = "## Acceptance criteria\n\n- [ ] alpha\n- [ ] beta\n- [ ] gamma";
+  const after = "## Acceptance criteria\n\n- [ ] gamma\n- [ ] alpha\n- [ ] beta"; // rotated
+  const beforeItems = extractAcceptanceCriteria(before)!;
+  const afterItems = extractAcceptanceCriteria(after)!;
+  const hashOf = (id: string) => id.split("-")[1];
+  const alphaBefore = beforeItems.find((i) => i.text === "alpha")!;
+  const alphaAfter = afterItems.find((i) => i.text === "alpha")!;
+  assert.equal(hashOf(alphaBefore.id), hashOf(alphaAfter.id), "the same text hashes identically regardless of position");
+  assert.notEqual(alphaBefore.id, alphaAfter.id, "the ordinal prefix differs -> the full id differs across the reorder");
+  assert.equal(alphaBefore.id, "1-" + hashOf(alphaBefore.id));
+  assert.equal(alphaAfter.id, "2-" + hashOf(alphaAfter.id));
+});
+
+test("extractAcceptanceCriteria corpus: editing one criterion's text changes only ITS id — sibling ids at other ordinals are untouched", () => {
+  const before = "## Acceptance criteria\n\n- [ ] alpha\n- [ ] beta\n- [ ] gamma";
+  const after = "## Acceptance criteria\n\n- [ ] alpha\n- [ ] beta EDITED\n- [ ] gamma";
+  const beforeItems = extractAcceptanceCriteria(before)!;
+  const afterItems = extractAcceptanceCriteria(after)!;
+  assert.equal(beforeItems[0]!.id, afterItems[0]!.id, "alpha (untouched, same ordinal) keeps its id");
+  assert.notEqual(beforeItems[1]!.id, afterItems[1]!.id, "beta's edited text changes its id");
+  assert.equal(beforeItems[2]!.id, afterItems[2]!.id, "gamma (untouched, same ordinal) keeps its id");
+});
+
+test("extractAcceptanceCriteria corpus: duplicate identical criterion text at different ordinals still gets distinct ids (the ordinal half disambiguates)", () => {
+  const items = extractAcceptanceCriteria("## Acceptance criteria\n\n- [ ] run the tests\n- [ ] run the tests")!;
+  assert.equal(items.length, 2);
+  assert.notEqual(items[0]!.id, items[1]!.id);
+  assert.equal(items[0]!.text, items[1]!.text);
+});
+
 // ── findOpenPrNumber (#46: the live findOpenPr wiring's pure match; PR #50 P2 #2 hardening —
 //   this selects gate②'s MERGE target, so ambiguity is fail-closed, never guessed) ──────────
 
@@ -515,12 +605,14 @@ const GATE0_PROJECT_JSON = JSON.stringify({
           nodes: [
             // #40: plan present + plan:approved -> dispatchable. Also carries a milestone —
             // the #86 threads-through-when-present coverage rides this item (PROJECT_JSON's
-            // only milestoned item, #10, is no longer returned under gate⓪).
+            // only milestoned item, #10, is no longer returned under gate⓪). #283: also carries
+            // a checkbox acceptance-criteria section — required for dispatch alongside
+            // plan:approved since isDispatchable now also gates on extractAcceptanceCriteria.
             {
               number: 40,
               title: "plan approved",
               labels: ["plan:approved"],
-              body: "## Verification\n- run npm test",
+              body: "## Acceptance criteria\n- [ ] the command succeeds\n\n## Verification\n- run npm test",
               milestone: "M4",
             },
             // #41: plan present, no plan:approved -> excluded (presence alone is not enough).
@@ -611,6 +703,76 @@ test("isDispatchable: BOTH verify:n/a and plan:approved (forbidden mixed state) 
   const p = parseProject(GATE0_PROJECT_JSON, "Status");
   const ready = selectReadyIssues(p, cfg);
   assert.ok(!ready.some((i) => i.number === 47), "mixed-label issue never dispatches");
+});
+
+// ── #283 (M10, E2, design #279 §5, D4): a malformed/empty checkbox AC set is not dispatchable ──
+
+const GATE0_AC_PROJECT_JSON = JSON.stringify({
+  data: {
+    user: {
+      projectV2: {
+        id: "PVT_gate0_ac",
+        field: { id: "PVTF_status", options: [{ id: "opt_ready", name: "Ready" }] },
+        items: {
+          nodes: [
+            // #60: plan:approved + a real verification section + a real checkbox AC section
+            // -> dispatchable, the happy path.
+            {
+              number: 60,
+              title: "AC present",
+              labels: ["plan:approved"],
+              body: "## Acceptance criteria\n\n- [ ] one\n- [ ] two\n\n## Verification\n- run npm test",
+            },
+            // #61: plan:approved + verification, but the Acceptance criteria heading has zero
+            // checkbox lines (prose only) -> excluded: malformed/empty AC.
+            {
+              number: 61,
+              title: "AC section present but no checkboxes",
+              labels: ["plan:approved"],
+              body: "## Acceptance criteria\n\nSome prose, no checkboxes.\n\n## Verification\n- run npm test",
+            },
+            // #62: plan:approved + verification, but NO Acceptance criteria heading at all ->
+            // excluded: empty AC (the pre-#283 dispatchable shape).
+            {
+              number: 62,
+              title: "no AC heading at all",
+              labels: ["plan:approved"],
+              body: "## Verification\n- run npm test",
+            },
+            // #63: verify:n/a, no AC heading at all -> STILL dispatchable (the doc-gate path is
+            // never held to the checkbox-AC requirement).
+            {
+              number: 63,
+              title: "verify:n/a, no AC needed",
+              labels: ["verify:n/a"],
+              body: "no plan needed",
+            },
+          ].map((it: { number: number; title: string; labels: string[]; body: string }) => ({
+            id: `ITEM_${it.number}`,
+            content: {
+              number: it.number,
+              title: it.title,
+              state: "OPEN",
+              body: it.body,
+              repository: { nameWithOwner: "herehigher/sapwood" },
+              labels: { nodes: it.labels.map((name) => ({ name })) },
+            },
+            fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+          })),
+        },
+      },
+    },
+  },
+});
+
+test("isDispatchable: #283 — a malformed/empty checkbox AC set on a non-verify:na issue is not dispatchable; verify:n/a is exempt", () => {
+  const p = parseProject(GATE0_AC_PROJECT_JSON, "Status");
+  const ready = selectReadyIssues(p, cfg);
+  assert.deepEqual(
+    ready.map((i) => i.number).sort((a, b) => a - b),
+    [60, 63],
+    "#61 (AC heading, no checkboxes) and #62 (no AC heading) are excluded; #63 (verify:n/a) is exempt",
+  );
 });
 
 test("getReadyIssues: any gh/API error during the project fetch -> rejects, never a silent partial/empty ready list (fail-closed)", async () => {
