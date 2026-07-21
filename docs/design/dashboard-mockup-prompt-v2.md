@@ -1,8 +1,8 @@
 # Dashboard 成品预期图 — v2（部件分解阶段）
 
 部件流：hero（冻结·26 号图）→ header（冻结·32 号图）→ lanes（冻结·37 号图）
-→ cost strip（冻结·40 号图）→ needs-attention strip（方案待确认）→
-activity feed / config drawer / 侧栏 rail → 整页融合。
+→ cost strip（冻结·40 号图）→ needs-attention strip（冻结·41 号图+42 重chip 嫁接）
+→ activity feed / config drawer / 侧栏 rail → 整页融合。
 
 本地工作文件，不提交。v1（整页提示词+首轮出图）见 `dashboard-mockup-prompt-v1.md`。
 本轮起改为**分部件设计、最后融合**，首个部件 = hero board。
@@ -483,7 +483,7 @@ Same two-panel layout, light "spring" theme: canvas warm cream nudged slightly t
 实心+斜纹、无分段"，BY MODEL 凭空分段。实施注记：**BY MODEL 条永不带
 刻度/分段**（中位刻度只属 stage 条）。
 
-# Needs-attention strip 部件（v6 · 三方合成方案待用户确认）
+# Needs-attention strip 部件（v6 · 冻结，基准 41 号图 + 42 重 chip 嫁接）
 
 rust 的正主。三方 = PM + 架构师（升级事件族全量审计，file:line 在案）+
 架空用户（Mara/Deniz）。
@@ -595,6 +595,15 @@ Same two-instance layout, light "spring" theme: canvas warm cream nudged slightl
 7. **全图零关闭钮零 X**（禁 UI 删除的像素证据）？
 8. 空态=同框架半高 + moss 行 + 心跳戳，框架未隐藏？
 9. rust 只出现在徽章与左边框（不整行泼）；moss 只在空态行？
+
+## 出图评审（2026-07-21，41/42/43 号图）
+
+**41 号定基准**（单行密度贴 strip 本分、字形槽位全行一致、双层/小标/
+空态/零关闭钮全过），嫁接 42 号的**重型年龄 chip**（加大加粗描边，
+≥24h 阈值——42 是唯一做对 oldest 喊话的）。43 淘汰：seen 行画成整行
+**提亮**=语义反转（看过的该变暗退后，提亮读作选中）。实施注记：
+①seen 变暗要 40–50% 不透明度，仅眼形字形不足；②CEILING 类字形槽位
+与其余行保持一致（徽章→字形→编号）。
 
 ## 变更记录（浓缩：只留迭代理由，细节以各部件章节现行文本为准）
 
