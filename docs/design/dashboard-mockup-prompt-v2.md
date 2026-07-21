@@ -307,6 +307,50 @@ needs-human=系统请求人（rust）；hold=人已介入、行使控制（**禁
   §11 follow-up #7（`pr-held`/`pr-released` 事件）为实施硬前置，
   出图画目标态不受影响；实施期与 #293 同款先立引擎 issue。
 
+## PROMPT — lanes 部件 · dark "autumn"（v4）
+
+一图验四事：fixing 卡（最大缺口）、on hold 卡（新议题）、idle 细行 +
+RECENT 收据、caption 上移面板级。handed off / DETACHED 不进主图。
+**全图无 rust**（needs-human 已拆去 strip；hold 禁 rust）——本身就是
+色彩语法的验收项。
+
+A single wide dashboard panel on a dark canvas, wide 16:4 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. This is the "lanes" panel of a larger dashboard: one row containing THREE cards side by side plus ONE slim full-width row underneath them. Dense compact instrument-panel aesthetic, square-cornered slots, NOT airy or rounded.
+
+PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; card surfaces slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; amber #E8A33D strictly for activity marks and progress bars. ABSOLUTELY NO rust orange, NO red, NO green checkmarks, NO neon, NO gradients, NO glow. All text tiny monospace or tiny uppercase letterspaced; everything still and calm.
+
+PANEL HEADER: top-left small letterspaced label "LANES"; top-right one quiet caption "opus · high · soft budget $10" — this caption appears ONCE at panel level, NEVER inside the cards.
+
+CARD 1 — working lane: small corner label "lane"; a LARGE monospace issue number "#94" as the card's headline (no issue title text anywhere); next to it a small static amber dot and the word "working"; below: "~$0.53 est" with a very thin amber progress bar only slightly filled; bottom-left small elapsed time "8m".
+
+CARD 2 — fixing lane: LARGE "#90" headline; beside it an amber dot and the words "FIXING · ROUND 1/2" plus a SMALL curved return-loop arrow icon (a thin arrow bending back on itself); below: a quiet reference "PR #99"; then "~$1.69 est" with a thin amber progress bar filled about a fifth; bottom-left elapsed "32m".
+
+CARD 3 — on hold lane: LARGE "#87" headline; beside it a small cream-outlined badge reading "ON HOLD" with a tiny pin/hand-shaped hold glyph inside the badge — badge is CREAM outline, calm and neutral, NOT amber, NOT orange; below: quiet reference "PR #96"; then "$1.10 settled" as plain text with NO progress bar, NO est, NO token counts; NO elapsed time.
+
+SLIM ROW below the three cards, full panel width, half card height: left side the word "idle" with a small hollow dot; right side one quiet receipt line "RECENT — #92 ⇒ PR #101 · $0.95".
+
+NO token counts anywhere. NO model names inside cards. NO issue titles. NO green/red status icons. NO rust or red pixels anywhere in this image.
+
+Only these strings must be legible: "LANES", "opus · high · soft budget $10", "#94", "working", "~$0.53 est", "8m", "#90", "FIXING · ROUND 1/2", "PR #99", "~$1.69 est", "32m", "#87", "ON HOLD", "PR #96", "$1.10 settled", "idle", "RECENT — #92 ⇒ PR #101 · $0.95". All other text may be soft unreadable placeholder lines.
+
+Mood: quiet instrument panel, autumn heartwood, warm firelit browns. The three cards must read as siblings of one component in different states: active amber (working, fixing), deliberately parked cream (on hold), and the slim idle row as quiet capacity.
+
+## PROMPT — lanes 部件 · light "spring"（变体，仅换调色）
+
+Same panel layout, light "spring" theme: canvas warm cream nudged slightly toward pale green #F1F0E2 — NOT white, NOT saturated green; card surfaces one step greener #E9EAD6; primary text dark heartwood brown #251B10; hairlines #8A7A64; activity accent deep amber #8A5A14; ON HOLD badge outline dark heartwood brown. Mood: early spring on warm paper.
+
+## Lanes 审评清单
+
+1. fixing 卡存在且带 `FIXING · ROUND 1/2` 计数 + 回环小箭头（评审回环
+   在细节层有家）？
+2. on hold 徽章是 cream 素色 + hold 钉，无告警感？**全图零 rust 零红**？
+3. on hold 卡是 `$1.10 settled` 纯文本——无 est、无进度条、无 token、
+   无经过时间（driving 态 telemetry 已清空的诚实呈现）？
+4. token 数全图缺席？model·effort 只在面板 caption 出现一次、卡内无？
+5. idle 是细行不是大卡；RECENT 收据在、且不声称"本道上一次"？
+6. 大字 issue 号无内联标题（标题=hover，#207 未落）？
+7. budget 条只出现在活进程卡（working/fixing），细、amber、无分段？
+8. 三卡读得出是同一部件的三种状态（活动 amber / 停驻 cream / 容量细行）？
+
 ## 变更记录
 
 - v2（2026-07-21）：转部件分解流程；记录 round-1 三条用户裁决；
@@ -351,3 +395,12 @@ needs-human=系统请求人（rust）；hold=人已介入、行使控制（**禁
   通栏分隔线。用户两条裁决：①E-STOP 缩写在软件语境误读 E-SHOP →
   改全拼 EMERGENCY STOP（与引擎信号名一致）；②急停带八边形轮廓图标，
   全页唯一图标按钮，PAUSE/STOP 保持纯文字（不对称即层级）。
+- v4（2026-07-21）：header 冻结（32 号图 8/8 过评，八边形实施时用标准
+  SVG、BACK TO LIVE ▸▸ 记为铁律记名例外）。lanes 部件三方合成：
+  架构师审计定六个真实状态（running/driving/fixing/done/failed/handoff），
+  原型三处结构性虚构（稳定槽位道史 / driving 道 live telemetry /
+  needs-human 占道头条）；架空用户共识 = fixing 卡缺席是最大洞、
+  hero 管位置卡片管深度。用户四点裁决全接受 + on hold 议题裁决
+  （人主动 hold 禁 rust、cream 徽章、主呈现在 lane 卡、不进 strip、
+  §11 #7 hold 事件为实施硬前置）。lanes 出图提示词（dark + spring）
+  + 8 项审评清单起草完成。
