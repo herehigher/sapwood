@@ -219,98 +219,6 @@ Same two-bar layout, light "spring" theme: canvas warm cream nudged slightly tow
 7. 右箭头在 LIVE 位处于灰态（已在最右，无更新一轮可去）？
 8. 无 Live/Replay 切换开关残留？无 wordmark/config（它们在侧栏）？
 
-# Cost strip 部件（v5 · 方案）
-
-§3 E 信息架构已定（phase+model 双桶、est/settled 斜纹语法、Config ▸ 入口），
-本轮只做数据核实 + 元素落地。**核实结论：零新引擎前置。**
-
-## 数据依据（架构师核查 2026-07-21）
-
-- `spend_ledger`：`ts/worker/issue/usd` + v-迁移 `model` 与 token 四列
-  （input/output/cache_read/cache_creation），每 (lane, model) 一行。
-- **phase 推导 = worker 名前缀**：lane 工人 `lane-<issue>-<uuid8>`
-  （worker.ts:988）、角色 session `role-<roleId>-<uuid8>`
-  （peripheral.ts:413，记账 peripheral.ts:916）。服务端前缀映射 →
-  §7 阶段词：role-po→Goal & align，role-architect→Arch review，
-  role-plan-review→Verify，`lane-*`→Lanes（首 leg+fix leg 同桶），
-  role-harvest→Summary，role-retro→Retro。内部 key 永不渲染。
-  实施注：前缀解析是服务端约定，须配一条"角色名前缀改动即碎"守护测试。
-- **回放窗口**：rounds 表 `start_spend_id` 游标（state.ts:25）切轮窗——
-  既有机制，live=今日 ts 窗，replay=轮 id 窗。
-- **est 叠层只属 Lanes 桶**：live est 三件套只存在于活 lane
-  （workers.est_cost_usd）；角色 session 同步短跑、无 live telemetry——
-  别的桶画斜纹尾就是造假。
-- Codex bot 评审=外部服务，引擎零记账——REVIEW 不成桶（诚实缺席）。
-
-## 元素方案
-
-| 元素 | 设计 | 数据 |
-|---|---|---|
-| BY STAGE 横条组 | 六桶横条（Goal & align / Arch review / Verify / **Lanes** / Summary / Retro），settled 实心 amber，**仅 Lanes 条**可带斜纹 est 尾；条右端小字金额 | 前缀映射 + SUM(usd)，est 尾=活 lane est_cost_usd 和 |
-| BY MODEL 横条组 | 每 model 一条（opus/sonnet/…），实心；hover = token 四分（input/output/cache read/cache write） | `model` 列 + token 四列 |
-| 窗口标注 | 左上角 "TODAY"（live）/ "ROUND 9"（replay，跟随导航器） | ts 窗 / start_spend_id 窗 |
-| Config ▸ | 右上小入口，开只读 drawer（§3 E 既有规格，不在本部件出图） | allowlist 键 |
-| 空态 | 今日零记账 → 条组隐去，一行 "no spend recorded today" | |
-
-不进 cost strip：日限额/run 总额（header 花费仪表管）、per-lane 成本
-（lane 卡管）——同一事实一个家。
-
-## 裁决记录（三方合成，2026-07-21；用户指令：带架空用户审评 + 历史轮费用议题）
-
-1. **历史轮费用**（用户提问）：平均值进 strip 标注（"this round $6.2 ·
-   avg $4.8" **成对**才是单位，孤立平均无锚点）；每轮总额的家=轮导航器
-   列表（已有 spend 列），strip 不重复。§2 历史聚合 deferral 不踩线
-   （本地 ledger 聚合，非 GitHub 历史）。
-2. **轮账单行**（Deniz）：replay 窗右对齐一行
-   `total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)` ——
-   review 零花费**明说**而非无声缺席（信任洞修补）；$/PR = 采纳备忘录
-   数字（轮 spend 窗 + artifact merged 数，零新数据）。
-3. **Config ▸ 砍出 strip**（两人设一致；rail 底部 config 齿轮已是入口）
-   ——§3 E 修订项。
-4. **布局 = Mara 案**：左右并排一条扁 strip，BY STAGE 占 2/3 宽。
-5. **BY MODEL 保留收窄**（评估者的"收据"信任信号），token 四分留 hover。
-6. **幽灵中位刻度**（Mara）：每根 stage 条一枚暗淡刻度=该阶段历史中位，
-   一眼判常异；超中位**不染 rust**（超均值≠该人看）。
-7. fix-leg v0.2 不拆；费率/速度概念不加。
-
-## PROMPT — cost strip 部件 · dark "autumn"（双态对照图 · v5）
-
-Two slim horizontal dashboard cost panels stacked vertically with a small gap on one dark canvas, wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. Top panel = LIVE "today" state, bottom panel = REPLAY "closed round" state of the SAME component. Dense compact instrument-panel aesthetic, square corners, NOT airy.
-
-PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; panel surfaces slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; muted secondary text #B9A98C; amber #E8A33D strictly for spend bars. NO rust orange, NO red, NO green, NO neon, NO gradients, NO glow. All text tiny monospace or tiny uppercase letterspaced.
-
-TOP PANEL — LIVE state:
-(1) top-left caption "COST · TODAY" followed by a muted reference "avg round $4.8";
-(2) left two-thirds, group label "BY STAGE": six thin horizontal bars stacked, labels left, small dollar amounts at each bar's right: "Goal & align $0.22", "Arch review $0.31", "Verify $0.18", "Lanes $8.9", "Summary $0.26", "Retro $0.29". The Lanes bar is much longer than all others and carries a short HATCHED translucent amber tail at its end (live estimate). Each bar also shows one FAINT short vertical tick — a dim historical-median marker, quiet, amber-dimmed, NOT a second bar;
-(3) right third, group label "BY MODEL": two solid amber bars "opus $7.8" and "sonnet $2.4". No hatched tails here;
-(4) NO config link anywhere.
-
-BOTTOM PANEL — REPLAY state of the same component:
-(1) top-left caption "COST · ROUND 9" with a small amber-outlined badge "CLOSED";
-(2) same six BY STAGE bars, ALL solid — no hatched tail anywhere — amounts "Goal & align $0.15", "Arch review $0.24", "Verify $0.12", "Lanes $5.1", "Summary $0.21", "Retro $0.38", faint median ticks present;
-(3) same BY MODEL group, solid bars "opus $4.9", "sonnet $1.3";
-(4) bottom-right one quiet ledger line: "total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)".
-
-Only these strings must be legible: "COST · TODAY", "avg round $4.8", "BY STAGE", "BY MODEL", "Goal & align", "Arch review", "Verify", "Lanes", "Summary", "Retro", "$8.9", "opus", "sonnet", "COST · ROUND 9", "CLOSED", "total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)". Other numbers may be small but tidy; any other text soft placeholder.
-
-Mood: quiet instrument panel, autumn heartwood, warm firelit browns. The two panels must read instantly as the same strip in two windows: live = est tail on Lanes only; replay = all settled plus the round ledger line.
-
-## PROMPT — cost strip 部件 · light "spring"（变体，仅换调色）
-
-Same two-panel layout, light "spring" theme: canvas warm cream nudged slightly toward pale green #F1F0E2 — NOT white, NOT saturated green; panel surfaces one step greener #E9EAD6; primary text dark heartwood brown #251B10; hairlines #8A7A64; spend bars deep amber #8A5A14. Mood: early spring on warm paper.
-
-## Cost strip 审评清单
-
-1. 双窗一眼可辨：TODAY 有 est 斜纹尾（仅 Lanes 条），ROUND 全实心？
-2. 六个 stage 桶齐全、用 §7 阶段词、无内部 key、无 REVIEW 假桶？
-3. 轮账单行存在且含 `review: external ($0)` 明示零？
-4. "avg round $4.8" 参照在 TODAY 标注旁（成对语义在 replay 由
-   total 行承担）？
-5. 中位刻度暗淡、不是第二根条、无 rust？
-6. BY STAGE 占约 2/3 宽、BY MODEL 收窄右侧、无 token 数内联？
-7. 无 Config 链接残留？
-8. 全图零 rust 零红零绿？
-
 # Lanes 部件（v4 · 三方合成方案待用户确认）
 
 输入：用户原型图（33 号，三卡：Available / #94 writing / #90 needs-human）。
@@ -416,33 +324,6 @@ needs-human=系统请求人（rust）；hold=人已介入、行使控制（**禁
   "held by label X — remove the label on GitHub to release"，标签名
   从 resolved config 与 #294 事件 payload 读出。
 
-## PROMPT — lanes 部件 · dark "autumn"（v4）
-
-一图验四事：fixing 卡（最大缺口）、on hold 卡（新议题）、idle 细行 +
-RECENT 收据、caption 上移面板级。handed off / DETACHED 不进主图。
-**全图无 rust**（needs-human 已拆去 strip；hold 禁 rust）——本身就是
-色彩语法的验收项。
-
-A single wide dashboard panel on a dark canvas, wide 16:4 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. This is the "lanes" panel of a larger dashboard: one row containing THREE cards side by side plus ONE slim full-width row underneath them. Dense compact instrument-panel aesthetic, square-cornered slots, NOT airy or rounded.
-
-PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; card surfaces slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; amber #E8A33D strictly for activity marks and progress bars. ABSOLUTELY NO rust orange, NO red, NO green checkmarks, NO neon, NO gradients, NO glow. All text tiny monospace or tiny uppercase letterspaced; everything still and calm.
-
-PANEL HEADER: top-left small letterspaced label "LANES"; top-right one quiet caption "opus · high · soft budget $10" — this caption appears ONCE at panel level, NEVER inside the cards.
-
-CARD 1 — working lane: small corner label "lane"; a LARGE monospace issue number "#94" as the card's headline (no issue title text anywhere); next to it a small static amber dot and the word "working"; below: "~$0.53 est" with a very thin amber progress bar only slightly filled; bottom-left small elapsed time "8m".
-
-CARD 2 — fixing lane: LARGE "#90" headline; beside it an amber dot and the words "FIXING · ROUND 1/2" plus a SMALL curved return-loop arrow icon (a thin arrow bending back on itself); below: a quiet reference "PR #99"; then "~$1.69 est" with a thin amber progress bar filled about a fifth; bottom-left elapsed "32m".
-
-CARD 3 — on hold lane: LARGE "#87" headline; beside it a small cream-outlined badge reading "ON HOLD" with a tiny pin/hand-shaped hold glyph inside the badge — badge is CREAM outline, calm and neutral, NOT amber, NOT orange; below: quiet reference "PR #96"; then "$1.10 settled" as plain text with NO progress bar, NO est, NO token counts; NO elapsed time.
-
-SLIM ROW below the three cards, full panel width, half card height: left side the word "idle" with a small hollow dot; right side one quiet receipt line "RECENT — #92 ⇒ PR #101 · $0.95".
-
-NO token counts anywhere. NO model names inside cards. NO issue titles. NO green/red status icons. NO rust or red pixels anywhere in this image.
-
-Only these strings must be legible: "LANES", "opus · high · soft budget $10", "#94", "working", "~$0.53 est", "8m", "#90", "FIXING · ROUND 1/2", "PR #99", "~$1.69 est", "32m", "#87", "ON HOLD", "PR #96", "$1.10 settled", "idle", "RECENT — #92 ⇒ PR #101 · $0.95". All other text may be soft unreadable placeholder lines.
-
-Mood: quiet instrument panel, autumn heartwood, warm firelit browns. The three cards must read as siblings of one component in different states: active amber (working, fixing), deliberately parked cream (on hold), and the slim idle row as quiet capacity.
-
 ## PROMPT — lanes 部件 · dark "autumn"（v4.1 · 基底=35 号图）
 
 首轮评审：34/35/36 共同过零 rust/零 token/caption 唯一/fixing 计数/
@@ -492,56 +373,114 @@ Same panel layout, light "spring" theme: canvas warm cream nudged slightly towar
 10. （v4.1 新增）水滴=issue、pull-request 字形=PR，两字形清晰可辨、
     全部编号前都带？
 
-## 变更记录
+# Cost strip 部件（v5 · 方案）
 
-- v2（2026-07-21）：转部件分解流程；记录 round-1 三条用户裁决；
-  三方合成 hero board 元素清单；开放问题 1/2 用户确认采纳；
-  hero board 单部件出图提示词（dark 主版 + spring 奶油微绿变体）起草完成。
-- v2.1（2026-07-21）：hero dark 首轮出图评审（6/9 过）。骨架采纳；修五处：
-  ①检查点禁止绿✓/红‼分步状态渲染（伪造 per-gate 进度）→ 同款中性细线圆；
-  ②fixing 水滴归 amber（rust 仅限"人该看"，全图 rust 元素限两处）；
-  ③年轮去粗边框/箭头，细密木纹填满盘面；④轮终局改本轮小数字
-  "5 merged · 3 pending · 1 needs human"，不与累计 24 重复；
-  ⑤w3 水滴停检查点旁、PLANNING 不缩写、ESCALATE → NEEDS A HUMAN。
-- v2.2（2026-07-21）：第二轮出图评审——以 17 号图为基准骨架（16 丢
-  REVIEWERS 标注、检查点图标又赋了各自语义）。用户修订：①backlog 收窄
-  至与规划列同宽，ready 数入标题括号，玻片列表候选/入围高亮区分；
-  ②术语原则澄清（禁项目内行话、行业标准词优先），规划三节点改名
-  GOAL PLAN & ALIGN / ARCH PLAN & REVIEW / VERIFY PLAN & APPROVAL；
-  残留修正：w3 水滴须紧贴 CHECKS 左侧、三个分区标注必须齐全。
-- v2.3（2026-07-21）：第三轮出图评审，用户四条修订：①backlog 入围玻片
-  上浮到列首（选中块在前、候选在后）；②分区头改阶段词
-  PLAN / IMPLEMENT / OUTCOME（角色词 producers/reviewers/mergers 移交
-  hover/图例层，治理分离由几何承担）；③规划三节点缩短为
-  GOAL & ALIGN / ARCH REVIEW / VERIFY；④检查点与规划列同款式——
-  圆内 icon、圆外文字，CHECKS 改名 CI（识别性 icon，仍禁状态渲染）。
-- v2.4（2026-07-21）：第四轮评审（24/25 号图已近预期）。升级出口重做：
-  悬浮 "NEEDS A HUMAN"+虚线箭头+w3 感叹钉 → 一条 rust **实线支线**从
-  CI/REVIEW 连接处向下长出（与 work lane 同款笔触），末端细线圆+人形
-  icon+圆外 "NEEDS HUMAN"（对齐 needs-human label，修 "need human" 语法）；
-  PR #99 水滴搬到支线上；CI/REVIEW 整体稍上移。rust 配额=仅此支线。
-  追加：OUTCOME 区年轮下两节点补文字标注 SUMMARY / RETRO（同款式：
-  圆内 icon、圆外文字；retro 为行业标准词，合术语原则）。
-- v3（2026-07-21）：hero 冻结（26 号图）。header 三方合成方案落定：
-  轮导航即模式（撤 Live/Replay toggle）、LIVE 常驻槽位、当前轮 v0.2
-  不可回拖、三档运行控制（PAUSE/STOP/E-STOP，E-STOP→#293）、
-  走带与引擎动词不共位置/图标语言铁律、#206 升格 header 硬前置。
-  kill-switch 行为经代码核查确认 drain-first。header 双态对照出图
-  提示词（dark 主版 + spring 变体）+ 8 项审评清单起草完成。
-  工作区迁至 worktree design/dashboard-mockups，文件归位 docs/design/。
-- v3.1（2026-07-21）：header 首轮出图评审（29/30/31 号图）。29 号定为基底
-  （密度贴 1.png、chevron 与三角字形隔离最净、E-STOP 虚线栅栏隔离最强）；
-  30 淘汰（PAUSE/STOP 下划线似超链接、圆容器混两套语言）；31 硬伤
-  （导航箭头用 ◁▷ 三角=媒体字形，打穿走带隔离铁律），但吸收其走带
-  通栏分隔线。用户两条裁决：①E-STOP 缩写在软件语境误读 E-SHOP →
-  改全拼 EMERGENCY STOP（与引擎信号名一致）；②急停带八边形轮廓图标，
-  全页唯一图标按钮，PAUSE/STOP 保持纯文字（不对称即层级）。
-- v4（2026-07-21）：header 冻结（32 号图 8/8 过评，八边形实施时用标准
-  SVG、BACK TO LIVE ▸▸ 记为铁律记名例外）。lanes 部件三方合成：
-  架构师审计定六个真实状态（running/driving/fixing/done/failed/handoff），
-  原型三处结构性虚构（稳定槽位道史 / driving 道 live telemetry /
-  needs-human 占道头条）；架空用户共识 = fixing 卡缺席是最大洞、
-  hero 管位置卡片管深度。用户四点裁决全接受 + on hold 议题裁决
-  （人主动 hold 禁 rust、cream 徽章、主呈现在 lane 卡、不进 strip、
-  §11 #7 hold 事件为实施硬前置）。lanes 出图提示词（dark + spring）
-  + 8 项审评清单起草完成。
+§3 E 信息架构已定（phase+model 双桶、est/settled 斜纹语法、Config ▸ 入口），
+本轮只做数据核实 + 元素落地。**核实结论：零新引擎前置。**
+
+## 数据依据（架构师核查 2026-07-21）
+
+- `spend_ledger`：`ts/worker/issue/usd` + v-迁移 `model` 与 token 四列
+  （input/output/cache_read/cache_creation），每 (lane, model) 一行。
+- **phase 推导 = worker 名前缀**：lane 工人 `lane-<issue>-<uuid8>`
+  （worker.ts:988）、角色 session `role-<roleId>-<uuid8>`
+  （peripheral.ts:413，记账 peripheral.ts:916）。服务端前缀映射 →
+  §7 阶段词：role-po→Goal & align，role-architect→Arch review，
+  role-plan-review→Verify，`lane-*`→Lanes（首 leg+fix leg 同桶），
+  role-harvest→Summary，role-retro→Retro。内部 key 永不渲染。
+  实施注：前缀解析是服务端约定，须配一条"角色名前缀改动即碎"守护测试。
+- **回放窗口**：rounds 表 `start_spend_id` 游标（state.ts:25）切轮窗——
+  既有机制，live=今日 ts 窗，replay=轮 id 窗。
+- **est 叠层只属 Lanes 桶**：live est 三件套只存在于活 lane
+  （workers.est_cost_usd）；角色 session 同步短跑、无 live telemetry——
+  别的桶画斜纹尾就是造假。
+- Codex bot 评审=外部服务，引擎零记账——REVIEW 不成桶（诚实缺席）。
+
+## 元素方案
+
+| 元素 | 设计 | 数据 |
+|---|---|---|
+| BY STAGE 横条组 | 六桶横条（Goal & align / Arch review / Verify / **Lanes** / Summary / Retro），settled 实心 amber，**仅 Lanes 条**可带斜纹 est 尾；条右端小字金额 | 前缀映射 + SUM(usd)，est 尾=活 lane est_cost_usd 和 |
+| BY MODEL 横条组 | 每 model 一条（opus/sonnet/…），实心；hover = token 四分（input/output/cache read/cache write） | `model` 列 + token 四列 |
+| 窗口标注 | 左上角 "TODAY"（live）/ "ROUND 9"（replay，跟随导航器） | ts 窗 / start_spend_id 窗 |
+| Config ▸ | 右上小入口，开只读 drawer（§3 E 既有规格，不在本部件出图） | allowlist 键 |
+| 空态 | 今日零记账 → 条组隐去，一行 "no spend recorded today" | |
+
+不进 cost strip：日限额/run 总额（header 花费仪表管）、per-lane 成本
+（lane 卡管）——同一事实一个家。
+
+## 裁决记录（三方合成，2026-07-21；用户指令：带架空用户审评 + 历史轮费用议题）
+
+1. **历史轮费用**（用户提问）：平均值进 strip 标注（"this round $6.2 ·
+   avg $4.8" **成对**才是单位，孤立平均无锚点）；每轮总额的家=轮导航器
+   列表（已有 spend 列），strip 不重复。§2 历史聚合 deferral 不踩线
+   （本地 ledger 聚合，非 GitHub 历史）。
+2. **轮账单行**（Deniz）：replay 窗右对齐一行
+   `total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)` ——
+   review 零花费**明说**而非无声缺席（信任洞修补）；$/PR = 采纳备忘录
+   数字（轮 spend 窗 + artifact merged 数，零新数据）。
+3. **Config ▸ 砍出 strip**（两人设一致；rail 底部 config 齿轮已是入口）
+   ——§3 E 修订项。
+4. **布局 = Mara 案**：左右并排一条扁 strip，BY STAGE 占 2/3 宽。
+5. **BY MODEL 保留收窄**（评估者的"收据"信任信号），token 四分留 hover。
+6. **幽灵中位刻度**（Mara）：每根 stage 条一枚暗淡刻度=该阶段历史中位，
+   一眼判常异；超中位**不染 rust**（超均值≠该人看）。
+7. fix-leg v0.2 不拆；费率/速度概念不加。
+
+## PROMPT — cost strip 部件 · dark "autumn"（双态对照图 · v5）
+
+Two slim horizontal dashboard cost panels stacked vertically with a small gap on one dark canvas, wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. Top panel = LIVE "today" state, bottom panel = REPLAY "closed round" state of the SAME component. Dense compact instrument-panel aesthetic, square corners, NOT airy.
+
+PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; panel surfaces slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; muted secondary text #B9A98C; amber #E8A33D strictly for spend bars. NO rust orange, NO red, NO green, NO neon, NO gradients, NO glow. All text tiny monospace or tiny uppercase letterspaced.
+
+TOP PANEL — LIVE state:
+(1) top-left caption "COST · TODAY" followed by a muted reference "avg round $4.8";
+(2) left two-thirds, group label "BY STAGE": six thin horizontal bars stacked, labels left, small dollar amounts at each bar's right: "Goal & align $0.22", "Arch review $0.31", "Verify $0.18", "Lanes $8.9", "Summary $0.26", "Retro $0.29". The Lanes bar is much longer than all others and carries a short HATCHED translucent amber tail at its end (live estimate). Each bar also shows one FAINT short vertical tick — a dim historical-median marker, quiet, amber-dimmed, NOT a second bar;
+(3) right third, group label "BY MODEL": two solid amber bars "opus $7.8" and "sonnet $2.4". No hatched tails here;
+(4) NO config link anywhere.
+
+BOTTOM PANEL — REPLAY state of the same component:
+(1) top-left caption "COST · ROUND 9" with a small amber-outlined badge "CLOSED";
+(2) same six BY STAGE bars, ALL solid — no hatched tail anywhere — amounts "Goal & align $0.15", "Arch review $0.24", "Verify $0.12", "Lanes $5.1", "Summary $0.21", "Retro $0.38", faint median ticks present;
+(3) same BY MODEL group, solid bars "opus $4.9", "sonnet $1.3";
+(4) bottom-right one quiet ledger line: "total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)".
+
+Only these strings must be legible: "COST · TODAY", "avg round $4.8", "BY STAGE", "BY MODEL", "Goal & align", "Arch review", "Verify", "Lanes", "Summary", "Retro", "$8.9", "opus", "sonnet", "COST · ROUND 9", "CLOSED", "total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)". Other numbers may be small but tidy; any other text soft placeholder.
+
+Mood: quiet instrument panel, autumn heartwood, warm firelit browns. The two panels must read instantly as the same strip in two windows: live = est tail on Lanes only; replay = all settled plus the round ledger line.
+
+## PROMPT — cost strip 部件 · light "spring"（变体，仅换调色）
+
+Same two-panel layout, light "spring" theme: canvas warm cream nudged slightly toward pale green #F1F0E2 — NOT white, NOT saturated green; panel surfaces one step greener #E9EAD6; primary text dark heartwood brown #251B10; hairlines #8A7A64; spend bars deep amber #8A5A14. Mood: early spring on warm paper.
+
+## Cost strip 审评清单
+
+1. 双窗一眼可辨：TODAY 有 est 斜纹尾（仅 Lanes 条），ROUND 全实心？
+2. 六个 stage 桶齐全、用 §7 阶段词、无内部 key、无 REVIEW 假桶？
+3. 轮账单行存在且含 `review: external ($0)` 明示零？
+4. "avg round $4.8" 参照在 TODAY 标注旁（成对语义在 replay 由
+   total 行承担）？
+5. 中位刻度暗淡、不是第二根条、无 rust？
+6. BY STAGE 占约 2/3 宽、BY MODEL 收窄右侧、无 token 数内联？
+7. 无 Config 链接残留？
+8. 全图零 rust 零红零绿？
+
+## 变更记录（浓缩：只留迭代理由，细节以各部件章节现行文本为准）
+
+- v2：转部件分解流程；hero 三方合成 + 首版提示词。
+- v2.1–v2.4：hero 四轮出图迭代，冻结于 26 号图。留下的通用规则：
+  ①检查点禁 per-gate 伪状态渲染；②rust 配额极窄（仅"人该看"）；
+  ③术语规则成型（禁项目内行话、行业标准词优先 → GOAL & ALIGN /
+  ARCH REVIEW / VERIFY，分区头 PLAN / IMPLEMENT / OUTCOME）；
+  ④升级出口=rust 实线支线（悬浮注释废）。
+- v3–v3.1：header 方案 + 两轮迭代，冻结于 32 号图。轮导航即模式
+  （撤 Live/Replay toggle）、三档运行控制、走带与引擎动词图标隔离
+  铁律、E-STOP → EMERGENCY STOP 全拼 + 八边形唯一图标（E-SHOP 误读）；
+  #206 升格 header 硬前置、#293 立项。
+- v4–v4.1：lanes 三方合成 + 两轮迭代，冻结于 37 号图。"卡面只映射
+  真实状态"原则（六状态、三处原型虚构拆除）；fixing 卡补最大缺口；
+  on hold 裁决（人主动、禁 rust、GitHub 标签执行入口）；w 槽号=显示层
+  渲染槽位、issue/PR 双字形、标题内联（#207 升格硬前置）；#294 立项。
+- v5：cost strip 方案 + 三方裁决（avg 参照进标注、轮账单行含
+  review: external ($0) 明示零、Config ▸ 砍除、幽灵中位刻度）；
+  零新引擎前置。文件重组：部件按页面流排序，历史迭代版本浓缩。
