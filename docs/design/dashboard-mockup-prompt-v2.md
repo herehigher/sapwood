@@ -555,12 +555,46 @@ produce-PR-and-stop 模式下 gated-green PR 的聚合行（"N PRs ready for
 your merge"，amber 非 rust——是工作流不是故障）**deferred**，v0.2 dogfood
 用 conductor-merge；orphan-detected 进 strip（快照语义清场）。
 
-## 裁决记录
+## 裁决记录（2026-07-21 全部落定）
 
-1. dissent：**用户改判进 strip**（amber 层不穿 rust，见上）✔ 2026-07-21
-2. 无 clear 类 `manual · verify on GitHub` 小标（#295 前诚实降级）——待确认
-3. PLAN / VERIFY 徽章合并——待确认
-4. 头部聚合行 + 空态心跳——待确认
+1. dissent：**用户改判进 strip**（amber 层不穿 rust，见上）✔
+2. 无 clear 类 `manual · verify on GitHub` 小标（#295 前诚实降级）✔
+3. PLAN / VERIFY 合并为一个 PLAN 徽章（词表最小化）✔
+4. 头部聚合行 `N waiting · oldest Xd · M dissent` + 空态心跳戳 ✔
+
+## PROMPT — needs-attention strip · dark "autumn"（双态对照图 · v6）
+
+A slim wide dashboard alert strip shown TWICE stacked vertically with a small gap on one dark canvas — top instance POPULATED, bottom instance EMPTY — wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. Dense compact instrument-panel aesthetic, square corners.
+
+PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; strip surface slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; muted secondary #B9A98C; amber #E8A33D; muted moss green #8FA36B ONLY for the empty-state line; rust orange #C05A2E ONLY on the waiting-tier badges and their thin left borders. No neon, no red, no gradients, no glow. Tiny monospace / tiny uppercase letterspaced text. ABSOLUTELY NO close buttons, NO "x" icons, NO dismiss affordances anywhere.
+
+TOP INSTANCE — populated. Header row: left small letterspaced title "NEEDS ATTENTION", right aggregate "3 waiting · oldest 3d · 1 dissent". Below, four full-width rows separated by hairlines, each row = badge, then a tiny glyph + number + short title, then a muted plain-language reason with an "asks:" verb, then a right-aligned age chip:
+(row 1, oldest) thin RUST left border; rust-outlined badge "FIX CAP"; pull-request glyph "PR #212 — retry queue backoff"; muted "fix rounds used up (3/3), reviewer still requesting changes · asks: adjudicate"; age chip "3d" rendered HEAVY — bold, bordered, impossible to miss;
+(row 2) rust left border; badge "REVIEW SILENCE"; pull-request glyph "PR #208 — cache warmers"; muted "reviewer never answered after 2 pings · asks: review or nudge"; age "2h"; this ENTIRE row slightly DIMMED with a tiny eye glyph at its far left (already seen by the operator — dimmed but fully present);
+(row 3) rust left border; badge "CEILING"; water-droplet glyph "#217 — nightly export job"; muted "hard-stopped at daily budget, worktree kept · asks: re-ready or salvage"; small cream hairline tag "manual · verify on GitHub"; age "45m";
+(row 4, last) NO rust anywhere in this row: AMBER-outlined badge "DISSENT"; pull-request glyph "PR #226 — schema loosening"; muted "worker complied, filed disagreement · asks: adjudicate"; age "20m".
+
+BOTTOM INSTANCE — empty state: the same strip frame at half height, containing one single quiet moss-green line, centered-left: "nothing waiting on you · checked 12s ago". Nothing else. The frame is identical to the populated instance — same width, same border.
+
+Only these strings must be legible: "NEEDS ATTENTION", "3 waiting · oldest 3d · 1 dissent", "FIX CAP", "PR #212", "3d", "REVIEW SILENCE", "PR #208", "2h", "CEILING", "#217", "manual · verify on GitHub", "45m", "DISSENT", "PR #226", "asks: adjudicate", "20m", "nothing waiting on you · checked 12s ago". Other text may be soft placeholder.
+
+Mood: quiet instrument panel, autumn heartwood. The two instances must read instantly as one component in two truths: filled = the system asking for a person (rust) plus one proceeding-under-protest advisory (amber, last, no rust); empty = calm moss reassurance with a heartbeat, frame never hidden.
+
+## PROMPT — needs-attention strip · light "spring"（变体，仅换调色）
+
+Same two-instance layout, light "spring" theme: canvas warm cream nudged slightly toward pale green #F1F0E2 — NOT white; strip surface one step greener #E9EAD6; primary text dark heartwood brown #251B10; hairlines #8A7A64; amber #8A5A14; rust accents #A34620 (badges + left borders only); empty-state moss line #3E6B4F. Mood: early spring on warm paper.
+
+## Needs-attention 审评清单
+
+1. rust 层与 amber DISSENT 层一眼分层（DISSENT 无 rust 边、排最后）？
+2. 头部聚合 `3 waiting · oldest 3d · 1 dissent` 分开计数？
+3. oldest-first：3d 条目在最上且年龄 chip 加重（无新色）？
+4. "seen" 行是变暗+眼形小标，条目仍完整在场、计数未变？
+5. `manual · verify on GitHub` 小标在 CEILING 条目上（诚实降级可见）？
+6. 每行都有 asks: 动词 + 白话原因 + 字形化编号（水滴/PR 字形沿用）？
+7. **全图零关闭钮零 X**（禁 UI 删除的像素证据）？
+8. 空态=同框架半高 + moss 行 + 心跳戳，框架未隐藏？
+9. rust 只出现在徽章与左边框（不整行泼）；moss 只在空态行？
 
 ## 变更记录（浓缩：只留迭代理由，细节以各部件章节现行文本为准）
 
