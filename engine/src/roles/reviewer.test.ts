@@ -2,23 +2,34 @@
 // deriveReviewAction) + the pluggable Reviewer implementations' verdictFromData (pure) and
 // triggerReview (against a fake IForge — no real gh calls anywhere in this file).
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { ConfigSchema } from "../config/config.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, PRReview, PRReviewData } from "../forge/forge.js";
-import type { ReviewAction, Reviewer, ReviewFallbackLock, ReviewVerdict } from "./reviewer.js";
+import type {
+  ApprovalResult,
+  ReviewAction,
+  ReviewContext,
+  Reviewer,
+  ReviewerAdapter,
+  ReviewFallbackLock,
+  ReviewVerdict,
+} from "./reviewer.js";
 import {
   buildReviewerByKind,
   buildReviewTriggerComment,
   CodexReviewer,
   changesRequestedOnHead,
+  deriveBlockingSignal,
   deriveReviewAction,
   freshHeadReviewCount,
   freshThumbCount,
   HumanReviewer,
+  isFinding,
   isReviewerKind,
   makeFallbackReviewers,
   makeReviewer,
@@ -28,6 +39,7 @@ import {
   REVIEWER_KINDS,
   resolveReviewVerdict,
   SameModelTrustedReviewer,
+  validateFindings,
 } from "./reviewer.js";
 
 // ── pure signal helpers (0day pr_gate.sh parity) ──────────────────────────────────────────
@@ -1040,9 +1052,9 @@ test("isReviewerKind: accepts exactly the three Reviewer kinds, rejects anything
   assert.equal(isReviewerKind(42), false);
 });
 
-test("resolveReviewVerdict: no fallback configured -> always the primary's own verdict, no lock, no transition (unchanged behavior)", () => {
+test("resolveReviewVerdict: no fallback configured -> always the primary's own verdict, no lock, no transition (unchanged behavior)", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [],
     data: mkData(),
@@ -1057,10 +1069,10 @@ test("resolveReviewVerdict: no fallback configured -> always the primary's own v
   assert.equal(result.transition, null);
 });
 
-test("resolveReviewVerdict: primary decisive (MERGE_OK) -> used directly even with fallbacks configured, no transition", () => {
+test("resolveReviewVerdict: primary decisive (MERGE_OK) -> used directly even with fallbacks configured, no transition", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "MERGE_OK");
   const fallback = new ScriptedReviewer("human", "MERGE_OK");
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data: mkData(),
@@ -1073,11 +1085,11 @@ test("resolveReviewVerdict: primary decisive (MERGE_OK) -> used directly even wi
   assert.equal(result.transition, null);
 });
 
-test("resolveReviewVerdict: primary WAIT_REVIEW under the threshold -> still the primary's verdict, no switch yet", () => {
+test("resolveReviewVerdict: primary WAIT_REVIEW under the threshold -> still the primary's verdict, no switch yet", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const fallback = new ScriptedReviewer("same-model-trusted", "MERGE_OK");
   const justTriggered = { head: HEAD, at: "2026-01-01T00:59:00Z" }; // 1 minute ago
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data: mkData(),
@@ -1091,11 +1103,11 @@ test("resolveReviewVerdict: primary WAIT_REVIEW under the threshold -> still the
   assert.equal(result.transition, null);
 });
 
-test("resolveReviewVerdict: threshold crossed -> the first fallback with a decisive verdict gates, using its OWN identity rules; a switch is reported and MERGE_OK gets locked", () => {
+test("resolveReviewVerdict: threshold crossed -> the first fallback with a decisive verdict gates, using its OWN identity rules; a switch is reported and MERGE_OK gets locked", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const fallback = new SameModelTrustedReviewer(["trusted-bot"]); // real mode semantics, not scripted
   const data = mkData({ reviews: [mkReview("trusted-bot", HEAD, "APPROVED")] });
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data,
@@ -1115,11 +1127,11 @@ test("resolveReviewVerdict: threshold crossed -> the first fallback with a decis
   assert.deepEqual(result.transition, { kind: "switch", mode: "same-model-trusted", head: HEAD });
 });
 
-test("resolveReviewVerdict: threshold crossed but an UNTRUSTED approver doesn't satisfy the fallback's own identity rules -> still queues, no switch", () => {
+test("resolveReviewVerdict: threshold crossed but an UNTRUSTED approver doesn't satisfy the fallback's own identity rules -> still queues, no switch", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const fallback = new SameModelTrustedReviewer(["trusted-bot"]);
   const data = mkData({ reviews: [mkReview("random-account", HEAD, "APPROVED")] }); // not trusted
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data,
@@ -1134,11 +1146,11 @@ test("resolveReviewVerdict: threshold crossed but an UNTRUSTED approver doesn't 
   assert.equal(result.transition, null);
 });
 
-test("resolveReviewVerdict: ordered fallback list — the SECOND entry gates when the first isn't decisive yet", () => {
+test("resolveReviewVerdict: ordered fallback list — the SECOND entry gates when the first isn't decisive yet", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const trustedBot = new ScriptedReviewer("same-model-trusted", "WAIT_REVIEW"); // not decisive
   const human = new ScriptedReviewer("human", "MERGE_OK");
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [trustedBot, human],
     data: mkData(),
@@ -1155,13 +1167,13 @@ test("resolveReviewVerdict: ordered fallback list — the SECOND entry gates whe
 // non-decisiveness, never overrides fresh blocking signals, is re-verified against live data
 // at every use, and is never cleared at verdict-resolution time. ──
 
-test("resolveReviewVerdict R2: primary decisive HANDLE_THREADS gates (blocks) even with a lock on the current head — blocking signals outrank any lock (fable-review P1)", () => {
+test("resolveReviewVerdict R2: primary decisive HANDLE_THREADS gates (blocks) even with a lock on the current head — blocking signals outrank any lock (fable-review P1)", async () => {
   const lock: ReviewFallbackLock = { head: HEAD, kind: "same-model-trusted" };
   // HANDLE_THREADS can only arise from unresolved threads / a standing CHANGES_REQUESTED —
   // identity-unfiltered blocking signals (often a human's explicit block). The lock must not
   // resurrect MERGE_OK over them.
   const primary = new ScriptedReviewer("different-model-codex", "HANDLE_THREADS");
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])],
     data: mkData(),
@@ -1176,10 +1188,10 @@ test("resolveReviewVerdict R2: primary decisive HANDLE_THREADS gates (blocks) ev
   assert.deepEqual(result.lock, lock); // NOT cleared at resolution time (Codex PR #71 P2)
 });
 
-test("resolveReviewVerdict R2: primary decisive MERGE_OK with a lock held -> primary gates, revert reported, lock left in place (never cleared at resolution time)", () => {
+test("resolveReviewVerdict R2: primary decisive MERGE_OK with a lock held -> primary gates, revert reported, lock left in place (never cleared at resolution time)", async () => {
   const lock: ReviewFallbackLock = { head: HEAD, kind: "same-model-trusted" };
   const primary = new ScriptedReviewer("different-model-codex", "MERGE_OK");
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])],
     data: mkData(),
@@ -1194,13 +1206,13 @@ test("resolveReviewVerdict R2: primary decisive MERGE_OK with a lock held -> pri
   assert.deepEqual(result.lock, lock); // survives — a transient non-merge tick must not lose the episode
 });
 
-test("resolveReviewVerdict R2: lock survives primary non-decisiveness — honored below the threshold by RE-VERIFYING the approval artifact on live data", () => {
+test("resolveReviewVerdict R2: lock survives primary non-decisiveness — honored below the threshold by RE-VERIFYING the approval artifact on live data", async () => {
   const lock: ReviewFallbackLock = { head: HEAD, kind: "same-model-trusted" };
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const fallback = new SameModelTrustedReviewer(["trusted-bot"]);
   const data = mkData({ reviews: [mkReview("trusted-bot", HEAD, "APPROVED")] }); // artifact exists
   const justTriggered = { head: HEAD, at: "2026-01-01T00:59:00Z" }; // below threshold
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data,
@@ -1219,13 +1231,13 @@ test("resolveReviewVerdict R2: lock survives primary non-decisiveness — honore
   assert.deepEqual(result.lock, lock); // unchanged
 });
 
-test("resolveReviewVerdict R2: a FORGED lock (valid kind, but no matching approval on the PR) synthesizes nothing (fable-review P2)", () => {
+test("resolveReviewVerdict R2: a FORGED lock (valid kind, but no matching approval on the PR) synthesizes nothing (fable-review P2)", async () => {
   const forged: ReviewFallbackLock = { head: HEAD, kind: "human" };
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const fallback = new HumanReviewer(); // real mode: needs a non-author APPROVED review
   const data = mkData(); // NO reviews at all — the claimed approval does not exist
   // Below the threshold the lock re-verify path runs; the artifact is missing -> queue.
-  const below = resolveReviewVerdict({
+  const below = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data,
@@ -1236,7 +1248,7 @@ test("resolveReviewVerdict R2: a FORGED lock (valid kind, but no matching approv
   });
   assert.equal(below.verdict.action, "WAIT_REVIEW");
   // Past the threshold the chain runs; the artifact is still missing -> still queue.
-  const past = resolveReviewVerdict({
+  const past = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data,
@@ -1248,11 +1260,11 @@ test("resolveReviewVerdict R2: a FORGED lock (valid kind, but no matching approv
   assert.equal(past.verdict.action, "WAIT_REVIEW");
 });
 
-test("resolveReviewVerdict R2: a lock whose kind is NOT among the currently configured fallbacks is ignored (config removal revokes the episode; a forged kind matches nothing)", () => {
+test("resolveReviewVerdict R2: a lock whose kind is NOT among the currently configured fallbacks is ignored (config removal revokes the episode; a forged kind matches nothing)", async () => {
   const lock: ReviewFallbackLock = { head: HEAD, kind: "human" };
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const data = mkData({ reviews: [mkReview("alice", HEAD, "APPROVED")] }); // a human approval DOES exist
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [],
     data,
@@ -1265,7 +1277,7 @@ test("resolveReviewVerdict R2: a lock whose kind is NOT among the currently conf
   assert.equal(result.transition, null);
 });
 
-test("resolveReviewVerdict R2: lock + fresh blocking signals in the data -> the fallback's own re-verify blocks; never MERGE_OK (fable-review P1, non-decisive-primary variant)", () => {
+test("resolveReviewVerdict R2: lock + fresh blocking signals in the data -> the fallback's own re-verify blocks; never MERGE_OK (fable-review P1, non-decisive-primary variant)", async () => {
   const lock: ReviewFallbackLock = { head: HEAD, kind: "same-model-trusted" };
   // A primary whose own query failed (REVIEW_UNAVAILABLE) while the live data now carries a
   // standing CHANGES_REQUESTED — the lock's re-verification runs the real mode, which puts
@@ -1278,7 +1290,7 @@ test("resolveReviewVerdict R2: lock + fresh blocking signals in the data -> the 
       mkReview("some-human", HEAD, "CHANGES_REQUESTED"), // ...but a human has since blocked
     ],
   });
-  const below = resolveReviewVerdict({
+  const below = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data,
@@ -1288,7 +1300,7 @@ test("resolveReviewVerdict R2: lock + fresh blocking signals in the data -> the 
     lock,
   });
   assert.notEqual(below.verdict.action, "MERGE_OK"); // the lock never overrides the block
-  const past = resolveReviewVerdict({
+  const past = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data,
@@ -1300,10 +1312,10 @@ test("resolveReviewVerdict R2: lock + fresh blocking signals in the data -> the 
   assert.equal(past.verdict.action, "HANDLE_THREADS"); // the chain surfaces the block (gates HUMAN)
 });
 
-test("resolveReviewVerdict: a lock recorded for a DIFFERENT (older) head is stale and ignored — a new push re-derives from scratch", () => {
+test("resolveReviewVerdict: a lock recorded for a DIFFERENT (older) head is stale and ignored — a new push re-derives from scratch", async () => {
   const staleLock: ReviewFallbackLock = { head: "OLD_HEAD", kind: "same-model-trusted" };
   const primary = new ScriptedReviewer("different-model-codex", "MERGE_OK"); // healthy for the NEW head
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [new SameModelTrustedReviewer(["trusted-bot"])],
     data: mkData({ headOid: HEAD }),
@@ -1319,10 +1331,10 @@ test("resolveReviewVerdict: a lock recorded for a DIFFERENT (older) head is stal
   assert.deepEqual(result.lock, staleLock);
 });
 
-test("resolveReviewVerdict: no trigger pin recorded yet -> never past threshold, primary's verdict unchanged (fail-closed)", () => {
+test("resolveReviewVerdict: no trigger pin recorded yet -> never past threshold, primary's verdict unchanged (fail-closed)", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const fallback = new ScriptedReviewer("human", "MERGE_OK");
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data: mkData(),
@@ -1335,10 +1347,10 @@ test("resolveReviewVerdict: no trigger pin recorded yet -> never past threshold,
   assert.equal(result.transition, null);
 });
 
-test("resolveReviewVerdict: REVIEW_UNAVAILABLE (an explicit failure) is treated the same as a persistent WAIT_REVIEW for failover purposes", () => {
+test("resolveReviewVerdict: REVIEW_UNAVAILABLE (an explicit failure) is treated the same as a persistent WAIT_REVIEW for failover purposes", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "REVIEW_UNAVAILABLE");
   const fallback = new ScriptedReviewer("human", "MERGE_OK");
-  const result = resolveReviewVerdict({
+  const result = await resolveReviewVerdict({
     primary,
     fallbacks: [fallback],
     data: mkData(),
@@ -1458,4 +1470,327 @@ test("#273 anchored phrase: trailing flavor prose is accepted, mid-prose embeddi
     ],
   });
   assert.equal(new CodexReviewer().verdictFromData(bad, LIVE_PIN).action, "WAIT_REVIEW");
+});
+
+// ── #282 (M10, E1): ReviewerAdapter seam — first-class approval/blocking split ──────────────────
+// Design #279 §1. This section tests the NEW seam types/functions directly, then regression-pins
+// them against the UNCHANGED verdictFromData surface over a shared fixture corpus — the seam is
+// a mechanical reorganization of the same computation `verdictFrom` already performed, never a
+// new one (#282 AC: "no new behavior").
+
+// -- Finding / validated findings shape (ApprovalResult's `rejected` variant) --
+
+test("isFinding: accepts a well-formed finding, rejects malformed/partial shapes", () => {
+  assert.equal(isFinding({ id: "1", body: "explain the bug" }), true);
+  assert.equal(isFinding({ id: "", body: "x" }), false); // empty id
+  assert.equal(isFinding({ id: "1", body: "" }), false); // empty body
+  assert.equal(isFinding({ id: "1" }), false); // missing body
+  assert.equal(isFinding({ body: "x" }), false); // missing id
+  assert.equal(isFinding(null), false);
+  assert.equal(isFinding("finding"), false);
+  assert.equal(isFinding(42), false);
+});
+
+test("validateFindings: an empty array is valid (approved carries zero findings, never `rejected` with nothing to say); one bad element fails the WHOLE array (fail-closed)", () => {
+  assert.equal(validateFindings([]), true);
+  assert.equal(
+    validateFindings([
+      { id: "1", body: "a" },
+      { id: "2", body: "b" },
+    ]),
+    true,
+  );
+  assert.equal(
+    validateFindings([
+      { id: "1", body: "a" },
+      { id: "", body: "b" },
+    ]),
+    false,
+  );
+  assert.equal(validateFindings("not-an-array"), false);
+  assert.equal(validateFindings(null), false);
+});
+
+test("ApprovalResult: `rejected` carries a validated findings array from day one (#282 AC) — `approved` cannot even represent findings (encoded in the type, not a runtime check)", () => {
+  const findings = [{ id: "1", body: "missing null check" }];
+  assert.equal(validateFindings(findings), true);
+  const rejected: ApprovalResult = { kind: "rejected", headOid: "HEAD", findings };
+  assert.deepEqual(rejected.findings, findings);
+  const approved: ApprovalResult = { kind: "approved", headOid: "HEAD", evidence: { freshApprovingReviews: 1, freshTrustedSignals: 0 } };
+  assert.equal(approved.kind, "approved");
+  assert.equal((approved as { findings?: unknown }).findings, undefined);
+});
+
+// -- deriveBlockingSignal: the ONE shared pure blocking function every kind routes through --
+
+test("deriveBlockingSignal: no unresolved threads, no standing change request -> not blocked", () => {
+  assert.deepEqual(deriveBlockingSignal(mkData()), { blocked: false, unresolvedThreads: 0, changesRequestedOnHead: false });
+});
+
+test("deriveBlockingSignal: unresolved threads alone block", () => {
+  const signal = deriveBlockingSignal(mkData({ unresolvedThreads: 3 }));
+  assert.equal(signal.blocked, true);
+  assert.equal(signal.unresolvedThreads, 3);
+  assert.equal(signal.changesRequestedOnHead, false);
+});
+
+test("deriveBlockingSignal: a standing CHANGES_REQUESTED alone blocks", () => {
+  const data = mkData({ reviews: [mkReview("some-human", "HEAD", "CHANGES_REQUESTED")] });
+  const signal = deriveBlockingSignal(data);
+  assert.equal(signal.blocked, true);
+  assert.equal(signal.changesRequestedOnHead, true);
+});
+
+test("deriveBlockingSignal: agrees with changesRequestedOnHead's own per-author clear semantics (same underlying computation, not re-derived ad hoc)", () => {
+  const data = mkData({
+    reviews: [mkReview("alice", "HEAD", "CHANGES_REQUESTED"), mkReview("alice", "HEAD", "APPROVED")],
+  });
+  assert.equal(deriveBlockingSignal(data).changesRequestedOnHead, changesRequestedOnHead(data.reviews, data.headOid, data.author));
+  assert.equal(deriveBlockingSignal(data).blocked, false); // same-reviewer re-approval clears it
+});
+
+// -- ReviewerAdapter.trigger / evaluate: each existing kind implements the seam too --
+
+test("CodexReviewer implements ReviewerAdapter: trigger() delegates to triggerReview (same comment, same call)", async () => {
+  const calls: [number, string][] = [];
+  const forge = {
+    getIssueBody: async () => "## Verification\nrun tests",
+    addPRComment: async (pr: number, body: string) => {
+      calls.push([pr, body]);
+    },
+  } as unknown as IForge;
+  const reviewer: ReviewerAdapter = new CodexReviewer();
+  await reviewer.trigger({ forge, pr: 7, issue: 46 });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]![0], 7);
+  assert.match(calls[0]![1], /@codex review/);
+});
+
+test("CodexReviewer.evaluate: no PRReviewData supplied -> unavailable (never silently pending)", async () => {
+  const reviewer: ReviewerAdapter = new CodexReviewer();
+  const result = await reviewer.evaluate({ forge: {} as IForge, pr: 1, issue: 1 });
+  assert.deepEqual(result, { kind: "unavailable", headOid: null, reason: "no PRReviewData supplied to evaluate()" });
+});
+
+test("CodexReviewer.evaluate: a fresh Codex-bot COMMENTED review -> approved, with evidence counts — blocking-blind (no thread/CR fields consulted at all)", async () => {
+  const reviewer: ReviewerAdapter = new CodexReviewer();
+  const data = mkData({ reviews: [mkReview("chatgpt-codex-connector[bot]", "HEAD", "COMMENTED")] });
+  const result = await reviewer.evaluate({ forge: {} as IForge, pr: 1, issue: 1, data });
+  assert.deepEqual(result, {
+    kind: "approved",
+    headOid: "HEAD",
+    evidence: { freshApprovingReviews: 1, freshTrustedSignals: 0 },
+  });
+});
+
+test("CodexReviewer.evaluate: nothing yet -> pending", async () => {
+  const reviewer: ReviewerAdapter = new CodexReviewer();
+  const result = await reviewer.evaluate({ forge: {} as IForge, pr: 1, issue: 1, data: mkData() });
+  assert.deepEqual(result, { kind: "pending", headOid: "HEAD" });
+});
+
+test("HumanReviewer.evaluate: an APPROVED non-author review -> approved; a COMMENTED review does not count", async () => {
+  const reviewer: ReviewerAdapter = new HumanReviewer();
+  const approved = await reviewer.evaluate({
+    forge: {} as IForge,
+    pr: 1,
+    issue: 1,
+    data: mkData({ reviews: [mkReview("alice", "HEAD", "APPROVED")] }),
+  });
+  assert.equal(approved.kind, "approved");
+  const commented = await reviewer.evaluate({
+    forge: {} as IForge,
+    pr: 1,
+    issue: 1,
+    data: mkData({ reviews: [mkReview("alice", "HEAD", "COMMENTED")] }),
+  });
+  assert.equal(commented.kind, "pending");
+});
+
+test("SameModelTrustedReviewer.evaluate: an empty trustedLogins list can NEVER produce approved (fail-closed, mirrors verdictFromData)", async () => {
+  const reviewer: ReviewerAdapter = new SameModelTrustedReviewer([]);
+  const result = await reviewer.evaluate({
+    forge: {} as IForge,
+    pr: 1,
+    issue: 1,
+    data: mkData({ reviews: [mkReview("anyone", "HEAD", "APPROVED")] }),
+  });
+  assert.equal(result.kind, "pending");
+});
+
+test("SameModelTrustedReviewer.evaluate: only a NAMED trusted login's APPROVED review counts", async () => {
+  const reviewer: ReviewerAdapter = new SameModelTrustedReviewer(["trusted-bot"]);
+  const untrusted = await reviewer.evaluate({
+    forge: {} as IForge,
+    pr: 1,
+    issue: 1,
+    data: mkData({ reviews: [mkReview("random-account", "HEAD", "APPROVED")] }),
+  });
+  assert.equal(untrusted.kind, "pending");
+  const trusted = await reviewer.evaluate({
+    forge: {} as IForge,
+    pr: 1,
+    issue: 1,
+    data: mkData({ reviews: [mkReview("trusted-bot", "HEAD", "APPROVED")] }),
+  });
+  assert.equal(trusted.kind, "approved");
+});
+
+// -- buildReviewerByKind: exhaustive, no fall-through-to-Codex (#282 AC) --
+
+test("buildReviewerByKind: every REVIEWER_KINDS entry constructs a reviewer of its OWN kind (never silently a CodexReviewer)", () => {
+  for (const kind of REVIEWER_KINDS) {
+    const reviewer = buildReviewerByKind(kind, []);
+    assert.equal(reviewer.kind, kind);
+  }
+});
+
+test("buildReviewerByKind: an unrecognized kind (bypassing the type system) throws rather than silently building a CodexReviewer (#282 startup fail-safe)", () => {
+  assert.throws(
+    () => buildReviewerByKind("bogus-kind" as unknown as Parameters<typeof buildReviewerByKind>[0], []),
+    /unhandled reviewer kind/,
+  );
+});
+
+test("grep-invariant: buildReviewerByKind's function body contains no `default:` switch case (#282 exhaustiveness AC)", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, "reviewer.ts"), "utf8");
+  const sigIdx = source.indexOf("export function buildReviewerByKind(");
+  assert.ok(sigIdx >= 0, "buildReviewerByKind not found in reviewer.ts");
+  const openIdx = source.indexOf("{", source.indexOf("): Reviewer", sigIdx));
+  assert.ok(openIdx > sigIdx, "could not find buildReviewerByKind's opening brace");
+  let depth = 0;
+  let closeIdx = -1;
+  for (let i = openIdx; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        closeIdx = i;
+        break;
+      }
+    }
+  }
+  assert.ok(closeIdx > openIdx, "could not find buildReviewerByKind's closing brace");
+  const body = source.slice(openIdx, closeIdx + 1);
+  assert.doesNotMatch(body, /\bdefault\s*:/, "buildReviewerByKind must never fall through to a default: case (#282)");
+});
+
+// -- Regression pin: verdictFromData (unchanged surface) vs evaluate()+deriveBlockingSignal (new
+// seam) must derive the IDENTICAL ReviewAction over a shared fixture corpus, for all three kinds
+// (#282 AC: "existing three kinds regression-pinned"). --
+
+async function reconstructAction(adapter: ReviewerAdapter, data: PRReviewData, pin?: ReviewTriggerPin): Promise<ReviewAction> {
+  const blocking = deriveBlockingSignal(data);
+  if (blocking.blocked) return "HANDLE_THREADS";
+  const ctx: ReviewContext =
+    pin === undefined ? { forge: {} as IForge, pr: 0, issue: 0, data } : { forge: {} as IForge, pr: 0, issue: 0, data, pin };
+  const approval = await adapter.evaluate(ctx);
+  if (approval.kind === "approved") return "MERGE_OK";
+  if (approval.kind === "rejected") return "HANDLE_THREADS";
+  if (approval.kind === "unavailable") return "REVIEW_UNAVAILABLE";
+  return "WAIT_REVIEW";
+}
+
+function corpusFor(approverLogin: string, acceptState: string): { label: string; data: PRReviewData; pin?: ReviewTriggerPin }[] {
+  return [
+    { label: "no signals at all", data: mkData(), pin: PIN },
+    { label: "fresh approving review only", data: mkData({ reviews: [mkReview(approverLogin, "HEAD", acceptState)] }), pin: PIN },
+    { label: "unresolved threads only (blocks despite no approval)", data: mkData({ unresolvedThreads: 2 }), pin: PIN },
+    {
+      label: "a standing CHANGES_REQUESTED only (blocks)",
+      data: mkData({ reviews: [mkReview("some-human", "HEAD", "CHANGES_REQUESTED")] }),
+      pin: PIN,
+    },
+    {
+      label: "approving review AND unresolved threads (blocking wins over approval)",
+      data: mkData({ reviews: [mkReview(approverLogin, "HEAD", acceptState)], unresolvedThreads: 1 }),
+      pin: PIN,
+    },
+    {
+      label: "approving review AND a standing change request from someone else (blocking wins)",
+      data: mkData({
+        reviews: [mkReview(approverLogin, "HEAD", acceptState), mkReview("some-human", "HEAD", "CHANGES_REQUESTED")],
+      }),
+      pin: PIN,
+    },
+    {
+      label: "a stale review on an OLD head does not count",
+      data: mkData({ reviews: [mkReview(approverLogin, "OLD_HEAD", acceptState)] }),
+      pin: PIN,
+    },
+    {
+      label: "the PR author's own review never counts",
+      data: mkData({ reviews: [mkReview("producer", "HEAD", acceptState)] }),
+      pin: PIN,
+    },
+    {
+      label: "no trigger pin supplied at all",
+      data: mkData({ reviews: [mkReview(approverLogin, "HEAD", acceptState)] }),
+    },
+    {
+      label: "an OID-bound trusted clean comment (#273) — no formal review at all",
+      data: mkData({
+        comments: [
+          {
+            login: approverLogin,
+            createdAt: "2026-07-07T08:00:00Z",
+            body: "Codex Review: Didn't find any major issues.\nReviewed head OID: HEAD",
+          },
+        ],
+      }),
+      pin: PIN,
+    },
+  ];
+}
+
+test("regression pin (#282): CodexReviewer — evaluate()+deriveBlockingSignal reconstructs the EXACT verdictFromData action over the fixture corpus", async () => {
+  const reviewer = new CodexReviewer();
+  for (const { label, data, pin } of corpusFor("chatgpt-codex-connector", "COMMENTED")) {
+    const expected = reviewer.verdictFromData(data, pin).action;
+    const actual = await reconstructAction(reviewer, data, pin);
+    assert.equal(actual, expected, label);
+  }
+});
+
+test("regression pin (#282): HumanReviewer — evaluate()+deriveBlockingSignal reconstructs the EXACT verdictFromData action over the fixture corpus", async () => {
+  const reviewer = new HumanReviewer();
+  for (const { label, data, pin } of corpusFor("alice", "APPROVED")) {
+    const expected = reviewer.verdictFromData(data, pin).action;
+    const actual = await reconstructAction(reviewer, data, pin);
+    assert.equal(actual, expected, label);
+  }
+});
+
+test("regression pin (#282): SameModelTrustedReviewer — evaluate()+deriveBlockingSignal reconstructs the EXACT verdictFromData action over the fixture corpus", async () => {
+  const reviewer = new SameModelTrustedReviewer(["trusted-bot"]);
+  for (const { label, data, pin } of corpusFor("trusted-bot", "APPROVED")) {
+    const expected = reviewer.verdictFromData(data, pin).action;
+    const actual = await reconstructAction(reviewer, data, pin);
+    assert.equal(actual, expected, label);
+  }
+});
+
+test("regression pin (#282): SameModelTrustedReviewer with an EMPTY trustedLogins list — both surfaces agree it can never approve (non-blocking scenarios only)", async () => {
+  const reviewer = new SameModelTrustedReviewer([]);
+  const scenarios: { label: string; data: PRReviewData; pin?: ReviewTriggerPin }[] = [
+    { label: "no signals", data: mkData(), pin: PIN },
+    { label: "an untrusted APPROVED review", data: mkData({ reviews: [mkReview("random-account", "HEAD", "APPROVED")] }), pin: PIN },
+  ];
+  for (const { label, data, pin } of scenarios) {
+    const expected = reviewer.verdictFromData(data, pin).action;
+    const actual = await reconstructAction(reviewer, data, pin);
+    assert.equal(actual, expected, label);
+  }
+  // Documented PRE-EXISTING quirk (unchanged by #282, not introduced by it): verdictFromData's
+  // own empty-trustedLogins branch short-circuits to WAIT_REVIEW UNCONDITIONALLY, even when a
+  // genuine blocking signal (unresolved threads / a standing change request) is present in the
+  // live data — see SameModelTrustedReviewer.verdictFromData's own early return above. This
+  // test's reconstructAction helper (like the design's real drive-loop combinator would) checks
+  // deriveBlockingSignal FIRST, so the two surfaces intentionally diverge in exactly this corner
+  // — a pre-existing quirk of the empty-allowlist fail-closed branch, out of scope to change here
+  // (verdicts must stay byte-preserved, #282 AC).
+  const blockedData = mkData({ unresolvedThreads: 1 });
+  assert.equal(reviewer.verdictFromData(blockedData, PIN).action, "WAIT_REVIEW");
+  assert.equal(await reconstructAction(reviewer, blockedData, PIN), "HANDLE_THREADS");
 });
