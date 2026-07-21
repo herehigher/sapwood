@@ -13,15 +13,23 @@
 //
 // Two structural guarantees, both asserted (not just documented) at the seams below:
 //   1. `assertOutsideWorktreeMounts` — the private clone's directory is provably disjoint from
-//      every worker worktree mount (worker.ts's own `<worktreeRoot>/<lane>` convention). A
-//      worker's `Bash(git *)` grant is scoped to ITS OWN worktree by the guard hook; a clone
-//      living outside that whole tree is simply never in a worker's reach to begin with.
+//      every worker worktree mount (worker.ts's own `<worktreeRoot>/<lane>` convention), checked
+//      BOTH lexically (`resolve()`, normalizes `..`) AND canonically (symlinks dereferenced via
+//      `realpathSync` on the nearest existing ancestor — code review round 2, P2: `resolve()`
+//      alone does not dereference symlinks, so a cloneDir reached through a symlinked ancestor
+//      pointing into `worktreeRoot` would otherwise pass). A worker's `Bash(git *)` grant is
+//      scoped to ITS OWN worktree by the guard hook; a clone living outside that whole tree is
+//      simply never in a worker's reach to begin with.
 //   2. `assertLocalConfigClean` — after cloning, the private clone's `git config --local --list`
 //      is asserted to contain ONLY the sections a plain `git clone --bare` is known to write
-//      (core/remote/branch), with a denylist on top for the dangerous `core.*` subkeys (hooks
-//      path, filter helpers, ssh/askpass overrides) even within that allowed section. Anything
-//      else fails closed — this is the "local config asserted EMPTY at clone time" AC, read as
-//      "empty of anything beyond the clone's own inert bookkeeping."
+//      (core/remote/branch), with a small denylist on top for specific dangerous subkeys (hooks
+//      path, filter/proxy/alternates helpers, ssh/askpass overrides, upload/receive-pack
+//      overrides) even within those allowed sections. Anything outside the allowlisted sections
+//      fails closed — this is the "local config asserted EMPTY at clone time" AC, read as "empty
+//      of anything beyond the clone's own inert bookkeeping." The in-section denylist is a FIXED,
+//      known-dangerous-keys list, not a claim of exhaustively covering every future git config
+//      key that could ever gain exec/network capability — the section-level allowlist is the
+//      primary defense; this narrows further within it.
 //
 // Instruction files (`CLAUDE.md`, `.claude/**`) are INCLUDED in the materialized tree — D7
 // reverses the earlier exclusion. There is no filtering/exclusion logic anywhere in this module
@@ -30,8 +38,8 @@
 // (§3a's instruction-path change escalation, issue #284's sibling E6) — not by this module.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 const pexecFile = promisify(execFile);
@@ -58,13 +66,42 @@ function isWithin(parent: string, child: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+/** Canonicalizes `p` by `realpathSync`-ing its NEAREST EXISTING ancestor (walking up via
+ *  `dirname`) and re-joining whatever suffix doesn't exist yet. Needed because the private
+ *  clone dir itself never exists at the time `assertOutsideWorktreeMounts` runs (it's created
+ *  fresh, see `createPrivateClone`'s own doc) -- `realpathSync` alone would throw ENOENT on it,
+ *  so this walks up to the first ancestor that DOES exist, resolves symlinks THERE, and reapplies
+ *  the non-existent tail lexically. Degrades to the plain `resolve()`d path if nothing in the
+ *  chain exists (the filesystem root always exists in practice, so this is unreachable in
+ *  practice, not a silent weakening). */
+function canonicalize(p: string): string {
+  let cur = resolve(p);
+  const tail: string[] = [];
+  while (!existsSync(cur)) {
+    const parent = dirname(cur);
+    if (parent === cur) return resolve(p); // reached the top with nothing existing -- give up cleanly
+    tail.unshift(basename(cur));
+    cur = parent;
+  }
+  const real = realpathSync(cur);
+  return tail.length === 0 ? real : join(real, ...tail);
+}
+
 /** #284 AC: "Bare clone provably outside all worker worktree mounts." `worktreeRoot` is
  *  worker.ts's OWN convention (`<worktreeRoot>/<laneName>`, default `<cwd>/.claude/worktrees` —
  *  see `WorkerSupervisor`'s `worktreeRoot` default) — every worker worktree lives under it, so
  *  disjointness from `worktreeRoot` is disjointness from every individual worktree. Checked
  *  BOTH directions: a clone nested inside the worktree root is obviously reachable, and a
  *  worktree root nested inside the clone dir would put every worker's mount inside the
- *  "private" tree, which is exactly backwards. Equality is rejected too. */
+ *  "private" tree, which is exactly backwards. Equality is rejected too.
+ *
+ *  TWO passes, lexical then canonical (code review round 2, P2): the plain `resolve()`d paths
+ *  are checked first (cheap, catches the common case and needs no filesystem access beyond what
+ *  `resolve()` itself does), then the SAME check is repeated against `realpathSync`-canonicalized
+ *  paths, so a cloneDir reached through a symlinked ancestor that resolves into `worktreeRoot`
+ *  is caught too. In production `cloneDir` is engine-trusted config, not producer-controlled, so
+ *  this second pass is hardening rather than closing a live exploit -- but AC1 says "provably
+ *  outside" and canonical-path checking is cheap enough to just do. */
 export function assertOutsideWorktreeMounts(cloneDir: string, worktreeRoot: string): void {
   const a = resolve(cloneDir);
   const b = resolve(worktreeRoot);
@@ -72,6 +109,14 @@ export function assertOutsideWorktreeMounts(cloneDir: string, worktreeRoot: stri
     throw new MaterializerError(
       `private clone dir "${cloneDir}" is not structurally disjoint from the worker worktree root "${worktreeRoot}" ` +
         "-- the clone must live entirely outside every worker's mount",
+    );
+  }
+  const canonA = canonicalize(cloneDir);
+  const canonB = canonicalize(worktreeRoot);
+  if (canonA === canonB || isWithin(canonB, canonA) || isWithin(canonA, canonB)) {
+    throw new MaterializerError(
+      `private clone dir "${cloneDir}" resolves through a symlink to a path that is not structurally disjoint from ` +
+        `the worker worktree root "${worktreeRoot}" -- canonical paths "${canonA}" vs "${canonB}"`,
     );
   }
 }
@@ -100,10 +145,12 @@ export function defaultWorktreeRoot(cwd: string = process.cwd()): string {
  *  just anything on a known-bad list. */
 const ALLOWED_LOCAL_CONFIG_SECTIONS = new Set(["core", "remote", "branch"]);
 
-/** Even WITHIN the allowed `core` section, a handful of subkeys are dangerous enough (they
- *  redirect git to run other programs, or leak credentials) to deny explicitly -- defense in
- *  depth in case a future git version starts writing one of these into a fresh bare clone's
- *  local config by default. */
+/** Even WITHIN the allowed `core` section, a fixed list of specific subkeys are dangerous enough
+ *  (they redirect git to run other programs, or leak credentials) to deny explicitly. This is a
+ *  known-bad list, not a claim of covering every current or future exec/network-capable `core.*`
+ *  key -- the section-level allowlist above is the primary defense; this narrows further within
+ *  it. `alternateRefsCommand`/`gitProxy` (code review round 2, P3) round out the set: both
+ *  invoke an external program the same way `hooksPath`/`sshCommand`/`askPass` do. */
 const DENIED_CORE_SUBKEYS = new Set([
   "hookspath",
   "fsmonitor",
@@ -113,7 +160,16 @@ const DENIED_CORE_SUBKEYS = new Set([
   "attributesfile",
   "excludesfile",
   "askpass",
+  "alternaterefscommand",
+  "gitproxy",
 ]);
+
+/** Within the allowed `remote` section, `uploadpack`/`receivepack` override the PROGRAM git
+ *  invokes on the remote side of a fetch/push (`remote.<name>.uploadpack`/`.receivepack`) --
+ *  exec-capable the same way the `core.*` denylist above is, just scoped to a different section
+ *  (code review round 2, P3). Checked against the LAST dot-separated segment of the key, same as
+ *  the `core.*` check, since a remote key's shape is `remote.<name>.<subkey>`. */
+const DENIED_REMOTE_SUBKEYS = new Set(["uploadpack", "receivepack"]);
 
 /** #284 AC: "local-config emptiness asserted at clone time." Reads `git config --local --list`
  *  from the freshly-cloned private clone and fails closed on anything outside the allowlist
@@ -142,13 +198,20 @@ export async function assertLocalConfigClean(cloneDir: string): Promise<void> {
           "(filter/credential/http/include/alias/protocol/receive/uploadpack/...) fails closed",
       );
     }
-    if (section === "core") {
-      const subkey = (dot === -1 ? "" : key.slice(dot + 1)).toLowerCase();
-      if (DENIED_CORE_SUBKEYS.has(subkey)) {
-        throw new MaterializerError(
-          `private clone local config at "${cloneDir}" sets dangerous "core.${subkey}" -- refusing to use this clone`,
-        );
-      }
+    // Last dot-separated segment: for `core.<subkey>` this is the same as everything after the
+    // first dot, but `remote.<name>.<subkey>` needs the LAST segment specifically (the middle
+    // segment is the remote's own name, not part of the subkey).
+    const lastDot = key.lastIndexOf(".");
+    const lastSegment = (lastDot === -1 ? "" : key.slice(lastDot + 1)).toLowerCase();
+    if (section === "core" && DENIED_CORE_SUBKEYS.has(lastSegment)) {
+      throw new MaterializerError(
+        `private clone local config at "${cloneDir}" sets dangerous "core.${lastSegment}" -- refusing to use this clone`,
+      );
+    }
+    if (section === "remote" && DENIED_REMOTE_SUBKEYS.has(lastSegment)) {
+      throw new MaterializerError(
+        `private clone local config at "${cloneDir}" sets dangerous "remote.*.${lastSegment}" (key "${key}") -- refusing to use this clone`,
+      );
     }
   }
 }
@@ -302,17 +365,29 @@ export interface MaterializeOptions {
  *  partial/wrong tree -- "materialization FAILURE, never a silently wrong tree" is the AC this
  *  function's structure is built around: an oid that fails format validation, a checkout that
  *  exits non-zero, a post-checkout OID that doesn't verify, or a stray `.git` entry in the
- *  result all short-circuit to `failure` before a manifest is ever built. */
+ *  result all short-circuit to `failure` before a manifest is ever built. This is an ABSOLUTE
+ *  contract (code review round 2, P2: design #279 §6 relies on it verbatim -- "All setup
+ *  failures (materialize failure included) map to `unavailable`", which only holds if this
+ *  function's returned PROMISE never rejects) -- every fs call that could throw (the pre-checkout
+ *  treeDir probe/creation, and `buildTreeManifest`'s directory walk + reads) is wrapped in its
+ *  own try/catch below; only `existsSync` (which never throws by Node's own contract) is left
+ *  bare. */
 export async function materialize(opts: MaterializeOptions): Promise<MaterializeResult> {
   const { clone, oid, treeDir } = opts;
   if (!FULL_OID.test(oid)) {
     return { kind: "failure", reason: `oid must be a full 40-hex commit sha, got ${JSON.stringify(oid)}` };
   }
   const dir = resolve(treeDir);
-  if (existsSync(dir) && readdirSync(dir).length > 0) {
-    return { kind: "failure", reason: `treeDir "${dir}" already exists and is not empty` };
+  try {
+    if (existsSync(dir) && readdirSync(dir).length > 0) {
+      return { kind: "failure", reason: `treeDir "${dir}" already exists and is not empty` };
+    }
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    // e.g. `dir` already exists as a REGULAR FILE (readdirSync/mkdirSync both throw ENOTDIR), or
+    // a permissions error -- a thrown fs error here must not escape this function as a rejection.
+    return { kind: "failure", reason: `treeDir setup for "${dir}" failed: ${(err as Error).message}` };
   }
-  mkdirSync(dir, { recursive: true });
 
   const { args, env } = buildCheckoutInvocation(clone.dir, dir, oid);
   try {
@@ -345,5 +420,14 @@ export async function materialize(opts: MaterializeOptions): Promise<Materialize
     return { kind: "failure", reason: `materialized tree at "${dir}" unexpectedly contains a .git entry` };
   }
 
-  return { kind: "materialized", treeDir: dir, oid, manifest: buildTreeManifest(dir) };
+  let manifest: TreeManifestEntry[];
+  try {
+    manifest = buildTreeManifest(dir);
+  } catch (err) {
+    // A file vanishing mid-hash, an unreadable entry, or any other fs error while walking the
+    // checked-out tree -- same "never throws" contract as every other step above.
+    return { kind: "failure", reason: `tree manifest of "${dir}" failed: ${(err as Error).message}` };
+  }
+
+  return { kind: "materialized", treeDir: dir, oid, manifest };
 }
