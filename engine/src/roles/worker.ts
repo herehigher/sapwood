@@ -497,7 +497,15 @@ export interface ClaudeArgsOpts {
   model: string;
   effort: string;
   fallbackModel: string;
-  worktree: string;
+  /** `--worktree <name>` — tells the CLI to create/use a git worktree of ITS OWN inherited cwd
+   *  (the engine's repo). Omitted -> no `--worktree` flag at all: #285's review session mode
+   *  spawns against an already-materialized plain source tree (review/materializer.ts's
+   *  checkout output, no `.git` at all — D1) via an explicit `cwd` on the spawned process
+   *  instead (see spawnClaudeSession's `cwd` opt) — asking the CLI to ALSO create a worktree
+   *  there would be nonsensical (there is no repo to create one from) and wrong (it would land
+   *  under the engine's OWN worktreeRoot, not the materialized tree). Every caller except
+   *  peripheral.ts's review-session path supplies this, unchanged. */
+  worktree?: string;
   name: string;
   sessionId: string;
   addDir?: string;
@@ -518,9 +526,63 @@ export interface ClaudeArgsOpts {
    *  inline-never-a-file stance as `settings` above (a file under stateDir would be a
    *  worker/session-writable on-disk target). Omitted -> no `--mcp-config` flag, unchanged
    *  behavior for every caller that doesn't attach a proxy (peripheral.ts's RoleRunner is the
-   *  only caller that ever supplies it, and only when its own `proxy` opt is present). */
+   *  only caller that ever supplies it, and only when its own `proxy` opt is present). #285:
+   *  review sessions also set this, to `EMPTY_MCP_CONFIG_JSON` — see `strictMcpConfig`'s doc. */
   mcpConfig?: string;
+  /** #285 (review session mode, D1 static-only, Codex sol-high P1): `--strict-mcp-config` —
+   *  verified real against a live `claude` CLI (worker.ts's own `probeLlmPing` already uses it,
+   *  and it's independently confirmed in `claude --help`: "Only use MCP servers from
+   *  --mcp-config, ignoring all other MCP configurations"). Paired with `mcpConfig:
+   *  EMPTY_MCP_CONFIG_JSON` (below) this closes an execution surface `--disallowedTools Bash`
+   *  and the PreToolUse guard hook do NOT mediate at all: the CLI starts MCP server PROCESSES at
+   *  session init, before any tool call the guard could ever intercept — a materialized review
+   *  tree can carry a producer-authored `.mcp.json` (or a project `.claude/settings.json`
+   *  declaring `enabledMcpjsonServers`) that would otherwise be picked up and LAUNCHED. Omitted
+   *  -> no `--strict-mcp-config` flag, unchanged behavior for every non-review caller (today:
+   *  none besides `probeLlmPing`, which sets its own argv directly, not through this field). */
+  strictMcpConfig?: boolean;
+  /** #285 (review session mode): `--setting-sources <sources>` — restricts WHICH settings
+   *  layers Claude Code loads (verified against `claude --help`: "Comma-separated list of
+   *  setting sources to load (user, project, local)"). The "project"/"local" sources resolve
+   *  against the spawned process's OWN cwd — for a review session that cwd IS the materialized
+   *  (producer-controlled) tree, so an unrestricted default would load a producer-authored
+   *  `.claude/settings.json`/`.claude/settings.local.json` verbatim, HOOKS included (a much
+   *  bigger execution surface than MCP: settings-declared hooks run arbitrary shell commands
+   *  directly, and Claude Code's own hooks/PreToolUse arrays are known to CONCATENATE across
+   *  settings layers rather than being replaced by this module's own inline `--settings` JSON —
+   *  omitted keys/arrays there keep the file's values, see `guardSettings`'s own doc).
+   *
+   *  Review sessions pass `""` (Codex sol-high PR #300 review, SECOND round, P1: an earlier
+   *  version of this fix passed `"user"`, keeping the operator's own `~/.claude/settings.json`
+   *  in scope — but this repo's OWN security.md documents that a worker leg's `Bash(node
+   *  *)`/`Bash(npm *)` grant runs with the operator's REAL, unconfined `$HOME` (the
+   *  `workerCredentialFreeEnv` "HONEST SCOPE" note's own `steal.mjs` proof-of-concept), so a
+   *  producer could in principle have influenced that real `~/.claude/settings.json` in an
+   *  EARLIER round — loading it here would reopen exactly the static-only (D1) surface this
+   *  whole field exists to close). `""` loads ZERO file-based settings sources at all —
+   *  VERIFIED against a live `claude` CLI, not assumed from `--help` text: a debug-log run with
+   *  the default (unrestricted) sources showed the CLI applying the operator's real
+   *  `~/.claude/settings.json` permission entries at session init (`"Applying permission
+   *  update ... destination 'userSettings'"`); the SAME run with `--setting-sources ""` never
+   *  emitted that line, while the CLI still completed a full turn cleanly (exit 0, empty
+   *  stderr) — proving both that the flag is accepted with an empty value AND that it actually
+   *  suppresses file-based loading, not just user-facing sources. The guard hook itself is
+   *  UNAFFECTED — it rides in on `--settings` (inline JSON, a wholly separate flag from
+   *  `--setting-sources`; see `docs/security.md`'s "Benchmark isolation recipe" section, which
+   *  already documents `--settings` as additive to whatever settings SOURCES load, never a
+   *  replacement for them). Omitted -> no `--setting-sources` flag, unchanged behavior (today's
+   *  default: user+project+local, correct for every OTHER role/worker session, whose cwd is the
+   *  ENGINE's own trusted worktree, never a reviewed PR's tree). NOTE: an empty string is a
+   *  MEANINGFUL value here, not "unset" — see `claudeArgs`' own `!== undefined` check below. */
+  settingSources?: string;
 }
+
+/** #285: the `--mcp-config` value review sessions pass alongside `--strict-mcp-config` — an
+ *  explicit, EMPTY server map. Belt-and-suspenders with `--strict-mcp-config` (which alone,
+ *  given no `--mcp-config` at all, likely already yields zero servers per its own documented
+ *  semantics) — passing this explicitly removes any ambiguity about what "no --mcp-config at
+ *  all" resolves to, and gives spawn-args tests a concrete, asserted value to pin. */
+export const EMPTY_MCP_CONFIG_JSON = JSON.stringify({ mcpServers: {} });
 
 /** The code-producing worker's own default `--allowedTools`/`--disallowedTools` pair — extracted
  *  as named exports (#244) so a caller that widens them (e.g. WorkerSupervisor.dispatch's own
@@ -554,8 +616,7 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     "--effort",
     o.effort,
     ...(o.fallbackModel === "none" ? [] : ["--fallback-model", o.fallbackModel]),
-    "--worktree",
-    o.worktree,
+    ...(o.worktree ? ["--worktree", o.worktree] : []),
     "--name",
     o.name,
     ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : ["--session-id", o.sessionId]),
@@ -569,6 +630,13 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     ...(o.addDir ? ["--add-dir", o.addDir] : []),
     ...(o.settings ? ["--settings", o.settings] : []),
     ...(o.mcpConfig ? ["--mcp-config", o.mcpConfig] : []),
+    ...(o.strictMcpConfig ? ["--strict-mcp-config"] : []),
+    // #285 (Codex sol-high PR #300 review, second round, P1): `!== undefined`, NOT bare
+    // truthiness — review sessions pass settingSources: "" (verified against a live claude CLI:
+    // an empty value loads ZERO file-based settings sources, see settingSources' own doc). A
+    // truthy check would silently DROP the flag for an empty string, falling back to the CLI's
+    // default (load everything) and defeating the entire closure this field exists for.
+    ...(o.settingSources !== undefined ? ["--setting-sources", o.settingSources] : []),
     "--output-format",
     "stream-json",
     "--include-hook-events",
@@ -686,12 +754,28 @@ export interface SpawnedSession {
  *  kill the whole tree), stdio wired to the given jsonl fd. The SAME primitive
  *  WorkerSupervisor.dispatch/resume use internally (not re-implemented — this function is
  *  exported so peripheral.ts's narrower role-session shape reuses it directly rather than
- *  opening a second `child_process` import site). */
-export function spawnClaudeSession(bin: string, args: string[], opts: { jsonlFd: number; env: NodeJS.ProcessEnv }): SpawnedSession {
+ *  opening a second `child_process` import site).
+ *
+ *  `opts.cwd` (#285, review session mode): OMITTED for every caller except peripheral.ts's
+ *  review-session path — the process then inherits the ENGINE's own cwd, exactly today's
+ *  behavior, and the CLI's `--worktree <name>` flag (claudeArgs) resolves relative to it. When
+ *  supplied, it points the spawned `claude` process directly at an ALREADY-MATERIALIZED plain
+ *  source tree (review/materializer.ts's private-clone checkout output — no `.git`, D1) instead
+ *  — paired, at the call site, with omitting `--worktree` entirely (asking the CLI to also
+ *  create a worktree there would be nonsensical: there is no repo to create one from). This is
+ *  the ONLY subprocess `cwd` option in this engine (worker.test.ts's #69 grep-invariant test
+ *  pins that WorkerSupervisor's own dispatch()/resume() spawn() calls never set one — this
+ *  optional field exists solely for the narrow, guard-active, no-Bash review-session shape). */
+export function spawnClaudeSession(
+  bin: string,
+  args: string[],
+  opts: { jsonlFd: number; env: NodeJS.ProcessEnv; cwd?: string },
+): SpawnedSession {
   const child = spawn(bin, args, {
     detached: true,
     stdio: ["ignore", opts.jsonlFd, opts.jsonlFd],
     env: opts.env,
+    ...(opts.cwd ? { cwd: opts.cwd } : {}),
   });
   const killGroup = (sig: NodeJS.Signals): void => {
     if (child.pid == null) return;

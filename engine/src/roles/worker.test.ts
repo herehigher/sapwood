@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -28,6 +31,7 @@ import {
   defaultFixPromptPath,
   defaultPromptPath,
   discoverClaudeBin,
+  EMPTY_MCP_CONFIG_JSON,
   extractFailureText,
   guardSettings,
   loadFixPromptTemplate,
@@ -41,6 +45,7 @@ import {
   probeLlmPing,
   renderPromptTemplate,
   shellSingleQuote,
+  spawnClaudeSession,
   WORKER_ALLOWED_TOOLS_NO_GH,
   WorkerSupervisor,
   workerCredentialFreeEnv,
@@ -569,6 +574,55 @@ test("claudeArgs: --mcp-config only when given (#234), inline JSON — never a f
   assert.equal(withProxy[i + 1], inlineJson);
 });
 
+test("claudeArgs (#285): worktree is OPTIONAL — omitted entirely -> no --worktree flag at all (review session mode spawns against an already-materialized cwd instead, via spawnClaudeSession's own cwd opt)", () => {
+  const withWorktree = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    worktree: "lane-1",
+    name: "lane-1",
+    sessionId: "s",
+  });
+  assert.ok(withWorktree.includes("--worktree") && withWorktree.includes("lane-1"));
+
+  const withoutWorktree = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    name: "review-1",
+    sessionId: "s",
+  });
+  assert.ok(!withoutWorktree.includes("--worktree"), "no --worktree flag at all when worktree is omitted");
+  // --name and everything else are unaffected by omitting worktree.
+  assert.ok(withoutWorktree.includes("--name") && withoutWorktree.includes("review-1"));
+});
+
+test("claudeArgs (#285, Codex sol-high PR #300 review, P1): strictMcpConfig -> --strict-mcp-config; mcpConfig + strictMcpConfig together pin an EMPTY server map; settingSources -> --setting-sources <value>; all three omitted -> none of these flags appear at all", () => {
+  const bare = claudeArgs({ prompt: "p", model: "m", effort: "high", fallbackModel: "sonnet", worktree: "w", name: "w", sessionId: "s" });
+  assert.ok(!bare.includes("--strict-mcp-config"), "omitted -> no --strict-mcp-config flag");
+  assert.ok(!bare.includes("--setting-sources"), "omitted -> no --setting-sources flag");
+
+  const reviewShaped = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    name: "review-1",
+    sessionId: "s",
+    mcpConfig: EMPTY_MCP_CONFIG_JSON,
+    strictMcpConfig: true,
+    settingSources: "user",
+  });
+  assert.ok(reviewShaped.includes("--strict-mcp-config"));
+  const mcpIdx = reviewShaped.indexOf("--mcp-config");
+  assert.equal(reviewShaped[mcpIdx + 1], EMPTY_MCP_CONFIG_JSON);
+  assert.equal(EMPTY_MCP_CONFIG_JSON, '{"mcpServers":{}}', "the empty-server-map JSON shape itself, pinned");
+  const srcIdx = reviewShaped.indexOf("--setting-sources");
+  assert.equal(reviewShaped[srcIdx + 1], "user");
+});
+
 // ── Integration: stub `claude` (zero token) drives the real spawn/sentinel/probe path ──
 const mkStub = (dir: string, body: string): string => {
   const p = join(dir, "claude-stub");
@@ -576,6 +630,50 @@ const mkStub = (dir: string, body: string): string => {
   chmodSync(p, 0o755);
   return p;
 };
+
+test("spawnClaudeSession (#285): opts.cwd, when given, is the spawned process's REAL working directory — a real subprocess test, not a config assertion", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-spawn-cwd-"));
+  const targetCwd = mkdtempSync(join(tmpdir(), "sapwood-spawn-cwd-target-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\npwd\nexit 0\n`);
+    const jsonlPath = join(dir, "out.jsonl");
+    const jsonlFd = openSync(jsonlPath, "w");
+    const session = spawnClaudeSession(bin, [], { jsonlFd, env: process.env, cwd: targetCwd });
+    await new Promise<void>((resolve, reject) => {
+      session.onExit(() => resolve());
+      session.onError(reject);
+    });
+    closeSync(jsonlFd);
+    const out = readFileSync(jsonlPath, "utf8").trim();
+    // realpathSync both sides: macOS's tmpdir() lives under a `/tmp` -> `/private/tmp` symlink,
+    // so a real shell's `pwd` (which resolves symlinks) can legitimately differ byte-for-byte
+    // from the un-resolved path string this test passed in, while still being the SAME directory.
+    assert.equal(realpathSync(out), realpathSync(targetCwd), "the spawned process actually ran with cwd=targetCwd");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(targetCwd, { recursive: true, force: true });
+  }
+});
+
+test("spawnClaudeSession (#285): opts.cwd OMITTED -> the spawned process inherits the ENGINE's own cwd (today's unchanged behavior for every non-review-session caller)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-spawn-cwd-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\npwd\nexit 0\n`);
+    const jsonlPath = join(dir, "out.jsonl");
+    const jsonlFd = openSync(jsonlPath, "w");
+    const session = spawnClaudeSession(bin, [], { jsonlFd, env: process.env });
+    await new Promise<void>((resolve, reject) => {
+      session.onExit(() => resolve());
+      session.onError(reject);
+    });
+    closeSync(jsonlFd);
+    const out = readFileSync(jsonlPath, "utf8").trim();
+    assert.equal(realpathSync(out), realpathSync(process.cwd()), "no cwd given -> inherits the engine process's own cwd, unchanged");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 const waitFor = async (predicate: () => boolean, message: string): Promise<void> => {
   for (let i = 0; i < 400 && !predicate(); i++) await sleep(20);
   assert.ok(predicate(), message);
@@ -2009,7 +2107,7 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
   }
 });
 
-test("#69 grep-invariant (engine-wide, fable P3; extended #284): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), and review/materializer.ts (execFile) — and no subprocess call site passes a cwd — the engine structurally CANNOT exec git in a worker worktree", () => {
+test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), and review/materializer.ts (execFile) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — WorkerSupervisor's own dispatch()/resume() spawn() calls stay cwd-less, so the engine structurally CANNOT exec git in a worker worktree", () => {
   const srcDir = new URL("../", import.meta.url);
   const files = readdirSync(srcDir, { recursive: true }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
   // Sanity: the three known subprocess modules are present in the scan set.
@@ -2024,7 +2122,31 @@ test("#69 grep-invariant (engine-wide, fable P3; extended #284): the ONLY child_
       assert.doesNotMatch(src, /\b(execFileSync|execFile|execSync|spawnSync|exec)\b/, "worker.ts has no exec API");
       assert.doesNotMatch(src, /["'`]git["'`]/, "worker.ts references no `git` command");
       assert.doesNotMatch(src, /preserveHandoffWip|runGit|tryGit|noHooksDir/, "deleted helpers not stranded");
-      assert.doesNotMatch(src, /\bcwd:/, "worker.ts passes no cwd to any subprocess");
+      // #285: spawnClaudeSession — the ONE shared primitive peripheral.ts's review-session path
+      // uses — may now take an OPTIONAL `cwd` (an already-materialized review tree, never a
+      // worker worktree). WorkerSupervisor's own dispatch()/resume() spawn() calls (the
+      // code-producing WORKER path this invariant's title is actually about) must still NEVER
+      // pass one: extracting spawnClaudeSession's function body and asserting `cwd:` appears
+      // ONLY there (and only as the caller-supplied `opts.cwd`) keeps that half of the
+      // invariant intact rather than just deleting the check.
+      const fnStart = src.indexOf("export function spawnClaudeSession");
+      assert.ok(fnStart > -1, "spawnClaudeSession must still be present");
+      const fnEnd = src.indexOf("\nexport interface WorkerDeps", fnStart);
+      assert.ok(fnEnd > fnStart, "spawnClaudeSession's body must end before the next top-level export (WorkerDeps)");
+      const before = src.slice(0, fnStart);
+      const fnBody = src.slice(fnStart, fnEnd);
+      const after = src.slice(fnEnd);
+      assert.doesNotMatch(
+        before,
+        /\bcwd:/,
+        "no cwd anywhere before spawnClaudeSession (WorkerSupervisor's dispatch/resume spawns stay cwd-less)",
+      );
+      assert.doesNotMatch(
+        after,
+        /\bcwd:/,
+        "no cwd anywhere after spawnClaudeSession (WorkerSupervisor's dispatch/resume spawns stay cwd-less)",
+      );
+      assert.match(fnBody, /\bcwd:\s*opts\.cwd\b/, "spawnClaudeSession's own cwd: is sourced ONLY from an explicit caller-supplied opt");
     } else if (f === "forge/gh.ts") {
       // execFile ONLY, no spawn/sync variants, and gh runs in the engine's own cwd (no cwd option).
       assert.doesNotMatch(src, /\b(execFileSync|execSync|spawnSync|spawn)\b/, "gh.ts uses execFile only");
