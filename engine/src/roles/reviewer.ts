@@ -213,6 +213,169 @@ export function buildReviewTriggerComment(
   return `${triggerCommand}\n\n${instruction}${doctrineBlock}${scopeBlock}${identityBlock}`;
 }
 
+// ── #282 (M10, E1): ReviewerAdapter seam — first-class approval/blocking split ──────────────────
+//
+// Design #279 §1: today's `verdictFrom` (below) conflates two independent halves into one
+// ReviewAction — "does this PR have anything BLOCKING it" (unresolved threads / a standing
+// change request) and "has an approving signal arrived" (a fresh accepted-state review / an
+// OID-bound clean comment, #273). The upcoming engine-agent reviewer kind (a static LLM review
+// session) can only ever speak to the SECOND half — it has no visibility into live
+// thread-resolution state, and must never be trusted to derive blocking itself (that stays
+// engine-side, over live PRReviewData, for every kind alike, so a compromised/hallucinating
+// review session cannot manufacture "nothing is blocking this"). This section introduces that
+// split as a NEW, additive seam: `ApprovalResult`/`ReviewerAdapter`/`deriveBlockingSignal`.
+//
+// The existing `Reviewer`/`ReviewVerdict`/`verdictFromData` surface (above/below) is UNCHANGED
+// in TYPE and in the outcomes it produces — merge-driver.ts's whole drive-loop state machine
+// (trigger pins, fallback failover, generation tracking, #273's OID-bound coverage) keeps
+// consuming it exactly as before; only `verdictFrom`'s OWN internals are refactored to route
+// through the shared blocking function and a shared approval-only helper (mechanical extract,
+// zero behavior change — see reviewer.test.ts's regression-pin suite comparing both paths over
+// the existing fixture corpus). Wiring the drive loop itself onto `ReviewerAdapter` end-to-end —
+// including reconciling #273's generation-tracking fields, which `ApprovalResult` deliberately
+// does not model — is left to the follow-up engine-agent integration issue; forcing that here
+// would trade this issue's "mechanical, zero behavior change" mandate for a much larger,
+// harder-to-verify diff across a security-relevant state machine.
+
+/** A validated review finding — the shape an engine-agent review session's structured output is
+ *  validated INTO before it can ever reach a `rejected` ApprovalResult (design #279 §1: "the
+ *  session never chooses outcomes" — `rejected` is engine-derived from a validated array, never
+ *  trusted prose). Minimal from day one (#282); the engine-agent issue extends it with per-AC
+ *  snapshot IDs (design #279 §5) without another migration, since callers already narrow through
+ *  `isFinding`/`validateFindings` rather than casting a session's raw output. */
+export interface Finding {
+  /** Stable identifier for this finding within one review (e.g. an ordinal, or the session's own
+   *  numbering) — never a free-text label, so downstream dedup/audit keys off it, not prose. */
+  id: string;
+  /** Human-readable finding body (the actual review comment text). Non-empty (see isFinding). */
+  body: string;
+}
+
+/** Runtime shape guard for a single `Finding` — `rejected`'s findings array is validated
+ *  ELEMENT-WISE at construction (never cast), so a malformed/partial object from an untrusted
+ *  producer (a future engine-agent session's structured output) can never silently become a
+ *  blocking verdict with a missing id/body. */
+export function isFinding(v: unknown): v is Finding {
+  if (typeof v !== "object" || v === null) return false;
+  const f = v as Record<string, unknown>;
+  return typeof f.id === "string" && f.id.length > 0 && typeof f.body === "string" && f.body.length > 0;
+}
+
+/** Validates an ENTIRE findings array (design #279 §1: "validated findings -> FIXABLE path").
+ *  An empty array is valid (see ApprovalResult's own doc — zero findings is `approved`, never
+ *  "rejected with nothing to say"); any non-Finding element fails the WHOLE array (fail-closed: a
+ *  single malformed entry must not silently drop just itself and understate what was found). */
+export function validateFindings(v: unknown): v is Finding[] {
+  return Array.isArray(v) && v.every(isFinding);
+}
+
+/** Evidence attached to an `approved` ApprovalResult (design #279 §1) — WHICH counted signals
+ *  satisfied gate②'s approval half, for the audit trail. Deliberately just the two counts
+ *  `verdictFrom` already derives (`freshHeadReviewCount` / #273's OID-bound clean comments): the
+ *  decisive fact is already the discriminant (`kind: "approved"`); this is provenance, not
+ *  another verdict input. At least one field is > 0 for every `approved` result.
+ *  Intentionally NOT redesigned for a future engine-agent kind's richer, per-source evidence
+ *  (e.g. session transcript ref, model identity) — that shape is deferred to #286 (E4a); this
+ *  interface may grow additional optional fields there without breaking the two existing counts. */
+export interface ApprovalEvidence {
+  /** Fresh, accept-state, non-author reviews on the current head (see freshHeadReviewCount). */
+  freshApprovingReviews: number;
+  /** Fresh, OID-bound, trusted clean comments (#273, see freshTrustedCleanComments below). */
+  freshTrustedSignals: number;
+}
+
+/**
+ * The approval-side verdict a `ReviewerAdapter` returns — deliberately BLOCKING-BLIND (design
+ * #279 §1): "Blocking derivation stays engine-side over live PRReviewData; adapters return
+ * approval-side results only." A `ReviewerAdapter` never sees unresolved-thread counts or
+ * standing-CHANGES_REQUESTED state; the caller combines this with `deriveBlockingSignal`'s own
+ * output (blocking always wins — the same fail-safe ordering `deriveReviewAction` already
+ * enforces above) before deriving a final ReviewAction/Gate.
+ *
+ *  - `approved` REQUIRES zero findings — encoded in the TYPE, not just a runtime check a caller
+ *    might skip: the optional `findings?: never` field means only OMITTING it type-checks, so
+ *    "approved with findings" is not representable (#282 review round 2, adopted P2 — verified
+ *    with a temporary probe under `tsc --noEmit`'s checked set; reviewer.test.ts itself is
+ *    EXCLUDED from that command by engine/tsconfig.json and runs under tsx, transpile-only, so a
+ *    `@ts-expect-error` inside it would never actually be re-checked by CI and is deliberately
+ *    NOT used there — see that test's own comment).
+ *  - `rejected` carries a VALIDATED (see validateFindings), NON-EMPTY findings array — the tuple
+ *    type `[Finding, ...Finding[]]` means "rejected with zero findings" is likewise not
+ *    representable (#282 review round 2, adopted P2: a rejection with nothing to say is a
+ *    contradiction in terms). The ONLY variant merge-driver maps onto the existing
+ *    HANDLE_THREADS -> FIXABLE lane (design #279 §1); the session that produced them never chose
+ *    the outcome, only supplied the findings. The symmetric `evidence?: never` mirrors
+ *    `approved`'s own field-exclusion pattern (a rejection carries no approval evidence).
+ *  - `pending` — nothing decisive yet (no approving artifact arrived); the caller keeps polling.
+ *  - `unavailable` — the adapter itself could not produce a verdict this tick (e.g. an
+ *    engine-agent session/materialize failure, design #279 §6); `headOid` may be null when not
+ *    even that much is known (mirrors ReviewVerdict.headOid's own null-on-failure contract).
+ */
+export type ApprovalResult =
+  | { kind: "approved"; headOid: string; evidence: ApprovalEvidence; findings?: never }
+  | { kind: "rejected"; headOid: string; findings: [Finding, ...Finding[]]; evidence?: never }
+  | { kind: "pending"; headOid: string }
+  | { kind: "unavailable"; headOid: string | null; reason: string };
+
+/** Everything a `ReviewerAdapter`'s two methods need, bundled ONE way (design #279 §1's sketch
+ *  shows both `trigger`/`evaluate` taking a single `ReviewContext`) — `trigger` reads only
+ *  `forge`/`pr`/`issue`/`triggerContext` (the SAME parameters `Reviewer.triggerReview` already
+ *  takes positionally); `evaluate` reads only `data`/`pin` (same as `Reviewer.verdictFromData`).
+ *  Each method simply ignores the half of the context it has no use for — the caller (a future
+ *  driveOne-equivalent) always populates both halves together, same call site shape as today. */
+export interface ReviewContext {
+  forge: IForge;
+  pr: number;
+  issue: number;
+  /** Delta-scoping for the trigger comment (see ReviewTriggerContext) — used by `trigger` only. */
+  triggerContext?: ReviewTriggerContext;
+  /** Live review data for THIS tick — used by `evaluate` only. */
+  data?: PRReviewData;
+  /** The engine-recorded trigger pin (see ReviewTriggerPin) — used by `evaluate` only. */
+  pin?: ReviewTriggerPin;
+}
+
+/** The approval-only half of the pluggable review-gate seam (design #279 §1) — a `Reviewer`
+ *  (below) additionally implements this so a future engine-agent kind can slot in alongside the
+ *  three existing kinds through the SAME shape, without merge-driver.ts's drive loop needing a
+ *  kind-specific branch. Read-only + comment-only, same producer != reviewer != merger posture as
+ *  `Reviewer` (module header) — `evaluate` never mutates anything and never derives blocking;
+ *  that stays with `deriveBlockingSignal` (below), consumed by every kind alike. */
+export interface ReviewerAdapter {
+  readonly kind: ReviewerKind;
+  /** Post the review trigger, or no-op for a kind with no bot to ping. Identical contract to
+   *  `Reviewer.triggerReview`, just bundled into one context object. */
+  trigger(ctx: ReviewContext): Promise<void>;
+  /** This tick's APPROVAL-ONLY verdict — never blocking-aware (see ApprovalResult's own doc).
+   *  Async because a future engine-agent kind's evaluate() spawns a real review session; the
+   *  three existing kinds resolve synchronously under the hood and simply wrap that result in an
+   *  already-settled Promise (see e.g. CodexReviewer.evaluate below). */
+  evaluate(ctx: ReviewContext): Promise<ApprovalResult>;
+}
+
+/** The blocking half of gate②'s ACTION derivation (design #279 §1), lifted out of `verdictFrom`
+ *  into ONE shared, pure, engine-side function every kind's verdict computation routes through —
+ *  the SAME "unresolved threads OR a standing CHANGES_REQUESTED" signals `deriveReviewAction`
+ *  already treats as fail-safe-first (a blocking signal outranks any approval, Codex PR #42 P1),
+ *  now computed directly from live `PRReviewData` in ONE place rather than re-derived ad hoc.
+ *  No `ReviewerAdapter` ever computes this itself (see ReviewerAdapter's own doc) — a future
+ *  engine-agent kind's `evaluate()` is blocking-blind by construction; this function is the ONLY
+ *  blocking authority, called once per tick regardless of which reviewer kind is active. */
+export interface BlockingSignal {
+  blocked: boolean;
+  unresolvedThreads: number;
+  changesRequestedOnHead: boolean;
+}
+
+export function deriveBlockingSignal(data: PRReviewData): BlockingSignal {
+  const changesRequested = changesRequestedOnHead(data.reviews, data.headOid, data.author);
+  return {
+    blocked: data.unresolvedThreads > 0 || changesRequested,
+    unresolvedThreads: data.unresolvedThreads,
+    changesRequestedOnHead: changesRequested,
+  };
+}
+
 /**
  * Verdict core. `countableReview` restricts WHOSE reviews may satisfy gate② (Codex PR #42 P1:
  * in codex mode, a review from any random non-author account must NOT count — only the Codex
@@ -347,6 +510,27 @@ function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: st
   }).length;
 }
 
+/** #282 (M10, E1): the approval-only half of `verdictFrom` (below), extracted so a
+ *  `ReviewerAdapter.evaluate()` implementation (see e.g. CodexReviewer.evaluate) can produce the
+ *  SAME `ApprovalEvidence` counts without duplicating `verdictFrom`'s own computation — the two
+ *  are regression-pinned against each other in reviewer.test.ts over the existing fixture corpus.
+ *  Returns `countable` too so `verdictFrom` doesn't re-filter `data.reviews` a second time for
+ *  its own `currentGenerationFormalResponse` computation below. NEVER touches blocking signals
+ *  (unresolved threads / changesRequestedOnHead) — see deriveBlockingSignal, computed separately
+ *  and always by the caller. */
+function computeApprovalSignal(
+  data: PRReviewData,
+  acceptStates: readonly string[],
+  countableReview?: (r: PRReview) => boolean,
+  trustedReactionLogin?: (login: string) => boolean,
+  pin?: ReviewTriggerPin,
+): { evidence: ApprovalEvidence; countable: PRReview[] } {
+  const countable = countableReview ? data.reviews.filter(countableReview) : data.reviews;
+  const fresh = freshHeadReviewCount(countable, data.headOid, data.author, acceptStates);
+  const freshTrustedSignals = freshTrustedThumbCount() + freshTrustedCleanComments(data, trustedReactionLogin, pin);
+  return { evidence: { freshApprovingReviews: fresh, freshTrustedSignals }, countable };
+}
+
 function verdictFrom(
   data: PRReviewData,
   acceptStates: readonly string[],
@@ -354,17 +538,18 @@ function verdictFrom(
   trustedReactionLogin?: (login: string) => boolean,
   pin?: ReviewTriggerPin,
 ): ReviewVerdict {
-  const countable = countableReview ? data.reviews.filter(countableReview) : data.reviews;
-  const fresh = freshHeadReviewCount(countable, data.headOid, data.author, acceptStates);
-  const freshTrustedSignals = freshTrustedThumbCount() + freshTrustedCleanComments(data, trustedReactionLogin, pin);
-  const currentHeadChangesRequested = changesRequestedOnHead(data.reviews, data.headOid, data.author);
+  const { evidence, countable } = computeApprovalSignal(data, acceptStates, countableReview, trustedReactionLogin, pin);
+  // #282: the blocking half now routes through the ONE shared engine-side function every kind
+  // consumes (deriveBlockingSignal, above) instead of an inline changesRequestedOnHead call —
+  // same value, computed once, reused below for currentHeadChangesRequested too.
+  const blocking = deriveBlockingSignal(data);
   const action = deriveReviewAction({
     hasEyesReaction: data.reactions.some((r) => r.content === "eyes"),
-    freshApprovingReviews: fresh,
+    freshApprovingReviews: evidence.freshApprovingReviews,
     // Legacy field name; only OID-bound clean comments reach this signal (#273).
-    freshTrustedThumbs: freshTrustedSignals,
-    unresolvedThreads: data.unresolvedThreads,
-    changesRequestedOnHead: currentHeadChangesRequested,
+    freshTrustedThumbs: evidence.freshTrustedSignals,
+    unresolvedThreads: blocking.unresolvedThreads,
+    changesRequestedOnHead: blocking.changesRequestedOnHead,
   });
   const cutoff = pin?.at == null ? NaN : Date.parse(pin.at);
   const currentGenerationFormalResponse =
@@ -377,8 +562,8 @@ function verdictFrom(
   return {
     action,
     headOid: data.headOid,
-    generationResponded: currentGenerationFormalResponse || currentHeadChangesRequested || freshTrustedSignals > 0,
-    coverageEstablished: currentGenerationFormalResponse || freshTrustedSignals > 0,
+    generationResponded: currentGenerationFormalResponse || blocking.changesRequestedOnHead || evidence.freshTrustedSignals > 0,
+    coverageEstablished: currentGenerationFormalResponse || evidence.freshTrustedSignals > 0,
   };
 }
 
@@ -387,7 +572,7 @@ function verdictFrom(
  *  not APPROVED — matching pr_gate.sh's fresh_head_review_count) from the CODEX BOT or a
  *  configured trusted login — never from an arbitrary non-author account (Codex PR #42 P1:
  *  gate② is "a fresh different-model review", so the reviewer identity is part of the gate). */
-export class CodexReviewer implements Reviewer {
+export class CodexReviewer implements Reviewer, ReviewerAdapter {
   readonly kind = "different-model-codex" as const;
   private static readonly ACCEPT = ["COMMENTED", "APPROVED"] as const;
   private readonly allowedLogins: string[];
@@ -423,12 +608,32 @@ export class CodexReviewer implements Reviewer {
     const trusted = (login: string) => this.allowedLogins.includes(login);
     return verdictFrom(data, CodexReviewer.ACCEPT, (r) => trusted(normalizeLogin(r.author)), trusted, pin);
   }
+
+  /** #282 (M10, E1): `ReviewerAdapter.trigger` — identical contract to `triggerReview` above,
+   *  just bundled into one `ReviewContext` (design #279 §1's sketch). */
+  async trigger(ctx: ReviewContext): Promise<void> {
+    return this.triggerReview(ctx.forge, ctx.pr, ctx.issue, ctx.triggerContext);
+  }
+
+  /** #282: `ReviewerAdapter.evaluate` — the APPROVAL-ONLY half of `verdictFromData` above,
+   *  reusing the EXACT SAME `computeApprovalSignal` helper `verdictFrom` calls (regression-pinned
+   *  against it in reviewer.test.ts) so both surfaces can never silently diverge. Never derives
+   *  blocking — see ApprovalResult's own doc. */
+  async evaluate(ctx: ReviewContext): Promise<ApprovalResult> {
+    if (!ctx.data) return { kind: "unavailable", headOid: null, reason: "no PRReviewData supplied to evaluate()" };
+    const data = ctx.data;
+    const trusted = (login: string) => this.allowedLogins.includes(login);
+    const { evidence } = computeApprovalSignal(data, CodexReviewer.ACCEPT, (r) => trusted(normalizeLogin(r.author)), trusted, ctx.pin);
+    return evidence.freshApprovingReviews > 0 || evidence.freshTrustedSignals > 0
+      ? { kind: "approved", headOid: data.headOid, evidence }
+      : { kind: "pending", headOid: data.headOid };
+  }
 }
 
 /** A human review satisfies gate② — only an explicit APPROVED state counts (a human clicking
  *  "Comment" is not the same signal as "Approve"), from anyone but the PR author. No trigger:
  *  there's no bot to ping — a human reviews out of band. */
-export class HumanReviewer implements Reviewer {
+export class HumanReviewer implements Reviewer, ReviewerAdapter {
   readonly kind = "human" as const;
   private static readonly ACCEPT = ["APPROVED"] as const;
 
@@ -441,13 +646,29 @@ export class HumanReviewer implements Reviewer {
     // to human thumbs, but still attributes formal-review coverage to the current generation.
     return verdictFrom(data, HumanReviewer.ACCEPT, undefined, undefined, pin);
   }
+
+  /** #282: no-op, same as triggerReview (bundled into one ReviewContext). */
+  async trigger(_ctx: ReviewContext): Promise<void> {
+    // No-op: nothing to ping. A human reviews on their own schedule.
+  }
+
+  /** #282: approval-only half — see CodexReviewer.evaluate's own doc for the shared-helper
+   *  rationale. No trustedReactionLogin -> freshTrustedSignals always 0, same as verdictFromData. */
+  async evaluate(ctx: ReviewContext): Promise<ApprovalResult> {
+    if (!ctx.data) return { kind: "unavailable", headOid: null, reason: "no PRReviewData supplied to evaluate()" };
+    const data = ctx.data;
+    const { evidence } = computeApprovalSignal(data, HumanReviewer.ACCEPT, undefined, undefined, ctx.pin);
+    return evidence.freshApprovingReviews > 0 || evidence.freshTrustedSignals > 0
+      ? { kind: "approved", headOid: data.headOid, evidence }
+      : { kind: "pending", headOid: data.headOid };
+  }
 }
 
 /** Only a NAMED trusted-reviewer login's APPROVED review on the current head counts — public-
  *  repo hardening seam (PLAN.md v1.1): an unlisted account approving is not gate②. Fail-closed:
  *  an empty trustedReviewers list means nobody is trusted, so this mode can NEVER produce
  *  MERGE_OK (not a config footgun that silently allows any reviewer). */
-export class SameModelTrustedReviewer implements Reviewer {
+export class SameModelTrustedReviewer implements Reviewer, ReviewerAdapter {
   readonly kind = "same-model-trusted" as const;
   private static readonly ACCEPT = ["APPROVED"] as const;
 
@@ -471,6 +692,31 @@ export class SameModelTrustedReviewer implements Reviewer {
       pin,
     );
   }
+
+  /** #282: no-op, same as triggerReview (bundled into one ReviewContext). */
+  async trigger(_ctx: ReviewContext): Promise<void> {
+    // No-op: the trusted reviewer is expected to act out of band (e.g. its own automation).
+  }
+
+  /** #282: approval-only half — mirrors verdictFromData's own fail-closed empty-list handling
+   *  (an empty trustedLogins list can never produce `approved`, same as it can never produce
+   *  MERGE_OK above). See CodexReviewer.evaluate's own doc for the shared-helper rationale. */
+  async evaluate(ctx: ReviewContext): Promise<ApprovalResult> {
+    if (!ctx.data) return { kind: "unavailable", headOid: null, reason: "no PRReviewData supplied to evaluate()" };
+    const data = ctx.data;
+    if (this.trustedLogins.length === 0) return { kind: "pending", headOid: data.headOid };
+    const trusted = this.trustedLogins.map(normalizeLogin);
+    const { evidence } = computeApprovalSignal(
+      data,
+      SameModelTrustedReviewer.ACCEPT,
+      (r) => trusted.includes(normalizeLogin(r.author)),
+      (l) => trusted.includes(l),
+      ctx.pin,
+    );
+    return evidence.freshApprovingReviews > 0 || evidence.freshTrustedSignals > 0
+      ? { kind: "approved", headOid: data.headOid, evidence }
+      : { kind: "pending", headOid: data.headOid };
+  }
 }
 
 /** A Reviewer implementation's discriminant (#54: shared by primary + fallback construction). */
@@ -481,8 +727,24 @@ export type ReviewerKind = Reviewer["kind"];
  *  the EXACT SAME mode implementation/semantics as picking that kind as the primary
  *  (reviewer.mode) would — reused, never forked. `doctrine` (#167) is threaded through
  *  identically to `triggerCommand`; only the `different-model-codex` case does anything with it
- *  (same-model-trusted / human post no trigger comment, so they have nothing to inject it
- *  into). */
+ *  (same-model-trusted / human post no trigger comment, so they have nothing to inject it into).
+ *
+ *  #282 (M10, E1): this switch is EXHAUSTIVE — no `default:` (grep-invariant test,
+ *  reviewer.test.ts) and no `different-model-codex`-shaped catch-all. The prior shape
+ *  (`case "different-model-codex": default: return new CodexReviewer(...)`) meant an
+ *  UNRECOGNIZED kind string silently mis-constructed a Codex reviewer instead of failing —
+ *  exactly the "can silently mis-construct" gap design #279 §1 calls out. Every member of
+ *  `ReviewerKind` now gets its OWN explicit case. Note the compile-time guarantee is NOT the
+ *  switch's own fallthrough behavior alone (Codex review round 2, adopted P2): a switch with no
+ *  `default:` whose every case returns is exhaustive-shaped, but the function stays TOTAL either
+ *  way once a trailing `throw` follows it — TypeScript would happily accept a NEW `ReviewerKind`
+ *  member with no matching case, since the throw still satisfies every code path (no TS2366).
+ *  The `_exhaustive: never` assignment right after the switch is what actually forces the
+ *  compile error: it only type-checks when `kind`'s residual type at that point is `never`
+ *  (every member consumed by a case above); a new, unhandled member leaves a non-`never` residual
+ *  and the assignment itself fails to compile. The `throw` below it remains startup-time defense
+ *  in depth for a `kind` value that bypasses the type system entirely (e.g. an unvalidated
+ *  cast) — it is unreachable for any value TypeScript itself can see reach this function. */
 export function buildReviewerByKind(
   kind: ReviewerKind,
   trustedReviewers: readonly string[],
@@ -494,13 +756,21 @@ export function buildReviewerByKind(
       return new HumanReviewer();
     case "same-model-trusted":
       return new SameModelTrustedReviewer(trustedReviewers);
-    // biome-ignore lint/complexity/noUselessSwitchCase: explicit case documents the fail-closed reviewer fallback.
     case "different-model-codex":
-    default:
       // trustedReviewers EXTENDS the Codex-bot allowlist in this mode (public-repo hardening:
       // gate② acceptance is identity-checked, not merely non-author — Codex PR #42 P1).
       return new CodexReviewer(trustedReviewers, triggerCommand, doctrine);
   }
+  // #282 review round 2 (adopted P2): the ACTUAL compile-time exhaustiveness sentinel. `kind`'s
+  // type here is `never` only if every ReviewerKind member was consumed by a case above — a
+  // future member added to the union without a matching case leaves a non-`never` residual type,
+  // and THIS assignment (not the switch, not the throw below) is what fails to compile (TS2322).
+  const _exhaustive: never = kind;
+  void _exhaustive; // referenced so it isn't flagged as an unused local
+  // Unreachable for any `kind` TypeScript can prove is a ReviewerKind (see doc above and the
+  // sentinel just above) — a startup-time fail-safe for a value that reached here only via a
+  // type-system bypass (e.g. an unvalidated cast).
+  throw new Error(`buildReviewerByKind: unhandled reviewer kind: ${String(kind)}`);
 }
 
 /** Resolve this repo's review-doctrine text for gate② trigger-comment injection (#167). Reuses
@@ -642,8 +912,18 @@ export interface ReviewFailoverResult {
  *    must be MERGE_OK (the approval artifact must actually exist on this head; blocking
  *    signals re-checked by construction, since every mode's verdictFrom puts them first).
  *    Nothing decisive anywhere -> the primary's non-decisive verdict, unchanged (queue).
+ *
+ * #282 (M10, E1): ASYNC-AWARE signature (design #279 §1). `Reviewer.verdictFromData` itself stays
+ * synchronous — the three existing kinds resolve from already-fetched `PRReviewData` with no I/O
+ * of their own — so this function's OWN body performs no `await`; the change is the boundary,
+ * not the computation. It exists so a future engine-agent kind's genuinely-async evaluation
+ * (design #279 §2's drive flow: materialize → spawn session → validate) can be threaded into the
+ * SAME failover-timing/lock/transition orchestration below without a second, parallel resolver —
+ * every call site (merge-driver.ts's driveOne) now `await`s this call; zero behavior change,
+ * mechanical signature update (reviewer.test.ts's resolveReviewVerdict suite is the regression
+ * pin: same assertions, `async`-wrapped).
  */
-export function resolveReviewVerdict(input: {
+export async function resolveReviewVerdict(input: {
   primary: Reviewer;
   fallbacks: readonly Reviewer[];
   data: PRReviewData;
@@ -651,7 +931,7 @@ export function resolveReviewVerdict(input: {
   now: Date;
   failoverAfterSec: number;
   lock: ReviewFallbackLock;
-}): ReviewFailoverResult {
+}): Promise<ReviewFailoverResult> {
   const { primary, fallbacks, data, triggerPin, now, failoverAfterSec, lock } = input;
   const primaryVerdict = primary.verdictFromData(data, triggerPin);
   // A lock only ever REFERS to a re-verifiable episode: current head + a kind that is still an

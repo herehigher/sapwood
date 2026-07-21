@@ -458,7 +458,9 @@ export class MergeDriver {
     // primary unavailability) a fallback's. `fallback` omitted -> identical to the pre-#54
     // `reviewer.verdictFromData(data, triggerPin)` call this replaces.
     const gateNow = (this.deps.now ?? (() => new Date()))();
-    const resolved = resolveReviewVerdict({
+    // #282: resolveReviewVerdict is now async-aware (design #279 §1) — mechanical `await` added
+    // here; driveOne is already async, so no other call-site shape changes.
+    const resolved = await resolveReviewVerdict({
       primary: reviewer,
       fallbacks: this.deps.fallbackReviewers ?? [],
       data,
