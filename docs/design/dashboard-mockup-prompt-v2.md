@@ -542,20 +542,25 @@ reconciler（观察外部态发 escalation-resolved，范式=concern-adjudicated
 | 无 clear 类的诚实边界（#295 落地前） | 该类条目带小标 `manual · verify on GitHub`——引擎无法确认时**把不确定说出来**（Mara 规则 7），#295 落地后与健康类同清场 | payload 判别（如 labeled:0） |
 | rust 预算 | 徽章+左边框 rust 点染，**不整行泼 rust**；strip 是 rust 主家但不是 rust 洪水 | |
 
-**排除判定（记名）**：dissent（concern-posted）不进 strip——speak-not-act
-没有停摆（"沉默也是合法回答"），去 activity feed，虽然它清场信号最好；
+**dissent 改判（用户，2026-07-21）**：dissent **进 strip**——返工代价论
+（speak-not-act 不阻塞交付，分歧越有价值发现越晚返工越贵；strip 是人
+唯一必看区）。但**不穿 rust**：amber DISSENT 层，排在 rust 条目之后，
+头部分开计数 `2 waiting · 1 dissent`（"waiting on you" 空态契约不稀释；
+rust 清零+有 dissent 时 moss 行变 `nothing blocked · 1 dissent open`）。
+离场=concern-adjudicated（closed/body-changed/external-reply）。
+色谱语义定稿：rust=停摆等人；amber dissent=带异议继续跑，早看免返工。
+
+**排除判定（记名）**：
 produce-PR-and-stop 模式下 gated-green PR 的聚合行（"N PRs ready for
 your merge"，amber 非 rust——是工作流不是故障）**deferred**，v0.2 dogfood
 用 conductor-merge；orphan-detected 进 strip（快照语义清场）。
 
-## 开放裁决点（用户）
+## 裁决记录
 
-1. dissent 排除出 strip（feed 管）——接受？
-2. 无 clear 类的 `manual · verify on GitHub` 小标（#295 前的诚实降级）
-   ——接受？
-3. reason 词表里 PLAN / VERIFY 两类是否合并为一个 PLAN 徽章
-   （plan-review-escalated 与 verify-na-proposed 都是规划期人工裁决）？
-4. 头部聚合行 + 空态心跳——接受？
+1. dissent：**用户改判进 strip**（amber 层不穿 rust，见上）✔ 2026-07-21
+2. 无 clear 类 `manual · verify on GitHub` 小标（#295 前诚实降级）——待确认
+3. PLAN / VERIFY 徽章合并——待确认
+4. 头部聚合行 + 空态心跳——待确认
 
 ## 变更记录（浓缩：只留迭代理由，细节以各部件章节现行文本为准）
 
