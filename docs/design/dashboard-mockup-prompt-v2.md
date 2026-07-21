@@ -1,4 +1,8 @@
-# Dashboard 成品预期图 — v2（部件分解阶段 · hero board）
+# Dashboard 成品预期图 — v2（部件分解阶段）
+
+部件流：hero（冻结·26 号图）→ header（冻结·32 号图）→ lanes（冻结·37 号图）
+→ cost strip（出图中）→ activity feed / needs-attention / config drawer /
+侧栏 rail → 整页融合。
 
 本地工作文件，不提交。v1（整页提示词+首轮出图）见 `dashboard-mockup-prompt-v1.md`。
 本轮起改为**分部件设计、最后融合**，首个部件 = hero board。
@@ -137,7 +141,7 @@ Same layout, light "spring" theme: background warm cream nudged slightly toward 
 
 ---
 
-# Header 部件（v3 · 方案定稿待用户确认）
+# Header 部件（v3.1 · 冻结，基准 32 号图）
 
 前提裁决（用户，2026-07-21）：**顶部不设 Live/Replay 切换**——看最新轮≈live，
 看历史轮=replay。与 §11"replay 单位是轮"同构；是对 §3 A 的正式修订（记档）。
@@ -219,7 +223,7 @@ Same two-bar layout, light "spring" theme: canvas warm cream nudged slightly tow
 7. 右箭头在 LIVE 位处于灰态（已在最右，无更新一轮可去）？
 8. 无 Live/Replay 切换开关残留？无 wordmark/config（它们在侧栏）？
 
-# Lanes 部件（v4 · 三方合成方案待用户确认）
+# Lanes 部件（v4.1 · 冻结，基准 37 号图）
 
 输入：用户原型图（33 号，三卡：Available / #94 writing / #90 needs-human）。
 三方 = PM + 架构师（引擎代码审计）+ 架空用户（Mara 运维者 / Deniz 评估者）。
@@ -373,7 +377,7 @@ Same panel layout, light "spring" theme: canvas warm cream nudged slightly towar
 10. （v4.1 新增）水滴=issue、pull-request 字形=PR，两字形清晰可辨、
     全部编号前都带？
 
-# Cost strip 部件（v5 · 方案）
+# Cost strip 部件（v5 · 出图中）
 
 §3 E 信息架构已定（phase+model 双桶、est/settled 斜纹语法、Config ▸ 入口），
 本轮只做数据核实 + 元素落地。**核实结论：零新引擎前置。**
