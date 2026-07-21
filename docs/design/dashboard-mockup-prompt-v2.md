@@ -1,11 +1,21 @@
 # Dashboard 成品预期图 — v2（部件分解阶段）
 
 部件流：hero（冻结·26 号图）→ header（冻结·32 号图）→ lanes（冻结·37 号图）
-→ cost strip（冻结·40 号图）→ needs-attention strip（冻结·41 号图+42 重chip 嫁接）
-→ activity feed / config drawer / 侧栏 rail → 整页融合。
+→ cost strip（冻结·40 号图）→ needs-attention strip（冻结·41 号图+42 重chip 嫁接）。
+**mockup 阶段就此收官（用户裁决 2026-07-21）**：activity feed / config
+drawer / 侧栏 rail 不再出图，按 §3 既有规格直接实施（feed 的定性已钉死：
+strip=还开着的事的队列，feed=发生过的事的日志）；整页融合也不出图，
+以六件冻结基线 + frontend-design.md 为实施依据。
 
-本地工作文件，不提交。v1（整页提示词+首轮出图）见 `dashboard-mockup-prompt-v1.md`。
-本轮起改为**分部件设计、最后融合**，首个部件 = hero board。
+**冻结基线图索引（docs/design/mockup/）**：
+hero-panel-dark/light.png（26 号）· header-dark/light.png（32 号）·
+lanes-dark/light.png（37 号）· cost-dark.png（40 号）·
+needs-attention-dark.png（41 号；v6.1 提示词含 42 重 chip 嫁接与
+seen 半透明修正，作为实施注记，未再出图）。
+
+设计阶段工作档案（随 PR 入库）。v1（整页提示词轮）已删除——其裁决全部
+被本文件与 frontend-design.md 第三修订吸收，唯一存留价值的出图方法论
+移至文末附录。流程 = 分部件设计 → 逐件出图评审 → 冻结。
 
 ## Round-1 审评落定（用户裁决，2026-07-20）
 
@@ -638,3 +648,15 @@ Same two-instance layout, light "spring" theme: canvas warm cream nudged slightl
 - v5：cost strip 方案 + 三方裁决（avg 参照进标注、轮账单行含
   review: external ($0) 明示零、Config ▸ 砍除、幽灵中位刻度）；
   零新引擎前置。文件重组：部件按页面流排序，历史迭代版本浓缩。
+
+## 附录：出图方法论（自 v1 存留，供未来 mockup 轮复用）
+
+- 钉死：画幅比例、每个关心的 hex（附口语描述）、按阅读顺序逐区块
+  布局+比例、关键图形的几何描述、字体**处理方式**（不写字体名）、
+  必须可读的字符串清单。
+- 放开：图标形状、微间距、纹理、条形图精确几何。
+- 失败模式规避：文字必然乱码 → 压缩文字面、必读字符串重复强调、其余
+  允许模糊占位；别说 "chart" → 直接描述条形；防漂移成纯黑+霓虹 →
+  底色说两遍+负面清单；一句话一个概念；关键约束放前 1/3；跑 3–4 seed，
+  产出当布局/氛围参考，不当文字来源；语义级约束（禁伪状态、色彩配额）
+  写成 NEVER/ONLY 负面句式最有效。
