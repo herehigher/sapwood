@@ -219,6 +219,50 @@ Same two-bar layout, light "spring" theme: canvas warm cream nudged slightly tow
 7. 右箭头在 LIVE 位处于灰态（已在最右，无更新一轮可去）？
 8. 无 Live/Replay 切换开关残留？无 wordmark/config（它们在侧栏）？
 
+# Cost strip 部件（v5 · 方案）
+
+§3 E 信息架构已定（phase+model 双桶、est/settled 斜纹语法、Config ▸ 入口），
+本轮只做数据核实 + 元素落地。**核实结论：零新引擎前置。**
+
+## 数据依据（架构师核查 2026-07-21）
+
+- `spend_ledger`：`ts/worker/issue/usd` + v-迁移 `model` 与 token 四列
+  （input/output/cache_read/cache_creation），每 (lane, model) 一行。
+- **phase 推导 = worker 名前缀**：lane 工人 `lane-<issue>-<uuid8>`
+  （worker.ts:988）、角色 session `role-<roleId>-<uuid8>`
+  （peripheral.ts:413，记账 peripheral.ts:916）。服务端前缀映射 →
+  §7 阶段词：role-po→Goal & align，role-architect→Arch review，
+  role-plan-review→Verify，`lane-*`→Lanes（首 leg+fix leg 同桶），
+  role-harvest→Summary，role-retro→Retro。内部 key 永不渲染。
+  实施注：前缀解析是服务端约定，须配一条"角色名前缀改动即碎"守护测试。
+- **回放窗口**：rounds 表 `start_spend_id` 游标（state.ts:25）切轮窗——
+  既有机制，live=今日 ts 窗，replay=轮 id 窗。
+- **est 叠层只属 Lanes 桶**：live est 三件套只存在于活 lane
+  （workers.est_cost_usd）；角色 session 同步短跑、无 live telemetry——
+  别的桶画斜纹尾就是造假。
+- Codex bot 评审=外部服务，引擎零记账——REVIEW 不成桶（诚实缺席）。
+
+## 元素方案
+
+| 元素 | 设计 | 数据 |
+|---|---|---|
+| BY STAGE 横条组 | 六桶横条（Goal & align / Arch review / Verify / **Lanes** / Summary / Retro），settled 实心 amber，**仅 Lanes 条**可带斜纹 est 尾；条右端小字金额 | 前缀映射 + SUM(usd)，est 尾=活 lane est_cost_usd 和 |
+| BY MODEL 横条组 | 每 model 一条（opus/sonnet/…），实心；hover = token 四分（input/output/cache read/cache write） | `model` 列 + token 四列 |
+| 窗口标注 | 左上角 "TODAY"（live）/ "ROUND 9"（replay，跟随导航器） | ts 窗 / start_spend_id 窗 |
+| Config ▸ | 右上小入口，开只读 drawer（§3 E 既有规格，不在本部件出图） | allowlist 键 |
+| 空态 | 今日零记账 → 条组隐去，一行 "no spend recorded today" | |
+
+不进 cost strip：日限额/run 总额（header 花费仪表管）、per-lane 成本
+（lane 卡管）——同一事实一个家。
+
+## 小裁决点（用户）
+
+1. BY STAGE 与 BY MODEL 左右并排（一横条部件）还是上下两行？
+   PM 倾向**左右并排**（部件是 strip，保持扁；六桶 vs 2–3 model 条
+   高度天然对齐）。
+2. Lanes 桶要不要在 hover 拆 first-leg / fix-leg？数据可拆（fix leg
+   spend 行 ts 在 fix 窗内）但边际复杂度存疑，PM 倾向 **v0.2 不拆**。
+
 # Lanes 部件（v4 · 三方合成方案待用户确认）
 
 输入：用户原型图（33 号，三卡：Available / #94 writing / #90 needs-human）。
