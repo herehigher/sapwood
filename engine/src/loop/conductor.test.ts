@@ -405,8 +405,15 @@ test("tick dispatch: the snapshotted body survives a live mid-flight edit — la
   assert.equal(st.getAcSnapshot(7)?.body, originalBody);
   // Simulate a human/producer editing the LIVE issue body after dispatch.
   forge.issueBodies[7] = "## Acceptance criteria\n\n- [ ] EDITED criterion\n\n## Verification plan\nrun tests";
-  // The snapshot is never re-derived from a live read — it's whatever was recorded at dispatch.
-  assert.equal(st.getAcSnapshot(7)?.body, originalBody, "session input stays the SNAPSHOTTED body, never a live re-fetch");
+  // #301 review round 3 (P3): this proves State.getAcSnapshot() itself is immutable across a
+  // live edit — never re-derived from a live read. It does NOT prove what any review SESSION's
+  // input is (that wiring is #286/E4a's job — see ac-snapshot.ts's module header and
+  // docs/security.md for the accurate scope statement).
+  assert.equal(
+    st.getAcSnapshot(7)?.body,
+    originalBody,
+    "the persisted snapshot never changes once recorded, regardless of a later live body edit",
+  );
   st.close();
 });
 
@@ -494,7 +501,7 @@ test("tick DRIVE (#301 P1#1): a lane whose ac_body_hash is set but whose ac_snap
   st.close();
 });
 
-test("tick DRIVE (#301 review, P2 F4): a needs-human LABEL WRITE FAILURE never claims the label 'has been applied' in the escalation comment, and the durable event honestly records the failure", async () => {
+test("tick DRIVE (#301 review, P2): a needs-human LABEL WRITE FAILURE never claims the label 'has been applied' or promises automatic reentry, and the durable event is written BEFORE the comment attempt", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -514,13 +521,48 @@ test("tick DRIVE (#301 review, P2 F4): a needs-human LABEL WRITE FAILURE never c
   assert.equal(gate.calls.length, 0);
   const comment = forge.issueComments.find(([n]) => n === 9)?.[1] ?? "";
   assert.ok(!/has been applied/.test(comment), "must never claim the label landed when the write failed");
-  assert.ok(/FAILED/.test(comment) && /human must apply the label by hand/.test(comment), "honestly explains the label write failed");
+  assert.ok(/FAILED/.test(comment), "honestly explains the label write failed");
+  assert.ok(
+    !/re-trigger review/.test(comment) && /manually/.test(comment),
+    "never promises automatic reentry (manually adding the label doesn't flip gated_escalation_labeled) — tells the human to review/merge by hand instead",
+  );
   const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["ac-snapshot-drift"]);
-  assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { labeled: number; labelError?: string; commented: boolean };
+  assert.equal(events.length, 1, "the event is durable EVEN THOUGH the comment attempt happens after it");
+  const payload = events[0]!.payload as { labeled: number; labelError?: string };
   assert.equal(payload.labeled, 0);
   assert.ok(typeof payload.labelError === "string" && payload.labelError.length > 0);
-  assert.equal(payload.commented, true, "the comment itself still succeeded (only the label failed) — also durably recorded");
+  assert.equal(st.getWorker("lane-labelfail")?.gated_escalation_labeled, 0);
+  st.close();
+});
+
+test("tick DRIVE (#301 review round 3, P2 regression fix): the durable ac-snapshot-drift event lands even when the FOLLOW-UP comment post fails — a comment failure can never strand the escalation invisibly", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  st.upsertWorker({
+    name: "lane-commentfail",
+    issue: 10,
+    session_id: "sess-10",
+    state: "driving",
+    started_at: "t0",
+    ended_at: null,
+    pr: 90,
+    ac_body_hash: "deadbeefcafe",
+  });
+  forge.throwOnAddIssueComment = true;
+  const gate = new FakeMergeGate();
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["ac-snapshot-drift"]);
+  assert.equal(
+    events.length,
+    1,
+    "the durable event survives a comment-post failure — it was written BEFORE the comment was ever attempted",
+  );
+  const payload = events[0]!.payload as { labeled: number };
+  assert.equal(payload.labeled, 1, "the label itself succeeded — only the comment failed");
+  assert.equal(st.getWorker("lane-commentfail")?.state, "failed");
+  assert.equal(st.getWorker("lane-commentfail")?.gated_escalation_labeled, 1);
   st.close();
 });
 

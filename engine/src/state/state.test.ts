@@ -2389,6 +2389,72 @@ test("migration v22->current: a populated v22 DB (predating ac_snapshots/ac_body
   }
 });
 
+// ── #301 review round 3 (P1#1): REAL v23 -> v24 migration — ac_body_hash BACKFILLS from an
+//    existing ac_snapshots row, rather than silently discarding drift protection for a worker
+//    that already has one recorded. A dev DB opened between the 22->23 and 23->24 commits (or a
+//    future engine build that lands them separately) can hold exactly this shape. ──
+
+test("migration v23->v24: ac_body_hash backfills from an existing ac_snapshots row for a worker's issue — a v23 DB with an active worker + a matching snapshot must NOT silently lose drift/ownership protection on upgrade; a worker with no matching snapshot stays genuinely NULL", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    // Build a REAL v23 DB: run migrations 0..22 (through 22->23, which creates ac_snapshots) —
+    // BEFORE 23->24 (workers.ac_body_hash) ever ran.
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 23; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 23");
+    // A `driving` lane whose dispatch-time snapshot already exists (the shape the backfill must
+    // repair) — a `failed`+PR lane awaiting GATED RECLAIM needs the SAME treatment (P1#3), so a
+    // second row proves the backfill isn't scoped to `driving` alone.
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("lane-v23-driving", 55, "sess-55", "driving", "2026-07-21T00:00:00Z", null, 900);
+    raw
+      .prepare(
+        "INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, gated_escalation_labeled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("lane-v23-failed", 57, "sess-57", "failed", "2026-07-21T00:00:00Z", "2026-07-21T01:00:00Z", 902, 1);
+    raw
+      .prepare("INSERT INTO ac_snapshots (issue, body_hash, body, manifest_json, snapshotted_at) VALUES (?, ?, ?, ?, ?)")
+      .run(55, "prev-hash-driving", "body text 55", "[]", "2026-07-21T00:00:00Z");
+    raw
+      .prepare("INSERT INTO ac_snapshots (issue, body_hash, body, manifest_json, snapshotted_at) VALUES (?, ?, ?, ?, ?)")
+      .run(57, "prev-hash-failed", "body text 57", "[]", "2026-07-21T00:00:00Z");
+    // A worker whose issue has NO matching snapshot row — a genuinely pre-#283/no-snapshot lane
+    // — must stay NULL: the backfill must never invent a hash for a lane that never had one.
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("lane-v23-legacy", 56, "sess-56", "running", "2026-07-21T00:00:00Z", null);
+    raw.close();
+
+    // Open with the CURRENT engine -> migrates 23 -> SCHEMA_VERSION.
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 24);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    assert.equal(s.getWorker("lane-v23-driving")?.ac_body_hash, "prev-hash-driving", "backfilled from the existing ac_snapshots row");
+    assert.equal(
+      s.getWorker("lane-v23-failed")?.ac_body_hash,
+      "prev-hash-failed",
+      "a failed+PR row awaiting GATED RECLAIM is ALSO backfilled",
+    );
+    assert.equal(s.getWorker("lane-v23-legacy")?.ac_body_hash, null, "no snapshot existed for this issue -> stays NULL, genuinely legacy");
+    // Pre-existing snapshot data itself survived untouched.
+    assert.equal(s.getAcSnapshot(55)?.bodyHash, "prev-hash-driving");
+    assert.equal(s.getAcSnapshot(57)?.bodyHash, "prev-hash-failed");
+    s.close();
+
+    // Idempotent reopen: no re-migration, same version, same data.
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("lane-v23-driving")?.ac_body_hash, "prev-hash-driving");
+    assert.equal(s2.getWorker("lane-v23-legacy")?.ac_body_hash, null);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #234: forge MCP proxy journal + frozen evidence bundles (migration 15->16) ─────────────
 
 test("migration v15->v16: a populated v15 DB opens with data intact, empty forge_proxy_journal/forge_proxy_bundles tables, user_version SCHEMA_VERSION, idempotent reopen", () => {

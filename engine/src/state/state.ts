@@ -694,14 +694,35 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   //    ac_snapshots' current content. If that snapshot is later missing entirely (unexpected
   //    schema tampering, manual DB surgery, or a future refactor of the invariant above) the
   //    drift check treats a stamped-but-unfindable hash as an anomaly and escalates — it is NEVER
-  //    silently treated as an ordinary pre-#283 legacy lane (which is what a NULL `ac_body_hash`,
-  //    the pre-migration default for every existing row, means instead).
+  //    silently treated as an ordinary pre-#283 legacy lane.
   //
-  // Nullable, no backfill: every row that predates this migration gets NULL (the pre-existing
-  // "no snapshot was ever recorded for this lane" case, unaffected — conductor.ts's drift check
-  // drives it normally, exactly as it did before this migration).
+  // BACKFILLED, not blanket-NULL (#301 review round 3, P1#1): a DB already at v23 (22->23 shipped
+  // ac_snapshots; this migration ships in the SAME release, but a dev DB opened between the two
+  // commits — or any future engine build that lands them separately — can already hold
+  // `driving`/`failed`+PR workers with a matching ac_snapshots row for their issue) would
+  // otherwise migrate every existing row to `ac_body_hash = NULL`, which checkAcDriftBeforeDrive
+  // reads as "pre-#283 legacy, nothing to check" — silently DISCARDING drift/ownership protection
+  // for a lane that in fact already has a real snapshot recorded. The UPDATE below copies the
+  // CURRENT ac_snapshots.body_hash for a row's issue onto every worker row that has one, for
+  // EVERY state (not just currently-active) — a `failed`+PR row awaiting GATED RECLAIM needs this
+  // exactly as much as a `driving` row, since it can be reactivated later (P1#3's own scenario).
+  // A row whose issue has NO ac_snapshots entry (genuinely pre-#283, or dispatched by a caller
+  // that bypassed the DISPATCH loop) is left NULL — the correct, honest "nothing recorded" case;
+  // NULL after this migration means exactly that, never "predates the migration". If more than
+  // one worker row ever shares an issue number (a terminated lane plus a newer one), every one of
+  // them is backfilled with the SAME current value; for the common single-lane case this exactly
+  // restores the row's own true dispatch-time hash, and for the rarer shared-issue case it is
+  // still SAFE, never LESS safe than the NULL default it replaces — a stale row backfilled with a
+  // hash that isn't really its own simply fails closed as an ownership mismatch at drive time
+  // (P1#3's own mechanism), the same fail-closed outcome that being unable to verify it at all
+  // would have produced anyway.
   (db) => {
-    db.exec(`ALTER TABLE workers ADD COLUMN ac_body_hash TEXT;`);
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN ac_body_hash TEXT;
+      UPDATE workers
+      SET ac_body_hash = (SELECT body_hash FROM ac_snapshots WHERE ac_snapshots.issue = workers.issue)
+      WHERE issue IN (SELECT issue FROM ac_snapshots);
+    `);
   },
 ];
 

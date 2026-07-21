@@ -1600,16 +1600,22 @@ async function escalateNeedsHuman(
  *  every WorkerRow with a non-null `ac_body_hash` is a hard guarantee a snapshot WAS recorded for
  *  it; a later absence is an anomaly, never legacy; ownership mismatch — P1#3; or an ordinary live
  *  body edit) re-escalates `needsHuman` (renewed gate⓪ adjudication is design #279 §5's human path
- *  back), mirroring escalateNeedsHuman's own label/upsert/event shape but with an UNCONDITIONAL
- *  drift-explaining comment (not just on a repeat gated-reentry). #301 review P2 (label/comment
- *  honesty): the comment text is CONDITIONAL on whether the needsHuman label write actually
- *  succeeded — it never claims a label "has been applied" when the write failed — and BOTH the
- *  label and comment outcomes land in the SAME durable event, so a human/dashboard watching the
- *  event log (not just live GitHub state) can never lose this escalation even if every forge write
- *  in it fails; matches this codebase's existing accepted stance for a label-write failure
- *  (gated_escalation_labeled=0 permanently excludes a row from automatic GATED RECLAIM — "manual
- *  drive as before #147" — the SAME fallback every other escalation in this file already has, not
- *  a new retry mechanism invented just for this one case). */
+ *  back), mirroring escalateNeedsHuman's own label/upsert/event/comment ORDERING exactly (#301
+ *  review round 3, P2 — a regression fix: an earlier revision of this function moved the durable
+ *  event to AFTER the (awaited) comment post so it could also record whether the comment
+ *  succeeded; that reintroduced a crash window escalateNeedsHuman's own established ordering
+ *  never had — a crash during the comment's own await left the row durably `failed`,
+ *  POSSIBLY with no label AND no event, permanently unrecoverable. The durable event is now
+ *  written immediately after the label attempt and the terminal upsert — BEFORE the comment is
+ *  ever attempted — so it is the crash-safe source of truth that the escalation happened and
+ *  what the label write did; the comment is a genuine best-effort side effect after that, exactly
+ *  like escalateNeedsHuman's own courtesy comment. Label/comment honesty: the comment text is
+ *  CONDITIONAL on whether the needsHuman label write actually succeeded — it never claims the
+ *  label "has been applied" when the write failed, and (since manually adding the label
+ *  afterward does NOT retroactively flip `gated_escalation_labeled` to 1) it never promises
+ *  automatic reentry either — a label-write failure here is permanently manual, same as every
+ *  other escalation's accepted stance in this file (gated_escalation_labeled=0 permanently
+ *  excludes a row from GATED RECLAIM — "manual drive as before #147"). */
 async function checkAcDriftBeforeDrive(
   forge: IForge,
   state: State,
@@ -1659,29 +1665,11 @@ async function checkAcDriftBeforeDrive(
     labelError = String(e);
   }
   state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
-  // #301 review P2: never CLAIM the label landed when it didn't — the comment text is honest
-  // either way, and this codebase's existing gate①/②/⓪ escalation pattern already treats a failed
-  // label write as "permanently manual" (gated_escalation_labeled=0 excludes it from automatic
-  // GATED RECLAIM), so this mirrors that accepted stance rather than inventing a new one.
-  const labelNote = labeled
-    ? `\`${cfg.labels.needsHuman}\` has been applied`
-    : `applying \`${cfg.labels.needsHuman}\` FAILED (${labelError}) — this lane will NOT be picked ` +
-      `up by automatic reentry; a human must apply the label by hand to re-trigger review`;
-  let commented = true;
-  let commentError: string | null = null;
-  try {
-    await forge.addIssueComment(
-      w.issue,
-      `sapwood: this issue's body changed after its acceptance-criteria snapshot was taken for ` +
-        `PR #${pr} (${reason}). Per design #279 §5, drift fails the review gate closed — this PR ` +
-        `will not be driven through gate②/merge while its AC authority cannot be verified. ` +
-        `${labelNote} — a human must re-adjudicate (a renewed gate⓪ pass): either restore the ` +
-        `original acceptance criteria/verification plan, or explicitly re-approve the new body.`,
-    );
-  } catch (e) {
-    commented = false;
-    commentError = String(e);
-  }
+  // #301 review round 3 (P2): the durable event lands HERE — immediately after the terminal
+  // upsert, BEFORE the comment is ever attempted — so it is the crash-safe record of "this
+  // escalation happened, and what the label write did" regardless of whatever the comment attempt
+  // below does or doesn't manage to do. Never moved after an awaited I/O call again (see this
+  // function's own header comment for the crash window that regression opened).
   state.appendEvent("ac-snapshot-drift", {
     worker: w.name,
     issue: w.issue,
@@ -1689,9 +1677,29 @@ async function checkAcDriftBeforeDrive(
     reason,
     labeled,
     ...(labelError != null ? { labelError } : {}),
-    commented,
-    ...(commentError != null ? { commentError } : {}),
   });
+  // #301 review round 3 (P2): never CLAIM the label landed when it didn't, and never promise
+  // automatic reentry a label-write failure can't actually deliver — a human adding the label BY
+  // HAND afterward does not retroactively set `gated_escalation_labeled`, so GATED RECLAIM stays
+  // permanently closed to this row regardless of the label's live GitHub state either way.
+  const labelNote = labeled
+    ? `\`${cfg.labels.needsHuman}\` has been applied`
+    : `applying \`${cfg.labels.needsHuman}\` FAILED (${labelError}) — this lane is now permanently ` +
+      `outside automatic reentry regardless of the label's live state on GitHub (adding it by hand ` +
+      `afterward does not change that); a human must review and merge this PR manually`;
+  // Best-effort courtesy comment — the durable event above is already the load-bearing record;
+  // a post failure here (network hiccup, permissions) loses only the friendly GitHub-visible
+  // explanation, never the escalation itself. Same shape as escalateNeedsHuman's own comment.
+  await forge
+    .addIssueComment(
+      w.issue,
+      `sapwood: this issue's body changed after its acceptance-criteria snapshot was taken for ` +
+        `PR #${pr} (${reason}). Per design #279 §5, drift fails the review gate closed — this PR ` +
+        `will not be driven through gate②/merge while its AC authority cannot be verified. ` +
+        `${labelNote} — a human must re-adjudicate (a renewed gate⓪ pass): either restore the ` +
+        `original acceptance criteria/verification plan, or explicitly re-approve the new body.`,
+    )
+    .catch(() => {});
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `ac-snapshot-drift: ${reason}` };
 }
 
