@@ -562,23 +562,26 @@ your merge"，amber 非 rust——是工作流不是故障）**deferred**，v0.2
 3. PLAN / VERIFY 合并为一个 PLAN 徽章（词表最小化）✔
 4. 头部聚合行 `N waiting · oldest Xd · M dissent` + 空态心跳戳 ✔
 
-## PROMPT — needs-attention strip · dark "autumn"（双态对照图 · v6）
+## PROMPT — needs-attention strip · dark "autumn"（双态对照图 · v6.1 · 基底=41 号图）
 
-A slim wide dashboard alert strip shown TWICE stacked vertically with a small gap on one dark canvas — top instance POPULATED, bottom instance EMPTY — wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. Dense compact instrument-panel aesthetic, square corners.
+基底 41（单行密度、槽位一致）+ 42 的重型年龄 chip；43 的 seen 提亮
+反转列为负约束。
+
+A slim wide dashboard alert strip shown TWICE stacked vertically with a small gap on one dark canvas — top instance POPULATED, bottom instance EMPTY — wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. Dense compact instrument-panel aesthetic, square corners. Every list row is a SINGLE line — no two-line wrapping.
 
 PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; strip surface slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; muted secondary #B9A98C; amber #E8A33D; muted moss green #8FA36B ONLY for the empty-state line; rust orange #C05A2E ONLY on the waiting-tier badges and their thin left borders. No neon, no red, no gradients, no glow. Tiny monospace / tiny uppercase letterspaced text. ABSOLUTELY NO close buttons, NO "x" icons, NO dismiss affordances anywhere.
 
-TOP INSTANCE — populated. Header row: left small letterspaced title "NEEDS ATTENTION", right aggregate "3 waiting · oldest 3d · 1 dissent". Below, four full-width rows separated by hairlines, each row = badge, then a tiny glyph + number + short title, then a muted plain-language reason with an "asks:" verb, then a right-aligned age chip:
-(row 1, oldest) thin RUST left border; rust-outlined badge "FIX CAP"; pull-request glyph "PR #212 — retry queue backoff"; muted "fix rounds used up (3/3), reviewer still requesting changes · asks: adjudicate"; age chip "3d" rendered HEAVY — bold, bordered, impossible to miss;
-(row 2) rust left border; badge "REVIEW SILENCE"; pull-request glyph "PR #208 — cache warmers"; muted "reviewer never answered after 2 pings · asks: review or nudge"; age "2h"; this ENTIRE row slightly DIMMED with a tiny eye glyph at its far left (already seen by the operator — dimmed but fully present);
-(row 3) rust left border; badge "CEILING"; water-droplet glyph "#217 — nightly export job"; muted "hard-stopped at daily budget, worktree kept · asks: re-ready or salvage"; small cream hairline tag "manual · verify on GitHub"; age "45m";
-(row 4, last) NO rust anywhere in this row: AMBER-outlined badge "DISSENT"; pull-request glyph "PR #226 — schema loosening"; muted "worker complied, filed disagreement · asks: adjudicate"; age "20m".
+TOP INSTANCE — populated. Header row: left small letterspaced title "NEEDS ATTENTION", right aggregate "3 waiting · oldest 3d · 1 dissent". Below, four single-line rows separated by hairlines. EVERY row uses the same slot order left to right: [thin colored left border] [badge] [tiny glyph] [number — short title] [muted reason with an "asks:" verb] [right-aligned age chip]:
+(row 1, oldest) RUST left border; rust-outlined badge "FIX CAP"; pull-request glyph; "PR #212 — retry queue backoff"; muted "fix rounds used up (3/3), reviewer still requesting changes · asks: adjudicate"; age chip "3d" rendered HEAVY — noticeably LARGER than the other age chips, bold cream text, thick border — the one loud element of the whole strip;
+(row 2) rust left border; badge "REVIEW SILENCE"; pull-request glyph; "PR #208 — cache warmers"; muted "reviewer never answered after 2 pings · asks: review or nudge"; small age chip "2h"; this ENTIRE row is DIMMED to about half opacity — clearly darker and quieter than its neighbors, NEVER highlighted or brighter — with a tiny eye glyph at its far left (operator has seen it; still unresolved, still counted);
+(row 3) rust left border; badge "CEILING"; water-droplet glyph; "#217 — nightly export job"; muted "hard-stopped at daily budget, worktree kept · asks: re-ready or salvage"; small cream hairline tag "manual · verify on GitHub"; small age chip "45m";
+(row 4, last) NO rust anywhere in this row: AMBER left border and AMBER-outlined badge "DISSENT"; pull-request glyph; "PR #226 — schema loosening"; muted "worker complied, filed disagreement · asks: adjudicate"; small age chip "20m".
 
-BOTTOM INSTANCE — empty state: the same strip frame at half height, containing one single quiet moss-green line, centered-left: "nothing waiting on you · checked 12s ago". Nothing else. The frame is identical to the populated instance — same width, same border.
+BOTTOM INSTANCE — empty state: the same strip frame at half height, containing one single quiet moss-green line, centered-left: "nothing waiting on you · checked 12s ago". Nothing else. The frame is identical in width and border to the populated instance.
 
 Only these strings must be legible: "NEEDS ATTENTION", "3 waiting · oldest 3d · 1 dissent", "FIX CAP", "PR #212", "3d", "REVIEW SILENCE", "PR #208", "2h", "CEILING", "#217", "manual · verify on GitHub", "45m", "DISSENT", "PR #226", "asks: adjudicate", "20m", "nothing waiting on you · checked 12s ago". Other text may be soft placeholder.
 
-Mood: quiet instrument panel, autumn heartwood. The two instances must read instantly as one component in two truths: filled = the system asking for a person (rust) plus one proceeding-under-protest advisory (amber, last, no rust); empty = calm moss reassurance with a heartbeat, frame never hidden.
+Mood: quiet instrument panel, autumn heartwood. Reading order of loudness: the oversized "3d" chip first, then the bright rust rows, then the dimmed seen row, then the amber dissent row; empty = calm moss reassurance with a heartbeat, frame never hidden.
 
 ## PROMPT — needs-attention strip · light "spring"（变体，仅换调色）
 
