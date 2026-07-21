@@ -472,11 +472,11 @@ explicit per-phase mapping (no field here may exceed the `events` /
 
 | Node | Drawer contents (source) |
 |---|---|
-| Planning | `align-summary` slice: created issues (with titles) + triaged issues (`align` in the artifact / the event, verbatim) |
-| Design review / Plan approval | that phase's `degradedPhases` entries, `plan-review-escalated` / `no-plan-after-draft` counts from events |
-| Lanes / checks / review / merge | the round's `dispatches`, `merges`, `retries`, `escalations`, `handoffs` counters (artifact fields) |
-| Round summary | the artifact's own top-line numbers (spend vs round budget, throughput counters) |
-| Self-improvement | the `retro` outcome object (opened PR / degraded / neither) |
+| Goal & align | `align-summary` slice: created issues (with titles) + triaged issues (`align` in the artifact / the event, verbatim) |
+| Arch review / Verify | that phase's `degradedPhases` entries, `plan-review-escalated` / `no-plan-after-draft` counts from events |
+| Lanes / CI / Review / merge | the round's `dispatches`, `merges`, `retries`, `escalations`, `handoffs` counters (artifact fields) |
+| Summary | the artifact's own top-line numbers (spend vs round budget, throughput counters) |
+| Retro | the `retro` outcome object (opened PR / degraded / neither) |
 
 Every row also shows the node's configured model·effort (or gate ②'s review
 mode). GitHub links are **derived from issue/PR numbers only** — no comment
@@ -936,7 +936,7 @@ overlay** (est telemetry, config, board). Replay is not a second UI — it is
 the same UI with a different cursor. §9's single reducer is this mechanism;
 the overlay is the named boundary.
 
-### Engine follow-ups (all additive; #1–2 filed as #206, #3 as #207, #4–5 as #210)
+### Engine follow-ups (all additive; #1–2 filed as #206, #3 as #207, #4–5 as #210, #6 as #293, #7 as #294)
 
 1. **`round-phase` event** (#206) — `appendEvent("round-phase",
    { round_id, phase })` covering the **full trail**: the initial `aligning`
@@ -979,7 +979,9 @@ the overlay is the named boundary.
    existing post-drain escalation treatment. Precedence EMERGENCY_STOP >
    KILL_SWITCH > PAUSE. Safety machinery — the implementing PR is
    human-merge-only. Powers the §3 Operations emergency-stop tier; the button and
-   the `estop` verb do not exist until it lands.
+   the `estop` verb do not exist until it lands. State-word mapping: an
+   emergency stop renders through the existing stopping/stopped words — no
+   new state word (same no-eighth-word doctrine as env-park).
 7. **Hold-visibility events → #294** (`pr-held` / `pr-released`) — a held PR
    (`escalation.holdLabels`) is indistinguishable from "waiting on review"
    in persisted data: the gate observes the label live and appends nothing.

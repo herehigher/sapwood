@@ -649,6 +649,13 @@ Same two-instance layout, light "spring" theme: canvas warm cream nudged slightl
   review: external ($0) 明示零、Config ▸ 砍除、幽灵中位刻度）；
   零新引擎前置。文件重组：部件按页面流排序，历史迭代版本浓缩。
 
+## 附录：色值调和注记（Sonnet 评审 P2，2026-07-21）
+
+lanes/cost/needs-attention 各 dark 提示词中的 muted secondary text
+`#B9A98C` 是出图用的近似值；**实施以 §5 token 表为准**（dark muted =
+`--bark-text #A6957C`）。图模型对 hex 本不精确，冻结 PNG 是布局/氛围
+基线，不是取色基线——取色一律回 token 表。
+
 ## 附录：出图方法论（自 v1 存留，供未来 mockup 轮复用）
 
 - 钉死：画幅比例、每个关心的 hex（附口语描述）、按阅读顺序逐区块
