@@ -94,7 +94,7 @@ test("runReviewSession: an upstream materialize() failure is NEVER handed to the
   assert.deepEqual(outcome, { kind: "unavailable", reason: "checkout of deadbeef failed: some git error" });
 });
 
-test("runReviewSession: a materialized result is passed to runner.run as reviewCwd, with the Read/Grep/Glob-only, no-Bash tool profile pinned explicitly, and no proxy opt at all", async () => {
+test("runReviewSession: a materialized result is passed to runner.run as reviewCwd — and NOTHING ELSE overriding the review profile (allowedTools/disallowedTools/proxy are all absent from the call, so RoleRunner.run()'s own hardcoded profile is what actually applies, not a wrapper-level convention)", async () => {
   let seenOpts: RoleSessionOpts | undefined;
   const fakeRunner = {
     run: async (opts: RoleSessionOpts): Promise<RoleSessionResult> => {
@@ -111,10 +111,13 @@ test("runReviewSession: a materialized result is passed to runner.run as reviewC
     fallbackModel: "none",
   });
   assert.equal(seenOpts?.reviewCwd, "/tmp/some-materialized-tree");
-  assert.equal(seenOpts?.allowedTools, "Read,Grep,Glob");
-  assert.equal(seenOpts?.disallowedTools, "Write,Edit,MultiEdit,NotebookEdit,Bash");
-  assert.ok(!seenOpts?.allowedTools?.includes("Bash"), "no Bash anywhere in the allow list");
-  assert.ok(seenOpts?.disallowedTools?.split(",").includes("Bash"), "Bash explicitly denied as a cross-source veto");
+  // Codex sol-high PR #300 review, P2/P3: the tool profile / proxy suppression / forced-hard
+  // guard / MCP-settings closure are ALL hardcoded inside RoleRunner.run() itself once reviewCwd
+  // is set (and run() now REFUSES a caller supplying allowedTools/disallowedTools/proxy alongside
+  // it) — this wrapper passes none of them, so there is nothing here that could silently diverge
+  // from run()'s own single source of truth.
+  assert.equal(seenOpts?.allowedTools, undefined);
+  assert.equal(seenOpts?.disallowedTools, undefined);
   assert.equal(seenOpts?.proxy, undefined, "a review session opts in to NO forge proxy at all");
   assert.deepEqual(outcome, { kind: "ran", outcome: "done", costUsd: 0, modelUsage: [], exitCode: 0, name: "role-engine-reviewer-abc" });
 });
@@ -243,7 +246,12 @@ test("end-to-end: the review session's tool profile is Read/Grep/Glob only, no B
     const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
     assert.equal(at("--allowedTools"), "Read,Grep,Glob");
     assert.equal(at("--disallowedTools"), "Write,Edit,MultiEdit,NotebookEdit,Bash");
-    assert.ok(!seen.includes("--mcp-config"), "no forge proxy -> no --mcp-config flag at all");
+    // Codex sol-high PR #300 review, P1: a review session DOES carry a --mcp-config — the
+    // explicit EMPTY one (paired with --strict-mcp-config), never a forge proxy's. "no proxy"
+    // and "no --mcp-config at all" are two different claims; only the former holds here.
+    assert.equal(at("--mcp-config"), '{"mcpServers":{}}');
+    assert.ok(seen.includes("--strict-mcp-config"), "MCP closure: only --mcp-config's (empty) servers ever load");
+    assert.equal(at("--setting-sources"), "user", "the materialized (producer-controlled) tree's own project/local settings never load");
   } finally {
     cleanup();
     rmSync(dir, { recursive: true, force: true });
@@ -345,6 +353,7 @@ test("runReviewSession: an OID-mismatch failure from materialize() (#284/E3a's o
 async function invokeGuardHookLive(
   payload: Record<string, unknown>,
   worktreeRoot: string,
+  guardModeEnv?: string,
 ): Promise<{ hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } } | null> {
   const srcDir = dirname(fileURLToPath(import.meta.url));
   const engineRoot = join(srcDir, "..", "..");
@@ -352,7 +361,17 @@ async function invokeGuardHookLive(
   const { stdout } = await new Promise<{ stdout: string; code: number | null }>((resolvePromise, reject) => {
     const child = spawn(process.execPath, ["--import", "tsx", guardHookTs], {
       cwd: engineRoot,
-      env: { ...process.env, SAPWOOD_WORKTREE_ROOT: worktreeRoot },
+      env: {
+        ...process.env,
+        SAPWOOD_WORKTREE_ROOT: worktreeRoot,
+        // #285 (Codex sol-high PR #300 review, P2): omitted -> unset, which resolveGuardMode
+        // (guard-hook.ts) resolves to "hard" by its own fail-safe default — the SAME value
+        // RoleRunner.run() now FORCES into every review session's env regardless of the
+        // engine's configured guard.mode. Passed explicitly here only by the soft-mode
+        // contrast test below, to demonstrate what the pre-fix (forwarded-unchanged) behavior
+        // would have done.
+        ...(guardModeEnv !== undefined ? { SAPWOOD_GUARD_MODE: guardModeEnv } : {}),
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let out = "";
@@ -410,6 +429,80 @@ test("LIVE containment: guard-hook.ts (the same hook peripheralSessionEnv/guardS
     );
   } finally {
     cleanup();
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("LIVE containment (Codex sol-high PR #300 review, P2): under a configured soft guard.mode, a review session still blocks a Read outside the materialized tree — the FORCED-hard env RoleRunner.run() sends is what a real guard-hook.ts subprocess actually enforces, not the engine's configured soft value", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-review-session-"));
+  const { result, cleanup } = await materializeFixture();
+  const outsideDir = mkdtempSync(join(tmpdir(), "sapwood-review-session-outside-"));
+  try {
+    const outsideFile = join(outsideDir, "secret.txt");
+    writeFileSync(outsideFile, "must never be read by a review session, soft config or not\n");
+
+    // 1) Prove RoleRunner.run() actually FORCES SAPWOOD_GUARD_MODE=hard for a review session
+    //    even when the engine's configured guard.mode is "soft" — captured from a REAL run(),
+    //    not asserted from config.
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s' "$SAPWOOD_GUARD_MODE" > "${join(dir, "guard_mode.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const softCfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, guard: { mode: "soft" } });
+    const runner = new RoleRunner({
+      cfg: softCfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 50,
+      guardHookPath: join(dir, "guard-hook.js"),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
+    });
+    writeFileSync(join(dir, "guard-hook.js"), "process.exit(0)\n");
+    const outcome = await runReviewSession(runner, {
+      materialize: result,
+      roleId: "engine-reviewer",
+      prompt: "p",
+      model: "opus",
+      effort: "high",
+      fallbackModel: "none",
+    });
+    assert.equal(outcome.kind, "ran");
+    const forcedGuardMode = readFileSync(join(dir, "guard_mode.seen"), "utf8");
+    assert.equal(
+      forcedGuardMode,
+      "hard",
+      "the review session's ACTUAL spawn env is forced hard, regardless of the configured soft guard.mode",
+    );
+
+    // 2) Replay that EXACT forced value through the REAL guard-hook.ts subprocess (same
+    //    containment root as the session actually got) — a Read outside the tree is DENIED.
+    const deniedUnderForcedHard = await invokeGuardHookLive(
+      { tool_name: "Read", tool_input: { file_path: outsideFile }, cwd: result.treeDir },
+      result.treeDir,
+      forcedGuardMode,
+    );
+    assert.ok(deniedUnderForcedHard, "under the forced-hard env a review session actually gets, an outside Read is denied");
+    assert.equal(deniedUnderForcedHard!.hookSpecificOutput.permissionDecision, "deny");
+
+    // 3) Contrast: replaying the SAME payload with the engine's raw configured value ("soft" —
+    //    what would have reached the guard WITHOUT this fix, had guard.mode simply been forwarded
+    //    unchanged) demonstrates the fix actually matters — soft mode turns the same containment
+    //    denial into a silent allow (applyGuardMode's own documented behavior).
+    const allowedUnderRawSoft = await invokeGuardHookLive(
+      { tool_name: "Read", tool_input: { file_path: outsideFile }, cwd: result.treeDir },
+      result.treeDir,
+      "soft",
+    );
+    assert.equal(
+      allowedUnderRawSoft,
+      null,
+      "counterfactual: the engine's raw configured 'soft' value, if forwarded unchanged (the pre-fix behavior), would have silently ALLOWED this same outside Read — this is exactly the hole forcing hard closes",
+    );
+  } finally {
+    cleanup();
+    rmSync(dir, { recursive: true, force: true });
     rmSync(outsideDir, { recursive: true, force: true });
   }
 });

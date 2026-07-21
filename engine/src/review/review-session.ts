@@ -7,17 +7,27 @@
 // `unavailable`" — so a future caller (#279's E4a ReviewerAdapter) never has to distinguish "the
 // review produced no findings" from "the review never actually ran" by inspecting exceptions.
 //
-// Everything else is intentionally NOT reimplemented here — it's RoleRunner.run()'s `reviewCwd`
-// facility (peripheral.ts), reused unchanged:
-//   - guard containment: SAPWOOD_WORKTREE_ROOT wired to the materialized tree, guard hooks ON;
-//   - tool profile: Read/Grep/Glob only, no Bash (pinned explicitly below, not just inherited);
+// Everything else is intentionally NOT reimplemented here — it's ALL RoleRunner.run()'s
+// `reviewCwd` facility (peripheral.ts), reused unchanged, and HARDCODED there (Codex sol-high
+// PR #300 review, P2/P3: the profile used to be pinned only by this wrapper passing
+// allowedTools/disallowedTools explicitly — a future direct `RoleRunner.run({reviewCwd, ...})`
+// caller could have overridden them. `run()` now REFUSES any caller-supplied
+// allowedTools/disallowedTools/proxy together with reviewCwd, so this module doesn't pass them
+// at all):
+//   - tool profile: Read/Grep/Glob only, no Bash (D1) — hardcoded in RoleRunner.run();
+//   - guard containment: SAPWOOD_WORKTREE_ROOT wired to the materialized tree, guard FORCED hard
+//     regardless of the engine's configured guard.mode (a review session must never silently run
+//     under a weaker, soft posture);
+//   - MCP + settings-source closure: --strict-mcp-config + an empty --mcp-config, and
+//     --setting-sources user — a materialized (producer-controlled) tree's own `.mcp.json` or
+//     `.claude/settings.json` never gets a chance to configure an MCP server or run a
+//     settings-declared hook;
 //   - no forge proxy, no gh/git credentials in the session env;
 //   - context-manifest recording: the same CLAUDE.md-family probe every role session gets,
 //     simply reading from the materialized tree instead of a fresh worktree.
 // This module is a thin, single-purpose composition over that facility — no new spawn logic,
 // no new guard logic, no new manifest logic.
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
-import { ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS } from "../roles/peripheral.js";
 import type { MaterializeResult } from "./materializer.js";
 
 export interface ReviewSessionOpts {
@@ -59,13 +69,11 @@ export async function runReviewSession(runner: Pick<RoleRunner, "run">, opts: Re
       effort: opts.effort,
       fallbackModel: opts.fallbackModel,
       reviewCwd: opts.materialize.treeDir,
-      // Pinned explicitly (not just inherited defaults) — design #279 §6/D1: a review session's
-      // tool profile is Read/Grep/Glob, no Bash, full stop, regardless of what the base
-      // ROLE_ALLOWED_TOOLS/ROLE_DISALLOWED_TOOLS constants happen to be at any future point.
-      // No `proxy` field: a review session never gets a forge proxy (RoleRunner.run() also
-      // enforces this structurally when reviewCwd is set — see its own doc).
-      allowedTools: ROLE_ALLOWED_TOOLS,
-      disallowedTools: ROLE_DISALLOWED_TOOLS,
+      // No allowedTools/disallowedTools/proxy: RoleRunner.run() HARDCODES the whole review
+      // profile (tool allow/deny, forced-hard guard, MCP/settings closure, no proxy) whenever
+      // reviewCwd is set, and REFUSES any of those three fields being supplied alongside it —
+      // see peripheral.ts's RoleSessionOpts.reviewCwd doc for the full, single-source-of-truth
+      // list of what review mode hardcodes.
     });
     return { kind: "ran", ...result };
   } catch (e) {

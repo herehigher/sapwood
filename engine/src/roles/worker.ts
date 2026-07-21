@@ -526,9 +526,45 @@ export interface ClaudeArgsOpts {
    *  inline-never-a-file stance as `settings` above (a file under stateDir would be a
    *  worker/session-writable on-disk target). Omitted -> no `--mcp-config` flag, unchanged
    *  behavior for every caller that doesn't attach a proxy (peripheral.ts's RoleRunner is the
-   *  only caller that ever supplies it, and only when its own `proxy` opt is present). */
+   *  only caller that ever supplies it, and only when its own `proxy` opt is present). #285:
+   *  review sessions also set this, to `EMPTY_MCP_CONFIG_JSON` — see `strictMcpConfig`'s doc. */
   mcpConfig?: string;
+  /** #285 (review session mode, D1 static-only, Codex sol-high P1): `--strict-mcp-config` —
+   *  verified real against a live `claude` CLI (worker.ts's own `probeLlmPing` already uses it,
+   *  and it's independently confirmed in `claude --help`: "Only use MCP servers from
+   *  --mcp-config, ignoring all other MCP configurations"). Paired with `mcpConfig:
+   *  EMPTY_MCP_CONFIG_JSON` (below) this closes an execution surface `--disallowedTools Bash`
+   *  and the PreToolUse guard hook do NOT mediate at all: the CLI starts MCP server PROCESSES at
+   *  session init, before any tool call the guard could ever intercept — a materialized review
+   *  tree can carry a producer-authored `.mcp.json` (or a project `.claude/settings.json`
+   *  declaring `enabledMcpjsonServers`) that would otherwise be picked up and LAUNCHED. Omitted
+   *  -> no `--strict-mcp-config` flag, unchanged behavior for every non-review caller (today:
+   *  none besides `probeLlmPing`, which sets its own argv directly, not through this field). */
+  strictMcpConfig?: boolean;
+  /** #285 (review session mode, Codex sol-high P1): `--setting-sources <sources>` — restricts
+   *  WHICH settings layers Claude Code loads (verified against `claude --help`: "Comma-separated
+   *  list of setting sources to load (user, project, local)"). The "project"/"local" sources
+   *  resolve against the spawned process's OWN cwd — for a review session that cwd IS the
+   *  materialized (producer-controlled) tree, so an unrestricted default would load a
+   *  producer-authored `.claude/settings.json`/`.claude/settings.local.json` verbatim, HOOKS
+   *  included (a much bigger execution surface than MCP: settings-declared hooks run arbitrary
+   *  shell commands directly, and Claude Code's own hooks/PreToolUse arrays are known to CONCATENATE
+   *  across settings layers rather than being replaced by this module's own inline `--settings`
+   *  JSON — omitted keys/arrays there keep the file's values, see `guardSettings`'s own doc).
+   *  Review sessions pass `"user"` — only the OPERATOR's own trusted `~/.claude/settings.json`
+   *  loads; the materialized tree's project/local layers never do. Omitted -> no
+   *  `--setting-sources` flag, unchanged behavior (today's default: user+project+local, correct
+   *  for every OTHER role/worker session, whose cwd is the ENGINE's own trusted worktree, never
+   *  a reviewed PR's tree). */
+  settingSources?: string;
 }
+
+/** #285: the `--mcp-config` value review sessions pass alongside `--strict-mcp-config` — an
+ *  explicit, EMPTY server map. Belt-and-suspenders with `--strict-mcp-config` (which alone,
+ *  given no `--mcp-config` at all, likely already yields zero servers per its own documented
+ *  semantics) — passing this explicitly removes any ambiguity about what "no --mcp-config at
+ *  all" resolves to, and gives spawn-args tests a concrete, asserted value to pin. */
+export const EMPTY_MCP_CONFIG_JSON = JSON.stringify({ mcpServers: {} });
 
 /** The code-producing worker's own default `--allowedTools`/`--disallowedTools` pair — extracted
  *  as named exports (#244) so a caller that widens them (e.g. WorkerSupervisor.dispatch's own
@@ -576,6 +612,8 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     ...(o.addDir ? ["--add-dir", o.addDir] : []),
     ...(o.settings ? ["--settings", o.settings] : []),
     ...(o.mcpConfig ? ["--mcp-config", o.mcpConfig] : []),
+    ...(o.strictMcpConfig ? ["--strict-mcp-config"] : []),
+    ...(o.settingSources ? ["--setting-sources", o.settingSources] : []),
     "--output-format",
     "stream-json",
     "--include-hook-events",

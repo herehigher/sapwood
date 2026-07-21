@@ -31,6 +31,7 @@ import {
   defaultFixPromptPath,
   defaultPromptPath,
   discoverClaudeBin,
+  EMPTY_MCP_CONFIG_JSON,
   extractFailureText,
   guardSettings,
   loadFixPromptTemplate,
@@ -596,6 +597,30 @@ test("claudeArgs (#285): worktree is OPTIONAL — omitted entirely -> no --workt
   assert.ok(!withoutWorktree.includes("--worktree"), "no --worktree flag at all when worktree is omitted");
   // --name and everything else are unaffected by omitting worktree.
   assert.ok(withoutWorktree.includes("--name") && withoutWorktree.includes("review-1"));
+});
+
+test("claudeArgs (#285, Codex sol-high PR #300 review, P1): strictMcpConfig -> --strict-mcp-config; mcpConfig + strictMcpConfig together pin an EMPTY server map; settingSources -> --setting-sources <value>; all three omitted -> none of these flags appear at all", () => {
+  const bare = claudeArgs({ prompt: "p", model: "m", effort: "high", fallbackModel: "sonnet", worktree: "w", name: "w", sessionId: "s" });
+  assert.ok(!bare.includes("--strict-mcp-config"), "omitted -> no --strict-mcp-config flag");
+  assert.ok(!bare.includes("--setting-sources"), "omitted -> no --setting-sources flag");
+
+  const reviewShaped = claudeArgs({
+    prompt: "p",
+    model: "m",
+    effort: "high",
+    fallbackModel: "sonnet",
+    name: "review-1",
+    sessionId: "s",
+    mcpConfig: EMPTY_MCP_CONFIG_JSON,
+    strictMcpConfig: true,
+    settingSources: "user",
+  });
+  assert.ok(reviewShaped.includes("--strict-mcp-config"));
+  const mcpIdx = reviewShaped.indexOf("--mcp-config");
+  assert.equal(reviewShaped[mcpIdx + 1], EMPTY_MCP_CONFIG_JSON);
+  assert.equal(EMPTY_MCP_CONFIG_JSON, '{"mcpServers":{}}', "the empty-server-map JSON shape itself, pinned");
+  const srcIdx = reviewShaped.indexOf("--setting-sources");
+  assert.equal(reviewShaped[srcIdx + 1], "user");
 });
 
 // ── Integration: stub `claude` (zero token) drives the real spawn/sentinel/probe path ──
