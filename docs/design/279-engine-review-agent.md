@@ -11,7 +11,11 @@ Evidence base for the problem statement: docs/research/review-bot-landscape-2026
 ## Owner rulings
 
 - **D1** static-only v1 (no producer-code execution; no Bash in session).
-- **D2** sanitized checkout — implemented as an ARCHIVE PROJECTION, see §3 [R2-4].
+- **D2** sanitized checkout — SUPERSEDED BY D6+D7 (2026-07-21 post-adjudication
+  cost/benefit re-review): the load-bearing security component was the engine-private
+  clone, not the custom projection; instruction-file exclusion contradicted
+  security.md's standing adjudication that role sessions legitimately absorb repo
+  `CLAUDE.md` (§Ambient repo context, with context-manifest audit). See §3.
 - **D3** rerun-when-needed, serial after CI; CI-covered AC is mapping-confirmed, not
   re-executed by the agent.
 - **D4** mandatory checkbox AC, engine-assigned IDs.
@@ -22,6 +26,26 @@ Evidence base for the problem statement: docs/research/review-bot-landscape-2026
   accounting is designed then). Rationale recorded: claude runner keeps cost tracking
   and the hard budget cap (`--max-budget-usd`, JSONL total_cost_usd) lossless; codex
   exec has no budget flag and, under plan auth, no dollar visibility at all.
+- **D6 (2026-07-21)** materializer simplified: the custom plumbing extractor
+  (ls-tree/cat-file) is dropped. The load-bearing defense against the git
+  config/hooks/filters execution class is the ENGINE-PRIVATE CLONE plus environment
+  config isolation — with those in place, a stock env-isolated checkout has no code
+  execution surface, and the remaining `.gitattributes` eol/ident content
+  normalization is an accepted, harmless residual (the review object is the
+  engine-supplied diff anyway). This reverses R3/R4's plumbing contract by owner
+  ruling: the plumbing added large custom machinery for a near-zero security delta.
+- **D7 (2026-07-21)** instruction files are NOT excluded from the reviewer's tree.
+  Blanket exclusion harms review (legitimate repo conventions are exactly what a
+  role session should absorb — security.md's standing adjudication — and instruction
+  changes themselves need in-context review). The authority-channel injection risk is
+  contained by a different, cheaper mechanism: **instruction-path change escalation**
+  (§3a) — a PR touching the instruction-resolution-graph paths routes to needs-human,
+  so an in-PR injected instruction can at worst blind THIS agent review and can never
+  reach autonomous merge. Standing (already-merged) instructions are human-vetted by
+  the same rule, so absorbing them as authority is absorbing human-vetted content.
+  Bonus: the same escalation covers the CURRENT hosted-Codex path's `AGENTS.md`
+  exposure (that bot reads PR-head AGENTS.md as review guidance) — one mechanism,
+  both reviewer kinds.
 
 ## 1. Seam [R2-1 closed]
 
@@ -95,39 +119,57 @@ consume:      approved → deriveGate → mergePR(pr, H) · rejected → FIXABLE
 Residual (accepted, documented): base movement in the refetch→merge gap — same
 exposure as today's hosted-bot path.
 
-## 3. Materialization: plumbing projection [R2-4, R3 closed]
+## 3. Materialization: private-clone checkout [R2-4 closed; D6 supersedes the R3/R4 plumbing contract]
 
-The reviewer NEVER gets a git worktree. The engine materializes a plain source tree:
+The reviewer never touches the shared repository. The engine materializes a plain
+source tree:
 
-- [R3] **Engine-private bare clone**, at a path structurally outside every worker
-  worktree/mount, fetched by the engine itself — never the shared repository whose
-  `.git/config` is writable from worker worktrees via `Bash(git *)`.
-- [R3] **Plumbing extraction, not `git archive`**: `git archive` is rejected because
-  it consults in-tree `.gitattributes` (`export-ignore` can HIDE files from the
-  reviewer, `export-subst` can rewrite content) and local config. [R4] The plumbing
-  invocation contract is EXPLICIT — plumbing is only safe under these exact flags
-  (bare `ls-tree` still consults `core.quotePath`; object reads honor replace refs
-  unless disabled):
-  · listing: `git ls-tree -r -z <H>` (NUL-delimited — no `core.quotePath` encoding);
-  · content: `git cat-file` raw blob reads, NEVER `--filters`/`--textconv`;
-  · both under `--no-replace-objects` (or `GIT_NO_REPLACE_OBJECTS=1`);
-  · env config isolation for every materializer git invocation:
-    `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` (the engine-private
-    clone's own local config is engine-written and empty-by-construction, asserted
-    at clone time).
-  Under this contract attributes, filters, hooks, replace refs, and ambient config
-  are all unreachable, and the projection is byte-identical to the reviewed commit's
-  tree. E3a's AC pins this exact invocation set. No `.git` directory is materialized
-  (session also has no Bash, D1).
-- Extraction validates paths (no traversal, symlink entries dropped).
-- **Instruction sanitization**: `CLAUDE.md`, `**/CLAUDE.md`, `.claude/**` are
-  EXCLUDED from the projection — not discovered as instructions AND not readable as
-  files; their changes remain reviewable as diff text (the diff is engine-supplied
-  data). Guard hooks therefore STAY ENABLED (no --bare/--safe-mode needed — nothing
-  to suppress), and read-containment root = the temp tree (SAPWOOD_WORKTREE_ROOT
-  mechanism unchanged) [closes the hooks-vs-sanitization dilemma].
-- The projection's tree manifest (file list + content hash) is recorded in the WAL
-  record for audit parity.
+- **Engine-private bare clone** (unchanged, load-bearing — D6), at a path
+  structurally outside every worker worktree/mount, fetched by the engine itself —
+  never the shared repository whose `.git/config` is writable from worker worktrees
+  via `Bash(git *)`. The git config/hooks/filters execution class requires a
+  producer-writable config; the private clone has none (local config asserted empty
+  at clone time).
+- **Stock env-isolated checkout** (D6, replacing the plumbing extractor):
+  `git -C <private-clone> --work-tree=<tmpdir> checkout <H> -- .` under
+  `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null`, `--no-replace-objects`,
+  and `-c core.symlinks=false` (symlinks materialize as plain text files — nothing
+  for read-containment to follow out of the tree). No `.git` directory lands in the
+  tmpdir (and the session has no Bash, D1). Checkout OID verified
+  post-materialization. Accepted residual: in-tree `.gitattributes` eol/ident
+  normalization — content-preserving, zero execution surface; the review object is
+  the engine-supplied diff in any case.
+- **Instruction files are INCLUDED** (D7, reversing the exclusion): repo `CLAUDE.md`
+  / `.claude/**` are legitimate role-session context per security.md's standing
+  "Ambient repo context" adjudication, absorbed under the SAME context-manifest
+  audit every role session already gets (the manifest records exactly which
+  instruction files were absorbed — existing machinery). Guard hooks stay enabled;
+  read-containment root = the tmpdir. The authority-channel risk is contained by
+  §3a, not by exclusion.
+- The tree manifest (file list + content hash) is recorded in the WAL record for
+  audit parity.
+
+## 3a. Instruction-path change escalation (D7's containment mechanism)
+
+A PR whose changed files touch the instruction-resolution graph — `CLAUDE.md`,
+`CLAUDE.local.md`, `.claude/CLAUDE.md`, `.claude/rules/**`, plus `AGENTS.md` (the
+hosted bot's guidance file) — is routed to **needs-human** by the engine (label
+applied once; merge gated, the WORK is not blocked — updating instruction files is
+sometimes the legitimate task, so this is escalation, never a guard write-denial
+that would mask real intent). Trust chain established:
+
+- Standing instructions were themselves merge-gated by a human under this rule →
+  absorbing them as session authority is absorbing human-vetted content.
+- An in-PR instruction edit can at worst blind the CURRENT agent review; the PR
+  cannot reach autonomous merge, so the injection buys nothing.
+- The same rule covers the hosted-Codex reviewer's PR-head `AGENTS.md` exposure —
+  previously an undocumented accepted residual of the CURRENT default gate②.
+
+Path list is config (`escalation.instructionPaths`) with the defaults above.
+Content-channel injection (diff/comment text persuading the reviewer) remains a
+documented accepted residual under the trusted-repos-first posture — structurally
+unclosable for any LLM reviewer, mitigated by the blocking-signal asymmetry (a
+false approval from one source never clears CI, human labels, or threads).
 
 ## 4. CI execution evidence [R2-2 closed]
 
@@ -183,11 +225,12 @@ to a whole-system trust-model change. DISPOSITION: standalone hardening issue
 
 ## 6. Session contract (updated)
 
-As v2 §3 plus: spawn via claude CLI only (D5); config example model `opus` against a
-`sonnet` worker; `--max-budget-usd` = remaining logical budget on attempt 2; attempt
-start recorded in the pin. Output schema unchanged (perAC + findings; no overall, no
-headOid). All setup failures (archive/materialize failure included) map to
-`unavailable`.
+As v2 §3 plus: spawn via claude CLI only (D5); the session runs in the §3
+materialized tree and absorbs its instruction files as ordinary role-session context
+(D7, context-manifest audited); config example model `opus` against a `sonnet`
+worker; `--max-budget-usd` = remaining logical budget on attempt 2; attempt start
+recorded in the pin. Output schema unchanged (perAC + findings; no overall, no
+headOid). All setup failures (materialize failure included) map to `unavailable`.
 
 ## 7. Config (updated)
 
@@ -231,11 +274,17 @@ guard blocking (snapshot+drift makes it unnecessary for this design).
 2. **E2 — AC machinery**: checkbox extractor + IDs, pre-launch FULL-BODY snapshot +
    any-drift fail-closed + snapshotted-body review input (engine-side enforcement)
    [R3], issue template + gate⓪ prompt tightening, docs.
-3. **E3a — plumbing materializer**: engine-private bare clone + ls-tree/cat-file
-   extraction (no `git archive`) [R3], path/symlink validation, instruction
-   exclusion, tree manifest. Pure infra, independently testable.
-4. **E3b — sanitized session mode**: role-session spawn against a materialized tree
-   (cwd facility), guard containment root wiring, no-Bash tool profile.
+3. **E3a — private-clone materializer** (slimmed by D6): engine-private bare clone +
+   stock env-isolated checkout (`--work-tree`, config isolation, `--no-replace-objects`,
+   `core.symlinks=false`), OID verification, tree manifest. Instruction files
+   included (D7). Pure infra, independently testable.
+4. **E3b — review session mode** (slimmed by D7): role-session spawn against a
+   materialized tree (cwd facility), guard containment root wiring, no-Bash tool
+   profile, context-manifest recording (existing role-session machinery).
+4a. **E6 — instruction-path change escalation** (§3a, D7): changed-files match
+   against `escalation.instructionPaths` → needs-human on the PR; covers hosted-bot
+   and engine-agent gates alike. Independent of E1–E4 (own PR, generic hardening);
+   must ship within M10 because §3's D7 trust chain relies on it.
 5. **E4a — adapter + config + session validation**: engine-agent adapter, config
    schema + strictness batch, output validation, runtime model-separation check.
 6. **E4b — drive ordering**: attempt pin + backoff, preflight, identity resolution
@@ -243,9 +292,11 @@ guard blocking (snapshot+drift makes it unnecessary for this design).
 7. **E4c — audit + fix transport + crash recovery**: audit comment + marker dedup +
    delivery receipt, `getPRAuditComments` proxy tool, restart reconciliation.
 8. **E5 — docs + round close** (same round as behavior change): configuration.md,
-   role-paradigm.md, security.md (projection sanitization, single-identity
+   role-paradigm.md, security.md (private-clone materialization, instruction-path
+   escalation + content-channel accepted residual, single-identity
    limitation, CI-evidence chain), PLAN.md decision row.
 
-Dependencies: E1→{E4a,E4b}; E2→E4a; E3a→E3b→E4a; E4a→E4b→E4c; E5 last. Each PR is
+Dependencies: E1→{E4a,E4b}; E2→E4a; E3a→E3b→E4a; E4a→E4b→E4c; E6 independent (must
+land within M10); E5 last. Each PR is
 independently reviewable; none touches guard.ts (no human-merge-only path in scope
 except security.md docs, which is doc-gate).
