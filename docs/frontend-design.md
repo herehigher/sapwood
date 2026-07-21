@@ -29,6 +29,21 @@ a read-only **phase inspector** drawer (§6); stage labels lead with plain
 language, backed by hover explainers and a legend (§7). One additional engine
 follow-up: issue/PR titles persisted in event payloads (§11).
 
+Amended 2026-07-21 (mockup design rounds — hero + header, third amendment):
+the hero's concrete geometry is settled from iterated image mockups (§6): a
+horizontal band under three phase captions **PLAN / IMPLEMENT / OUTCOME**,
+with the reviewer's push-back drawn as a **fix-loop return arrow** into the
+lane and escalation as a **rust branch** dropping out of the checkpoint pair;
+the **Live ↔ Replay toggle is removed** — the round navigator *is* the mode
+(§3 A, §11); run controls become three tiers **Pause / Stop / E-Stop** (§3
+Operations; E-Stop engine signal → #293); the light theme returns to a
+**cream ground nudged toward sapwood green** (§5, supersedes the pale-green
+grounds); a **terminology rule** is added (§7): project-internal jargon never
+renders, industry-standard words are first choice. Engine-state precedence is
+fixed (staleness beats PAUSE — §8), `/api/rounds` re-anchors on the `rounds`
+table (§8), and #206 is upgraded to a **hard prerequisite** for the header
+(the run-spend anchor exists only in engine memory today — §11).
+
 ---
 
 ## 1. Goals & audiences
@@ -76,17 +91,21 @@ acceptance bar, checked at review):
 
 ## 3. Information architecture
 
-Single page, no routing. Five modules, one screen:
+Single page, no routing. Five modules, one screen — plus a slim left **icon
+rail** (~56 px) that is pure chrome, not navigation: wordmark at top, anchor /
+drawer entries (overview, cost, config) and the theme switch, config gear at
+bottom. Rail items scroll or open drawers on this one page; the moment a rail
+item becomes a routed page, that is a scope amendment to this section.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ ◉ sapwood    ● running     spend ▓▓▓░░ $12 / $100    [Replay]│  A header
+│ ◉ sapwood   ● running   ◂ round 12 ▸   spend ▓▓░ $12 / $100  │  A header
 ├──────────────────────────────────────────────────────────────┤
-│      ╭─▶ PO ─▶ Architect ─▶ ⓪ plan review ─╮                 │
-│      ┆                                     ▼                 │  B hero
-│  Backlog ─▶ ┃lane┃lane┃lane┃ ─▶ ①checks ─▶ ②review ─▶ ◎rings│  (closed
-│      ┆                                     │                 │   loop)
-│      ╰╌╌ Retro ◀─ Harvest ◀────────────────╯                 │
+│   PLAN               IMPLEMENT                   OUTCOME     │
+│   Goal&align→Arch review→Verify                              │  B hero
+│  Backlog ─▶ ┃lane┃lane┃lane┃ ─▶ CI ─ Review ─▶ ◎rings       │  (closed
+│                ╰◀╌ fix loop ╌╯     ╰▼ needs human            │   loop)
+│      ╰╌╌╌╌ dashed return ◀╌ Summary · Retro ╌╌╌╌╯            │
 ├───────────────────────────────────┬──────────────────────────┤
 │ C lanes                           │ D activity               │
 │ ┌────────┐ ┌────────┐ ┌────────┐  │  Merged PR #94           │
@@ -106,9 +125,31 @@ Single page, no routing. Five modules, one screen:
   #154 run-scoped ledger sum): numerator and denominator must always come
   from the **same budget tier** (§11); with no run budget configured the
   meter falls back whole to the daily tier (today vs `cost.dailyBudgetUsd`),
-  never a mixed-tier fraction. The daily hard ceiling stays visible as a
-  small secondary readout — it is the line that actually stops the engine.
-  Then the Live ↔ Replay toggle.
+  never a mixed-tier fraction. The daily hard ceiling — the line that
+  actually stops the engine — moves behind hover, **auto-surfacing with a
+  warning tint once its usage crosses ~75%** (a non-binding constraint is
+  noise; a binding one is information). The est tail renders in live view
+  only — history has only settled cost (§11).
+
+  Display vocabulary collapses for the glance: `standby` + env-park render
+  as **waiting** (park adds a small sub-caption), `winding down` +
+  `stopping` as **stopping**; full internal states live in the tooltip.
+  The dot is static — the hero already breathes; the word is the signal,
+  the dot its punctuation.
+
+  **There is no Live ↔ Replay toggle** (2026-07-21 amendment). The **round
+  navigator is the mode**: `◂ [round N] ▸` — the rightmost position is a
+  permanent **LIVE slot** showing the open round ("round 12 · executing")
+  or, when none is open, the engine state itself ("live · waiting", "live ·
+  stopped"; fresh DB → "no rounds yet" with the §3 empty-state direction).
+  Stepping left enters a closed round and the whole page replays it (§11).
+  Clicking the round number opens the round list: one row per round —
+  id · date · merged-PR count · spend — closed rows prefixed with a small
+  ▶ glyph (the replayability affordance; the list doubles as the history
+  ledger). Whenever the view is not at LIVE, a "back to live" jump stays
+  visible, and the header carries a persistent tinted **"ROUND N · CLOSED"**
+  badge. `◂`'s hover tooltip reads "replay round N−1". Scrubbing *within*
+  the open round is deliberately not offered in v0.2 (§10).
 - **B — Hero: the Loop.** The whole pipeline as one **closed loop** (§6):
   round phases arc across the top, the worker pipeline runs through the
   middle, harvest/retro return along the bottom back to PO. Fixed stage;
@@ -140,8 +181,9 @@ Single page, no routing. Five modules, one screen:
   details (worker, head, mode) collapse behind each entry — never in the
   sentence.
 - **E — Cost strip + Config drawer.** Two small SVG bar groups: today's spend
-  **by phase** (align / architect / gate⓪ / workers / harvest / retro) and
-  **by model** (token split available on hover). Phase, not lane: lanes are
+  **by phase** (displayed with the §7 stage labels: goal & align / arch
+  review / verify / lanes / summary / retro — never the internal phase
+  keys) and **by model** (token split available on hover). Phase, not lane: lanes are
   short-lived reused slots (w1/w2/w3), so a by-lane day aggregate carries
   little meaning — per-lane cost already lives on the lane cards (§3 C), and
   the phase bucketing matches the replay round tier (§11). `Config ▸` opens a
@@ -215,10 +257,10 @@ signal, no acknowledge UI invented. The strip never invents state and
 never requires an acknowledge action. In replay it rebuilds from the same
 fold at the cursor, like every other event-backed surface (§11).
 
-**Operations — start · pause · resume · stop** (design-director round 2,
-user decision): the release dashboard is no longer a pure spectator — the
-four engine-level verbs get UI entry points in the header, next to the
-engine state word they act on. The **data surface stays read-only**; the
+**Operations — start · pause · resume · stop · e-stop** (design-director
+round 2, user decision; e-stop added 2026-07-21): the release dashboard is
+no longer a pure spectator — the engine-level verbs get UI entry points in
+the header, next to the engine state word they act on. The **data surface stays read-only**; the
 verbs are the *only* write path, and they write nothing but the engine's
 own control signals:
 
@@ -228,14 +270,28 @@ own control signals:
 | Resume | Remove the PAUSE sentinel; the next tick continues the run. |
 | Stop | Create the kill-switch sentinel — the PLAN.md safety tier, described honestly: active lanes get the bounded drain window (`cost.drainWindowSec`) to finish or hand off; a lane still running after it is hard-stopped by the engine. Drain-first with the existing hard backstop — the dashboard adds no new stop mechanism and must not promise a softer one than the engine has. |
 | Start | Clear stop/pause sentinels so the next tick runs. If the engine *process* is dead, the dashboard cannot spawn it — the button flips to showing the CLI launch command instead (honest boundary; process supervision is not a browser feature). |
+| E-Stop | **Immediate hard stop, no drain window** — every running lane's process group is killed at once; in-flight work is lost and lanes escalate `needs-human`. Requires the additive `EMERGENCY_STOP` engine sentinel (#293, `type:security`, human-merge-only) — the button does not render until that signal exists. Verified 2026-07-21: the existing kill switch is drain-first by design (SIGTERM handoff requests, hard kill only past `cost.drainWindowSec`), so Stop ≠ E-Stop and the UI must never describe either tier as softer or harder than the engine's actual behavior. |
 
 **Misfire protection is mandatory**: every verb is two-step — the control
 opens a confirm that names the consequence in §7 plain language ("Stop —
 lanes get the drain window to finish or hand off; any lane still running
 after that is stopped hard"), with the
 confirm action requiring a deliberate second click; Stop additionally arms
-only after a short hold (the one irreversible-feeling verb gets the extra
-beat). While a verb is taking effect the header shows the engine's real
+only after a short hold, and **releasing the hold cancels — armed is never
+"release to fire"**. E-Stop gets both: hold-to-arm plus a confirm that
+names the consequence verbatim ("in-flight work is killed, WIP may be
+lost"), rendered rust and visually isolated from Pause/Stop by a hard gap —
+Pause and Stop themselves keep spacing (the 20-px-hover-slip accident is a
+design input, not an edge case).
+
+Two placement rules (2026-07-21): the verbs are **hidden entirely while
+viewing a closed round** — they act on the present engine while every other
+pixel shows an as-of-cursor past, so rendering them invites acting on stale
+evidence; the "back to live" jump is the way back to them. And the replay
+transport (§11) must **never share position or icon language** with these
+verbs: transport = media glyphs in its own strip, engine verbs = text
+buttons at the header's right — otherwise leaving replay swaps a media ⏸
+for an engine STOP under the same cursor position. While a verb is taking effect the header shows the engine's real
 transition state (`winding down`, `stopping` — §8 derivations, not an
 optimistic flip); controls disable during transitions. Buttons reflect
 validity (Resume only while paused, etc.). Server side this is **one**
@@ -281,22 +337,25 @@ is the default — it is a monitoring surface — with a light ("sapwood") theme
 via `prefers-color-scheme` and a manual override.
 
 **Color** (dark theme values; light theme swaps grounds and darkens accents
-one step for contrast). The light theme's grounds are **pale sapwood green**,
-not cream: background a milky warm pale green, panels one step greener — the
-literal color of a trunk's living sapwood layer, which carries the identity
-better than a generic cream landing page. Consequence: `--moss` (success)
-loses signal against a greenish ground, so the light theme's success color
-shifts to a deeper teal-green, and **every text-on-ground pair is re-checked
-for WCAG AA per theme** (the §5 quality floor already requires this; the
-palette shift makes it load-bearing, not pro-forma).
+one step for contrast). The light theme's grounds (re-decided 2026-07-21,
+supersedes the pale-green ruling after side-by-side mockup review): **warm
+cream nudged toward sapwood green** — a cream base with a faint green
+whisper, not white, not saturated green, not the earlier milky pale green.
+Owner adjudication over rendered candidates: pure pale-green grounds read
+wrong in practice; the cream-with-green-tint keeps the "spring on warm
+paper" mood while still carrying the sapwood identity. Success stays the
+deeper teal-green (moss loses signal on warm light grounds), and **every
+text-on-ground pair is re-checked for WCAG AA per theme** (the §5 quality
+floor already requires this; the palette shift makes it load-bearing, not
+pro-forma).
 
 Light-theme starting values (#143 implements these; AA-verify each pair with
 a contrast tool at implementation and adjust the failing side, per the
-quality floor): ground `#EEF3E6` (milky pale green), panel `#E2EAD4`,
-primary text `#251B10` (heartwood, reused), muted text `#57604A`, accent
-amber as text/fill `#8A5A14`, success `#3E6B4F` (the teal-green shift),
-failure `#A34620`. Borders keep `--bark`. Dark-theme values below are
-unchanged:
+quality floor): ground `#F1F0E2` (cream, green whisper), panel `#E9EAD6`
+(one step greener), primary text `#251B10` (heartwood, reused), muted text
+`#57604A`, accent amber as text/fill `#8A5A14`, success `#3E6B4F`
+(teal-green), failure `#A34620`. Borders keep `--bark`. Dark-theme values
+below are unchanged:
 
 | Token | Hex | Role |
 |---|---|---|
@@ -344,25 +403,56 @@ color alone — the est segment carries a texture (hatch) or the `est` label.
 
 ## 6. Motion spec — the hero Loop
 
-The hero is a fixed stage (SVG) drawn as a **closed loop** — the round's
-circular nature is the geometry itself, not a caption. Three tiers, one
-circuit (§3's sketch): the round-phase arc across the top (PO → architect →
-gate⓪ plan review), feeding down into the worker pipeline through the middle
-(backlog stack → lane channels, `lanes.max` of them → gate ① checks →
-gate ② review → trunk cross-section), whose rings arc closes along the bottom
-(harvest → retro) with a dashed return path back to PO. Roles are labeled
-*on the stage itself* in plain words (§7's stage-label rule): the conductor
-is the stage (it schedules everything); workers are the lane channels — each
-channel carries its own plain primary label **"Work lane 1…N"** with the
-mono id (`w1`) demoted to secondary small print, exactly the treatment the
-stage nodes get (a bare `w2` on the stage is jargon by the §7 rule; the
-design-director round-2 user test confirmed it reads as noise); the
-reviewer sits at gate ②; the merge driver is the arm between gate ② and the
-trunk. **LLM-backed** stage nodes (Planning, Design review, Plan approval,
-lanes, Round summary, Self-improvement) carry their configured model·effort
-caption (§3 C); gate ② shows the review *mode* word instead (e.g. `codex`),
-flipped by `reviewer-fallback-*` events; checks and the merge arm are not
-model-backed and carry no caption.
+The hero is a fixed stage (SVG) drawn as a **closed loop** — the loop is the
+semantics; the concrete geometry was settled 2026-07-21 through iterated
+image mockups as a **horizontal band, four zones left → right, closed by a
+dashed bottom return path** into the planning zone. Three small uppercase
+phase captions span the top: **PLAN** (backlog + planning columns),
+**IMPLEMENT** (lanes + checkpoints), **OUTCOME** (rings + reflection). Role
+words (producers ≠ reviewers ≠ mergers) no longer caption the stage — the
+separation is carried by geometry (the checkpoints sit outside the lanes;
+the merge arm answers only to review) and the role vocabulary lives in the
+"?" legend (§7).
+
+The four zones:
+
+1. **Backlog** (narrow, same width as planning): title `BACKLOG (7 ready)` —
+   count in the title, live-only, linking out to the board. Below it this
+   round's **selection pool** from `pool-selected` events (replayable):
+   selected chips amber-filled and floated to the top, candidates as dim
+   outlines beneath.
+2. **Planning**: three nodes stacked vertically — **GOAL & ALIGN**
+   (`aligning`), **ARCH REVIEW** (`architecting`), **VERIFY**
+   (`plan_review`; the verification-plan gate — "no plan, no dispatch" is
+   its hover) — icon inside a hairline circle, label outside below, the
+   active phase carrying a soft pulse halo, with the staleness caption
+   ("last event 14s ago") under the group.
+3. **Work lanes + fix loop** (the centerpiece, ~45% width): `lanes.max`
+   horizontal channels (`w1…`), each independently in its own state;
+   droplets ride them. Lanes converge into two adjacent checkpoints in the
+   same node style — **CI** and **REVIEW** — which render as *one calm
+   waiting area* (no per-gate progress, §10). The **fix loop is drawn as
+   the engine's true shape**: a return arrow from the checkpoint area back
+   *into the lane itself*, labeled with the send-back reason (**review
+   findings / checks failed / merge conflict**, from `drive-fixup.reason` /
+   the fix-leg prescription), the lane chip showing `FIXING · round n of
+   cap` (`workers.fix_rounds` vs `lanes.prFixCap`). From the connector
+   between CI and REVIEW, the **escalation branch** — same stroke as a
+   lane, rust — drops downward to a person node labeled **NEEDS HUMAN**;
+   escalated PR droplets park on it. Rust appears nowhere else on the
+   stage.
+4. **Rings + reflection**: the trunk cross-section (fine concentric rings
+   filling the disc, no border circle), the big serif ring count, then two
+   small nodes **SUMMARY** (`harvesting`) and **RETRO** (`retro`), and the
+   round's outcome tally (`N merged · N pending · N needs human`) — small
+   numbers, never repeating the all-time ring count.
+
+**LLM-backed** stage nodes (the planning trio, lanes, SUMMARY, RETRO) carry
+their configured model·effort caption (§3 C); REVIEW shows the review *mode*
+word instead (e.g. `codex`), flipped by `reviewer-fallback-*` events; CI and
+the merge arm are not model-backed and carry no caption. Lane channels keep
+the plain primary label "Work lane N" with the mono id demoted to small
+print (§7).
 
 **Two kinds of motion, one honesty rule.** A **droplet** is a real entity —
 an issue or a PR — and only real events move it (table below). The **pipes
@@ -406,10 +496,12 @@ drive it, via one anime.js timeline per transition:
 | Event(s) | Animation |
 |---|---|
 | `dispatched` | Droplet detaches from the backlog stack, travels into a lane channel (`--travel`); the lane card (§3 C) lights `--sap` in the same beat. |
-| lane `running → driving` (canonical source: the PR-open transition event, `reclaim-done` with `payload.next: driving` — `/state` polling is only the live overlay that may show it a beat earlier) | Droplet emerges from the lane carrying a PR tag and parks **in the gate section** (drawn as the two gates ①②, labeled "checks" and "review"), which breathes softly while the PR waits. The engine computes gate progress live against GitHub and persists no substate, so v0.2 renders the review passage as one *waiting* state — the gates never fake per-gate progress. (A persisted `gate-advanced` event unlocking the two-step animation is deferred, §10.) |
+| lane `running → driving` (canonical source: the PR-open transition event, `reclaim-done` with `payload.next: driving` — `/state` polling is only the live overlay that may show it a beat earlier) | Droplet emerges from the lane carrying a PR tag and parks **at the CI / REVIEW checkpoint pair**, which breathes softly while the PR waits. The engine computes gate progress live against GitHub and persists no substate, so v0.2 renders the review passage as one *waiting* state — the checkpoints never fake per-gate progress or pass/fail states. (A persisted `gate-advanced` event unlocking the two-step animation is deferred, §10.) |
+| `drive-fixup` → `fix-leg-started` | The droplet travels the **return arrow** back into its own lane; the send-back reason word (review findings / checks failed / merge conflict) lights on the arrow, the lane chip flips to `FIXING · round n of cap`, and the lane channel re-lights `--sap` — the worker fixing its own PR is the loop's proof moment. `fix-leg-resumed` re-lights the same state after a mid-fix handoff. |
+| `fix-rounds-capped`, `drive-needs-human` | The droplet crosses onto the **rust escalation branch** and parks at the NEEDS HUMAN node; the same item lands as a row in the Needs-attention strip. Still, not loud. |
 | `merged` | Both gates flash `--moss` with a ✓, the droplet crosses the merge arm into the trunk and **becomes a ring**: a new circle strokes in over 1.2 s, ring counter increments in Fraunces. The one celebratory moment. |
 | `handoff` | Droplet folds back into the backlog with a small progress badge ("saved for a successor"). |
-| `reclaim-failed`, `reclaim-dead`, `drive-needs-human`, `rollback-escalated` | Droplet stops, flips `--rust` with a static ✕, and pins a marker above its position; no shaking, no bouncing — failures are still, not loud. |
+| `reclaim-failed`, `reclaim-dead`, `rollback-escalated` | Droplet stops, flips `--rust` with a static ✕; no shaking, no bouncing — failures are still, not loud. (`drive-needs-human` routes via the escalation branch above.) |
 | `ceiling-escalated` / PAUSE / kill switch | Stage dims; ambient sap flow stops; header state word explains. |
 
 Ambient (CSS only): a faint sap shimmer along active lane channels (≥ 3 s
@@ -456,8 +548,15 @@ the replay reducer is the mechanism either way.
 ## 7. Copy — the plain-language layer
 
 All user-visible sentences live in one module (`copy.ts`), keyed by event
-kind. Voice: active, specific, no system internals (say "lane", "checks",
-"review", never "reclaim", "tick", "worktree"). The kinds — counted by the
+kind. Voice: active, specific, no system internals (say "lane", "CI",
+"review", never "reclaim", "tick", "worktree").
+
+**Terminology rule** (clarified 2026-07-21): "no jargon" bans
+**project-internal** vocabulary — gate⓪/①/② numbering, harvest, reclaim,
+PO — never industry-standard words. Standard terms are the *first choice*
+precisely because they convey what actually happens: **CI**, **retro**,
+**backlog**, **E-Stop**. A label must let an outsider infer the actual work
+performed at that node. The kinds — counted by the
 map, never by this prose: an earlier hard-coded "33" here had already
 drifted past #180's park/environment family, proving §2's own rule
 (`run-started`/`round-phase` remain pending their engine issue; **every
@@ -477,6 +576,11 @@ checklist item**):
 | `drive-no-pr` | Lane {worker} ended without opening a PR |
 | `drive-queued` | PR #{pr} is ready — waiting its turn to merge |
 | `drive-stopped` | PR #{pr} is open and left for you — auto-merge is off |
+| `pool-selected` | Selected {n} issue(s) for this round |
+| `drive-fixup` | PR #{pr} sent back to fix — {reason} (reason word from the payload: review findings / checks failed / merge conflict) |
+| `fix-leg-started` | Lane {worker} is fixing its PR — round {n} of {cap} |
+| `fix-leg-resumed` | Lane {worker} resumed fixing after a handoff |
+| `fix-rounds-capped` | PR #{pr} used up its fix attempts — needs a human |
 | `ceiling-escalated` | Safety ceiling reached — winding down all work |
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |
@@ -517,23 +621,28 @@ work waiting on a person additionally carry `attention` on the same entry —
 the strip and the sentences share one map and cannot drift apart.
 
 **Stage labels lead with plain language** (decided at the design-director
-review: PO / gate⓪ / harvest / retro are jargon to anyone who hasn't read
-PLAN.md, and the small-print caption "PO · goal alignment" is still jargon).
+review: PO / gate⓪ / harvest are jargon to anyone who hasn't read PLAN.md,
+and the small-print caption "PO · goal alignment" is still jargon; *retro*
+is reprieved by the terminology rule above — it is standard agile
+vocabulary).
 On the stage the plain word is the **primary** label and the internal term
 the secondary small print — not the other way around:
 
 | Stage (internal) | Primary label | Hover explainer (one sentence, from `copy.ts`) |
 |---|---|---|
-| PO / aligning | Planning | Decides what's worth doing this round and files it as issues |
-| Architect | Design review | Checks the round's plans fit the architecture before work starts |
-| gate⓪ plan review | Plan approval | An independent review approves each plan before any code is written |
+| PO / aligning | Goal & align | Decides what's worth doing this round and files it as issues |
+| Architect | Arch review | Checks the round's plans fit the architecture before work starts |
+| gate⓪ plan review | Verify | An independent review approves each plan — including how it will be verified — before any code is written |
 | Lanes / workers | Writing | Autonomous workers implement approved issues, one lane each |
 | lane channel `wN` | Work lane {N} | One autonomous worker's slot — reused across issues |
-| gate① checks | Checks | CI must pass before a PR moves on |
+| `fixing` state | Fixing (round {n} of {cap}) | The worker is addressing review findings on its own PR |
+| gate① checks | CI | Automated checks must pass before a PR moves on |
 | gate② review | Review | An independent reviewer approves the PR against its plan |
+| escalation exit | Needs human | Work that automation can't finish waits here for you |
 | Merge / rings | Merged | Approved work lands; every merged PR adds one ring |
-| Harvest | Round summary | Collects what the round produced and what needs a human |
-| Retro | Self-improvement | The loop proposes one improvement to itself |
+| Harvest | Summary | Collects what the round produced and what needs a human |
+| Retro | Retro | The loop proposes one improvement to itself |
+| zone captions | Plan / Implement / Outcome | The three phases spanning the hero; role words (producer ≠ reviewer ≠ merger) live in the "?" legend, not on the stage |
 
 These labels and explainers live in the same `copy.ts` module — one map, no
 second vocabulary. A small **"?" legend toggle** in the header overlays the
@@ -563,8 +672,15 @@ mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
                                     // not read as a green "running"); no open round + newest
                                     // standby-wait newer than any standby-exit → standby
                                     // (parked, healthy — #125); else running.
-                                    // Precedence: sentinel files > newest event > staleness
-                                    // overrides everything (docs/loop-walkthrough-v0.2.md §6)
+                                    // Precedence (fixed 2026-07-21, resolving §8 vs
+                                    // walkthrough §6): STALENESS BEATS PAUSE — a dead engine
+                                    // with a PAUSE file renders stalled, the sentinel demoted
+                                    // to a secondary chip ("PAUSE set"); KILL_SWITCH + stale
+                                    // stays stopped (truthful either way). Derivation is
+                                    // server-side only, so `sapwood status` and the dashboard
+                                    // can never disagree. Env-park folds into the standby
+                                    // display tier ("waiting") with a park sub-caption —
+                                    // no eighth state word.
     "reasons": [],                  // ceiling_breach.reasons when winding-down
     "lastTickAt": "2026-07-09T08:12:00Z"   // engine_session.last_tick_at
   },
@@ -643,8 +759,14 @@ phase window — all pre-#206 history — bucket as **"unattributed"**, drawn
 last and labeled; a silent misfile into a real phase is worse than an
 honest leftover bucket.
 
-**`GET /api/rounds`** — replay chapter marks and (deferred) round browsing;
-one row per closed round from `round_artifacts`, ascending:
+**`GET /api/rounds`** — replay chapter marks and the round navigator's list
+(§3 A). Re-anchored 2026-07-21: the **`rounds` table is the spine** — one
+row per round, open or closed, including rounds that closed without an
+artifact (pre-#123 history, or a crash between `closeRound` and
+`saveRoundArtifact`) — with the artifact **left-joined** for the outcome
+tally (merged PRs, spend, escalations); rows without an artifact render
+tally-less, honestly. Each row also carries `status`, `startedAt`/`endedAt`,
+and an `eventCount` for the transport's "event n/N". Ascending:
 
 ```jsonc
 { "rounds": [{ "roundId": 12, "schemaVersion": 1,
@@ -663,7 +785,9 @@ opened read-only, serves `dashboard/dist` statics plus these four GET
 routes and exactly one write route:
 
 **`POST /api/control`** — body `{ "verb": "start" | "pause" | "resume" |
-"stop" }`, allowlist-validated; anything else is 400. Effect is sentinel-file
+"stop" | "estop" }`, allowlist-validated; anything else is 400. `estop` is
+registered only once the #293 `EMERGENCY_STOP` engine sentinel exists —
+until then it is not in the allowlist and the button does not render. Effect is sentinel-file
 creation/removal only (§3 Operations) — the SQLite handle stays read-only,
 no config or GitHub writes exist. Requests must be same-origin JSON:
 `Content-Type: application/json` plus the `X-Sapwood-Control` header (§3
@@ -725,6 +849,11 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 - **Per-gate progress in the hero** — needs the engine to persist gate
   substate (a `gate-advanced` event); v0.2 renders the review passage as one
   waiting state (§6).
+- **Scrubbing within the open round** — a "cursor behind HEAD" mode with
+  its own rules for control visibility, est overlays, and auto-follow;
+  deferred to v0.3 (§11). A round is fully replayable the moment it closes.
+- **Honest "On hold" rendering** — blocked on the hold-visibility event
+  (§11 follow-up #7); until then held PRs render as waiting.
 - **Config replay** — becomes possible once `run-started` carries a
   resolved-config snapshot (§11); v0.2 keeps the config drawer live-only.
   (The earlier "replayable cost panels" deferral is superseded: `spend_ledger`
@@ -782,11 +911,19 @@ mutable snapshot or outside the engine's own DB is live-only.
 
 ### Mode purity
 
-- The toggle is **global**: entering Replay swaps the data source for the
-  whole screen. Live values must never render beside replayed state as if
-  they were one moment — the header in replay shows the *as-of-cursor*
-  round/phase/spend plus a persistent REPLAY badge; whether the engine is
-  currently alive shrinks to one small live indicator.
+- Mode is carried by the **round navigator**, not a toggle (2026-07-21
+  amendment, §3 A): the navigator's LIVE slot is live mode; stepping to a
+  closed round swaps the data source for the **whole screen**. Live values
+  must never render beside replayed state as if they were one moment — in a
+  closed round the header shows the *as-of-cursor* round/phase/spend plus
+  the persistent tinted "ROUND N · CLOSED" badge; whether the engine is
+  currently alive shrinks to the engine-state word. Engine control verbs
+  hide entirely (§3 Operations — mode purity applied to the write path).
+- The **open round is not scrubbable** in v0.2: at LIVE the cursor is
+  pinned to HEAD. Scrubbing backward inside a live round would create a
+  third mode ("cursor behind HEAD") with unanswered rules for controls,
+  est overlays, and auto-follow; a round becomes fully replayable the
+  moment it closes (§10).
 - Panels that cannot replay dim with an **on-panel** "live only" badge. A
   footer note alone is not acceptable — the badge belongs on the panel that
   would otherwise lie.
@@ -810,7 +947,13 @@ the overlay is the named boundary.
    `{ config: <allowlisted subset>, configHash }` — the same allowlist the
    config drawer serves (§3 E); a hash alone cannot power historical
    captions or budgets. Gives replay its run grouping and later makes the
-   config drawer historically honest (§10).
+   config drawer historically honest (§10). **Upgraded 2026-07-21 to a hard
+   prerequisite for the header**: the #154 run-spend anchor
+   (`runSpendAnchorId`) exists only in engine-process memory — the
+   dashboard server cannot compute `spend.runUsd` (§8) until this event's
+   adjacent ledger position persists the anchor. Until it lands, the header
+   meter runs whole on the daily tier (§3 A's existing fallback path — no
+   new machinery).
 3. **Titles in event payloads** (#207, design-director amendment) —
    `dispatched` carries the issue title, PR-producing/merging events carry
    the PR title, read from data the engine already holds at those moments
@@ -830,6 +973,20 @@ the overlay is the named boundary.
 5. **`dashboard.controls` config key** (#210, round-2 amendment) — boolean,
    default `true`, added to the strict config schema; gates the §3
    Operations verbs and the §8 `POST /api/control` route.
+6. **`EMERGENCY_STOP` sentinel** (#293, third amendment) — immediate hard
+   stop, no drain window: detection hard-kills every running/fixing lane's
+   process group in the same tick via the existing kill path, with the
+   existing post-drain escalation treatment. Precedence EMERGENCY_STOP >
+   KILL_SWITCH > PAUSE. Safety machinery — the implementing PR is
+   human-merge-only. Powers the §3 Operations E-Stop tier; the button and
+   the `estop` verb do not exist until it lands.
+7. **Hold-visibility event** (third amendment, unfiled) — a held PR
+   (`escalation.holdLabels`) is indistinguishable from "waiting on review"
+   in persisted data: the gate observes the label live and appends nothing.
+   Rendering an honest "On hold" state needs one additive event when the
+   gate observes the hold transition; until then the design accepts held
+   PRs rendering as waiting. File alongside the lane-board implementation
+   issue.
 
 New event kinds must land in the §7 copy map in the same PR (gate②
 checklist); payload-only additions like #3 need no copy entry.
