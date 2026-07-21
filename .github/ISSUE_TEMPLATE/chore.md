@@ -18,6 +18,14 @@ Out of scope: <!-- Encouraged: name one adjacent thing this issue will not do. -
 
 ## Acceptance criteria
 
+<!-- Each line MUST be a literal `- [ ]` checkbox (start unchecked — nothing should be done yet)
+     — the engine parses this exact format into the acceptance-criteria set a worker is
+     dispatched against and later reviewed on. Prose, nested sub-bullets, or a plain `-` bullet
+     with no checkbox do not count. A criterion may wrap onto more than one line (indent the
+     continuation, like this comment) — that's fine, it's still one criterion. Exempt ONLY if
+     this chore is inherently unverifiable and carries the `verify:n/a` label (doc-gate path,
+     see the Verification plan section below). -->
+
 - [ ] Concrete, checkable statement of what "done" looks like.
 
 ## Verification plan

@@ -728,6 +728,70 @@ way an initial review does. The label itself is never removed by that check eith
 See [`docs/PLAN.md`](PLAN.md#v02-north-star-the-round-orchestrator) (the "gate⓪ is scoped
 to the round pool..." locked decision, issue #214) for the full detail.
 
+## The AC-authority dispatch snapshot (#283, design #279 §5)
+
+Per-AC verdicts (the engine-side review agent design, #279) need an authoritative,
+immutable acceptance-criteria set to judge a PR against — but the producer holds `gh
+issue edit` capability (`worker.ts`'s own grant), so the live issue body is **not**
+authoritative once a worker has been dispatched against it: a worker (or anyone else
+with write access) could edit the issue after dispatch and silently shift what the
+final review measures the PR against.
+
+The fix is engine-side, not a new permission boundary: **before a worker ever spawns**,
+the conductor's DISPATCH loop (`conductor.ts`) extracts the checkbox acceptance-criteria
+set (`- [ ]` lines under `## Acceptance criteria` — `forge.ts`'s
+`extractAcceptanceCriteria`) from the exact body `getReadyIssues` already fetched, and
+persists a snapshot — `{full body hash, full body text, AC manifest}` — via
+`State.recordAcSnapshot`, inside the same fail-closed unit as the dispatch attempt
+itself (a write failure rolls the board claim back to `Ready` exactly like a spawn
+failure would). `isDispatchable` (`forge.ts`) additionally refuses to dispatch any
+non-`verify:n/a` issue whose checkbox AC set is missing or malformed — a bare
+`Verification`/`Acceptance` section with no real `- [ ]` lines is no longer enough,
+matching the `plan:approved` re-check in `plan-review.ts`'s `validateReviewerOutput`/
+`validateDrafterOutput` (same "approve claim must be true" doctrine, extended to the
+checkbox set the snapshot is built from).
+
+**A drifted lane never reaches the merge/review gate.** Before the conductor's DRIVE
+loop ever hands a driving lane to `gate.driveOne`, it re-reads the issue's LIVE body
+(this IS a live fetch — it exists specifically to detect an edit, not to avoid one) and
+compares its full hash against the recorded snapshot (`ac-snapshot.ts`'s
+`checkAcSnapshotDrift`) — ANY drift, not just inside the AC section (a verification-plan
+edit counts too), fails closed: the lane is escalated to `needs-human` with a
+drift-explaining comment, and `driveOne` is **never** invoked for that lane that tick,
+for any reviewer kind. There is no re-extraction path — a drifted lane cannot silently
+proceed; a human must re-adjudicate (a renewed gate⓪ pass) before the lane can drive
+again. A lane with no recorded snapshot (dispatched before this feature shipped) is not
+treated as drift — it drives normally, so this only ever tightens NEW dispatches.
+
+**Scope note: this is the tick-time GATE, not yet the review SESSION's input.** #283
+(this section) delivers snapshot persistence and the drift gate above — it does not
+change what body text an actual review session sees. The existing hosted-bot trigger
+(`reviewer.ts`'s `CodexReviewer.triggerReview`, human-merge-only and out of this PR's
+scope) still performs its own separate live `getIssueBody` read to build the `@codex
+review` trigger comment, unaffected by any of this. Wiring `state.getAcSnapshot(issue).body`
+as the actual input to a review session — so the session itself never sees a live
+re-fetch — is issue #286 (E4a, the engine-agent adapter)'s job; #283 provides the
+primitive (proven immutable across a live edit) that consumer is built to read.
+
+**Snapshot ownership is bound to the lane, not just the issue.** `ac_snapshots` is
+upsert-by-issue (one row per issue number) — but a `failed`-with-PR lane awaiting a
+human's GATED RECLAIM (#147) is *not* counted as in-flight (`activeWorkers()` excludes
+`failed`), so a fresh dispatch of the *same* issue number can legitimately overwrite the
+issue-keyed snapshot while the older, un-reclaimed lane still exists. Each `WorkerRow`
+therefore stamps its own dispatch-time hash (`workers.ac_body_hash`) at creation, from
+the exact snapshot just recorded in the same synchronous step (never re-read from the
+table) — the drift check verifies that hash still matches the issue's *current* stored
+snapshot before ever trusting it as that lane's authority. A mismatch (a different,
+later lane's snapshot having since replaced it) — or the snapshot going missing entirely
+despite a lane's own record of having recorded one — is treated as a fail-closed
+anomaly, escalated exactly like an ordinary live-body edit, never silently absorbed.
+
+Ids in the AC manifest are ordinal+hash (`<1-based position>-<8 hex chars of
+sha256(text)>`) — stable for a single extraction (the same body always yields the same
+ids), but never assumed stable across a body edit; drift detection is what prevents a
+changed body from ever being silently re-extracted into a NEW id set that the engine
+would then treat as equivalent to the old one.
+
 ## See also
 
 - [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `cost`,

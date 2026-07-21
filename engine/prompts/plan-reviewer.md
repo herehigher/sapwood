@@ -23,6 +23,14 @@ You are judging whether this issue is genuinely fit to hand to a headless autono
 worker with no human watching — not whether the underlying work is a good idea (a human
 already decided that by moving it to `Ready`). Concretely:
 
+- **Acceptance criteria are checkbox items — mandatory, not stylistic.** Every criterion must
+  be its own literal `- [ ]` line under the `## Acceptance criteria` heading; the engine parses
+  exactly this shape into the authoritative AC set a worker is dispatched against and later
+  reviewed on (design #279 §5). Prose, a paragraph, or a plain `-` bullet with no checkbox do
+  not count as ANY acceptance criteria at all, even if the words are perfectly clear — a
+  malformed or empty checkbox set makes an otherwise-good plan **not dispatchable**, full stop.
+  If you correct anything here (outcome 1's minor-correction latitude), reformat loose prose
+  into real `- [ ]` lines rather than leaving it as narrative text.
 - **Acceptance criteria** are concrete enough that someone reading the finished PR could
   answer yes/no for each one, not "sort of" or "probably."
 - **The verification plan** (tests to write/run, commands to execute, observable

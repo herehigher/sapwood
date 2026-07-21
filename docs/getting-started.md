@@ -197,6 +197,15 @@ runs the plan-reviewer peripheral each round and applies it automatically when i
 a plan; `sapwood init` provisions the label like `sapwood:verify:n/a` and
 `sapwood:origin:agent` above.
 
+Acceptance criteria must be written as literal checkbox lines — `- [ ] ...` — under the
+`## Acceptance criteria` heading, never as prose (#283). The engine parses exactly this
+shape into the authoritative AC set a worker is dispatched against; a malformed or empty
+checkbox set blocks dispatch even with `plan:approved` applied. The engine also snapshots
+the full issue body BEFORE a worker ever spawns, and re-checks it for drift at review
+time — see
+[`security.md`](security.md#the-ac-authority-dispatch-snapshot-283-design-279-5) for the
+full mechanism.
+
 Any issue a human didn't personally author — including one an agent role opens on your
 behalf — should carry the configured `labels.originAgent` label (`sapwood:origin:agent` by
 default); see

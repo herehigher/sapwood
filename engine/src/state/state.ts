@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
 // never edit a shipped migration, add a new one. user_version (a SQLite builtin) is the
@@ -638,6 +639,91 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       WHERE review_triggered_head IS NOT NULL;
     `);
   },
+  // 22 -> 23: the AC-authority dispatch snapshot (#283, design #279 §5, D4). One row per
+  // ISSUE (not per worker/lane, and not append-only like input_manifest/context_manifests) —
+  // `issue` is the primary key, upserted via State.recordAcSnapshot. `body` is the FULL
+  // snapshotted issue-body text at dispatch time (never re-derived); `body_hash` is
+  // `hashBody(body)`, stored alongside rather than re-computed on every drift check;
+  // `manifest_json` is the caller's already-extracted `AcceptanceCriterion[]`, opaque JSON
+  // (state.ts stores it, never interprets it — same convention as round_artifacts/
+  // context_manifests' own `json` columns).
+  //
+  // #301 review (P1#3, Codex sol high): this table is upsert-by-issue, and — contrary to an
+  // earlier draft of this comment — the DISPATCH loop's inFlightIssues check does NOT actually
+  // guarantee "at most one active lane per issue" against this table: `activeWorkers()` (the
+  // in-flight set) excludes `failed` lanes, so a `failed`+PR lane awaiting GATED RECLAIM (#147)
+  // does NOT block a fresh dispatch of the SAME issue number. A later dispatch's snapshot can
+  // therefore legitimately OVERWRITE this row while an older, not-yet-reclaimed lane for the
+  // same issue still exists. This table alone is consequently NOT sufficient to answer "is this
+  // THE snapshot MY lane was dispatched against" — that ownership check is what the
+  // workers.ac_body_hash column (migration 23->24 below) exists to close: each WorkerRow stamps
+  // its OWN dispatch-time hash at creation, and conductor.ts's drift check (checkAcDriftBeforeDrive)
+  // compares that stamped hash against this table's CURRENT row for the issue before ever trusting
+  // it as this lane's authority — a mismatch (a different, later lane's snapshot) is treated as an
+  // ownership anomaly, same fail-closed escalation as an ordinary live-body drift.
+  (db) => {
+    db.exec(`
+      CREATE TABLE ac_snapshots (
+        issue          INTEGER PRIMARY KEY,
+        body_hash      TEXT NOT NULL,
+        body           TEXT NOT NULL,
+        manifest_json  TEXT NOT NULL,
+        snapshotted_at TEXT NOT NULL
+      );
+    `);
+  },
+  // 23 -> 24 (#301 review, P1#1 + P1#3, Codex sol high): `workers.ac_body_hash` binds a lane's
+  // own dispatch-time AC-snapshot identity to ITS OWN row, closing two gaps the issue-keyed
+  // ac_snapshots table alone left open:
+  //
+  //  - P1#3 (ownership race): ac_snapshots is upsert-by-issue, and a `failed`+PR lane awaiting
+  //    GATED RECLAIM (#147) does NOT block a fresh dispatch of the SAME issue (activeWorkers()
+  //    excludes `failed` — see the migration 22->23 comment above). A later lane's dispatch can
+  //    legitimately overwrite the issue-keyed snapshot while an older, un-reclaimed lane for the
+  //    same issue still exists. Stamping the EXACT hash a lane's own dispatch recorded onto that
+  //    lane's OWN row means a reclaimed lane can verify "is the CURRENT ac_snapshots row for my
+  //    issue still MINE" before ever trusting it — a mismatch (a different, later lane's
+  //    snapshot silently having replaced it) is caught and escalated, never silently driven.
+  //  - P1#1 (crash-window defense in depth): every fresh WorkerRow is created in conductor.ts's
+  //    DISPATCH loop strictly AFTER `state.recordAcSnapshot` already succeeded (the same
+  //    synchronous try block, no `await` between them, exhaustively verified: no other code path
+  //    in this codebase creates a NEW WorkerRow — every other `upsertWorker` call site spreads an
+  //    EXISTING row, `{...w, ...}` — see conductor.ts's DISPATCH loop comment). So a non-null
+  //    `ac_body_hash` on a lane is a hard guarantee "a snapshot for this exact hash was
+  //    successfully recorded at this lane's own dispatch time", not merely an inference from
+  //    ac_snapshots' current content. If that snapshot is later missing entirely (unexpected
+  //    schema tampering, manual DB surgery, or a future refactor of the invariant above) the
+  //    drift check treats a stamped-but-unfindable hash as an anomaly and escalates — it is NEVER
+  //    silently treated as an ordinary pre-#283 legacy lane.
+  //
+  // BACKFILLED, not blanket-NULL (#301 review round 3, P1#1): a DB already at v23 (22->23 shipped
+  // ac_snapshots; this migration ships in the SAME release, but a dev DB opened between the two
+  // commits — or any future engine build that lands them separately — can already hold
+  // `driving`/`failed`+PR workers with a matching ac_snapshots row for their issue) would
+  // otherwise migrate every existing row to `ac_body_hash = NULL`, which checkAcDriftBeforeDrive
+  // reads as "pre-#283 legacy, nothing to check" — silently DISCARDING drift/ownership protection
+  // for a lane that in fact already has a real snapshot recorded. The UPDATE below copies the
+  // CURRENT ac_snapshots.body_hash for a row's issue onto every worker row that has one, for
+  // EVERY state (not just currently-active) — a `failed`+PR row awaiting GATED RECLAIM needs this
+  // exactly as much as a `driving` row, since it can be reactivated later (P1#3's own scenario).
+  // A row whose issue has NO ac_snapshots entry (genuinely pre-#283, or dispatched by a caller
+  // that bypassed the DISPATCH loop) is left NULL — the correct, honest "nothing recorded" case;
+  // NULL after this migration means exactly that, never "predates the migration". If more than
+  // one worker row ever shares an issue number (a terminated lane plus a newer one), every one of
+  // them is backfilled with the SAME current value; for the common single-lane case this exactly
+  // restores the row's own true dispatch-time hash, and for the rarer shared-issue case it is
+  // still SAFE, never LESS safe than the NULL default it replaces — a stale row backfilled with a
+  // hash that isn't really its own simply fails closed as an ownership mismatch at drive time
+  // (P1#3's own mechanism), the same fail-closed outcome that being unable to verify it at all
+  // would have produced anyway.
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN ac_body_hash TEXT;
+      UPDATE workers
+      SET ac_body_hash = (SELECT body_hash FROM ac_snapshots WHERE ac_snapshots.issue = workers.issue)
+      WHERE issue IN (SELECT issue FROM ac_snapshots);
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -799,6 +885,17 @@ export interface WorkerRow {
    *  state `fixing`) instead of resuming it as an ordinary leg. Cleared (0) the instant that
    *  resume lands. Optional; DB default 0 (every ordinary handoff row). */
   fixing_handoff?: number;
+  /** #283/#301 (schema v23->v24, P1#1 + P1#3 review fixes): this lane's OWN dispatch-time
+   *  AC-snapshot hash (ac-snapshot.ts's `AcSnapshot.bodyHash`) — stamped ONCE, at row creation,
+   *  from the EXACT snapshot `conductor.ts`'s DISPATCH loop recorded moments earlier in the same
+   *  synchronous stretch (never re-read from the DB, so no race with a later dispatch's own
+   *  overwrite of the issue-keyed `ac_snapshots` row). `null`/undefined means either a pre-#283
+   *  legacy row (no snapshot was ever recorded for it — drive normally, unaffected by any of
+   *  this) or a lane created by a test/caller that bypassed the DISPATCH loop entirely. A
+   *  NON-null value is a hard guarantee a snapshot was recorded for this exact hash at dispatch
+   *  time — conductor.ts's checkAcDriftBeforeDrive treats a later mismatch (or the ac_snapshots
+   *  row going missing outright) as a fail-closed anomaly, never as "nothing to check". */
+  ac_body_hash?: string | null;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -1188,8 +1285,8 @@ export class State {
             review_covered_head,
             review_fallback_head, review_fallback_kind,
             gated_reentry_attempts, gated_reentry_capped, gated_escalation_labeled,
-            resume_attempts, resume_capped, fix_rounds, fixing_handoff)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            resume_attempts, resume_capped, fix_rounds, fixing_handoff, ac_body_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            issue = excluded.issue, session_id = excluded.session_id,
            state = excluded.state, started_at = excluded.started_at,
@@ -1213,7 +1310,8 @@ export class State {
            resume_attempts = excluded.resume_attempts,
            resume_capped = excluded.resume_capped,
            fix_rounds = excluded.fix_rounds,
-           fixing_handoff = excluded.fixing_handoff`,
+           fixing_handoff = excluded.fixing_handoff,
+           ac_body_hash = excluded.ac_body_hash`,
       )
       .run(
         row.name,
@@ -1240,6 +1338,7 @@ export class State {
         row.resume_capped ?? 0,
         row.fix_rounds ?? 0,
         row.fixing_handoff ?? 0,
+        row.ac_body_hash ?? null,
       );
   }
 
@@ -2234,6 +2333,55 @@ export class State {
       recordedAt: r.recorded_at,
       json: r.json,
     }));
+  }
+
+  // ── #283: AC-authority dispatch snapshot (ac_snapshots, migration 22->23) ───────────────
+
+  /** Persist ONE issue's pre-launch AC-authority snapshot (design #279 §5) — INSERT OR REPLACE
+   *  keyed by `snapshot.issue` alone (see the migration comment above for why upsert-by-issue,
+   *  not append-only, is the right shape). conductor.ts's DISPATCH loop calls this BEFORE
+   *  `supervisor.dispatch()` ever spawns the worker, inside the SAME try/catch that already
+   *  rolls the board claim back to Ready on a dispatch failure — a write failure here throws
+   *  and is caught by that SAME rollback path, so a snapshot-persistence hiccup can never leave
+   *  a worker running against an unrecorded AC set. `manifest` is stored as opaque JSON (never
+   *  interpreted here, same convention as round_artifacts/context_manifests). */
+  recordAcSnapshot(snapshot: AcSnapshot): void {
+    this.db
+      .prepare(
+        `INSERT INTO ac_snapshots (issue, body_hash, body, manifest_json, snapshotted_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(issue) DO UPDATE SET
+           body_hash = excluded.body_hash,
+           body = excluded.body,
+           manifest_json = excluded.manifest_json,
+           snapshotted_at = excluded.snapshotted_at`,
+      )
+      .run(snapshot.issue, snapshot.bodyHash, snapshot.body, JSON.stringify(snapshot.manifest), snapshot.snapshottedAt);
+  }
+
+  /** The read counterpart — conductor.ts's DRIVE loop consults this before a driving lane ever
+   *  reaches `gate.driveOne` (see checkAcSnapshotDrift, ac-snapshot.ts, and
+   *  checkAcDriftBeforeDrive, conductor.ts). `null` when no snapshot is currently recorded for
+   *  this issue — either a lane dispatched before this migration shipped, or a caller that
+   *  bypassed the DISPATCH loop (e.g. a test seeding a worker row directly). The caller's
+   *  treatment of `null` depends on ITS OWN lane's `workers.ac_body_hash` (#301 P1#1/P1#3 fix):
+   *  a lane that never recorded one (`ac_body_hash` null) treats this as "nothing to compare
+   *  against" and drives normally; a lane whose OWN dispatch DID record one (`ac_body_hash` set)
+   *  treats a `null` here — or a non-null row whose `bodyHash` no longer matches that lane's own
+   *  stamped hash (a LATER, different lane's dispatch has since overwritten it, see the migration
+   *  22->23 comment) — as a fail-closed anomaly, never as "nothing to compare against". */
+  getAcSnapshot(issue: number): AcSnapshot | null {
+    const row = this.db
+      .prepare("SELECT issue, body_hash, body, manifest_json, snapshotted_at FROM ac_snapshots WHERE issue = ?")
+      .get(issue) as { issue: number; body_hash: string; body: string; manifest_json: string; snapshotted_at: string } | undefined;
+    if (!row) return null;
+    return {
+      issue: row.issue,
+      bodyHash: row.body_hash,
+      body: row.body,
+      manifest: JSON.parse(row.manifest_json) as AcceptanceCriterion[],
+      snapshottedAt: row.snapshotted_at,
+    };
   }
 
   // ── #234: forge MCP proxy journal (forge_proxy_journal, migration 15->16) ───────────────

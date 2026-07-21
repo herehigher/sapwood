@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { extractVerificationPlan } from "../forge/forge.js";
+import { extractAcceptanceCriteria, extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
 import type { State } from "../state/state.js";
@@ -210,6 +210,15 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
     if (extractVerificationPlan(bodyToCheck) == null) {
       return { ok: false, reason: "approve claim's issue body has no verification/acceptance plan section" };
     }
+    // #283 (M10, E2, design #279 §5, D4): mandatory checkbox AC. `plan:approved` is the ONLY
+    // gate a non-verify:na issue passes through before dispatch (forge.ts's isDispatchable
+    // re-checks the SAME extractor), so an approve claim over a body with no honest `- [ ]`
+    // acceptance-criteria set must be rejected here too — same "approve claim must be true"
+    // doctrine as the verification-plan check above, just extended to the checkbox AC set the
+    // dispatch-time snapshot (ac-snapshot.ts) is built from.
+    if (extractAcceptanceCriteria(bodyToCheck) == null) {
+      return { ok: false, reason: "approve claim's issue body has no checkbox acceptance-criteria items (`- [ ] ...`)" };
+    }
   }
   return {
     ok: true,
@@ -243,6 +252,15 @@ export function validateDrafterOutput(text: string, expectedIssue: number): Draf
   }
   if (extractVerificationPlan(block.body) == null) {
     return { ok: false, reason: "drafted body has no verification/acceptance plan section" };
+  }
+  // #283 (M10, E2, design #279 §5, D4): the drafter's deliverable is re-reviewed by a fresh
+  // plan-review pass (never self-approved — plan-author != plan-approver), but a drafted body
+  // with no checkbox AC set would otherwise sail through THIS content check only to be rejected
+  // by validateReviewerOutput's own approve-time check (or, worse, by forge.ts's isDispatchable
+  // at actual dispatch time, much later) — failing here, at the drafter's own output, gives the
+  // fastest possible feedback loop.
+  if (extractAcceptanceCriteria(block.body) == null) {
+    return { ok: false, reason: "drafted body has no checkbox acceptance-criteria items (`- [ ] ...`)" };
   }
   return { ok: true, body: block.body };
 }
@@ -641,9 +659,11 @@ async function reviewOneIssue(
  *  of its own needed beyond the phase's existing one.
  *
  *  A confirm SESSION is dispatched only when the current body still has SOMETHING to confirm —
- *  see the extractVerificationPlan check at the top: an approved-but-planless orphan (#214 gate②
- *  review's forge.ts fix widened pool eligibility to include it) skips the session entirely and
- *  goes straight to the draft cycle, deterministically. */
+ *  see the extractVerificationPlan AND extractAcceptanceCriteria checks at the top (#301 review,
+ *  P2 F6 added the latter, symmetric with the former): an approved-but-planless orphan (#214
+ *  gate② review's forge.ts fix widened pool eligibility to include it) OR an approved issue whose
+ *  checkbox AC set has since gone missing/malformed both skip the session entirely and go
+ *  straight to the draft cycle, deterministically. */
 async function confirmOneIssue(
   deps: PlanReviewDeps,
   issue: Issue,
@@ -678,6 +698,30 @@ async function confirmOneIssue(
           "steps are explicit again.",
       },
       trailEntry: "confirm: skipped — approved body has no verification plan section",
+    });
+    return;
+  }
+  // #283/#301 review (P2 F6): the SAME self-healing check above, symmetrically extended to the
+  // checkbox acceptance-criteria set. Without this, an already-approved issue whose AC section
+  // later became empty/malformed (e.g. a human edit, or `plan:approved` surviving a body rewrite)
+  // would burn a confirm session every pool re-entry: the session sees a body with a real
+  // verification-plan section and confirms it, the engine makes zero writes, the body is
+  // unchanged, `isDispatchable` (forge.ts) still refuses to dispatch it (no valid AC set), round
+  // close releases the pool label, and the issue re-pools next round for ANOTHER confirm session
+  // — the exact same budget-burning, no-forward-progress loop the verification-plan check above
+  // exists to prevent, just for the AC set instead. Same fix shape: skip the confirm session
+  // entirely and seed the ordinary draft-cycle machinery directly.
+  if (extractAcceptanceCriteria(currentBody) == null) {
+    await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
+      decision: {
+        decision: "draft_request",
+        issue: issue.number,
+        body:
+          "This issue carries plan:approved but its body no longer contains a valid checkbox " +
+          "acceptance-criteria set (`- [ ] ...` lines under `## Acceptance criteria`) — restore " +
+          "or rewrite the acceptance criteria so they are real, checkable checkbox items again.",
+      },
+      trailEntry: "confirm: skipped — approved body has no checkbox acceptance-criteria set",
     });
     return;
   }

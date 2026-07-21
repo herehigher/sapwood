@@ -62,14 +62,20 @@ then `## Acceptance criteria` and a sibling `## Verification plan`. Feature and 
 issues may also carry an optional `## Constraints` between What and Acceptance criteria,
 but only for hard issue-specific implementation boundaries; omit it otherwise. Acceptance
 and Verification are the exact heading words the engine's extractor scans for, so keep
-them verbatim even as you rewrite the content under them. This is soft, structural guidance
-only — it makes the drafted issue read like every other issue in the repo, nothing more.
-The engine does not check formatting; it re-validates the actual SEMANTIC content (a real,
-checkable acceptance criteria + verification plan) the same way regardless of heading
-style. For a docs/chore
-issue that turns out to be inherently unverifiable, note that in the body and say so in
-your final message — the doc-gate (`verify:n/a`) label decision itself still belongs to
-the plan-reviewer/a human, never to you.
+them verbatim even as you rewrite the content under them.
+
+**Acceptance criteria are checkbox items, mandatory, not stylistic (design #279 §5).** Every
+criterion under `## Acceptance criteria` MUST be its own literal `- [ ] ...` line — the engine
+parses exactly this shape into the authoritative AC set a worker is later dispatched against
+and reviewed on. A paragraph, a plain `-` bullet with no checkbox, or folding several criteria
+into one line does not count as a checkable AC set at all, no matter how clear the prose reads
+— it makes the issue **not dispatchable** even after the plan-reviewer approves it. This ONE
+heading's format IS enforced, unlike the rest of this template's soft, structural guidance: the
+engine re-validates the actual SEMANTIC content of the Verification-plan section (a real,
+executable plan, any prose shape), but the Acceptance-criteria section is checked for this
+EXACT checkbox syntax. For a docs/chore issue that turns out to be inherently unverifiable,
+note that in the body and say so in your final message — the doc-gate (`verify:n/a`) label
+decision itself still belongs to the plan-reviewer/a human, never to you.
 
 ## Non-negotiables
 

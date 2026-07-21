@@ -1285,7 +1285,8 @@ test("#110/#235 final integration: a role session spawns with a read-only (no Ba
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const issueNumber = 42;
-    const revisedBody = "## Verification\n- run `npm test`, confirm green CI\n- confirm the acceptance criteria above\n";
+    const revisedBody =
+      "## Acceptance criteria\n\n- [ ] the criteria are met\n\n## Verification\n- run `npm test`, confirm green CI\n- confirm the acceptance criteria above\n";
     const resultText =
       `<<<SAPWOOD_RESULT>>>\n${JSON.stringify({ decision: "approve", issue: issueNumber })}\n<<<END_SAPWOOD_RESULT>>>\n` +
       `<<<BODY>>>\n${revisedBody}\n<<<END_BODY>>>`;

@@ -193,9 +193,10 @@ class MinimalSupervisor implements Supervisor {
  *  structured-output "approve" decision; "po-triage" emits a structured-output body revision.
  *  Issue numbers are recovered from the rendered prompt (every shipped issues-only role prompt
  *  renders "Number: #<n>" verbatim), and both carry their OWN BODY with a verification section
- *  so they validate regardless of whatever FakeForge.getIssueBody's stub (always "") would
- *  otherwise fail the content-invariant check on. "po-align" emits a valid empty declaration
- *  (no issues to create) — this file's scoping/wiring properties don't exercise creation. */
+ *  AND (#283) a checkbox acceptance-criteria section so they validate regardless of whatever
+ *  FakeForge.getIssueBody's stub (always "") would otherwise fail the content-invariant check
+ *  on. "po-align" emits a valid empty declaration (no issues to create) — this file's scoping/
+ *  wiring properties don't exercise creation. */
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
   constructor(
@@ -211,7 +212,7 @@ class ScriptedRunner {
       const issue = m ? Number(m[1]) : 0;
       const resultText =
         `${RESULT_BLOCK_START}\n${JSON.stringify({ decision: "approve", issue })}\n${RESULT_BLOCK_END}\n` +
-        `${BODY_BLOCK_START}\nApproved by the scripted test reviewer.\n\n## Verification\n\nStubbed.\n${BODY_BLOCK_END}`;
+        `${BODY_BLOCK_START}\nApproved by the scripted test reviewer.\n\n## Acceptance criteria\n\n- [ ] stubbed criterion\n\n## Verification\n\nStubbed.\n${BODY_BLOCK_END}`;
       return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
     }
     if (opts.roleId === "po-triage") {
@@ -219,7 +220,7 @@ class ScriptedRunner {
       const issue = m ? Number(m[1]) : 0;
       const resultText =
         `${RESULT_BLOCK_START}\n${JSON.stringify({ issue })}\n${RESULT_BLOCK_END}\n` +
-        `${BODY_BLOCK_START}\nDrafted by the scripted test triage session.\n\n## Verification\n\nStubbed.\n${BODY_BLOCK_END}`;
+        `${BODY_BLOCK_START}\nDrafted by the scripted test triage session.\n\n## Acceptance criteria\n\n- [ ] stubbed criterion\n\n## Verification\n\nStubbed.\n${BODY_BLOCK_END}`;
       return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: `role-${opts.roleId}-1`, resultText };
     }
     if (opts.roleId === "po-align") {

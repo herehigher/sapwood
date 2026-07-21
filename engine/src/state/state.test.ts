@@ -2294,6 +2294,167 @@ test("listContextManifestsForRound: two attempts of the same phase are independe
   s.close();
 });
 
+// ── #283: AC-authority dispatch snapshot (ac_snapshots, migration 22->23) ──────────────────
+
+test("recordAcSnapshot/getAcSnapshot: round-trips one issue's snapshot exactly, null for an issue never snapshotted", () => {
+  const s = mem();
+  assert.equal(s.getAcSnapshot(7), null);
+  s.recordAcSnapshot({
+    issue: 7,
+    bodyHash: "abc123",
+    body: "## Acceptance criteria\n\n- [ ] one",
+    manifest: [{ id: "1-deadbeef", text: "one" }],
+    snapshottedAt: "2026-07-21T00:00:00Z",
+  });
+  const snap = s.getAcSnapshot(7);
+  assert.equal(snap?.bodyHash, "abc123");
+  assert.equal(snap?.body, "## Acceptance criteria\n\n- [ ] one");
+  assert.deepEqual(snap?.manifest, [{ id: "1-deadbeef", text: "one" }]);
+  assert.equal(snap?.snapshottedAt, "2026-07-21T00:00:00Z");
+  // A different issue is independent.
+  assert.equal(s.getAcSnapshot(8), null);
+  s.close();
+});
+
+test("recordAcSnapshot: re-recording the SAME issue upserts — never a second row (a fresh dispatch of a terminated lane's issue replaces the stale snapshot)", () => {
+  const s = mem();
+  s.recordAcSnapshot({
+    issue: 7,
+    bodyHash: "hash-v1",
+    body: "v1 body",
+    manifest: [],
+    snapshottedAt: "t0",
+  });
+  s.recordAcSnapshot({
+    issue: 7,
+    bodyHash: "hash-v2",
+    body: "v2 body",
+    manifest: [{ id: "1-cafebabe", text: "new criterion" }],
+    snapshottedAt: "t1",
+  });
+  const snap = s.getAcSnapshot(7);
+  assert.equal(snap?.bodyHash, "hash-v2");
+  assert.equal(snap?.body, "v2 body");
+  assert.equal(snap?.snapshottedAt, "t1");
+  s.close();
+});
+
+// ── #301 review (P3 F7): REAL v22 -> current migration — a populated pre-#283 DB survives ──
+
+test("migration v22->current: a populated v22 DB (predating ac_snapshots/ac_body_hash) opens with data intact, workers.ac_body_hash defaults to NULL, ac_snapshots empty-but-usable, user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    // Build a REAL v22 DB: run the shipped migrations 0..21 exactly as that engine would have —
+    // BEFORE #283's ac_snapshots (22->23) and #301's workers.ac_body_hash (23->24) ever existed.
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 22; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 22");
+    // A pre-#283 driving lane with a PR — exactly the "legacy lane, no AC snapshot ever
+    // recorded" shape checkAcDriftBeforeDrive (conductor.ts) must keep driving normally.
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("lane-v22", 42, "sess-42", "driving", "2026-07-20T00:00:00Z", null, 99);
+    assert.throws(() => raw.prepare("SELECT ac_body_hash FROM workers").get(), "the column genuinely does not exist pre-migration");
+    assert.throws(() => raw.prepare("SELECT * FROM ac_snapshots").get(), "the table genuinely does not exist pre-migration");
+    raw.close();
+
+    // Open with the CURRENT engine -> migrates 22 -> SCHEMA_VERSION.
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 24);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    // Pre-existing data survived intact, and the new column defaults to NULL (never treated as
+    // drift — see checkAcDriftBeforeDrive's own doc: a null ac_body_hash means "legacy, nothing
+    // to check", drive normally).
+    const w = s.getWorker("lane-v22");
+    assert.equal(w?.issue, 42);
+    assert.equal(w?.pr, 99);
+    assert.equal(w?.state, "driving");
+    assert.equal(w?.ac_body_hash, null);
+    // The new table is present and fully usable post-migration.
+    assert.equal(s.getAcSnapshot(42), null);
+    s.recordAcSnapshot({ issue: 42, bodyHash: "h1", body: "b1", manifest: [], snapshottedAt: "t0" });
+    assert.equal(s.getAcSnapshot(42)?.bodyHash, "h1");
+    s.close();
+
+    // Idempotent reopen: no re-migration, same version, same data.
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("lane-v22")?.ac_body_hash, null);
+    assert.equal(s2.getAcSnapshot(42)?.bodyHash, "h1");
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #301 review round 3 (P1#1): REAL v23 -> v24 migration — ac_body_hash BACKFILLS from an
+//    existing ac_snapshots row, rather than silently discarding drift protection for a worker
+//    that already has one recorded. A dev DB opened between the 22->23 and 23->24 commits (or a
+//    future engine build that lands them separately) can hold exactly this shape. ──
+
+test("migration v23->v24: ac_body_hash backfills from an existing ac_snapshots row for a worker's issue — a v23 DB with an active worker + a matching snapshot must NOT silently lose drift/ownership protection on upgrade; a worker with no matching snapshot stays genuinely NULL", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    // Build a REAL v23 DB: run migrations 0..22 (through 22->23, which creates ac_snapshots) —
+    // BEFORE 23->24 (workers.ac_body_hash) ever ran.
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 23; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 23");
+    // A `driving` lane whose dispatch-time snapshot already exists (the shape the backfill must
+    // repair) — a `failed`+PR lane awaiting GATED RECLAIM needs the SAME treatment (P1#3), so a
+    // second row proves the backfill isn't scoped to `driving` alone.
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("lane-v23-driving", 55, "sess-55", "driving", "2026-07-21T00:00:00Z", null, 900);
+    raw
+      .prepare(
+        "INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr, gated_escalation_labeled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("lane-v23-failed", 57, "sess-57", "failed", "2026-07-21T00:00:00Z", "2026-07-21T01:00:00Z", 902, 1);
+    raw
+      .prepare("INSERT INTO ac_snapshots (issue, body_hash, body, manifest_json, snapshotted_at) VALUES (?, ?, ?, ?, ?)")
+      .run(55, "prev-hash-driving", "body text 55", "[]", "2026-07-21T00:00:00Z");
+    raw
+      .prepare("INSERT INTO ac_snapshots (issue, body_hash, body, manifest_json, snapshotted_at) VALUES (?, ?, ?, ?, ?)")
+      .run(57, "prev-hash-failed", "body text 57", "[]", "2026-07-21T00:00:00Z");
+    // A worker whose issue has NO matching snapshot row — a genuinely pre-#283/no-snapshot lane
+    // — must stay NULL: the backfill must never invent a hash for a lane that never had one.
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("lane-v23-legacy", 56, "sess-56", "running", "2026-07-21T00:00:00Z", null);
+    raw.close();
+
+    // Open with the CURRENT engine -> migrates 23 -> SCHEMA_VERSION.
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 24);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    assert.equal(s.getWorker("lane-v23-driving")?.ac_body_hash, "prev-hash-driving", "backfilled from the existing ac_snapshots row");
+    assert.equal(
+      s.getWorker("lane-v23-failed")?.ac_body_hash,
+      "prev-hash-failed",
+      "a failed+PR row awaiting GATED RECLAIM is ALSO backfilled",
+    );
+    assert.equal(s.getWorker("lane-v23-legacy")?.ac_body_hash, null, "no snapshot existed for this issue -> stays NULL, genuinely legacy");
+    // Pre-existing snapshot data itself survived untouched.
+    assert.equal(s.getAcSnapshot(55)?.bodyHash, "prev-hash-driving");
+    assert.equal(s.getAcSnapshot(57)?.bodyHash, "prev-hash-failed");
+    s.close();
+
+    // Idempotent reopen: no re-migration, same version, same data.
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("lane-v23-driving")?.ac_body_hash, "prev-hash-driving");
+    assert.equal(s2.getWorker("lane-v23-legacy")?.ac_body_hash, null);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #234: forge MCP proxy journal + frozen evidence bundles (migration 15->16) ─────────────
 
 test("migration v15->v16: a populated v15 DB opens with data intact, empty forge_proxy_journal/forge_proxy_bundles tables, user_version SCHEMA_VERSION, idempotent reopen", () => {

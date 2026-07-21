@@ -144,8 +144,12 @@ class FakeForge implements IForge {
     if (this.throwOnAddIssueComment) throw new Error("simulated forge failure");
     this.issueComments.push([n, body]);
   }
-  async getIssueBody(): Promise<string> {
-    return "";
+  // #283: per-issue live body map — mutable so a test can simulate a mid-flight edit between
+  // dispatch and a later DRIVE-phase drift check. Defaults to "" (byte-for-byte the pre-#283
+  // behavior for any test that never populates it).
+  issueBodies: Record<number, string> = {};
+  async getIssueBody(n: number): Promise<string> {
+    return this.issueBodies[n] ?? "";
   }
   updateIssueBodyCalls: Array<[number, string]> = [];
   async updateIssueBody(issue: number, body: string): Promise<void> {
@@ -363,6 +367,261 @@ test("tick dispatch: a launch failure rolls the board back to Ready", async () =
   assert.equal(st.runningWorkers().length, 0);
   // The rollback succeeded on the first attempt -> no durable retry marker left behind.
   assert.equal(st.pendingRollbacks().length, 0);
+  st.close();
+});
+
+// ── #283 (M10, E2, design #279 §5): AC-authority dispatch snapshot ─────────────────────────
+
+test("tick dispatch: an AC snapshot is persisted BEFORE the worker ever spawns, from the SAME body getReadyIssues fetched", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  const body = "## Acceptance criteria\n\n- [ ] one\n- [ ] two\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  let snapshotSeenAtSpawn: ReturnType<State["getAcSnapshot"]> = null;
+  const originalDispatch = sup.dispatch.bind(sup);
+  sup.dispatch = async (issue: Issue) => {
+    // Proves ordering: by the moment the worker is spawned, the snapshot already exists.
+    snapshotSeenAtSpawn = st.getAcSnapshot(issue.number);
+    return originalDispatch(issue);
+  };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.ok(snapshotSeenAtSpawn, "the AC snapshot must already be persisted by the time dispatch() (the spawn) is called");
+  assert.equal(snapshotSeenAtSpawn!.body, body);
+  assert.equal(snapshotSeenAtSpawn!.manifest.length, 2);
+  // And it's still there (unchanged) after the tick completes.
+  const snap = st.getAcSnapshot(7);
+  assert.equal(snap?.body, body);
+  st.close();
+});
+
+test("tick dispatch: the snapshotted body survives a live mid-flight edit — later reads never see the edited text", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  const originalBody = "## Acceptance criteria\n\n- [ ] original criterion\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.equal(st.getAcSnapshot(7)?.body, originalBody);
+  // Simulate a human/producer editing the LIVE issue body after dispatch.
+  forge.issueBodies[7] = "## Acceptance criteria\n\n- [ ] EDITED criterion\n\n## Verification plan\nrun tests";
+  // #301 review round 3 (P3): this proves State.getAcSnapshot() itself is immutable across a
+  // live edit — never re-derived from a live read. It does NOT prove what any review SESSION's
+  // input is (that wiring is #286/E4a's job — see ac-snapshot.ts's module header and
+  // docs/security.md for the accurate scope statement).
+  assert.equal(
+    st.getAcSnapshot(7)?.body,
+    originalBody,
+    "the persisted snapshot never changes once recorded, regardless of a later live body edit",
+  );
+  st.close();
+});
+
+test("tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explaining comment, and driveOne is NEVER called (no silent re-extraction)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  // Dispatch normally so the AC snapshot lands through the real DISPATCH path.
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  forge.issueBodies[7] = originalBody;
+  const firstTick = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
+  assert.ok(dispatchedOutcome);
+  const workerName = (dispatchedOutcome as { worker: string }).worker;
+  // The worker finishes with a PR — promotes to `driving` on the NEXT tick's RECLAIM phase.
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+  // A human (or the producer, who holds `gh issue edit`) edits the issue body mid-flight.
+  forge.issueBodies[7] = "## Acceptance criteria\n\n- [ ] one EDITED\n\n## Verification plan\nrun tests";
+  const gate = new FakeMergeGate();
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0, "driveOne must never be called once drift is detected");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"));
+  assert.ok(
+    forge.issueComments.some(([n, body]) => n === 7 && /changed since its dispatch-time AC snapshot/.test(body)),
+    "a drift-explaining comment is posted on the issue",
+  );
+  assert.equal(st.getWorker(workerName)?.state, "failed");
+  assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason.startsWith("ac-snapshot-drift")));
+  st.close();
+});
+
+test("tick DRIVE: a driving lane with NO recorded AC snapshot (predates #283, ac_body_hash null) is never treated as drift — drives normally", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-legacy", 4);
+  sup.probes["lane-legacy"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 1, "no snapshot recorded for issue 4 -> not drift -> driveOne runs normally");
+  assert.equal(st.getWorker("lane-legacy")?.state, "driving");
+  st.close();
+});
+
+// ── #301 review (P1#1): crash-window defense — a lane that recorded its OWN dispatch-time hash
+//    (ac_body_hash set) but whose ac_snapshots row is missing is an ANOMALY, never silently
+//    treated as a pre-#283 legacy lane. This is the shape a crash landing after the board claim
+//    but before (or losing) the snapshot write would leave behind — distinct from FIX 1's
+//    theoretical analysis (no code path in this codebase actually creates a WorkerRow without
+//    first recording its snapshot in the same synchronous step — see conductor.ts's DISPATCH
+//    loop comment), this test proves the DEFENSE holds regardless: IF such a row ever existed
+//    (crash, corruption, a future refactor of that invariant), it fails closed instead of driving
+//    unprotected. ──
+
+test("tick DRIVE (#301 P1#1): a lane whose ac_body_hash is set but whose ac_snapshots row is MISSING (the crash-window shape) escalates as an anomaly — never silently drives as if it were a pre-#283 legacy lane", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  // Seed a lane that claims to have recorded a snapshot (ac_body_hash set) but for which NO
+  // ac_snapshots row actually exists — the exact shape a crash between the board claim and the
+  // snapshot write (or the write itself failing after upsertWorker somehow ran anyway) leaves.
+  st.upsertWorker({
+    name: "lane-crashed",
+    issue: 8,
+    session_id: "sess-8",
+    state: "driving",
+    started_at: "t0",
+    ended_at: null,
+    pr: 77,
+    ac_body_hash: "deadbeefcafe",
+  });
+  assert.equal(st.getAcSnapshot(8), null, "precondition: no snapshot exists for issue 8");
+  const gate = new FakeMergeGate();
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0, "driveOne must never be called for a lane whose expected snapshot cannot be verified");
+  assert.equal(st.getWorker("lane-crashed")?.state, "failed", "the lane re-escalates instead of driving unprotected");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 8 && l === "needs-human"));
+  assert.ok(
+    forge.issueComments.some(([n, body]) => n === 8 && /no longer present/.test(body)),
+    "the escalation comment explains the snapshot is missing, distinct from an ordinary live-body edit",
+  );
+  assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 8 && d.reason.startsWith("ac-snapshot-drift")));
+  st.close();
+});
+
+test("tick DRIVE (#301 review, P2): a needs-human LABEL WRITE FAILURE never claims the label 'has been applied' or promises automatic reentry, and the durable event is written BEFORE the comment attempt", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  st.upsertWorker({
+    name: "lane-labelfail",
+    issue: 9,
+    session_id: "sess-9",
+    state: "driving",
+    started_at: "t0",
+    ended_at: null,
+    pr: 88,
+    ac_body_hash: "deadbeefcafe",
+  });
+  forge.throwOnAddLabel = true;
+  const gate = new FakeMergeGate();
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0);
+  const comment = forge.issueComments.find(([n]) => n === 9)?.[1] ?? "";
+  assert.ok(!/has been applied/.test(comment), "must never claim the label landed when the write failed");
+  assert.ok(/FAILED/.test(comment), "honestly explains the label write failed");
+  assert.ok(
+    !/re-trigger review/.test(comment) && /manually/.test(comment),
+    "never promises automatic reentry (manually adding the label doesn't flip gated_escalation_labeled) — tells the human to review/merge by hand instead",
+  );
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["ac-snapshot-drift"]);
+  assert.equal(events.length, 1, "the event is durable EVEN THOUGH the comment attempt happens after it");
+  const payload = events[0]!.payload as { labeled: number; labelError?: string };
+  assert.equal(payload.labeled, 0);
+  assert.ok(typeof payload.labelError === "string" && payload.labelError.length > 0);
+  assert.equal(st.getWorker("lane-labelfail")?.gated_escalation_labeled, 0);
+  st.close();
+});
+
+test("tick DRIVE (#301 review round 3, P2 regression fix): the durable ac-snapshot-drift event lands even when the FOLLOW-UP comment post fails — a comment failure can never strand the escalation invisibly", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  st.upsertWorker({
+    name: "lane-commentfail",
+    issue: 10,
+    session_id: "sess-10",
+    state: "driving",
+    started_at: "t0",
+    ended_at: null,
+    pr: 90,
+    ac_body_hash: "deadbeefcafe",
+  });
+  forge.throwOnAddIssueComment = true;
+  const gate = new FakeMergeGate();
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(gate.calls.length, 0);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["ac-snapshot-drift"]);
+  assert.equal(
+    events.length,
+    1,
+    "the durable event survives a comment-post failure — it was written BEFORE the comment was ever attempted",
+  );
+  const payload = events[0]!.payload as { labeled: number };
+  assert.equal(payload.labeled, 1, "the label itself succeeded — only the comment failed");
+  assert.equal(st.getWorker("lane-commentfail")?.state, "failed");
+  assert.equal(st.getWorker("lane-commentfail")?.gated_escalation_labeled, 1);
+  st.close();
+});
+
+// ── #301 review (P1#3): a reclaimed lane's OWN dispatch-time snapshot identity is what's
+//    checked, not just "does ANY snapshot currently exist for this issue" — ac_snapshots is
+//    upsert-by-issue, and a `failed`+PR lane awaiting GATED RECLAIM is NOT counted as in-flight
+//    (activeWorkers() excludes `failed`), so a fresh, independent dispatch of the SAME issue
+//    number can legitimately overwrite the issue-keyed snapshot while the older lane still
+//    exists, un-reclaimed. ──
+
+test("tick GATED RECLAIM/DRIVE (#301 P1#3): a reclaimed lane's stale ac_body_hash no longer matching the issue's CURRENT ac_snapshots row (a different, later lane's dispatch replaced it) escalates as an ownership anomaly — driveOne is never called against the wrong AC authority", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+
+  // Lane A dispatches issue 7 with bodyA.
+  const bodyA = "## Acceptance criteria\n\n- [ ] A's criterion\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: bodyA }];
+  await tick({ forge, state: st, supervisor: sup, cfg });
+  const laneA = st.runningWorkers().find((w) => w.issue === 7)!;
+  assert.ok(laneA);
+  const hashA = st.getAcSnapshot(7)!.bodyHash;
+  assert.equal(laneA.ac_body_hash, hashA);
+
+  // Lane A fails with a PR, needs-human escalated (the exact shape gatedFailedWorkers() requires
+  // — a real DRIVE escalation would produce this same shape; seeded directly here to isolate the
+  // ownership-race property under test from the escalation machinery itself).
+  st.upsertWorker({ ...laneA, state: "failed", pr: 500, ended_at: "t1", gated_escalation_labeled: 1 });
+  forge.issueLabelsByIssue[7] = [cfg.labels.needsHuman];
+
+  // A DIFFERENT, later dispatch for the SAME issue 7 — activeWorkers() excludes `failed`, so
+  // DISPATCH does not consider issue 7 in-flight; bodyB overwrites the issue-keyed snapshot.
+  const bodyB = "## Acceptance criteria\n\n- [ ] B's DIFFERENT criterion\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: bodyB }];
+  await tick({ forge, state: st, supervisor: sup, cfg });
+  const laneB = st.runningWorkers().find((w) => w.issue === 7 && w.name !== laneA.name);
+  assert.ok(laneB, "a second, independent lane was dispatched for the same issue");
+  const hashB = st.getAcSnapshot(7)!.bodyHash;
+  assert.notEqual(hashB, hashA, "the issue-keyed snapshot now belongs to lane B, not lane A");
+
+  // A human removes needs-human -> GATED RECLAIM reactivates lane A back to driving.
+  forge.issueLabelsByIssue[7] = [];
+  forge.ready = []; // lane B already dispatched this tick; nothing new to dispatch
+  const gate = new FakeMergeGate();
+  const r = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.ok(r.gatedReclaimed.some((g) => g.kind === "reclaimed" && g.worker === laneA.name));
+  // Lane A's OWN snapshot hash no longer matches the CURRENT issue-keyed snapshot (now lane B's)
+  // -> the drift check must treat this as an ownership mismatch, NEVER silently drive lane A's PR
+  // against lane B's AC set.
+  assert.equal(
+    gate.calls.some((c) => c.pr === 500),
+    false,
+    "driveOne must never be called for lane A's stale/mismatched snapshot",
+  );
+  assert.equal(st.getWorker(laneA.name)?.state, "failed", "lane A re-escalates instead of driving unprotected");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 7 && l === cfg.labels.needsHuman));
+  const comment = forge.issueComments.filter(([n]) => n === 7).pop()?.[1] ?? "";
+  assert.match(comment, /different, later dispatch appears to have replaced it/);
   st.close();
 });
 
