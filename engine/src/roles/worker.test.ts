@@ -2009,11 +2009,11 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
   }
 });
 
-test("#69 grep-invariant (engine-wide, fable P3): the ONLY child_process importers are worker.ts (spawn) and gh.ts (execFile), and no subprocess call site passes a cwd — the engine structurally CANNOT exec git in a worker worktree", () => {
+test("#69 grep-invariant (engine-wide, fable P3; extended #284): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), and review/materializer.ts (execFile) — and no subprocess call site passes a cwd — the engine structurally CANNOT exec git in a worker worktree", () => {
   const srcDir = new URL("../", import.meta.url);
   const files = readdirSync(srcDir, { recursive: true }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
-  // Sanity: the two known subprocess modules are present in the scan set.
-  assert.ok(files.includes("roles/worker.ts") && files.includes("forge/gh.ts"));
+  // Sanity: the three known subprocess modules are present in the scan set.
+  assert.ok(files.includes("roles/worker.ts") && files.includes("forge/gh.ts") && files.includes("review/materializer.ts"));
   for (const f of files) {
     const src = readFileSync(new URL(f, srcDir), "utf8");
     const importsChildProcess = /from "node:child_process"/.test(src);
@@ -2029,6 +2029,17 @@ test("#69 grep-invariant (engine-wide, fable P3): the ONLY child_process importe
       // execFile ONLY, no spawn/sync variants, and gh runs in the engine's own cwd (no cwd option).
       assert.doesNotMatch(src, /\b(execFileSync|execSync|spawnSync|spawn)\b/, "gh.ts uses execFile only");
       assert.doesNotMatch(src, /\bcwd:/, "gh.ts passes no cwd to execFile");
+    } else if (f === "review/materializer.ts") {
+      // #284: a THIRD legitimate importer — the private-clone materializer invokes `git` itself
+      // (clone/checkout/rev-parse), ENGINE-side, structurally outside every worker worktree
+      // (never runs in a worker's worktree, never touches the shared repo's config). execFile
+      // (async) ONLY, same discipline as gh.ts; every git target is passed via `-C`, never a
+      // subprocess `cwd` option.
+      assert.doesNotMatch(src, /\b(execFileSync|execSync|spawnSync|spawn)\b/, "materializer.ts uses execFile only");
+      // Object-literal `cwd:` (an execFile options property) is banned; a `cwd: string` TS
+      // parameter annotation (this module's own `defaultPrivateCloneDir(cwd = process.cwd())`
+      // helpers) is a different, unrelated thing and must not false-positive here.
+      assert.doesNotMatch(src, /[{,]\s*cwd\s*:/, "materializer.ts passes no cwd option to execFile (uses -C instead)");
     } else {
       // Every other engine module must not shell out at all.
       assert.equal(importsChildProcess, false, `${f} must not import node:child_process`);

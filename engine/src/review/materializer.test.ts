@@ -1,0 +1,503 @@
+// materializer.test.ts (#284) — covers every acceptance criterion in the issue against REAL git
+// fixture repos, not mocks: bare-clone-outside-worktree-mounts + local-config-emptiness, the
+// exact pinned invocation (args + env), a hooks/filter/replace-ref-laden fixture proving the
+// PRIVATE clone materialization path is unaffected, a symlink fixture, `.git`-absence + OID
+// verification, and instruction-file inclusion + manifest recording. `execFileSync` here is
+// TEST-ONLY fixture plumbing (this file is excluded from the engine-wide child_process
+// grep-invariant in worker.test.ts, which only scans non-`.test.ts` files).
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import {
+  assertLocalConfigClean,
+  assertOutsideWorktreeMounts,
+  buildCheckoutInvocation,
+  buildCloneInvocation,
+  createPrivateClone,
+  defaultPrivateCloneDir,
+  defaultWorktreeRoot,
+  MaterializerError,
+  materialize,
+} from "./materializer.js";
+
+// ── fixture plumbing ────────────────────────────────────────────────────────────────────────
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+/** A real, non-bare git repo with gpg signing off (this sandbox has no signing key) and a
+ *  deterministic identity, ready for fixture commits. */
+function initSharedRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-materializer-shared-"));
+  git(dir, ["init", "-q", "-b", "main"]);
+  git(dir, ["config", "commit.gpgsign", "false"]);
+  git(dir, ["config", "user.email", "fixture@example.com"]);
+  git(dir, ["config", "user.name", "fixture"]);
+  return dir;
+}
+
+function headOid(dir: string): string {
+  return git(dir, ["rev-parse", "HEAD"]).trim();
+}
+
+// ── pure builders: pinned invocation contract ──────────────────────────────────────────────
+
+test("buildCloneInvocation: pinned argv (--bare --no-hardlinks) and env forces GIT_CONFIG_GLOBAL/SYSTEM=/dev/null over any inherited value", () => {
+  const { args, env } = buildCloneInvocation("/src/repo", "/priv/clone.git", {
+    PATH: "/usr/bin",
+    GIT_CONFIG_GLOBAL: "/tmp/attacker-global",
+    GIT_CONFIG_SYSTEM: "/tmp/attacker-system",
+  });
+  assert.deepEqual(args, ["clone", "--bare", "--no-hardlinks", "/src/repo", "/priv/clone.git"]);
+  assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null", "an ambient GIT_CONFIG_GLOBAL must never survive");
+  assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null", "an ambient GIT_CONFIG_SYSTEM must never survive");
+  assert.equal(env.PATH, "/usr/bin", "unrelated env is passed through");
+});
+
+test("buildCheckoutInvocation: pinned argv (-C, --work-tree, --no-replace-objects, -c core.symlinks=false, -- .) and isolated env", () => {
+  const { args, env } = buildCheckoutInvocation("/priv/clone.git", "/tmp/tree", "a".repeat(40), { PATH: "/usr/bin" });
+  assert.deepEqual(args, [
+    "-C",
+    "/priv/clone.git",
+    "--work-tree",
+    "/tmp/tree",
+    "--no-replace-objects",
+    "-c",
+    "core.symlinks=false",
+    "checkout",
+    "a".repeat(40),
+    "--",
+    ".",
+  ]);
+  assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+  assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null");
+});
+
+test("buildCheckoutInvocation env isolation wins even when the CALLER's own env already sets GIT_CONFIG_GLOBAL/SYSTEM to something else", () => {
+  const { env } = buildCheckoutInvocation("/c", "/t", "a".repeat(40), {
+    GIT_CONFIG_GLOBAL: "/tmp/hostile-global.gitconfig",
+    GIT_CONFIG_SYSTEM: "/tmp/hostile-system.gitconfig",
+  });
+  assert.equal(env.GIT_CONFIG_GLOBAL, "/dev/null");
+  assert.equal(env.GIT_CONFIG_SYSTEM, "/dev/null");
+});
+
+// ── structural disjointness: bare clone provably outside worker worktree mounts ────────────
+
+test("assertOutsideWorktreeMounts: rejects equal paths, clone nested inside worktreeRoot, and worktreeRoot nested inside clone", () => {
+  assert.throws(() => assertOutsideWorktreeMounts("/x/worktrees", "/x/worktrees"), MaterializerError);
+  assert.throws(() => assertOutsideWorktreeMounts("/x/worktrees/lane-1", "/x/worktrees"), MaterializerError);
+  assert.throws(() => assertOutsideWorktreeMounts("/x", "/x/worktrees"), MaterializerError);
+});
+
+test("assertOutsideWorktreeMounts: accepts a structurally disjoint sibling directory", () => {
+  assert.doesNotThrow(() => assertOutsideWorktreeMounts("/x/data/review/clone.git", "/x/.claude/worktrees"));
+});
+
+test("defaultPrivateCloneDir/defaultWorktreeRoot: shipped defaults are themselves structurally disjoint", () => {
+  const cwd = "/repo";
+  assert.doesNotThrow(() => assertOutsideWorktreeMounts(defaultPrivateCloneDir(cwd), defaultWorktreeRoot(cwd)));
+  assert.equal(defaultPrivateCloneDir(cwd), join(cwd, "data", "review", "clone.git"));
+  assert.equal(defaultWorktreeRoot(cwd), join(cwd, ".claude", "worktrees"));
+});
+
+// ── local-config emptiness at clone time ───────────────────────────────────────────────────
+
+test("createPrivateClone: rejects a cloneDir nested inside worktreeRoot BEFORE ever touching git", () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const insideCloneDir = join(worktreeRoot, "lane-1", "clone.git");
+    assert.rejects(() => createPrivateClone({ sourceRepoDir: shared, cloneDir: insideCloneDir, worktreeRoot }), MaterializerError);
+    assert.equal(existsSync(insideCloneDir), false, "no clone was ever attempted");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("createPrivateClone + assertLocalConfigClean: a fresh bare clone's local config contains ONLY core/remote/branch keys", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    assert.equal(clone.dir, cloneDir);
+    assert.ok(existsSync(join(cloneDir, "HEAD")), "a real bare repo was created");
+    await assert.doesNotReject(() => assertLocalConfigClean(cloneDir));
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("assertLocalConfigClean: fails closed on a filter.* entry (section outside core/remote/branch)", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    // Simulate the paranoid case directly: something wrote a filter entry into the PRIVATE
+    // clone's own local config after creation.
+    git(cloneDir, ["config", "--local", "filter.evil.smudge", "cat"]);
+    await assert.rejects(() => assertLocalConfigClean(cloneDir), MaterializerError);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("assertLocalConfigClean: fails closed on core.hooksPath even though 'core' itself is an allowed section", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    git(cloneDir, ["config", "--local", "core.hooksPath", "/tmp/evil-hooks"]);
+    await assert.rejects(() => assertLocalConfigClean(cloneDir), MaterializerError);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("createPrivateClone: re-creates the clone FRESH on every call (no config/state carried across calls)", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    // Poison the existing clone's config the way a stale/compromised clone might look.
+    git(cloneDir, ["config", "--local", "filter.evil.smudge", "cat"]);
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    await assert.doesNotReject(() => assertLocalConfigClean(cloneDir), "the re-clone left no trace of the poisoned config");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+// ── adversarial fixture: hooks + filters + replace-refs are all neutralized ────────────────
+
+test("materialize: a shared-clone post-checkout hook and an unconfigured smudge/clean filter never reach the private-clone checkout (positive control proves both mechanisms are real, not just absent by accident)", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shared = initSharedRepo();
+  const sentinel = join(cloneRoot, "hook-fired.marker");
+  try {
+    // Hooks live in `.git/hooks`, never tracked/committed content -- installed directly into
+    // the SHARED repo's git dir, exactly where a producer's own `Bash(git *)` grant could leave
+    // one (or a malicious repo could ship one, in the untrusted-source case). `post-checkout`
+    // fires even for a pathspec-restricted `checkout <oid> -- .` (git passes flag=0 for "file
+    // retrieval" checkouts, but still runs the hook) -- empirically confirmed against this
+    // sandbox's git 2.50.1, so this fixture exercises a REAL positive control, not an assumed one.
+    const sharedHooksDir = join(shared, ".git", "hooks");
+    writeFileSync(join(sharedHooksDir, "post-checkout"), `#!/bin/sh\necho fired > "${sentinel}"\n`);
+    chmodSync(join(sharedHooksDir, "post-checkout"), 0o755);
+
+    writeFileSync(join(shared, "secret.txt"), "ORIGINAL\n");
+    writeFileSync(join(shared, ".gitattributes"), "secret.txt filter=marker\n");
+    git(shared, ["add", "secret.txt", ".gitattributes"]);
+    git(shared, ["commit", "-qm", "add secret + attribute (filter unconfigured at commit time)"]);
+    const H = headOid(shared);
+
+    // Configure the filter LOCALLY on `shared` only, AFTER the commit -- clean/smudge never
+    // touch the already-written blob, only future working-tree materializations.
+    git(shared, ["config", "filter.marker.smudge", "sed s/^/SMUDGED-/"]);
+    git(shared, ["config", "filter.marker.clean", "cat"]);
+    // Positive control: prove BOTH the hook and the filter are REAL by exercising them on
+    // `shared`'s own worktree (a plain checkout there must smudge the file AND fire the hook).
+    rmSync(sentinel, { force: true });
+    rmSync(join(shared, "secret.txt"));
+    git(shared, ["checkout", "--", "secret.txt"]);
+    assert.equal(
+      readFileSync(join(shared, "secret.txt"), "utf8"),
+      "SMUDGED-ORIGINAL\n",
+      "sanity: the filter mechanism works when configured",
+    );
+    assert.equal(existsSync(sentinel), true, "sanity: the hook mechanism is real and does fire on a plain checkout");
+    rmSync(sentinel, { force: true });
+
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    // filter.marker.* was never copied into the private clone's local config (bare clone
+    // doesn't propagate arbitrary local-config keys) -- assertLocalConfigClean (already run
+    // inside createPrivateClone) is the automated proof of that; re-assert directly here too.
+    await assert.doesNotReject(() => assertLocalConfigClean(cloneDir));
+    // The hook script itself never propagates into a fresh bare clone either -- `git clone`
+    // only ever writes non-executable `*.sample` templates into a NEW clone's `hooks/` dir,
+    // never copies a source repo's actual hook scripts. Asserted directly, not just implied by
+    // the sentinel check below.
+    assert.equal(existsSync(join(cloneDir, "hooks", "post-checkout")), false, "the private clone's hooks dir has no post-checkout script");
+
+    const treeDir = join(treeRoot, "tree-1");
+    const result = await materialize({ clone, oid: H, treeDir });
+    assert.equal(result.kind, "materialized");
+    if (result.kind !== "materialized") return;
+    assert.equal(
+      readFileSync(join(result.treeDir, "secret.txt"), "utf8"),
+      "ORIGINAL\n",
+      "smudge filter did not run against the private-clone checkout",
+    );
+    assert.equal(existsSync(sentinel), false, "post-checkout hook did not fire -- it was never present on the private clone to begin with");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("materialize: --no-replace-objects is load-bearing -- a replace ref present on the private clone is ignored by materialize(), but WOULD win without the flag", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "original-content\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "original commit"]);
+    const original = headOid(shared);
+    writeFileSync(join(shared, "f.txt"), "REPLACED-content\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "replacement commit"]);
+    const replacement = headOid(shared);
+
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    // `git clone` does not fetch refs/replace/* by default -- install the replace ref DIRECTLY
+    // on the private clone to test the flag's effect regardless of how such a ref could arrive.
+    git(cloneDir, ["replace", original, replacement]);
+    assert.equal(
+      git(cloneDir, ["show", `${original}:f.txt`]),
+      "REPLACED-content\n",
+      "sanity: the replace ref is live and would fool a naive read",
+    );
+
+    const treeDirIsolated = join(treeRoot, "tree-isolated");
+    const result = await materialize({ clone, oid: original, treeDir: treeDirIsolated });
+    assert.equal(result.kind, "materialized");
+    if (result.kind === "materialized") {
+      assert.equal(
+        readFileSync(join(result.treeDir, "f.txt"), "utf8"),
+        "original-content\n",
+        "--no-replace-objects: the replace ref must not apply",
+      );
+    }
+
+    // Demonstrate the flag is load-bearing: the SAME checkout WITHOUT --no-replace-objects
+    // (manually stripped from the pinned invocation) checks out the REPLACED content instead.
+    const treeDirUnprotected = join(treeRoot, "tree-unprotected");
+    mkdirSync(treeDirUnprotected, { recursive: true });
+    execFileSync("git", ["-C", cloneDir, "--work-tree", treeDirUnprotected, "-c", "core.symlinks=false", "checkout", original, "--", "."], {
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+    });
+    assert.equal(
+      readFileSync(join(treeDirUnprotected, "f.txt"), "utf8"),
+      "REPLACED-content\n",
+      "without --no-replace-objects the same checkout is fooled by the replace ref -- proves the flag matters",
+    );
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+// ── symlink fixture, .git absence, instruction files, manifest ─────────────────────────────
+
+test("materialize: a tracked symlink materializes as a plain regular text file (core.symlinks=false), no .git directory in the tree, instruction files included, manifest recorded", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "target-file-contents\n");
+    execFileSync("ln", ["-s", "f.txt", "link.txt"], { cwd: shared });
+    mkdirSync(join(shared, ".claude", "rules"), { recursive: true });
+    writeFileSync(join(shared, "CLAUDE.md"), "# repo instructions\n");
+    writeFileSync(join(shared, ".claude", "rules", "x.md"), "rule x\n");
+    git(shared, ["add", "f.txt", "link.txt", "CLAUDE.md", ".claude/rules/x.md"]);
+    git(shared, ["commit", "-qm", "add symlink + instruction files"]);
+    const H = headOid(shared);
+
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    const treeDir = join(treeRoot, "tree-1");
+    const result = await materialize({ clone, oid: H, treeDir });
+
+    assert.equal(result.kind, "materialized");
+    if (result.kind !== "materialized") return;
+
+    // Symlink materializes as a PLAIN regular file, not an OS symlink.
+    const linkStat = lstatSync(join(result.treeDir, "link.txt"));
+    assert.equal(linkStat.isSymbolicLink(), false, "no real OS symlink was created");
+    assert.equal(linkStat.isFile(), true);
+    assert.equal(readFileSync(join(result.treeDir, "link.txt"), "utf8"), "f.txt", "symlink target text materializes as plain content");
+
+    // No `.git` anywhere in the tree.
+    assert.equal(existsSync(join(result.treeDir, ".git")), false);
+
+    // Instruction files INCLUDED (D7) -- not excluded, not specially transformed.
+    assert.equal(readFileSync(join(result.treeDir, "CLAUDE.md"), "utf8"), "# repo instructions\n");
+    assert.equal(readFileSync(join(result.treeDir, ".claude", "rules", "x.md"), "utf8"), "rule x\n");
+
+    // Tree manifest: every file present, sorted, correctly hashed.
+    const paths = result.manifest.map((m) => m.path).sort();
+    assert.deepEqual(paths, [".claude/rules/x.md", "CLAUDE.md", "f.txt", "link.txt"]);
+    const claudeEntry = result.manifest.find((m) => m.path === "CLAUDE.md");
+    assert.ok(claudeEntry);
+    const expectedHash = createHash("sha256").update("# repo instructions\n").digest("hex");
+    assert.equal(claudeEntry?.contentHash, expectedHash);
+    assert.equal(result.oid, H);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+// ── OID mismatch -> failure, never a silently wrong tree ───────────────────────────────────
+
+test("materialize: rejects a non-full-length oid up front, before touching git at all", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "x\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    const treeDir = join(treeRoot, "tree-short-oid");
+    const result = await materialize({ clone, oid: headOid(shared).slice(0, 7), treeDir });
+    assert.equal(result.kind, "failure");
+    assert.equal(existsSync(join(treeDir, "f.txt")), false, "nothing was checked out for an ambiguous oid");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("materialize: checkout OID mismatch (post-checkout verification resolves a DIFFERENT oid) -> failure, never a silently wrong tree", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "sapwood-materializer-gitshim-"));
+  const shared = initSharedRepo();
+  const oldPath = process.env.PATH;
+  try {
+    writeFileSync(join(shared, "f.txt"), "x\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    const H = headOid(shared);
+
+    // A `git` shim FIRST on PATH: delegates every invocation to the REAL git, except
+    // `rev-parse --verify`, which it answers with a DIFFERENT (bogus) oid -- simulating a
+    // corrupted/mismatched post-checkout verification without needing a real repo corruption.
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const bogusOid = "d".repeat(40);
+    writeFileSync(
+      join(shimDir, "git"),
+      `#!/usr/bin/env bash\nif [[ "$*" == *"rev-parse"*"--verify"* ]]; then\n  echo "${bogusOid}"\n  exit 0\nfi\nexec "${realGit}" "$@"\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${oldPath}`;
+
+    const treeDir = join(treeRoot, "tree-mismatch");
+    const result = await materialize({ clone, oid: H, treeDir });
+    assert.equal(result.kind, "failure");
+    if (result.kind === "failure") assert.match(result.reason, /mismatch/i);
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("materialize: checkout of a well-formed but nonexistent oid fails cleanly (never falls back to HEAD or any other tree)", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "x\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    const treeDir = join(treeRoot, "tree-nonexistent");
+    const result = await materialize({ clone, oid: "f".repeat(40), treeDir });
+    assert.equal(result.kind, "failure");
+    assert.equal(existsSync(join(treeDir, "f.txt")), false);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("materialize: refuses to write onto an already-populated treeDir", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "x\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    const treeDir = join(treeRoot, "tree-nonempty");
+    mkdirSync(treeDir, { recursive: true });
+    writeFileSync(join(treeDir, "pre-existing.txt"), "already here\n");
+    const result = await materialize({ clone, oid: headOid(shared), treeDir });
+    assert.equal(result.kind, "failure");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
