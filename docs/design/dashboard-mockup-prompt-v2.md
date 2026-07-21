@@ -430,6 +430,13 @@ Same panel layout, light "spring" theme: canvas warm cream nudged slightly towar
 6. **幽灵中位刻度**（Mara）：每根 stage 条一枚暗淡刻度=该阶段历史中位，
    一眼判常异；超中位**不染 rust**（超均值≠该人看）。
 7. fix-leg v0.2 不拆；费率/速度概念不加。
+8. **$ ⇄ tok 显示切换**（用户新增，2026-07-21）：微型 `$ | tok` 文字
+   开关，strip 右上（原 Config ▸ 位）。三道护栏：①只切两组条的单位，
+   货币事实（avg round / 轮账单行）永远 $；②tok 模式无 est 斜纹尾
+   （引擎无 est-tokens 事实，尾巴诚实消失）；③开关=显示 chrome（与
+   主题切换同类），永不进控制动词的位置/样式语言。token 四分 hover
+   两模式保留；tok 模式同样禁分段。默认 $——与人设裁决兼容（砍的是
+   常驻内联，不是按需深入）。40 号基准不返工，融合图补画开关。
 
 ## PROMPT — cost strip 部件 · dark "autumn"（双态对照图 · v5）
 
