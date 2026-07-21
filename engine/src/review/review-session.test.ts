@@ -251,7 +251,7 @@ test("end-to-end: the review session's tool profile is Read/Grep/Glob only, no B
     // and "no --mcp-config at all" are two different claims; only the former holds here.
     assert.equal(at("--mcp-config"), '{"mcpServers":{}}');
     assert.ok(seen.includes("--strict-mcp-config"), "MCP closure: only --mcp-config's (empty) servers ever load");
-    assert.equal(at("--setting-sources"), "user", "the materialized (producer-controlled) tree's own project/local settings never load");
+    assert.equal(at("--setting-sources"), "", "ZERO file settings sources load (not user/project/local) — only the inline guard --settings; the materialized tree's own settings AND the producer-influenceable user ~/.claude/settings.json are both excluded");
   } finally {
     cleanup();
     rmSync(dir, { recursive: true, force: true });

@@ -449,6 +449,55 @@ enforcement; the manifest exists so a session's read footprint is diagnosable af
 the fact, the same "record, don't seal" stance this whole section takes for ambient
 `CLAUDE.md` absorption.
 
+## Review session mode: closed MCP/settings surface, forced-hard guard (#285)
+
+The engine-agent reviewer (design #279) runs a static review session directly against an
+already-**materialized** tree — `review/materializer.ts`'s private-clone checkout of the exact
+reviewed commit, with no `.git` at all (D1: static-only, no producer-code execution). Unlike an
+ordinary worker/peripheral session, this materialized cwd is **producer-controlled content** — the
+PR head under review — so the ambient-context posture the section above locks in ("what a session
+can *read* is not the boundary") needs one further closure specific to this mode: a materialized
+tree can carry its own `.mcp.json` or `.claude/settings.json`, and neither the `--disallowedTools
+Bash` grant nor the PreToolUse guard hook mediates MCP-server-process launches or
+settings-declared hooks at all — both fire at session **init**, before any tool call either
+mechanism could ever intercept. `peripheral.ts`'s `RoleRunner.run({ reviewCwd })` closes this,
+hardcoded (not caller-overridable) for every review session:
+
+- **`--strict-mcp-config` + an explicit empty `--mcp-config '{"mcpServers":{}}'`** — zero MCP
+  servers configured from any source (project/user/ambient included), regardless of what the
+  materialized tree's own `.mcp.json` declares (the CLI never even reads it under
+  `--strict-mcp-config`).
+- **`--setting-sources ""`** — zero FILE-based settings sources loaded (neither `project` nor
+  `local`, both resolved against the session's own cwd — the materialized/producer tree — nor
+  `user`, the operator's own `~/.claude/settings.json`). Verified empirically against a live
+  `claude` CLI (not assumed from `--help` text alone): with the default (unrestricted) sources, a
+  debug-log run showed the CLI applying the operator's real `~/.claude/settings.json` permission
+  entries at session init; with `--setting-sources ""`, that application never happened, while the
+  CLI still ran a full turn cleanly (exit 0, empty stderr). Excluding `user` too — not just
+  `project`/`local` — closes a specific residual this page already names above: a worker leg's
+  `Bash(node *)`/`Bash(npm *)` grant runs with the operator's REAL `$HOME` and structurally cannot
+  be filesystem-confined from it (the "forge MCP proxy" section's `workerCredentialFreeEnv` HONEST
+  SCOPE note, and its `steal.mjs` proof-of-concept), so a producer could in principle have
+  influenced the operator's own `~/.claude/settings.json` in an *earlier* round; a review session
+  loading `user` settings would inherit whatever that earlier influence left behind. Loading no
+  file sources at all removes that inheritance path for review specifically, without requiring the
+  broader (still-open) worker HOME residual to be solved.
+- **The guard hook keeps working regardless** — it is mounted via **inline** `--settings`
+  (`guardSettings()`'s JSON, passed as a CLI argument value, never a file), which this "Benchmark
+  isolation recipe" section already establishes is a *separate* mechanism from file-based settings
+  discovery (inline `--settings` layers additively; excluding file sources via `--setting-sources`
+  doesn't touch it). A review session's read-containment (`SAPWOOD_WORKTREE_ROOT` = the
+  materialized tree) is therefore unaffected by closing every file-based settings source.
+- **Guard mode is forced `hard`** for every review session (`SAPWOOD_GUARD_MODE=hard` in the spawn
+  env), regardless of the engine's configured `guard.mode` — a review session is security-bearing
+  by construction and must never silently inherit a weaker, soft (observe-only) posture just
+  because the operator runs ordinary worker/role sessions that way.
+- **The tool profile (`Read`/`Grep`/`Glob`, no `Bash`) and the no-forge-proxy rule are hardcoded**
+  in `RoleRunner.run()` itself, not a caller convention — supplying `allowedTools`/
+  `disallowedTools`/`proxy` alongside `reviewCwd` is refused (thrown), the same treatment a
+  materialized directory that doesn't exist at spawn time gets (every setup failure maps to a
+  `session-unavailable` outcome, never a silent degraded run).
+
 ### Benchmark isolation recipe (evals only — never production)
 
 **Not to be confused with #235's guard-hook read containment above.** This section's
@@ -685,3 +734,6 @@ to the round pool..." locked decision, issue #214) for the full detail.
   `labels`, and `roles` config sections referenced above.
 - [`PLAN.md`](PLAN.md) — the full architecture, decision log, and the v0.2 round
   orchestrator's self-feed design.
+- [`design/279-engine-review-agent.md`](design/279-engine-review-agent.md) — the full
+  engine-agent reviewer design (materialization, review session mode, the drive/audit
+  flow) the "Review session mode" section above distills.

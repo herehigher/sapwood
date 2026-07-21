@@ -206,10 +206,17 @@ export interface RoleSessionOpts {
    *     servers and/or its OWN hooks) — exactly the producer-controlled execution D1 exists to
    *     prevent. So a review session ALWAYS passes `--strict-mcp-config` +
    *     `--mcp-config EMPTY_MCP_CONFIG_JSON` (worker.ts's own docs: zero MCP servers load, from
-   *     ANY source, project/user/ambient included) AND `--setting-sources user` (only the
-   *     OPERATOR's own trusted `~/.claude/settings.json` loads — the materialized tree's
-   *     project/local settings layers, which is where a producer-authored settings.json's hooks
-   *     would otherwise load from, never do);
+   *     ANY source, project/user/ambient included) AND `--setting-sources ""` (Codex sol-high PR
+   *     #300 review, SECOND round, P1: NO file-based settings source loads at all — not
+   *     `project`/`local` (the materialized tree's own layers) and, tightened from an earlier
+   *     `"user"`-only version of this fix, not `user` either — this repo's own security.md
+   *     documents that a worker leg's `Bash(node *)`/`Bash(npm *)` grant runs with the operator's
+   *     REAL, unconfined `$HOME`, so a producer could in principle have influenced the operator's
+   *     real `~/.claude/settings.json` in an earlier round; loading it here would have reopened
+   *     that same D1 surface through a different door. Verified empirically against a live
+   *     `claude` CLI, not assumed — see worker.ts's `settingSources` doc for the exact debug-log
+   *     evidence. The guard hook is UNAFFECTED: it rides in on `--settings`, an inline,
+   *     independent flag);
    *   - NEVER deletes this directory on exit — its lifecycle (creation, eventual cleanup) is
    *     OWNED by whoever materialized it and passed it in here, not by this runner (contrast the
    *     default worktree path, which this runner both creates via `--worktree` and unconditionally
@@ -578,14 +585,18 @@ export class RoleRunner {
         settings: settingsJson,
         allowedTools,
         disallowedTools,
-        // Codex sol-high PR #300 review, P1 (load-bearing fix): review sessions close the MCP +
-        // settings-source execution surface entirely — see RoleSessionOpts.reviewCwd's own doc
-        // for why (a materialized tree's producer-authored `.mcp.json`/`.claude/settings.json`
-        // is otherwise a live execution channel neither `--disallowedTools Bash` nor the
-        // PreToolUse guard hook mediates at all). reviewMode is checked FIRST — proxyHandle is
-        // always undefined in review mode (enforced above), so these branches never conflict.
+        // Codex sol-high PR #300 review, P1 (load-bearing fix; settingSources tightened to ""
+        // in a SECOND review round — see RoleSessionOpts.reviewCwd's own doc for the full
+        // rationale, including the worker-real-HOME residual this closes): review sessions close
+        // the MCP + settings-source execution surface entirely (a materialized tree's
+        // producer-authored `.mcp.json`/`.claude/settings.json` is otherwise a live execution
+        // channel neither `--disallowedTools Bash` nor the PreToolUse guard hook mediates at
+        // all) — NO file-based settings source loads, not even `user` (worker.ts's
+        // `settingSources` doc has the empirical verification). reviewMode is checked FIRST —
+        // proxyHandle is always undefined in review mode (enforced above), so these branches
+        // never conflict.
         ...(reviewMode
-          ? { mcpConfig: EMPTY_MCP_CONFIG_JSON, strictMcpConfig: true, settingSources: "user" }
+          ? { mcpConfig: EMPTY_MCP_CONFIG_JSON, strictMcpConfig: true, settingSources: "" }
           : proxyHandle
             ? { mcpConfig: proxyHandle.mcpConfigJson }
             : {}),

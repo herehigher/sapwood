@@ -541,21 +541,39 @@ export interface ClaudeArgsOpts {
    *  -> no `--strict-mcp-config` flag, unchanged behavior for every non-review caller (today:
    *  none besides `probeLlmPing`, which sets its own argv directly, not through this field). */
   strictMcpConfig?: boolean;
-  /** #285 (review session mode, Codex sol-high P1): `--setting-sources <sources>` — restricts
-   *  WHICH settings layers Claude Code loads (verified against `claude --help`: "Comma-separated
-   *  list of setting sources to load (user, project, local)"). The "project"/"local" sources
-   *  resolve against the spawned process's OWN cwd — for a review session that cwd IS the
-   *  materialized (producer-controlled) tree, so an unrestricted default would load a
-   *  producer-authored `.claude/settings.json`/`.claude/settings.local.json` verbatim, HOOKS
-   *  included (a much bigger execution surface than MCP: settings-declared hooks run arbitrary
-   *  shell commands directly, and Claude Code's own hooks/PreToolUse arrays are known to CONCATENATE
-   *  across settings layers rather than being replaced by this module's own inline `--settings`
-   *  JSON — omitted keys/arrays there keep the file's values, see `guardSettings`'s own doc).
-   *  Review sessions pass `"user"` — only the OPERATOR's own trusted `~/.claude/settings.json`
-   *  loads; the materialized tree's project/local layers never do. Omitted -> no
-   *  `--setting-sources` flag, unchanged behavior (today's default: user+project+local, correct
-   *  for every OTHER role/worker session, whose cwd is the ENGINE's own trusted worktree, never
-   *  a reviewed PR's tree). */
+  /** #285 (review session mode): `--setting-sources <sources>` — restricts WHICH settings
+   *  layers Claude Code loads (verified against `claude --help`: "Comma-separated list of
+   *  setting sources to load (user, project, local)"). The "project"/"local" sources resolve
+   *  against the spawned process's OWN cwd — for a review session that cwd IS the materialized
+   *  (producer-controlled) tree, so an unrestricted default would load a producer-authored
+   *  `.claude/settings.json`/`.claude/settings.local.json` verbatim, HOOKS included (a much
+   *  bigger execution surface than MCP: settings-declared hooks run arbitrary shell commands
+   *  directly, and Claude Code's own hooks/PreToolUse arrays are known to CONCATENATE across
+   *  settings layers rather than being replaced by this module's own inline `--settings` JSON —
+   *  omitted keys/arrays there keep the file's values, see `guardSettings`'s own doc).
+   *
+   *  Review sessions pass `""` (Codex sol-high PR #300 review, SECOND round, P1: an earlier
+   *  version of this fix passed `"user"`, keeping the operator's own `~/.claude/settings.json`
+   *  in scope — but this repo's OWN security.md documents that a worker leg's `Bash(node
+   *  *)`/`Bash(npm *)` grant runs with the operator's REAL, unconfined `$HOME` (the
+   *  `workerCredentialFreeEnv` "HONEST SCOPE" note's own `steal.mjs` proof-of-concept), so a
+   *  producer could in principle have influenced that real `~/.claude/settings.json` in an
+   *  EARLIER round — loading it here would reopen exactly the static-only (D1) surface this
+   *  whole field exists to close). `""` loads ZERO file-based settings sources at all —
+   *  VERIFIED against a live `claude` CLI, not assumed from `--help` text: a debug-log run with
+   *  the default (unrestricted) sources showed the CLI applying the operator's real
+   *  `~/.claude/settings.json` permission entries at session init (`"Applying permission
+   *  update ... destination 'userSettings'"`); the SAME run with `--setting-sources ""` never
+   *  emitted that line, while the CLI still completed a full turn cleanly (exit 0, empty
+   *  stderr) — proving both that the flag is accepted with an empty value AND that it actually
+   *  suppresses file-based loading, not just user-facing sources. The guard hook itself is
+   *  UNAFFECTED — it rides in on `--settings` (inline JSON, a wholly separate flag from
+   *  `--setting-sources`; see `docs/security.md`'s "Benchmark isolation recipe" section, which
+   *  already documents `--settings` as additive to whatever settings SOURCES load, never a
+   *  replacement for them). Omitted -> no `--setting-sources` flag, unchanged behavior (today's
+   *  default: user+project+local, correct for every OTHER role/worker session, whose cwd is the
+   *  ENGINE's own trusted worktree, never a reviewed PR's tree). NOTE: an empty string is a
+   *  MEANINGFUL value here, not "unset" — see `claudeArgs`' own `!== undefined` check below. */
   settingSources?: string;
 }
 
@@ -613,7 +631,12 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     ...(o.settings ? ["--settings", o.settings] : []),
     ...(o.mcpConfig ? ["--mcp-config", o.mcpConfig] : []),
     ...(o.strictMcpConfig ? ["--strict-mcp-config"] : []),
-    ...(o.settingSources ? ["--setting-sources", o.settingSources] : []),
+    // #285 (Codex sol-high PR #300 review, second round, P1): `!== undefined`, NOT bare
+    // truthiness — review sessions pass settingSources: "" (verified against a live claude CLI:
+    // an empty value loads ZERO file-based settings sources, see settingSources' own doc). A
+    // truthy check would silently DROP the flag for an empty string, falling back to the CLI's
+    // default (load everything) and defeating the entire closure this field exists for.
+    ...(o.settingSources !== undefined ? ["--setting-sources", o.settingSources] : []),
     "--output-format",
     "stream-json",
     "--include-hook-events",

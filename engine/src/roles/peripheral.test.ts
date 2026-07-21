@@ -1737,7 +1737,7 @@ test("run (#285): reviewCwd hardcodes the tool profile — an explicit opts.allo
   }
 });
 
-test("run (#285, Codex sol-high PR #300 review, P1): reviewCwd closes the MCP + settings-source execution surface — --strict-mcp-config, an explicit EMPTY --mcp-config, and --setting-sources user — even when the materialized tree carries its OWN .mcp.json declaring a server", async () => {
+test('run (#285, Codex sol-high PR #300 review, P1): reviewCwd closes the MCP + settings-source execution surface — --strict-mcp-config, an explicit EMPTY --mcp-config, and --setting-sources "" (zero file settings sources) — even when the materialized tree carries its OWN .mcp.json declaring a server', async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
   // A producer-authored .mcp.json in the REVIEWED tree, declaring an MCP server that would start
@@ -1776,8 +1776,8 @@ test("run (#285, Codex sol-high PR #300 review, P1): reviewCwd closes the MCP + 
     assert.ok(!at("--mcp-config").includes("malicious"), "the tree's own .mcp.json content never reaches argv at all");
     assert.equal(
       at("--setting-sources"),
-      "user",
-      "project/local settings sources (resolved against the materialized/producer tree) never load",
+      "",
+      "ZERO file settings sources load — not user, project, or local; only the inline guard --settings applies (the operator's ~/.claude/settings.json is producer-influenceable per security.md's worker-real-HOME boundary, so a review session must not load it either)",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
