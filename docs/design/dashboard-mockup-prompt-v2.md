@@ -282,6 +282,15 @@ needs-human 的家在 Needs-attention strip（原因词+直达链接住那里）
   与引擎命名漂移注记；schema v11 → 22。
 - §3 C 空道 "quiet outline" 改为细行+RECENT 收据；caption 上移面板级。
 - token 数收 hover（context % 对 pricing.yaml contextWindow）。
+- **首轮出图后用户三裁决（2026-07-21，均接受）**：
+  1. **w1/w2/w3 槽号**与 hero 对读——定性为显示层渲染槽位，hero 与
+     面板由服务端同一排序分配（w2 水滴=w2 卡）；红线：槽号不携带历史。
+  2. **issue/PR 图标区分**：issue=水滴（hero 同款）、PR=行业标准
+     pull-request 字形；"?" 图例补这一对。
+  3. **标题内联**（issue 一行截断 + PR 行带标题）——对 §3 C hover-only
+     的正式修订；**#207（标题入事件 payload）升格为 lanes 面板硬前置**
+     （面板服务器不碰 GitHub，标题唯一来源是事件）；#207 落地前卡面
+     退化为纯编号。
 
 ## 裁决记录（用户，2026-07-21：四点全部接受）
 
@@ -335,6 +344,34 @@ Only these strings must be legible: "LANES", "opus · high · soft budget $10", 
 
 Mood: quiet instrument panel, autumn heartwood, warm firelit browns. The three cards must read as siblings of one component in different states: active amber (working, fixing), deliberately parked cream (on hold), and the slim idle row as quiet capacity.
 
+## PROMPT — lanes 部件 · dark "autumn"（v4.1 · 基底=35 号图）
+
+首轮评审：34/35/36 共同过零 rust/零 token/caption 唯一/fixing 计数/
+ON HOLD cream 徽章。基底取 35（卡顶横条给槽号+状态一个家，卡身高度
+容得下标题行）。三处用户裁决并入：w 槽号、issue/PR 字形、标题内联。
+
+A single wide dashboard panel on a dark canvas, wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. This is the "lanes" panel of a larger dashboard: one row of THREE cards side by side plus ONE slim full-width row underneath. Dense compact instrument-panel aesthetic, square-cornered slots, NOT airy or rounded.
+
+PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; card surfaces slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; muted secondary text #B9A98C; amber #E8A33D strictly for activity marks and progress bars. ABSOLUTELY NO rust orange, NO red, NO green checkmarks, NO neon, NO gradients, NO glow. All text tiny monospace or tiny uppercase letterspaced; everything still and calm.
+
+PANEL HEADER: top-left small letterspaced label "LANES"; top-right one quiet caption "opus · high · soft budget $10" — appears ONCE at panel level, NEVER inside cards.
+
+Each card has a slim TOP STRIP separated from the card body by a hairline rule. Two tiny glyphs are used throughout and must look clearly different: a small WATER-DROPLET outline glyph always sits before issue numbers; a small GIT PULL-REQUEST glyph (two tiny circles joined by a branching line) always sits before PR numbers. Both are thin cream line icons.
+
+CARD 1 — working lane. Top strip: left "w1", right a small static amber dot + "working". Body: droplet glyph + LARGE monospace "#94"; under it one muted single-line issue title "Add cost ceiling alert webhook"; then "~$0.53 est" with a very thin amber progress bar only slightly filled; bottom-left elapsed "8m".
+
+CARD 2 — fixing lane. Top strip: left "w2", right amber dot + "FIXING · ROUND 1/2" + a SMALL curved return-loop arrow icon. Body: droplet glyph + LARGE "#90"; muted title line "Support multi-repo board sync"; below it a quieter reference line: pull-request glyph + "PR #99 — board: multi-repo sync support"; then "~$1.69 est" with a thin amber bar filled about a fifth; bottom-left elapsed "32m".
+
+CARD 3 — on hold lane. Top strip: left "w3", right a small cream-outlined badge "ON HOLD" with a tiny pin glyph inside — CREAM outline, calm, NOT amber, NOT orange. Body: droplet glyph + LARGE "#87"; muted title line "Prune stale board columns"; reference line: pull-request glyph + "PR #96 — chore: prune stale columns"; then "$1.10 settled" as plain text with NO progress bar, NO est; NO elapsed time.
+
+SLIM ROW below the three cards, full width, half card height: left "w4 · idle" with a small hollow dot; right one quiet receipt "RECENT — #92 ⇒ PR #101 · $0.95".
+
+NO token counts anywhere. NO model names inside cards. NO green/red status icons. NO rust or red pixels anywhere.
+
+Only these strings must be legible: "LANES", "opus · high · soft budget $10", "w1", "working", "#94", "Add cost ceiling alert webhook", "~$0.53 est", "8m", "w2", "FIXING · ROUND 1/2", "#90", "Support multi-repo board sync", "PR #99", "~$1.69 est", "32m", "w3", "ON HOLD", "#87", "PR #96", "$1.10 settled", "w4 · idle", "RECENT — #92 ⇒ PR #101 · $0.95". Other text may be soft placeholder lines.
+
+Mood: quiet instrument panel, autumn heartwood, warm firelit browns. Three sibling cards in different states: active amber (working, fixing), deliberately parked cream (on hold), slim idle capacity row.
+
 ## PROMPT — lanes 部件 · light "spring"（变体，仅换调色）
 
 Same panel layout, light "spring" theme: canvas warm cream nudged slightly toward pale green #F1F0E2 — NOT white, NOT saturated green; card surfaces one step greener #E9EAD6; primary text dark heartwood brown #251B10; hairlines #8A7A64; activity accent deep amber #8A5A14; ON HOLD badge outline dark heartwood brown. Mood: early spring on warm paper.
@@ -348,9 +385,13 @@ Same panel layout, light "spring" theme: canvas warm cream nudged slightly towar
    无经过时间（driving 态 telemetry 已清空的诚实呈现）？
 4. token 数全图缺席？model·effort 只在面板 caption 出现一次、卡内无？
 5. idle 是细行不是大卡；RECENT 收据在、且不声称"本道上一次"？
-6. 大字 issue 号无内联标题（标题=hover，#207 未落）？
+6. ~~大字 issue 号无内联标题~~ **v4.1 改判**：issue/PR 标题一行截断内联
+   （用户裁决；#207 升格 lanes 硬前置）？
 7. budget 条只出现在活进程卡（working/fixing），细、amber、无分段？
 8. 三卡读得出是同一部件的三种状态（活动 amber / 停驻 cream / 容量细行）？
+9. （v4.1 新增）w1–w4 槽号在卡顶横条/细行，与 hero 可对读？
+10. （v4.1 新增）水滴=issue、pull-request 字形=PR，两字形清晰可辨、
+    全部编号前都带？
 
 ## 变更记录
 
