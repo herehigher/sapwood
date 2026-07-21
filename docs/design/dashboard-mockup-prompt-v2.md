@@ -1,8 +1,8 @@
 # Dashboard 成品预期图 — v2（部件分解阶段）
 
 部件流：hero（冻结·26 号图）→ header（冻结·32 号图）→ lanes（冻结·37 号图）
-→ cost strip（冻结·40 号图）→ activity feed / needs-attention / config drawer /
-侧栏 rail → 整页融合。
+→ cost strip（冻结·40 号图）→ needs-attention strip（方案待确认）→
+activity feed / config drawer / 侧栏 rail → 整页融合。
 
 本地工作文件，不提交。v1（整页提示词+首轮出图）见 `dashboard-mockup-prompt-v1.md`。
 本轮起改为**分部件设计、最后融合**，首个部件 = hero board。
@@ -482,6 +482,80 @@ Same two-panel layout, light "spring" theme: canvas warm cream nudged slightly t
 像素层备选）；39 淘汰：条画成带分隔线的分段盒，打穿"预算条一种语法：
 实心+斜纹、无分段"，BY MODEL 凭空分段。实施注记：**BY MODEL 条永不带
 刻度/分段**（中位刻度只属 stage 条）。
+
+# Needs-attention strip 部件（v6 · 三方合成方案待用户确认）
+
+rust 的正主。三方 = PM + 架构师（升级事件族全量审计，file:line 在案）+
+架空用户（Mara/Deniz）。
+
+## 架构师审计核心（离场机制三分天下）
+
+引擎升级事件 Tier-1 约 18 种（drive-needs-human / fix-rounds-capped /
+gated-reentry-capped / resume-capped / resume-undecidable /
+review-silence-escalated / ceiling-escalated / env-failure-preserved /
+worktree-retained / rollback-escalated / park-escalated /
+plan-review-escalated / fix-thread-write-escalated / 无 PR 家族 / …）。
+清场信号分三类：
+
+1. **健康类（真实 clear）**：gated-reentry / merged / dispatched /
+   park-resumed / plan-approved / concern-adjudicated / 同键 supersession。
+2. **永久闩类（零 clear）**：gated-reentry-capped（手工合并引擎零感知）、
+   worktree-retained（等 #210 worktree-released）、merged-path
+   rollback-escalated、labeled:0 的 drive-needs-human。
+3. **只认 dispatched 类**：resume-capped / resume-undecidable /
+   ceiling-escalated（该路径不置 gated_escalation_labeled，规范原 clear
+   列表过宽——修订项）/ env-failure-preserved / 无 PR 升级——人在循环外
+   手工完成即永久僵尸。
+
+发射侧漏洞：**verify:n/a 提案零事件**（plan-review.ts:540-564 只贴标签）。
+规范另有四处修订项：plan-review-escalated 的 round-close clear 不诚实
+（须改 issue-scoped，真 clear=plan-approved/dispatched）；ceiling clear
+列表过宽；rollback 两 target 未区分；Tier-2 label-failed 家族取舍要对称。
+
+**引擎补洞（已立项 2026-07-21）**：**#295** escalation-resolution
+reconciler（观察外部态发 escalation-resolved，范式=concern-adjudicated
++ #210）；**#296** verify-na-proposed 事件。二者为 strip 契约
+（"空=没有事等你"）的硬前置。
+
+## 架空用户核心裁决（Mara/Deniz 高度同向）
+
+- **入场铁律**：系统**真的停下来在等人**才进 strip——警告/FYI/自愈/
+  人自己的 hold 一律不进；一条假 rust 杀死整个契约。
+- **禁 UI 删除**；允许点击后的本地 "seen" 变暗（计数不变、条目不消失）。
+- **oldest-first**；同 issue 多告警合一行叠 reason 徽章。
+- 过期升级**不发明新色**：≥24h 年龄 chip 加重，位置（oldest-first 置顶）
+  自己喊。头部聚合 `N waiting · oldest 3d`。
+- **空态永不隐藏**：一行 moss `nothing waiting on you` + 心跳时间戳
+  （"空"与"采集器死了"必须可区分）。
+- **位置：页首 header 之下**（Deniz："把自我批评放 hero 之上是价值观
+  声明——失败是一等公民"）。
+
+## 元素方案
+
+| 元素 | 设计 | 数据 |
+|---|---|---|
+| 头部行 | `NEEDS ATTENTION — 3 waiting · oldest 3d`；空态换 moss 行 `nothing waiting on you · checked 12s ago` | 服务端 fold + 轮询心跳 |
+| 条目行（整行可点，直达 issue/PR） | `[REASON 徽章(可叠)] [字形+编号+标题截断] — 白话原因 + 明示要求（"asks: adjudicate"）· 年龄`；默认一行，chevron 展开细节（尝试计数等） | 事件 payload + §7 copy map |
+| reason 词表（封闭集，行业词） | FIX CAP / REVIEW SILENCE / NO PR / RESUME CAP / CEILING / ENV / BOARD / PLAN / VERIFY? / WORKTREE / PARKED / ORPHAN | 事件 kind → 徽章映射 |
+| 折叠律 | dedupe 键=issue（无实体类按 source 单例）；Tier-2 label-failed 不成行，折为父条目上的小注 "label write failing, retrying"；每 tick 重发类必须折叠 | 架构师 C 节 |
+| seen 态 | 本地 cosmetic 变暗（localStorage），计数永不变 | 纯前端 |
+| 无 clear 类的诚实边界（#295 落地前） | 该类条目带小标 `manual · verify on GitHub`——引擎无法确认时**把不确定说出来**（Mara 规则 7），#295 落地后与健康类同清场 | payload 判别（如 labeled:0） |
+| rust 预算 | 徽章+左边框 rust 点染，**不整行泼 rust**；strip 是 rust 主家但不是 rust 洪水 | |
+
+**排除判定（记名）**：dissent（concern-posted）不进 strip——speak-not-act
+没有停摆（"沉默也是合法回答"），去 activity feed，虽然它清场信号最好；
+produce-PR-and-stop 模式下 gated-green PR 的聚合行（"N PRs ready for
+your merge"，amber 非 rust——是工作流不是故障）**deferred**，v0.2 dogfood
+用 conductor-merge；orphan-detected 进 strip（快照语义清场）。
+
+## 开放裁决点（用户）
+
+1. dissent 排除出 strip（feed 管）——接受？
+2. 无 clear 类的 `manual · verify on GitHub` 小标（#295 前的诚实降级）
+   ——接受？
+3. reason 词表里 PLAN / VERIFY 两类是否合并为一个 PLAN 徽章
+   （plan-review-escalated 与 verify-na-proposed 都是规划期人工裁决）？
+4. 头部聚合行 + 空态心跳——接受？
 
 ## 变更记录（浓缩：只留迭代理由，细节以各部件章节现行文本为准）
 
