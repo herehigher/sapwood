@@ -219,6 +219,94 @@ Same two-bar layout, light "spring" theme: canvas warm cream nudged slightly tow
 7. 右箭头在 LIVE 位处于灰态（已在最右，无更新一轮可去）？
 8. 无 Live/Replay 切换开关残留？无 wordmark/config（它们在侧栏）？
 
+# Lanes 部件（v4 · 三方合成方案待用户确认）
+
+输入：用户原型图（33 号，三卡：Available / #94 writing / #90 needs-human）。
+三方 = PM + 架构师（引擎代码审计）+ 架空用户（Mara 运维者 / Deniz 评估者）。
+
+## 原型审计（架构师，file:line 在案）
+
+引擎真实 worker 状态**只有六个**：`running / driving / fixing / done / failed
+/ handoff`（state.ts:701）。逐项判定：
+
+| 原型元素 | 判定 | 依据 |
+|---|---|---|
+| "Work lane 1 (w1)" 稳定槽位 | **虚构** | lane 名=`lane-<issue>-<uuid8>` 一次性（worker.ts:988）；w1/w2/w3 只能是渲染序号，不是有历史的实体 |
+| 空道卡 "LAST RUN —…"（按道归属） | **虚构**（全局版真实） | "这条道的上一次 run" 无此概念；"最近完成的 run" 可从终态 workers row + spend_ledger 真实回填 |
+| "writing" 状态词 | **假粒度** | 无 writing/testing 子状态；running 就是 running |
+| 每道不同 model·effort | **虚构** | config 只有全局 worker.model/effort；workers 表无 model 列 |
+| driving 道（卡3）的 est/tok/budget 条 | **虚构** | 离开 running 瞬间 telemetry 清空（clearLiveTelemetry, state.ts:1304）；driving 只有已结算成本 |
+| 卡3 "— needs human" 占道显示 | **基本虚构** | gate② 升级即释放道（lane→failed）+ 事件进 Needs-attention strip；唯一占道例外=review-silence-escalated（#170） |
+| "#94" / "⇌ PR #99" / est $ / tok 数 / 经过时间 | 真实 | workers.issue/pr/est_cost_usd/context_tokens/started_at（est 每 RECLAIM probe 刷新） |
+| "5% budget" 条 | 真实可推 | est / worker.budgetUsdSoft（zod 默认 10，分母恒存在） |
+| 议题标题内联 | 超前 | 标题入事件=#207 未落；§3 C 定为 hover |
+
+原型遗漏而引擎有据：**fixing**（fix_rounds / lanes.prFixCap → "round 1/2"，有
+live telemetry）、**handoff**（resume_attempts / worker.maxResumes）、gated
+re-entry 等人摘标、park/canary 停派、DETACHED（重启后无实时数据，不得显示
+冻结数字）、auto-compact（context_tokens 掉落值得示意）。
+
+## 架空用户核心诉求
+
+- 两人共同点的最大洞：**fix 态卡缺席**——Mara 的"stalled 还是在思考"盲区
+  = Deniz 的"证明评审回环存在"盲区。引擎恰好有真字段供。
+- 共同砍：token 数内联（美元已讲完成本故事）→ 收 hover。
+- 升级卡要**原因词 + 点击直达**（Mara 要行动，Deniz 要信）。
+- 分工共识：**hero 管位置，卡片管深度**（why/cost/reason/act）；卡片头条
+  复述水滴位置=纯重复。
+- 分歧：空闲卡。Mara 要收窄成细行（三张 Available 大卡挤掉扫视路径），
+  Deniz 要保 "LAST RUN 收据"（最有说服力的采纳证据）。折中=细行保收据。
+
+## PM 合成：五种卡面（全部映射真实状态）
+
+面板 = 一行全局 caption + N 个 lane 位（`lanes.max` 定容量，渲染序即槽序，
+不造 lane 人格）。**面板级 caption：`opus · high · soft budget $10`**（全局
+config 事实上移，卡面不再重复）。
+
+| 卡面 | 触发 | 内容 | 样式 |
+|---|---|---|---|
+| **working**（原型卡2 骨架保留） | state=running | 大字 issue 号（hover 标题）· 状态词 working · `~$0.53 est` + budget 细条 · 经过时间 · amber 点 | 全尺寸，amber |
+| **fixing**（新增，最大缺口） | state=fixing | 大字 issue 号 · `fixing · round 1/2`（fix_rounds/prFixCap）· PR 号 · est + budget 条（fix leg 有活进程有 telemetry）· 经过时间 | 全尺寸，amber，回环小箭头 icon 呼应 hero |
+| **in review**（原型卡3 改造） | state=driving | 大字 issue 号 · `PR #99 · in review`（review_trigger_in_flight 推导）· **已结算成本**（spend_ledger 和，无 est 无 tok 无 budget 条）| 中尺寸，静 amber 描边；review-silence-escalated 例外时加 rust 边注（唯一允许的占道 rust）|
+| **handed off**（新增） | state=handoff | issue 号 · `handed off · resume 1/2` · WIP 已推送提示 · 已结算成本 | 中尺寸 |
+| **idle**（原型卡1 收窄） | 容量−活跃 | 细行：`idle` + `RECENT — #92 ⇒ PR #101 · $0.95`（**全局最近完成 run** 收据，按新近序分配到空行，不再声称"本道上一次"）| 细行，静默 |
+
+排序律：fixing > handoff > working > in review > idle（需要注意的在前）。
+DETACHED 道：telemetry 为 NULL 时显示 `no live data`，禁止冻结数字。
+needs-human 的家在 Needs-attention strip（原因词+直达链接住那里）；lane 卡
+不再做升级头条——与引擎状态机一致（升级即释放道）。
+
+## 实施期规范修订清单（记档防丢）
+
+- §8 items 增补 `fixing`/`handoff`（合同早于 v19）；样例 `"lane":"w1"`
+  与引擎命名漂移注记；schema v11 → 22。
+- §3 C 空道 "quiet outline" 改为细行+RECENT 收据；caption 上移面板级。
+- token 数收 hover（context % 对 pricing.yaml contextWindow）。
+
+## 裁决记录（用户，2026-07-21：四点全部接受）
+
+1. idle 收据 = 细行 + `RECENT`（全局新近，不装道史）✔
+2. needs-human 移出 lane 卡 → Needs-attention strip（卡上只留
+   review-silence 例外的 rust 边注）✔
+3. token 数收 hover；model·effort 上移面板级 caption ✔
+4. 状态词表 working / fixing (round n of cap) / in review / handed off /
+   idle 采纳 ✔
+
+## On hold（用户新增议题，2026-07-21 裁决）
+
+hold = 三档升级模型中唯一**人主动发起**的载体（人贴 hold 标签 →
+gate 推导判 WAIT，不合并直到摘标）。语义与 needs-human 相反：
+needs-human=系统请求人（rust）；hold=人已介入、行使控制（**禁 rust**）。
+
+- **Lane 卡（主呈现）**：in review 卡变体，状态词 `PR #99 · on hold`，
+  小 hold 钉图标 + cream 素色徽章，平静无告警感；已结算成本照旧；
+  排序与 in review 同档（人自己停的不抢注意力位）。
+- **Hero**：水滴停 CI/REVIEW 检查点 + 小 hold 钉（第三修订已画为目标态）。
+- **Needs-attention strip：不进**（strip 纯度=系统在等人）。
+- 数据边界：引擎今天只在 gate 推导时读 hold 标签、无事件落库 →
+  §11 follow-up #7（`pr-held`/`pr-released` 事件）为实施硬前置，
+  出图画目标态不受影响；实施期与 #293 同款先立引擎 issue。
+
 ## 变更记录
 
 - v2（2026-07-21）：转部件分解流程；记录 round-1 三条用户裁决；
