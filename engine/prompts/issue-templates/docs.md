@@ -18,11 +18,13 @@ Out of scope: <!-- Encouraged: name one adjacent documentation change this issue
 
 ## Acceptance criteria
 
-<!-- Each line MUST be a literal `- [ ]` checkbox — the engine parses this exact format into
-     the acceptance-criteria set a worker is dispatched against and later reviewed on. Prose,
-     nested sub-bullets, or a plain `-` bullet with no checkbox do not count. Exempt ONLY if
-     this doc change is inherently unverifiable and carries the `verify:n/a` label (doc-gate
-     path, see the Verification plan section below). -->
+<!-- Each line MUST be a literal `- [ ]` checkbox (start unchecked — nothing should be done yet)
+     — the engine parses this exact format into the acceptance-criteria set a worker is
+     dispatched against and later reviewed on. Prose, nested sub-bullets, or a plain `-` bullet
+     with no checkbox do not count. A criterion may wrap onto more than one line (like the
+     example below) — that's fine, it's still one criterion. Exempt ONLY if this doc change is
+     inherently unverifiable and carries the `verify:n/a` label (doc-gate path, see the
+     Verification plan section below). -->
 
 - [ ] Concrete, checkable statement of what "done" looks like (e.g. which section of
       which doc is added/updated, and what it says).

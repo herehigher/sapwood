@@ -941,18 +941,52 @@ test("createPlanReviewStub (#214 gate② review delta P2): an approved-but-planl
   state.close();
 });
 
+test("createPlanReviewStub (#283/#301 review, P2 F6): an approved-but-AC-less orphan (plan:approved survives, verification plan present, but the checkbox acceptance-criteria set is empty/malformed) skips the confirm session ENTIRELY — symmetric with the planless-orphan path above, no infinite re-pool loop", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 221, title: "AC-less orphan", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
+  // A REAL verification-plan section (so confirmOneIssue's FIRST pre-check passes) but no
+  // checkbox AC lines at all — the SECOND pre-check (#301 F6) must catch this instead.
+  forge.issueBodies[221] = "Someone stripped the checkboxes.\n\n## Verification\n\nRun `npm test`.";
+  const NEW_BODY = "Repaired.\n\n## Acceptance criteria\n\n- [ ] it works\n\n## Verification\n\nRun the suite.";
+  const runner = new ScriptedRunner([
+    { result: doneResult("drafter-221", sapwoodResult({ issue: 221 }, NEW_BODY)) },
+    { result: doneResult("reviewer-221", sapwoodResult({ decision: "approve", issue: 221 })) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["plan-drafter", "plan-reviewer"],
+    "NO plan-reviewer-confirm session at all — the engine skipped straight to the draft cycle, deterministically",
+  );
+  assert.ok(
+    runner.calls[0]!.prompt.includes("checkbox"),
+    "the drafter's brief is the engine-authored, deterministic explanation naming the checkbox AC set, not anything a session produced",
+  );
+  assert.deepEqual(forge.updateIssueBodyCalls, [[221, NEW_BODY]]);
+  assert.ok(forge.issueLabels[221]!.includes(cfg.labels.planApproved), "converged back to approved via the ordinary cycle");
+  state.close();
+});
+
 test("createPlanReviewStub (#214): confirm 'invalidate' feeds the SAME draft-cycle machinery an unadjudicated draft_request would — reviewer brief -> drafter -> re-review, existing caps, converges to approved", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
   const state = new State(":memory:");
   const round = state.startRound("2026-07-18T00:00:00.000Z");
   forge.poolEligibleIssues = [{ number: 200, title: "stale plan", labels: [ROUND_POOL_LABEL, cfg.labels.planApproved] }];
-  // #214 gate② review (delta P2): a real verification-plan SECTION must be present (confirmOneIssue's
-  // own extractVerificationPlan pre-check would otherwise skip the confirm session outright) — the
-  // STALENESS this test's narrative is about lives in the CONTENT (a renamed file), not in the
-  // section's mere presence.
+  // #214 gate② review (delta P2): a real verification-plan SECTION AND a real checkbox AC set
+  // must both be present (confirmOneIssue's own extractVerificationPlan/extractAcceptanceCriteria
+  // pre-checks — #301 review P2 F6 added the latter — would otherwise skip the confirm session
+  // outright). The STALENESS this test's narrative is about lives in the CONTENT (a renamed
+  // file), not in either section's mere presence.
   forge.issueBodies[200] =
-    "OLD PLAN referencing a file since renamed.\n\n## Verification\n\nRun `npm test` from the old (now-renamed) location.";
+    "OLD PLAN referencing a file since renamed.\n\n## Acceptance criteria\n\n- [ ] it works\n\n" +
+    "## Verification\n\nRun `npm test` from the old (now-renamed) location.";
   const NEW_BODY = "NEW PLAN\n\n## Acceptance criteria\n\n- [ ] it works\n\n## Verification\n\nRun the new suite.";
   const runner = new ScriptedRunner([
     { result: doneResult("confirm-200", sapwoodResult({ decision: "invalidate", issue: 200 }, "references a file since renamed on main")) },

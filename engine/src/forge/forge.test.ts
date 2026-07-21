@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
+import { defaultIssueTemplatePath } from "../loop/init.js";
 import {
   assemblePRReviewData,
   countUnresolvedThreads,
@@ -359,6 +361,66 @@ test("extractAcceptanceCriteria: only counts lines under Acceptance criteria, ne
 test("extractAcceptanceCriteria: fence-safety is inherited from extractMarkdownSections — a fenced pseudo-heading's checkboxes are never counted as a phantom section", () => {
   const body = "```markdown\n## Acceptance criteria\n- [ ] fenced, not real\n```\n\nno real AC section here";
   assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+// ── #301 review (P2 F5): wrapped continuation lines are folded, never silently dropped ───────
+
+test("extractAcceptanceCriteria: a criterion wrapping onto a second, indented line is folded into ONE criterion's text, not dropped", () => {
+  const body =
+    '## Acceptance criteria\n\n- [ ] Concrete, checkable statement of what "done" looks like (e.g. which section of\n      which doc is added/updated, and what it says).\n\n## Verification plan\nlink resolves';
+  const items = extractAcceptanceCriteria(body)!;
+  assert.equal(items.length, 1);
+  assert.equal(
+    items[0]!.text,
+    'Concrete, checkable statement of what "done" looks like (e.g. which section of which doc is added/updated, and what it says).',
+  );
+});
+
+test("extractAcceptanceCriteria: #301 review regression pin — the SHIPPED docs.md template's own wrapped example round-trips to exactly one, complete criterion", () => {
+  const docsTemplate = readFileSync(defaultIssueTemplatePath("docs.md"), "utf8");
+  const items = extractAcceptanceCriteria(docsTemplate)!;
+  assert.equal(items.length, 1);
+  assert.match(items[0]!.text, /^Concrete, checkable statement of what "done" looks like/);
+  assert.match(items[0]!.text, /which doc is added\/updated, and what it says\)\.$/, "the wrapped second line is folded in, not dropped");
+});
+
+test("extractAcceptanceCriteria: multiple wrapped criteria each fold independently, and a blank line ends a continuation run", () => {
+  const body =
+    "## Acceptance criteria\n\n- [ ] first criterion\n  wraps here\n\n- [ ] second criterion\n  also wraps\n\nunrelated trailing prose after a blank line";
+  const items = extractAcceptanceCriteria(body)!;
+  assert.deepEqual(
+    items.map((i) => i.text),
+    ["first criterion wraps here", "second criterion also wraps"],
+  );
+});
+
+test("extractAcceptanceCriteria: a NEW list item or heading immediately after a checkbox line is never folded into the PRECEDING criterion", () => {
+  const body = "## Acceptance criteria\n\n- [ ] one\n- [ ] two\n\n### Notes\nsome nested notes";
+  const items = extractAcceptanceCriteria(body)!;
+  assert.deepEqual(
+    items.map((i) => i.text),
+    ["one", "two"],
+  );
+});
+
+test("extractAcceptanceCriteria: id hashing is computed over the FINAL folded text (a wrapped criterion's id reflects its whole text, not just the first line)", () => {
+  const wrapped = "## Acceptance criteria\n\n- [ ] first line\n  second line";
+  const oneLine = "## Acceptance criteria\n\n- [ ] first line second line";
+  assert.deepEqual(extractAcceptanceCriteria(wrapped), extractAcceptanceCriteria(oneLine));
+});
+
+// ── #301 review (P2 F5): heading matching tightened to "Acceptance criteria", not a bare
+//    "acceptance" substring — an unrelated heading merely starting with that word no longer
+//    false-matches. ──
+
+test("extractAcceptanceCriteria: an unrelated heading merely starting with 'Acceptance' (no 'criteria') is NOT treated as the AC section", () => {
+  const body = "## Acceptance of risk\n\n- [ ] this is not really an AC line\n\n## Verification plan\nrun tests";
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("extractAcceptanceCriteria: 'Acceptance Criteria' heading variants (case, trailing words) still match", () => {
+  assert.equal(extractAcceptanceCriteria("## ACCEPTANCE CRITERIA\n\n- [ ] shout-cased heading")!.length, 1);
+  assert.equal(extractAcceptanceCriteria("## Acceptance criteria (AC)\n\n- [ ] trailing parenthetical")!.length, 1);
 });
 
 // ── #283 corpus test: id stability under reorder/edit WITHIN a snapshot ──────────────────────

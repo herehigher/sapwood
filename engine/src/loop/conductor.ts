@@ -1584,16 +1584,32 @@ async function escalateNeedsHuman(
 /** #283 (M10, E2, design #279 §5): review-time AC-snapshot drift check. Called for EVERY driving
  *  lane, BEFORE `gate.driveOne` is ever invoked for it this tick — the fail-closed guarantee is
  *  ordering: drift detection must happen before, not instead of or racing, the drive attempt, so
- *  a drifted lane can NEVER reach `driveOne` (no silent re-extraction against a body the review
- *  input was never meant to see). Returns `null` when the lane should drive normally this tick
- *  (either no snapshot was ever recorded for this issue — a lane dispatched before this feature
- *  shipped, never treated as drift — or the live body still hashes to the recorded snapshot).
- *  A transient forge read failure queues (retried next tick) rather than escalating a human over
- *  an infra blip, the same fail-safe stance every other forge hiccup in this loop takes. Actual
- *  drift re-escalates `needsHuman` (renewed gate⓪ adjudication is design #279 §5's human path
- *  back) with a comment naming what changed, mirroring escalateNeedsHuman's own label/upsert/
- *  event shape but with an UNCONDITIONAL drift-explaining comment (not just on a repeat
- *  gated-reentry, #279 §5's own AC). */
+ *  an unverifiable lane can NEVER reach `driveOne` (no silent re-extraction against a body the
+ *  drift check was never meant to bypass). Returns `null` when the lane should drive normally
+ *  this tick: `w.ac_body_hash` is unset — a pre-#283 legacy lane that never recorded one, drive
+ *  normally, unaffected by any of this — OR it's set AND the current `ac_snapshots` row for this
+ *  issue both (a) still belongs to THIS lane (`bodyHash` matches `w.ac_body_hash` — #301 review
+ *  P1#3: a `failed`+PR lane awaiting GATED RECLAIM is NOT in `activeWorkers()`, so a fresh
+ *  dispatch of the SAME issue can legitimately overwrite the issue-keyed snapshot while this lane
+ *  still exists; ownership must be checked, not just presence) and (b) the LIVE issue body still
+ *  hashes to it (no edit since dispatch). A transient forge read failure queues (retried next
+ *  tick) rather than escalating a human over an infra blip, the same fail-safe stance every other
+ *  forge hiccup in this loop takes.
+ *
+ *  Any of the three failure classes above (missing snapshot despite an expected hash — #301 P1#1:
+ *  every WorkerRow with a non-null `ac_body_hash` is a hard guarantee a snapshot WAS recorded for
+ *  it; a later absence is an anomaly, never legacy; ownership mismatch — P1#3; or an ordinary live
+ *  body edit) re-escalates `needsHuman` (renewed gate⓪ adjudication is design #279 §5's human path
+ *  back), mirroring escalateNeedsHuman's own label/upsert/event shape but with an UNCONDITIONAL
+ *  drift-explaining comment (not just on a repeat gated-reentry). #301 review P2 (label/comment
+ *  honesty): the comment text is CONDITIONAL on whether the needsHuman label write actually
+ *  succeeded — it never claims a label "has been applied" when the write failed — and BOTH the
+ *  label and comment outcomes land in the SAME durable event, so a human/dashboard watching the
+ *  event log (not just live GitHub state) can never lose this escalation even if every forge write
+ *  in it fails; matches this codebase's existing accepted stance for a label-write failure
+ *  (gated_escalation_labeled=0 permanently excludes a row from automatic GATED RECLAIM — "manual
+ *  drive as before #147" — the SAME fallback every other escalation in this file already has, not
+ *  a new retry mechanism invented just for this one case). */
 async function checkAcDriftBeforeDrive(
   forge: IForge,
   state: State,
@@ -1602,16 +1618,37 @@ async function checkAcDriftBeforeDrive(
   pr: number,
   iso: () => string,
 ): Promise<DrivenOutcome | null> {
+  const expectedHash = w.ac_body_hash ?? null;
+  if (expectedHash == null) return null; // pre-#283 legacy lane, no snapshot ever expected -> drive normally
+
   const snapshot = state.getAcSnapshot(w.issue);
-  if (!snapshot) return null; // nothing recorded (pre-#283 lane) -> drive normally
-  let liveBody: string;
-  try {
-    liveBody = await forge.getIssueBody(w.issue);
-  } catch (e) {
-    return { kind: "queued", worker: w.name, issue: w.issue, pr, reason: `ac-drift-check-unavailable: ${String(e)}` };
+  let reason: string;
+  if (!snapshot) {
+    // #301 P1#1: this lane's OWN dispatch recorded a snapshot (expectedHash is non-null) — its
+    // absence now is an anomaly (a crash/corruption/future-refactor gap), never "nothing to
+    // compare" (that reading is reserved for expectedHash === null above).
+    reason =
+      `this lane's AC snapshot (recorded at dispatch, hash ${expectedHash.slice(0, 12)}) is no ` +
+      `longer present for issue #${w.issue} — its dispatch-time authority can no longer be verified`;
+  } else if (snapshot.bodyHash !== expectedHash) {
+    // #301 P1#3: the issue-keyed ac_snapshots row no longer belongs to THIS lane — a later,
+    // independent dispatch for the same issue number (activeWorkers() excludes `failed`, so this
+    // lane being un-reclaimed never blocked that later dispatch) has overwritten it.
+    reason =
+      `the recorded AC snapshot for issue #${w.issue} no longer matches this lane's OWN ` +
+      `dispatch-time snapshot (this lane: ${expectedHash.slice(0, 12)}, currently stored: ` +
+      `${snapshot.bodyHash.slice(0, 12)}) — a different, later dispatch appears to have replaced it`;
+  } else {
+    let liveBody: string;
+    try {
+      liveBody = await forge.getIssueBody(w.issue);
+    } catch (e) {
+      return { kind: "queued", worker: w.name, issue: w.issue, pr, reason: `ac-drift-check-unavailable: ${String(e)}` };
+    }
+    const result = checkAcSnapshotDrift(liveBody, snapshot);
+    if (result.ok) return null; // ownership confirmed, no live-body drift -> drive normally
+    reason = result.reason;
   }
-  const result = checkAcSnapshotDrift(liveBody, snapshot);
-  if (result.ok) return null; // no drift -> drive normally
 
   let labeled = 1;
   let labelError: string | null = null;
@@ -1622,26 +1659,40 @@ async function checkAcDriftBeforeDrive(
     labelError = String(e);
   }
   state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: labeled });
+  // #301 review P2: never CLAIM the label landed when it didn't — the comment text is honest
+  // either way, and this codebase's existing gate①/②/⓪ escalation pattern already treats a failed
+  // label write as "permanently manual" (gated_escalation_labeled=0 excludes it from automatic
+  // GATED RECLAIM), so this mirrors that accepted stance rather than inventing a new one.
+  const labelNote = labeled
+    ? `\`${cfg.labels.needsHuman}\` has been applied`
+    : `applying \`${cfg.labels.needsHuman}\` FAILED (${labelError}) — this lane will NOT be picked ` +
+      `up by automatic reentry; a human must apply the label by hand to re-trigger review`;
+  let commented = true;
+  let commentError: string | null = null;
+  try {
+    await forge.addIssueComment(
+      w.issue,
+      `sapwood: this issue's body changed after its acceptance-criteria snapshot was taken for ` +
+        `PR #${pr} (${reason}). Per design #279 §5, drift fails the review gate closed — this PR ` +
+        `will not be driven through gate②/merge while its AC authority cannot be verified. ` +
+        `${labelNote} — a human must re-adjudicate (a renewed gate⓪ pass): either restore the ` +
+        `original acceptance criteria/verification plan, or explicitly re-approve the new body.`,
+    );
+  } catch (e) {
+    commented = false;
+    commentError = String(e);
+  }
   state.appendEvent("ac-snapshot-drift", {
     worker: w.name,
     issue: w.issue,
     pr,
-    reason: result.reason,
+    reason,
     labeled,
     ...(labelError != null ? { labelError } : {}),
+    commented,
+    ...(commentError != null ? { commentError } : {}),
   });
-  await forge
-    .addIssueComment(
-      w.issue,
-      `sapwood: this issue's body changed after its acceptance-criteria snapshot was taken for ` +
-        `PR #${pr} (${result.reason}). Per design #279 §5, review is scoped to the SNAPSHOTTED ` +
-        `body, never a live re-fetch — a body edit after dispatch cannot silently re-author the ` +
-        `acceptance criteria this PR is being judged against. \`${cfg.labels.needsHuman}\` has ` +
-        `been applied — a human must re-adjudicate (a renewed gate⓪ pass): either restore the ` +
-        `original acceptance criteria/verification plan, or explicitly re-approve the new body.`,
-    )
-    .catch(() => {});
-  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `ac-snapshot-drift: ${result.reason}` };
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `ac-snapshot-drift: ${reason}` };
 }
 
 export async function tick(deps: TickDeps): Promise<TickResult> {
@@ -2880,6 +2931,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // the launch fails after the claim, roll the board back to Ready so it's reclaimable.
       await forge.claimIssue(issue.number);
       let dispatchRes: { name: string; sessionId: string };
+      // #301 review (P1#1/P1#3): hoisted OUTSIDE the try so it's available below to stamp onto
+      // the fresh WorkerRow. Built and recorded INSIDE the try (next line) so a build/record
+      // failure still rolls the claim back exactly like a dispatch() failure would; definite-
+      // assignment is safe because every path past the try/catch below only runs on success.
+      let acSnapshot!: ReturnType<typeof buildAcSnapshot>;
       try {
         // #283 (M10, E2, design #279 §5): the AC-authority snapshot lands BEFORE the worker
         // ever spawns — same fail-closed unit as the dispatch attempt itself (this try/catch):
@@ -2888,7 +2944,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // a worker running against an unrecorded AC set. Built from the SAME `issue.body`
         // getReadyIssues already fetched this tick for the dispatch decision — never a second,
         // possibly-disagreeing live read.
-        state.recordAcSnapshot(buildAcSnapshot(issue.number, issue.body ?? "", iso()));
+        acSnapshot = buildAcSnapshot(issue.number, issue.body ?? "", iso());
+        state.recordAcSnapshot(acSnapshot);
         dispatchRes = await supervisor.dispatch(issue);
       } catch (e) {
         state.appendEvent("dispatch-failed", { issue: issue.number, error: String(e) });
@@ -2916,6 +2973,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         state: "running",
         started_at: iso(),
         ended_at: null,
+        // #301 review (P1#1/P1#3): this lane's OWN dispatch-time snapshot identity, read straight
+        // from the `acSnapshot` local var built moments earlier in this SAME synchronous try
+        // block — never a re-read from `ac_snapshots` (which a LATER dispatch for the same issue
+        // could since have overwritten). See checkAcDriftBeforeDrive for how this is used.
+        ac_body_hash: acSnapshot.bodyHash,
       };
       // #168 P1-1: a lane dispatched while still parked IS the llm episode's canary — recorded
       // durably on the episode row the moment it launches, so its terminal reclaim

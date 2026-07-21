@@ -2339,6 +2339,56 @@ test("recordAcSnapshot: re-recording the SAME issue upserts — never a second r
   s.close();
 });
 
+// ── #301 review (P3 F7): REAL v22 -> current migration — a populated pre-#283 DB survives ──
+
+test("migration v22->current: a populated v22 DB (predating ac_snapshots/ac_body_hash) opens with data intact, workers.ac_body_hash defaults to NULL, ac_snapshots empty-but-usable, user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    // Build a REAL v22 DB: run the shipped migrations 0..21 exactly as that engine would have —
+    // BEFORE #283's ac_snapshots (22->23) and #301's workers.ac_body_hash (23->24) ever existed.
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 22; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 22");
+    // A pre-#283 driving lane with a PR — exactly the "legacy lane, no AC snapshot ever
+    // recorded" shape checkAcDriftBeforeDrive (conductor.ts) must keep driving normally.
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("lane-v22", 42, "sess-42", "driving", "2026-07-20T00:00:00Z", null, 99);
+    assert.throws(() => raw.prepare("SELECT ac_body_hash FROM workers").get(), "the column genuinely does not exist pre-migration");
+    assert.throws(() => raw.prepare("SELECT * FROM ac_snapshots").get(), "the table genuinely does not exist pre-migration");
+    raw.close();
+
+    // Open with the CURRENT engine -> migrates 22 -> SCHEMA_VERSION.
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 24);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    // Pre-existing data survived intact, and the new column defaults to NULL (never treated as
+    // drift — see checkAcDriftBeforeDrive's own doc: a null ac_body_hash means "legacy, nothing
+    // to check", drive normally).
+    const w = s.getWorker("lane-v22");
+    assert.equal(w?.issue, 42);
+    assert.equal(w?.pr, 99);
+    assert.equal(w?.state, "driving");
+    assert.equal(w?.ac_body_hash, null);
+    // The new table is present and fully usable post-migration.
+    assert.equal(s.getAcSnapshot(42), null);
+    s.recordAcSnapshot({ issue: 42, bodyHash: "h1", body: "b1", manifest: [], snapshottedAt: "t0" });
+    assert.equal(s.getAcSnapshot(42)?.bodyHash, "h1");
+    s.close();
+
+    // Idempotent reopen: no re-migration, same version, same data.
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    assert.equal(s2.getWorker("lane-v22")?.ac_body_hash, null);
+    assert.equal(s2.getAcSnapshot(42)?.bodyHash, "h1");
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #234: forge MCP proxy journal + frozen evidence bundles (migration 15->16) ─────────────
 
 test("migration v15->v16: a populated v15 DB opens with data intact, empty forge_proxy_journal/forge_proxy_bundles tables, user_version SCHEMA_VERSION, idempotent reopen", () => {

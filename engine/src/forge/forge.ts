@@ -1360,38 +1360,67 @@ export interface AcceptanceCriterion {
 /** Matches one top-level markdown checkbox list item: `- [ ]`, `- [x]`, `- [X]`, optionally
  *  indented up to 3 spaces (CommonMark's own list-item allowance). Anything else under the
  *  heading (prose, a plain `- bullet` with no checkbox, a sub-bullet nested deeper) is not an
- *  acceptance-criterion line and is silently skipped, not counted. */
+ *  acceptance-criterion line and is silently skipped, not counted. Both the unchecked and
+ *  checked forms count as real criteria (#301 review, P2 F5): a checked box is still a genuine,
+ *  GitHub-rendered checkbox — the issue templates/prompts recommend `- [ ]` for a fresh issue
+ *  (nothing should be pre-checked before dispatch), but the extractor doesn't police that; it
+ *  only refuses to invent structure that isn't there. */
 const CHECKBOX_LINE = /^ {0,3}-\s\[([ xX])\]\s+(.+)$/;
+
+/** A markdown list marker (checkbox or plain) or a heading — anything matching this ends a
+ *  wrapped-continuation run (#301 review, P2 F5): a NEW list item or heading is never folded
+ *  into the PREVIOUS criterion's text, even though it isn't itself a checkbox line. */
+const NEW_BLOCK_LINE = /^ {0,3}(?:[-*+]|\d+[.)])\s|^#{1,6}\s/;
 
 /**
  * Extract the checkbox acceptance-criteria list from an issue body (#283, design #279 §5, D4):
  * every `- [ ]`/`- [x]` line under the FIRST-MATCHING `## Acceptance criteria`-shaped heading
  * (reuses extractMarkdownSections' fence-safe, nesting-safe heading scan — the SAME engine
- * extractVerificationPlan uses, but scoped to `acceptance` only, never `verification`, so a
- * body with an Acceptance section and a SEPARATE Verification-plan section never pulls
- * checkbox lines that live only in the latter). Returns `null` — never `[]` — for BOTH "no
- * matching heading at all" and "heading present but zero checkbox lines under it": either way
- * the issue carries no honest AC set, and `isDispatchable` below (and plan-review.ts's
- * approve-claim re-check) both treat `null` identically, as "malformed/empty, not
- * dispatchable" for a non-`verify:n/a` issue. Order-preserving; see AcceptanceCriterion's own
- * doc for the id scheme.
+ * extractVerificationPlan uses, but scoped to a heading containing the literal words
+ * "acceptance criteria" — #301 review, P2 F5: tightened from a bare `/acceptance/` substring,
+ * which would have false-matched an unrelated heading like "## Acceptance of risk"; every
+ * shipped template uses exactly "Acceptance criteria" so this costs nothing real — so a body
+ * with an Acceptance-criteria section and a SEPARATE Verification-plan section never pulls
+ * checkbox lines that live only in the latter). A checkbox line's WRAPPED CONTINUATION lines
+ * (#301 review, P2 F5: the shipped docs/chore templates themselves wrap one criterion across two
+ * physical lines) are folded into that criterion's text: any non-blank line immediately
+ * following a checkbox (or another continuation line, with no blank line breaking the run) that
+ * is itself neither a checkbox, a new list marker, nor a heading is space-joined onto the
+ * PRECEDING criterion. A blank line, a new list item, or a heading ends the continuation run.
+ * Returns `null` — never `[]` — for BOTH "no matching heading at all" and "heading present but
+ * zero checkbox lines under it": either way the issue carries no honest AC set, and
+ * `isDispatchable` below (and plan-review.ts's approve-claim re-check) both treat `null`
+ * identically, as "malformed/empty, not dispatchable" for a non-`verify:n/a` issue.
+ * Order-preserving; see AcceptanceCriterion's own doc for the id scheme (computed over the FINAL
+ * folded text, not just the checkbox's own first line).
  */
 export function extractAcceptanceCriteria(body: string): AcceptanceCriterion[] | null {
-  const sections = extractMarkdownSections(body, /acceptance/);
+  const sections = extractMarkdownSections(body, /acceptance\s+criteria/);
   if (sections.length === 0) return null;
   const text = sections.join("\n\n");
-  const items: AcceptanceCriterion[] = [];
-  let ordinal = 0;
+  const texts: string[] = [];
+  let continuing = false;
   for (const rawLine of text.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     const match = CHECKBOX_LINE.exec(line);
-    if (!match) continue;
-    ordinal += 1;
-    const itemText = match[2]!.trim();
-    const hash = createHash("sha256").update(itemText).digest("hex").slice(0, 8);
-    items.push({ id: `${ordinal}-${hash}`, text: itemText });
+    if (match) {
+      texts.push(match[2]!.trim());
+      continuing = true;
+      continue;
+    }
+    if (line.trim() === "" || NEW_BLOCK_LINE.test(line)) {
+      continuing = false;
+      continue;
+    }
+    if (continuing) {
+      texts[texts.length - 1] = `${texts[texts.length - 1]} ${line.trim()}`;
+    }
   }
-  return items.length > 0 ? items : null;
+  if (texts.length === 0) return null;
+  return texts.map((itemText, index) => ({
+    id: `${index + 1}-${createHash("sha256").update(itemText).digest("hex").slice(0, 8)}`,
+    text: itemText,
+  }));
 }
 
 /**
