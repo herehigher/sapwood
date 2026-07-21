@@ -316,6 +316,13 @@ needs-human=系统请求人（rust）；hold=人已介入、行使控制（**禁
   **#294 已立**（2026-07-21，v0.2 里程碑，Project #4）：`pr-held`/
   `pr-released` transition-only 事件（沿用 #169 去重旗范式，gate 行为
   不动），为 ON HOLD 卡 + hero hold 钉的实施硬前置。
+- **执行入口（2026-07-21 议定）**：hold 动作**在 GitHub 执行**（PR 贴
+  `escalation.holdLabels` 标签；issue 侧同标签兼派工排除 #248），
+  dashboard **不设 hold 按钮**——写面只有 /api/control 运行态哨兵，
+  零 GitHub 写路径（#110"token 即能力"既锁）。面板职责=affordance：
+  ①PR 号一键直达 GitHub PR 页；②"?" 图例 + ON HOLD hover 白话说明
+  "held by label X — remove the label on GitHub to release"，标签名
+  从 resolved config 与 #294 事件 payload 读出。
 
 ## PROMPT — lanes 部件 · dark "autumn"（v4）
 
