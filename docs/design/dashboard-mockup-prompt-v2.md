@@ -255,13 +255,61 @@ Same two-bar layout, light "spring" theme: canvas warm cream nudged slightly tow
 不进 cost strip：日限额/run 总额（header 花费仪表管）、per-lane 成本
 （lane 卡管）——同一事实一个家。
 
-## 小裁决点（用户）
+## 裁决记录（三方合成，2026-07-21；用户指令：带架空用户审评 + 历史轮费用议题）
 
-1. BY STAGE 与 BY MODEL 左右并排（一横条部件）还是上下两行？
-   PM 倾向**左右并排**（部件是 strip，保持扁；六桶 vs 2–3 model 条
-   高度天然对齐）。
-2. Lanes 桶要不要在 hover 拆 first-leg / fix-leg？数据可拆（fix leg
-   spend 行 ts 在 fix 窗内）但边际复杂度存疑，PM 倾向 **v0.2 不拆**。
+1. **历史轮费用**（用户提问）：平均值进 strip 标注（"this round $6.2 ·
+   avg $4.8" **成对**才是单位，孤立平均无锚点）；每轮总额的家=轮导航器
+   列表（已有 spend 列），strip 不重复。§2 历史聚合 deferral 不踩线
+   （本地 ledger 聚合，非 GitHub 历史）。
+2. **轮账单行**（Deniz）：replay 窗右对齐一行
+   `total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)` ——
+   review 零花费**明说**而非无声缺席（信任洞修补）；$/PR = 采纳备忘录
+   数字（轮 spend 窗 + artifact merged 数，零新数据）。
+3. **Config ▸ 砍出 strip**（两人设一致；rail 底部 config 齿轮已是入口）
+   ——§3 E 修订项。
+4. **布局 = Mara 案**：左右并排一条扁 strip，BY STAGE 占 2/3 宽。
+5. **BY MODEL 保留收窄**（评估者的"收据"信任信号），token 四分留 hover。
+6. **幽灵中位刻度**（Mara）：每根 stage 条一枚暗淡刻度=该阶段历史中位，
+   一眼判常异；超中位**不染 rust**（超均值≠该人看）。
+7. fix-leg v0.2 不拆；费率/速度概念不加。
+
+## PROMPT — cost strip 部件 · dark "autumn"（双态对照图 · v5）
+
+Two slim horizontal dashboard cost panels stacked vertically with a small gap on one dark canvas, wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. Top panel = LIVE "today" state, bottom panel = REPLAY "closed round" state of the SAME component. Dense compact instrument-panel aesthetic, square corners, NOT airy.
+
+PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; panel surfaces slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; muted secondary text #B9A98C; amber #E8A33D strictly for spend bars. NO rust orange, NO red, NO green, NO neon, NO gradients, NO glow. All text tiny monospace or tiny uppercase letterspaced.
+
+TOP PANEL — LIVE state:
+(1) top-left caption "COST · TODAY" followed by a muted reference "avg round $4.8";
+(2) left two-thirds, group label "BY STAGE": six thin horizontal bars stacked, labels left, small dollar amounts at each bar's right: "Goal & align $0.22", "Arch review $0.31", "Verify $0.18", "Lanes $8.9", "Summary $0.26", "Retro $0.29". The Lanes bar is much longer than all others and carries a short HATCHED translucent amber tail at its end (live estimate). Each bar also shows one FAINT short vertical tick — a dim historical-median marker, quiet, amber-dimmed, NOT a second bar;
+(3) right third, group label "BY MODEL": two solid amber bars "opus $7.8" and "sonnet $2.4". No hatched tails here;
+(4) NO config link anywhere.
+
+BOTTOM PANEL — REPLAY state of the same component:
+(1) top-left caption "COST · ROUND 9" with a small amber-outlined badge "CLOSED";
+(2) same six BY STAGE bars, ALL solid — no hatched tail anywhere — amounts "Goal & align $0.15", "Arch review $0.24", "Verify $0.12", "Lanes $5.1", "Summary $0.21", "Retro $0.38", faint median ticks present;
+(3) same BY MODEL group, solid bars "opus $4.9", "sonnet $1.3";
+(4) bottom-right one quiet ledger line: "total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)".
+
+Only these strings must be legible: "COST · TODAY", "avg round $4.8", "BY STAGE", "BY MODEL", "Goal & align", "Arch review", "Verify", "Lanes", "Summary", "Retro", "$8.9", "opus", "sonnet", "COST · ROUND 9", "CLOSED", "total $6.2 · 3 PRs merged · $2.07/PR · review: external ($0)". Other numbers may be small but tidy; any other text soft placeholder.
+
+Mood: quiet instrument panel, autumn heartwood, warm firelit browns. The two panels must read instantly as the same strip in two windows: live = est tail on Lanes only; replay = all settled plus the round ledger line.
+
+## PROMPT — cost strip 部件 · light "spring"（变体，仅换调色）
+
+Same two-panel layout, light "spring" theme: canvas warm cream nudged slightly toward pale green #F1F0E2 — NOT white, NOT saturated green; panel surfaces one step greener #E9EAD6; primary text dark heartwood brown #251B10; hairlines #8A7A64; spend bars deep amber #8A5A14. Mood: early spring on warm paper.
+
+## Cost strip 审评清单
+
+1. 双窗一眼可辨：TODAY 有 est 斜纹尾（仅 Lanes 条），ROUND 全实心？
+2. 六个 stage 桶齐全、用 §7 阶段词、无内部 key、无 REVIEW 假桶？
+3. 轮账单行存在且含 `review: external ($0)` 明示零？
+4. "avg round $4.8" 参照在 TODAY 标注旁（成对语义在 replay 由
+   total 行承担）？
+5. 中位刻度暗淡、不是第二根条、无 rust？
+6. BY STAGE 占约 2/3 宽、BY MODEL 收窄右侧、无 token 数内联？
+7. 无 Config 链接残留？
+8. 全图零 rust 零红零绿？
 
 # Lanes 部件（v4 · 三方合成方案待用户确认）
 
