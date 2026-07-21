@@ -206,7 +206,10 @@ export function buildReviewTriggerComment(
       ? `\n\nReview only the commit delta ${context.baseHead}..${context.head}. The verdict must bind to the new head ${context.head}.`
       : `\n\nReview the full PR diff at head ${context.head}.`
     : "";
-  const identityBlock = context ? `\n\nState the exact head OID you reviewed in your response as: Reviewed head OID: ${context.head}` : "";
+  // #273 live verification (#278): request the assertion in the bot's own NATIVE dialect —
+  // "Reviewed commit:" is the line Codex already emits unprompted; asking for a custom
+  // "Reviewed head OID:" label was ignored by the live bot. The parser accepts both labels.
+  const identityBlock = context ? `\n\nState the commit you reviewed in your response as: Reviewed commit: ${context.head}` : "";
   return `${triggerCommand}\n\n${instruction}${doctrineBlock}${scopeBlock}${identityBlock}`;
 }
 
@@ -229,12 +232,36 @@ function freshTrustedThumbCount(): number {
 /**
  * Codex's clean verdict is sometimes a plain conversation COMMENT ("Codex Review: Didn't find
  * any major issues") with NO review object (post-#55 P2). #273 requires every such comment to
- * carry exactly one distinct, matching OID assertion. A single-pass classifier quarantines
- * quoted lines without rewriting them; BOTH phrase and OID parsing see only clean lines. The
- * verdict phrase must occupy its whole line (apart from whitespace/emphasis decoration).
+ * carry at least one OID assertion, ALL of which must match the current head. A single-pass
+ * classifier quarantines quoted lines without rewriting them; BOTH phrase and OID parsing see
+ * only clean lines.
+ *
+ * Live-verified against the REAL bot output (#278, 2026-07-19/21): Codex appends flavor prose
+ * to the canonical phrase on the SAME line ("… major issues. Can't wait for the next one!"),
+ * so the phrase is anchored at line START (0-3 space indent, optional emphasis) with trailing
+ * prose permitted — mid-prose embeddings ("The phrase … would be wrong") still fail the
+ * anchor, and inline-code negations still fail the caller's no-backtick line guard.
  */
-const CLEAN_VERDICT_RE = /^ {0,3}[*_]*Codex Review: Didn't find any major issues\.?[\s*_]*$/i;
-const REVIEWED_HEAD_OID_RE = /^Reviewed head OID: (\S+)\s*$/;
+const CLEAN_VERDICT_RE = /^ {0,3}[*_]*Codex Review: Didn't find any major issues\b/i;
+/**
+ * Reviewed-commit assertion line. Live-verified (#278): the bot's NATIVE format is
+ * `**Reviewed commit:** `cdee61ce5c`` — its own label ("Reviewed commit:"), markdown bold,
+ * a backticked ABBREVIATED (10-hex) OID — and the bot does NOT echo the trigger's requested
+ * custom "Reviewed head OID:" wording. Accept both labels, tolerate emphasis/backtick
+ * decoration, and capture the value; matching semantics live in oidAssertionMatchesHead
+ * (exact equality, or a >=7-hex abbreviated prefix of the head).
+ */
+const REVIEWED_HEAD_OID_RE = /^ {0,3}[*_]*Reviewed (?:commit|head OID):[*_]*\s*`?([^\s`]+)`?\s*[*_]*$/i;
+
+/** True when one asserted OID identifies `head`: byte equality (legacy/full form), or — the
+ *  bot's native abbreviated form — a case-insensitive hex prefix of at least 7 chars (git's
+ *  own minimum abbreviation floor; #278's live bot emits 10). A non-hex or too-short
+ *  assertion never prefix-matches (fail-closed); it can only count via exact equality. */
+export function oidAssertionMatchesHead(asserted: string, head: string): boolean {
+  if (asserted === head) return true;
+  if (asserted.length < 7 || !/^[0-9a-f]+$/i.test(asserted)) return false;
+  return head.toLowerCase().startsWith(asserted.toLowerCase());
+}
 
 function cleanReviewCommentLines(body: string): string[] {
   const clean: string[] = [];
@@ -304,7 +331,11 @@ function freshTrustedCleanComments(data: PRReviewData, trustedLogin?: (login: st
     const createdAt = Date.parse(c.createdAt);
     const cleanLines = cleanReviewCommentLines(c.body);
     const statedOids = assertedHeadOids(cleanLines);
-    const oidMatches = statedOids.size === 1 && statedOids.has(data.headOid);
+    // At least one assertion, and EVERY assertion must identify the current head (a comment
+    // that also asserts any other commit is discarded unconditionally — #273 mismatch rule).
+    // Multiple assertions that all match are fine: the live bot emits its native abbreviated
+    // line, and a future compliant response could echo the full OID alongside it.
+    const oidMatches = statedOids.size > 0 && [...statedOids].every((oid) => oidAssertionMatchesHead(oid, data.headOid));
     return (
       normalizeLogin(c.login) !== author &&
       trustedLogin(normalizeLogin(c.login)) &&

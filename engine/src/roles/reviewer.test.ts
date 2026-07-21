@@ -24,6 +24,7 @@ import {
   makeReviewer,
   NO_FALLBACK_LOCK,
   normalizeLogin,
+  oidAssertionMatchesHead,
   REVIEWER_KINDS,
   resolveReviewVerdict,
   SameModelTrustedReviewer,
@@ -209,7 +210,7 @@ test("buildReviewTriggerComment: first trigger requests the full PR diff and an 
     baseHead: null,
   });
   assert.match(body, /full PR diff at head H1/i);
-  assert.match(body, /Reviewed head OID: H1/);
+  assert.match(body, /Reviewed commit: H1/);
 });
 
 test("buildReviewTriggerComment: a moved head requests only the X..Y delta but binds the verdict to Y", () => {
@@ -219,7 +220,7 @@ test("buildReviewTriggerComment: a moved head requests only the X..Y delta but b
   });
   assert.match(body, /H1\.\.H2/);
   assert.match(body, /verdict must bind to the new head H2/i);
-  assert.match(body, /Reviewed head OID: H2/);
+  assert.match(body, /Reviewed commit: H2/);
 });
 
 // #156: reviewer.triggerCommand — the trigger text is now a parameter (default unchanged).
@@ -1348,4 +1349,113 @@ test("resolveReviewVerdict: REVIEW_UNAVAILABLE (an explicit failure) is treated 
   });
   assert.equal(result.sourceKind, "human");
   assert.deepEqual(result.transition, { kind: "switch", mode: "human", head: HEAD });
+});
+
+// ── #273 LIVE VERIFICATION (#278, 2026-07-19/21): the REAL bot's clean-comment format ────────
+// Verbatim body of https://github.com/herehigher/sapwood/issues/278 comment 5015784046 — the
+// live @codex review response to the #277-style trigger. Ground truth this parser must accept:
+// flavor prose trails the canonical phrase ON THE SAME LINE; the OID line is the bot's NATIVE
+// dialect (`**Reviewed commit:** `<10-hex-abbrev>``), NOT the trigger's requested custom label.
+const LIVE_HEAD = "cdee61ce5c677a674e7cf85e08839f7ee53da444";
+const LIVE_PIN = { head: LIVE_HEAD, at: "2026-07-19T12:50:38Z" };
+const LIVE_CLEAN_BODY = [
+  "Codex Review: Didn't find any major issues. Can't wait for the next one!",
+  "",
+  "**Reviewed commit:** `cdee61ce5c`",
+  "",
+  "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+  "<br/>",
+  "",
+  "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+  "- Open a pull request for review",
+  "- Mark a draft as ready",
+  '- Comment "@codex review".',
+  "",
+  "If Codex has suggestions, it will comment; otherwise it will react with 👍.",
+  "",
+  "",
+  "",
+  "",
+  'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".',
+  "            ",
+  "</details>",
+].join("\n");
+
+test("LIVE #278: the real Codex clean comment (native abbreviated Reviewed-commit line) satisfies gate② on the matching head", () => {
+  const data = mkData({
+    headOid: LIVE_HEAD,
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-19T12:52:03Z", body: LIVE_CLEAN_BODY }],
+  });
+  assert.deepEqual(new CodexReviewer().verdictFromData(data, LIVE_PIN), {
+    action: "MERGE_OK",
+    headOid: LIVE_HEAD,
+    generationResponded: true,
+    coverageEstablished: true,
+  });
+});
+
+test("LIVE #278: the same real comment against a DIFFERENT head is discarded (abbreviated OID prefix-mismatch)", () => {
+  const other = "3171aae349f00000000000000000000000000000";
+  const data = mkData({
+    headOid: other,
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-19T12:52:03Z", body: LIVE_CLEAN_BODY }],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(data, { head: other, at: "2026-07-19T12:50:38Z" }).action, "WAIT_REVIEW");
+});
+
+test("LIVE #278: native line plus an echoed full-OID line (both matching) is accepted — multiple agreeing assertions", () => {
+  const body = `${LIVE_CLEAN_BODY}\nReviewed head OID: ${LIVE_HEAD}`;
+  const data = mkData({
+    headOid: LIVE_HEAD,
+    comments: [{ login: "chatgpt-codex-connector[bot]", createdAt: "2026-07-19T12:52:03Z", body }],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(data, LIVE_PIN).action, "MERGE_OK");
+});
+
+test("#273 abbreviation floor: a hex prefix shorter than 7 chars never matches; non-hex never prefix-matches", () => {
+  assert.equal(oidAssertionMatchesHead("cdee61", LIVE_HEAD), false);
+  assert.equal(oidAssertionMatchesHead("cdee61c", LIVE_HEAD), true);
+  assert.equal(oidAssertionMatchesHead("cdee61ce5c", LIVE_HEAD), true);
+  assert.equal(oidAssertionMatchesHead(LIVE_HEAD, LIVE_HEAD), true);
+  assert.equal(oidAssertionMatchesHead("HEAD", "HEADLONGER"), false);
+  assert.equal(oidAssertionMatchesHead("HEAD", "HEAD"), true);
+});
+
+test("#273 live format: bold label + backticked value decorations are stripped by the assertion regex", () => {
+  const data = mkData({
+    headOid: LIVE_HEAD,
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-19T12:52:03Z",
+        body: "Codex Review: Didn't find any major issues.\n**Reviewed commit:** `cdee61ce5c`",
+      },
+    ],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(data, LIVE_PIN).action, "MERGE_OK");
+});
+
+test("#273 anchored phrase: trailing flavor prose is accepted, mid-prose embedding still is not", () => {
+  const good = mkData({
+    headOid: LIVE_HEAD,
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-19T12:52:03Z",
+        body: "Codex Review: Didn't find any major issues. More of your lovely PRs please.\n**Reviewed commit:** `cdee61ce5c`",
+      },
+    ],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(good, LIVE_PIN).action, "MERGE_OK");
+  const bad = mkData({
+    headOid: LIVE_HEAD,
+    comments: [
+      {
+        login: "chatgpt-codex-connector[bot]",
+        createdAt: "2026-07-19T12:52:03Z",
+        body: `My honest take is that saying "Codex Review: Didn't find any major issues" would be wrong.\n**Reviewed commit:** \`cdee61ce5c\``,
+      },
+    ],
+  });
+  assert.equal(new CodexReviewer().verdictFromData(bad, LIVE_PIN).action, "WAIT_REVIEW");
 });
