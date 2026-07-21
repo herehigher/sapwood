@@ -35,8 +35,8 @@ horizontal band under three phase captions **PLAN / IMPLEMENT / OUTCOME**,
 with the reviewer's push-back drawn as a **fix-loop return arrow** into the
 lane and escalation as a **rust branch** dropping out of the checkpoint pair;
 the **Live ↔ Replay toggle is removed** — the round navigator *is* the mode
-(§3 A, §11); run controls become three tiers **Pause / Stop / E-Stop** (§3
-Operations; E-Stop engine signal → #293); the light theme returns to a
+(§3 A, §11); run controls become three tiers **Pause / Stop / Emergency stop** (§3
+Operations; emergency-stop engine signal → #293); the light theme returns to a
 **cream ground nudged toward sapwood green** (§5, supersedes the pale-green
 grounds); a **terminology rule** is added (§7): project-internal jargon never
 renders, industry-standard words are first choice. Engine-state precedence is
@@ -270,7 +270,7 @@ own control signals:
 | Resume | Remove the PAUSE sentinel; the next tick continues the run. |
 | Stop | Create the kill-switch sentinel — the PLAN.md safety tier, described honestly: active lanes get the bounded drain window (`cost.drainWindowSec`) to finish or hand off; a lane still running after it is hard-stopped by the engine. Drain-first with the existing hard backstop — the dashboard adds no new stop mechanism and must not promise a softer one than the engine has. |
 | Start | Clear stop/pause sentinels so the next tick runs. If the engine *process* is dead, the dashboard cannot spawn it — the button flips to showing the CLI launch command instead (honest boundary; process supervision is not a browser feature). |
-| E-Stop | **Immediate hard stop, no drain window** — every running lane's process group is killed at once; in-flight work is lost and lanes escalate `needs-human`. Requires the additive `EMERGENCY_STOP` engine sentinel (#293, `type:security`, human-merge-only) — the button does not render until that signal exists. Verified 2026-07-21: the existing kill switch is drain-first by design (SIGTERM handoff requests, hard kill only past `cost.drainWindowSec`), so Stop ≠ E-Stop and the UI must never describe either tier as softer or harder than the engine's actual behavior. |
+| Emergency stop | **Immediate hard stop, no drain window** — every running lane's process group is killed at once; in-flight work is lost and lanes escalate `needs-human`. Requires the additive `EMERGENCY_STOP` engine sentinel (#293, `type:security`, human-merge-only) — the button does not render until that signal exists. Verified 2026-07-21: the existing kill switch is drain-first by design (SIGTERM handoff requests, hard kill only past `cost.drainWindowSec`), so Stop ≠ Emergency stop and the UI must never describe either tier as softer or harder than the engine's actual behavior. **Label rule (2026-07-21):** the button reads **EMERGENCY STOP** spelled out — the industrial abbreviation "E-STOP" is standard on hardware (ISO 13850) but misreads as "E-SHOP" at small type in a web header, and the full form matches the engine signal name exactly. It carries a small **octagon outline icon** (stop-sign shape) — the page's only icon-bearing control button and, like rust, page-unique; Pause/Stop stay text-only (the asymmetry *is* the tier hierarchy). |
 
 **Misfire protection is mandatory**: every verb is two-step — the control
 opens a confirm that names the consequence in §7 plain language ("Stop —
@@ -278,7 +278,7 @@ lanes get the drain window to finish or hand off; any lane still running
 after that is stopped hard"), with the
 confirm action requiring a deliberate second click; Stop additionally arms
 only after a short hold, and **releasing the hold cancels — armed is never
-"release to fire"**. E-Stop gets both: hold-to-arm plus a confirm that
+"release to fire"**. Emergency stop gets both: hold-to-arm plus a confirm that
 names the consequence verbatim ("in-flight work is killed, WIP may be
 lost"), rendered rust and visually isolated from Pause/Stop by a hard gap —
 Pause and Stop themselves keep spacing (the 20-px-hover-slip accident is a
@@ -555,7 +555,7 @@ kind. Voice: active, specific, no system internals (say "lane", "CI",
 **project-internal** vocabulary — gate⓪/①/② numbering, harvest, reclaim,
 PO — never industry-standard words. Standard terms are the *first choice*
 precisely because they convey what actually happens: **CI**, **retro**,
-**backlog**, **E-Stop**. A label must let an outsider infer the actual work
+**backlog**, **emergency stop**. A label must let an outsider infer the actual work
 performed at that node. The kinds — counted by the
 map, never by this prose: an earlier hard-coded "33" here had already
 drifted past #180's park/environment family, proving §2's own rule
@@ -978,7 +978,7 @@ the overlay is the named boundary.
    process group in the same tick via the existing kill path, with the
    existing post-drain escalation treatment. Precedence EMERGENCY_STOP >
    KILL_SWITCH > PAUSE. Safety machinery — the implementing PR is
-   human-merge-only. Powers the §3 Operations E-Stop tier; the button and
+   human-merge-only. Powers the §3 Operations emergency-stop tier; the button and
    the `estop` verb do not exist until it lands.
 7. **Hold-visibility event** (third amendment, unfiled) — a held PR
    (`escalation.holdLabels`) is indistinguishable from "waiting on review"

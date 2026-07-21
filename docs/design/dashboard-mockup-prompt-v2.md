@@ -150,7 +150,7 @@ Same layout, light "spring" theme: background warm cream nudged slightly toward 
 | 2 | **轮导航**（模式载体） | `◂ [round 12] ▸` 步进器；**最右永远是 LIVE 槽**：有开轮显 "LIVE · round 12 · executing"，无开轮显 "LIVE · waiting/stopped"（live 是一个可导航到的位置，空轮情形有定义）。点击轮号弹列表：每行 = 轮号 · 日期 · PR 数 · 花费 · 已关轮行首 **▶ 字形**（可回放性一眼可读，列表兼作 history ledger）。不在 LIVE 位时，**"◂ back to live" 常显** | `rounds` 表为脊柱 + `round_artifacts` left-join 终局三数（无 artifact 的轮如实无 tally）——§8 /api/rounds 修订项。`◂` hover tooltip = "replay round 11"（无模式开关下的可发现性） |
 | 3 | 回放走带（条件性） | 仅历史轮渲染：play/pause · 一个速度循环钮（×1/×4/×16）· scrub "event 12/33"；同时 header 持续显示 **"ROUND 9 · CLOSED" 染色徽章**（40 秒后也不忘身处历史）。功能就此打住（无逐帧/AB 区间/花式倍速） | 游标=events.id，章节窗=rounds 的 id cursors，纯客户端折叠。**铁律：走带与引擎动词永不共享位置与图标语言**（走带=媒体图标、左侧下沉条；引擎动词=文字按钮、右上）——本轮走查唯一"真实事故级"发现 |
 | 4 | 花费仪表 | `$10.4 ▓▓▓░ +$2.2 est / $100`：实付实心+估算斜纹，run 层为主；**日限额收 hover，用量 ≥75% 自动浮出示警**。历史轮：截至游标、纯实付无 est 段、"today" 副读数隐藏 | 四个数：日和(有)/日限(config)/run 和(**引擎内存 anchor 未持久化——见依赖**)/run 限(optional)。无 run 限→整表落日层（§3 A 既有路径）；config 不可读→只分子不造分母 |
-| 5 | 运行控制（三档） | header 右端，**文字小按钮**：**PAUSE**（温和：不再派新活，在飞的干完）/ **STOP**（drain-first：kill-switch + 排水窗内收尾，超时才硬停）/ **E-STOP**（急停：立即硬停一切，rust 红、视觉隔离在最右）。合法动词才显示（resume 仅 paused 态…）；两步确认；STOP 长按 arm 且**松手=取消**；E-STOP 双保险（长按 arm + 确认弹层写明后果"in-flight work is killed, WIP may be lost"）。**看历史轮时整组隐藏**（对过去无可操作——模式纯净律用在写路径上），配 "back to live" 跳回 | POST /api/control 哨兵写；`dashboard.controls` 键 gate（#210 未落地）。**E-STOP 需引擎新增信号**（现有 kill-switch 必排水后杀；急停=跳过排水立即硬杀，additive，实施时立引擎 issue）。进程已死时 Start 钮翻转为 CLI 启动命令展示 |
+| 5 | 运行控制（三档） | header 右端，**文字小按钮**：**PAUSE**（温和：不再派新活，在飞的干完）/ **STOP**（drain-first：kill-switch + 排水窗内收尾，超时才硬停）/ **EMERGENCY STOP**（急停：立即硬停一切，rust 红、视觉隔离在最右，**八边形轮廓图标 + 全拼**——E-STOP 缩写在软件语境误读为 E-SHOP，v3.1 裁决弃用；全拼与引擎信号 `EMERGENCY_STOP` 一字不差。图标规则：八边形全页唯一，PAUSE/STOP 保持纯文字——不对称即层级）。合法动词才显示（resume 仅 paused 态…）；两步确认；STOP 长按 arm 且**松手=取消**；E-STOP 双保险（长按 arm + 确认弹层写明后果"in-flight work is killed, WIP may be lost"）。**看历史轮时整组隐藏**（对过去无可操作——模式纯净律用在写路径上），配 "back to live" 跳回 | POST /api/control 哨兵写；`dashboard.controls` 键 gate（#210 未落地）。**E-STOP 需引擎新增信号**（现有 kill-switch 必排水后杀；急停=跳过排水立即硬杀，additive，实施时立引擎 issue）。进程已死时 Start 钮翻转为 CLI 启动命令展示 |
 | 6 | "?" 图例 | 小圆钮：水滴=issue / lane=worker / 年轮=merged PR 三行 + 角色词（producers≠reviewers≠mergers 住这里）+ est/settled 斜纹语法 | copy.ts 静态，live/replay 同词表 |
 
 不进 header：wordmark/config（侧栏）、needs-attention 条（独立）、staleness 明细（hero）。
@@ -174,39 +174,45 @@ Same layout, light "spring" theme: background warm cream nudged slightly toward 
   type:security，实施 PR human-merge-only）。UI 侧 E-STOP 与 STOP 的区别
   必须在确认弹层里如实陈述（不许把急停说得比引擎行为软）。
 
-## PROMPT — header 部件 · dark "autumn"（双态对照图）
+## PROMPT — header 部件 · dark "autumn"（双态对照图 · v3.1）
 
-Two horizontal dashboard header bars stacked vertically with a small gap on one dark canvas, wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. Top bar = LIVE state, bottom bar = HISTORY state of the SAME header. This is one component of a larger dashboard.
+基底=29 号图（密度、方槽 chevron、虚线栅栏），融合 31 号图的走带通栏分隔线；
+E-STOP 改 `⬡ EMERGENCY STOP`。
 
-PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; bar surfaces slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; amber #E8A33D for activity; rust orange #C05A2E strictly reserved for the E-STOP button and human-related marks. No neon, no purple, no gradients, no glow, no shadows. All text tiny monospace or tiny uppercase letterspaced; nothing animated-looking, everything still and calm.
+Two horizontal dashboard header bars stacked vertically with a small gap on one dark canvas, wide 16:5 landscape, flat modern web app UI, crisp vector look, no browser chrome, no perspective, no photograph. Top bar = LIVE state, bottom bar = HISTORY state of the SAME header. This is one component of a larger dashboard. Dense compact instrument-panel layout, square-cornered slots, NOT airy or rounded.
+
+PALETTE (autumn, warm): canvas warm dark brown #251B10 — NOT black; bar surfaces slightly lighter brown #2E2317 with hairline 1px borders #8A7A64; primary text warm cream #F1E7D2; amber #E8A33D for activity; rust orange #C05A2E strictly reserved for the EMERGENCY STOP button. No neon, no purple, no gradients, no glow, no shadows. All text tiny monospace or tiny uppercase letterspaced; nothing animated-looking, everything still and calm.
 
 TOP BAR — LIVE state, left to right:
 (1) a small static green dot + the word "running";
-(2) round navigator: a left chevron "◂", then a quiet pill "ROUND 12 · LIVE", then a right chevron "▸" rendered dimmed/disabled;
-(3) center-right: a thin horizontal budget meter — solid amber segment, then a short hatched translucent amber tail, then empty track — captioned "$10.4 + $2.2 est / $100";
-(4) right end: two small hairline text buttons "PAUSE" and "STOP" side by side, then a clear gap, then one rust-outlined text button "E-STOP" visually isolated at the far right;
-(5) a tiny hairline circle "?" button after the controls.
+(2) round navigator: a rectangular stepper made of three joined slots — left slot with a thin chevron "‹", middle slot "ROUND 12 · LIVE", right slot with a chevron "›" rendered dimmed/disabled. Chevrons are thin angle brackets, NEVER triangle play glyphs;
+(3) center: a thin horizontal budget meter — solid amber segment, then a short hatched translucent amber tail, then empty track — captioned below "$10.4 + $2.2 est / $100";
+(4) a thin vertical DASHED divider, then two small plain text buttons "PAUSE" and "STOP" (no underline, no border), then another thin vertical dashed divider, then one rust-outlined rectangular button at the far right containing a small rust octagon outline icon (stop-sign shape, empty inside) followed by the rust text "EMERGENCY STOP" — the only rust element and the only icon-bearing button in the whole image;
+(5) a tiny hairline circle "?" button at the very end.
 
-BOTTOM BAR — HISTORY state of the same header, left to right:
+BOTTOM BAR — HISTORY state of the same header. Two rows separated by a full-width thin horizontal hairline rule inside the bar.
+Upper row, left to right:
 (1) the same static green dot + "running" (the engine is still alive);
-(2) round navigator now shows "◂ ROUND 9 · CLOSED ▸" with a subtle amber-tinted badge, plus a small solid button "▸▸ BACK TO LIVE";
-(3) below-left inside the bar: a slim replay transport — a play triangle, a speed chip "×4", and a thin scrub line with a position dot captioned "event 12/33" — drawn with MEDIA-style icons, clearly different shape language from the text buttons above;
-(4) the budget meter shows a solid-only amber segment captioned "$6.2 of this round" — no hatched tail in history;
-(5) NO PAUSE/STOP/E-STOP buttons anywhere on this bar — the right end is empty except the "?" button.
+(2) the same rectangular round stepper now reading "‹ ROUND 9 · CLOSED ›" with a subtle amber-tinted outline badge, then a small solid amber button "▸▸ BACK TO LIVE";
+(3) the budget meter with a solid-only amber segment captioned "$6.2 of this round" — no hatched tail;
+(4) NO PAUSE, NO STOP, NO EMERGENCY STOP anywhere on this bar — right end empty except the "?" button.
+Lower row, under the full-width hairline rule — the replay transport, clearly a separate control layer: a small play triangle "▷", a speed chip "×4", a long thin scrub line with one round position dot, and at the far right the caption "event 12/33". MEDIA-style icons live ONLY in this lower row.
 
-Only these strings must be legible: "running", "ROUND 12 · LIVE", "ROUND 9 · CLOSED", "BACK TO LIVE", "$10.4 + $2.2 est / $100", "PAUSE", "STOP", "E-STOP", "×4", "event 12/33". All other text may be soft unreadable placeholder lines.
+Only these strings must be legible: "running", "ROUND 12 · LIVE", "ROUND 9 · CLOSED", "BACK TO LIVE", "$10.4 + $2.2 est / $100", "PAUSE", "STOP", "EMERGENCY STOP", "$6.2 of this round", "×4", "event 12/33". All other text may be soft unreadable placeholder lines.
 
-Mood: quiet instrument panel, autumn heartwood, warm firelit browns. The two bars must read instantly as the same component in two modes: live = controls present + est tail; history = transport present + controls gone.
+Mood: quiet instrument panel, autumn heartwood, warm firelit browns. The two bars must read instantly as the same component in two modes: live = controls present + est tail; history = transport row present + controls gone.
 
 ## PROMPT — header 部件 · light "spring"（变体，仅换调色）
 
-Same two-bar layout, light "spring" theme: canvas warm cream nudged slightly toward pale green #F1F0E2 — NOT white, NOT saturated green; bar surfaces one step greener #E9EAD6; primary text dark heartwood brown #251B10; hairlines #8A7A64; activity accent deep amber #8A5A14; E-STOP and human marks #A34620. Mood: early spring on warm paper.
+Same two-bar layout, light "spring" theme: canvas warm cream nudged slightly toward pale green #F1F0E2 — NOT white, NOT saturated green; bar surfaces one step greener #E9EAD6; primary text dark heartwood brown #251B10; hairlines #8A7A64; activity accent deep amber #8A5A14; EMERGENCY STOP button (octagon icon + text) #A34620. Mood: early spring on warm paper.
 
 ## Header 审评清单
 
 1. 双态一眼可辨：live 有控制无走带，history 有走带无控制？
-2. E-STOP 与 PAUSE/STOP 之间有视觉断层，且是 rust 色、全图唯一 rust？
-3. 走带是媒体图标语言（▶/×4/scrub 线），与文字按钮形状语言明显不同、位置不同？
+2. EMERGENCY STOP 全拼 + 八边形轮廓图标，与 PAUSE/STOP 间有虚线断层，
+   rust 色全图唯一、八边形全图唯一、图标按钮全图唯一？
+3. 走带是媒体图标语言（▷/×4/scrub 线），住在通栏细线下的独立子行；
+   轮导航箭头是 chevron（‹ ›）**绝非三角形**？
 4. est 斜纹尾只出现在 live 态；history 态是纯实付实心段？
 5. "ROUND 9 · CLOSED" 徽章醒目（不会看着看着忘了在历史）？"BACK TO LIVE" 存在？
 6. 状态词是主角，色点是静止小标点（无光晕无动画感）？
@@ -250,3 +256,10 @@ Same two-bar layout, light "spring" theme: canvas warm cream nudged slightly tow
   kill-switch 行为经代码核查确认 drain-first。header 双态对照出图
   提示词（dark 主版 + spring 变体）+ 8 项审评清单起草完成。
   工作区迁至 worktree design/dashboard-mockups，文件归位 docs/design/。
+- v3.1（2026-07-21）：header 首轮出图评审（29/30/31 号图）。29 号定为基底
+  （密度贴 1.png、chevron 与三角字形隔离最净、E-STOP 虚线栅栏隔离最强）；
+  30 淘汰（PAUSE/STOP 下划线似超链接、圆容器混两套语言）；31 硬伤
+  （导航箭头用 ◁▷ 三角=媒体字形，打穿走带隔离铁律），但吸收其走带
+  通栏分隔线。用户两条裁决：①E-STOP 缩写在软件语境误读 E-SHOP →
+  改全拼 EMERGENCY STOP（与引擎信号名一致）；②急停带八边形轮廓图标，
+  全页唯一图标按钮，PAUSE/STOP 保持纯文字（不对称即层级）。
