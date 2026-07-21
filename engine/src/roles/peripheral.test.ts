@@ -2,7 +2,7 @@
 // integration style as worker.test.ts) drives the real spawn/sentinel/timeout/cost-parse path.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1630,5 +1630,221 @@ test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> today's beha
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], ROLE_ALLOWED_TOOLS, "base allowedTools, unwidened");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #285: review session mode — reviewCwd (an explicit, pre-materialized cwd) ──────────────
+
+test("run (#285): reviewCwd -> no --worktree flag, no --add-dir, and the guard's SAPWOOD_WORKTREE_ROOT containment root IS the materialized directory (never <worktreeRoot>/<name>)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "${join(dir, "args.seen")}"
+printf '%s' "$SAPWOOD_WORKTREE_ROOT" > "${join(dir, "worktree_root.seen")}"
+echo '{"type":"result","total_cost_usd":0}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({
+      roleId: "engine-reviewer",
+      prompt: "review this diff",
+      model: "opus",
+      effort: "high",
+      fallbackModel: "none",
+      reviewCwd: materializedDir,
+    });
+    assert.equal(result.outcome, "done");
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.ok(!seen.includes("--worktree"), "no --worktree flag in review session mode");
+    assert.ok(!seen.includes("--add-dir"), "never mounts engine state, same as every role session");
+    assert.equal(
+      readFileSync(join(dir, "worktree_root.seen"), "utf8"),
+      materializedDir,
+      "the guard containment root is the materialized directory, not <worktreeRoot>/<name>",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+test("run (#285): reviewCwd tool profile is Read/Grep/Glob only, Bash explicitly denied — same spawn-args assertion style as the base role-session test above", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    await runner.run({
+      roleId: "engine-reviewer",
+      prompt: "p",
+      model: "opus",
+      effort: "high",
+      fallbackModel: "none",
+      reviewCwd: materializedDir,
+    });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
+    assert.equal(at("--allowedTools"), "Read,Grep,Glob");
+    assert.equal(at("--disallowedTools"), "Write,Edit,MultiEdit,NotebookEdit,Bash");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+test("run (#285): reviewCwd's materialized directory is NEVER deleted afterward — this runner didn't create it and doesn't own its lifecycle (contrast the default worktree path, always deleted)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
+  writeFileSync(join(materializedDir, "CLAUDE.md"), "# fixture\n");
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({
+      roleId: "engine-reviewer",
+      prompt: "p",
+      model: "opus",
+      effort: "high",
+      fallbackModel: "none",
+      reviewCwd: materializedDir,
+    });
+    assert.equal(result.outcome, "done");
+    assert.ok(existsSync(materializedDir), "materialized directory still exists");
+    assert.ok(existsSync(join(materializedDir, "CLAUDE.md")), "its contents are untouched");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+test("run (#285): reviewCwd pointing at a NONEXISTENT directory throws before spawning — every setup failure surfaces loudly, never a silent run against a missing/incomplete materialized tree", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = mkRunner(dir, bin);
+    await assert.rejects(
+      () =>
+        runner.run({
+          roleId: "engine-reviewer",
+          prompt: "p",
+          model: "opus",
+          effort: "high",
+          fallbackModel: "none",
+          reviewCwd: join(dir, "does-not-exist"),
+        }),
+      /materialized cwd .* does not exist/,
+    );
+    // Only the fixture files created BEFORE run() was ever called (the stub binary, the hook
+    // stub) should exist — no sentinel/jsonl file for the refused attempt was ever created (the
+    // reviewCwd check happens before jsonlFd is opened, see run()'s own ordering).
+    assert.deepEqual(readdirSync(dir).sort(), ["claude-stub", "guard-hook.js"], "no stray sentinel/jsonl files from the refused attempt");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run (#285): reviewCwd combined with an explicit opts.proxy is refused (caller bug, not a silent override) — a review session never attaches a forge proxy", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = mkRunner(dir, bin);
+    await assert.rejects(
+      () =>
+        runner.run({
+          roleId: "engine-reviewer",
+          prompt: "p",
+          model: "opus",
+          effort: "high",
+          fallbackModel: "none",
+          reviewCwd: materializedDir,
+          proxy: {
+            mint: async () => {
+              throw new Error("must never be called");
+            },
+          },
+        }),
+      /never attaches a forge proxy/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+test("run (#285): reviewCwd NEVER attaches RoleRunnerDeps.defaultProxy either — structurally suppressed, not just opts.proxy-refused", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    let minted = false;
+    const runner = mkRunner(dir, bin, {
+      defaultProxy: {
+        mint: async () => {
+          minted = true;
+          throw new Error("must never be called for a review session");
+        },
+      },
+    });
+    const result = await runner.run({
+      roleId: "engine-reviewer",
+      prompt: "p",
+      model: "opus",
+      effort: "high",
+      fallbackModel: "none",
+      reviewCwd: materializedDir,
+    });
+    assert.equal(result.outcome, "done");
+    assert.equal(minted, false, "the RoleRunner-wide default proxy is never consulted for a review session");
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.ok(!seen.includes("--mcp-config"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+test("run (#285): context manifest's worktree.path is the materialized directory, and CLAUDE.md-family sources are probed from it — the EXISTING #236 mechanism, unchanged, fed a different root", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
+  writeFileSync(join(materializedDir, "CLAUDE.md"), "# materialized tree conventions\n");
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash
+echo '{"type":"system","subtype":"init","model":"claude-stub-model","claude_code_version":"9.9.9","tools":["Read","Grep","Glob"],"mcp_servers":[]}'
+echo '{"type":"result","subtype":"success","total_cost_usd":0.0005,"model":"claude-stub-model"}'
+exit 0
+`,
+    );
+    const runner = mkRunner(dir, bin, { preSpawnCaptureTimeoutMs: 3000, preSpawnCapturePollMs: 5 });
+    const result = await runner.run({
+      roleId: "engine-reviewer",
+      prompt: "review this diff",
+      model: "opus",
+      effort: "high",
+      fallbackModel: "none",
+      reviewCwd: materializedDir,
+    });
+    assert.equal(result.outcome, "done");
+    const manifest = result.contextManifest;
+    assert.ok(manifest);
+    assert.equal(manifest!.worktree.path, materializedDir);
+    const claudeMd = manifest!.sources.find((s) => s.label === "repo CLAUDE.md");
+    assert.equal(claudeMd?.kind, "snapshot");
+    assert.equal((claudeMd as { content: string }).content, "# materialized tree conventions\n");
+    assert.equal((claudeMd as { path: string }).path, join(materializedDir, "CLAUDE.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
   }
 });

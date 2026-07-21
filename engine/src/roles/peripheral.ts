@@ -163,6 +163,35 @@ export interface RoleSessionOpts {
   proxy?: {
     mint: (session: { role: string; session: string }) => Promise<ForgeProxyHandle>;
   };
+  /** #285 (review session mode, design #279 §3/§6, D7): run this session directly inside an
+   *  ALREADY-MATERIALIZED plain source tree — review/materializer.ts's `materialize()` output
+   *  (a private-clone checkout at a specific reviewed commit, no `.git` at all) — instead of the
+   *  default fresh `--worktree`-provisioned git worktree of the ENGINE's own repo. Mutually
+   *  exclusive with the default worktree path; when present, `run()`:
+   *   - omits `--worktree` from argv entirely (there is no repo at this path for the CLI to
+   *     create ANOTHER worktree from — see claudeArgs' `worktree` opt doc);
+   *   - spawns `claude` with `cwd` set to this EXACT directory (worker.ts's `spawnClaudeSession`
+   *     `cwd` opt), so the session's own working directory IS the materialized tree;
+   *   - points the guard's containment root (`SAPWOOD_WORKTREE_ROOT`) at this SAME directory,
+   *     never `<worktreeRoot>/<name>` — Read/Grep/Glob stay confined to exactly the materialized
+   *     tree, nothing else;
+   *   - NEVER attaches a forge proxy, regardless of `proxy` above or `RoleRunnerDeps.defaultProxy`
+   *     — a review session gets no `mcp__forge__*` tools and no `gh`/git credentials in its env
+   *     (peripheralSessionEnv's stripping already covers the latter for every role session; this
+   *     field additionally forces the FORMER off, structurally, for this mode specifically).
+   *     Supplying `proxy` together with `reviewCwd` is refused (a caller bug, not a silent
+   *     override) — see run()'s own doc;
+   *   - NEVER deletes this directory on exit — its lifecycle (creation, eventual cleanup) is
+   *     OWNED by whoever materialized it and passed it in here, not by this runner (contrast the
+   *     default worktree path, which this runner both creates via `--worktree` and unconditionally
+   *     deletes afterward).
+   *  A missing/nonexistent directory at spawn time is a SETUP FAILURE — `run()` throws rather
+   *  than spawning against a bad path (design #279 §6: "All setup failures ... map to
+   *  `unavailable`" — the caller's job, e.g. a future review-session wrapper, is to catch this and
+   *  surface it as `unavailable`, never a silently degraded run). Context-manifest recording (the
+   *  CLAUDE.md-family probe, `.claude/rules/**`, etc.) is the EXISTING mechanism, entirely
+   *  unchanged — it simply reads from this directory instead of the default worktree path. */
+  reviewCwd?: string;
 }
 
 export interface RoleSessionResult {
@@ -423,6 +452,23 @@ export class RoleRunner {
           `running a role session; refusing to run an unguarded session in hard mode`,
       );
     }
+    // #285: review session mode — resolve + validate BEFORE any sentinel/jsonl file is created,
+    // same "fail before touching disk" posture as the guard-hook check above. A missing/absent
+    // materialized directory is a SETUP FAILURE (design #279 §6: every setup failure maps to
+    // `unavailable`) — never a silent fall-through to spawning against a bad cwd.
+    const materializedCwd = opts.reviewCwd !== undefined ? resolve(opts.reviewCwd) : undefined;
+    if (materializedCwd !== undefined && !existsSync(materializedCwd)) {
+      throw new Error(
+        `review session materialized cwd "${materializedCwd}" does not exist — refusing to spawn a review ` +
+          `session against a missing/incomplete materialized tree (every setup failure maps to session-unavailable)`,
+      );
+    }
+    if (materializedCwd !== undefined && opts.proxy !== undefined) {
+      // A caller bug, not a silent override (RoleSessionOpts.reviewCwd's own doc): review
+      // sessions never get a forge proxy, so supplying one alongside reviewCwd is refused loudly
+      // rather than quietly dropped.
+      throw new Error("review session mode (reviewCwd) never attaches a forge proxy — opts.proxy must not be set together with reviewCwd");
+    }
     const sessionId = randomUUID();
     const jsonlPath = this.path(name, "jsonl");
     const jsonlFd = openSync(jsonlPath, "w");
@@ -438,7 +484,11 @@ export class RoleRunner {
     // fall back to the RoleRunner-wide default (RoleRunnerDeps.defaultProxy's own doc) — the
     // engine's real startup wiring attaches the default there rather than touching every
     // stub's own session-construction call site.
-    const proxyOpt = opts.proxy ?? this.deps.defaultProxy;
+    // #285: a review session (reviewCwd present) NEVER gets a proxy — not opts.proxy (refused
+    // above), and not the RoleRunner-wide default either; this is enforced HERE, structurally,
+    // so a review session can never silently inherit a proxy some other caller configured
+    // RoleRunnerDeps.defaultProxy with.
+    const proxyOpt = materializedCwd !== undefined ? undefined : (opts.proxy ?? this.deps.defaultProxy);
     let proxyHandle: ForgeProxyHandle | undefined;
     if (proxyOpt) {
       try {
@@ -463,7 +513,9 @@ export class RoleRunner {
         model: opts.model,
         effort: opts.effort,
         fallbackModel: opts.fallbackModel,
-        worktree: name,
+        // #285: omit --worktree entirely in review session mode — the materialized tree has no
+        // `.git` for the CLI to create another worktree from (see ClaudeArgsOpts.worktree's doc).
+        ...(materializedCwd === undefined ? { worktree: name } : {}),
         name,
         sessionId,
         settings: settingsJson,
@@ -476,7 +528,13 @@ export class RoleRunner {
       const startedMs = this.now().getTime();
       const session = spawnClaudeSession(this.bin, args, {
         jsonlFd,
-        env: peripheralSessionEnv(guardMode, resolve(this.worktreeRoot, name)),
+        // #285: the spawned process's OWN cwd — set to the materialized tree in review session
+        // mode, omitted (inherits the engine's cwd, unchanged) otherwise.
+        ...(materializedCwd !== undefined ? { cwd: materializedCwd } : {}),
+        // #285: the guard's containment root — the materialized tree in review session mode
+        // (Read/Grep/Glob confined to EXACTLY the reviewed tree), the default worktree path
+        // otherwise (unchanged).
+        env: peripheralSessionEnv(guardMode, materializedCwd ?? resolve(this.worktreeRoot, name)),
       });
 
       // Register the exit listener BEFORE any await — same rationale as worker.ts's dispatch():
@@ -530,7 +588,10 @@ export class RoleRunner {
       // observed within the bound, capture proceeds anyway (best-effort, never blocks the
       // session) — `captureBasis` on the resulting manifest names which case fired, never silently
       // presenting a timeout-fallback capture as equally reliable.
-      const worktreePath = join(this.worktreeRoot, name);
+      // #285: in review session mode this IS the materialized tree (the same directory the
+      // session's cwd + guard containment root above both point at) — never the default
+      // `<worktreeRoot>/<name>` path, which nothing ever creates in this mode.
+      const worktreePath = materializedCwd ?? join(this.worktreeRoot, name);
       const initObserved = await waitForInitLine(jsonlPath, this.preSpawnCaptureTimeoutMs, this.preSpawnCapturePollMs);
       const captureBasis: PreSpawnManifestCapture["captureBasis"] = initObserved ? "init-observed" : "timeout-fallback";
       const worktreeAppeared = existsSync(worktreePath);
@@ -591,7 +652,7 @@ export class RoleRunner {
       // fail-closed validator path) plus one stderr line naming it — never a read outside root.
       let scratchText: string | undefined;
       if (opts.scratchFile !== undefined) {
-        const root = resolve(this.worktreeRoot, name);
+        const root = materializedCwd ?? resolve(this.worktreeRoot, name);
         const target = resolve(root, opts.scratchFile);
         if (!target.startsWith(root + sep)) {
           (this.deps.log ?? console.error)(
@@ -624,10 +685,17 @@ export class RoleRunner {
       // dirty-vs-clean retention there is no WIP that could ever need preserving here. Retro's
       // one worktree deliverable (the scratch file) was already captured above; its actual code
       // proposal lives on its PUSHED BRANCH, never in the worktree.
-      try {
-        rmSync(join(this.worktreeRoot, name), { recursive: true, force: true });
-      } catch {
-        /* best-effort */
+      //
+      // #285: a review session's materialized directory is NEVER deleted here — this runner
+      // didn't create it (no `--worktree` was ever passed, see above) and doesn't own its
+      // lifecycle; deleting it out from under whoever materialized it and passed it in via
+      // `reviewCwd` would be a correctness bug, not cleanup.
+      if (materializedCwd === undefined) {
+        try {
+          rmSync(join(this.worktreeRoot, name), { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
       }
 
       return {
@@ -757,7 +825,11 @@ export class RoleRunner {
     // EVERY role while still granting zero write capability — the emptiness check would have
     // mis-recorded every issues-only role's worktree as conservatively dirty. hasWriteCapableGrant
     // below checks for an actual write-capable TOKEN instead of mere non-emptiness.
-    const worktreePath = join(this.worktreeRoot, name);
+    // #285: the SAME resolution run() itself used (materializedCwd when reviewCwd was supplied,
+    // the default worktree path otherwise) — recomputed here rather than threaded through,
+    // matching this method's existing "recompute from opts+name" convention for every other
+    // per-session value.
+    const worktreePath = opts.reviewCwd !== undefined ? resolve(opts.reviewCwd) : join(this.worktreeRoot, name);
     const effectiveAllowedTools = opts.allowedTools ?? ROLE_ALLOWED_TOOLS;
     const writeCapable = hasWriteCapableGrant(effectiveAllowedTools);
     const worktree: WorktreeGitState = !pre.worktreeAppeared

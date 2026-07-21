@@ -497,7 +497,15 @@ export interface ClaudeArgsOpts {
   model: string;
   effort: string;
   fallbackModel: string;
-  worktree: string;
+  /** `--worktree <name>` — tells the CLI to create/use a git worktree of ITS OWN inherited cwd
+   *  (the engine's repo). Omitted -> no `--worktree` flag at all: #285's review session mode
+   *  spawns against an already-materialized plain source tree (review/materializer.ts's
+   *  checkout output, no `.git` at all — D1) via an explicit `cwd` on the spawned process
+   *  instead (see spawnClaudeSession's `cwd` opt) — asking the CLI to ALSO create a worktree
+   *  there would be nonsensical (there is no repo to create one from) and wrong (it would land
+   *  under the engine's OWN worktreeRoot, not the materialized tree). Every caller except
+   *  peripheral.ts's review-session path supplies this, unchanged. */
+  worktree?: string;
   name: string;
   sessionId: string;
   addDir?: string;
@@ -554,8 +562,7 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     "--effort",
     o.effort,
     ...(o.fallbackModel === "none" ? [] : ["--fallback-model", o.fallbackModel]),
-    "--worktree",
-    o.worktree,
+    ...(o.worktree ? ["--worktree", o.worktree] : []),
     "--name",
     o.name,
     ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : ["--session-id", o.sessionId]),
@@ -686,12 +693,28 @@ export interface SpawnedSession {
  *  kill the whole tree), stdio wired to the given jsonl fd. The SAME primitive
  *  WorkerSupervisor.dispatch/resume use internally (not re-implemented — this function is
  *  exported so peripheral.ts's narrower role-session shape reuses it directly rather than
- *  opening a second `child_process` import site). */
-export function spawnClaudeSession(bin: string, args: string[], opts: { jsonlFd: number; env: NodeJS.ProcessEnv }): SpawnedSession {
+ *  opening a second `child_process` import site).
+ *
+ *  `opts.cwd` (#285, review session mode): OMITTED for every caller except peripheral.ts's
+ *  review-session path — the process then inherits the ENGINE's own cwd, exactly today's
+ *  behavior, and the CLI's `--worktree <name>` flag (claudeArgs) resolves relative to it. When
+ *  supplied, it points the spawned `claude` process directly at an ALREADY-MATERIALIZED plain
+ *  source tree (review/materializer.ts's private-clone checkout output — no `.git`, D1) instead
+ *  — paired, at the call site, with omitting `--worktree` entirely (asking the CLI to also
+ *  create a worktree there would be nonsensical: there is no repo to create one from). This is
+ *  the ONLY subprocess `cwd` option in this engine (worker.test.ts's #69 grep-invariant test
+ *  pins that WorkerSupervisor's own dispatch()/resume() spawn() calls never set one — this
+ *  optional field exists solely for the narrow, guard-active, no-Bash review-session shape). */
+export function spawnClaudeSession(
+  bin: string,
+  args: string[],
+  opts: { jsonlFd: number; env: NodeJS.ProcessEnv; cwd?: string },
+): SpawnedSession {
   const child = spawn(bin, args, {
     detached: true,
     stdio: ["ignore", opts.jsonlFd, opts.jsonlFd],
     env: opts.env,
+    ...(opts.cwd ? { cwd: opts.cwd } : {}),
   });
   const killGroup = (sig: NodeJS.Signals): void => {
     if (child.pid == null) return;
