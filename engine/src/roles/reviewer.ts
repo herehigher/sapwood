@@ -273,7 +273,10 @@ export function validateFindings(v: unknown): v is Finding[] {
  *  satisfied gate②'s approval half, for the audit trail. Deliberately just the two counts
  *  `verdictFrom` already derives (`freshHeadReviewCount` / #273's OID-bound clean comments): the
  *  decisive fact is already the discriminant (`kind: "approved"`); this is provenance, not
- *  another verdict input. At least one field is > 0 for every `approved` result. */
+ *  another verdict input. At least one field is > 0 for every `approved` result.
+ *  Intentionally NOT redesigned for a future engine-agent kind's richer, per-source evidence
+ *  (e.g. session transcript ref, model identity) — that shape is deferred to #286 (E4a); this
+ *  interface may grow additional optional fields there without breaking the two existing counts. */
 export interface ApprovalEvidence {
   /** Fresh, accept-state, non-author reviews on the current head (see freshHeadReviewCount). */
   freshApprovingReviews: number;
@@ -289,20 +292,28 @@ export interface ApprovalEvidence {
  * output (blocking always wins — the same fail-safe ordering `deriveReviewAction` already
  * enforces above) before deriving a final ReviewAction/Gate.
  *
- *  - `approved` REQUIRES zero findings — encoded in the TYPE (this variant carries no findings
- *    field at all), so "approved with findings" is not even representable, never a runtime check
- *    a caller might skip.
- *  - `rejected` carries a VALIDATED (see validateFindings) findings array — the ONLY variant
- *    merge-driver maps onto the existing HANDLE_THREADS -> FIXABLE lane (design #279 §1); the
- *    session that produced them never chose the outcome, only supplied the findings.
+ *  - `approved` REQUIRES zero findings — encoded in the TYPE, not just a runtime check a caller
+ *    might skip: the optional `findings?: never` field means only OMITTING it type-checks, so
+ *    "approved with findings" is not representable (#282 review round 2, adopted P2 — verified
+ *    with a temporary probe under `tsc --noEmit`'s checked set; reviewer.test.ts itself is
+ *    EXCLUDED from that command by engine/tsconfig.json and runs under tsx, transpile-only, so a
+ *    `@ts-expect-error` inside it would never actually be re-checked by CI and is deliberately
+ *    NOT used there — see that test's own comment).
+ *  - `rejected` carries a VALIDATED (see validateFindings), NON-EMPTY findings array — the tuple
+ *    type `[Finding, ...Finding[]]` means "rejected with zero findings" is likewise not
+ *    representable (#282 review round 2, adopted P2: a rejection with nothing to say is a
+ *    contradiction in terms). The ONLY variant merge-driver maps onto the existing
+ *    HANDLE_THREADS -> FIXABLE lane (design #279 §1); the session that produced them never chose
+ *    the outcome, only supplied the findings. The symmetric `evidence?: never` mirrors
+ *    `approved`'s own field-exclusion pattern (a rejection carries no approval evidence).
  *  - `pending` — nothing decisive yet (no approving artifact arrived); the caller keeps polling.
  *  - `unavailable` — the adapter itself could not produce a verdict this tick (e.g. an
  *    engine-agent session/materialize failure, design #279 §6); `headOid` may be null when not
  *    even that much is known (mirrors ReviewVerdict.headOid's own null-on-failure contract).
  */
 export type ApprovalResult =
-  | { kind: "approved"; headOid: string; evidence: ApprovalEvidence }
-  | { kind: "rejected"; headOid: string; findings: Finding[] }
+  | { kind: "approved"; headOid: string; evidence: ApprovalEvidence; findings?: never }
+  | { kind: "rejected"; headOid: string; findings: [Finding, ...Finding[]]; evidence?: never }
   | { kind: "pending"; headOid: string }
   | { kind: "unavailable"; headOid: string | null; reason: string };
 
@@ -723,13 +734,17 @@ export type ReviewerKind = Reviewer["kind"];
  *  (`case "different-model-codex": default: return new CodexReviewer(...)`) meant an
  *  UNRECOGNIZED kind string silently mis-constructed a Codex reviewer instead of failing —
  *  exactly the "can silently mis-construct" gap design #279 §1 calls out. Every member of
- *  `ReviewerKind` now gets its OWN explicit case; TypeScript's control-flow exhaustiveness check
- *  over the closed `ReviewerKind` union means a future kind added to that union WITHOUT a
- *  matching case here fails the BUILD (TS2366: the switch no longer narrows to `never`, so this
- *  function's declared `Reviewer` return type is not satisfied on every path) — never a silent
- *  runtime fallthrough to Codex. The `throw` below is startup-time defense in depth only, for a
- *  `kind` value that bypasses the type system entirely (e.g. an unvalidated cast); it is
- *  unreachable for any value TypeScript itself can see reach this function. */
+ *  `ReviewerKind` now gets its OWN explicit case. Note the compile-time guarantee is NOT the
+ *  switch's own fallthrough behavior alone (Codex review round 2, adopted P2): a switch with no
+ *  `default:` whose every case returns is exhaustive-shaped, but the function stays TOTAL either
+ *  way once a trailing `throw` follows it — TypeScript would happily accept a NEW `ReviewerKind`
+ *  member with no matching case, since the throw still satisfies every code path (no TS2366).
+ *  The `_exhaustive: never` assignment right after the switch is what actually forces the
+ *  compile error: it only type-checks when `kind`'s residual type at that point is `never`
+ *  (every member consumed by a case above); a new, unhandled member leaves a non-`never` residual
+ *  and the assignment itself fails to compile. The `throw` below it remains startup-time defense
+ *  in depth for a `kind` value that bypasses the type system entirely (e.g. an unvalidated
+ *  cast) — it is unreachable for any value TypeScript itself can see reach this function. */
 export function buildReviewerByKind(
   kind: ReviewerKind,
   trustedReviewers: readonly string[],
@@ -746,8 +761,15 @@ export function buildReviewerByKind(
       // gate② acceptance is identity-checked, not merely non-author — Codex PR #42 P1).
       return new CodexReviewer(trustedReviewers, triggerCommand, doctrine);
   }
-  // Unreachable for any `kind` TypeScript can prove is a ReviewerKind (see doc above) — a
-  // startup-time fail-safe for a value that reached here only via a type-system bypass.
+  // #282 review round 2 (adopted P2): the ACTUAL compile-time exhaustiveness sentinel. `kind`'s
+  // type here is `never` only if every ReviewerKind member was consumed by a case above — a
+  // future member added to the union without a matching case leaves a non-`never` residual type,
+  // and THIS assignment (not the switch, not the throw below) is what fails to compile (TS2322).
+  const _exhaustive: never = kind;
+  void _exhaustive; // referenced so it isn't flagged as an unused local
+  // Unreachable for any `kind` TypeScript can prove is a ReviewerKind (see doc above and the
+  // sentinel just above) — a startup-time fail-safe for a value that reached here only via a
+  // type-system bypass (e.g. an unvalidated cast).
   throw new Error(`buildReviewerByKind: unhandled reviewer kind: ${String(kind)}`);
 }
 

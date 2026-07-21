@@ -12,6 +12,7 @@ import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, PRReview, PRReviewData } from "../forge/forge.js";
 import type {
   ApprovalResult,
+  Finding,
   ReviewAction,
   ReviewContext,
   Reviewer,
@@ -1511,14 +1512,31 @@ test("validateFindings: an empty array is valid (approved carries zero findings,
   assert.equal(validateFindings(null), false);
 });
 
-test("ApprovalResult: `rejected` carries a validated findings array from day one (#282 AC) — `approved` cannot even represent findings (encoded in the type, not a runtime check)", () => {
-  const findings = [{ id: "1", body: "missing null check" }];
+test("ApprovalResult: `rejected` carries a validated, NON-EMPTY findings array from day one (#282 AC); `approved` cannot even represent findings — both encoded in the TYPE (#282 review round 2, adopted P2), not just a runtime check", () => {
+  const findings: [Finding, ...Finding[]] = [{ id: "1", body: "missing null check" }];
   assert.equal(validateFindings(findings), true);
   const rejected: ApprovalResult = { kind: "rejected", headOid: "HEAD", findings };
+  assert.equal(rejected.kind, "rejected");
+  assert.ok(rejected.findings.length >= 1); // the tuple type [Finding, ...Finding[]] guarantees this at compile time too
   assert.deepEqual(rejected.findings, findings);
+
   const approved: ApprovalResult = { kind: "approved", headOid: "HEAD", evidence: { freshApprovingReviews: 1, freshTrustedSignals: 0 } };
   assert.equal(approved.kind, "approved");
-  assert.equal((approved as { findings?: unknown }).findings, undefined);
+  if (approved.kind === "approved") {
+    // `findings?: never` on the approved variant — this is the ONLY value the type permits.
+    assert.equal(approved.findings, undefined);
+  }
+  // NOTE (#282 review round 2, adopted P2): `{ kind: "rejected", findings: [] }` and
+  // `{ kind: "approved", ..., findings: [...] }` both fail to COMPILE against the ApprovalResult
+  // type above (findings: [Finding, ...Finding[]] rejects an empty array; findings?: never on
+  // `approved` rejects any real array) — manually verified via a temporary probe file under
+  // engine/src/roles/ (a location `tsc --noEmit` actually checks) before this fix was pushed, not
+  // committed here as a `@ts-expect-error` assertion: engine/tsconfig.json excludes `*.test.ts`
+  // from `tsc --noEmit`, and `npm test` runs this file through tsx (transpile-only, no type
+  // diagnostics), so a `@ts-expect-error` directive INSIDE this file would be inert — never
+  // actually re-checked by CI — which would be misleading to leave here as if it were live
+  // protection. The runtime assertions above are what this test suite can actually enforce on
+  // every run; the type itself is the real, CI-visible guard for any checked `.ts` caller.
 });
 
 // -- deriveBlockingSignal: the ONE shared pure blocking function every kind routes through --
