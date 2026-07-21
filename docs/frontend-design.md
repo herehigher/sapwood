@@ -852,8 +852,8 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 - **Scrubbing within the open round** — a "cursor behind HEAD" mode with
   its own rules for control visibility, est overlays, and auto-follow;
   deferred to v0.3 (§11). A round is fully replayable the moment it closes.
-- **Honest "On hold" rendering** — blocked on the hold-visibility event
-  (§11 follow-up #7); until then held PRs render as waiting.
+- **Honest "On hold" rendering** — blocked on the hold-visibility events
+  (#294, §11 follow-up #7); until then held PRs render as waiting.
 - **Config replay** — becomes possible once `run-started` carries a
   resolved-config snapshot (§11); v0.2 keeps the config drawer live-only.
   (The earlier "replayable cost panels" deferral is superseded: `spend_ledger`
@@ -980,13 +980,12 @@ the overlay is the named boundary.
    KILL_SWITCH > PAUSE. Safety machinery — the implementing PR is
    human-merge-only. Powers the §3 Operations emergency-stop tier; the button and
    the `estop` verb do not exist until it lands.
-7. **Hold-visibility event** (third amendment, unfiled) — a held PR
+7. **Hold-visibility events → #294** (`pr-held` / `pr-released`) — a held PR
    (`escalation.holdLabels`) is indistinguishable from "waiting on review"
    in persisted data: the gate observes the label live and appends nothing.
-   Rendering an honest "On hold" state needs one additive event when the
-   gate observes the hold transition; until then the design accepts held
-   PRs rendering as waiting. File alongside the lane-board implementation
-   issue.
+   #294 adds transition-only events (dedupe-flag paradigm, gate behavior
+   untouched) — the hard prerequisite for the lanes panel's ON HOLD card
+   and the hero hold pin; until it lands, held PRs render as waiting.
 
 New event kinds must land in the §7 copy map in the same PR (gate②
 checklist); payload-only additions like #3 need no copy entry.

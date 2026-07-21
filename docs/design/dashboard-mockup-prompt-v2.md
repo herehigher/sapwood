@@ -304,8 +304,9 @@ needs-human=系统请求人（rust）；hold=人已介入、行使控制（**禁
 - **Hero**：水滴停 CI/REVIEW 检查点 + 小 hold 钉（第三修订已画为目标态）。
 - **Needs-attention strip：不进**（strip 纯度=系统在等人）。
 - 数据边界：引擎今天只在 gate 推导时读 hold 标签、无事件落库 →
-  §11 follow-up #7（`pr-held`/`pr-released` 事件）为实施硬前置，
-  出图画目标态不受影响；实施期与 #293 同款先立引擎 issue。
+  **#294 已立**（2026-07-21，v0.2 里程碑，Project #4）：`pr-held`/
+  `pr-released` transition-only 事件（沿用 #169 去重旗范式，gate 行为
+  不动），为 ON HOLD 卡 + hero hold 钉的实施硬前置。
 
 ## PROMPT — lanes 部件 · dark "autumn"（v4）
 
