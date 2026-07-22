@@ -101,7 +101,8 @@ cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
 
 reviewer:
   # different-model-codex: 0day-style gate② (fresh non-author Codex review) — default.
-  # same-model-trusted | human | produce-pr-and-stop are the other modes.
+  # same-model-trusted | human | engine-agent are the other reviewer kinds.
+  # produce-pr-and-stop is configured separately at merge.mode.
   mode: different-model-codex
   # triggerCommand: "@codex review"
   #                   #156: the PR-comment text that requests a review. Default = Codex's
@@ -128,17 +129,25 @@ reviewer:
   # How long a current-head review may stay non-decisive before sapwood labels the PR
   # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
   escalateAfterSec: 86400
+  # engine-agent only: this block is REQUIRED with mode: engine-agent and rejected with every
+  # other reviewer mode. The model must differ from worker.model; actual session/worker model
+  # usage is checked again at runtime. There is deliberately no fallbackModel.
+  # agent:
+  #   model: opus       # required; a different Claude model from the producer
+  #   effort: high      # low | medium | high
+  #   promptFile: prompts/engine-reviewer.md
+  #                     # optional; unset uses engine/prompts/engine-reviewer.md. Relative paths
+  #                     # resolve against this config file's directory; invalid files fail fast.
+  #   costCapUsd: 3     # whole-logical-review cap; one retry receives only the remainder
+  #   retryAfterSec: 900 # backoff between paid attempts on the same head after unavailable
 
-# escalation:
-#   # #292: reviewer instruction files are human-vetted authority. A PR changing any old or
-#   # new path matched here receives labels.needsHuman before either review gate can proceed.
-#   # Matching is case-insensitive; supported glob subset: `*` within one path segment and
-#   # recursive `**`. Paths must be trimmed canonical repo-relative forms (no ./, /, .. segment,
-#   # //, or trailing /). A list at GitHub's 3,000-file ceiling escalates as unverifiable. Set
-#   # to [] to deliberately disable the mechanism (then sapwood does not fetch changed files).
-#   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md]
-#   # humanLabels: [sapwood:needs-human, sapwood:blocked]
-#   # holdLabels: [sapwood:hold]
+# Engine-agent execution evidence. Every pair must match a SUCCESS CheckRun on the reviewed head
+# from the named owning GitHub App; a same-named check from another app is not evidence. Empty is
+# legal, but mode: engine-agent warns and queues fail-closed before a paid review session.
+# ci:
+#   requiredChecks:
+#     - name: test
+#       app: github-actions # default when omitted
 
 # labels omitted: this repo adopts the shipped sapwood:* namespace defaults. Shown here (all
 # commented) so every workflow-label key has ONE documented home; see docs/configuration.md's
@@ -427,9 +436,17 @@ reviewer:
 #     maxBytesPerSession: 2000000
 #   timeoutMs: 30000              # hard per-call ceiling, independent of worker.timeoutSec
 
-# escalation omitted: humanLabels/holdLabels derive from the default labels.prefix.
+# escalation omitted: humanLabels/holdLabels derive from the default labels.prefix, and
+# instructionPaths uses the reviewer-authority trust-chain defaults shown below.
 # escalation:
 #   humanLabels: [sapwood:needs-human, sapwood:blocked]
+#   # #292: reviewer instruction files are human-vetted authority. A PR changing any old or
+#   # new path matched here receives labels.needsHuman before either review gate can proceed.
+#   # Matching is case-insensitive; supported glob subset: `*` within one path segment and
+#   # recursive `**`. Paths must be trimmed canonical repo-relative forms (no ./, /, .. segment,
+#   # //, or trailing /). A list at GitHub's 3,000-file ceiling escalates as unverifiable. Set
+#   # to [] to deliberately disable the mechanism (then sapwood does not fetch changed files).
+#   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md]
 #   holdLabels: [sapwood:hold]  # #248: human-applied WAIT-tier hold (three-tier escalation
 #                                # model: hold/needs-human/blocked, each one fact). Matched by
 #                                # EXACT case-insensitive identity everywhere (never substring —

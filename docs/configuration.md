@@ -294,33 +294,61 @@ Gate② — who reviews a PR before it can merge.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `different-model-codex` | The reviewer kind: `different-model-codex` (0day-style fresh non-author Codex review), `same-model-trusted` (allowlisted reviewers only), or `human` (any non-author approval). |
+| `mode` | `different-model-codex` | The reviewer kind: `different-model-codex` (0day-style fresh non-author Codex review), `same-model-trusted` (allowlisted reviewers only), `human` (any non-author approval), or `engine-agent` (an engine-composed, static review session using a different Claude model). |
 | `triggerCommand` | `"@codex review"` | The PR-comment text posted to request a review (`different-model-codex` mode). Non-empty string; rejected empty at parse. |
 | `deltaChainMax` | `3` | Maximum consecutive `X..Y` delta-scoped re-reviews. The next head move requests a full-PR review and resets the chain. Positive integer. |
 | `trustedReviewers` | `[]` | Allowlisted reviewer logins, used by `same-model-trusted`. |
-| `fallback` | `[]` | Ordered, opt-in list of reviewer modes to fail over to when the primary is unavailable past `failoverAfterSec`. Each entry keeps its own mode semantics (identity allowlist for bot modes, any-non-author-approval for `human`). Empty (the default) is byte-for-byte pre-failover behavior: an unavailable primary queues the PR forever, no silent degradation. `same-model-trusted` in `fallback` with an empty `trustedReviewers` is rejected at parse — it could never produce a verdict, so the failover would be silently inert. |
+| `fallback` | `[]` | Ordered, opt-in list of reviewer modes to fail over to when the primary is unavailable past `failoverAfterSec`. Entries may be `different-model-codex`, `same-model-trusted`, or `human`; `engine-agent` is deliberately primary-only and is rejected here. Each entry keeps its own mode semantics (identity allowlist for hosted-bot modes, any-non-author approval for `human`). Empty (the default) is byte-for-byte pre-failover behavior: an unavailable primary queues the PR forever, no silent degradation. `same-model-trusted` in `fallback` with an empty `trustedReviewers` is rejected at parse — it could never produce a verdict, so the failover would be silently inert. |
 | `failoverAfterSec` | `1200` (20min) | How long the primary reviewer may stay non-decisive before gate② hands off to the first fallback entry that itself reaches a decisive verdict. Irrelevant when `fallback` is empty. |
 | `escalateAfterSec` | `86400` (24h) | How long a current-head review may stay non-decisive before sapwood applies `needs-human` to the PR and emits `review-silence-escalated`. This adds visibility only: the lane stays driving, polling continues, and gate② is never softened. A configured failover receives its full `failoverAfterSec` evaluation window first. |
+| `agent.model` | required | Claude model for the `engine-agent` review session. Must be non-empty and differ from `worker.model`; runtime checks also require the worker's and review session's recorded actual models to be distinguishable. |
+| `agent.effort` | `high` | Review-session effort: `low`, `medium`, or `high`. |
+| `agent.promptFile` | shipped `engine/prompts/engine-reviewer.md` | Optional review prompt template. A relative path resolves against the config file's directory. A configured missing, unreadable, empty, or invalid template fails startup; it never falls back silently. |
+| `agent.costCapUsd` | `3` | Positive finite dollar cap for one logical review. The first attempt receives the cap; a single retry after invalid/unparseable output receives only the recorded remainder. Unknown first-attempt spend disables the retry fail-closed. |
+| `agent.retryAfterSec` | `900` (15min) | Positive-integer backoff between paid engine-agent attempts on the same head after an unavailable verdict. The unavailable pin's first-attempt clock still governs configured reviewer failover and human escalation. |
 
 A fallback-obtained approval is **advisory, never verdict-bearing** on its own: it's
 re-verified against live PR data through the recorded mode's own rules at every use, and
 the always-blocking signals (unresolved review threads, a standing
 `CHANGES_REQUESTED` from anyone) block regardless of any failover state.
 
-**Choosing a reviewer entry point (`triggerCommand`, #156):** sapwood doesn't hard-code how you
-invoke a review — the default posts `@codex review`, which triggers a Codex PR-comment review,
-but you can point this at any bot or reviewer entry point your workflow uses (e.g. a different
-bot's mention, or your own CI-triggering comment). The verdict *parser* stays Codex-shaped for
-now regardless of this setting — it looks for `COMMENTED`/`APPROVED` review states from a
-Codex-bot (or `trustedReviewers`-allowlisted) identity — so a custom trigger whose reviewer posts
-a different verdict shape (e.g. a differently-formatted approval comment) is not yet understood
-by gate②. Custom verdict formats are out of scope here; see v1.x reviewer adapters.
+`reviewer.agent` is required when `mode: engine-agent` and rejected with every other mode; it has
+no `fallbackModel` field. The engine spawns this review directly after deterministic preflight —
+there is no trigger comment or hosted bot to poll. The session emits strictly structured per-AC
+judgments and findings; the engine validates that output, derives approval or rejection, writes a
+non-authoritative audit comment, then re-fetches the live gate state before consuming the verdict.
+
+**Choosing a hosted-bot entry point (`triggerCommand`, #156):** for the hosted-bot modes,
+sapwood doesn't hard-code how you invoke a review — the default posts `@codex review`, which
+triggers a Codex PR-comment review, but you can point this at any bot or reviewer entry point your
+workflow uses. The hosted-bot verdict parser stays Codex-shaped regardless of this setting: it
+looks for `COMMENTED`/`APPROVED` review states from a Codex-bot (or
+`trustedReviewers`-allowlisted) identity. A custom trigger whose reviewer posts a different
+verdict shape is not yet understood by gate②; this trigger/parse contract does not apply to the
+engine-agent's structured session output.
 
 ## `merge`
 
 | Key | Default | Meaning |
 |---|---|---|
 | `mode` | `conductor-merge` | `conductor-merge`: once gate① (CI green) and gate② (a fresh review on the current head) both pass, the conductor squash-merges, pinned to that exact head (`--match-head-commit`, closing the TOCTOU window). `produce-pr-and-stop`: both gates are still computed and reported every tick, but the engine never calls the merge API — a human merges. |
+
+## `ci`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `requiredChecks` | `[]` | Trusted CheckRun execution evidence required by the engine-agent preflight. Each entry is an object with `name` (required, non-empty) and `app` (default `github-actions`, non-empty). Every configured pair must match a current-head CheckRun with conclusion `SUCCESS` and the configured owning GitHub App slug. |
+
+The `name` + `app` binding is part of the evidence contract: a same-named check from an
+untrusted app, a legacy status context, or a `SKIPPED`, `NEUTRAL`, queued, or in-progress CheckRun
+does not count. The review session supplies the static half of a code-verifiable AC's evidence by
+mapping it to a substantive, enabled test on the discovery path; the engine supplies the
+deterministic execution half from these trusted CheckRuns.
+
+An empty list is legal so configuration can be adopted incrementally. With
+`reviewer.mode: engine-agent`, config loading warns, and the shipped drive preflight queues
+fail-closed because it has no trusted execution evidence; no paid review session begins until at
+least one required check is configured and satisfied.
 
 ## `labels`
 

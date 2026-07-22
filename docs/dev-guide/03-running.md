@@ -9,7 +9,7 @@ For installation into another repository, use [Getting started](../getting-start
 - Git and a repository that can create worktrees (`engine/src/roles/worker.ts`).
 - GitHub CLI authenticated with repository and Project scopes; `sapwood init` performs the preflight (`engine/src/loop/init.ts`).
 - Claude Code CLI available as `claude`, or selected with `CLAUDE_BIN` (`engine/src/roles/worker.ts`).
-- The default reviewer is a Codex-backed GitHub review trigger, not a locally spawned `codex` command (`engine/src/roles/reviewer.ts`). Configure another supported reviewer mode if that integration is unavailable.
+- The default reviewer is a Codex-backed GitHub review trigger, not a locally spawned `codex` command (`engine/src/roles/reviewer.ts`). Other supported kinds include trusted/human GitHub reviews and the engine-composed `engine-agent` Claude session (`engine/src/review/`).
 
 ## Install & build
 

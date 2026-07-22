@@ -3,13 +3,14 @@
 For the six peripheral roles below, sapwood's deterministic engine (`runRounds`,
 `engine/src/loop/round.ts`) is the only piece of code that ever writes to GitHub on their
 behalf — each role session is a scoped, bounded subordinate whose judgment reaches
-GitHub only through the engine (#110). The **worker is the explicit exception** and is
-out of this doc's scope: worker sessions hold real write grants
+GitHub only through the engine (#110). The **worker is the write-capable exception** and is
+out of this doc's peripheral-role scope: worker sessions hold real write grants
 (`Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),...`, with only
 `Bash(gh pr merge*)`/`Bash(gh pr ready*)` deny-listed — `engine/src/roles/worker.ts:211-212`,
 noise-reduction only) and open their own PRs; their actual boundary is tier 2 of the
 ladder below, the fail-closed guard hook intercepting merge/approve/ready — see
-[`security.md`](security.md). This doc is the contract every peripheral role session
+[`security.md`](security.md). Gate② reviewers are also not peripheral roles; their separate
+contract is summarized below. This doc is the contract every peripheral role session
 satisfies today, and the contract a v1.0 user-defined role (governed extension
 points, issue #134) must satisfy to be added safely.
 
@@ -40,6 +41,35 @@ post-v1.0, user-defined) must specify all five before it ships:
 5. **Escalation path** — what the role does when its session degrades (crashes,
    times out, or produces output that never validates): degrade-and-proceed
    (advisory) vs. escalate-needs-human (gate-blocking).
+
+## Gate② reviewer kinds, including engine-agent
+
+Gate② has four reviewer kinds: `different-model-codex`, `same-model-trusted`, `human`,
+and `engine-agent`. The first three consume review artifacts already present on GitHub.
+`engine-agent` is different: it is an **engine-composed review session**, not a peripheral
+role session and not a hosted bot. After deterministic preflight, the engine materializes the
+exact PR head from an engine-private clone and runs a static, different-Claude-model session over
+that tree. The profile is closed by construction: `Read`/`Grep`/`Glob` only, no Bash or forge
+proxy, an empty strict MCP configuration, no file-based settings sources, worktree-confined reads,
+and a forced-hard guard regardless of the ordinary configured guard mode.
+
+The session never approves, labels, comments on, fixes, or merges a PR. Its strict output contains
+only per-AC statuses and findings; it cannot name an overall verdict or head OID. The deterministic
+engine owns the approval/blocking split:
+
+- zero findings and only `confirmed`/`claim-accepted` AC states derive `approved`; any
+  `claim-accepted` IDs remain explicit unreproduced claims in the evidence;
+- any finding or `cannot-confirm` AC derives `rejected`, which enters the existing FIXABLE path;
+- malformed output, setup failure, indistinguishable worker/reviewer models, or unavailable
+  execution evidence never approves: they retry/back off as allowed, then queue unavailable;
+- unresolved threads, standing current-head `CHANGES_REQUESTED`, human/hold labels, instruction-
+  path escalation, and the other live merge gates remain engine-side blockers regardless of an
+  approval-side result.
+
+An engine-agent decisive result is consumed only after its sanitized, non-authoritative audit
+comment has a delivery receipt and a final live refetch still matches the pinned head/base and
+gate state. This keeps the review session a bounded judgment source while the engine remains the
+only component that turns that judgment into gate behavior.
 
 ## The write-scope tier ladder
 
