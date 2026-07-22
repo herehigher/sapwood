@@ -33,6 +33,7 @@ import { labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js"
 import type { ApprovalResult, ReviewerAdapter } from "../roles/reviewer.js";
 import { changesRequestedOnHead, deriveBlockingSignal } from "../roles/reviewer.js";
 import { requiredChecksSatisfied } from "./ci-evidence.js";
+import { escalateInstructionPathChanges } from "./instruction-path-escalation.js";
 
 /** The per-head engine-agent ATTEMPT PIN (design #279 §2 R3) — see state.ts's schema v24->v25
  *  migration comment for the storage shape this mirrors exactly (4 fields, same as the design
@@ -223,9 +224,9 @@ export type EngineAgentDriveOutcome =
  * `finalizeVerdict`; every other path returns `{kind:"queued"}` — this function NEVER calls
  * `forge.mergePR` or dispatches a fix leg itself.
  *
- * Ordering (design #279 §2, exact): terminal-state check -> attempt-gate (pin) -> preflight ->
- * identity -> WAL -> session (evaluate) -> audit -> refetch -> consume. See inline comments for
- * where each step lives.
+ * Ordering (design #279 §2 + #292): terminal-state check -> instruction-path escalation ->
+ * attempt-gate (pin) -> preflight -> identity -> WAL -> session (evaluate) -> audit -> refetch
+ * -> consume. See inline comments for where each step lives.
  *
  * #303 review round 1 (PM P1): TWO coherence checks guard against reviewing one commit and
  * merging another — (1) immediately after identity resolves, `data0.headOid` must equal the
@@ -277,6 +278,20 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   }
   if (data0.state !== "OPEN") {
     return { kind: "needs-human", reason: `engine-agent: gate:HUMAN:pr-state-${data0.state}` };
+  }
+
+  // #292: instruction-path edits change reviewer authority, so escalate before attempt-pin
+  // reconciliation, CI reads, diff identity work, or any paid engine-agent session. The shared
+  // helper keeps classic and engine-agent matching/write semantics identical.
+  const instructionEscalation = await escalateInstructionPathChanges({ forge: deps.forge, pr, labels: data0.labels, cfg: deps.cfg });
+  if (instructionEscalation.kind === "unavailable") {
+    return { kind: "queued", reason: `engine-agent: ${instructionEscalation.reason}` };
+  }
+  if (instructionEscalation.kind === "escalated") {
+    return {
+      kind: "needs-human",
+      reason: `engine-agent: gate:HUMAN:instruction-path-change:${instructionEscalation.matchedPaths.join(",")}`,
+    };
   }
 
   // ── attempt-gate: the per-head pin (design #279 §2 R3) ──────────────────────────────────────

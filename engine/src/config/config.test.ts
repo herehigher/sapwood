@@ -73,6 +73,22 @@ test("#248: escalation.holdLabels defaults to [<prefix>hold]; labels.prefix affe
   assert.deepEqual(bare.escalation.holdLabels, ["hold"]);
 });
 
+test("#292: escalation.instructionPaths has trust-chain defaults, is configurable, and [] deliberately disables it", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.deepEqual(parseConfig(base).escalation.instructionPaths, [
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    ".claude/CLAUDE.md",
+    ".claude/rules/**",
+    "AGENTS.md",
+  ]);
+  assert.deepEqual(
+    parseConfig(`${base}escalation: { instructionPaths: ["**/AGENTS.md", instructions/*.md] }`).escalation.instructionPaths,
+    ["**/AGENTS.md", "instructions/*.md"],
+  );
+  assert.deepEqual(parseConfig(`${base}escalation: { instructionPaths: [] }`).escalation.instructionPaths, []);
+});
+
 test("#248: an explicit escalation.holdLabels array is used verbatim, independent of humanLabels", () => {
   const cfg = parseConfig(`
 board: { owner: a, repo: r, projectNumber: 1 }

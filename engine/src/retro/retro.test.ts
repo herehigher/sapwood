@@ -695,6 +695,9 @@ class MinimalForge implements IForge {
   async getPRDiff(): Promise<string> {
     return "";
   }
+  async getPRChangedFiles(): Promise<[]> {
+    return [];
+  }
   async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }

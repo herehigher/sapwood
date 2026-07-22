@@ -995,6 +995,12 @@ const ConfigSchemaRaw = z
     escalation: z
       .object({
         humanLabels: z.array(z.string()).optional(),
+        // #292: repo-root-relative reviewer-instruction paths whose PR edits require human
+        // adjudication. The explicit empty list is a deliberate off-switch (and avoids even
+        // fetching changed files); matching supports literal paths plus `*` and `**`.
+        instructionPaths: z
+          .array(z.string().min(1, "escalation.instructionPaths entries must be non-empty repo-relative paths"))
+          .default(["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", ".claude/rules/**", "AGENTS.md"]),
         // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
         // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written
         // ESCALATE tier. Optional here for the same "tell unset apart from explicitly set"
@@ -1053,7 +1059,7 @@ export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doct
   goal: { file: string };
   doctrine: { file: string; maxChars: number; fileRaw?: string };
   labels: ReturnType<typeof workflowLabelDefaults> & { prefix: string };
-  escalation: { humanLabels: string[]; holdLabels: string[] };
+  escalation: { humanLabels: string[]; holdLabels: string[]; instructionPaths: string[] };
   notify: { mentions: string[] };
 };
 

@@ -80,6 +80,13 @@ export interface PRStatus {
   baseOid?: string;
 }
 
+/** #292: one rename-aware entry from GitHub's pull-request files API. The old path is retained
+ * because deleting or renaming standing reviewer instructions changes the authority graph. */
+export interface PRChangedFile {
+  filename: string;
+  previousFilename?: string;
+}
+
 /** One reaction on the PR's top-level issue-comment thread (`gh api .../reactions`). */
 export interface PRReaction {
   content: string; // "+1" | "eyes" | ...
@@ -193,6 +200,11 @@ export interface IForge {
    *  Bash grant of its own; the engine fetches this itself, once per touched PR, before the
    *  session ever runs (retro-digest.ts's buildRetroDigest). */
   getPRDiff(pr: number): Promise<string>;
+  /** #292: rename-aware changed paths for the instruction-authority escalation gate. Both the
+   *  current `filename` and optional `previousFilename` are retained because removing or
+   *  renaming an instruction file changes the reviewer-resolution graph too. Failures throw so
+   *  gate callers queue fail-closed; a partial page must never be treated as a complete list. */
+  getPRChangedFiles(pr: number): Promise<PRChangedFile[]>;
   /** #111 PR-A: commit history since `sinceIso` — the digest's "git log since round start"
    *  source. Deliberately sourced from the GitHub API (`gh api .../commits`), NOT a local
    *  `git log` subprocess: worker.test.ts's #69 grep-invariant pins that the ONLY engine
@@ -687,6 +699,16 @@ export class GithubForge implements IForge {
 
   async getPRDiff(pr: number): Promise<string> {
     return this.gh(["pr", "diff", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`]);
+  }
+
+  async getPRChangedFiles(pr: number): Promise<PRChangedFile[]> {
+    const out = await this.gh([
+      "api",
+      `repos/${this.cfg.board.owner}/${this.repo()}/pulls/${pr}/files?per_page=100`,
+      "--paginate",
+      "--slurp",
+    ]);
+    return parsePRChangedFiles(out);
   }
 
   async getCommitsSince(sinceIso: string): Promise<CommitInfo[]> {
@@ -1763,6 +1785,31 @@ export function parsePRStatus(json: string): PRStatus {
     ciRed,
     ...(d.baseRefOid !== undefined ? { baseOid: d.baseRefOid } : {}),
   };
+}
+
+/**
+ * #292: parse every paginated pull-file entry without dropping rename provenance. Accepts the
+ * `gh api --paginate --slurp` page-array shape (and a single flat page for focused tests), and
+ * rejects malformed entries fail-closed rather than treating an incomplete path list as safe.
+ */
+export function parsePRChangedFiles(json: string): PRChangedFile[] {
+  const raw: unknown = JSON.parse(json);
+  if (!Array.isArray(raw)) throw new Error("getPRChangedFiles: expected an array");
+  const entries: unknown[] = raw.every(Array.isArray) ? raw.flat() : raw;
+  return entries.map((entry, index) => {
+    if (entry === null || typeof entry !== "object") throw new Error(`getPRChangedFiles: entry ${index} is not an object`);
+    const value = entry as { filename?: unknown; previous_filename?: unknown };
+    if (typeof value.filename !== "string" || value.filename.length === 0) {
+      throw new Error(`getPRChangedFiles: entry ${index} has no filename`);
+    }
+    if (value.previous_filename !== undefined && typeof value.previous_filename !== "string") {
+      throw new Error(`getPRChangedFiles: entry ${index} has an invalid previous_filename`);
+    }
+    return {
+      filename: value.filename,
+      ...(value.previous_filename !== undefined ? { previousFilename: value.previous_filename } : {}),
+    };
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

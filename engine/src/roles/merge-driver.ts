@@ -31,6 +31,7 @@ import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
 import { labelsInclude, labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { EngineAgentDriveDeps } from "../review/drive.js";
 import { driveEngineAgentReview } from "../review/drive.js";
+import { escalateInstructionPathChanges } from "../review/instruction-path-escalation.js";
 import type {
   ReviewAction,
   Reviewer,
@@ -378,6 +379,18 @@ export class MergeDriver {
     // Split observation -> queue and re-read next tick; never derive a gate from mixed heads.
     if (status.headOid !== data.headOid) {
       return { kind: "queued", pr, reason: `gate-head-mismatch: ci-head=${status.headOid} review-head=${data.headOid}` };
+    }
+
+    // #292: standing instruction files are reviewer authority. Check after the two live gate
+    // reads agree, but before conflict handling or a review trigger, so no autonomous reviewer
+    // is spent on a PR that must be human-adjudicated. The shared helper's exact-label latch
+    // returns `latched`; existing deriveGate handling below remains the downstream HUMAN path.
+    const instructionEscalation = await escalateInstructionPathChanges({ forge, pr, labels: data.labels, cfg });
+    if (instructionEscalation.kind === "unavailable") {
+      return { kind: "queued", pr, reason: instructionEscalation.reason };
+    }
+    if (instructionEscalation.kind === "escalated") {
+      return { kind: "needs-human", pr, reason: `gate:HUMAN:instruction-path-change:${instructionEscalation.matchedPaths.join(",")}` };
     }
 
     // #270: sense conflicts before triggering or evaluating review. A born-conflicted PR has

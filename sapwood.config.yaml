@@ -129,6 +129,15 @@ reviewer:
   # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
   escalateAfterSec: 86400
 
+# escalation:
+#   # #292: reviewer instruction files are human-vetted authority. A PR changing any old or
+#   # new path matched here receives labels.needsHuman before either review gate can proceed.
+#   # Supported glob subset: `*` within one path segment and recursive `**`. Set to [] to
+#   # deliberately disable the mechanism (then sapwood does not fetch changed files at all).
+#   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md]
+#   # humanLabels: [sapwood:needs-human, sapwood:blocked]
+#   # holdLabels: [sapwood:hold]
+
 # labels omitted: this repo adopts the shipped sapwood:* namespace defaults. Shown here (all
 # commented) so every workflow-label key has ONE documented home; see docs/configuration.md's
 # `labels` table for the full description of each.

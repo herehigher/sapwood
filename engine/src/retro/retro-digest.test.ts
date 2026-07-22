@@ -79,6 +79,9 @@ class FakeForge implements IForge {
     if (this.diffErrors.has(pr)) throw new Error(`simulated fetch failure for PR #${pr}`);
     return this.diffs.get(pr) ?? "";
   }
+  async getPRChangedFiles(): Promise<[]> {
+    return [];
+  }
   async getCommitsSince(): Promise<CommitInfo[]> {
     return this.commits;
   }
