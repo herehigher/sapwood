@@ -129,6 +129,8 @@ function validateAgentFindings(v: unknown): v is Finding[] {
  * Emulating CommonMark pairing here would be over-engineering, so any exotic fence in scope makes
  * orientation undecidable and refuses the strip. The observed benign haiku wrapper, which uses
  * plain triple-backtick fences throughout, is unaffected.
+ * Classification removes one trailing CR per line so mixed-EOL session output cannot give the
+ * strict and wider fence-regex families different views of the same delimiter.
  *
  * This deliberately lives at the engine-agent boundary rather than in `parseStructuredBlock`,
  * the shared P1-reviewed containment primitive, so no other peripheral role inherits a wider
@@ -138,36 +140,37 @@ function validateAgentFindings(v: unknown): v is Finding[] {
  */
 function stripSymmetricFence(text: string): string {
   const lines = text.split("\n");
+  const normalizedLines = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   const isStrictFenceDelimiter = (line: string): boolean => /^```[a-zA-Z0-9-]*\s*$/.test(line);
   const isWiderFenceDelimiter = (line: string): boolean => /^(?:`{3,}|~{3,})[^\r\n]*$/.test(line);
   let closingIndex = lines.length - 1;
-  while (closingIndex >= 0 && lines[closingIndex]!.trim() === "") closingIndex -= 1;
-  if (closingIndex < 0 || !/^```\s*$/.test(lines[closingIndex]!)) return text;
+  while (closingIndex >= 0 && normalizedLines[closingIndex]!.trim() === "") closingIndex -= 1;
+  if (closingIndex < 0 || !/^```\s*$/.test(normalizedLines[closingIndex]!)) return text;
 
   let resultIndex = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (lines[i]!.trim() === RESULT_BLOCK_START) {
+    if (normalizedLines[i]!.trim() === RESULT_BLOCK_START) {
       resultIndex = i;
       break;
     }
   }
   const openingIndex = resultIndex - 1;
-  if (openingIndex < 0 || !isStrictFenceDelimiter(lines[openingIndex]!)) return text;
+  if (openingIndex < 0 || !isStrictFenceDelimiter(normalizedLines[openingIndex]!)) return text;
 
   for (let i = 0; i < closingIndex; i += 1) {
     if (i === openingIndex) continue;
-    const line = lines[i]!;
+    const line = normalizedLines[i]!;
     if (isWiderFenceDelimiter(line) && !isStrictFenceDelimiter(line)) return text;
   }
 
   let precedingFenceCount = 0;
   for (let i = 0; i < openingIndex; i += 1) {
-    if (isStrictFenceDelimiter(lines[i]!)) precedingFenceCount += 1;
+    if (isStrictFenceDelimiter(normalizedLines[i]!)) precedingFenceCount += 1;
   }
   if (precedingFenceCount % 2 !== 0) return text;
 
   for (let i = openingIndex + 1; i < closingIndex; i += 1) {
-    if (isStrictFenceDelimiter(lines[i]!)) return text;
+    if (isStrictFenceDelimiter(normalizedLines[i]!)) return text;
   }
 
   return lines.filter((_line, index) => index !== openingIndex && index !== closingIndex).join("\n");

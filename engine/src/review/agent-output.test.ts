@@ -318,6 +318,52 @@ ${JSON.stringify({
   assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
 });
 
+test("parseAgentReviewOutputText (#319 round 4): a CRLF four-backtick preamble cannot bypass the wider fence scan", () => {
+  const text = `\`\`\`\`text
+unclosed preamble code
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\n");
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 4): CRLF tilde fences cannot bypass the wider fence scan", () => {
+  const text = `~~~text
+preamble code
+~~~
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\n");
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 4): the observed benign wrapper parses with all-CRLF endings", () => {
+  const text = `I reviewed the acceptance criteria against the supplied diff and found no blocking issues.
+
+\`\`\`
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\n");
+  assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  });
+});
+
 test("parseAgentReviewOutputText (#319 round 2): a complete fenced preamble before a correctly fenced sentinel block still parses", () => {
   const text = `\`\`\`text
 preamble code
