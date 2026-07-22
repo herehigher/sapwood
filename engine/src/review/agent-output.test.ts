@@ -239,6 +239,68 @@ test("parseAgentReviewOutputText: a valid sentinel-wrapped block parses", () => 
   assert.equal(out.perAC.length, 2);
 });
 
+test("parseAgentReviewOutputText (#319): observed haiku prose + symmetrically fenced sentinel block parses through the engine-agent schema", () => {
+  const text = `I reviewed the acceptance criteria against the supplied diff and found no blocking issues.
+
+\`\`\`
+<<<SAPWOOD_RESULT>>>
+{
+  "perAC": [
+    { "id": "1-aaaaaaaa", "status": "confirmed" },
+    { "id": "2-bbbbbbbb", "status": "confirmed" }
+  ],
+  "findings": []
+}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
+    perAC: [
+      { id: "1-aaaaaaaa", status: "confirmed" },
+      { id: "2-bbbbbbbb", status: "confirmed" },
+    ],
+    findings: [],
+  });
+});
+
+test("parseAgentReviewOutputText (#319): a json-tagged opening fence and bare closing fence parse", () => {
+  const text = `prose before the block
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.ok(parseAgentReviewOutputText(text, MANIFEST));
+});
+
+test("parseAgentReviewOutputText (#319 containment): a lone trailing fence without an opening fence still fails", () => {
+  const text = `${wrap({
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  })}
+\`\`\``;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 containment): trailing prose after the end sentinel still fails", () => {
+  const text = `${wrap({
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  })}
+trailing prose`;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319): unfenced correct output retains existing behavior", () => {
+  const text = wrap({
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  });
+  assert.ok(parseAgentReviewOutputText(text, MANIFEST));
+});
+
 test("parseAgentReviewOutputText: no sentinel block at all -> null", () => {
   assert.equal(parseAgentReviewOutputText("just some prose, no block", MANIFEST), null);
 });

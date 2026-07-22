@@ -12,7 +12,7 @@
 
 import type { ApprovalResult } from "../roles/reviewer.js";
 import { type Finding, isFinding, validateFindings } from "../roles/reviewer.js";
-import { parseStructuredBlock } from "../state/structured-output.js";
+import { parseStructuredBlock, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { AcceptanceCriterion } from "./ac-snapshot.js";
 
 /** One AC-manifest id's per-criterion judgment (design #279 §2/§4.1):
@@ -118,6 +118,34 @@ function validateAgentFindings(v: unknown): v is Finding[] {
   return true;
 }
 
+/**
+ * Remove the narrow markdown-wrapper shape observed from haiku-tier engine-agent reviewers:
+ * an opening fence immediately before the result sentinel and a bare closing fence as the last
+ * non-whitespace line. This deliberately lives at the engine-agent boundary rather than in
+ * `parseStructuredBlock`, the shared P1-reviewed containment primitive, so no other peripheral
+ * role inherits a wider parser contract. Requiring the symmetric pair cannot hide the truncation
+ * shape guarded by the shared trailing-content rule: a truncated body leaves real content after
+ * the end sentinel, never only a lone closing fence paired with the opening fence.
+ */
+function stripSymmetricFence(text: string): string {
+  const lines = text.split("\n");
+  let closingIndex = lines.length - 1;
+  while (closingIndex >= 0 && lines[closingIndex]!.trim() === "") closingIndex -= 1;
+  if (closingIndex < 0 || !/^```\s*$/.test(lines[closingIndex]!)) return text;
+
+  let resultIndex = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i]!.trim() === RESULT_BLOCK_START) {
+      resultIndex = i;
+      break;
+    }
+  }
+  const openingIndex = resultIndex - 1;
+  if (openingIndex < 0 || !/^```[a-zA-Z0-9-]*\s*$/.test(lines[openingIndex]!)) return text;
+
+  return lines.filter((_line, index) => index !== openingIndex && index !== closingIndex).join("\n");
+}
+
 /** Parse + validate the session's raw `resultText` (worker.ts's `parseResultText` output) in one
  *  step — engine-agent.ts's actual call site. Reuses state/structured-output.ts's
  *  `parseStructuredBlock` — the SAME `<<<SAPWOOD_RESULT>>>...<<<END_SAPWOOD_RESULT>>>` sentinel
@@ -131,7 +159,7 @@ function validateAgentFindings(v: unknown): v is Finding[] {
  *  `findings[].body` travels as an ordinary JSON string field inside the metadata block itself
  *  (same convention fix-response.ts's `reply` field uses), never a separate raw-markdown segment. */
 export function parseAgentReviewOutputText(text: string, manifest: readonly AcceptanceCriterion[]): AgentReviewOutput | null {
-  const block = parseStructuredBlock(text);
+  const block = parseStructuredBlock(stripSymmetricFence(text));
   if (!block) return null;
   let raw: unknown;
   try {

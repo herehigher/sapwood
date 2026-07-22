@@ -80,6 +80,8 @@ this same output) and a `body` (the actual comment text, specific enough to act 
 
 End your final message with a JSON metadata block and nothing else after it — no other role's
 optional BODY segment applies here; every finding's text lives inline as the `body` field below.
+Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence. NOTHING — including
+a closing ``` fence — may follow `<<<END_SAPWOOD_RESULT>>>`.
 
 ```
 <<<SAPWOOD_RESULT>>>
