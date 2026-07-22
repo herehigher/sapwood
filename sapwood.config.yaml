@@ -133,7 +133,7 @@ reviewer:
   # other reviewer mode. The model must differ from worker.model; actual session/worker model
   # usage is checked again at runtime. There is deliberately no fallbackModel.
   # agent:
-  #   model: opus       # required; a different Claude model from the producer
+  #   model: sonnet     # required; must differ from worker.model
   #   effort: high      # low | medium | high
   #   promptFile: prompts/engine-reviewer.md
   #                     # optional; unset uses engine/prompts/engine-reviewer.md. Relative paths

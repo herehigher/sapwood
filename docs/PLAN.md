@@ -255,8 +255,9 @@ PR, merge it under the locked two-gate policy, and stop itself when spend or a h
 says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.sh`.
 
 - **`reviewer.ts` (#13)** — pluggable gate②: **different-model Codex** (default) /
-  same-model-trusted-only / human / engine-agent. A verdict is pinned to a **specific head oid** — a
-  review of a stale head counts as *no review*. In the hosted Codex / same-model modes, only
+  same-model-trusted-only / human (engine-agent added in M10 — Decision #10). A verdict is pinned
+  to a **specific head oid** — a review of a stale head counts as *no review*. In the Codex /
+  same-model modes, only
   the Codex bot (or a configured `trustedReviewers` allowlist) can *satisfy* gate②
   (`human` mode accepts any non-author approval — no allowlist there); in every mode a
   `CHANGES_REQUESTED` from **anyone** on the current head blocks until that same
@@ -845,9 +846,9 @@ marker idempotency, output schema, escalation path) see
   #39, #40).** `reviewer.ts` + `merge-driver.ts` with the **0day-style default**:
   autonomous-merge gated on a fresh non-author Codex review (gate②) + CI green (gate①),
   merged by the Conductor; produce-PR-and-stop selectable. Pluggable reviewer
-  (different-model Codex / same-model-trusted-only / human / engine-agent), engine cost
-  ceiling + kill switch (#14), rollback hardening (#31). 23-case parity vs
-  `test_loop_merge_driver.sh`;
+  (different-model Codex / same-model-trusted-only / human; engine-agent added in M10 —
+  Decision #10), engine cost ceiling + kill switch (#14), rollback hardening (#31). 23-case
+  parity vs `test_loop_merge_driver.sh`;
   `--match-head-commit` TOCTOU pin. Key decisions + deferrals in "M3 review gate + merge
   modes" above. ~~Live end-to-end merge-gate run moves to M4 with the loop driver.~~
 - **M4 — UX surface + CLI:** ✅ **loop driver delivered (#46, PR TBD):** `driver.ts`

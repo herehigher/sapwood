@@ -37,9 +37,10 @@ is enforced structurally, not by asking the model nicely:
   malformed `tool_input` for a guarded tool, or any exception thrown while deciding. A
   safety hook that can be disabled by feeding it garbage isn't one.
 
-**Single-identity limitation for engine-agent review.** The engine-agent review session and the
-merger use one GitHub account: the identity behind the engine's token. There is no separate
-reviewer account whose GitHub approval proves account-level independence. For this reviewer kind,
+**Single-identity limitation for engine-agent review.** The engine-agent review session has no
+GitHub credentials or forge access at all. The limitation is that the engine posts the audit
+comment and performs the merge under one token identity; there is no separate reviewer account
+whose GitHub approval proves account-level independence. For this reviewer kind,
 producer≠reviewer is enforced at the process/session boundary — a different-model, read-only,
 closed review session produces structured judgment, while deterministic engine code alone writes
 GitHub state and merges — not at the GitHub-account boundary. This is a bounded limitation, not an
@@ -514,8 +515,9 @@ hardcoded (not caller-overridable) for every review session:
 clone outside every worker worktree and materializes the pinned head into a temporary plain tree.
 Every git operation ignores global/system config; clone-local config is allowlisted and dangerous
 exec-capable keys fail closed; checkout disables replacement objects and materializes symlinks as
-plain text; the resulting tree contains no `.git` directory and its checked-out OID and manifest
-are verified. Instruction files remain present by design. Their authority risk is handled by the
+plain text; the resulting tree contains no `.git` directory, the requested OID is verified after
+checkout, and a hashed manifest of the resulting tree is recorded. Instruction files remain
+present by design. Their authority risk is handled by the
 instruction-path escalation below, while the closed session profile above prevents project MCP or
 settings files in that producer-controlled tree from gaining an execution channel.
 

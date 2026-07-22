@@ -303,7 +303,7 @@ Gate② — who reviews a PR before it can merge.
 | `escalateAfterSec` | `86400` (24h) | How long a current-head review may stay non-decisive before sapwood applies `needs-human` to the PR and emits `review-silence-escalated`. This adds visibility only: the lane stays driving, polling continues, and gate② is never softened. A configured failover receives its full `failoverAfterSec` evaluation window first. |
 | `agent.model` | required | Claude model for the `engine-agent` review session. Must be non-empty and differ from `worker.model`; runtime checks also require the worker's and review session's recorded actual models to be distinguishable. |
 | `agent.effort` | `high` | Review-session effort: `low`, `medium`, or `high`. |
-| `agent.promptFile` | shipped `engine/prompts/engine-reviewer.md` | Optional review prompt template. A relative path resolves against the config file's directory. A configured missing, unreadable, empty, or invalid template fails startup; it never falls back silently. |
+| `agent.promptFile` | shipped `engine/prompts/engine-reviewer.md` | Optional review prompt template. A relative path resolves against the config file's directory. A custom template must contain all mandatory placeholders: `{{diff}}`, `{{issue-body}}`, `{{acceptance-criteria}}`, and `{{doctrine}}`; missing any fails startup. A configured missing, unreadable, empty, or invalid template fails startup; it never falls back silently. |
 | `agent.costCapUsd` | `3` | Positive finite dollar cap for one logical review. The first attempt receives the cap; a single retry after invalid/unparseable output receives only the recorded remainder. Unknown first-attempt spend disables the retry fail-closed. |
 | `agent.retryAfterSec` | `900` (15min) | Positive-integer backoff between paid engine-agent attempts on the same head after an unavailable verdict. The unavailable pin's first-attempt clock still governs configured reviewer failover and human escalation. |
 
@@ -317,6 +317,9 @@ no `fallbackModel` field. The engine spawns this review directly after determini
 there is no trigger comment or hosted bot to poll. The session emits strictly structured per-AC
 judgments and findings; the engine validates that output, derives approval or rejection, writes a
 non-authoritative audit comment, then re-fetches the live gate state before consuming the verdict.
+Engine-agent review spend is governed only by `agent.costCapUsd`. It is not written to
+`spend_ledger`, so it is outside `cost.roundBudgetUsd`, `cost.dailyBudgetUsd`, and
+`stop.afterSpendUsd`.
 
 **Choosing a hosted-bot entry point (`triggerCommand`, #156):** for the hosted-bot modes,
 sapwood doesn't hard-code how you invoke a review — the default posts `@codex review`, which
