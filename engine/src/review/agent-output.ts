@@ -120,11 +120,11 @@ function validateAgentFindings(v: unknown): v is Finding[] {
 
 /** Fence classifiers exported to pin the subset invariant that makes ambiguity scanning safe. */
 export function isStrictFenceDelimiter(line: string): boolean {
-  return /^```[a-zA-Z0-9-]*\s*$/.test(line);
+  return /^```[a-zA-Z0-9-]*$/.test(line);
 }
 
 export function isWiderFenceDelimiter(line: string): boolean {
-  return /^(?:`{3,}|~{3,})[^\r\n]*$/.test(line);
+  return /^(?:`{3,}|~{3,})[\s\S]*$/.test(line);
 }
 
 /**
@@ -138,12 +138,11 @@ export function isWiderFenceDelimiter(line: string): boolean {
  * Emulating CommonMark pairing here would be over-engineering, so any exotic fence in scope makes
  * orientation undecidable and refuses the strip. The observed benign haiku wrapper, which uses
  * plain triple-backtick fences throughout, is unaffected.
- * Classification removes all trailing CR characters per line. For a strict-shaped candidate,
- * the regex families' trailing-character classes disagree only on CR: `[^\r\n]*` excludes CR
- * and LF, LF cannot occur within a split line, and every other whitespace character is matched
- * by both. Stripping all trailing CRs before classification therefore makes
- * `strict(line) => wider(line)` hold by construction, so no CR-based EOL variant can be visible
- * only to the strict test.
+ * Classification uses a canonical view with all trailing whitespace removed. After
+ * canonicalization, a strict line is exactly three backticks followed by tag characters; the
+ * wider prefix `{3,}` covers that prefix and `[\s\S]*` covers any remainder. Therefore
+ * `strict(canon) => wider(canon)` holds structurally: no whitespace or EOL variant can make a
+ * line visible to the strict family but invisible to the ambiguity scan.
  *
  * This deliberately lives at the engine-agent boundary rather than in `parseStructuredBlock`,
  * the shared P1-reviewed containment primitive, so no other peripheral role inherits a wider
@@ -153,35 +152,35 @@ export function isWiderFenceDelimiter(line: string): boolean {
  */
 function stripSymmetricFence(text: string): string {
   const lines = text.split("\n");
-  const normalizedLines = lines.map((line) => line.replace(/\r+$/, ""));
+  const canonicalLines = lines.map((line) => line.replace(/\s+$/u, ""));
   let closingIndex = lines.length - 1;
-  while (closingIndex >= 0 && normalizedLines[closingIndex]!.trim() === "") closingIndex -= 1;
-  if (closingIndex < 0 || !/^```\s*$/.test(normalizedLines[closingIndex]!)) return text;
+  while (closingIndex >= 0 && canonicalLines[closingIndex]!.trim() === "") closingIndex -= 1;
+  if (closingIndex < 0 || canonicalLines[closingIndex] !== "```") return text;
 
   let resultIndex = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (normalizedLines[i]!.trim() === RESULT_BLOCK_START) {
+    if (canonicalLines[i]!.trim() === RESULT_BLOCK_START) {
       resultIndex = i;
       break;
     }
   }
   const openingIndex = resultIndex - 1;
-  if (openingIndex < 0 || !isStrictFenceDelimiter(normalizedLines[openingIndex]!)) return text;
+  if (openingIndex < 0 || !isStrictFenceDelimiter(canonicalLines[openingIndex]!)) return text;
 
   for (let i = 0; i < closingIndex; i += 1) {
     if (i === openingIndex) continue;
-    const line = normalizedLines[i]!;
+    const line = canonicalLines[i]!;
     if (isWiderFenceDelimiter(line) && !isStrictFenceDelimiter(line)) return text;
   }
 
   let precedingFenceCount = 0;
   for (let i = 0; i < openingIndex; i += 1) {
-    if (isStrictFenceDelimiter(normalizedLines[i]!)) precedingFenceCount += 1;
+    if (isStrictFenceDelimiter(canonicalLines[i]!)) precedingFenceCount += 1;
   }
   if (precedingFenceCount % 2 !== 0) return text;
 
   for (let i = openingIndex + 1; i < closingIndex; i += 1) {
-    if (isStrictFenceDelimiter(normalizedLines[i]!)) return text;
+    if (isStrictFenceDelimiter(canonicalLines[i]!)) return text;
   }
 
   return lines.filter((_line, index) => index !== openingIndex && index !== closingIndex).join("\n");

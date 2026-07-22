@@ -386,16 +386,33 @@ ${JSON.stringify({
   }
 });
 
-test("fence classifiers (#319 round 5): strict acceptance implies wider acceptance after trailing-CR normalization", () => {
+test("parseAgentReviewOutputText (#319 round 6): mixed trailing-whitespace preambles cannot bypass the wider fence scan", () => {
+  const preambles = ["````text\r ", "~~~text\r ", "````text\r\t"];
+  for (const preamble of preambles) {
+    const text = `${preamble}
+unclosed preamble code
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+    assert.equal(parseAgentReviewOutputText(text, MANIFEST), null, `expected ${JSON.stringify(preamble)} to remain ambiguous`);
+  }
+});
+
+test("fence classifiers (#319 round 6): strict acceptance implies wider acceptance after trailing-whitespace canonicalization", () => {
   const fenceStems = ["```", "```lang", "````", "````lang", "~~~", "~~~lang"];
-  const suffixes = ["", "\r", "\r\r", " ", "\t", "  ", "\t\t", " \r", "\t\r", " \t\r\r"];
+  const suffixes = ["", "\r", "\r\r", " ", "\t", "  ", "\t\t", "\r ", "\r\t", " \r", "\r\r ", "\t\r", " \t\r\r"];
 
   for (const stem of fenceStems) {
     for (const suffix of suffixes) {
       const candidate = `${stem}${suffix}`;
-      const normalized = candidate.replace(/\r+$/, "");
-      if (isStrictFenceDelimiter(normalized)) {
-        assert.equal(isWiderFenceDelimiter(normalized), true, `strict delimiter escaped wider scan: ${JSON.stringify(candidate)}`);
+      const canon = candidate.replace(/\s+$/u, "");
+      if (isStrictFenceDelimiter(canon)) {
+        assert.equal(isWiderFenceDelimiter(canon), true, `strict delimiter escaped wider scan: ${JSON.stringify(candidate)}`);
       }
     }
   }
@@ -412,6 +429,24 @@ ${JSON.stringify({
 })}
 <<<END_SAPWOOD_RESULT>>>
 \`\`\``.replaceAll("\n", "\r\r\n");
+  assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  });
+});
+
+test("parseAgentReviewOutputText (#319 round 6): the observed benign wrapper parses with trailing-space fence endings", () => {
+  const trailingSpace = " ";
+  const text = `I reviewed the acceptance criteria against the supplied diff and found no blocking issues.
+
+\`\`\`json${trailingSpace}
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\`${trailingSpace}`;
   assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
     perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
     findings: [],
