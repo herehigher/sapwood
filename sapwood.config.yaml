@@ -132,8 +132,10 @@ reviewer:
 # escalation:
 #   # #292: reviewer instruction files are human-vetted authority. A PR changing any old or
 #   # new path matched here receives labels.needsHuman before either review gate can proceed.
-#   # Supported glob subset: `*` within one path segment and recursive `**`. Set to [] to
-#   # deliberately disable the mechanism (then sapwood does not fetch changed files at all).
+#   # Matching is case-insensitive; supported glob subset: `*` within one path segment and
+#   # recursive `**`. Paths must be trimmed canonical repo-relative forms (no ./, /, .. segment,
+#   # //, or trailing /). A list at GitHub's 3,000-file ceiling escalates as unverifiable. Set
+#   # to [] to deliberately disable the mechanism (then sapwood does not fetch changed files).
 #   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md]
 #   # humanLabels: [sapwood:needs-human, sapwood:blocked]
 #   # holdLabels: [sapwood:hold]

@@ -87,6 +87,12 @@ export interface PRChangedFile {
   previousFilename?: string;
 }
 
+export interface PRChangedFilesResult {
+  files: PRChangedFile[];
+  /** False when GitHub's pull-files REST ceiling means the returned list may be truncated. */
+  complete: boolean;
+}
+
 /** One reaction on the PR's top-level issue-comment thread (`gh api .../reactions`). */
 export interface PRReaction {
   content: string; // "+1" | "eyes" | ...
@@ -203,8 +209,9 @@ export interface IForge {
   /** #292: rename-aware changed paths for the instruction-authority escalation gate. Both the
    *  current `filename` and optional `previousFilename` are retained because removing or
    *  renaming an instruction file changes the reviewer-resolution graph too. Failures throw so
-   *  gate callers queue fail-closed; a partial page must never be treated as a complete list. */
-  getPRChangedFiles(pr: number): Promise<PRChangedFile[]>;
+   *  gate callers queue fail-closed. `complete` is false at GitHub's 3,000-file REST ceiling so
+   *  a potentially partial list degrades to human review rather than being treated as safe. */
+  getPRChangedFiles(pr: number): Promise<PRChangedFilesResult>;
   /** #111 PR-A: commit history since `sinceIso` — the digest's "git log since round start"
    *  source. Deliberately sourced from the GitHub API (`gh api .../commits`), NOT a local
    *  `git log` subprocess: worker.test.ts's #69 grep-invariant pins that the ONLY engine
@@ -701,14 +708,15 @@ export class GithubForge implements IForge {
     return this.gh(["pr", "diff", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`]);
   }
 
-  async getPRChangedFiles(pr: number): Promise<PRChangedFile[]> {
+  async getPRChangedFiles(pr: number): Promise<PRChangedFilesResult> {
     const out = await this.gh([
       "api",
       `repos/${this.cfg.board.owner}/${this.repo()}/pulls/${pr}/files?per_page=100`,
       "--paginate",
       "--slurp",
     ]);
-    return parsePRChangedFiles(out);
+    const files = parsePRChangedFiles(out);
+    return { files, complete: files.length < 3000 };
   }
 
   async getCommitsSince(sinceIso: string): Promise<CommitInfo[]> {

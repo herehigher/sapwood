@@ -161,8 +161,8 @@ class FakeForge implements IForge {
   async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles(): Promise<[]> {
-    return [];
+  async getPRChangedFiles() {
+    return { files: [], complete: true };
   }
   async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
@@ -3474,7 +3474,9 @@ test("#170 review silence: aged episode labels PR + emits once while driving; ve
     };
     const held = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
     assert.equal(st.getWorker("lane-silent")?.state, "failed");
-    assert.deepEqual(held.driven, [{ kind: "needs-human", worker: "lane-silent", issue: 170, pr: 170, reason: "gate:HUMAN:MERGE_OK" }]);
+    assert.deepEqual(held.driven, [
+      { kind: "needs-human", worker: "lane-silent", issue: 170, pr: 170, reason: "gate:HUMAN:instruction-path-latch" },
+    ]);
     assert.equal(rawEventKinds(path).filter((k) => k === "review-silence-escalated").length, 1);
 
     // Human clears both synchronized holds. Existing gated reentry clears the old pin and posts
@@ -3612,7 +3614,9 @@ test("tick DRIVE (#248): hold + needs-human simultaneously on the SAME PR -> esc
   forge.prReviewData = { ...forge.prReviewData, headOid: "H1", labels: ["hold", "needs-human"] };
 
   const r = await tick({ forge, state: st, supervisor: sup, cfg, mergeGate: gate });
-  assert.deepEqual(r.driven, [{ kind: "needs-human", worker: "lane-both", issue: 51, pr: 601, reason: "gate:HUMAN:WAIT_REVIEW" }]);
+  assert.deepEqual(r.driven, [
+    { kind: "needs-human", worker: "lane-both", issue: 51, pr: 601, reason: "gate:HUMAN:instruction-path-latch" },
+  ]);
   assert.equal(st.getWorker("lane-both")?.state, "failed");
   // #248 review round 1 (G4): the escalation DOES write needs-human (asserted above via the
   // outcome kind) — this proves that legitimate write is never, itself, the hold label.

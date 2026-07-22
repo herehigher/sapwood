@@ -220,7 +220,7 @@ function makeDeps(overrides: {
     getPRStatus: async () => status(),
     getPRReviewData: async () => data(),
     getPRDiff: async () => "diff-text",
-    getPRChangedFiles: async () => [],
+    getPRChangedFiles: async () => ({ files: [], complete: true }),
     addPRLabel: async () => {},
     addPRComment: async () => {},
     getPRChecks: async () => checksPage(),
@@ -318,7 +318,7 @@ test("#292 driveEngineAgentReview: instruction edit labels/comments once before 
       getPRReviewData: async () => data({ labels: latched ? ["sapwood:needs-human"] : [] }),
       getPRChangedFiles: async () => {
         fileReads++;
-        return [{ filename: ".claude/rules/team/reviewer.md" }];
+        return { files: [{ filename: ".claude/rules/team/reviewer.md" }], complete: true };
       },
       addPRLabel: async () => {
         labelWrites++;
@@ -349,7 +349,7 @@ test("#292 driveEngineAgentReview: instruction edit labels/comments once before 
   assert.equal(recorded.wal, null);
 
   const second = await driveEngineAgentReview(deps, 1, 2);
-  assert.equal(second.kind, "queued", "the existing human-label preflight remains the downstream latch path");
+  assert.deepEqual(second, { kind: "needs-human", reason: "engine-agent: gate:HUMAN:instruction-path-latch" });
   assert.equal(fileReads, 1);
   assert.equal(labelWrites, 1);
   assert.equal(comments, 1);

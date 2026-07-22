@@ -326,10 +326,10 @@ class FakeForge implements IForge {
   async getPRDiff(): Promise<string> {
     return "";
   }
-  async getPRChangedFiles(): Promise<Array<{ filename: string; previousFilename?: string }>> {
+  async getPRChangedFiles() {
     this.calls.push("changed-files");
     if (this.changedFilesErr) throw this.changedFilesErr;
-    return this.changedFiles;
+    return { files: this.changedFiles, complete: true };
   }
   async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
@@ -428,6 +428,21 @@ test("#292 MergeDriver: instruction-path change escalates once before review, th
   assert.deepEqual(forge.prLabelsAdded, [[7, "needs-human"]]);
   assert.equal(forge.comments.length, 1);
   assert.equal(forge.calls.filter((call) => call === "changed-files").length, 1, "latched tick must not refetch files");
+});
+
+test("#292 MergeDriver: an existing needs-human label returns HUMAN before file fetch or review trigger", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["needs-human"] };
+  forge.changedFiles = [{ filename: "src/app.ts" }];
+  const reviewer = new FakeReviewer();
+
+  // For a needs-human-labeled PR that does not touch instruction paths, the terminal outcome is
+  // unchanged from pre-#292 (needs-human); the latch deliberately avoids the wasted trigger.
+  const outcome = await new MergeDriver({ forge, reviewer, cfg: mkCfg() }).driveOne(7, 46, null, noopRecord);
+  assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "gate:HUMAN:instruction-path-latch" });
+  assert.equal(forge.calls.includes("changed-files"), false);
+  assert.deepEqual(reviewer.triggered, []);
+  assert.deepEqual(forge.comments, []);
 });
 
 test("#292 MergeDriver regression pin: a non-matching PR keeps the pre-#292 merge outcome/call path, plus exactly one changed-files read", async () => {

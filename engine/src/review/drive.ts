@@ -287,10 +287,18 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   if (instructionEscalation.kind === "unavailable") {
     return { kind: "queued", reason: `engine-agent: ${instructionEscalation.reason}` };
   }
+  if (instructionEscalation.kind === "latched") {
+    // The latch cannot distinguish sapwood's own #292 label write from a human-applied label,
+    // and need not: both are human territory. Conductor escalation handling is idempotent.
+    return { kind: "needs-human", reason: "engine-agent: gate:HUMAN:instruction-path-latch" };
+  }
   if (instructionEscalation.kind === "escalated") {
     return {
       kind: "needs-human",
-      reason: `engine-agent: gate:HUMAN:instruction-path-change:${instructionEscalation.matchedPaths.join(",")}`,
+      reason:
+        instructionEscalation.reason === "instruction-path-list-incomplete"
+          ? `engine-agent: gate:HUMAN:${instructionEscalation.reason}`
+          : `engine-agent: gate:HUMAN:instruction-path-change:${instructionEscalation.matchedPaths.join(",")}`,
     };
   }
 

@@ -4,11 +4,17 @@ import { ConfigSchema } from "../config/config.js";
 import type { IForge, PRChangedFile } from "../forge/forge.js";
 import { escalateInstructionPathChanges, instructionPathMatches, matchedInstructionPaths } from "./instruction-path-escalation.js";
 
-test("#292 instructionPathMatches: literals are exact/case-sensitive and * stays within one segment", () => {
+test("#292 instructionPathMatches: matching is checkout-safe case-insensitive and * stays within one segment", () => {
   assert.equal(instructionPathMatches("CLAUDE.md", "CLAUDE.md"), true);
-  assert.equal(instructionPathMatches("claude.md", "CLAUDE.md"), false);
+  assert.equal(instructionPathMatches("claude.md", "CLAUDE.md"), true);
+  assert.equal(instructionPathMatches(".CLAUDE/RULES/evil.md", ".claude/rules/**"), true);
   assert.equal(instructionPathMatches("rules/a.md", "rules/*.md"), true);
   assert.equal(instructionPathMatches("rules/nested/a.md", "rules/*.md"), false);
+});
+
+test("#292 instructionPathMatches: consecutive globstars memoize pathological non-matches", () => {
+  const pattern = `${Array.from({ length: 14 }, () => "**").join("/")}/CLAUDE.md`;
+  assert.equal(instructionPathMatches("a/b/c/d/e/f/g/h/i/j/k/l/m/n/nope.md", pattern), false);
 });
 
 test("#292 instructionPathMatches: ** recurses at any depth, including zero directories", () => {
@@ -34,7 +40,7 @@ test("#292 escalation helper: label-presence latch writes label then one comment
   const forge = {
     getPRChangedFiles: async () => {
       calls.push("files");
-      return [{ filename: "AGENTS.md" }];
+      return { files: [{ filename: "AGENTS.md" }], complete: true };
     },
     addPRLabel: async (_pr: number, label: string) => {
       calls.push(`label:${label}`);
@@ -89,7 +95,7 @@ test("#292 escalation helper: a post-label comment failure is latched and never 
   const labels: string[] = [];
   let comments = 0;
   const forge = {
-    getPRChangedFiles: async () => [{ filename: "CLAUDE.md" }],
+    getPRChangedFiles: async () => ({ files: [{ filename: "CLAUDE.md" }], complete: true }),
     addPRLabel: async (_pr: number, label: string) => {
       labels.push(label);
     },
@@ -101,4 +107,37 @@ test("#292 escalation helper: a post-label comment failure is latched and never 
   assert.equal((await escalateInstructionPathChanges({ forge, pr: 7, labels, cfg })).kind, "escalated");
   assert.equal((await escalateInstructionPathChanges({ forge, pr: 7, labels, cfg })).kind, "latched");
   assert.equal(comments, 1);
+});
+
+test("#292 escalation helper: an incomplete 3,000-file list escalates without pattern matching", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const files = Array.from({ length: 3000 }, (_, index) => ({ filename: `src/generated-${index}.ts` }));
+  let comment = "";
+  const forge = {
+    getPRChangedFiles: async () => ({ files, complete: false }),
+    addPRLabel: async () => {},
+    addPRComment: async (_pr: number, body: string) => {
+      comment = body;
+    },
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+
+  const result = await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg });
+  assert.deepEqual(result, { kind: "escalated", matchedPaths: [], reason: "instruction-path-list-incomplete" });
+  assert.match(comment, /changed-file list exceeded the GitHub API ceiling.*could not be verified.*instruction-path-list-incomplete/s);
+});
+
+test("#292 escalation helper: matched paths are defanged before rendering in an engine-authored comment", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  let comment = "";
+  const forge = {
+    getPRChangedFiles: async () => ({ files: [{ filename: ".claude/rules/evil`\n@user.md" }], complete: true }),
+    addPRLabel: async () => {},
+    addPRComment: async (_pr: number, body: string) => {
+      comment = body;
+    },
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+
+  assert.equal((await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg })).kind, "escalated");
+  assert.doesNotMatch(comment, /evil`|\n@user/);
+  assert.match(comment, /`\.claude\/rules\/evil\?\?@user\.md`/);
 });

@@ -4,16 +4,24 @@ import { labelsInclude } from "../forge/labels.js";
 
 /**
  * #292: match a repo-root-relative Git path against the deliberately small instruction-path
- * glob subset. Literal patterns are exact and case-sensitive (Git semantics); `*` matches
- * within one path segment, while a whole `**` segment matches zero or more segments.
+ * glob subset. Git paths are case-sensitive, but reviewer instructions are consumed on
+ * case-insensitive macOS/Windows checkouts too; case-folding makes a suspicious case variant
+ * escalate safely. `*` matches within one path segment, while a whole `**` segment matches
+ * zero or more segments.
  * Keeping this pure and zero-dependency makes the reviewer-authority trust boundary auditable.
  */
 export function instructionPathMatches(path: string, pattern: string): boolean {
+  path = path.toLowerCase();
+  pattern = pattern.toLowerCase();
   if (!pattern.includes("*")) return path === pattern;
   const pathSegments = path.split("/");
   const patternSegments = pattern.split("/");
+  const visited = new Set<number>();
 
   const match = (patternIndex: number, pathIndex: number): boolean => {
+    const state = patternIndex * (pathSegments.length + 1) + pathIndex;
+    if (visited.has(state)) return false;
+    visited.add(state);
     if (patternIndex === patternSegments.length) return pathIndex === pathSegments.length;
     const segment = patternSegments[patternIndex]!;
     if (segment === "**") {
@@ -50,15 +58,26 @@ export function matchedInstructionPaths(files: readonly PRChangedFile[], pattern
  * drift between the classic review trigger and the engine-agent paid-session preflight. */
 export type InstructionPathEscalationResult =
   | { kind: "clear" | "latched" }
-  | { kind: "escalated"; matchedPaths: string[] }
+  | { kind: "escalated"; matchedPaths: string[]; reason: "instruction-path-change" | "instruction-path-list-incomplete" }
   | { kind: "unavailable"; reason: string };
+
+function sanitizePathForComment(path: string): string {
+  return [...path]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127 || character === "`" ? "?" : character;
+    })
+    .join("");
+}
 
 /**
  * #292: enforce the human-vetted standing-instructions trust chain at merge-gate time. An empty
  * `escalation.instructionPaths` list is a deliberate off-switch: no forge read occurs. The exact,
- * case-insensitive needs-human label is the idempotence latch. On a match the label is written
+ * case-insensitive needs-human label is the idempotence latch. On escalation the label is written
  * BEFORE the comment; if comment delivery then fails, the label remains the latch and the comment
- * is not retried forever (human authority is preserved even when audit delivery is unavailable).
+ * is not retried forever (the crash window between those writes is an accepted bounded audit
+ * blind spot; human authority is preserved by the label). The changed-files read is bounded by
+ * the latch: latched PRs never fetch the list again.
  */
 export async function escalateInstructionPathChanges(input: {
   forge: Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
@@ -70,14 +89,15 @@ export async function escalateInstructionPathChanges(input: {
   if (patterns.length === 0) return { kind: "clear" };
   if (labelsInclude(input.labels, input.cfg.labels.needsHuman)) return { kind: "latched" };
 
-  let files: PRChangedFile[];
+  let changedFiles: Awaited<ReturnType<IForge["getPRChangedFiles"]>>;
   try {
-    files = await input.forge.getPRChangedFiles(input.pr);
+    changedFiles = await input.forge.getPRChangedFiles(input.pr);
   } catch (error) {
     return { kind: "unavailable", reason: `instruction-path-files-unavailable: ${String(error)}` };
   }
-  const matchedPaths = matchedInstructionPaths(files, patterns);
-  if (matchedPaths.length === 0) return { kind: "clear" };
+  const matchedPaths = changedFiles.complete ? matchedInstructionPaths(changedFiles.files, patterns) : [];
+  const incomplete = !changedFiles.complete;
+  if (!incomplete && matchedPaths.length === 0) return { kind: "clear" };
 
   try {
     await input.forge.addPRLabel(input.pr, input.cfg.labels.needsHuman);
@@ -85,15 +105,23 @@ export async function escalateInstructionPathChanges(input: {
     return { kind: "unavailable", reason: `instruction-path-label-failed: ${String(error)}` };
   }
 
-  const renderedPaths = matchedPaths.map((path) => `\`${path}\``).join(", ");
   try {
-    await input.forge.addPRComment(
-      input.pr,
-      `Sapwood escalated this PR for human review because it changes reviewer instruction path(s): ${renderedPaths}. ` +
-        "Standing instructions are human-vetted reviewer authority; in-PR instruction-graph edits must never reach autonomous merge (#292).",
-    );
+    if (incomplete) {
+      await input.forge.addPRComment(
+        input.pr,
+        "Sapwood escalated this PR for human review because its changed-file list exceeded the GitHub API ceiling and could not be verified. " +
+          "The reviewer instruction graph may therefore be incomplete (instruction-path-list-incomplete, #292).",
+      );
+    } else {
+      const renderedPaths = matchedPaths.map((path) => `\`${sanitizePathForComment(path)}\``).join(", ");
+      await input.forge.addPRComment(
+        input.pr,
+        `Sapwood escalated this PR for human review because it changes reviewer instruction path(s): ${renderedPaths}. ` +
+          "Standing instructions are human-vetted reviewer authority; in-PR instruction-graph edits must never reach autonomous merge (#292).",
+      );
+    }
   } catch {
     // Label-first is intentional: it is already the durable latch, so never retry the comment.
   }
-  return { kind: "escalated", matchedPaths };
+  return { kind: "escalated", matchedPaths, reason: incomplete ? "instruction-path-list-incomplete" : "instruction-path-change" };
 }
