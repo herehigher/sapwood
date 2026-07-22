@@ -154,10 +154,12 @@ test("run --config fails closed on a missing or flag-shaped operand", () => {
   }
 });
 
-test("run --help documents that --config selects config only and keeps runtime paths cwd-relative", () => {
+test("run --help documents config-relative file keys and cwd-relative runtime paths", () => {
   const result = runCli(["node", "sapwood", "run", "--help"]);
   assert.match(result.stdout, /--config PATH/);
-  assert.match(result.stdout, /Selects\s+the config only/);
+  assert.match(result.stdout, /config-file-relative logging\.path, promptFile, goal\.file, and doctrine\.file/);
+  assert.match(result.stdout, /default log sits beside that config/);
+  assert.match(result.stdout, /DB\s+\(data\/sapwood\.sqlite\), KILL_SWITCH\/PAUSE, sessions, and worktree roots/);
   assert.match(result.stdout, /remain relative to the current working directory/);
 });
 

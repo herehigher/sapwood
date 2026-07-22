@@ -24,7 +24,7 @@ The root build fans out to the engine workspace. TypeScript emits ESM, declarati
 
 ## Configuration
 
-The checked-in `sapwood.config.yaml` is the commented default for this repository. `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, and `sapwood validate [path]` bypass the probe. The run flag selects only the config: `data/`, `data/KILL_SWITCH`, `data/PAUSE`, sessions, and worktree roots remain relative to the current working directory. JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
+The checked-in `sapwood.config.yaml` is the commented default for this repository. `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, and `sapwood validate [path]` bypass the probe. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys resolve from the selected config's directory, so an alternate config's default log lands beside that config; the DB (`data/sapwood.sqlite`), `KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative. JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
 
 Environment variables read or propagated by the engine are deliberately narrow:
 

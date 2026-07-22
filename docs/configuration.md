@@ -17,8 +17,10 @@ sapwood validate [path]
 The loader probes, in order: `sapwood.config.yaml`, `sapwood.config.yml`,
 `sapwood.config.json`. An explicit path from `sapwood run --config <path>` (including
 `--dry-run`), `sapwood status --config <path>`, or `sapwood validate [path]` bypasses
-the probe. The run flag selects only the config; runtime data, controls, sessions, and
-worktree roots stay cwd-relative.
+the probe. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys
+resolve from the selected config's directory, so an alternate config's default log lands
+beside it; the DB (`data/sapwood.sqlite`), `KILL_SWITCH`/`PAUSE`, sessions, and worktree
+roots stay cwd-relative.
 Only `board.owner`, `board.repo`, and `board.projectNumber` are
 required; every other key has a default.
 

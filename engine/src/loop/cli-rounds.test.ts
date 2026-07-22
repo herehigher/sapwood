@@ -12,7 +12,7 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
-import { type EngineOverrides, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
+import { type EngineOverrides, runCli, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
 import { State } from "../state/state.js";
@@ -715,6 +715,23 @@ test("runEngine rejects malformed --config before any dispatch or state write", 
   const forge = new FakeForge();
   try {
     assert.equal(await runEngine(["node", "sapwood", "run", "--config", "--once"], { cfg: mkCfg(), forge, state }), 1);
+    assert.deepEqual(forge.boardCalls, []);
+    assert.equal(state.activeWorkers().length, 0);
+    assert.equal(state.getRound(1), undefined);
+  } finally {
+    state.close();
+  }
+});
+
+test("runEngine rejects --milestone --config x.yaml exactly as runCli does", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  try {
+    const argv = ["node", "sapwood", "run", "--milestone", "--config", "x.yaml"];
+    assert.equal(runCli(argv).code, 1);
+    const { code, stderr } = await captureStderr(() => runEngine(argv, { cfg: mkCfg({ engine: { driver: "tick" } }), forge, state }));
+    assert.equal(code, 1);
+    assert.match(stderr, /--milestone requires a value/);
     assert.deepEqual(forge.boardCalls, []);
     assert.equal(state.activeWorkers().length, 0);
     assert.equal(state.getRound(1), undefined);
