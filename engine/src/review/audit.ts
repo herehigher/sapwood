@@ -52,8 +52,21 @@ export function buildAuditComment(wal: EngineReviewWal, artifact: EngineReviewAr
   const outcome = wal.decisiveOutcome ?? "unknown";
   const acRows =
     artifact.perAC.length > 0 ? artifact.perAC.map((a) => `| ${escapeCell(a.id)} | ${a.status} |`).join("\n") : "| — | no AC entries |";
+  // Write-boundary sanitization: never trust session prose. Blockquoting every body line
+  // structurally breaks reviewer.ts's ^ {0,3} line-start anchors in CLEAN_VERDICT_RE and
+  // REVIEWED_HEAD_OID_RE, so finding text cannot become an approval-parseable engine comment.
   const findings =
-    artifact.findings.length > 0 ? artifact.findings.map((f) => `- **${escapeCell(f.id)}**: ${f.body}`).join("\n") : "- None recorded.";
+    artifact.findings.length > 0
+      ? artifact.findings
+          .map(
+            (f) =>
+              `- **${escapeCell(f.id)}**\n${f.body
+                .split("\n")
+                .map((line) => `> ${line}`)
+                .join("\n")}`,
+          )
+          .join("\n")
+      : "- None recorded.";
   const models = artifact.sessionActualModels.length > 0 ? artifact.sessionActualModels.join(", ") : "unknown";
   return `${buildAuditMarker(markerForWal(wal))}
 
