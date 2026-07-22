@@ -275,6 +275,36 @@ ${JSON.stringify({
   assert.ok(parseAgentReviewOutputText(text, MANIFEST));
 });
 
+test("parseAgentReviewOutputText (#319 round 2 containment): a prior fence opener makes the candidate fence a closer, so the ambiguous text stays rejected", () => {
+  const text = `\`\`\`text
+preamble code
+\`\`\`
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 2): a complete fenced preamble before a correctly fenced sentinel block still parses", () => {
+  const text = `\`\`\`text
+preamble code
+\`\`\`
+prose between the complete preamble and result
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.ok(parseAgentReviewOutputText(text, MANIFEST));
+});
+
 test("parseAgentReviewOutputText (#319 containment): a lone trailing fence without an opening fence still fails", () => {
   const text = `${wrap({
     perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),

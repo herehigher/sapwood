@@ -121,14 +121,19 @@ function validateAgentFindings(v: unknown): v is Finding[] {
 /**
  * Remove the narrow markdown-wrapper shape observed from haiku-tier engine-agent reviewers:
  * an opening fence immediately before the result sentinel and a bare closing fence as the last
- * non-whitespace line. This deliberately lives at the engine-agent boundary rather than in
- * `parseStructuredBlock`, the shared P1-reviewed containment primitive, so no other peripheral
- * role inherits a wider parser contract. Requiring the symmetric pair cannot hide the truncation
- * shape guarded by the shared trailing-content rule: a truncated body leaves real content after
- * the end sentinel, never only a lone closing fence paired with the opening fence.
+ * non-whitespace line. The candidate opener must also be in opening orientation (an even number
+ * of fence delimiters precede it) and the closing fence must be its direct match (no intervening
+ * fence delimiters). Any ambiguous orientation fails closed by returning the original text.
+ *
+ * This deliberately lives at the engine-agent boundary rather than in `parseStructuredBlock`,
+ * the shared P1-reviewed containment primitive, so no other peripheral role inherits a wider
+ * parser contract. Requiring the oriented symmetric pair cannot hide the truncation shape guarded
+ * by the shared trailing-content rule: a truncated body leaves real content after the end
+ * sentinel, never only a lone closing fence paired with the opening fence.
  */
 function stripSymmetricFence(text: string): string {
   const lines = text.split("\n");
+  const isFenceDelimiter = (line: string): boolean => /^```[a-zA-Z0-9-]*\s*$/.test(line);
   let closingIndex = lines.length - 1;
   while (closingIndex >= 0 && lines[closingIndex]!.trim() === "") closingIndex -= 1;
   if (closingIndex < 0 || !/^```\s*$/.test(lines[closingIndex]!)) return text;
@@ -141,7 +146,17 @@ function stripSymmetricFence(text: string): string {
     }
   }
   const openingIndex = resultIndex - 1;
-  if (openingIndex < 0 || !/^```[a-zA-Z0-9-]*\s*$/.test(lines[openingIndex]!)) return text;
+  if (openingIndex < 0 || !isFenceDelimiter(lines[openingIndex]!)) return text;
+
+  let precedingFenceCount = 0;
+  for (let i = 0; i < openingIndex; i += 1) {
+    if (isFenceDelimiter(lines[i]!)) precedingFenceCount += 1;
+  }
+  if (precedingFenceCount % 2 !== 0) return text;
+
+  for (let i = openingIndex + 1; i < closingIndex; i += 1) {
+    if (isFenceDelimiter(lines[i]!)) return text;
+  }
 
   return lines.filter((_line, index) => index !== openingIndex && index !== closingIndex).join("\n");
 }
