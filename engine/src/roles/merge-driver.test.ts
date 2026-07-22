@@ -256,7 +256,11 @@ class FakeForge implements IForge {
   }
   merged: Array<[number, string]> = [];
   labelsAdded: Array<[number, string]> = [];
+  prLabelsAdded: Array<[number, string]> = [];
   comments: Array<[number, string]> = [];
+  changedFiles: Array<{ filename: string; previousFilename?: string }> = [];
+  changedFilesErr: Error | null = null;
+  calls: string[] = [];
   status: PRStatus = { number: 1, headOid: "HEAD", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   reviewData: PRReviewData = {
     headOid: "HEAD",
@@ -285,19 +289,26 @@ class FakeForge implements IForge {
     this.labelsAdded.push([n, l]);
   }
   async removeLabel(): Promise<void> {}
-  async addPRLabel(): Promise<void> {}
+  async addPRLabel(pr: number, label: string): Promise<void> {
+    this.calls.push("add-pr-label");
+    this.prLabelsAdded.push([pr, label]);
+    this.reviewData = { ...this.reviewData, labels: [...this.reviewData.labels, label] };
+  }
   async openPR(): Promise<number> {
     return 1;
   }
   async getPRStatus(): Promise<PRStatus> {
+    this.calls.push("status");
     if (this.statusErr) throw this.statusErr;
     return this.statusSequence.shift() ?? this.status;
   }
   async mergePR(pr: number, headOid: string): Promise<void> {
+    this.calls.push("merge");
     if (this.mergeErr) throw this.mergeErr;
     this.merged.push([pr, headOid]);
   }
   async addPRComment(pr: number, body: string): Promise<void> {
+    this.calls.push("comment");
     this.comments.push([pr, body]);
   }
   async addIssueComment(): Promise<void> {}
@@ -309,10 +320,16 @@ class FakeForge implements IForge {
     this.updateIssueBodyCalls.push([issue, body]);
   }
   async getPRReviewData(): Promise<PRReviewData> {
+    this.calls.push("review-data");
     return this.reviewData;
   }
   async getPRDiff(): Promise<string> {
     return "";
+  }
+  async getPRChangedFiles() {
+    this.calls.push("changed-files");
+    if (this.changedFilesErr) throw this.changedFilesErr;
+    return { files: this.changedFiles, complete: true };
   }
   async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
@@ -391,6 +408,68 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
 // below ("review-trigger pin (#55 P1-B)").
 const ALREADY_TRIGGERED = { head: "HEAD", at: "2020-01-01T00:00:00Z" };
 const noopRecord = (_head: string, _at: string): void => {};
+
+test("#292 MergeDriver: instruction-path change escalates once before review, then the exact PR-label latch suppresses all repeat writes", async () => {
+  const forge = new FakeForge();
+  forge.changedFiles = [{ filename: "src/new-name.md", previousFilename: "CLAUDE.md" }];
+  const reviewer = new FakeReviewer();
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
+
+  const first = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(first.kind, "needs-human");
+  assert.match(first.reason, /instruction-path-change:CLAUDE\.md/);
+  assert.deepEqual(forge.prLabelsAdded, [[7, "needs-human"]]);
+  assert.equal(forge.comments.length, 1);
+  assert.match(forge.comments[0]?.[1] ?? "", /human-vetted reviewer authority.*#292/);
+  assert.deepEqual(reviewer.triggered, []);
+
+  const second = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(second.kind, "needs-human");
+  assert.deepEqual(forge.prLabelsAdded, [[7, "needs-human"]]);
+  assert.equal(forge.comments.length, 1);
+  assert.equal(forge.calls.filter((call) => call === "changed-files").length, 1, "latched tick must not refetch files");
+});
+
+test("#292 MergeDriver: an existing needs-human label returns HUMAN before file fetch or review trigger", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["needs-human"] };
+  forge.changedFiles = [{ filename: "src/app.ts" }];
+  const reviewer = new FakeReviewer();
+
+  // For a needs-human-labeled PR that does not touch instruction paths, the terminal outcome is
+  // unchanged from pre-#292 (needs-human); the latch deliberately avoids the wasted trigger.
+  const outcome = await new MergeDriver({ forge, reviewer, cfg: mkCfg() }).driveOne(7, 46, null, noopRecord);
+  assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "gate:HUMAN:instruction-path-latch" });
+  assert.equal(forge.calls.includes("changed-files"), false);
+  assert.deepEqual(reviewer.triggered, []);
+  assert.deepEqual(forge.comments, []);
+});
+
+test("#292 MergeDriver regression pin: a non-matching PR keeps the pre-#292 merge outcome/call path, plus exactly one changed-files read", async () => {
+  const forge = new FakeForge();
+  forge.changedFiles = [{ filename: "src/app.ts" }];
+  const outcome = await new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() }).driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+  );
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.deepEqual(forge.calls, ["status", "review-data", "changed-files", "merge"]);
+  assert.deepEqual(forge.prLabelsAdded, []);
+  assert.deepEqual(forge.comments, []);
+});
+
+test("#292 MergeDriver: changed-files read failure queues fail-closed before review or merge", async () => {
+  const forge = new FakeForge();
+  forge.changedFilesErr = new Error("rate limited");
+  const reviewer = new FakeReviewer();
+  const outcome = await new MergeDriver({ forge, reviewer, cfg: mkCfg() }).driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.reason, /instruction-path-files-unavailable.*rate limited/);
+  assert.deepEqual(reviewer.triggered, []);
+  assert.deepEqual(forge.merged, []);
+});
 
 test("#170 reviewSilenceDuration: non-decisive age, label latch, and failover window", () => {
   const base = {

@@ -969,6 +969,33 @@ const EnvFailure = z
 // directly rather than through `parseConfig`/`loadConfig`. Doing the resolution as a schema-level
 // transform (rather than only inside `parseConfig`) means there is no second, easy-to-forget
 // call site for a future test or caller to miss.
+const InstructionPath = z.string().superRefine((path, ctx) => {
+  if (path.trim().length === 0) {
+    ctx.addIssue({ code: "custom", message: "escalation.instructionPaths entries must be non-empty after trim" });
+  }
+  if (path !== path.trim()) {
+    ctx.addIssue({ code: "custom", message: "escalation.instructionPaths entries must not have leading or trailing whitespace" });
+  }
+  if (path.startsWith("./") || path.startsWith("/")) {
+    ctx.addIssue({
+      code: "custom",
+      message: "escalation.instructionPaths entries must be canonical repo-relative paths without ./ or / prefixes",
+    });
+  }
+  if (path.split("/").includes("..")) {
+    ctx.addIssue({ code: "custom", message: "escalation.instructionPaths entries must not contain .. path segments" });
+  }
+  if (path.split("/").includes(".")) {
+    ctx.addIssue({ code: "custom", message: "entries must not contain . path segments — GitHub reports normalized paths" });
+  }
+  if (path.includes("//")) {
+    ctx.addIssue({ code: "custom", message: "escalation.instructionPaths entries must not contain empty // path segments" });
+  }
+  if (path.endsWith("/")) {
+    ctx.addIssue({ code: "custom", message: "escalation.instructionPaths entries must not end with /" });
+  }
+});
+
 const ConfigSchemaRaw = z
   .object({
     board: Board,
@@ -995,6 +1022,12 @@ const ConfigSchemaRaw = z
     escalation: z
       .object({
         humanLabels: z.array(z.string()).optional(),
+        // #292: repo-root-relative reviewer-instruction paths whose PR edits require human
+        // adjudication. The explicit empty list is a deliberate off-switch (and avoids even
+        // fetching changed files); matching supports literal paths plus `*` and `**`.
+        instructionPaths: z
+          .array(InstructionPath)
+          .default(["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", ".claude/rules/**", "AGENTS.md"]),
         // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
         // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written
         // ESCALATE tier. Optional here for the same "tell unset apart from explicitly set"
@@ -1053,7 +1086,7 @@ export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doct
   goal: { file: string };
   doctrine: { file: string; maxChars: number; fileRaw?: string };
   labels: ReturnType<typeof workflowLabelDefaults> & { prefix: string };
-  escalation: { humanLabels: string[]; holdLabels: string[] };
+  escalation: { humanLabels: string[]; holdLabels: string[]; instructionPaths: string[] };
   notify: { mentions: string[] };
 };
 

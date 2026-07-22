@@ -19,6 +19,7 @@ import {
   parseIssueMeta,
   parseIssueRelations,
   parsePageInfo,
+  parsePRChangedFiles,
   parsePRChecksPage,
   parsePRComments,
   parsePRCommentsPage,
@@ -39,6 +40,38 @@ import {
   selectReadyIssues,
   selectUnplacedIssues,
 } from "./forge.js";
+
+test("#292 parsePRChangedFiles: flattens paginated results and preserves rename old/new paths", () => {
+  assert.deepEqual(
+    parsePRChangedFiles(
+      JSON.stringify([[{ filename: "docs/CLAUDE.md", previous_filename: "CLAUDE.md" }], [{ filename: ".claude/rules/a.md" }]]),
+    ),
+    [{ filename: "docs/CLAUDE.md", previousFilename: "CLAUDE.md" }, { filename: ".claude/rules/a.md" }],
+  );
+  assert.throws(() => parsePRChangedFiles(JSON.stringify([[{ previous_filename: "CLAUDE.md" }]])), /no filename/);
+});
+
+test("#292 GithubForge.getPRChangedFiles: uses the rename-aware paginated REST files endpoint", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify([[{ filename: "AGENTS.md" }]]);
+  };
+  assert.deepEqual(await forge.getPRChangedFiles(29), { files: [{ filename: "AGENTS.md" }], complete: true });
+  assert.deepEqual(seen[0], ["api", "repos/o/r/pulls/29/files?per_page=100", "--paginate", "--slurp"]);
+});
+
+test("#292 GithubForge.getPRChangedFiles: marks the 3,000-file API ceiling incomplete", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: () => Promise<string> }).gh = async () =>
+    JSON.stringify([Array.from({ length: 3000 }, (_, index) => ({ filename: `generated/${index}.txt` }))]);
+  const result = await forge.getPRChangedFiles(29);
+  assert.equal(result.files.length, 3000);
+  assert.equal(result.complete, false);
+});
 
 // A representative ProjectV2 query response. `data.user` or `data.organization` —
 // the parser is owner-kind agnostic (reads whichever root is present).

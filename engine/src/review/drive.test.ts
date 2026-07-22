@@ -220,6 +220,9 @@ function makeDeps(overrides: {
     getPRStatus: async () => status(),
     getPRReviewData: async () => data(),
     getPRDiff: async () => "diff-text",
+    getPRChangedFiles: async () => ({ files: [], complete: true }),
+    addPRLabel: async () => {},
+    addPRComment: async () => {},
     getPRChecks: async () => checksPage(),
     ...overrides.forge,
   } as IForge;
@@ -301,6 +304,84 @@ test("driveEngineAgentReview: split-state reads (status0.state !== data0.state, 
   const outcome = await driveEngineAgentReview(deps, 1, 2);
   assert.equal(outcome.kind, "queued");
   assert.match(outcome.kind === "queued" ? outcome.reason : "", /gate-state-mismatch/);
+});
+
+test("#292 driveEngineAgentReview: instruction edit labels/comments once before CI, identity, WAL, or a paid session", async () => {
+  const filename = ".claude/rules/team/reviewer`\n\u202e.md";
+  let latched = false;
+  let fileReads = 0;
+  let labelWrites = 0;
+  let comments = 0;
+  let checkReads = 0;
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRReviewData: async () => data({ labels: latched ? ["sapwood:needs-human"] : [] }),
+      getPRChangedFiles: async () => {
+        fileReads++;
+        return { files: [{ filename }], complete: true };
+      },
+      addPRLabel: async () => {
+        labelWrites++;
+        latched = true;
+      },
+      addPRComment: async (_pr, body) => {
+        comments++;
+        assert.match(body, /\.claude\/rules\/team\/reviewer\?\?\?\.md.*#292/);
+      },
+      getPRChecks: async () => {
+        checkReads++;
+        return checksPage();
+      },
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+
+  const first = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(first, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer???.md",
+  });
+  assert.equal(fileReads, 1);
+  assert.equal(labelWrites, 1);
+  assert.equal(comments, 1);
+  assert.equal(checkReads, 0);
+  assert.equal(evaluated, false);
+  assert.equal(recorded.wal, null);
+
+  const second = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(second, { kind: "needs-human", reason: "engine-agent: gate:HUMAN:instruction-path-latch" });
+  assert.equal(fileReads, 1);
+  assert.equal(labelWrites, 1);
+  assert.equal(comments, 1);
+});
+
+test("#292 driveEngineAgentReview: changed-files failure queues fail-closed before CI/session work", async () => {
+  let checkReads = 0;
+  let evaluated = false;
+  const { deps } = makeDeps({
+    forge: {
+      getPRChangedFiles: async () => {
+        throw new Error("files API unavailable");
+      },
+      getPRChecks: async () => {
+        checkReads++;
+        return checksPage();
+      },
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /instruction-path-files-unavailable/);
+  assert.equal(checkReads, 0);
+  assert.equal(evaluated, false);
 });
 
 // ── #303 review round 2 (Codex P1 #2): refetchStillValid split-generation ─────────────────────

@@ -48,6 +48,7 @@ test("#288 production seam: config -> construction -> drive -> audit receipt -> 
     getPRStatus: async () => ({ state: "OPEN", headOid: H, baseOid: B, ciGreen: true, mergeable: "MERGEABLE" }),
     getPRReviewData: async () => reviewData,
     getPRDiff: async () => "diff --git a/x b/x\n+ok\n",
+    getPRChangedFiles: async () => ({ files: [], complete: true }),
     getPRChecks: async () => ({
       checks: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }],
       total: 1,

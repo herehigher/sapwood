@@ -99,6 +99,9 @@ class FakeForge implements IForge {
   async getPRDiff(): Promise<string> {
     return "";
   }
+  async getPRChangedFiles() {
+    return { files: [], complete: true };
+  }
   async getCommitsSince(): Promise<CommitInfo[]> {
     return [];
   }

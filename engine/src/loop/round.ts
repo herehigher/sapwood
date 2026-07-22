@@ -259,6 +259,9 @@ export class RoundScopedForge implements IForge {
   getPRDiff(pr: number) {
     return this.inner.getPRDiff(pr);
   }
+  getPRChangedFiles(pr: number): ReturnType<IForge["getPRChangedFiles"]> {
+    return this.inner.getPRChangedFiles(pr);
+  }
   getCommitsSince(sinceIso: string) {
     return this.inner.getCommitsSince(sinceIso);
   }
@@ -429,6 +432,9 @@ export class PoolScopedForge implements IForge {
   }
   getPRDiff(pr: number) {
     return this.inner.getPRDiff(pr);
+  }
+  getPRChangedFiles(pr: number): ReturnType<IForge["getPRChangedFiles"]> {
+    return this.inner.getPRChangedFiles(pr);
   }
   getCommitsSince(sinceIso: string) {
     return this.inner.getCommitsSince(sinceIso);

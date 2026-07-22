@@ -73,6 +73,49 @@ test("#248: escalation.holdLabels defaults to [<prefix>hold]; labels.prefix affe
   assert.deepEqual(bare.escalation.holdLabels, ["hold"]);
 });
 
+test("#292: escalation.instructionPaths has trust-chain defaults, is configurable, and [] deliberately disables it", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.deepEqual(parseConfig(base).escalation.instructionPaths, [
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    ".claude/CLAUDE.md",
+    ".claude/rules/**",
+    "AGENTS.md",
+  ]);
+  assert.deepEqual(
+    parseConfig(`${base}escalation: { instructionPaths: ["**/AGENTS.md", instructions/*.md] }`).escalation.instructionPaths,
+    ["**/AGENTS.md", "instructions/*.md"],
+  );
+  assert.deepEqual(parseConfig(`${base}escalation: { instructionPaths: [] }`).escalation.instructionPaths, []);
+});
+
+test("#292: escalation.instructionPaths rejects silently inert non-canonical entries", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  const rejected: Array<[string, RegExp]> = [
+    ["", /non-empty after trim/],
+    ["   ", /non-empty after trim/],
+    [" CLAUDE.md", /leading or trailing whitespace/],
+    ["CLAUDE.md ", /leading or trailing whitespace/],
+    ["./CLAUDE.md", /canonical repo-relative paths/],
+    ["/CLAUDE.md", /canonical repo-relative paths/],
+    ["../CLAUDE.md", /\.\. path segments/],
+    ["docs/../CLAUDE.md", /\.\. path segments/],
+    [".", /must not contain \. path segments/],
+    [".claude/./rules/**", /must not contain \. path segments/],
+    [".claude//rules/**", /empty \/\/ path segments/],
+    [".claude/rules/", /must not end with/],
+  ];
+  for (const [path, message] of rejected) {
+    assert.throws(() => parseConfig(`${base}escalation: { instructionPaths: [${JSON.stringify(path)}] }`), message, path);
+  }
+
+  assert.deepEqual(
+    parseConfig(`${base}escalation: { instructionPaths: [CLAUDE.md, .claude/rules/**, "**/AGENTS.md", instructions/*.md] }`).escalation
+      .instructionPaths,
+    ["CLAUDE.md", ".claude/rules/**", "**/AGENTS.md", "instructions/*.md"],
+  );
+});
+
 test("#248: an explicit escalation.holdLabels array is used verbatim, independent of humanLabels", () => {
   const cfg = parseConfig(`
 board: { owner: a, repo: r, projectNumber: 1 }

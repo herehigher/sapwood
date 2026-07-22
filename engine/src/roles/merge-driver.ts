@@ -31,6 +31,7 @@ import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
 import { labelsInclude, labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
 import type { EngineAgentDriveDeps } from "../review/drive.js";
 import { driveEngineAgentReview } from "../review/drive.js";
+import { escalateInstructionPathChanges } from "../review/instruction-path-escalation.js";
 import type {
   ReviewAction,
   Reviewer,
@@ -378,6 +379,29 @@ export class MergeDriver {
     // Split observation -> queue and re-read next tick; never derive a gate from mixed heads.
     if (status.headOid !== data.headOid) {
       return { kind: "queued", pr, reason: `gate-head-mismatch: ci-head=${status.headOid} review-head=${data.headOid}` };
+    }
+
+    // #292: standing instruction files are reviewer authority. Check after the two live gate
+    // reads agree, but before conflict handling or a review trigger, so no autonomous reviewer
+    // is spent on a PR that must be human-adjudicated.
+    const instructionEscalation = await escalateInstructionPathChanges({ forge, pr, labels: data.labels, cfg });
+    if (instructionEscalation.kind === "unavailable") {
+      return { kind: "queued", pr, reason: instructionEscalation.reason };
+    }
+    if (instructionEscalation.kind === "latched") {
+      // The latch cannot distinguish sapwood's own #292 label write from a human-applied label,
+      // and need not: both are human territory. Conductor escalation handling is idempotent.
+      return { kind: "needs-human", pr, reason: "gate:HUMAN:instruction-path-latch" };
+    }
+    if (instructionEscalation.kind === "escalated") {
+      return {
+        kind: "needs-human",
+        pr,
+        reason:
+          instructionEscalation.reason === "instruction-path-list-incomplete"
+            ? `gate:HUMAN:${instructionEscalation.reason}`
+            : `gate:HUMAN:instruction-path-change:${instructionEscalation.matchedPaths.join(",")}`,
+      };
     }
 
     // #270: sense conflicts before triggering or evaluating review. A born-conflicted PR has
