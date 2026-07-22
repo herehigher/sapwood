@@ -121,6 +121,22 @@ behind branch protection and a distinct identity.
   checkpoint below.
 - **AI stub detection** (plan-cascade borrow) is a cheap gate② checklist
   candidate; park until the reviewer-agent work (E-series) stabilizes.
+- **Upstream decomposition: build the light version in-house** (2026-07-22
+  owner challenge, PM + architecture adjudicated — this REVERSES the round's
+  earlier "leave it to ecosystem tools" line). Source audit: ~70% of the
+  capability already ships in the PO align pipeline (persist-first proposal
+  log, per-issue idempotent create loop with marker dedupe + receipts,
+  `origin:agent` governance, source-blind gate⓪, blocked-by dispatch filter);
+  crash semantics are the already-solved per-step-idempotent pattern, not a
+  new atomicity surface. Genuinely new: a decompose role (medium — 500–900
+  lines by analogy to architect.ts), a body-marker parent link, and one
+  hardcoded anti-recursion rule (never decompose `origin:agent` issues).
+  Human signature preserved: children land outside Ready; moving each card
+  stays the human why/what act. External heavy planners keep the same
+  interface — GitHub itself (issue + `origin:agent` + plan); the "interface"
+  deliverable is a documented intake contract, zero code. Filed as #310,
+  v0.2 non-critical path (dogfood candidate: decomposing the dashboard scope
+  itself).
 - Public numbers hygiene: cite "2300+ tests" (measured ~2331 on 2026-07-22),
   never rounder-up figures.
 
