@@ -71,11 +71,12 @@ bootstrap_github,session_start}.sh`. Guard: `backend/src/zeroday/loop/guard.py`
 | 2 | Engine language | TypeScript (whole stack) |
 | 3 | Trust context | **Trusted repos first**, architected toward public-repo hardening |
 | 4 | Dashboard | **Deferred to v0.2.** v1 ships a CLI/terminal status view; validate demand, then build the dashboard from real usage |
-| 5 | Default merge gate | **0day-style: autonomous-merge gated on a different-model Codex PR review** — gate① CI green + gate② a fresh non-author Codex review → the Conductor merges (producer≠merger). Reviewer is pluggable; **produce-PR-and-stop** (human merges) and same-model self-review remain selectable modes. Different-model default matches 0day and the security review's recommendation. |
+| 5 | Default merge gate | **0day-style: autonomous-merge gated on a different-model Codex PR review** — gate① CI green + gate② a fresh non-author review → the Conductor merges (producer≠merger). Reviewer is pluggable: hosted different-model Codex (default), same-model-trusted, human, or the engine-agent session in Decision #10; **produce-PR-and-stop** remains selectable when a human must merge. Different-model default matches 0day and the security review's recommendation. |
 | 6 | Method | 0day's TDD + two-gate + taxonomy as overridable defaults |
 | 7 | Config format | **YAML default** — `sapwood.config.yaml`, hand-edited with inline comments (serves "易读易配置"). Zod-validated after parse. The YAML parser also reads JSON for free (YAML ⊃ JSON), so `.json` works with zero extra code; no separate `.ts` config. |
 | 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. Cheap (plan written once, read by worker + reviewer who already read the diff); net-saves by killing wrong-direction PRs and rework. **Amended 2026-07-09 (gate⓪, lands in v0.2 — see the v0.2 chapter):** presence alone is no longer the bar — a **plan-reviewer peripheral (gate⓪)** reviews each plan's quality/feasibility post-`Ready`, pre-dispatch, and `getReadyIssues` requires the plan **and** its `plan:approved` label (fail-closed). `verify:n/a` is never self-declared: gate⓪ can only *propose* it, always paired with `needs-human`, and a human finalizes the adjudication by removing `needs-human` (→ doc-gate path). |
 | 9 | Edge-case handling | **Rare edge cases degrade to `needs-human`, never to more machinery** (CTO, 2026-07-07, #69). Automation covers the common path only; when a low-probability edge would require new hardening/persistence/recovery code, the correct handling is: preserve the evidence, label `needs-human`, stop. First application: the drain path never runs git in worker worktrees (the whole #59–#68 issue family collapsed into sentinel-only handoff + dirty-worktree retention). |
+| 10 | Engine-agent reviewer | **Engine-composed, static, different-Claude-model gate② session** (#279): D1 no producer-code execution/Bash; D2 superseded by D6's engine-private, config-isolated checkout; D3 runs serially after trusted CI and reruns only when needed; D4 checkbox ACs receive engine IDs; D5 configured and actual reviewer models must differ from the producer's; D6 materializes the exact head from a private clone; D7 includes instruction context but changes to configured instruction paths escalate to human review. The dispatch-time full-body/AC snapshot is authoritative session input; code-verifiable confirmation requires app-slug-bound `ci.requiredChecks`; `engine-agent` is primary-only (never a fallback) and has no fallback model. |
 
 ## Architecture (v1)
 
@@ -92,7 +93,7 @@ sapwood/
 │   ├── merge-driver.ts      # the only place a merge happens (autonomous-merge mode)
 │   ├── forge.ts             # IForge interface + GithubForge impl (gh CLI/GraphQL)
 │   ├── guard.ts             # fail-closed PreToolUse hook (port of guard.py), zero-dep
-│   ├── reviewer.ts          # pluggable review gate (default = different-model Codex review, 0day-style)
+│   ├── reviewer.ts          # pluggable review gate (hosted/trusted/human/engine-agent; Codex default)
 │   ├── config.ts            # load sapwood.config.yaml (yaml→zod), JSON also parses; defaults
 │   ├── state.ts             # SQLite (WAL) state + per-round metrics/events
 │   └── cli.ts               # `sapwood` binary: init / status / stop — runs WITHOUT a live session
@@ -254,8 +255,9 @@ PR, merge it under the locked two-gate policy, and stop itself when spend or a h
 says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.sh`.
 
 - **`reviewer.ts` (#13)** — pluggable gate②: **different-model Codex** (default) /
-  same-model-trusted-only / human. A verdict is pinned to a **specific head oid** — a
-  review of a stale head counts as *no review*. In the Codex / same-model modes, only
+  same-model-trusted-only / human (engine-agent added in M10 — Decision #10). A verdict is pinned
+  to a **specific head oid** — a review of a stale head counts as *no review*. In the Codex /
+  same-model modes, only
   the Codex bot (or a configured `trustedReviewers` allowlist) can *satisfy* gate②
   (`human` mode accepts any non-author approval — no allowlist there); in every mode a
   `CHANGES_REQUESTED` from **anyone** on the current head blocks until that same
@@ -323,8 +325,9 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
 - **Cost telemetry (#47)** — `spend_ledger` also records model id + categorized token
   usage (input/output/cache-read/cache-creation) per (lane, model), parsed from the
   same stream-json result the USD figure already came from. The ledger records
-  **loop/worker spend only** — Codex-review and human-session usage happen outside
-  stream-json and are not captured here.
+  **loop/worker spend only**. Hosted Codex and human review usage happens outside
+  stream-json; engine-agent sessions expose cost to their own whole-review cap, but
+  reviewer spend is not written to `spend_ledger`.
 - **Guard boundary extended (#43)** — the merge path is now inside the worker-unwritable
   boundary: `merge-driver.ts` source and the *running* `engine/dist/roles/reviewer.js` /
   `merge-driver.js` artifacts (same vector class as the guard artifact, closed in #26 R3).
@@ -677,8 +680,9 @@ public-repo hardening is additive, not a rewrite.** v1 requirements:
 - **Structural producer≠merger (not just the argv guard):** the merge is always
   executed by the Conductor, never the worker (matches 0day's `loop_merge_driver.sh`),
   backed by branch protection + a merge identity distinct from the worker, so the
-  invariant holds even if the guard is bypassed. gate② is a fresh non-author Codex
-  review; produce-PR-and-stop (human merges) is the conservative selectable mode.
+  invariant holds even if the guard is bypassed. gate② is a fresh non-author review from
+  the configured reviewer kind (hosted Codex by default, or trusted/human/engine-agent);
+  produce-PR-and-stop (human merges) is the conservative selectable mode.
 - **Protect the boundary from worker `Write`:** path-level deny on
   `.claude/settings.json` (hook wiring) and `.github/workflows/**`; **human-merge-only**
   for any change to `guard.ts`, hook wiring, `reviewer.ts`, or security config
@@ -842,8 +846,9 @@ marker idempotency, output schema, escalation path) see
   #39, #40).** `reviewer.ts` + `merge-driver.ts` with the **0day-style default**:
   autonomous-merge gated on a fresh non-author Codex review (gate②) + CI green (gate①),
   merged by the Conductor; produce-PR-and-stop selectable. Pluggable reviewer
-  (different-model Codex / same-model-trusted-only / human), engine cost ceiling + kill
-  switch (#14), rollback hardening (#31). 23-case parity vs `test_loop_merge_driver.sh`;
+  (different-model Codex / same-model-trusted-only / human; engine-agent added in M10 —
+  Decision #10), engine cost ceiling + kill switch (#14), rollback hardening (#31). 23-case
+  parity vs `test_loop_merge_driver.sh`;
   `--match-head-commit` TOCTOU pin. Key decisions + deferrals in "M3 review gate + merge
   modes" above. ~~Live end-to-end merge-gate run moves to M4 with the loop driver.~~
 - **M4 — UX surface + CLI:** ✅ **loop driver delivered (#46, PR TBD):** `driver.ts`
@@ -1321,7 +1326,7 @@ to when v0.2 implementation issues are cut, not locked here.
   shows the dead workers.
 - **End-to-end dogfood:** on a trusted throwaway repo — `init` (zero manual GitHub UI
   steps, from clean `gh auth`), seed 2–3 issues. Default 0day-style run:
-  claim → worktree → PR → **Codex review** → CI green + fresh review → **Conductor
+  claim → worktree → PR → **configured independent review** → CI green + fresh review → **Conductor
   merges** (confirm the worker never self-merges). Also exercise the conservative
   produce-PR-and-stop mode (stops for human merge).
 - **Soft budget handoff (explicit test):** a worker reaching its soft per-worker

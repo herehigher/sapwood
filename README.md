@@ -73,7 +73,7 @@ flowchart LR
     WORKER --- GUARD
   end
 
-  REVIEWER["Independent reviewer<br/>(different model, e.g. Codex)"]
+  REVIEWER["Independent reviewer<br/>(different model — hosted bot or engine-agent session)"]
 
   ISSUES -->|Ready| CONDUCTOR
   ROUND -->|"drives ticks (executing phase)"| CONDUCTOR

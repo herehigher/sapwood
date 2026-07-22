@@ -37,6 +37,19 @@ is enforced structurally, not by asking the model nicely:
   malformed `tool_input` for a guarded tool, or any exception thrown while deciding. A
   safety hook that can be disabled by feeding it garbage isn't one.
 
+**Single-identity limitation for engine-agent review.** The engine-agent review session has no
+GitHub credentials or forge access at all. The limitation is that the engine posts the audit
+comment and performs the merge under one token identity; there is no separate reviewer account
+whose GitHub approval proves account-level independence. For this reviewer kind,
+producer≠reviewer is enforced at the process/session boundary — a different-model, read-only,
+closed review session produces structured judgment, while deterministic engine code alone writes
+GitHub state and merges — not at the GitHub-account boundary. This is a bounded limitation, not an
+identity claim. The compensating control is the receipted, non-authoritative audit-comment trail:
+it records the reviewed head and diff, run id, actual reviewer model(s), prompt hash, and
+materialized-tree manifest hash before any engine-agent-derived merge/FIXABLE outcome is consumed.
+It makes the separation and evidence inspectable, but does not turn the shared account into two
+independent principals.
+
 ### Guard modes: hard vs. soft
 
 `guard.mode` (default `hard`) controls how the hook responds to a blocked command:
@@ -498,6 +511,24 @@ hardcoded (not caller-overridable) for every review session:
   materialized directory that doesn't exist at spawn time gets (every setup failure maps to a
   `session-unavailable` outcome, never a silent degraded run).
 
+**Projection sanitization contract.** `review/materializer.ts` creates a fresh engine-private bare
+clone outside every worker worktree and materializes the pinned head into a temporary plain tree.
+Every git operation ignores global/system config; clone-local config is allowlisted and dangerous
+exec-capable keys fail closed; checkout disables replacement objects and materializes symlinks as
+plain text; the resulting tree contains no `.git` directory, the requested OID is verified after
+checkout, and a hashed manifest of the resulting tree is recorded. Instruction files remain
+present by design. Their authority risk is handled by the
+instruction-path escalation below, while the closed session profile above prevents project MCP or
+settings files in that producer-controlled tree from gaining an execution channel.
+
+The other sanitization boundary is the write from the session to GitHub. The session's structured
+output is data, never instructions for the engine to execute: a strict schema accepts only complete
+per-AC judgments and findings, and deterministic code derives the verdict. When `review/audit.ts`
+renders the human evidence record, it escapes table cells and blockquotes every line of finding
+prose before it crosses into a PR comment. That quoting prevents session prose from matching the
+hosted-reviewer's clean-verdict or reviewed-head parsers. Audit comments are explicitly
+non-authoritative and are never read back as gate② approvals.
+
 ### Benchmark isolation recipe (evals only — never production)
 
 **Not to be confused with #235's guard-hook read containment above.** This section's
@@ -539,6 +570,25 @@ producer≠reviewer≠merger safety boundary this whole page describes — runni
 it is running unguarded, full stop, regardless of how convenient the isolation is for
 reproducibility. Benchmark runs are a separate, offline, human-supervised activity;
 they never feed sapwood's own dispatch loop.
+
+## Instruction-path changes escalate to human review (#292)
+
+Standing reviewer instructions are authority, so sapwood treats their merge history as a trust
+chain. Before either a hosted-bot review trigger or a paid engine-agent session, the merge gate
+checks the PR's rename-aware changed-file list against `escalation.instructionPaths`. A match on
+an old or new path applies `labels.needsHuman` before review proceeds and posts one explanatory
+comment. If GitHub cannot provide a complete changed-file list within its API ceiling, the PR also
+escalates fail-closed. The exact needs-human PR label is the latch: later ticks neither fetch the
+file list nor repeat either write.
+
+This ensures instructions absorbed by a review session were previously human-vetted, while an
+instruction edit in the current PR can never use its own new authority to reach autonomous merge.
+The default paths cover `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`,
+`.claude/rules/**`, and `AGENTS.md`, so the same rule protects both engine-agent context and the
+hosted bot's PR-head guidance. This is deliberately **escalation, not a guard write-denial**:
+editing standing instructions is legitimate work, and denying the edit would mask that intent.
+The worker may produce the change; a human must adjudicate it. Setting
+`escalation.instructionPaths: []` explicitly turns the mechanism off.
 
 ## Human-merge-only paths
 
@@ -763,15 +813,12 @@ proceed; a human must re-adjudicate (a renewed gate⓪ pass) before the lane can
 again. A lane with no recorded snapshot (dispatched before this feature shipped) is not
 treated as drift — it drives normally, so this only ever tightens NEW dispatches.
 
-**Scope note: this is the tick-time GATE, not yet the review SESSION's input.** #283
-(this section) delivers snapshot persistence and the drift gate above — it does not
-change what body text an actual review session sees. The existing hosted-bot trigger
-(`reviewer.ts`'s `CodexReviewer.triggerReview`, human-merge-only and out of this PR's
-scope) still performs its own separate live `getIssueBody` read to build the `@codex
-review` trigger comment, unaffected by any of this. Wiring `state.getAcSnapshot(issue).body`
-as the actual input to a review session — so the session itself never sees a live
-re-fetch — is issue #286 (E4a, the engine-agent adapter)'s job; #283 provides the
-primitive (proven immutable across a live edit) that consumer is built to read.
+**The engine-agent session consumes the snapshot directly.** Its adapter resolves
+`state.getAcSnapshot(issue)` and builds the review prompt from that frozen full body and AC
+manifest; it never re-fetches the issue body or re-extracts acceptance criteria for session input.
+A missing snapshot is `unavailable` fail-closed. The hosted-bot trigger still performs its own live
+`getIssueBody` read to build the `@codex review` comment, but the conductor's full-body drift gate
+above runs before either reviewer kind reaches its gate path.
 
 **Snapshot ownership is bound to the lane, not just the issue.** `ac_snapshots` is
 upsert-by-issue (one row per issue number) — but a `failed`-with-PR lane awaiting a
@@ -792,10 +839,26 @@ ids), but never assumed stable across a body edit; drift detection is what preve
 changed body from ever being silently re-extracted into a NEW id set that the engine
 would then treat as equivalent to the old one.
 
+## CI execution evidence for engine-agent review (design #279 §4)
+
+A code-verifiable AC reaches `confirmed` only through two complementary checks. The review session
+statically maps the AC to a named, substantive, non-skipped test on the discovery path and checks
+that its assertions are meaningful. Separately, deterministic engine code requires every
+configured `ci.requiredChecks` `{name, app}` pair to match a current-head CheckRun with conclusion
+`SUCCESS` whose check suite belongs to that exact GitHub App slug. The app binding is part of the
+trust boundary: a same-named check from another app is not evidence. Legacy status contexts and
+`SKIPPED`, `NEUTRAL`, queued, or in-progress CheckRuns do not satisfy the chain.
+
+`ci.requiredChecks: []` is parse-valid but emits a warning under `reviewer.mode: engine-agent`.
+The shipped drive path then fails its CI-evidence preflight and queues before spending on a review
+session. Workflow-command binding remains a documented residual: the agent reviews workflow-file
+changes in the diff, but the engine does not statically prove that a named CheckRun executed a
+particular command.
+
 ## See also
 
-- [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `cost`,
-  `labels`, and `roles` config sections referenced above.
+- [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `ci`,
+  `escalation`, `cost`, `labels`, and `roles` config sections referenced above.
 - [`PLAN.md`](PLAN.md) — the full architecture, decision log, and the v0.2 round
   orchestrator's self-feed design.
 - [`design/279-engine-review-agent.md`](design/279-engine-review-agent.md) — the full
