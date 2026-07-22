@@ -289,6 +289,35 @@ ${JSON.stringify({
   assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
 });
 
+test("parseAgentReviewOutputText (#319 round 3): an unclosed four-backtick preamble fence makes the wrapped block ambiguous", () => {
+  const text = `\`\`\`\`text
+unclosed preamble code
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 3): a tilde-fenced preamble makes the wrapped block ambiguous", () => {
+  const text = `~~~text
+preamble code
+~~~
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
 test("parseAgentReviewOutputText (#319 round 2): a complete fenced preamble before a correctly fenced sentinel block still parses", () => {
   const text = `\`\`\`text
 preamble code
