@@ -5,7 +5,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AcceptanceCriterion } from "./ac-snapshot.js";
-import { deriveApprovalResult, parseAgentReviewOutputText, validateAgentReviewOutput } from "./agent-output.js";
+import {
+  deriveApprovalResult,
+  isStrictFenceDelimiter,
+  isWiderFenceDelimiter,
+  parseAgentReviewOutputText,
+  validateAgentReviewOutput,
+} from "./agent-output.js";
 
 const MANIFEST: AcceptanceCriterion[] = [
   { id: "1-aaaaaaaa", text: "first criterion" },
@@ -358,6 +364,54 @@ ${JSON.stringify({
 })}
 <<<END_SAPWOOD_RESULT>>>
 \`\`\``.replaceAll("\n", "\r\n");
+  assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  });
+});
+
+test("parseAgentReviewOutputText (#319 round 5): CRCRLF four-backtick and tilde preambles cannot bypass the wider fence scan", () => {
+  const preambles = ["````text\nunclosed preamble code", "~~~text\nunclosed preamble code\n~~~"];
+  for (const preamble of preambles) {
+    const text = `${preamble}
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\r\n");
+    assert.equal(parseAgentReviewOutputText(text, MANIFEST), null, `expected ${JSON.stringify(preamble)} to remain ambiguous`);
+  }
+});
+
+test("fence classifiers (#319 round 5): strict acceptance implies wider acceptance after trailing-CR normalization", () => {
+  const fenceStems = ["```", "```lang", "````", "````lang", "~~~", "~~~lang"];
+  const suffixes = ["", "\r", "\r\r", " ", "\t", "  ", "\t\t", " \r", "\t\r", " \t\r\r"];
+
+  for (const stem of fenceStems) {
+    for (const suffix of suffixes) {
+      const candidate = `${stem}${suffix}`;
+      const normalized = candidate.replace(/\r+$/, "");
+      if (isStrictFenceDelimiter(normalized)) {
+        assert.equal(isWiderFenceDelimiter(normalized), true, `strict delimiter escaped wider scan: ${JSON.stringify(candidate)}`);
+      }
+    }
+  }
+});
+
+test("parseAgentReviewOutputText (#319 round 5): the observed benign wrapper parses with all-CRCRLF endings", () => {
+  const text = `I reviewed the acceptance criteria against the supplied diff and found no blocking issues.
+
+\`\`\`
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\r\n");
   assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
     perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
     findings: [],

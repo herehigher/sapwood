@@ -118,6 +118,15 @@ function validateAgentFindings(v: unknown): v is Finding[] {
   return true;
 }
 
+/** Fence classifiers exported to pin the subset invariant that makes ambiguity scanning safe. */
+export function isStrictFenceDelimiter(line: string): boolean {
+  return /^```[a-zA-Z0-9-]*\s*$/.test(line);
+}
+
+export function isWiderFenceDelimiter(line: string): boolean {
+  return /^(?:`{3,}|~{3,})[^\r\n]*$/.test(line);
+}
+
 /**
  * Remove the narrow markdown-wrapper shape observed from haiku-tier engine-agent reviewers:
  * an opening fence immediately before the result sentinel and a bare closing fence as the last
@@ -129,8 +138,12 @@ function validateAgentFindings(v: unknown): v is Finding[] {
  * Emulating CommonMark pairing here would be over-engineering, so any exotic fence in scope makes
  * orientation undecidable and refuses the strip. The observed benign haiku wrapper, which uses
  * plain triple-backtick fences throughout, is unaffected.
- * Classification removes one trailing CR per line so mixed-EOL session output cannot give the
- * strict and wider fence-regex families different views of the same delimiter.
+ * Classification removes all trailing CR characters per line. For a strict-shaped candidate,
+ * the regex families' trailing-character classes disagree only on CR: `[^\r\n]*` excludes CR
+ * and LF, LF cannot occur within a split line, and every other whitespace character is matched
+ * by both. Stripping all trailing CRs before classification therefore makes
+ * `strict(line) => wider(line)` hold by construction, so no CR-based EOL variant can be visible
+ * only to the strict test.
  *
  * This deliberately lives at the engine-agent boundary rather than in `parseStructuredBlock`,
  * the shared P1-reviewed containment primitive, so no other peripheral role inherits a wider
@@ -140,9 +153,7 @@ function validateAgentFindings(v: unknown): v is Finding[] {
  */
 function stripSymmetricFence(text: string): string {
   const lines = text.split("\n");
-  const normalizedLines = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
-  const isStrictFenceDelimiter = (line: string): boolean => /^```[a-zA-Z0-9-]*\s*$/.test(line);
-  const isWiderFenceDelimiter = (line: string): boolean => /^(?:`{3,}|~{3,})[^\r\n]*$/.test(line);
+  const normalizedLines = lines.map((line) => line.replace(/\r+$/, ""));
   let closingIndex = lines.length - 1;
   while (closingIndex >= 0 && normalizedLines[closingIndex]!.trim() === "") closingIndex -= 1;
   if (closingIndex < 0 || !/^```\s*$/.test(normalizedLines[closingIndex]!)) return text;
