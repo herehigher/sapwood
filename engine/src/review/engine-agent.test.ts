@@ -442,6 +442,8 @@ test("shipped engine-reviewer prompt (#319): forbids markdown fences around the 
   const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
   assert.match(prompt, /Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence\./);
   assert.match(prompt, /NOTHING — including[\s\S]*— may follow `<<<END_SAPWOOD_RESULT>>>`\./);
+  assert.doesNotMatch(prompt, /^```[ \t]*\n<<<SAPWOOD_RESULT>>>/m);
+  assert.doesNotMatch(prompt, /^<<<END_SAPWOOD_RESULT>>>[ \t]*\n```[ \t]*$/m);
 });
 
 test("loadEngineReviewerPromptTemplate: a custom template MISSING a required placeholder throws at load, naming the missing one (#74 fail-fast)", () => {

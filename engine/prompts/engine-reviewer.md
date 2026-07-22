@@ -83,7 +83,6 @@ optional BODY segment applies here; every finding's text lives inline as the `bo
 Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence. NOTHING — including
 a closing ``` fence — may follow `<<<END_SAPWOOD_RESULT>>>`.
 
-```
 <<<SAPWOOD_RESULT>>>
 {
   "perAC": [
@@ -94,7 +93,6 @@ a closing ``` fence — may follow `<<<END_SAPWOOD_RESULT>>>`.
   ]
 }
 <<<END_SAPWOOD_RESULT>>>
-```
 
 `perAC` must contain EXACTLY one entry per id listed in `<acceptance-criteria>` — no more, no
 fewer, no duplicates — each `status` one of `"confirmed"`, `"cannot-confirm"`, or
