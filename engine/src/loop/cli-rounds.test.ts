@@ -12,7 +12,7 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
-import { type EngineOverrides, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
+import { type EngineOverrides, runCli, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
 import { State } from "../state/state.js";
@@ -613,6 +613,147 @@ test("sapwood run --dry-run stays driver-agnostic: the preview path works with t
     assert.match(stdout, /no worker dispatched, no state written/);
   } finally {
     process.stdout.write = originalWrite;
+  }
+});
+
+test("sapwood run --config loads the named config and resolves worker.promptFile against that config's directory", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-run-config-"));
+  const state = new State(":memory:");
+  try {
+    writeFileSync(join(dir, "worker.md"), "Implement issue #{{issue.number}}: {{issue.title}}\n{{issue.body}}\n");
+    writeFileSync(
+      join(dir, "alternate.yaml"),
+      ["board: { owner: o, repo: r, projectNumber: 4 }", "engine: { driver: tick }", "worker: { promptFile: worker.md }", ""].join("\n"),
+    );
+    const forge = new FakeForge();
+    const code = await runEngine(["node", "sapwood", "run", "--config", join(dir, "alternate.yaml"), "--once"], {
+      forge,
+      state,
+      logger: silentLogger,
+    });
+    assert.equal(code, 0, "the named tick-driver config must win over the cwd's rounds config");
+    assert.equal(state.eventsSince("1970-01-01T00:00:00.000Z", ["tick-error"]).length, 0);
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run without --config preserves the cwd probe", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-run-config-probe-"));
+  const previousCwd = process.cwd();
+  const state = new State(":memory:");
+  try {
+    writeFileSync(join(dir, "sapwood.config.yaml"), "board: { owner: o, repo: r, projectNumber: 4 }\nengine: { driver: tick }\n");
+    process.chdir(dir);
+    assert.equal(await runEngine(["node", "sapwood", "run", "--once"], { forge: new FakeForge(), state, logger: silentLogger }), 0);
+  } finally {
+    process.chdir(previousCwd);
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run --dry-run --config loads the named config", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-dry-run-config-"));
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  let stdout = "";
+  try {
+    writeFileSync(join(dir, "alternate.yaml"), "board: { owner: o, repo: r, projectNumber: 4 }\nworker: { budgetUsdSoft: 7.25 }\n");
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      stdout += chunk.toString();
+      return true;
+    }) as typeof process.stdout.write;
+    const code = await runDryRun({ forge: new FakeForge() }, join(dir, "alternate.yaml"));
+    assert.equal(code, 0);
+    assert.match(stdout, /\$7\.25 soft budget\/worker/);
+  } finally {
+    process.stdout.write = originalWrite;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sapwood run --config load errors occur before dispatch or state writes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-run-config-errors-"));
+  const state = new State(":memory:");
+  class TrackingForge extends FakeForge {
+    readyReads = 0;
+    override async getReadyIssues(): Promise<Issue[]> {
+      this.readyReads++;
+      return [];
+    }
+  }
+  const forge = new TrackingForge();
+  try {
+    await assert.rejects(
+      runEngine(["node", "sapwood", "run", "--config", join(dir, "missing.yaml"), "--once"], {
+        forge,
+        state,
+        logger: silentLogger,
+      }),
+      /ENOENT/,
+    );
+    writeFileSync(join(dir, "invalid.yaml"), "board: { owner: o }\n");
+    await assert.rejects(
+      runEngine(["node", "sapwood", "run", "--config", join(dir, "invalid.yaml"), "--once"], {
+        forge,
+        state,
+        logger: silentLogger,
+      }),
+    );
+    assert.equal(forge.readyReads, 0);
+    assert.equal(state.activeWorkers().length, 0);
+    assert.equal(state.getRound(1), undefined);
+  } finally {
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runEngine rejects malformed --config before any dispatch or state write", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  try {
+    assert.equal(await runEngine(["node", "sapwood", "run", "--config", "--once"], { cfg: mkCfg(), forge, state }), 1);
+    assert.deepEqual(forge.boardCalls, []);
+    assert.equal(state.activeWorkers().length, 0);
+    assert.equal(state.getRound(1), undefined);
+  } finally {
+    state.close();
+  }
+});
+
+test("runEngine rejects --milestone --config x.yaml exactly as runCli does", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  try {
+    const argv = ["node", "sapwood", "run", "--milestone", "--config", "x.yaml"];
+    assert.equal(runCli(argv).code, 1);
+    const { code, stderr } = await captureStderr(() => runEngine(argv, { cfg: mkCfg({ engine: { driver: "tick" } }), forge, state }));
+    assert.equal(code, 1);
+    assert.match(stderr, /--milestone requires a value/);
+    assert.deepEqual(forge.boardCalls, []);
+    assert.equal(state.activeWorkers().length, 0);
+    assert.equal(state.getRound(1), undefined);
+  } finally {
+    state.close();
+  }
+});
+
+test("runEngine's tests-only cfg override keeps precedence over --config", async () => {
+  const state = new State(":memory:");
+  try {
+    assert.equal(
+      await runEngine(["node", "sapwood", "run", "--config", "/does/not/exist.yaml", "--once"], {
+        cfg: mkCfg({ engine: { driver: "tick" } }),
+        forge: new FakeForge(),
+        state,
+        logger: silentLogger,
+      }),
+      0,
+    );
+  } finally {
+    state.close();
   }
 });
 

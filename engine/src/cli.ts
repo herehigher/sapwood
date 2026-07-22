@@ -63,7 +63,7 @@ Flags:
 `;
 
 const RUN_USAGE = `\
-usage: sapwood run [--once | --until-idle | --dry-run] [--milestone NAME] [--stop-* ...]
+usage: sapwood run [--once | --until-idle | --dry-run] [--config PATH] [--milestone NAME] [--stop-* ...]
 
 Run the engine. Default driver (cfg.engine.driver, "rounds"): the round orchestrator —
 peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the
@@ -75,6 +75,11 @@ cfg.engine.tickIntervalSec's cadence, no peripherals — the pre-#106 behavior, 
 reachable as an explicit escape hatch.
 
 Flags:
+  --config PATH  Load config from this path instead of probing the defaults. Selects
+                 config-file-relative logging.path, promptFile, goal.file, and doctrine.file
+                 keys (so its default log sits beside that config). The DB
+                 (data/sapwood.sqlite), KILL_SWITCH/PAUSE, sessions, and worktree roots
+                 remain relative to the current working directory.
   --once         Tick driver only (engine.driver: tick): run exactly one tick, then exit
                  (exit 1 if the tick attempt failed). No equivalent under the round
                  orchestrator, which has no notion of a single tick — passing it under
@@ -131,6 +136,29 @@ never waits for wind-down (stoppedBy stays "once").
  *  engine starts — `sapwood run --bogus` silently starting a daemon that claims issues and
  *  dispatches workers is the exact failure Codex PR #50 flagged (thread on cli.ts:46). */
 const RUN_FLAGS = ["--once", "--until-idle", "--dry-run"] as const;
+
+/** Pull `--config PATH` out of a run-subcommand argv, consuming its operand so later scans
+ *  cannot mistake the path for a positional or flag. Mirrors status's fail-closed value-taking
+ *  parse: a missing or flag-shaped operand is always an error, never a fallback to cwd probing.
+ *  Tolerates full process.argv for the same reason parseStopFlags/parseMilestoneFlag do. */
+export function parseRunConfigFlag(argv: string[]): { rest: string[]; configPath?: string; error?: string } {
+  const rest: string[] = [];
+  let configPath: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token !== "--config") {
+      rest.push(token);
+      continue;
+    }
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("-")) {
+      return { rest, error: "--config requires a path" };
+    }
+    configPath = value;
+    i++;
+  }
+  return configPath !== undefined ? { rest, configPath } : { rest };
+}
 
 /** #76/#154: the four value-taking `--stop-*` flags, each paired with the StopConfig key it
  *  feeds. */
@@ -328,8 +356,8 @@ export function formatDryRunPreview(preview: DryRunPreview): string {
  *  takes) so a test can prove --dry-run keeps working under the new rounds DEFAULT — main()
  *  routes --dry-run here BEFORE runEngine ever runs, so the preview is driver-agnostic by
  *  construction, and this stays the one place that must never gain a driver dependency. */
-export async function runDryRun(overrides: Pick<EngineOverrides, "cfg" | "forge"> = {}): Promise<number> {
-  const cfg = overrides.cfg ?? loadConfig();
+export async function runDryRun(overrides: Pick<EngineOverrides, "cfg" | "forge"> = {}, configPath?: string): Promise<number> {
+  const cfg = overrides.cfg ?? loadConfig(configPath);
   // Same fail-fast the real run does (#74): a broken worker.promptFile must surface in the
   // preview too — dry-run exists to predict the real run, not to green-light a config the
   // real run would reject at startup. Renderer is discarded; only validation matters here.
@@ -534,7 +562,20 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
   }
 }
 
-export function runCli(argv: string[]): { stdout: string; stderr: string; code: number } {
+/** Parsed run inputs produced by the synchronous validation boundary. Passing this token into
+ *  runEngine/runDryRun prevents the async entry path from interpreting raw argv a second time. */
+export interface ValidatedRunArgs {
+  configPath?: string;
+}
+
+export interface CliResult {
+  stdout: string;
+  stderr: string;
+  code: number;
+  validatedRun?: ValidatedRunArgs;
+}
+
+export function runCli(argv: string[]): CliResult {
   const arg = argv[2];
   if (arg === "--version" || arg === "-v") {
     return { stdout: version + "\n", stderr: "", code: 0 };
@@ -557,10 +598,16 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
     if (flags.includes("--help") || flags.includes("-h")) {
       return { stdout: RUN_USAGE, stderr: "", code: 0 };
     }
+    // #320: pull the value-taking config flag out before every other scan. Its path operand is
+    // config data, never a positional/flag for the run-mode or stop-condition parsers.
+    const { rest: afterConfig, configPath, error: configError } = parseRunConfigFlag(flags);
+    if (configError) {
+      return { stdout: "", stderr: `sapwood run: ${configError}\n\n${RUN_USAGE}`, code: 1 };
+    }
     // #129: pull --milestone out first — it's sugar for round.milestone + stop.onMilestoneComplete
     // together, and its VALUE token (a milestone name) must never be mistaken for an unknown bare
     // flag below, same reasoning as the --stop-* extraction that follows.
-    const { rest: afterMilestone, milestone, error: milestoneError } = parseMilestoneFlag(flags);
+    const { rest: afterMilestone, milestone, error: milestoneError } = parseMilestoneFlag(afterConfig);
     if (milestoneError) {
       return { stdout: "", stderr: `sapwood run: ${milestoneError}\n\n${RUN_USAGE}`, code: 1 };
     }
@@ -609,8 +656,14 @@ export function runCli(argv: string[]): { stdout: string; stderr: string; code: 
         code: 1,
       };
     }
+    return {
+      stdout: "",
+      stderr: "",
+      code: -1,
+      validatedRun: configPath !== undefined ? { configPath } : {},
+    };
   }
-  // "init"/"run [valid flags]" fall through to the async path — signal caller to proceed
+  // "init" falls through to the async path — signal caller to proceed.
   return { stdout: "", stderr: "", code: -1 };
 }
 
@@ -1099,11 +1152,25 @@ export function tickOnlyFlagError(argv: string[]): string | null {
  *  (`cfg.engine.driver: "tick"`). `overrides` is production-empty (see EngineOverrides doc);
  *  tests pass fakes to drive this exact function — the real `main()` entry point — instead of
  *  reimplementing its wiring. */
-export async function runEngine(argv: string[], overrides: EngineOverrides = {}): Promise<number> {
+export async function runEngine(argv: string[], overrides: EngineOverrides = {}, validatedRun?: ValidatedRunArgs): Promise<number> {
+  // Production hands in runCli's validated token, so argv is parsed once at the entry boundary.
+  // Exported direct callers do not get a bypass: validate once here before touching config,
+  // collaborators, or state.
+  if (validatedRun === undefined) {
+    const validation = runCli(argv);
+    if (validation.code !== -1 || validation.validatedRun === undefined) {
+      if (validation.stdout) process.stdout.write(validation.stdout);
+      if (validation.stderr) process.stderr.write(validation.stderr);
+      return validation.code === -1 ? 1 : validation.code;
+    }
+    validatedRun = validation.validatedRun;
+  }
   // #129: fold --milestone's round-scope half in here, once, before either driver sees cfg —
   // this run's `round.milestone` override applies regardless of which driver runs, though only
   // the round orchestrator (round.ts) actually reads it for dispatch scoping.
-  const cfg = applyMilestoneOverride(argv, overrides.cfg ?? loadConfig());
+  // EngineOverrides.cfg is a tests-only injection seam and keeps its established precedence.
+  // Production passes no override, so the CLI path is handed to loadConfig verbatim.
+  const cfg = applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath));
   if (cfg.engine.driver === "tick") return runTickEngine(argv, cfg, overrides);
   // Gate② P2: fail fast on tick-only flags BEFORE any collaborator is constructed or any
   // dispatch can happen — same abort-with-zero-dispatch stance as buildRenderPrompt /
@@ -1117,15 +1184,17 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {})
 }
 
 async function main(argv: string[]): Promise<number> {
-  const { stdout, stderr, code } = runCli(argv);
+  const { stdout, stderr, code, validatedRun } = runCli(argv);
   if (stdout) process.stdout.write(stdout);
   if (stderr) process.stderr.write(stderr);
   if (code !== -1) return code;
 
   if (argv[2] === "run") {
     // Validated above (runCli's run-flag block) — a bare presence check is safe here.
-    if (argv.slice(3).includes("--dry-run")) return runDryRun();
-    return runEngine(argv);
+    if (argv.slice(3).includes("--dry-run")) {
+      return runDryRun({}, validatedRun?.configPath);
+    }
+    return runEngine(argv, {}, validatedRun);
   }
 
   try {

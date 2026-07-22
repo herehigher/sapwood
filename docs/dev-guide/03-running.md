@@ -24,7 +24,7 @@ The root build fans out to the engine workspace. TypeScript emits ESM, declarati
 
 ## Configuration
 
-The checked-in `sapwood.config.yaml` is the commented default for this repository. `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; an explicit CLI path bypasses the probe (`engine/src/config/config.ts`). JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
+The checked-in `sapwood.config.yaml` is the commented default for this repository. `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, and `sapwood validate [path]` bypass the probe. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys resolve from the selected config's directory, so an alternate config's default log lands beside that config; the DB (`data/sapwood.sqlite`), `KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative. JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
 
 Environment variables read or propagated by the engine are deliberately narrow:
 
@@ -45,12 +45,14 @@ Validate and preview first:
 ```bash
 node --import tsx engine/src/cli.ts validate
 node --import tsx engine/src/cli.ts run --dry-run
+node --import tsx engine/src/cli.ts run --dry-run --config path/to/sapwood.config.yaml
 ```
 
 The shipped `engine.driver` default is `rounds`. Start it with:
 
 ```bash
 node --import tsx engine/src/cli.ts run
+node --import tsx engine/src/cli.ts run --config path/to/sapwood.config.yaml
 ```
 
 For a single scheduling tick, set `engine.driver: tick` in `sapwood.config.yaml`, then run:
