@@ -92,13 +92,20 @@ export function hashDiff(diffText: string): string {
   return createHash("sha256").update(diffText).digest("hex");
 }
 
-export type IdentityResult = { kind: "resolved"; H: string; B: string; D: string } | { kind: "queue"; reason: string };
+export type IdentityResult = { kind: "resolved"; H: string; B: string; D: string; diffText: string } | { kind: "queue"; reason: string };
 
 /**
  * design #279 §2 R2-6: resolve H (head) + B (base) + D (diff hash), then REFETCH status and
  * require head==H ∧ base==B; one mismatch restarts resolution ONCE (using the fresh values from
  * the mismatched refetch), a second mismatch queues this tick. Never throws — a forge failure at
  * any step queues (same never-throws contract as merge-driver.ts's own forge reads).
+ *
+ * #303 review round 2 (P1, Codex gpt-5.6-sol high): the returned `diffText` is the EXACT text
+ * this function hashed into `D` from the WINNING round (the round whose refetch actually
+ * matched) — the caller (`driveEngineAgentReview`) threads it into the session as
+ * `ReviewContext.diffText`, so "session input diff === D" is true BY CONSTRUCTION rather than by
+ * the adapter fetching its own (potentially later, potentially different) copy. Design #279 §1:
+ * "the review object is the engine-supplied diff."
  */
 export async function resolveIdentity(
   forge: Pick<IForge, "getPRDiff" | "getPRStatus">,
@@ -123,7 +130,7 @@ export async function resolveIdentity(
       return { kind: "queue", reason: `engine-agent: identity refetch failed: ${String(e)}` };
     }
     if (refetched.headOid === H && (refetched.baseOid ?? null) === B) {
-      return { kind: "resolved", H, B, D };
+      return { kind: "resolved", H, B, D, diffText };
     }
     if (round === 1) return { kind: "queue", reason: "engine-agent: identity mismatch persisted after one restart" };
     H = refetched.headOid;
@@ -135,7 +142,19 @@ export async function resolveIdentity(
 
 /** Whether a refetched status/data pair still matches the identity (H,B) a decisive verdict was
  *  produced against, with nothing newly blocking and CI still green — design #279 §2's
- *  post-session refetch gate, reused identically by the decisive-pin cheap-consume path. */
+ *  post-session refetch gate, reused identically by the decisive-pin cheap-consume path.
+ *
+ *  #303 review round 2 (P1, Codex gpt-5.6-sol high): also requires `data.headOid === H` —
+ *  `status`/`data` are two INDEPENDENT reads (a `Promise.all` pair, or two separately-timed
+ *  fetches on the decisive-pin path) that can race a push exactly like `merge-driver.ts`'s
+ *  classic head-mismatch guard exists to catch. Without this, `status@H` (stale, pre-push) +
+ *  `data@H2` (fresh, post-push, and — critically — UNBLOCKED because the push's own commits
+ *  happen to carry no new thread/CR) would pass validation on `status`'s stale head while
+ *  actually reading a DIFFERENT generation's review data — a rejected verdict could then dispatch
+ *  a fix leg against H2 while carrying findings that were about H1. Checked ALONGSIDE the
+ *  existing `status.headOid !== H` check (either alone is sufficient to catch a plain head move;
+ *  together they catch the split-generation case where the two reads disagree with EACH OTHER,
+ *  not just with H). */
 export function refetchStillValid(
   status: PRStatus,
   data: PRReviewData,
@@ -143,6 +162,7 @@ export function refetchStillValid(
   B: string,
 ): { ok: true } | { ok: false; reason: string } {
   if (status.headOid !== H) return { ok: false, reason: `head-moved:${status.headOid}` };
+  if (data.headOid !== H) return { ok: false, reason: `data-head-mismatch:${data.headOid}` };
   if ((status.baseOid ?? null) !== B) return { ok: false, reason: `base-moved:${status.baseOid ?? "unknown"}` };
   if (deriveBlockingSignal(data).blocked) return { ok: false, reason: "newly-blocking" };
   if (!status.ciGreen) return { ok: false, reason: "ci-no-longer-green" };
@@ -192,6 +212,8 @@ export interface EngineAgentDriveDeps {
 
 export type EngineAgentDriveOutcome =
   | { kind: "queued"; reason: string }
+  | { kind: "merged"; headOid: string }
+  | { kind: "needs-human"; reason: string }
   | { kind: "consume"; status: PRStatus; data: PRReviewData; verdict: { action: "MERGE_OK" | "HANDLE_THREADS"; headOid: string } };
 
 /**
@@ -202,24 +224,60 @@ export type EngineAgentDriveOutcome =
  * `finalizeVerdict`; every other path returns `{kind:"queued"}` — this function NEVER calls
  * `forge.mergePR` or dispatches a fix leg itself.
  *
- * Ordering (design #279 §2, exact): attempt-gate (pin) -> preflight -> identity -> WAL -> session
- * (evaluate) -> audit -> refetch -> consume. See inline comments for where each step lives.
+ * Ordering (design #279 §2, exact): terminal-state check -> attempt-gate (pin) -> preflight ->
+ * identity -> WAL -> session (evaluate) -> audit -> refetch -> consume. See inline comments for
+ * where each step lives.
  *
- * #303 review (PM P1): TWO coherence checks guard against reviewing one commit and merging
- * another — (1) immediately after identity resolves, `data0.headOid` (fetched during preflight,
- * BEFORE identity resolution) must equal the resolved H, or this generation queues with NO WAL
- * write and NO session spawn; (2) immediately before `auditDelivery`, a decisive verdict's OWN
- * `headOid` must equal H, or it queues with the pin left 'unavailable' — a verdict is only ever
- * consumed for the exact oid this attempt's pin/WAL carry (the #273 OID-binding lesson).
+ * #303 review round 1 (PM P1): TWO coherence checks guard against reviewing one commit and
+ * merging another — (1) immediately after identity resolves, `data0.headOid` must equal the
+ * resolved H, or this generation queues with NO WAL write and NO session spawn; (2) immediately
+ * before `auditDelivery`, a decisive verdict's OWN `headOid` must equal H, or it queues with the
+ * pin left 'unavailable' — a verdict is only ever consumed for the exact oid this attempt's
+ * pin/WAL carry (the #273 OID-binding lesson).
+ *
+ * #303 review round 2 (Codex gpt-5.6-sol high, adjudicated by PM, 3 P1):
+ *  - Terminal-state blindness: this function used to have NO equivalent of merge-driver.ts's own
+ *    early MERGED/split-state checks — a produce-pr-and-stop lane whose audited PR a human just
+ *    merged would loop `queued` forever (preflight's `pr-not-open:MERGED` reason, never a
+ *    terminal outcome). Fixed by fetching `status0`+`data0` TOGETHER at the very top (mirroring
+ *    the classic path's own `Promise.all`) and checking MERGED / split-state / CLOSED BEFORE the
+ *    attempt-pin check even runs — covering BOTH the decisive-pin-consume path and the
+ *    fresh-attempt path with the SAME single check, since both now read the SAME status0/data0.
+ *  - `refetchStillValid` gained `data.headOid === H` (see that function's own doc).
+ *  - The engine-supplied diff is now threaded end to end: `resolveIdentity` returns the exact
+ *    text it hashed into D, and `evaluate()` receives it as `ctx.diffText` — `EngineAgentReviewer`
+ *    never fetches its own diff anymore (engine-agent.ts, #303 review round 2).
  */
 export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: number, issue: number): Promise<EngineAgentDriveOutcome> {
   const now = deps.now();
 
   let status0: PRStatus;
+  let data0: PRReviewData;
   try {
-    status0 = await deps.forge.getPRStatus(pr);
+    [status0, data0] = await Promise.all([deps.forge.getPRStatus(pr), deps.forge.getPRReviewData(pr)]);
   } catch (e) {
     return { kind: "queued", reason: `engine-agent: gate-data-unavailable: ${String(e)}` };
+  }
+
+  // ── terminal-state handling (#303 review round 2 P1, merge-driver.ts's driveOne parity) ──────
+  // MERGED wins over everything else, checked on EITHER read (one may predate the merge) — an
+  // ALREADY-MERGED PR is terminal success, never re-gated (same rationale as the classic path's
+  // own check). Split-state reads (status0.state !== data0.state) never derive anything from a
+  // mixed pair — queue, re-read next tick, same "never gate from mixed reads" stance the classic
+  // path's own head-mismatch/state-mismatch guards take. A COHERENT CLOSED-without-merge is
+  // genuinely human territory — behaviorally the SAME outcome deriveGate's own fail-safe
+  // `prState !== OPEN -> HUMAN` rule would reach once a verdict exists; returned directly here
+  // since this point in the pipeline never derives one. Placed BEFORE the attempt-pin check so
+  // BOTH the decisive-pin-consume path and the fresh-attempt path share this ONE check against
+  // the SAME status0/data0 pair (no separate terminal-state gap on either path).
+  if (status0.state === "MERGED" || data0.state === "MERGED") {
+    return { kind: "merged", headOid: status0.headOid };
+  }
+  if (status0.state !== data0.state) {
+    return { kind: "queued", reason: `engine-agent: gate-state-mismatch: ci-state=${status0.state} review-state=${data0.state}` };
+  }
+  if (data0.state !== "OPEN") {
+    return { kind: "needs-human", reason: `engine-agent: gate:HUMAN:pr-state-${data0.state}` };
   }
 
   // ── attempt-gate: the per-head pin (design #279 §2 R3) ──────────────────────────────────────
@@ -234,15 +292,10 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     // decisive, already-delivered verdict on every tick (cheap — no paid session) — a transient
     // merge failure or a refetch-race discard on an earlier tick must not permanently strand the
     // lane once the race resolves (design #279 §2: "a transient merge failure clears nothing").
+    // Reuses the SAME status0/data0 fetched above (#303 review round 2) — no separate fetch.
     const wal = deps.getWal();
     if (!wal || wal.runId !== pin.runId || wal.head !== status0.headOid || wal.decisiveOutcome == null) {
       return { kind: "queued", reason: "engine-agent: decisive pin has no matching delivered WAL record — anomaly, fail-closed" };
-    }
-    let data0: PRReviewData;
-    try {
-      data0 = await deps.forge.getPRReviewData(pr);
-    } catch (e) {
-      return { kind: "queued", reason: `engine-agent: gate-data-unavailable: ${String(e)}` };
     }
     const revalidate = refetchStillValid(status0, data0, wal.head, wal.base);
     if (!revalidate.ok) {
@@ -265,12 +318,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   }
 
   // ── preflight (design #279 §2): every gate BEFORE any paid session ─────────────────────────
-  let data0: PRReviewData;
-  try {
-    data0 = await deps.forge.getPRReviewData(pr);
-  } catch (e) {
-    return { kind: "queued", reason: `engine-agent: gate-data-unavailable: ${String(e)}` };
-  }
+  // Reuses the SAME status0/data0 fetched above (#303 review round 2) — no separate fetch.
   const preflight = checkPreflight({
     status: status0,
     data: data0,
@@ -293,7 +341,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   // ── identity resolution (design #279 §2 R2-6) ───────────────────────────────────────────────
   const identity = await resolveIdentity(deps.forge, pr, status0);
   if (identity.kind === "queue") return { kind: "queued", reason: identity.reason };
-  const { H, B, D } = identity;
+  const { H, B, D, diffText } = identity;
 
   // #303 review (PM P1): identity/session-input coherence. `data0` was fetched BEFORE identity
   // resolution and is never refreshed by a mismatch-restart — so on a restart (resolveIdentity
@@ -325,7 +373,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   deps.recordAttemptPin({ head: H, at: attemptStart, runId, kind: "unavailable" });
 
   // ── session + validate (delegated to the injected ReviewerAdapter, E4a's own responsibility) ─
-  const approvalResult = await deps.reviewerAdapter.evaluate({ forge: deps.forge, pr, issue, data: data0 });
+  const approvalResult = await deps.reviewerAdapter.evaluate({ forge: deps.forge, pr, issue, data: data0, diffText });
 
   if (approvalResult.kind === "unavailable" || approvalResult.kind === "pending") {
     // Pin already recorded 'unavailable' above (same runId/at) — nothing further to persist.

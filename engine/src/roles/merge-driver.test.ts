@@ -1784,6 +1784,81 @@ test("MergeDriver.driveOne (engine-agent): WAL precedes spawn — the WAL row ex
   assert.equal((walSeenInsideEvaluate as { head: string }).head, "HEAD");
 });
 
+// ── #303 review round 2 (Codex gpt-5.6-sol high P1 #1): terminal-state handling ───────────────
+
+test("MergeDriver.driveOne (engine-agent, produce-pr-and-stop human-merge transition, decisive pin PRESENT): a human merges the audited PR out of band — the NEXT tick detects MERGED and finally closes the lane, never re-attempts consume", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, state: "MERGED" };
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD" };
+    },
+  };
+  const recorded: EARecorded = {
+    pin: { head: "HEAD", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "decisive" },
+    wal: {
+      runId: "run-1",
+      head: "HEAD",
+      base: "BASE",
+      diffHash: "d",
+      treeManifestHash: null,
+      attemptStart: "2026-01-01T00:00:00.000Z",
+      decisiveOutcome: "approved",
+    },
+  };
+  const cfg = mkEngineAgentCfg({ merge: { mode: "produce-pr-and-stop" } });
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.equal(evaluated, false, "MERGED short-circuits before the decisive-pin consume path is ever reached");
+});
+
+test("MergeDriver.driveOne (engine-agent, produce-pr-and-stop human-merge transition, NO pin at all): the very first read already shows MERGED -> merged outcome directly, no session, no pin/WAL machinery touched", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.reviewData = { ...forge.reviewData, state: "MERGED" };
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD" };
+    },
+  };
+  const recorded: EARecorded = { pin: null, wal: null };
+  const cfg = mkEngineAgentCfg({ merge: { mode: "produce-pr-and-stop" } });
+  const driver = new MergeDriver({ forge, reviewer, cfg });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.equal(evaluated, false);
+  assert.equal(recorded.pin, null);
+  assert.equal(recorded.wal, null);
+});
+
+test("MergeDriver.driveOne (engine-agent): a COHERENT CLOSED-without-merge -> needs-human (classic deriveGate non-OPEN parity)", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.status = { ...forge.status, state: "CLOSED" };
+  forge.reviewData = { ...forge.reviewData, state: "CLOSED" };
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "engine-agent: gate:HUMAN:pr-state-CLOSED" });
+});
+
+test("MergeDriver.driveOne (engine-agent): split-state reads (status OPEN, review-data CLOSED) -> queued, never derives anything from a mixed pair", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.reviewData = { ...forge.reviewData, state: "CLOSED" }; // forge.status stays OPEN (default)
+  const reviewer = { kind: "engine-agent" as const, evaluate: async () => ({ kind: "pending" as const, headOid: "HEAD" }) };
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /gate-state-mismatch/);
+});
+
 test("MergeDriver.driveOne (engine-agent, #303 review P1): identity/session-input coherence — a mismatch-restart resolving a NEW head while the PR-review data still holds the OLD head -> queued, evaluate() never called, no WAL write", async () => {
   const forge = new EngineAgentFakeForge();
   let statusCalls = 0;

@@ -680,7 +680,12 @@ export class MergeDriver {
       pr,
       issue,
     );
+    // #303 review round 2 (P1): terminal-state outcomes (merged/needs-human) map directly —
+    // same shape the classic path's own MERGED early-return already produces (no finalizeVerdict
+    // involvement, mirroring merge-driver.ts's own MERGED check above in the classic branch).
     if (outcome.kind === "queued") return { kind: "queued", pr, reason: outcome.reason };
+    if (outcome.kind === "merged") return { kind: "merged", pr, headOid: outcome.headOid };
+    if (outcome.kind === "needs-human") return { kind: "needs-human", pr, reason: outcome.reason };
     return this.finalizeVerdict(pr, outcome.status, outcome.data, outcome.verdict);
   }
 }

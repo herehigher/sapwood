@@ -228,15 +228,23 @@ export class EngineAgentReviewer implements ReviewerAdapter {
       return { kind: "unavailable", headOid, reason: preCheckFailure };
     }
 
-    // Session input: the engine-supplied diff (ctx.forge.getPRDiff) + the snapshotted body/AC
-    // ids + doctrine — NEVER a live issue-body fetch (design #279 §5/§6).
-    let diff: string;
-    try {
-      diff = await ctx.forge.getPRDiff(ctx.pr);
-    } catch (e) {
-      return { kind: "unavailable", headOid, reason: `getPRDiff(#${ctx.pr}) failed: ${e instanceof Error ? e.message : String(e)}` };
+    // Session input: the engine-supplied diff + the snapshotted body/AC ids + doctrine — NEVER a
+    // live issue-body fetch (design #279 §5/§6). #303 review round 2 (P1): this adapter NEVER
+    // fetches the diff itself (no `ctx.forge.getPRDiff` call anywhere in this class) — `ctx.diffText`
+    // is the CALLER-SUPPLIED text (review/drive.ts's `resolveIdentity` return value, the exact
+    // bytes it hashed into the WAL-pinned diff hash D). A self-fetched diff could review bytes
+    // that differ from D if a push landed between the WAL persist and this call; requiring the
+    // caller to supply it makes "session input diff === D" true by construction, not by timing
+    // luck. Missing ⇒ unavailable, fail closed (a caller that doesn't thread it through is a
+    // caller bug, never silently degraded to a live re-fetch).
+    if (ctx.diffText === undefined) {
+      return {
+        kind: "unavailable",
+        headOid,
+        reason: "ReviewContext.diffText missing — the engine-agent adapter never fetches its own diff (design #279 §1, #303 review P1)",
+      };
     }
-    const prompt = this.buildPrompt(diff, snapshot);
+    const prompt = this.buildPrompt(ctx.diffText, snapshot);
 
     // 3. Materialize the head. Failure ⇒ unavailable — `runReviewSession` (called from
     // `attempt()` below) already maps a `MaterializeResult` failure to its own `unavailable`

@@ -59,8 +59,22 @@ function mkData(overrides: Partial<PRReviewData> = {}): PRReviewData {
   };
 }
 
-function mkForge(overrides: Partial<IForge> = {}): IForge {
-  return { getPRDiff: async () => "diff --git a/x b/x\n+added line\n", ...overrides } as unknown as IForge;
+/** #303 review round 2 (P1): `getPRDiff` must NEVER be called by `EngineAgentReviewer.evaluate`
+ *  anymore (the diff is caller-supplied via `ctx.diffText`) — `getPRDiffCalls` is a PER-FORGE-
+ *  INSTANCE counter (never module-level/shared) so each test's assertion is independent of test
+ *  ordering; still present on the fake so a call site that mistakenly reaches for it fails LOUDLY
+ *  (returns a value, recorded) rather than throwing a "not a function" TypeError that could mask
+ *  which assertion actually caught the regression. */
+function mkForge(overrides: Partial<IForge> = {}): IForge & { getPRDiffCalls: number[] } {
+  const getPRDiffCalls: number[] = [];
+  return {
+    getPRDiffCalls,
+    getPRDiff: async (pr: number) => {
+      getPRDiffCalls.push(pr);
+      return "diff --git a/x b/x\n+added line\n";
+    },
+    ...overrides,
+  } as unknown as IForge & { getPRDiffCalls: number[] };
 }
 
 /** A resultText carrying a valid sentinel-wrapped structured block for MANIFEST. */
@@ -141,8 +155,12 @@ function mkDeps(opts: {
   };
 }
 
+// #303 review round 2 (P1): every test's default ctx() now carries `diffText` — the
+// engine-supplied diff `EngineAgentReviewer.evaluate` reads instead of calling `ctx.forge.getPRDiff`.
+const DEFAULT_DIFF_TEXT = "diff --git a/x b/x\n+added line\n";
+
 function ctx(overrides: Partial<ReviewContext> = {}): ReviewContext {
-  return { forge: mkForge(), pr: 5, issue: 42, data: mkData(), ...overrides };
+  return { forge: mkForge(), pr: 5, issue: 42, data: mkData(), diffText: DEFAULT_DIFF_TEXT, ...overrides };
 }
 
 // ── Construction ─────────────────────────────────────────────────────────────────────────────
@@ -203,17 +221,14 @@ test("evaluate(): producing worker's actual model EQUALS reviewer.agent.model ->
   assert.equal(runner.calls.length, 0);
 });
 
-test("evaluate(): getPRDiff throws -> unavailable, materialize never even attempted", async () => {
+test("evaluate(): ctx.diffText missing -> unavailable, materialize never even attempted, getPRDiff never called (#303 review round 2 P1 — the adapter never fetches its own diff)", async () => {
   const { build, materializeCalls } = mkDeps({ runnerQueue: [] });
-  const forge = mkForge({
-    getPRDiff: async () => {
-      throw new Error("network blip");
-    },
-  });
-  const result = await build().evaluate(ctx({ forge }));
+  const forge = mkForge();
+  const result = await build().evaluate(ctx({ forge, diffText: undefined }));
   assert.equal(result.kind, "unavailable");
-  assert.match((result as { reason: string }).reason, /getPRDiff.*network blip/);
+  assert.match((result as { reason: string }).reason, /diffText/);
   assert.equal(materializeCalls.length, 0);
+  assert.deepEqual(forge.getPRDiffCalls, [], "the adapter must never call getPRDiff itself");
 });
 
 test("evaluate(): materialize failure -> unavailable, never spawns a session", async () => {
@@ -387,12 +402,18 @@ test("evaluate(): materialize is called with ctx.data.headOid, and getAcSnapshot
   assert.deepEqual(getAcSnapshotCalls, [99]);
 });
 
-test("evaluate(): the diff is threaded into the session prompt (fetched via ctx.forge.getPRDiff, never a live issue body)", async () => {
+test("evaluate(): the diff reaching the session prompt is BYTE-IDENTICAL to ctx.diffText (the drive-supplied text), and getPRDiff is NEVER called by the adapter (#303 review round 2 P1)", async () => {
   const { build, runner } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED })] });
-  const forge = mkForge({ getPRDiff: async () => "UNIQUE_DIFF_MARKER_12345" });
-  await build().evaluate(ctx({ forge }));
-  assert.match(runner.calls[0]!.prompt, /UNIQUE_DIFF_MARKER_12345/);
+  const forge = mkForge();
+  const diffText = "UNIQUE_DIFF_MARKER_12345 — byte-for-byte, the exact drive-supplied text";
+  await build().evaluate(ctx({ forge, diffText }));
+  // Byte-identical: the prompt's diff block, extracted, equals diffText exactly — not merely
+  // "contains a substring of it" (a looser match could hide truncation/re-encoding bugs).
+  const promptDiffMatch = runner.calls[0]!.prompt.match(/<diff>\n([\s\S]*?)\n<\/diff>/);
+  assert.ok(promptDiffMatch, "expected the prompt to carry a <diff>...</diff> block");
+  assert.equal(promptDiffMatch![1], diffText);
   assert.match(runner.calls[0]!.prompt, /first criterion/);
+  assert.deepEqual(forge.getPRDiffCalls, [], "the adapter must never fetch its own diff — the diff is caller-supplied");
 });
 
 test("evaluate(): the SNAPSHOTTED issue body reaches the session prompt inside <issue-body> tags (#302 review P1 — issue #286's What: diff + snapshotted body + AC ids + doctrine; design #279 §5)", async () => {

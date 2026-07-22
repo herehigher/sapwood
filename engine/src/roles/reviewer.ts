@@ -350,6 +350,16 @@ export interface ReviewContext {
   data?: PRReviewData;
   /** The engine-recorded trigger pin (see ReviewTriggerPin) — used by `evaluate` only. */
   pin?: ReviewTriggerPin;
+  /** #287 (E4b, #303 review round 2 P1): the ENGINE-SUPPLIED diff text (design #279 §1: "the
+   *  review object is the engine-supplied diff") — for the engine-agent kind, this is the EXACT
+   *  text `review/drive.ts`'s `resolveIdentity` hashed into the WAL-pinned diff hash D. An
+   *  adapter that live-fetches its own diff (e.g. via `ctx.forge.getPRDiff`) could review bytes
+   *  that differ from D if a push lands between WAL persist and the adapter's own fetch — this
+   *  field closes that gap by making the diff a CALLER-SUPPLIED input, never a second read the
+   *  adapter performs itself. `EngineAgentReviewer.evaluate` requires this (undefined ⇒
+   *  `unavailable`, fail closed) and never calls `getPRDiff`. Optional/unused by every other
+   *  `ReviewerAdapter` kind (Codex/human/same-model-trusted have no session to feed a diff into). */
+  diffText?: string;
 }
 
 /** The approval-only half of the pluggable review-gate seam (design #279 §1) — a `Reviewer`

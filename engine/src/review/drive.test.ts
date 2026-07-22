@@ -95,7 +95,7 @@ test("resolveIdentity: no mismatch — resolves H/B/D on the first round", async
     getPRStatus: async () => status(),
   };
   const r = await resolveIdentity(forge, 1, status());
-  assert.deepEqual(r, { kind: "resolved", H: "H1", B: "B1", D: hashDiff("diff-text") });
+  assert.deepEqual(r, { kind: "resolved", H: "H1", B: "B1", D: hashDiff("diff-text"), diffText: "diff-text" });
 });
 
 test("resolveIdentity: ONE mismatch restarts using the fresh values, then resolves", async () => {
@@ -109,7 +109,7 @@ test("resolveIdentity: ONE mismatch restarts using the fresh values, then resolv
     },
   };
   const r = await resolveIdentity(forge, 1, status());
-  assert.deepEqual(r, { kind: "resolved", H: "H2", B: "B1", D: hashDiff("diff-text") });
+  assert.deepEqual(r, { kind: "resolved", H: "H2", B: "B1", D: hashDiff("diff-text"), diffText: "diff-text" });
   assert.equal(call, 2);
 });
 
@@ -241,6 +241,81 @@ function makeDeps(overrides: {
   };
   return { deps, recorded };
 }
+
+// ── #303 review round 2 (Codex P1 #1): terminal-state handling ────────────────────────────────
+
+test("driveEngineAgentReview: MERGED (status0.state) with NO pin at all -> merged outcome, no session, no pin/WAL touched", async () => {
+  const { deps, recorded } = makeDeps({ forge: { getPRStatus: async () => status({ state: "MERGED" }) } });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, { kind: "merged", headOid: "H1" });
+  assert.equal(recorded.pin, null);
+  assert.equal(recorded.wal, null);
+});
+
+test("driveEngineAgentReview: MERGED (data0.state) with a DECISIVE pin already present (produce-pr-and-stop human-merge transition — the audited PR the pin was written for is now merged) -> merged outcome, the decisive-pin consume path is never even reached", async () => {
+  const { deps, recorded } = makeDeps({ forge: { getPRReviewData: async () => data({ state: "MERGED" }) } });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "decisive" };
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: "approved",
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, { kind: "merged", headOid: "H1" });
+  // The pin/WAL are left exactly as they were — this outcome bypasses the pin machinery
+  // entirely (same as the classic path's own MERGED check, which never touches trigger pins).
+  assert.equal(recorded.pin?.kind, "decisive");
+});
+
+test("driveEngineAgentReview: a COHERENT CLOSED-without-merge (both reads agree) -> needs-human, classic deriveGate non-OPEN parity", async () => {
+  const { deps } = makeDeps({
+    forge: { getPRStatus: async () => status({ state: "CLOSED" }), getPRReviewData: async () => data({ state: "CLOSED" }) },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "needs-human");
+});
+
+test("driveEngineAgentReview: split-state reads (status0.state !== data0.state, NEITHER merged) -> queued, never derives anything from a mixed pair", async () => {
+  const { deps } = makeDeps({
+    forge: { getPRStatus: async () => status({ state: "OPEN" }), getPRReviewData: async () => data({ state: "CLOSED" }) },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /gate-state-mismatch/);
+});
+
+// ── #303 review round 2 (Codex P1 #2): refetchStillValid split-generation ─────────────────────
+
+test("refetchStillValid: split-generation — status@H (stale) + data@H2 (fresh, unblocked) -> discard (the status-only head check alone would have missed this)", () => {
+  const r = refetchStillValid(status({ headOid: "H1" }), data({ headOid: "H2", unresolvedThreads: 0 }), "H1", "B1");
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.reason, /data-head-mismatch/);
+});
+
+test("driveEngineAgentReview: a REJECTED verdict whose post-session data refetch reports a DIFFERENT (newer, unblocked) head than status -> discarded, never reaches FIXABLE consume", async () => {
+  let call = 0;
+  const { deps } = makeDeps({
+    forge: {
+      getPRReviewData: async () => {
+        call++;
+        // call 1: preflight's top-level fetch, at H1 (matches identity). call 2+: the POST-
+        // SESSION refetch reports H2 — a split-generation race, unblocked (unresolvedThreads: 0)
+        // so the OLD `deriveBlockingSignal` check alone would NOT have caught it.
+        return call === 1 ? data({ headOid: "H1" }) : data({ headOid: "H2", unresolvedThreads: 0 });
+      },
+      // status stays at H1 throughout — only the review-data read raced ahead.
+    },
+    evaluate: async () => ({ kind: "rejected", headOid: "H1", findings: [{ id: "f1", body: "bug" }] }),
+    auditDelivery: async () => ({ delivered: true }),
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued", "must NOT reach {kind:'consume'} (which would dispatch FIXABLE against the wrong generation)");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /refetch/);
+});
 
 test("driveEngineAgentReview: preflight failure -> queued, no WAL, no pin (costs nothing)", async () => {
   const { deps, recorded } = makeDeps({ forge: { getPRReviewData: async () => data({ isDraft: true }) } });
