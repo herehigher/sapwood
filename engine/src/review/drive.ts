@@ -204,6 +204,13 @@ export type EngineAgentDriveOutcome =
  *
  * Ordering (design #279 §2, exact): attempt-gate (pin) -> preflight -> identity -> WAL -> session
  * (evaluate) -> audit -> refetch -> consume. See inline comments for where each step lives.
+ *
+ * #303 review (PM P1): TWO coherence checks guard against reviewing one commit and merging
+ * another — (1) immediately after identity resolves, `data0.headOid` (fetched during preflight,
+ * BEFORE identity resolution) must equal the resolved H, or this generation queues with NO WAL
+ * write and NO session spawn; (2) immediately before `auditDelivery`, a decisive verdict's OWN
+ * `headOid` must equal H, or it queues with the pin left 'unavailable' — a verdict is only ever
+ * consumed for the exact oid this attempt's pin/WAL carry (the #273 OID-binding lesson).
  */
 export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: number, issue: number): Promise<EngineAgentDriveOutcome> {
   const now = deps.now();
@@ -288,6 +295,24 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   if (identity.kind === "queue") return { kind: "queued", reason: identity.reason };
   const { H, B, D } = identity;
 
+  // #303 review (PM P1): identity/session-input coherence. `data0` was fetched BEFORE identity
+  // resolution and is never refreshed by a mismatch-restart — so on a restart (resolveIdentity
+  // moved on to a NEW head H) or a plain race (the head moved between the data0 fetch and
+  // identity resolution, even with no restart), `data0.headOid` can silently diverge from the
+  // resolved H. `evaluate()` below is handed `ctx.data = data0` (the reviewer session judges
+  // `ctx.data.headOid`, the OLD head) while WAL/pin/consume all carry H (the NEW head) — a
+  // session that read one commit could gate a merge of another. Checked HERE, BEFORE the WAL
+  // write: an incoherent generation gets NO WAL record and NO session at all (never partially
+  // attempted) — this tick simply queues, and the NEXT tick re-fetches status0/data0/identity
+  // as one fresh, coherent generation. Never throws (same fail-closed-to-queue contract as
+  // every other step in this pipeline).
+  if (data0.headOid !== H) {
+    return {
+      kind: "queued",
+      reason: `engine-agent: identity/session-input incoherence — data0.headOid (${data0.headOid}) != resolved head H (${H}), refusing to spawn a session against mismatched inputs`,
+    };
+  }
+
   // ── WAL persist, BEFORE spawning ────────────────────────────────────────────────────────────
   const runId = deps.newRunId();
   const attemptStart = now.toISOString();
@@ -310,6 +335,22 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     // actionable, non-decisive result.
     const reason = approvalResult.kind === "unavailable" ? approvalResult.reason : "pending (no decisive artifact yet)";
     return { kind: "queued", reason: `engine-agent: ${reason}` };
+  }
+
+  // #303 review (PM P1, defense in depth): the #273 OID-binding lesson applied to this internal
+  // seam — a `ReviewerAdapter.evaluate()` implementation computes its OWN `headOid` on the
+  // returned `ApprovalResult` (E4a's own contract), independent of the `H` this attempt's
+  // pin/WAL were opened against. Even though `ctx.data.headOid` was just proven === H above,
+  // nothing stops a (buggy, or future non-E4a) adapter from returning a DIFFERENT headOid on
+  // its verdict — and a verdict is only ever consumed for the EXACT oid the pin/WAL carry.
+  // Checked BEFORE `auditDelivery` / the decisive-pin upgrade: a mismatch here queues, the pin
+  // STAYS 'unavailable' (never promoted to permanent on an unverified oid), and `auditDelivery`
+  // is never called for a verdict that can't be trusted to be about H.
+  if (approvalResult.headOid !== H) {
+    return {
+      kind: "queued",
+      reason: `engine-agent: decisive verdict headOid (${approvalResult.headOid}) != this attempt's resolved head H (${H}) — refusing to consume (OID-binding violation, #273's lesson)`,
+    };
   }
 
   // ── audit: discover-before-post, record delivery (E4c/#288's own implementation) ───────────

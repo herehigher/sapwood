@@ -1784,6 +1784,69 @@ test("MergeDriver.driveOne (engine-agent): WAL precedes spawn — the WAL row ex
   assert.equal((walSeenInsideEvaluate as { head: string }).head, "HEAD");
 });
 
+test("MergeDriver.driveOne (engine-agent, #303 review P1): identity/session-input coherence — a mismatch-restart resolving a NEW head while the PR-review data still holds the OLD head -> queued, evaluate() never called, no WAL write", async () => {
+  const forge = new EngineAgentFakeForge();
+  let statusCalls = 0;
+  const originalGetPRStatus = forge.getPRStatus.bind(forge);
+  forge.getPRStatus = async () => {
+    statusCalls++;
+    // call 1: driveOne's/drive.ts's own status0 fetch -> HEAD (unchanged).
+    // calls 2-3: resolveIdentity's own refetches — the head has moved to HEAD2 (mismatch,
+    // restarts once, then resolves HEAD2 as stable).
+    return statusCalls === 1 ? originalGetPRStatus() : { ...(await originalGetPRStatus()), headOid: "HEAD2" };
+  };
+  // getPRReviewData (fetched during preflight, BEFORE identity resolution) is never refreshed —
+  // it still reports the stale HEAD, exactly the divergence the coherence check must catch.
+  let evaluated = false;
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "pending" as const, headOid: "HEAD2" };
+    },
+  };
+  const recorded: EARecorded = { pin: null, wal: null };
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
+  assert.equal(outcome.kind, "queued");
+  assert.equal(evaluated, false, "an incoherent generation must never spawn a session");
+  assert.equal(recorded.wal, null, "no WAL record for an incoherent generation");
+});
+
+test("MergeDriver.driveOne (engine-agent, #303 review P1): a decisive verdict whose OWN headOid diverges from this attempt's resolved head -> queued, pin stays 'unavailable' (never permanent), never reaches finalizeVerdict/merge", async () => {
+  const forge = new EngineAgentFakeForge();
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => ({
+      kind: "approved" as const,
+      headOid: "SOME-OTHER-OID",
+      evidence: { freshApprovingReviews: 0, freshTrustedSignals: 0 },
+    }),
+  };
+  const recorded: EARecorded = { pin: null, wal: null };
+  let auditCalled = false;
+  const driver = new MergeDriver({ forge, reviewer, cfg: mkEngineAgentCfg() });
+  const outcome = await driver.driveOne(
+    7,
+    46,
+    ALREADY_TRIGGERED,
+    noopRecord,
+    undefined,
+    undefined,
+    undefined,
+    mkEngineAgentDeps(recorded, {
+      auditDelivery: async () => {
+        auditCalled = true;
+        return { delivered: true };
+      },
+    }),
+  );
+  assert.equal(outcome.kind, "queued");
+  assert.deepEqual(forge.merged, []);
+  assert.equal(auditCalled, false);
+  assert.equal(recorded.pin?.kind, "unavailable");
+});
+
 test("MergeDriver.driveOne (engine-agent): CI-evidence fixture matrix — SKIPPED conclusion never satisfies preflight, no session", async () => {
   const forge = new EngineAgentFakeForge();
   forge.checksPage = { checks: [{ name: "test", status: "COMPLETED", conclusion: "SKIPPED", state: null, appSlug: "github-actions" }] };

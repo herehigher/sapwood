@@ -282,6 +282,74 @@ test("driveEngineAgentReview: WAL is persisted BEFORE the session (evaluate) is 
   assert.equal((walAtEvaluateTime as { head: string }).head, "H1");
 });
 
+// ── #303 review (PM P1): identity/session-input coherence ─────────────────────────────────────
+
+test("driveEngineAgentReview: a mismatch-restart resolving a NEW head while data0 still holds the OLD head -> queued, evaluate() NEVER called, no WAL write for that incoherent generation", async () => {
+  let statusCalls = 0;
+  let evaluated = false;
+  const { deps, recorded } = makeDeps({
+    forge: {
+      // call 1: driveEngineAgentReview's own status0 fetch -> H1.
+      // call 2: resolveIdentity's first refetch -> the head has moved to H2 (mismatch, restarts).
+      // call 3: resolveIdentity's restart-round refetch -> H2 again (stable) -> resolves H=H2.
+      getPRStatus: async () => {
+        statusCalls++;
+        if (statusCalls === 1) return status();
+        return status({ headOid: "H2" });
+      },
+      // data0 (fetched during preflight, BEFORE identity resolution) is never refreshed — it
+      // still reports the OLD head H1, exactly the divergence the coherence check must catch.
+      getPRReviewData: async () => data({ headOid: "H1" }),
+    },
+    evaluate: async () => {
+      evaluated = true;
+      return { kind: "unavailable", headOid: "H2", reason: "should never run" };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /incoherence/);
+  assert.equal(evaluated, false, "an incoherent generation must never spawn a session");
+  assert.equal(recorded.wal, null, "no WAL record for an incoherent generation");
+  assert.equal(recorded.pin, null, "no pin write either — this generation was never attempted");
+});
+
+test("driveEngineAgentReview: the head moved BEFORE identity resolution even ran (status0 and every resolveIdentity refetch already agree on the NEW head, no restart triggered) — data0 still holds the stale head from a slightly earlier read -> queued, same coherence guard", async () => {
+  // Every getPRStatus call — the top-level status0 fetch AND resolveIdentity's own internal
+  // refetch — consistently reports H2 (a push landed before ANY of this tick's status reads).
+  // resolveIdentity therefore resolves H=H2 in ONE round, with NO internal mismatch/restart at
+  // all. But getPRReviewData (a separate read, issued moments earlier during preflight) still
+  // reports the pre-push head H1 — the plain race the coherence check exists to catch even when
+  // resolveIdentity itself never restarted anything.
+  const { deps, recorded } = makeDeps({
+    forge: {
+      getPRStatus: async () => status({ headOid: "H2" }),
+      getPRReviewData: async () => data({ headOid: "H1" }),
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /incoherence/);
+  assert.equal(recorded.wal, null);
+});
+
+test("driveEngineAgentReview: a decisive verdict whose OWN headOid diverges from this attempt's resolved H -> queued, auditDelivery NEVER called, pin stays 'unavailable' (OID-binding, #273's lesson)", async () => {
+  let auditCalled = false;
+  const { deps, recorded } = makeDeps({
+    evaluate: async () => ({ kind: "approved", headOid: "WRONG-OID", evidence: { freshApprovingReviews: 0, freshTrustedSignals: 0 } }),
+    auditDelivery: async () => {
+      auditCalled = true;
+      return { delivered: true };
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(outcome.kind, "queued");
+  assert.match(outcome.kind === "queued" ? outcome.reason : "", /OID-binding|headOid/);
+  assert.equal(auditCalled, false, "a verdict for the wrong oid must never reach the audit-delivery seam");
+  assert.equal(recorded.pin?.kind, "unavailable", "never promoted to permanent on an unverified oid");
+  assert.equal(recorded.wal?.decisiveOutcome, null, "no decisive outcome recorded for the mismatched verdict");
+});
+
 test("driveEngineAgentReview: unavailable verdict -> queued, pin recorded 'unavailable' for backoff", async () => {
   const { deps, recorded } = makeDeps({ evaluate: async () => ({ kind: "unavailable", headOid: "H1", reason: "session crashed" }) });
   const outcome = await driveEngineAgentReview(deps, 1, 2);
@@ -322,7 +390,7 @@ test("driveEngineAgentReview: unavailable pin -> backoff EXPIRED -> this tick IS
 
 test("driveEngineAgentReview: head change clears a prior pin (both kinds) before re-evaluating", async () => {
   const { deps, recorded } = makeDeps({
-    forge: { getPRStatus: async () => status({ headOid: "H2" }) },
+    forge: { getPRStatus: async () => status({ headOid: "H2" }), getPRReviewData: async () => data({ headOid: "H2" }) },
     evaluate: async () => ({ kind: "unavailable", headOid: "H2", reason: "x" }),
   });
   recorded.pin = { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "prior", kind: "decisive" };
