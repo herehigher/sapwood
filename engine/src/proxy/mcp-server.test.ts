@@ -31,6 +31,7 @@ const CAPS = {
   maxReviewsPerCall: 20,
   maxChecksPerCall: 20,
   maxAuditCommentsPerCall: 20,
+  maxAuditCommentScanWindow: 100,
 };
 
 function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {

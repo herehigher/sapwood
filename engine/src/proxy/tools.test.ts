@@ -48,6 +48,7 @@ const CAPS: ProxyCaps = {
   maxReviewsPerCall: 5,
   maxChecksPerCall: 5,
   maxAuditCommentsPerCall: 5,
+  maxAuditCommentScanWindow: 100,
 };
 
 // ── tool names / tools/list ─────────────────────────────────────────────────────────────────
@@ -99,7 +100,7 @@ test("#288 rejected findings reach the fix evidence channel through capped, mark
     2,
     CAPS,
   );
-  assert.equal(requestedCap, CAPS.maxAuditCommentsPerCall);
+  assert.equal(requestedCap, CAPS.maxAuditCommentScanWindow);
   assert.deepEqual(
     value.comments.map((c) => c.runId),
     ["r2", "r1"],
@@ -109,6 +110,42 @@ test("#288 rejected findings reach the fix evidence channel through capped, mark
     false,
   );
   assert.match(value.comments[0]!.body, /rejected finding r2/);
+});
+
+test("#288 audit scan window is independent of the filtered return cap, so newer non-audit spam does not displace audit evidence", async () => {
+  const audit = `<!-- sapwood-audit kind=engine-agent head=${"a".repeat(40)} diff=${"b".repeat(64)} run=kept -->\nAudit`;
+  let requestedCap = 0;
+  const value = await fetchPRAuditCommentsResponse(
+    {
+      getPRComments: async (_pr, cap) => {
+        requestedCap = cap;
+        return {
+          total: 26,
+          comments: [
+            { id: "audit", login: "bot", createdAt: "t00", body: audit },
+            ...Array.from({ length: 25 }, (_, i) => ({ id: `spam-${i}`, login: "human", createdAt: `t${i + 1}`, body: "ordinary" })),
+          ],
+        };
+      },
+    },
+    7,
+    undefined,
+    { ...CAPS, maxAuditCommentsPerCall: 20, maxAuditCommentScanWindow: 100 },
+  );
+  assert.equal(requestedCap, 100);
+  assert.deepEqual(
+    value.comments.map((comment) => comment.runId),
+    ["kept"],
+  );
+  assert.equal(value.complete, true);
+});
+
+test("#288 audit comments report complete:false when total top-level comments exceed the scan window", async () => {
+  const value = await fetchPRAuditCommentsResponse({ getPRComments: async () => ({ total: 101, comments: [] }) }, 7, undefined, {
+    ...CAPS,
+    maxAuditCommentScanWindow: 100,
+  });
+  assert.equal(value.complete, false);
 });
 
 // ── arg validation: schema / scope / cap / unknown-tool matrix (issue #234 AC) ──────────────

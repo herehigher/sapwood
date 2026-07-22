@@ -2845,3 +2845,59 @@ test("migration v24->current: a populated v24 DB (predating engine_review_wal/ac
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("migration v25->v26 clears a decisive engine-review pin whose WAL has no verifiable audit receipt", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 25; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 25");
+    raw
+      .prepare(
+        `INSERT INTO workers (
+          name, issue, session_id, state, started_at, ended_at, pr,
+          engine_review_pin_head, engine_review_pin_at, engine_review_pin_run_id,
+          engine_review_pin_kind, engine_review_first_attempt_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "lane-v25",
+        201,
+        "sess-201",
+        "driving",
+        "2026-07-22T00:00:00Z",
+        null,
+        951,
+        "H1",
+        "2026-07-22T00:01:00Z",
+        "run-v25",
+        "decisive",
+        "2026-07-22T00:01:00Z",
+      );
+    raw
+      .prepare(
+        `INSERT INTO engine_review_wal (
+          worker_name, run_id, head, base, diff_hash, tree_manifest_hash,
+          attempt_start, decisive_outcome
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run("lane-v25", "run-v25", "H1", "B1", "D1", "manifest", "2026-07-22T00:01:00Z", "approved");
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.equal(SCHEMA_VERSION, 26);
+    assert.equal(s.userVersion(), 26);
+    assert.equal(s.getEngineReviewAttemptPin("lane-v25"), null, "the lane is re-reviewable on its unchanged head");
+    const row = s.getWorker("lane-v25");
+    assert.equal(row?.engine_review_pin_head, null);
+    assert.equal(row?.engine_review_pin_at, null);
+    assert.equal(row?.engine_review_pin_run_id, null);
+    assert.equal(row?.engine_review_pin_kind, null);
+    assert.equal(row?.engine_review_first_attempt_at, null);
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

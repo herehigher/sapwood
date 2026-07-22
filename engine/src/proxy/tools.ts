@@ -112,8 +112,11 @@ export interface ProxyCaps {
    *  `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as
    *  maxReviewsPerCall above. */
   maxChecksPerCall: number;
-  /** #288: max top-level comments fetched/returned by getPRAuditComments. */
+  /** #288: max marker-filtered audit comments returned by getPRAuditComments. */
   maxAuditCommentsPerCall: number;
+  /** #288: max top-level comments scanned before marker filtering. Independent of the return
+   *  cap so newer ordinary-comment spam cannot displace an audit comment prematurely. */
+  maxAuditCommentScanWindow: number;
 }
 
 // ── Arg schemas (strict — an unrecognized key, e.g. a caller-supplied `repo`/`owner`, fails
@@ -272,7 +275,8 @@ export const TOOL_DEFINITIONS: { name: ToolName; description: string; inputSchem
   },
   {
     name: TOOL_PR_AUDIT_COMMENTS,
-    description: "Fetch only sapwood engine-agent audit comments on a pull request, newest first and bounded to the last N.",
+    description:
+      "Fetch only sapwood engine-agent audit comments on a pull request, newest first and bounded to the last N, from a bounded top-level-comment scan.",
     inputSchema: {
       type: "object",
       properties: { pr: { type: "integer", minimum: 1 }, lastN: { type: "integer", minimum: 1 } },
@@ -663,14 +667,14 @@ export async function fetchPRAuditCommentsResponse(
   caps: ProxyCaps,
 ) {
   const cap = lastN ?? caps.maxAuditCommentsPerCall;
-  const page = await forge.getPRComments(pr, caps.maxAuditCommentsPerCall);
+  const page = await forge.getPRComments(pr, caps.maxAuditCommentScanWindow);
   const comments = page.comments
     .map((comment) => ({ comment, marker: parseAuditMarker(comment.body) }))
     .filter((entry): entry is { comment: typeof entry.comment; marker: NonNullable<typeof entry.marker> } => entry.marker !== null)
     .slice(-cap)
     .reverse()
     .map(({ comment, marker }) => ({ id: comment.id, createdAt: comment.createdAt, ...marker, body: comment.body }));
-  return { pr, comments, returned: comments.length, complete: page.total <= caps.maxAuditCommentsPerCall };
+  return { pr, comments, returned: comments.length, complete: page.total <= caps.maxAuditCommentScanWindow };
 }
 
 // Re-exported so mcp-server.ts/journal.ts never need their own import of RelatedRef just to

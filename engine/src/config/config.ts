@@ -660,9 +660,12 @@ const ProxyConfig = z
         // `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as
         // maxReviewsPerCall above. .max(100): fed straight into GraphQL's `first:`.
         maxChecksPerCall: z.number().int().positive().max(100).default(50),
-        // #288: getPRAuditComments' caller-visible/fetch cap. Fed to GraphQL `last:`, hence
-        // GitHub's hard maximum of 100 is enforced at config parse time.
+        // #288: getPRAuditComments' caller-visible return cap, applied AFTER marker filtering.
         maxAuditCommentsPerCall: z.number().int().positive().max(100).default(20),
+        // #288: independent top-level-comment scan window, fed to GraphQL `last:` before marker
+        // filtering. Keeping this wider than the return cap prevents ordinary-comment spam from
+        // prematurely displacing audit evidence. GitHub caps connection arguments at 100.
+        maxAuditCommentScanWindow: z.number().int().positive().max(100).default(100),
       })
       .strict()
       .default({}),

@@ -683,10 +683,14 @@ export class MergeDriver {
     // same shape the classic path's own MERGED early-return already produces (no finalizeVerdict
     // involvement, mirroring merge-driver.ts's own MERGED check above in the classic branch).
     if (outcome.kind === "queued") {
-      // A decisive engine-agent artifact whose audit is not yet receipted blocks EVERY
-      // downstream action, including fallback gating and visibility escalation. Reconciliation
-      // gets first chance on the next tick; until then this is an audit-delivery queue, not
-      // reviewer silence (#288 ordering AC).
+      // The receipted-audit-comment invariant governs ENGINE-AGENT-DERIVED outcomes only: a
+      // decisive verdict never reaches merge/FIXABLE/escalation before its receipted audit
+      // comment. This block enforces that ordering by running BEFORE fallback consultation.
+      // A fallback-gated outcome on an UNAVAILABLE primary carries its own evidence chain (the
+      // fallback reviewer's PR artifact + the failover switch announcement, design #279 §2) and
+      // intentionally requires no engine audit comment because no engine-agent verdict exists to
+      // audit. Reconciliation gets first chance on the next tick; until then a decisive engine-
+      // agent artifact is an audit-delivery queue, not reviewer silence (#288 ordering AC).
       const pendingAuditWal = engineAgentDeps.getWal();
       if (pendingAuditWal?.decisiveOutcome != null && pendingAuditWal.auditCommentId == null) {
         return { kind: "queued", pr, reason: outcome.reason };

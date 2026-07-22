@@ -798,11 +798,29 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   //    delivery receipt; prose is never a receipt and never a gate signal.
   //  - `audit_delivered_at`: engine observation time for that receipt. Both receipt fields are
   //    written in one run-id-guarded UPDATE, so a stale completion cannot receipt a newer WAL.
+  //  This migration has not shipped, so it also repairs populated v25 development DBs in place:
+  //  v25 could persist a `decisive` pin before the receipt columns existed. Such a pin is not
+  //  verifiable when its WAL row is absent or has no audit-comment receipt, so all four pin
+  //  fields plus the companion first-attempt clock are cleared. The honest downgrade is no pin;
+  //  the unchanged head receives a fresh review instead of consuming unauditable state.
   (db) => {
     db.exec(`
       ALTER TABLE engine_review_wal ADD COLUMN review_artifact_json TEXT;
       ALTER TABLE engine_review_wal ADD COLUMN audit_comment_id TEXT;
       ALTER TABLE engine_review_wal ADD COLUMN audit_delivered_at TEXT;
+      UPDATE workers
+      SET engine_review_pin_head = NULL,
+          engine_review_pin_at = NULL,
+          engine_review_pin_run_id = NULL,
+          engine_review_pin_kind = NULL,
+          engine_review_first_attempt_at = NULL
+      WHERE engine_review_pin_kind = 'decisive'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM engine_review_wal
+          WHERE engine_review_wal.worker_name = workers.name
+            AND engine_review_wal.audit_comment_id IS NOT NULL
+        );
     `);
   },
 ];
