@@ -350,6 +350,21 @@ test("evaluate(): the diff is threaded into the session prompt (fetched via ctx.
   assert.match(runner.calls[0]!.prompt, /first criterion/);
 });
 
+test("evaluate(): the SNAPSHOTTED issue body reaches the session prompt inside <issue-body> tags (#302 review P1 — issue #286's What: diff + snapshotted body + AC ids + doctrine; design #279 §5)", async () => {
+  const { build, runner } = mkDeps({
+    runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED })],
+    // A body with a verification plan — the reviewer-relevant input the full-body snapshot
+    // exists to protect; distinct marker text so the assertion can only match via snapshot.body.
+    snapshot: { ...SNAPSHOT, body: "## Why\nstuff\n\n## Verification plan\nUNIQUE_BODY_MARKER_67890" },
+  });
+  await build().evaluate(ctx());
+  const prompt = runner.calls[0]!.prompt;
+  assert.match(prompt, /<issue-body>[\s\S]*UNIQUE_BODY_MARKER_67890[\s\S]*<\/issue-body>/);
+  // The template renders fully — no {{issue-body}} (or any other) placeholder may survive into
+  // a live session prompt (renderEngineReviewerPrompt's own fail-closed contract).
+  assert.doesNotMatch(prompt, /\{\{[a-zA-Z0-9._-]+\}\}/);
+});
+
 test("evaluate(): fallbackModel is 'none' — engine-agent never silently swaps models mid-session (D5)", async () => {
   const { build, runner } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED })] });
   await build().evaluate(ctx());

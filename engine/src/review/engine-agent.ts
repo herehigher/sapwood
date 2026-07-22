@@ -332,7 +332,18 @@ export class EngineAgentReviewer implements ReviewerAdapter {
         : "(no acceptance criteria in the snapshot — nothing to judge per-AC; findings may still be reported)";
     const doctrineText =
       this.deps.doctrine && this.deps.doctrine.trim().length > 0 ? this.deps.doctrine : "(none configured for this repo)";
-    return renderEngineReviewerPrompt(this.promptTemplate, { diff, "acceptance-criteria": acText, doctrine: doctrineText });
+    // #302 review P1: the FULL snapshotted body — not just the extracted AC lines — is a session
+    // input in its own right (issue #286's What; design #279 §5: "The session reviews against the
+    // SNAPSHOTTED body text"). The body carries the verification plan and every other
+    // reviewer-relevant input the full-body hash pin exists to protect; the `<acceptance-criteria>`
+    // block stays the ONLY authoritative per-AC id list (the template says so explicitly), the
+    // body is context, never a second id source.
+    return renderEngineReviewerPrompt(this.promptTemplate, {
+      diff,
+      "issue-body": snapshot.body,
+      "acceptance-criteria": acText,
+      doctrine: doctrineText,
+    });
   }
 }
 

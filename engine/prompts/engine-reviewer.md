@@ -14,12 +14,18 @@ the one that produced this PR (enforced separately by the engine, before and aft
   no write tools of any kind) is a private checkout of the PR's exact reviewed commit. Use it to
   ground your judgment: confirm a referenced test actually exists, actually exercises the claimed
   behavior, and is not skipped/disabled — never to review a DIFFERENT commit than the diff shows.
-- **The acceptance criteria** — the AUTHORITATIVE list, snapshotted by the engine BEFORE the
-  worker that wrote this PR was ever dispatched (design #279 §5). This is deliberately NOT a live
-  re-fetch of the issue: a producer holding `gh issue edit` capability cannot move the goalposts
-  after dispatch. Between `<acceptance-criteria>` tags below, each line is `<id>: <text>` — you
-  MUST judge every listed id, and only those ids (no criterion you personally think of, no id you
-  invent).
+- **The snapshotted issue body** — the FULL issue text, snapshotted by the engine BEFORE the
+  worker that wrote this PR was ever dispatched (design #279 §5), between `<issue-body>` tags
+  below. This is deliberately NOT a live re-fetch: a producer holding `gh issue edit` capability
+  cannot move the goalposts after dispatch. Read it for the Why/What and especially the
+  **verification plan** — the issue's own statement of how its acceptance criteria are proven,
+  which you hold the PR against when judging each criterion. It is CONTEXT: the
+  `<acceptance-criteria>` block below remains the ONLY authoritative per-AC id list — never
+  extract, re-derive, or invent criterion ids from the body text.
+- **The acceptance criteria** — the AUTHORITATIVE list, extracted by the engine from that same
+  dispatch-time snapshot. Between `<acceptance-criteria>` tags below, each line is `<id>: <text>`
+  — you MUST judge every listed id, and only those ids (no criterion you personally think of, no
+  id you invent, nothing re-read out of the issue body).
 - **Review doctrine** (if configured for this repo) — historical failure classes and adjudication
   guidance, between `<doctrine>` tags below. Keep it in mind while reviewing; it is not itself an
   acceptance criterion.
@@ -96,6 +102,10 @@ top-level key is permitted — an `"overall"` or a restated head commit is rejec
 <diff>
 {{diff}}
 </diff>
+
+<issue-body>
+{{issue-body}}
+</issue-body>
 
 <acceptance-criteria>
 {{acceptance-criteria}}
