@@ -4,7 +4,7 @@
 // to `unavailable`; every setup/model-separation check fires before a session is even spawned
 // where possible; cost-remainder arithmetic and the retry-once contract are pinned directly.
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -13,7 +13,12 @@ import type { IForge, PRReviewData } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import type { ApprovalResult, ReviewContext } from "../roles/reviewer.js";
 import type { AcSnapshot } from "./ac-snapshot.js";
-import { type EngineAgentReviewer, loadEngineReviewerPromptTemplate, makeEngineAgentReviewer } from "./engine-agent.js";
+import {
+  defaultEngineReviewerPromptPath,
+  type EngineAgentReviewer,
+  loadEngineReviewerPromptTemplate,
+  makeEngineAgentReviewer,
+} from "./engine-agent.js";
 import type { MaterializeResult } from "./materializer.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────────────────────
@@ -432,6 +437,16 @@ test("evaluate(): the SNAPSHOTTED issue body reaches the session prompt inside <
 });
 
 // ── prompt template: placeholder completeness + whitespace tolerance (#302 review Codex P1) ──
+
+test("shipped engine-reviewer prompt (#319): forbids markdown fences around the sentinel block and any content after the end sentinel", () => {
+  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  assert.match(prompt, /Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence\./);
+  assert.match(prompt, /NOTHING — including[\s\S]*— may follow `<<<END_SAPWOOD_RESULT>>>`\./);
+  assert.equal(prompt.match(/^<<<SAPWOOD_RESULT>>>[ \t]*$/gm)?.length, 1);
+  assert.equal(prompt.match(/^<<<END_SAPWOOD_RESULT>>>[ \t]*$/gm)?.length, 1);
+  assert.doesNotMatch(prompt, /^```[ \t]*\n<<<SAPWOOD_RESULT>>>/m);
+  assert.doesNotMatch(prompt, /^<<<END_SAPWOOD_RESULT>>>[ \t]*\n```[ \t]*$/m);
+});
 
 test("loadEngineReviewerPromptTemplate: a custom template MISSING a required placeholder throws at load, naming the missing one (#74 fail-fast)", () => {
   const dir = mkdtempSync(join(tmpdir(), "engine-agent-template-"));

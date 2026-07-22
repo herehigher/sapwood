@@ -5,7 +5,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AcceptanceCriterion } from "./ac-snapshot.js";
-import { deriveApprovalResult, parseAgentReviewOutputText, validateAgentReviewOutput } from "./agent-output.js";
+import {
+  deriveApprovalResult,
+  isStrictFenceDelimiter,
+  isWiderFenceDelimiter,
+  parseAgentReviewOutputText,
+  validateAgentReviewOutput,
+} from "./agent-output.js";
 
 const MANIFEST: AcceptanceCriterion[] = [
   { id: "1-aaaaaaaa", text: "first criterion" },
@@ -237,6 +243,256 @@ test("parseAgentReviewOutputText: a valid sentinel-wrapped block parses", () => 
   const out = parseAgentReviewOutputText(text, MANIFEST);
   assert.ok(out);
   assert.equal(out.perAC.length, 2);
+});
+
+test("parseAgentReviewOutputText (#319): observed haiku prose + symmetrically fenced sentinel block parses through the engine-agent schema", () => {
+  const text = `I reviewed the acceptance criteria against the supplied diff and found no blocking issues.
+
+\`\`\`
+<<<SAPWOOD_RESULT>>>
+{
+  "perAC": [
+    { "id": "1-aaaaaaaa", "status": "confirmed" },
+    { "id": "2-bbbbbbbb", "status": "confirmed" }
+  ],
+  "findings": []
+}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
+    perAC: [
+      { id: "1-aaaaaaaa", status: "confirmed" },
+      { id: "2-bbbbbbbb", status: "confirmed" },
+    ],
+    findings: [],
+  });
+});
+
+test("parseAgentReviewOutputText (#319): a json-tagged opening fence and bare closing fence parse", () => {
+  const text = `prose before the block
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.ok(parseAgentReviewOutputText(text, MANIFEST));
+});
+
+test("parseAgentReviewOutputText (#319 round 2 containment): a prior fence opener makes the candidate fence a closer, so the ambiguous text stays rejected", () => {
+  const text = `\`\`\`text
+preamble code
+\`\`\`
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 3): an unclosed four-backtick preamble fence makes the wrapped block ambiguous", () => {
+  const text = `\`\`\`\`text
+unclosed preamble code
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 3): a tilde-fenced preamble makes the wrapped block ambiguous", () => {
+  const text = `~~~text
+preamble code
+~~~
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 4): a CRLF four-backtick preamble cannot bypass the wider fence scan", () => {
+  const text = `\`\`\`\`text
+unclosed preamble code
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\n");
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 4): CRLF tilde fences cannot bypass the wider fence scan", () => {
+  const text = `~~~text
+preamble code
+~~~
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\n");
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 round 4): the observed benign wrapper parses with all-CRLF endings", () => {
+  const text = `I reviewed the acceptance criteria against the supplied diff and found no blocking issues.
+
+\`\`\`
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\n");
+  assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  });
+});
+
+test("parseAgentReviewOutputText (#319 round 5): CRCRLF four-backtick and tilde preambles cannot bypass the wider fence scan", () => {
+  const preambles = ["````text\nunclosed preamble code", "~~~text\nunclosed preamble code\n~~~"];
+  for (const preamble of preambles) {
+    const text = `${preamble}
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\r\n");
+    assert.equal(parseAgentReviewOutputText(text, MANIFEST), null, `expected ${JSON.stringify(preamble)} to remain ambiguous`);
+  }
+});
+
+test("parseAgentReviewOutputText (#319 round 6): mixed trailing-whitespace preambles cannot bypass the wider fence scan", () => {
+  const preambles = ["````text\r ", "~~~text\r ", "````text\r\t"];
+  for (const preamble of preambles) {
+    const text = `${preamble}
+unclosed preamble code
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+    assert.equal(parseAgentReviewOutputText(text, MANIFEST), null, `expected ${JSON.stringify(preamble)} to remain ambiguous`);
+  }
+});
+
+test("fence classifiers (#319 round 6): strict acceptance implies wider acceptance after trailing-whitespace canonicalization", () => {
+  const fenceStems = ["```", "```lang", "````", "````lang", "~~~", "~~~lang"];
+  const suffixes = ["", "\r", "\r\r", " ", "\t", "  ", "\t\t", "\r ", "\r\t", " \r", "\r\r ", "\t\r", " \t\r\r"];
+
+  for (const stem of fenceStems) {
+    for (const suffix of suffixes) {
+      const candidate = `${stem}${suffix}`;
+      const canon = candidate.replace(/\s+$/u, "");
+      if (isStrictFenceDelimiter(canon)) {
+        assert.equal(isWiderFenceDelimiter(canon), true, `strict delimiter escaped wider scan: ${JSON.stringify(candidate)}`);
+      }
+    }
+  }
+});
+
+test("parseAgentReviewOutputText (#319 round 5): the observed benign wrapper parses with all-CRCRLF endings", () => {
+  const text = `I reviewed the acceptance criteria against the supplied diff and found no blocking issues.
+
+\`\`\`
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``.replaceAll("\n", "\r\r\n");
+  assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  });
+});
+
+test("parseAgentReviewOutputText (#319 round 6): the observed benign wrapper parses with trailing-space fence endings", () => {
+  const trailingSpace = " ";
+  const text = `I reviewed the acceptance criteria against the supplied diff and found no blocking issues.
+
+\`\`\`json${trailingSpace}
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\`${trailingSpace}`;
+  assert.deepEqual(parseAgentReviewOutputText(text, MANIFEST), {
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  });
+});
+
+test("parseAgentReviewOutputText (#319 round 2): a complete fenced preamble before a correctly fenced sentinel block still parses", () => {
+  const text = `\`\`\`text
+preamble code
+\`\`\`
+prose between the complete preamble and result
+\`\`\`json
+<<<SAPWOOD_RESULT>>>
+${JSON.stringify({
+  perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+  findings: [],
+})}
+<<<END_SAPWOOD_RESULT>>>
+\`\`\``;
+  assert.ok(parseAgentReviewOutputText(text, MANIFEST));
+});
+
+test("parseAgentReviewOutputText (#319 containment): a lone trailing fence without an opening fence still fails", () => {
+  const text = `${wrap({
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  })}
+\`\`\``;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319 containment): trailing prose after the end sentinel still fails", () => {
+  const text = `${wrap({
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  })}
+trailing prose`;
+  assert.equal(parseAgentReviewOutputText(text, MANIFEST), null);
+});
+
+test("parseAgentReviewOutputText (#319): unfenced correct output retains existing behavior", () => {
+  const text = wrap({
+    perAC: MANIFEST.map((a) => ({ id: a.id, status: "confirmed" })),
+    findings: [],
+  });
+  assert.ok(parseAgentReviewOutputText(text, MANIFEST));
 });
 
 test("parseAgentReviewOutputText: no sentinel block at all -> null", () => {

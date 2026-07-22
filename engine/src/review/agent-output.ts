@@ -12,7 +12,7 @@
 
 import type { ApprovalResult } from "../roles/reviewer.js";
 import { type Finding, isFinding, validateFindings } from "../roles/reviewer.js";
-import { parseStructuredBlock } from "../state/structured-output.js";
+import { parseStructuredBlock, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { AcceptanceCriterion } from "./ac-snapshot.js";
 
 /** One AC-manifest id's per-criterion judgment (design #279 §2/§4.1):
@@ -118,6 +118,74 @@ function validateAgentFindings(v: unknown): v is Finding[] {
   return true;
 }
 
+/** Fence classifiers exported to pin the subset invariant that makes ambiguity scanning safe. */
+export function isStrictFenceDelimiter(line: string): boolean {
+  return /^```[a-zA-Z0-9-]*$/.test(line);
+}
+
+export function isWiderFenceDelimiter(line: string): boolean {
+  return /^(?:`{3,}|~{3,})[\s\S]*$/.test(line);
+}
+
+/**
+ * Remove the narrow markdown-wrapper shape observed from haiku-tier engine-agent reviewers:
+ * an opening fence immediately before the result sentinel and a bare closing fence as the last
+ * non-whitespace line. The candidate opener must also be in opening orientation (an even number
+ * of plain triple-backtick fence delimiters precede it) and the closing fence must be its direct
+ * match (no intervening fence delimiters). Any ambiguous orientation fails closed by returning
+ * the original text. Mixed fence types do not pair by simple parity: a tilde fence only closes
+ * with tildes, while a longer backtick fence requires at least as many backticks to close.
+ * Emulating CommonMark pairing here would be over-engineering, so any exotic fence in scope makes
+ * orientation undecidable and refuses the strip. The observed benign haiku wrapper, which uses
+ * plain triple-backtick fences throughout, is unaffected.
+ * Classification uses a canonical view with all trailing whitespace removed. After
+ * canonicalization, a strict line is exactly three backticks followed by tag characters; the
+ * wider prefix `{3,}` covers that prefix and `[\s\S]*` covers any remainder. Therefore
+ * `strict(canon) => wider(canon)` holds structurally: no whitespace or EOL variant can make a
+ * line visible to the strict family but invisible to the ambiguity scan.
+ *
+ * This deliberately lives at the engine-agent boundary rather than in `parseStructuredBlock`,
+ * the shared P1-reviewed containment primitive, so no other peripheral role inherits a wider
+ * parser contract. Requiring the oriented symmetric pair cannot hide the truncation shape guarded
+ * by the shared trailing-content rule: a truncated body leaves real content after the end
+ * sentinel, never only a lone closing fence paired with the opening fence.
+ */
+function stripSymmetricFence(text: string): string {
+  const lines = text.split("\n");
+  const canonicalLines = lines.map((line) => line.replace(/\s+$/u, ""));
+  let closingIndex = lines.length - 1;
+  while (closingIndex >= 0 && canonicalLines[closingIndex]!.trim() === "") closingIndex -= 1;
+  if (closingIndex < 0 || canonicalLines[closingIndex] !== "```") return text;
+
+  let resultIndex = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (canonicalLines[i]!.trim() === RESULT_BLOCK_START) {
+      resultIndex = i;
+      break;
+    }
+  }
+  const openingIndex = resultIndex - 1;
+  if (openingIndex < 0 || !isStrictFenceDelimiter(canonicalLines[openingIndex]!)) return text;
+
+  for (let i = 0; i < closingIndex; i += 1) {
+    if (i === openingIndex) continue;
+    const line = canonicalLines[i]!;
+    if (isWiderFenceDelimiter(line) && !isStrictFenceDelimiter(line)) return text;
+  }
+
+  let precedingFenceCount = 0;
+  for (let i = 0; i < openingIndex; i += 1) {
+    if (isStrictFenceDelimiter(canonicalLines[i]!)) precedingFenceCount += 1;
+  }
+  if (precedingFenceCount % 2 !== 0) return text;
+
+  for (let i = openingIndex + 1; i < closingIndex; i += 1) {
+    if (isStrictFenceDelimiter(canonicalLines[i]!)) return text;
+  }
+
+  return lines.filter((_line, index) => index !== openingIndex && index !== closingIndex).join("\n");
+}
+
 /** Parse + validate the session's raw `resultText` (worker.ts's `parseResultText` output) in one
  *  step — engine-agent.ts's actual call site. Reuses state/structured-output.ts's
  *  `parseStructuredBlock` — the SAME `<<<SAPWOOD_RESULT>>>...<<<END_SAPWOOD_RESULT>>>` sentinel
@@ -131,7 +199,7 @@ function validateAgentFindings(v: unknown): v is Finding[] {
  *  `findings[].body` travels as an ordinary JSON string field inside the metadata block itself
  *  (same convention fix-response.ts's `reply` field uses), never a separate raw-markdown segment. */
 export function parseAgentReviewOutputText(text: string, manifest: readonly AcceptanceCriterion[]): AgentReviewOutput | null {
-  const block = parseStructuredBlock(text);
+  const block = parseStructuredBlock(stripSymmetricFence(text));
   if (!block) return null;
   let raw: unknown;
   try {
