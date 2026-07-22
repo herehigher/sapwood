@@ -488,6 +488,14 @@ export interface LaneProbe {
    *  "cheap, existing capture, just a new read" stance failureText already takes; an ordinary
    *  worker's DONE result text is simply never consumed by anything. */
   resultText?: string;
+  /** #287 (E4b, AC#1): the EARLIEST observable actual model for a still-`running` lane — the
+   *  session-init line's own self-report (worker.ts's parseSessionInit), read from the SAME
+   *  in-memory jsonl liveTelemetry already re-scans on every probe. `null`/undefined when no
+   *  init line has landed yet (session still starting) or the lane isn't held in-memory
+   *  (detached/terminal — see worker.ts's probe() for why this mirrors liveTelemetry's own
+   *  "in-memory lane only" scoping). tick()'s KEEP branch feeds a non-null value into
+   *  State.recordWorkerActualModel alongside its existing State.setLiveTelemetry call. */
+  actualModel?: string | null;
 }
 
 /** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
@@ -1880,6 +1888,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // for a detached lane — a number we can no longer refresh must not look live.
       if (p.liveTelemetry) state.setLiveTelemetry(w.name, p.liveTelemetry);
       else state.clearLiveTelemetry(w.name);
+      // #287 (E4b, AC#1): as early as the session-init line is observed, record it durably —
+      // well before this leg's own terminal reclaim would otherwise settle it into spend_ledger
+      // (see State.getWorkerActualModels' own doc for why that's too late for a still-`driving`
+      // lane's engine-agent review). Union-append, idempotent; a no-op once already recorded.
+      if (p.actualModel) state.recordWorkerActualModel(w.name, p.actualModel);
       reclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
       continue;
     }
@@ -2006,6 +2019,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     if (laneClass === "KEEP") {
       if (p.liveTelemetry) state.setLiveTelemetry(w.name, p.liveTelemetry);
       else state.clearLiveTelemetry(w.name);
+      // #287 (E4b, AC#1): same early actual-model capture as the ordinary RECLAIM loop's KEEP
+      // branch above — a fix leg is a live session too.
+      if (p.actualModel) state.recordWorkerActualModel(w.name, p.actualModel);
       fixingReclaimed.push({ kind: "kept", worker: w.name, issue: w.issue });
       continue;
     }

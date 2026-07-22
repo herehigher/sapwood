@@ -67,6 +67,17 @@ export interface PRStatus {
    *  caller does `status.ciRed ?? false`) — the same "additive, pre-existing callers unaffected"
    *  convention `mergeable`'s tri-state and every other optional PRStatus-adjacent field use. */
   ciRed?: boolean;
+  /** #287 (E4b, design #279 §2 R2-6): the PR's BASE ref oid (`gh pr view --json baseRefOid`) —
+   *  part of the engine-agent drive path's identity triple (headOid H, baseOid B, diff hash D):
+   *  a base move (e.g. main advanced and the PR's diff base shifted) invalidates an in-flight
+   *  review exactly like a head move does, so it must be observable alongside headOid. ADDITIVE
+   *  and OPTIONAL: absent on any fixture/fake built before this field existed (or a `gh` version
+   *  whose JSON genuinely omits it) — every pre-#287 caller/fixture keeps working unchanged,
+   *  same "additive, pre-existing callers unaffected" convention `ciRed` above documents. Only
+   *  the engine-agent identity-resolution path (review/drive.ts) requires this to be non-null;
+   *  every other PRStatus consumer (deriveGate, mergeDecision, the classic Reviewer kinds) never
+   *  reads it. */
+  baseOid?: string;
 }
 
 /** One reaction on the PR's top-level issue-comment thread (`gh api .../reactions`). */
@@ -468,6 +479,17 @@ export interface PRCheckItem {
   status: string;
   conclusion: string | null;
   state: string | null;
+  /** #287 (E4b, design #279 §4 R3): the GitHub App slug that owns this CheckRun's check suite
+   *  (`checkSuite { app { slug } }`) — the binding a same-NAMED check from an untrusted app must
+   *  fail, so `ci.requiredChecks`' `{name, app}` pairs can verify OWNERSHIP, not just presence.
+   *  Only ever populated for a modern CheckRun node; a legacy StatusContext entry (`state` set,
+   *  `conclusion` null) has no check-suite/App concept at all and this is always `null` for one —
+   *  review/ci-evidence.ts's requiredChecksSatisfied treats that `null` as "cannot verify
+   *  ownership," which is exactly why a legacy status-context check never satisfies a
+   *  `ci.requiredChecks` entry (design #279 §4: "SKIPPED/NEUTRAL/legacy-status-context DO NOT
+   *  satisfy it"). `undefined` on any pre-#287 fixture/fake reads identically to `null` at every
+   *  call site (both fail the ownership check) — additive, no fixture breakage. */
+  appSlug?: string | null;
 }
 
 /** #244 (Codex sol-high PR #260 review, P1): IForge.getPRChecks' bounded result — `total` is
@@ -642,7 +664,9 @@ export class GithubForge implements IForge {
       "--repo",
       `${this.cfg.board.owner}/${this.repo()}`,
       "--json",
-      "number,headRefOid,state,mergeable,statusCheckRollup",
+      // #287 (E4b): baseRefOid added — a real `gh pr view --json` field (verified against a live
+      // `gh` binary), giving PRStatus.baseOid without switching this call to raw GraphQL.
+      "number,headRefOid,baseRefOid,state,mergeable,statusCheckRollup",
     ]);
     return parsePRStatus(out);
   }
@@ -1670,6 +1694,8 @@ export function parsePRStatus(json: string): PRStatus {
   const d = JSON.parse(json) as {
     number: number;
     headRefOid: string;
+    // #287 (E4b): additive — absent on any pre-#287 fixture (see PRStatus.baseOid's own doc).
+    baseRefOid?: string;
     state: string;
     mergeable: string;
     // CheckRun entries carry `conclusion`; legacy commit StatusContext entries carry
@@ -1703,6 +1729,7 @@ export function parsePRStatus(json: string): PRStatus {
     mergeable: d.mergeable === "MERGEABLE" || d.mergeable === "CONFLICTING" ? d.mergeable : "UNKNOWN",
     ciGreen,
     ciRed,
+    ...(d.baseRefOid !== undefined ? { baseOid: d.baseRefOid } : {}),
   };
 }
 
@@ -2106,7 +2133,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
                 totalCount
                 nodes {
                   __typename
-                  ... on CheckRun { name status conclusion }
+                  ... on CheckRun { name status conclusion checkSuite { app { slug } } }
                   ... on StatusContext { context state }
                 }
               }
@@ -2120,7 +2147,9 @@ query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
 
 /** Pure parse of PR_CHECKS_QUERY. A legacy StatusContext node (`context` instead of `name`, no
  *  `conclusion`) falls back to `context` for the name field — same dual-shape tolerance
- *  parsePRStatus already has for the REST rollup shape. */
+ *  parsePRStatus already has for the REST rollup shape. #287 (E4b, design #279 §4 R3): each
+ *  CheckRun node's `checkSuite.app.slug` becomes `PRCheckItem.appSlug` — absent/null for a
+ *  StatusContext node (no check-suite concept), never guessed. */
 export function parsePRChecksPage(json: string): PRChecksPage {
   const d = JSON.parse(json) as {
     data?: {
@@ -2132,7 +2161,14 @@ export function parsePRChecksPage(json: string): PRChecksPage {
                 statusCheckRollup?: {
                   contexts?: {
                     totalCount?: number;
-                    nodes?: { name?: string; context?: string; status?: string; conclusion?: string | null; state?: string | null }[];
+                    nodes?: {
+                      name?: string;
+                      context?: string;
+                      status?: string;
+                      conclusion?: string | null;
+                      state?: string | null;
+                      checkSuite?: { app?: { slug?: string | null } | null } | null;
+                    }[];
                   };
                 } | null;
               };
@@ -2148,6 +2184,7 @@ export function parsePRChecksPage(json: string): PRChecksPage {
     status: c.status ?? "",
     conclusion: c.conclusion ?? null,
     state: c.state ?? null,
+    appSlug: c.checkSuite?.app?.slug ?? null,
   }));
   return { checks, total: conn?.totalCount ?? checks.length };
 }

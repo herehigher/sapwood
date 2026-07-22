@@ -724,6 +724,72 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       WHERE issue IN (SELECT issue FROM ac_snapshots);
     `);
   },
+  // 24 -> 25 (#287, E4b, design #279 §2/§6): the engine-agent drive-ordering columns.
+  //
+  //  - `actual_models_json` (design #287 AC#1, PM scope addition on #287): a durable, EARLY
+  //    per-lane record of this worker's OWN observed actual model(s) — JSON array of distinct
+  //    model strings, union-appended as they're observed (worker.ts's probe(), reading the live
+  //    jsonl's session-init line), NEVER waiting for spend_ledger's terminal-reclaim settlement
+  //    (see State.getWorkerActualModels' own doc for why that alone is too late for a still-
+  //    `driving` lane's engine-agent review). `'unknown'` is excluded at the WRITE site
+  //    (recordWorkerActualModel), same convention spend_ledger's own model column already uses —
+  //    never stored as if it were a real, comparable model string. NULL for every pre-#287 row
+  //    (nothing observed yet, honest empty — not "known to be blank").
+  //  - `engine_review_pin_*` (design #279 §2 R3): the per-head ATTEMPT PIN — same 4-field shape
+  //    `{head, at, runId, kind}` design #279 §2 specifies, same storage PATTERN as
+  //    review_triggered_head/at above (plain nullable columns on the lane's own row, cleared on
+  //    a head change). `engine_review_pin_kind` is plain TEXT ('decisive' | 'unavailable'),
+  //    validated at the read boundary (state.ts's own accessor), same "never cast a persisted
+  //    string" stance review_fallback_kind already takes.
+  //  - `engine_review_first_attempt_at`: a COMPANION clock, deliberately NOT part of the literal
+  //    4-field pin — the pin's own `at` is the MOST RECENT attempt-start for the pinned head (it
+  //    drives `retryAfterSec` backoff-between-attempts, design #279 §2's "retry with backoff...
+  //    between paid attempts"); the #54 fallback chain's `failoverAfterSec` clock is explicitly
+  //    measured from the pin's FIRST attempt-start for the head (design #279 §2: "the #54 chain
+  //    is consulted on the EXISTING failoverAfterSec clock measured from the pin's first
+  //    attempt-start for H") — two genuinely different clocks that a single `at` field cannot
+  //    serve simultaneously once a head has been retried more than once. Set ONCE per head (on
+  //    the transition from "no pin"/a different head to a pin for a NEW head), left untouched by
+  //    every subsequent same-head attempt; cleared alongside the pin on a head change.
+  //
+  // All five columns nullable, no default: every pre-#287 row gets NULL (no pin, no observed
+  // model) — fail-closed, identical in spirit to review_triggered_head/at's own migration.
+  (db) => {
+    db.exec(`
+      ALTER TABLE workers ADD COLUMN actual_models_json TEXT;
+      ALTER TABLE workers ADD COLUMN engine_review_pin_head TEXT;
+      ALTER TABLE workers ADD COLUMN engine_review_pin_at TEXT;
+      ALTER TABLE workers ADD COLUMN engine_review_pin_run_id TEXT;
+      ALTER TABLE workers ADD COLUMN engine_review_pin_kind TEXT;
+      ALTER TABLE workers ADD COLUMN engine_review_first_attempt_at TEXT;
+      -- #287 (design #279 §2 WAL): {runId, H, B, D, attempt-start} persisted BEFORE the engine
+      -- spawns a review session — crash recovery (E4c, #288) reconciles the audit marker against
+      -- this record. One row PER WORKER NAME (a lane's own current/most-recent WAL entry;
+      -- upserted per attempt, never append-only — the prior attempt's WAL is superseded the
+      -- instant a new one is persisted, same "current pin state" shape as the workers.* columns
+      -- above, not an audit trail of every past attempt). tree_manifest_hash is the sha256 of
+      -- the materializer's own sorted tree manifest (review/materializer.ts's TreeManifestEntry[])
+      -- — a HASH/POINTER, not the full file listing (design #279 §3's "recorded in the WAL
+      -- record for audit parity"; storing the full per-file listing here would duplicate
+      -- unbounded tree-shaped data this table was never meant to hold — see review/drive.ts's own
+      -- doc for the write-ordering this hash is completed under). NULL until the materialize step
+      -- completes (written by a SEPARATE update, still strictly before the review session spawns
+      -- — see review/drive.ts). decisive_outcome ('approved' | 'rejected') is written ONLY once
+      -- the audit-delivery seam (E4c, #288) reports success — see review/drive.ts's own doc for
+      -- why a decisive pin's PERMANENCE is independent of whether the SAME tick's consume step
+      -- raced (the audit receipt, not the consume outcome, is what makes a verdict permanent).
+      CREATE TABLE engine_review_wal (
+        worker_name         TEXT PRIMARY KEY,
+        run_id              TEXT NOT NULL,
+        head                TEXT NOT NULL,
+        base                TEXT NOT NULL,
+        diff_hash           TEXT NOT NULL,
+        tree_manifest_hash  TEXT,
+        attempt_start       TEXT NOT NULL,
+        decisive_outcome    TEXT
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -896,6 +962,26 @@ export interface WorkerRow {
    *  time — conductor.ts's checkAcDriftBeforeDrive treats a later mismatch (or the ac_snapshots
    *  row going missing outright) as a fail-closed anomaly, never as "nothing to check". */
   ac_body_hash?: string | null;
+  /** #287 (E4b, AC#1): JSON-encoded array of this lane's own distinct OBSERVED actual model(s)
+   *  — see the schema v24->v25 migration comment for the full rationale and getWorkerActualModels'
+   *  own doc for how this unions with spend_ledger. Written via State.recordWorkerActualModel
+   *  (union-append, 'unknown' excluded); never written via upsertWorker's full-row replace (same
+   *  update-in-place stance as est_cost_usd/context_tokens above — a stale `{...w, ...}` call
+   *  site must never accidentally clobber this with an old snapshot). NULL until first observed. */
+  actual_models_json?: string | null;
+  /** #287 (E4b, design #279 §2 R3): the per-head engine-agent ATTEMPT PIN — see the schema
+   *  v24->v25 migration comment for the full field-by-field rationale. NULL/undefined means no
+   *  pin recorded for this lane (or a pre-#287 row). */
+  engine_review_pin_head?: string | null;
+  engine_review_pin_at?: string | null;
+  engine_review_pin_run_id?: string | null;
+  /** Plain TEXT — validated against `"decisive" | "unavailable"` at the read boundary
+   *  (review/drive.ts's isAttemptPinKind), never cast. An unrecognized string fails closed to
+   *  "no pin" exactly like review_fallback_kind's own read-boundary validation. */
+  engine_review_pin_kind?: string | null;
+  /** #287 (E4b): the COMPANION clock — see the schema v24->v25 migration comment for why this is
+   *  separate from engine_review_pin_at. */
+  engine_review_first_attempt_at?: string | null;
 }
 
 /** Board status literal reused across forge/state (kept local to avoid a state.ts -> forge.ts
@@ -1386,6 +1472,149 @@ export class State {
     this.db.prepare("UPDATE workers SET review_fallback_head = ?, review_fallback_kind = ? WHERE name = ?").run(head, kind, name);
   }
 
+  /** #287 (E4b, AC#1): record ONE freshly-observed actual model for `name`'s lane, as early as
+   *  worker.ts's probe() sees it (the session-init line, well before the lane's own leg reaches
+   *  a terminal reclaim / spend_ledger settlement — see getWorkerActualModels' own doc). Union-
+   *  append, idempotent: a model already recorded is a no-op (no duplicate, no extra write);
+   *  `'unknown'`/empty are never stored (same exclusion spend_ledger's own model column already
+   *  applies at settleTerminalWorker time — an unidentifiable model is never a comparable actual).
+   *  Update-in-place on the EXISTING row (never routed through upsertWorker's full-row replace —
+   *  see WorkerRow.actual_models_json's own doc for why); a no-op if `name` has no row yet. */
+  recordWorkerActualModel(name: string, model: string): void {
+    if (!model || model === "unknown") return;
+    const row = this.db.prepare("SELECT actual_models_json FROM workers WHERE name = ?").get(name) as
+      | { actual_models_json: string | null }
+      | undefined;
+    if (!row) return;
+    let models: string[];
+    try {
+      const parsed: unknown = row.actual_models_json ? JSON.parse(row.actual_models_json) : [];
+      models = Array.isArray(parsed) ? parsed.filter((m): m is string => typeof m === "string") : [];
+    } catch {
+      models = []; // corrupt JSON (should never happen — this column is engine-written only) — fail closed, start fresh
+    }
+    if (models.includes(model)) return; // already recorded, no-op
+    models.push(model);
+    this.db.prepare("UPDATE workers SET actual_models_json = ? WHERE name = ?").run(JSON.stringify(models), name);
+  }
+
+  /** #287 (E4b, design #279 §2 R3): the engine-agent per-head ATTEMPT PIN for `name`'s lane.
+   *  `null` clears it (a head change, driveOne's own detection — see review/drive.ts). Also
+   *  writes engine_review_first_attempt_at when transitioning from "no pin"/a different head to
+   *  a NEW head's first attempt (see the schema v24->v25 migration comment for why this
+   *  companion clock exists); left untouched on every subsequent same-head write. Update-in-
+   *  place — never routed through upsertWorker (same rationale as recordReviewFallback above). */
+  recordEngineReviewAttemptPin(
+    name: string,
+    pin: { head: string; at: string; runId: string; kind: "decisive" | "unavailable" } | null,
+  ): void {
+    if (pin === null) {
+      this.db
+        .prepare(
+          "UPDATE workers SET engine_review_pin_head = NULL, engine_review_pin_at = NULL, " +
+            "engine_review_pin_run_id = NULL, engine_review_pin_kind = NULL, engine_review_first_attempt_at = NULL WHERE name = ?",
+        )
+        .run(name);
+      return;
+    }
+    const row = this.getWorker(name);
+    const isNewHead = row?.engine_review_pin_head !== pin.head || row?.engine_review_first_attempt_at == null;
+    this.db
+      .prepare(
+        "UPDATE workers SET engine_review_pin_head = ?, engine_review_pin_at = ?, engine_review_pin_run_id = ?, " +
+          "engine_review_pin_kind = ?, engine_review_first_attempt_at = ? WHERE name = ?",
+      )
+      .run(pin.head, pin.at, pin.runId, pin.kind, isNewHead ? pin.at : (row?.engine_review_first_attempt_at ?? pin.at), name);
+  }
+
+  /** #287 (E4b): the CURRENT engine-agent attempt pin, validated at this read boundary — an
+   *  unrecognized `engine_review_pin_kind` string (should never happen; this column is engine-
+   *  written only) fails closed to "no pin", same stance review_fallback_kind's own read
+   *  boundary already takes. */
+  getEngineReviewAttemptPin(name: string): { head: string; at: string; runId: string; kind: "decisive" | "unavailable" } | null {
+    const row = this.getWorker(name);
+    if (!row || row.engine_review_pin_head == null || row.engine_review_pin_at == null || row.engine_review_pin_run_id == null) return null;
+    if (row.engine_review_pin_kind !== "decisive" && row.engine_review_pin_kind !== "unavailable") return null;
+    return {
+      head: row.engine_review_pin_head,
+      at: row.engine_review_pin_at,
+      runId: row.engine_review_pin_run_id,
+      kind: row.engine_review_pin_kind,
+    };
+  }
+
+  /** #287 (E4b): persist `name`'s lane's engine-agent WAL record — see the schema v24->v25
+   *  migration comment for the full field rationale and write-ordering. Upsert-by-worker_name
+   *  (current attempt only, never append-only — see the migration comment). Called BEFORE the
+   *  review session is spawned. */
+  recordEngineReviewWal(name: string, wal: { runId: string; head: string; base: string; diffHash: string; attemptStart: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO engine_review_wal (worker_name, run_id, head, base, diff_hash, tree_manifest_hash, attempt_start, decisive_outcome)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)
+         ON CONFLICT(worker_name) DO UPDATE SET
+           run_id = excluded.run_id, head = excluded.head, base = excluded.base,
+           diff_hash = excluded.diff_hash, tree_manifest_hash = NULL,
+           attempt_start = excluded.attempt_start, decisive_outcome = NULL`,
+      )
+      .run(name, wal.runId, wal.head, wal.base, wal.diffHash, wal.attemptStart);
+  }
+
+  /** #287 (E4b, design #279 §3): fill in the materializer's tree-manifest hash once the
+   *  materialize step completes — still strictly before the review session spawns (see
+   *  review/drive.ts). Guarded by `runId` so a WAL row already superseded by a LATER attempt
+   *  (e.g. a crash-restart's fresh WAL write racing a stale in-flight completion) can never have
+   *  a stale hash land on the wrong attempt's row. */
+  updateEngineReviewWalManifestHash(name: string, runId: string, manifestHash: string): void {
+    this.db
+      .prepare("UPDATE engine_review_wal SET tree_manifest_hash = ? WHERE worker_name = ? AND run_id = ?")
+      .run(manifestHash, name, runId);
+  }
+
+  /** #287 (E4b): record the DECISIVE outcome ('approved' | 'rejected') on `name`'s current WAL
+   *  row — written ONLY once the audit-delivery seam (E4c, #288) reports success (see
+   *  review/drive.ts's own doc for why decisive-pin permanence is independent of a later
+   *  refetch-race discard). Same `runId` guard as updateEngineReviewWalManifestHash. */
+  recordEngineReviewWalDecisiveOutcome(name: string, runId: string, outcome: "approved" | "rejected"): void {
+    this.db.prepare("UPDATE engine_review_wal SET decisive_outcome = ? WHERE worker_name = ? AND run_id = ?").run(outcome, name, runId);
+  }
+
+  /** #287 (E4b): the CURRENT engine-agent WAL record for `name`'s lane (the lane's most recent
+   *  attempt — this table is upsert-by-worker_name, never append-only, see the migration
+   *  comment). `null` when none has ever been recorded. */
+  getEngineReviewWal(name: string): {
+    runId: string;
+    head: string;
+    base: string;
+    diffHash: string;
+    treeManifestHash: string | null;
+    attemptStart: string;
+    decisiveOutcome: "approved" | "rejected" | null;
+  } | null {
+    const row = this.db.prepare("SELECT * FROM engine_review_wal WHERE worker_name = ?").get(name) as
+      | {
+          run_id: string;
+          head: string;
+          base: string;
+          diff_hash: string;
+          tree_manifest_hash: string | null;
+          attempt_start: string;
+          decisive_outcome: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    const decisiveOutcome = row.decisive_outcome === "approved" || row.decisive_outcome === "rejected" ? row.decisive_outcome : null;
+    return {
+      runId: row.run_id,
+      head: row.head,
+      base: row.base,
+      diffHash: row.diff_hash,
+      treeManifestHash: row.tree_manifest_hash,
+      attemptStart: row.attempt_start,
+      decisiveOutcome,
+    };
+  }
+
   /** #155: refresh a still-`running` lane's LIVE per-probe telemetry trio (update-in-place —
    *  see the schema v10->v11 migration comment for why this is a dedicated pair of methods
    *  rather than routed through upsertWorker's full-row replace: a generic `{...w, ...changes}`
@@ -1652,27 +1881,40 @@ export class State {
    *  storage of a lane's ACTUAL — not requested — model, populated by `recordSpend`/
    *  `settleTerminalWorker` from the CLI's own stream-json report, worker.ts's parseModelUsage).
    *
-   *  HONEST LIMITATION (documented, not a bug): `spend_ledger` rows are written only at a lane's
-   *  TERMINAL settlement (reclaim) — a lane still `driving` (its PR open, awaiting gate②, which
-   *  is exactly when a review would run) has NOT yet settled, so this legitimately returns `[]`
-   *  for it. `[]` reads as "worker actual unknown" at the call site (design #279 §6: "worker
-   *  actual unknown ⇒ unavailable" — a same-model verdict must never gate, so an UNKNOWN actual
-   *  fails closed exactly like a KNOWN-equal one, never optimistically treated as
-   *  "distinguishable"). Wiring an EARLIER, still-live signal (e.g. the session's own init-line
-   *  self-report, worker.ts's parseSessionInit) into a durable per-lane record is E4b's (#287)
-   *  concern, not this accessor's — see engine-agent.ts's own module doc for the accepted
-   *  residual this produces today. `'unknown'` rows (recordSpend's own fallback for a CLI report
-   *  with no model identifier) are excluded — an "unknown" actual is exactly as indistinguishable
-   *  as no row at all, never treated as a real, comparable model string. */
+   *  #287 (E4b, AC#1) CLOSES the honest limitation this doc used to describe: `spend_ledger` rows
+   *  are written only at a lane's TERMINAL settlement (reclaim), which can genuinely postdate the
+   *  moment an engine-agent review needs a signal — so this now UNIONS spend_ledger's settled
+   *  models with `workers.actual_models_json` (State.recordWorkerActualModel), the durable EARLY
+   *  record worker.ts's probe() writes as soon as the session-init line (or a later modelUsage
+   *  observation) is seen, well before any terminal reclaim. `[]` still means genuinely
+   *  "unknown" (design #279 §6: "worker actual unknown ⇒ unavailable" — a same-model verdict
+   *  must never gate, so an UNKNOWN actual fails closed exactly like a KNOWN-equal one, never
+   *  optimistically treated as "distinguishable"), now reached only when NEITHER source has
+   *  observed anything yet. `'unknown'` entries are excluded from both sources — an "unknown"
+   *  actual is exactly as indistinguishable as no row at all, never treated as a real, comparable
+   *  model string. */
   getWorkerActualModels(issue: number): string[] {
-    const lane = this.db.prepare("SELECT name FROM workers WHERE issue = ? ORDER BY started_at DESC LIMIT 1").get(issue) as
-      | { name: string }
-      | undefined;
+    const lane = this.db
+      .prepare("SELECT name, actual_models_json FROM workers WHERE issue = ? ORDER BY started_at DESC LIMIT 1")
+      .get(issue) as { name: string; actual_models_json: string | null } | undefined;
     if (!lane) return [];
     const rows = this.db
       .prepare("SELECT DISTINCT model FROM spend_ledger WHERE worker = ? AND model != 'unknown' ORDER BY model")
       .all(lane.name) as { model: string }[];
-    return rows.map((r) => r.model);
+    const models = new Set(rows.map((r) => r.model));
+    if (lane.actual_models_json) {
+      try {
+        const parsed: unknown = JSON.parse(lane.actual_models_json);
+        if (Array.isArray(parsed)) {
+          for (const m of parsed) {
+            if (typeof m === "string" && m.length > 0 && m !== "unknown") models.add(m);
+          }
+        }
+      } catch {
+        // corrupt JSON (should never happen — engine-written only) — ignore, fall back to spend_ledger alone
+      }
+    }
+    return [...models].sort();
   }
 
   /** Cumulative spend for `now`'s UTC calendar day (spend_ledger sum, ts-prefix match). */

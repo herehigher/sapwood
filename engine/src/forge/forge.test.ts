@@ -957,6 +957,54 @@ test("parsePRStatus: clean mergeable PR with passing checks", () => {
   assert.deepEqual(s, { number: 21, headOid: "d0ce0a5", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
 });
 
+test("parsePRStatus (#287, E4b): baseRefOid becomes PRStatus.baseOid — additive, older fixtures without it keep parsing with no baseOid key at all", () => {
+  const withBase = parsePRStatus(
+    JSON.stringify({
+      number: 21,
+      headRefOid: "d0ce0a5",
+      baseRefOid: "main-sha",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.equal(withBase.baseOid, "main-sha");
+
+  // Older fixture: no baseRefOid field at all — must parse unaffected, baseOid absent (not null).
+  const withoutBase = parsePRStatus(
+    JSON.stringify({
+      number: 21,
+      headRefOid: "d0ce0a5",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ conclusion: "SUCCESS" }],
+    }),
+  );
+  assert.equal(withoutBase.baseOid, undefined);
+  assert.ok(!Object.hasOwn(withoutBase, "baseOid"));
+});
+
+test("getPRStatus (#287): the gh pr view --json field list includes baseRefOid", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return JSON.stringify({
+      number: 1,
+      headRefOid: "abc",
+      baseRefOid: "def",
+      state: "OPEN",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [],
+    });
+  };
+  const status = await forge.getPRStatus(7);
+  const jsonFlagIdx = seen[0]!.indexOf("--json");
+  assert.ok(seen[0]![jsonFlagIdx + 1]!.includes("baseRefOid"));
+  assert.equal(status.baseOid, "def");
+});
+
 test("parsePRStatus: an empty rollup fails closed (checks may not be created yet), and is NOT red (#246 — no checks reported is pending, not failed)", () => {
   const s = parsePRStatus(JSON.stringify({ number: 1, headRefOid: "abc", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] }));
   assert.equal(s.ciGreen, false); // genuinely CI-less repos opt in via ci.requireChecks (M3)
@@ -2084,10 +2132,13 @@ test("parsePRChecksPage: CheckRun entries carry conclusion, legacy StatusContext
   });
   const page = parsePRChecksPage(json);
   assert.equal(page.total, 3);
+  // #287 (E4b): appSlug is null on every entry here — none of these fixture nodes carry a
+  // checkSuite.app.slug (the first has none in the fixture, the legacy StatusContext and the
+  // in-progress CheckRun structurally never do). See the dedicated appSlug tests below.
   assert.deepEqual(page.checks, [
-    { name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null },
-    { name: "legacy-ci", status: "", conclusion: null, state: "PENDING" },
-    { name: "", status: "", conclusion: null, state: null },
+    { name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: null },
+    { name: "legacy-ci", status: "", conclusion: null, state: "PENDING", appSlug: null },
+    { name: "", status: "", conclusion: null, state: null, appSlug: null },
   ]);
 });
 
@@ -2099,6 +2150,39 @@ test("parsePRChecksPage: no statusCheckRollup/commits -> empty checks, total 0",
     ),
     { checks: [], total: 0 },
   );
+});
+
+test("parsePRChecksPage (#287, E4b): checkSuite.app.slug becomes PRCheckItem.appSlug on a CheckRun node; a StatusContext node never has one (null)", () => {
+  const json = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: {
+                    contexts: {
+                      totalCount: 2,
+                      nodes: [
+                        { name: "test", status: "COMPLETED", conclusion: "SUCCESS", checkSuite: { app: { slug: "github-actions" } } },
+                        { context: "legacy-ci", state: "SUCCESS" },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  const page = parsePRChecksPage(json);
+  assert.deepEqual(page.checks, [
+    { name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" },
+    { name: "legacy-ci", status: "", conclusion: null, state: "SUCCESS", appSlug: null },
+  ]);
 });
 
 test("getPRChecks: scoped to owner/repo, GraphQL contexts(first: cap) with owner/repo/number/cap variables", async () => {

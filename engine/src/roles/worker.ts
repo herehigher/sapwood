@@ -2017,6 +2017,11 @@ export class WorkerSupervisor implements Supervisor {
     // baseline of 0 would misprice a resumed detached lane's current leg).
     const lane = this.lanes.get(name);
     const liveTelemetry = lane ? this.liveTelemetry(lane) : undefined;
+    // #287 (E4b, AC#1): the earliest observable actual model — read from the SAME in-memory
+    // jsonl liveTelemetry above already re-scans, so this is no new I/O, only a new parse of
+    // data already in hand. parseSessionInit's `model` is null until the init line lands (early
+    // in a session, but not instant) — conductor.ts's tick() only persists a non-null value.
+    const actualModel = lane ? parseSessionInit(this.readJsonl(lane.jsonlPath)).model : undefined;
     // #168: only for a FAILED lane — a DONE/handoff lane's classification is irrelevant
     // (env-failure disposition only applies to the FAILED reclaim path, conductor.ts), and
     // computing it unconditionally would re-read the jsonl on every probe of every lane for no
@@ -2044,6 +2049,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(liveTelemetry ? { liveTelemetry } : {}),
       ...(failureText !== undefined ? { failureText } : {}),
       ...(resultText !== undefined ? { resultText } : {}),
+      ...(actualModel != null ? { actualModel } : {}),
     };
   }
 
