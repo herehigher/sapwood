@@ -15,7 +15,11 @@ sapwood validate [path]
 ```
 
 The loader probes, in order: `sapwood.config.yaml`, `sapwood.config.yml`,
-`sapwood.config.json`. Only `board.owner`, `board.repo`, and `board.projectNumber` are
+`sapwood.config.json`. An explicit path from `sapwood run --config <path>` (including
+`--dry-run`), `sapwood status --config <path>`, or `sapwood validate [path]` bypasses
+the probe. The run flag selects only the config; runtime data, controls, sessions, and
+worktree roots stay cwd-relative.
+Only `board.owner`, `board.repo`, and `board.projectNumber` are
 required; every other key has a default.
 
 ## Data directory is stateful

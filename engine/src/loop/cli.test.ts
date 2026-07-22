@@ -14,6 +14,7 @@ import {
   formatStopConditionLine,
   normalizeUnplacedBoardItems,
   parseMilestoneFlag,
+  parseRunConfigFlag,
   parseRunStopMode,
   parseStatusArgs,
   parseStopFlags,
@@ -117,6 +118,47 @@ test("run with an unknown flag errors + usage, exit 1 — never a silently-start
 test("run with valid flags still falls through to the engine path (code -1)", () => {
   assert.equal(runCli(["node", "sapwood", "run", "--once"]).code, -1);
   assert.equal(runCli(["node", "sapwood", "run", "--until-idle"]).code, -1);
+});
+
+test("parseRunConfigFlag: absent leaves argv untouched; present consumes exactly its path operand", () => {
+  const absent = ["node", "sapwood", "run", "--once"];
+  assert.deepEqual(parseRunConfigFlag(absent), { rest: absent });
+  assert.deepEqual(parseRunConfigFlag(["node", "sapwood", "run", "--config", "x.yaml", "--once"]), {
+    rest: ["node", "sapwood", "run", "--once"],
+    configPath: "x.yaml",
+  });
+});
+
+test("run --config interleaves with --once and stop flags without its operand becoming an argument", () => {
+  for (const argv of [
+    ["node", "sapwood", "run", "--config", "x.yaml", "--once"],
+    ["node", "sapwood", "run", "--once", "--config", "x.yaml"],
+    ["node", "sapwood", "run", "--stop-after-issues", "1", "--config", "x.yaml", "--until-idle"],
+    ["node", "sapwood", "run", "--config", "x.yaml", "--milestone", "M4"],
+  ]) {
+    assert.equal(runCli(argv).code, -1, argv.join(" "));
+  }
+});
+
+test("run --config fails closed on a missing or flag-shaped operand", () => {
+  for (const argv of [
+    ["node", "sapwood", "run", "--config"],
+    ["node", "sapwood", "run", "--config", "--once"],
+  ]) {
+    const parsed = parseRunConfigFlag(argv);
+    assert.equal(parsed.error, "--config requires a path", argv.join(" "));
+    const result = runCli(argv);
+    assert.equal(result.code, 1, argv.join(" "));
+    assert.match(result.stderr, /--config requires a path/);
+    assert.match(result.stderr, /usage: sapwood run/);
+  }
+});
+
+test("run --help documents that --config selects config only and keeps runtime paths cwd-relative", () => {
+  const result = runCli(["node", "sapwood", "run", "--help"]);
+  assert.match(result.stdout, /--config PATH/);
+  assert.match(result.stdout, /Selects\s+the config only/);
+  assert.match(result.stdout, /remain relative to the current working directory/);
 });
 
 test("runExitCode: --once with a failed-only attempt exits 1; success exits 0 (Codex PR #50 cli.ts:82)", () => {
