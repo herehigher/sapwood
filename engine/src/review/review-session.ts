@@ -18,10 +18,11 @@
 //   - guard containment: SAPWOOD_WORKTREE_ROOT wired to the materialized tree, guard FORCED hard
 //     regardless of the engine's configured guard.mode (a review session must never silently run
 //     under a weaker, soft posture);
-//   - MCP + settings-source closure: --strict-mcp-config + an empty --mcp-config, and
-//     --setting-sources user — a materialized (producer-controlled) tree's own `.mcp.json` or
-//     `.claude/settings.json` never gets a chance to configure an MCP server or run a
-//     settings-declared hook;
+//   - MCP + settings-source closure: --strict-mcp-config + an empty --mcp-config, and an EMPTY
+//     --setting-sources list ("", per peripheral.ts's review-mode spawn args, #300 P1) — no
+//     project/local/user settings source loads at all, so a materialized (producer-controlled)
+//     tree's own `.mcp.json` or `.claude/settings.json` never gets a chance to configure an MCP
+//     server or run a settings-declared hook;
 //   - no forge proxy, no gh/git credentials in the session env;
 //   - context-manifest recording: the same CLAUDE.md-family probe every role session gets,
 //     simply reading from the materialized tree instead of a fresh worktree.
