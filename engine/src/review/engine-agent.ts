@@ -21,6 +21,7 @@
 // resolution, and the audit-comment transport. This module only implements `evaluate()`'s pure
 // decision logic end-to-end against injected deps — a caller that already has a live
 // `ReviewContext` (forge/pr/issue/data) can use it today; nothing yet CALLS it in production.
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,7 @@ import type { RoleRunner } from "../roles/peripheral.js";
 import type { ApprovalResult, ReviewContext, ReviewerAdapter } from "../roles/reviewer.js";
 import type { AcSnapshot } from "./ac-snapshot.js";
 import { deriveApprovalResult, parseAgentReviewOutputText } from "./agent-output.js";
+import type { EngineReviewArtifact } from "./audit.js";
 import type { MaterializeResult } from "./materializer.js";
 import { runReviewSession } from "./review-session.js";
 
@@ -62,6 +64,9 @@ export interface EngineAgentReviewerDeps {
    *  (reviewer.ts's `loadReviewDoctrine`). */
   doctrine?: string;
   now: () => Date;
+  /** #288: construction-bound validated-artifact side channel. ApprovalResult intentionally
+   *  stays small; audit provenance is reported only after strict output + model validation. */
+  onReviewArtifact?: (headOid: string, artifact: EngineReviewArtifact) => void;
 }
 
 /** Resolves the shipped default prompt — `engine/prompts/engine-reviewer.md` inside the engine
@@ -173,6 +178,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
   readonly kind = "engine-agent" as const;
   private readonly promptTemplate: string;
   private readonly agentCfg: NonNullable<SapwoodConfig["reviewer"]["agent"]>;
+  private readonly promptHash: string;
 
   constructor(private readonly deps: EngineAgentReviewerDeps) {
     const agent = deps.cfg.reviewer.agent;
@@ -185,6 +191,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     }
     this.agentCfg = agent;
     this.promptTemplate = loadEngineReviewerPromptTemplate(agent.promptFile);
+    this.promptHash = createHash("sha256").update(this.promptTemplate).digest("hex");
   }
 
   /** #286: no bot to ping — unlike CodexReviewer's `@codex review` PR comment (which asks an
@@ -363,7 +370,14 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     if (!parsed) {
       return { kind: "failed", costUsd: outcome.costUsd, costKnown };
     }
-    return { kind: "verdict", result: deriveApprovalResult(parsed, headOid) };
+    const result = deriveApprovalResult(parsed, headOid);
+    this.deps.onReviewArtifact?.(headOid, {
+      perAC: parsed.perAC,
+      findings: result.kind === "rejected" ? result.findings : [],
+      sessionActualModels: [...new Set(outcome.modelUsage.map((m) => m.model).filter((m) => m !== "unknown"))],
+      promptHash: this.promptHash,
+    });
+    return { kind: "verdict", result };
   }
 
   /** D5: `null` when `reviewerModels` is DISTINGUISHABLE from `workerModels` (safe to proceed);
@@ -417,10 +431,9 @@ export class EngineAgentReviewer implements ReviewerAdapter {
   }
 }
 
-/** Construct an `EngineAgentReviewer` from an explicit deps object — the factory
- *  reviewer.ts's `buildReviewerByKind` names in its own "engine-agent" case's error message.
- *  #287 (E4b) is what actually calls this from the drive loop, given a real `State`/materializer/
- *  `RoleRunner`; nothing in production calls it yet (this PR's own scope note). */
+/** Construct an `EngineAgentReviewer` from explicit dependencies. #288's production composition
+ * root supplies the State accessors, RoleRunner, materializer, doctrine, and artifact side channel;
+ * reviewer.ts's narrower classic-reviewer factory intentionally cannot supply those dependencies. */
 export function makeEngineAgentReviewer(deps: EngineAgentReviewerDeps): EngineAgentReviewer {
   return new EngineAgentReviewer(deps);
 }

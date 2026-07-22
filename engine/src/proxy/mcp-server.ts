@@ -41,6 +41,7 @@ import {
   fetchIssueCommentsResponse,
   fetchIssueDetailsView,
   fetchIssueRelationsResponse,
+  fetchPRAuditCommentsResponse,
   fetchPRChecksResponse,
   fetchPRDetailsResponse,
   fetchPRReviewsResponse,
@@ -50,6 +51,7 @@ import {
   type IssueDetailsArgs,
   type IssueRelationsArgs,
   mcpToolFullName,
+  type PRAuditCommentsArgs,
   type PRChecksArgs,
   type PRDetailsArgs,
   PROXY_VERSION,
@@ -64,6 +66,7 @@ import {
   TOOL_ISSUE_DETAILS,
   TOOL_ISSUE_RELATIONS,
   TOOL_NAMES,
+  TOOL_PR_CHECKS,
   TOOL_PR_DETAILS,
   TOOL_PR_REVIEW_THREADS,
   TOOL_PR_REVIEWS,
@@ -84,6 +87,7 @@ export type ProxyForge = Pick<
   | "getPRReviews"
   | "getPRReviewThreads"
   | "getPRChecks"
+  | "getPRComments"
 >;
 
 export interface ForgeProxyDeps {
@@ -377,12 +381,14 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
       // capThreads/fetchPRReviewThreadsResponse already folds into `complete`.
       return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
     }
-    // TOOL_PR_CHECKS — the eighth and last fixed-algebra member (validateToolArgs already
-    // rejected anything else as unknown_tool).
-    const { pr } = args as z.infer<typeof PRChecksArgs>;
-    const value = await fetchPRChecksResponse(deps.forge, pr, deps.caps);
-    // #244 (Codex sol-high PR #260 review, P1): same completeness contract as pr_reviews above.
-    return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
+    if (tool === TOOL_PR_CHECKS) {
+      const { pr } = args as z.infer<typeof PRChecksArgs>;
+      const value = await fetchPRChecksResponse(deps.forge, pr, deps.caps);
+      return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
+    }
+    const { pr, lastN } = args as z.infer<typeof PRAuditCommentsArgs>;
+    const value = await fetchPRAuditCommentsResponse(deps.forge, pr, lastN, deps.caps);
+    return { value, upstreamIds: [pr], counts: { returned: value.returned }, truncated: !value.complete };
   }
 
   await new Promise<void>((resolve, reject) => {

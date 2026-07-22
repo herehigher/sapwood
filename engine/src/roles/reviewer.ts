@@ -432,7 +432,7 @@ function freshTrustedThumbCount(): number {
  * prose permitted — mid-prose embeddings ("The phrase … would be wrong") still fail the
  * anchor, and inline-code negations still fail the caller's no-backtick line guard.
  */
-const CLEAN_VERDICT_RE = /^ {0,3}[*_]*Codex Review: Didn't find any major issues\b/i;
+export const CLEAN_VERDICT_RE = /^ {0,3}[*_]*Codex Review: Didn't find any major issues\b/i;
 /**
  * Reviewed-commit assertion line. Live-verified (#278): the bot's NATIVE format is
  * `**Reviewed commit:** `cdee61ce5c`` — its own label ("Reviewed commit:"), markdown bold,
@@ -441,7 +441,7 @@ const CLEAN_VERDICT_RE = /^ {0,3}[*_]*Codex Review: Didn't find any major issues
  * decoration, and capture the value; matching semantics live in oidAssertionMatchesHead
  * (exact equality, or a >=7-hex abbreviated prefix of the head).
  */
-const REVIEWED_HEAD_OID_RE = /^ {0,3}[*_]*Reviewed (?:commit|head OID):[*_]*\s*`?([^\s`]+)`?\s*[*_]*$/i;
+export const REVIEWED_HEAD_OID_RE = /^ {0,3}[*_]*Reviewed (?:commit|head OID):[*_]*\s*`?([^\s`]+)`?\s*[*_]*$/i;
 
 /** True when one asserted OID identifies `head`: byte equality (legacy/full form), or — the
  *  bot's native abbreviated form — a case-insensitive hex prefix of at least 7 chars (git's
@@ -803,33 +803,23 @@ export function buildReviewerByKind(
       // gate② acceptance is identity-checked, not merely non-author — Codex PR #42 P1).
       return new CodexReviewer(trustedReviewers, triggerCommand, doctrine);
     case "engine-agent":
-      // #286 (E4a): engine-agent has NO legal construction path through this factory — it is not
+      // #286/#288: engine-agent has NO legal construction path through this limited factory — it is not
       // a `Reviewer` (no triggerReview/verdictFromData half; see ReviewerKind's own doc above),
       // so this function (return type `Reviewer`) cannot produce one, only decline clearly. A
       // real `EngineAgentReviewer` is built by engine-agent.ts's own factory
       // (makeEngineAgentReviewer), given a deps object (materializer/runner/state accessors)
-      // this seam has no way to supply — #287 (E4b) is what wires that constructed adapter into
-      // the drive loop's engine-agent path. Throwing here (rather than silently building a
+      // this seam has no way to supply. #288's executable composition root in cli.ts instead uses
+      // review/production.ts to bind them and wire the adapter into the drive loop. Throwing here
+      // (rather than silently building a
       // Codex/human placeholder, or a Reviewer-shaped stub whose verdictFromData is permanently
       // WAIT_REVIEW) keeps "this factory never silently mis-constructs" (#282's own AC) true for
-      // the new kind too: a caller that reaches this branch (e.g. makeReviewer with
-      // reviewer.mode: engine-agent, before #287 lands) gets a loud, specific error instead of a
+      // the new kind too: a caller that reaches this branch gets a loud, specific error instead of a
       // reviewer that LOOKS like it covers gate② but never can.
-      // #287 (E4b): merge-driver.ts's driveOne now HAS an engine-agent drive path
-      // (driveEngineAgentOne, composed from review/drive.ts) — but this factory still refuses to
-      // build the reviewer this mode needs, on purpose: the drive path only ever CONSUMES a
-      // decisive verdict once its injected `auditDelivery` seam reports success, and that seam
-      // has NO production implementation until #288 (E4c) ships the audit comment + delivery
-      // receipt. Constructing a real EngineAgentReviewer here (letting `reviewer.mode:
-      // engine-agent` actually start the engine) would be a dead end that can never merge/FIXABLE
-      // anything, and — worse — would look production-ready when it structurally cannot be until
-      // the audit chain exists. Throwing here keeps that honest: `sapwood run` with `reviewer.mode:
-      // engine-agent` fails loudly at startup, not silently at every drive tick.
+      // Keeping this exhaustively matched throw is safe because production engine-agent mode never
+      // calls this factory; cli.ts selects the dependency-rich construction path first.
       throw new Error(
         'buildReviewerByKind: "engine-agent" is constructed via engine-agent.ts\'s makeEngineAgentReviewer, ' +
-          "not this factory — reviewer.mode: engine-agent has no primary-reviewer construction path here yet. " +
-          "The drive-ordering machinery landed in #287 (E4b), but production enablement is gated on #288 (E4c: " +
-          "audit comment + delivery receipt) — that issue is what will replace this throw.",
+          "not this limited factory; use review/production.ts, which binds materializer, runner, state, and audit delivery.",
       );
   }
   // #282 review round 2 (adopted P2): the ACTUAL compile-time exhaustiveness sentinel. `kind`'s

@@ -1535,6 +1535,9 @@ interface EARecorded {
     treeManifestHash: string | null;
     attemptStart: string;
     decisiveOutcome: "approved" | "rejected" | null;
+    reviewArtifactJson: string | null;
+    auditCommentId: string | null;
+    auditDeliveredAt: string | null;
   } | null;
 }
 
@@ -1552,12 +1555,28 @@ function mkEngineAgentDeps(
     },
     getWal: () => recorded.wal,
     recordWal: (wal: { runId: string; head: string; base: string; diffHash: string; attemptStart: string }) => {
-      recorded.wal = { ...wal, treeManifestHash: null, decisiveOutcome: null };
+      recorded.wal = {
+        ...wal,
+        treeManifestHash: null,
+        decisiveOutcome: null,
+        reviewArtifactJson: null,
+        auditCommentId: null,
+        auditDeliveredAt: null,
+      };
     },
     recordWalDecisiveOutcome: (runId: string, outcome: "approved" | "rejected") => {
       if (recorded.wal && recorded.wal.runId === runId) recorded.wal = { ...recorded.wal, decisiveOutcome: outcome };
     },
-    auditDelivery: overrides.auditDelivery ?? (async () => ({ delivered: false, reason: "#288 not implemented in this test" })),
+    auditDelivery: async (result: ApprovalResult) => {
+      const delivered = await (
+        overrides.auditDelivery ?? (async () => ({ delivered: false, reason: "#288 not implemented in this test" }))
+      )(result);
+      if (delivered.delivered && recorded.wal) {
+        recorded.wal = { ...recorded.wal, reviewArtifactJson: "{}", auditCommentId: "C1", auditDeliveredAt: "2026-01-01T00:00:01.000Z" };
+      }
+      return delivered;
+    },
+    reconcileAuditDelivery: async () => ({ delivered: false, reason: "nothing to reconcile" }),
     ciChecksCap: 20,
   };
 }
@@ -1721,7 +1740,7 @@ test("MergeDriver.driveOne (engine-agent): a head change clears the pin — a fr
   assert.equal(recorded.pin?.head, "HEAD2");
 });
 
-test("MergeDriver.driveOne (engine-agent): approved but audit delivery UNAVAILABLE -> queued, never merges (E4c's ordering invariant — no production auditDelivery impl exists yet)", async () => {
+test("MergeDriver.driveOne (engine-agent): approved but audit delivery UNAVAILABLE -> queued, never merges (E4c's ordering invariant)", async () => {
   const forge = new EngineAgentFakeForge();
   const reviewer = {
     kind: "engine-agent" as const,
@@ -1734,6 +1753,32 @@ test("MergeDriver.driveOne (engine-agent): approved but audit delivery UNAVAILAB
   assert.equal(outcome.kind, "queued");
   assert.deepEqual(forge.merged, []);
   assert.equal(recorded.pin?.kind, "unavailable", "never permanent without a receipted audit comment");
+});
+
+test("#288 ordering: rejected but audit/receipt unavailable never reaches FIXABLE or #170 escalation", async () => {
+  const forge = new EngineAgentFakeForge();
+  const cfg = mkEngineAgentCfg({ reviewer: { mode: "engine-agent", agent: { model: "opus" }, escalateAfterSec: 1 } });
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => ({
+      kind: "rejected" as const,
+      headOid: "HEAD",
+      findings: [{ id: "F1", body: "bug" }] as [{ id: string; body: string }],
+    }),
+  };
+  const recorded: EARecorded = { pin: null, wal: null };
+  const deps = {
+    ...mkEngineAgentDeps(recorded, {
+      auditDelivery: async () => ({ delivered: false, reason: "post failed" }),
+      now: () => new Date("2026-01-01T01:00:00Z"),
+    }),
+    getFirstAttemptAt: () => "2026-01-01T00:00:00Z",
+  };
+  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [], now: () => new Date("2026-01-01T01:00:00Z") });
+  const outcome = await driver.driveOne(7, 1, ALREADY_TRIGGERED, noopRecord, undefined, false, undefined, deps);
+  assert.equal(outcome.kind, "queued");
+  assert.equal(outcome.reviewSilenceEscalation, undefined);
+  assert.equal(forge.merged.length, 0);
 });
 
 test("MergeDriver.driveOne (engine-agent): post-session refetch race — head moved between session and consume discards the approval, never merges", async () => {
@@ -1956,4 +2001,45 @@ test("MergeDriver.driveOne (engine-agent): CI-evidence fixture matrix — a fore
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord, undefined, undefined, undefined, mkEngineAgentDeps(recorded));
   assert.equal(outcome.kind, "queued");
   assert.equal(evaluated, false);
+});
+
+test("#288/#54 engine-agent unavailable past first-attempt failover uses fallback's live verdictFromData and can gate", async () => {
+  const forge = new EngineAgentFakeForge();
+  forge.reviewData = { ...forge.reviewData, reviews: [{ author: "human", state: "APPROVED", commitOid: "HEAD" }] };
+  const cfg = mkEngineAgentCfg({
+    reviewer: { mode: "engine-agent", agent: { model: "opus", retryAfterSec: 900 }, fallback: ["human"], failoverAfterSec: 60 },
+  });
+  const recorded: EARecorded = { pin: { head: "HEAD", at: "2026-01-01T00:05:00Z", runId: "run-1", kind: "unavailable" }, wal: null };
+  const deps = { ...mkEngineAgentDeps(recorded), getFirstAttemptAt: () => "2026-01-01T00:00:00Z" };
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => ({ kind: "unavailable" as const, headOid: "HEAD", reason: "pin unavailable" }),
+  };
+  const driver = new MergeDriver({
+    forge,
+    reviewer,
+    cfg,
+    fallbackReviewers: [new HumanReviewer()],
+    now: () => new Date("2026-01-01T00:10:00Z"),
+  });
+  const outcome = await driver.driveOne(7, 1, ALREADY_TRIGGERED, noopRecord, undefined, false, undefined, deps);
+  assert.equal(outcome.kind, "merged");
+  assert.equal(forge.merged.length, 1);
+  assert.equal(outcome.reviewerTransition?.mode, "human");
+});
+
+test("#288/#170 engine-agent silence past first-attempt escalation emits visibility signal, latched by existing conductor path", async () => {
+  const forge = new EngineAgentFakeForge();
+  const cfg = mkEngineAgentCfg({ reviewer: { mode: "engine-agent", agent: { model: "opus", retryAfterSec: 900 }, escalateAfterSec: 60 } });
+  const recorded: EARecorded = { pin: { head: "HEAD", at: "2026-01-01T00:05:00Z", runId: "run-1", kind: "unavailable" }, wal: null };
+  const deps = { ...mkEngineAgentDeps(recorded), getFirstAttemptAt: () => "2026-01-01T00:00:00Z" };
+  const reviewer = {
+    kind: "engine-agent" as const,
+    evaluate: async () => ({ kind: "unavailable" as const, headOid: "HEAD", reason: "pin unavailable" }),
+  };
+  const driver = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers: [], now: () => new Date("2026-01-01T00:10:00Z") });
+  const outcome = await driver.driveOne(7, 1, ALREADY_TRIGGERED, noopRecord, undefined, false, undefined, deps);
+  assert.equal(outcome.kind, "queued");
+  assert.equal(outcome.reviewSilenceEscalation?.head, "HEAD");
+  assert.equal(outcome.reviewSilenceEscalation?.silenceSec, 600);
 });

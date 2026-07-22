@@ -30,6 +30,8 @@ const CAPS = {
   maxCommentsPerThread: 20,
   maxReviewsPerCall: 20,
   maxChecksPerCall: 20,
+  maxAuditCommentsPerCall: 20,
+  maxAuditCommentScanWindow: 100,
 };
 
 function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
@@ -59,6 +61,7 @@ function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
     getPRReviews: async () => ({ reviews, total: reviews.length }),
     getPRReviewThreads: async () => ({ threads, pageCapped: false }),
     getPRChecks: async () => ({ checks, total: checks.length }),
+    getPRComments: async () => ({ comments: [], total: 0 }),
     ...over,
   };
 }
@@ -186,11 +189,11 @@ test("initialize echoes the client's protocolVersion and reports serverInfo/capa
   });
 });
 
-test("tools/list returns the 8 fixed tools (4 issue + 4 PR, #244) with strict object schemas", async () => {
+test("tools/list returns the 9 fixed tools (including #288 audit transport) with strict object schemas", async () => {
   await withServer({}, async (h) => {
     const res = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const json = await res.json();
-    assert.equal(json.result.tools.length, 8);
+    assert.equal(json.result.tools.length, 9);
     assert.deepEqual(json.result.tools.map((t: { name: string }) => t.name).sort(), [...TOOL_NAMES].sort());
   });
 });
@@ -334,31 +337,46 @@ test("tools/call: a hung upstream call is killed by the per-call timeout -> isEr
 // the #234 issue-tool matrix above exactly.
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("tools/call: pr_details/pr_reviews/pr_review_threads/pr_checks succeed and journal a 'fetched' row each", async () => {
-  await withServer({}, async (h, state) => {
-    for (const [name, args] of [
-      ["pr_details", { pr: 1 }],
-      ["pr_reviews", { pr: 1 }],
-      ["pr_review_threads", { pr: 1 }],
-      ["pr_checks", { pr: 1 }],
-    ] as const) {
-      const { body } = await callTool(h.url, h.token, name, args);
-      assert.equal(body.result.isError, false, `${name} should succeed`);
-      if (name === "pr_details") {
-        assert.equal(JSON.parse(body.result.content[0].text).baseRefName, "develop");
+test("tools/call: every PR evidence tool, including #288 audit comments, succeeds and journals a fetched row", async () => {
+  const auditBody = `<!-- sapwood-audit kind=engine-agent head=${"a".repeat(40)} diff=${"b".repeat(64)} run=r1 -->\nrecord`;
+  await withServer(
+    {
+      forge: fakeForge({
+        getPRComments: async () => ({ comments: [{ id: "IC1", login: "bot", createdAt: "t", body: auditBody }], total: 1 }),
+      }),
+    },
+    async (h, state) => {
+      for (const [name, args] of [
+        ["pr_details", { pr: 1 }],
+        ["pr_reviews", { pr: 1 }],
+        ["pr_review_threads", { pr: 1 }],
+        ["pr_checks", { pr: 1 }],
+        ["getPRAuditComments", { pr: 1 }],
+      ] as const) {
+        const { body } = await callTool(h.url, h.token, name, args);
+        assert.equal(body.result.isError, false, `${name} should succeed`);
+        if (name === "pr_details") {
+          assert.equal(JSON.parse(body.result.content[0].text).baseRefName, "develop");
+        }
       }
-    }
-    const rows = state.listForgeProxyJournal({
-      roundId: 1,
-      phase: "architecting",
-      role: "architect",
-      session: "role-architect-abc",
-      attempt: 1,
-    });
-    assert.equal(rows.length, 4);
-    assert.deepEqual(rows.map((r) => r.tool).sort(), ["pr_checks", "pr_details", "pr_review_threads", "pr_reviews"]);
-    assert.ok(rows.every((r) => r.status === "delivered" && r.responseCanonical && r.contentHash));
-  });
+      const rows = state.listForgeProxyJournal({
+        roundId: 1,
+        phase: "architecting",
+        role: "architect",
+        session: "role-architect-abc",
+        attempt: 1,
+      });
+      assert.equal(rows.length, 5);
+      assert.deepEqual(rows.map((r) => r.tool).sort(), [
+        "getPRAuditComments",
+        "pr_checks",
+        "pr_details",
+        "pr_review_threads",
+        "pr_reviews",
+      ]);
+      assert.ok(rows.every((r) => r.status === "delivered" && r.responseCanonical && r.contentHash));
+    },
+  );
 });
 
 test("tools/call: pr_details malformed args -> isError invalid_args", async () => {
@@ -439,11 +457,11 @@ test("tools/call: pr_reviews upstream error is sanitized before reaching the res
 
 // ── #244 role x tool matrix enforcement (deny-by-default) ─────────────────────────────────
 
-test("allowedTools omitted (default) -> every fixed tool callable, tools/list advertises all 8", async () => {
+test("allowedTools omitted (default) -> every fixed tool callable, tools/list advertises all 9", async () => {
   await withServer({}, async (h) => {
     const list = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const listJson = await list.json();
-    assert.equal(listJson.result.tools.length, 8);
+    assert.equal(listJson.result.tools.length, 9);
     const { body } = await callTool(h.url, h.token, "pr_details", { pr: 1 });
     assert.equal(body.result.isError, false);
   });
@@ -488,6 +506,7 @@ test("allowedTools = [] (an unlisted role's deny-by-default resolution, proxy/ac
       pr_reviews: { pr: 1 },
       pr_review_threads: { pr: 1 },
       pr_checks: { pr: 1 },
+      getPRAuditComments: { pr: 1 },
     };
     for (const name of TOOL_NAMES) {
       const { body } = await callTool(h.url, h.token, name, validArgsByTool[name]);

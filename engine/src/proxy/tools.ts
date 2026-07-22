@@ -21,6 +21,7 @@ import type {
   RelatedRef,
   ReviewThreadItem,
 } from "../forge/forge.js";
+import { parseAuditMarker } from "../review/audit.js";
 
 // ── Tool names (fixed algebra — v1's 4 issue tools, #234, plus #244's 4 PR tools) ───────────
 
@@ -34,6 +35,7 @@ export const TOOL_PR_DETAILS = "pr_details";
 export const TOOL_PR_REVIEWS = "pr_reviews";
 export const TOOL_PR_REVIEW_THREADS = "pr_review_threads";
 export const TOOL_PR_CHECKS = "pr_checks";
+export const TOOL_PR_AUDIT_COMMENTS = "getPRAuditComments";
 
 export const FORGE_MCP_SERVER_NAME = "forge";
 
@@ -47,15 +49,22 @@ export const TOOL_NAMES = [
   TOOL_PR_REVIEWS,
   TOOL_PR_REVIEW_THREADS,
   TOOL_PR_CHECKS,
+  TOOL_PR_AUDIT_COMMENTS,
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 /** #244: the 4 original issue-oriented tools — used by proxy/access.ts's role x tool matrix
  *  (issue-oriented peripheral roles get this subset). */
 export const ISSUE_TOOLS: readonly ToolName[] = [TOOL_ISSUE_DETAILS, TOOL_ISSUE_COMMENTS, TOOL_ISSUE_RELATIONS, TOOL_SEARCH_ISSUES];
-/** #244: the 4 new PR-facing tools — used by proxy/access.ts's role x tool matrix (the fix-loop
- *  worker leg gets this subset). */
-export const PR_TOOLS: readonly ToolName[] = [TOOL_PR_DETAILS, TOOL_PR_REVIEWS, TOOL_PR_REVIEW_THREADS, TOOL_PR_CHECKS];
+/** #244/#288: the bounded PR-facing evidence tools — used by proxy/access.ts's role x tool
+ *  matrix (the fix-loop worker leg gets this subset). */
+export const PR_TOOLS: readonly ToolName[] = [
+  TOOL_PR_DETAILS,
+  TOOL_PR_REVIEWS,
+  TOOL_PR_REVIEW_THREADS,
+  TOOL_PR_CHECKS,
+  TOOL_PR_AUDIT_COMMENTS,
+];
 
 /** The `--allowedTools` entries a session needs to actually call these tools — Claude Code's MCP
  *  tool namespace is `mcp__<server>__<tool>` (worker.ts's ClaudeArgsOpts.allowedTools doc). */
@@ -103,6 +112,11 @@ export interface ProxyCaps {
    *  `contexts(first: cap)`. Same no-lastN/completeness-not-rejection stance as
    *  maxReviewsPerCall above. */
   maxChecksPerCall: number;
+  /** #288: max marker-filtered audit comments returned by getPRAuditComments. */
+  maxAuditCommentsPerCall: number;
+  /** #288: max top-level comments scanned before marker filtering. Independent of the return
+   *  cap so newer ordinary-comment spam cannot displace an audit comment prematurely. */
+  maxAuditCommentScanWindow: number;
 }
 
 // ── Arg schemas (strict — an unrecognized key, e.g. a caller-supplied `repo`/`owner`, fails
@@ -157,6 +171,7 @@ export const PRDetailsArgs = z.object({ pr: z.number().int().positive() }).stric
 export const PRReviewsArgs = z.object({ pr: z.number().int().positive() }).strict();
 export const PRReviewThreadsArgs = z.object({ pr: z.number().int().positive(), lastN: z.number().int().positive().optional() }).strict();
 export const PRChecksArgs = z.object({ pr: z.number().int().positive() }).strict();
+export const PRAuditCommentsArgs = z.object({ pr: z.number().int().positive(), lastN: z.number().int().positive().optional() }).strict();
 
 const ARG_SCHEMAS: Record<ToolName, z.ZodTypeAny> = {
   [TOOL_ISSUE_DETAILS]: IssueDetailsArgs,
@@ -167,6 +182,7 @@ const ARG_SCHEMAS: Record<ToolName, z.ZodTypeAny> = {
   [TOOL_PR_REVIEWS]: PRReviewsArgs,
   [TOOL_PR_REVIEW_THREADS]: PRReviewThreadsArgs,
   [TOOL_PR_CHECKS]: PRChecksArgs,
+  [TOOL_PR_AUDIT_COMMENTS]: PRAuditCommentsArgs,
 };
 
 /** Hand-written JSON Schema for `tools/list` — kept in sync with the zod schemas above by
@@ -253,6 +269,17 @@ export const TOOL_DEFINITIONS: { name: ToolName; description: string; inputSchem
     inputSchema: {
       type: "object",
       properties: { pr: { type: "integer", minimum: 1 } },
+      required: ["pr"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_PR_AUDIT_COMMENTS,
+    description:
+      "Fetch only sapwood engine-agent audit comments on a pull request, newest first and bounded to the last N, from a bounded top-level-comment scan.",
+    inputSchema: {
+      type: "object",
+      properties: { pr: { type: "integer", minimum: 1 }, lastN: { type: "integer", minimum: 1 } },
       required: ["pr"],
       additionalProperties: false,
     },
@@ -381,6 +408,11 @@ function checkOverCap(tool: ToolName, args: unknown, caps: ProxyCaps): string | 
     const { lastN } = args as z.infer<typeof PRReviewThreadsArgs>;
     if (lastN !== undefined && lastN > caps.maxReviewThreadsPerCall) {
       return `requested lastN=${lastN}, exceeds the cap of ${caps.maxReviewThreadsPerCall}`;
+    }
+  } else if (tool === TOOL_PR_AUDIT_COMMENTS) {
+    const { lastN } = args as z.infer<typeof PRAuditCommentsArgs>;
+    if (lastN !== undefined && lastN > caps.maxAuditCommentsPerCall) {
+      return `requested lastN=${lastN}, exceeds the cap of ${caps.maxAuditCommentsPerCall}`;
     }
   }
   return null;
@@ -626,6 +658,23 @@ export async function fetchPRReviewThreadsResponse(
 export async function fetchPRChecksResponse(forge: Pick<IForge, "getPRChecks">, pr: number, caps: ProxyCaps): Promise<PRChecksResponse> {
   const { checks, total } = await forge.getPRChecks(pr, caps.maxChecksPerCall);
   return { pr, checks, total, returned: checks.length, complete: checks.length >= total };
+}
+
+export async function fetchPRAuditCommentsResponse(
+  forge: Pick<IForge, "getPRComments">,
+  pr: number,
+  lastN: number | undefined,
+  caps: ProxyCaps,
+) {
+  const cap = lastN ?? caps.maxAuditCommentsPerCall;
+  const page = await forge.getPRComments(pr, caps.maxAuditCommentScanWindow);
+  const comments = page.comments
+    .map((comment) => ({ comment, marker: parseAuditMarker(comment.body) }))
+    .filter((entry): entry is { comment: typeof entry.comment; marker: NonNullable<typeof entry.marker> } => entry.marker !== null)
+    .slice(-cap)
+    .reverse()
+    .map(({ comment, marker }) => ({ id: comment.id, createdAt: comment.createdAt, ...marker, body: comment.body }));
+  return { pr, comments, returned: comments.length, complete: page.total <= caps.maxAuditCommentScanWindow };
 }
 
 // Re-exported so mcp-server.ts/journal.ts never need their own import of RelatedRef just to

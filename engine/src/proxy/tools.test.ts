@@ -11,6 +11,7 @@ import {
   capThreads,
   fetchIssueDetailsView,
   fetchIssueRelationsResponse,
+  fetchPRAuditCommentsResponse,
   fetchPRChecksResponse,
   fetchPRDetailsResponse,
   fetchPRReviewsResponse,
@@ -26,6 +27,7 @@ import {
   TOOL_ISSUE_DETAILS,
   TOOL_ISSUE_RELATIONS,
   TOOL_NAMES,
+  TOOL_PR_AUDIT_COMMENTS,
   TOOL_PR_CHECKS,
   TOOL_PR_DETAILS,
   TOOL_PR_REVIEW_THREADS,
@@ -45,6 +47,8 @@ const CAPS: ProxyCaps = {
   maxCommentsPerThread: 10,
   maxReviewsPerCall: 5,
   maxChecksPerCall: 5,
+  maxAuditCommentsPerCall: 5,
+  maxAuditCommentScanWindow: 100,
 };
 
 // ── tool names / tools/list ─────────────────────────────────────────────────────────────────
@@ -58,7 +62,7 @@ test("TOOL_DEFINITIONS: one entry per fixed tool, in TOOL_NAMES order, each a st
     TOOL_DEFINITIONS.map((t) => t.name),
     TOOL_NAMES,
   );
-  assert.equal(TOOL_DEFINITIONS.length, 8, "4 issue tools (#234) + 4 PR tools (#244)");
+  assert.equal(TOOL_DEFINITIONS.length, 9, "4 issue tools (#234) + 4 PR tools (#244) + audit transport (#288)");
   for (const def of TOOL_DEFINITIONS) {
     assert.equal(def.inputSchema.type, "object");
     assert.equal(def.inputSchema.additionalProperties, false);
@@ -67,8 +71,81 @@ test("TOOL_DEFINITIONS: one entry per fixed tool, in TOOL_NAMES order, each a st
 
 test("ISSUE_TOOLS / PR_TOOLS: partition TOOL_NAMES exactly, no overlap", () => {
   assert.deepEqual([...ISSUE_TOOLS].sort(), [TOOL_ISSUE_COMMENTS, TOOL_ISSUE_DETAILS, TOOL_ISSUE_RELATIONS, TOOL_SEARCH_ISSUES].sort());
-  assert.deepEqual([...PR_TOOLS].sort(), [TOOL_PR_CHECKS, TOOL_PR_DETAILS, TOOL_PR_REVIEWS, TOOL_PR_REVIEW_THREADS].sort());
+  assert.deepEqual(
+    [...PR_TOOLS].sort(),
+    [TOOL_PR_CHECKS, TOOL_PR_DETAILS, TOOL_PR_REVIEWS, TOOL_PR_REVIEW_THREADS, TOOL_PR_AUDIT_COMMENTS].sort(),
+  );
   assert.deepEqual([...ISSUE_TOOLS, ...PR_TOOLS].sort(), [...TOOL_NAMES].sort());
+});
+
+test("#288 rejected findings reach the fix evidence channel through capped, marker-filtered, read-only audit comments, newest first", async () => {
+  const marker = (run: string) =>
+    `<!-- sapwood-audit kind=engine-agent head=${"a".repeat(40)} diff=${"b".repeat(64)} run=${run} -->\nEngine-derived review disposition recorded: **rejected**.\n### Findings\n- rejected finding ${run}`;
+  let requestedCap = 0;
+  const value = await fetchPRAuditCommentsResponse(
+    {
+      getPRComments: async (_pr, cap) => {
+        requestedCap = cap;
+        return {
+          total: 3,
+          comments: [
+            { id: "1", login: "bot", createdAt: "t1", body: marker("r1") },
+            { id: "2", login: "human", createdAt: "t2", body: "ordinary comment" },
+            { id: "3", login: "bot", createdAt: "t3", body: marker("r2") },
+          ],
+        };
+      },
+    },
+    7,
+    2,
+    CAPS,
+  );
+  assert.equal(requestedCap, CAPS.maxAuditCommentScanWindow);
+  assert.deepEqual(
+    value.comments.map((c) => c.runId),
+    ["r2", "r1"],
+  );
+  assert.equal(
+    value.comments.some((c) => c.body === "ordinary comment"),
+    false,
+  );
+  assert.match(value.comments[0]!.body, /rejected finding r2/);
+});
+
+test("#288 audit scan window is independent of the filtered return cap, so newer non-audit spam does not displace audit evidence", async () => {
+  const audit = `<!-- sapwood-audit kind=engine-agent head=${"a".repeat(40)} diff=${"b".repeat(64)} run=kept -->\nAudit`;
+  let requestedCap = 0;
+  const value = await fetchPRAuditCommentsResponse(
+    {
+      getPRComments: async (_pr, cap) => {
+        requestedCap = cap;
+        return {
+          total: 26,
+          comments: [
+            { id: "audit", login: "bot", createdAt: "t00", body: audit },
+            ...Array.from({ length: 25 }, (_, i) => ({ id: `spam-${i}`, login: "human", createdAt: `t${i + 1}`, body: "ordinary" })),
+          ],
+        };
+      },
+    },
+    7,
+    undefined,
+    { ...CAPS, maxAuditCommentsPerCall: 20, maxAuditCommentScanWindow: 100 },
+  );
+  assert.equal(requestedCap, 100);
+  assert.deepEqual(
+    value.comments.map((comment) => comment.runId),
+    ["kept"],
+  );
+  assert.equal(value.complete, true);
+});
+
+test("#288 audit comments report complete:false when total top-level comments exceed the scan window", async () => {
+  const value = await fetchPRAuditCommentsResponse({ getPRComments: async () => ({ total: 101, comments: [] }) }, 7, undefined, {
+    ...CAPS,
+    maxAuditCommentScanWindow: 100,
+  });
+  assert.equal(value.complete, false);
 });
 
 // ── arg validation: schema / scope / cap / unknown-tool matrix (issue #234 AC) ──────────────

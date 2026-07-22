@@ -52,6 +52,7 @@ function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
     getPRReviews: async () => ({ reviews, total: reviews.length }),
     getPRReviewThreads: async () => ({ threads, pageCapped: false }),
     getPRChecks: async () => ({ checks, total: checks.length }),
+    getPRComments: async () => ({ comments: [], total: 0 }),
     ...over,
   };
 }
@@ -74,7 +75,7 @@ test("createProxyMint: mints a handle scoped to the caller's role — an issue-o
     try {
       assert.deepEqual(
         workerHandle.toolNames.sort(),
-        ["pr_details", "pr_reviews", "pr_review_threads", "pr_checks"].map((t) => `mcp__forge__${t}`).sort(),
+        ["pr_details", "pr_reviews", "pr_review_threads", "pr_checks", "getPRAuditComments"].map((t) => `mcp__forge__${t}`).sort(),
       );
     } finally {
       await workerHandle.stop();

@@ -14,7 +14,7 @@ import { ISSUE_TOOLS, PR_TOOLS, type ToolName } from "./tools.js";
 
 /** Issue-oriented peripheral roles (#234's original consumer set: pool/align/triage/harvest/
  *  architect/plan-review/retro) keep the 4 issue tools — unchanged by this PR. The fix-loop
- *  worker leg (#244, the M9 fix loop's evidence channel for PR review data) gets the 4 NEW
+ *  worker leg (#244/#288, the M9 fix loop's evidence channel for PR review data) gets the
  *  PR-facing tools only: a worker's own issue body already reaches it via the prompt template
  *  (worker.ts's `{{issue.body}}` substitution), so the issue tools would be redundant there, and
  *  granting them would widen a worker's forge-read surface beyond what its job needs. */

@@ -94,6 +94,17 @@ export interface PRComment {
   body: string;
 }
 
+/** One bounded top-level PR conversation comment. Unlike PRComment (legacy issue-comment
+ *  readers), this carries GitHub's opaque node id so #288 can persist a delivery receipt. */
+export interface PRTopLevelComment extends PRComment {
+  id: string;
+}
+
+export interface PRCommentsPage {
+  comments: PRTopLevelComment[];
+  total: number;
+}
+
 /** One commit (`gh api repos/<owner>/<repo>/commits?since=...`) — #111 PR-A's git-log-since
  *  source for the retro round-digest (see IForge.getCommitsSince's doc for why this is a GitHub
  *  API read rather than a local `git log`). `message` is the FULL commit message (subject +
@@ -168,6 +179,9 @@ export interface IForge {
   mergePR(pr: number, headOid: string): Promise<void>;
   /** Post a PR comment (e.g. the `@codex review` trigger). #13 reviewer.ts. */
   addPRComment(pr: number, body: string): Promise<void>;
+  /** #288: newest top-level PR conversation comments, bounded by GraphQL `last: cap`. Raw
+   *  comments only; callers marker-filter them and never derive gate② approval from them. */
+  getPRComments(pr: number, cap: number): Promise<PRCommentsPage>;
   /** Post an ISSUE comment (distinct from addPRComment — a reclaimed lane's retained
    *  worktree may have no PR at all yet). #69: the dirty-worktree-retention escalation path
    *  uses this to tell a human where the preserved worktree lives. */
@@ -724,6 +738,24 @@ export class GithubForge implements IForge {
     // The `@codex review` trigger (default reviewer) rides this same call — a plain PR
     // comment, never a review/approval/merge call (producer != reviewer != merger).
     await this.gh(["pr", "comment", String(pr), "--repo", `${this.cfg.board.owner}/${this.repo()}`, "--body", body]);
+  }
+
+  async getPRComments(pr: number, cap: number): Promise<PRCommentsPage> {
+    const out = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${PR_COMMENTS_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `number=${pr}`,
+      "-F",
+      `cap=${cap}`,
+    ]);
+    return parsePRCommentsPage(out);
   }
 
   async addIssueComment(issue: number, body: string): Promise<void> {
@@ -2114,6 +2146,43 @@ export function parsePRReviewsPage(json: string): PRReviewsPage {
     ...(r.submittedAt !== undefined ? { submittedAt: r.submittedAt } : {}),
   }));
   return { reviews, total: conn?.totalCount ?? reviews.length };
+}
+
+/** #288: bounded top-level PR conversation read. `last` keeps the newest audit marker during
+ *  dedup/reconciliation and prevents an old, busy PR from creating an unbounded response. */
+export const PR_COMMENTS_QUERY = `
+query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      comments(last: $cap) {
+        totalCount
+        nodes { id author { login } createdAt body }
+      }
+    }
+  }
+}`;
+
+export function parsePRCommentsPage(json: string): PRCommentsPage {
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          comments?: {
+            totalCount?: number;
+            nodes?: Array<{ id?: string; author?: { login?: string }; createdAt?: string; body?: string }>;
+          };
+        };
+      };
+    };
+  };
+  const conn = d.data?.repository?.pullRequest?.comments;
+  const comments = (conn?.nodes ?? []).map((c) => ({
+    id: c.id ?? "",
+    login: c.author?.login ?? "",
+    createdAt: c.createdAt ?? "",
+    body: c.body ?? "",
+  }));
+  return { comments, total: conn?.totalCount ?? comments.length };
 }
 
 /** #244 (Codex sol-high PR #260 review, P1): the CAPPED checks query — reads the PR's HEAD

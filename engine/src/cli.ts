@@ -20,6 +20,7 @@ import { parseReconcileCompleted, reconcileStartup, type StartupOrphan, sweepSta
 import { type PeripheralPhase, type RoundStopHit, type RoundsResult, runRounds } from "./loop/round.js";
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { createProxyMint } from "./proxy/mint.js";
+import { makeProductionEngineAgent } from "./review/production.js";
 import { MergeDriver } from "./roles/merge-driver.js";
 import { RoleRunner, type RoleRunnerDeps } from "./roles/peripheral.js";
 import { makeFallbackReviewers, makeReviewer } from "./roles/reviewer.js";
@@ -863,7 +864,13 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
   // true, shadow: false).
   const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, log);
-  const reviewer = makeReviewer(cfg);
+  const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log }) : null;
+  const engineAgent = engineReviewRunner
+    ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
+        ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
+      })
+    : null;
+  const reviewer = engineAgent?.reviewer ?? makeReviewer(cfg);
   // #54: the ordered reviewer-failover chain (cfg.reviewer.fallback) — empty by default, in
   // which case MergeDriver.driveOne behaves exactly as before this existed.
   const fallbackReviewers = makeFallbackReviewers(cfg);
@@ -927,6 +934,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
     probeLlmReachable,
     log,
     ...(fixLegResume !== undefined ? { fixLegResume } : {}),
+    ...(engineAgent !== null ? { engineAgentDriveDeps: engineAgent.driveDepsForLane } : {}),
     onTick: (result) => {
       log(formatTickSummary(result));
       overrides.onTick?.(result);
@@ -964,7 +972,13 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
   const forge = overrides.forge ?? new GithubForge(cfg);
-  const reviewer = makeReviewer(cfg);
+  const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log }) : null;
+  const engineAgent = engineReviewRunner
+    ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
+        ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
+      })
+    : null;
+  const reviewer = engineAgent?.reviewer ?? makeReviewer(cfg);
   const fallbackReviewers = makeFallbackReviewers(cfg);
   const mergeGate = new MergeDriver({ forge, reviewer, cfg, fallbackReviewers });
   const supervisor = new WorkerSupervisor({
@@ -1024,6 +1038,7 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     supervisor,
     cfg,
     mergeGate,
+    ...(engineAgent !== null ? { engineAgentDriveDeps: engineAgent.driveDepsForLane } : {}),
     tickIntervalSec: cfg.engine.tickIntervalSec,
     peripherals,
     // #212: restrict the executing phase's dispatch to this round's pool (round-defaults.ts's

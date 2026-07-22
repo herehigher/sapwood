@@ -23,9 +23,8 @@
 // pins, preflight, identity/WAL, and the post-session refetch (review/drive.ts's own
 // composition), converging on the SAME `finalizeVerdict` helper (extracted, mechanical, zero
 // behavior change for the three existing Reviewer kinds — see finalizeVerdict's own doc) the
-// classic path already used inline. See review/drive.ts's module header for why this path has
-// no production reachability yet (engine-agent stays un-constructable via buildReviewerByKind
-// until #288/E4c).
+// classic path already used inline. #288's production composition binds its dependency-rich
+// construction and crash-safe audit delivery outside buildReviewerByKind's limited classic seam.
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
@@ -683,7 +682,64 @@ export class MergeDriver {
     // #303 review round 2 (P1): terminal-state outcomes (merged/needs-human) map directly —
     // same shape the classic path's own MERGED early-return already produces (no finalizeVerdict
     // involvement, mirroring merge-driver.ts's own MERGED check above in the classic branch).
-    if (outcome.kind === "queued") return { kind: "queued", pr, reason: outcome.reason };
+    if (outcome.kind === "queued") {
+      // The receipted-audit-comment invariant governs ENGINE-AGENT-DERIVED outcomes only: a
+      // decisive verdict never reaches merge/FIXABLE/escalation before its receipted audit
+      // comment. This block enforces that ordering by running BEFORE fallback consultation.
+      // A fallback-gated outcome on an UNAVAILABLE primary carries its own evidence chain (the
+      // fallback reviewer's PR artifact + the failover switch announcement, design #279 §2) and
+      // intentionally requires no engine audit comment because no engine-agent verdict exists to
+      // audit. Reconciliation gets first chance on the next tick; until then a decisive engine-
+      // agent artifact is an audit-delivery queue, not reviewer silence (#288 ordering AC).
+      const pendingAuditWal = engineAgentDeps.getWal();
+      if (pendingAuditWal?.decisiveOutcome != null && pendingAuditWal.auditCommentId == null) {
+        return { kind: "queued", pr, reason: outcome.reason };
+      }
+      // #288 scope addition (#54/#170): engine-agent's unavailable pin uses the persisted FIRST
+      // attempt clock (not the retry pin's latest-at) to consult each configured fallback's
+      // existing verdictFromData semantics over a fresh live PRReviewData snapshot. No cloned
+      // approval logic: the fallback objects are the same factory-built Reviewer instances used
+      // by the classic path.
+      const firstAt = engineAgentDeps.getFirstAttemptAt?.() ?? null;
+      const pin = engineAgentDeps.getAttemptPin();
+      if (firstAt && pin?.kind === "unavailable") {
+        const gateNow = (this.deps.now ?? (() => new Date()))();
+        const silenceSec = (gateNow.getTime() - Date.parse(firstAt)) / 1000;
+        let status: PRStatus | null = null;
+        let data: PRReviewData | null = null;
+        try {
+          [status, data] = await Promise.all([this.deps.forge.getPRStatus(pr), this.deps.forge.getPRReviewData(pr)]);
+        } catch {
+          return { kind: "queued", pr, reason: outcome.reason };
+        }
+        if (status.headOid === data.headOid && status.state === data.state && data.headOid === pin.head) {
+          if (silenceSec >= this.deps.cfg.reviewer.failoverAfterSec) {
+            const triggerPin: ReviewTriggerPin = { head: pin.head, at: firstAt };
+            for (const fallback of this.deps.fallbackReviewers ?? []) {
+              const verdict = fallback.verdictFromData(data, triggerPin);
+              if (verdict.action === "MERGE_OK" || verdict.action === "HANDLE_THREADS") {
+                const gated = await this.finalizeVerdict(pr, status, data, verdict);
+                return { ...gated, reviewerTransition: { kind: "switch", mode: fallback.kind, head: data.headOid } };
+              }
+            }
+          }
+          const escalation = reviewSilenceDuration({
+            action: "WAIT_REVIEW",
+            triggerPin: { head: pin.head, at: firstAt },
+            now: gateNow,
+            escalateAfterSec: this.deps.cfg.reviewer.escalateAfterSec,
+            needsHumanLabelPresent: labelsInclude(data.labels, this.deps.cfg.labels.needsHuman),
+            holdLabelPresent: labelsIncludeAny(data.labels, this.deps.cfg.escalation.holdLabels),
+            fallbackConfigured: (this.deps.fallbackReviewers?.length ?? 0) > 0,
+            failoverAfterSec: this.deps.cfg.reviewer.failoverAfterSec,
+          });
+          if (escalation != null) {
+            return { kind: "queued", pr, reason: outcome.reason, reviewSilenceEscalation: { head: data.headOid, silenceSec: escalation } };
+          }
+        }
+      }
+      return { kind: "queued", pr, reason: outcome.reason };
+    }
     if (outcome.kind === "merged") return { kind: "merged", pr, headOid: outcome.headOid };
     if (outcome.kind === "needs-human") return { kind: "needs-human", pr, reason: outcome.reason };
     return this.finalizeVerdict(pr, outcome.status, outcome.data, outcome.verdict);

@@ -72,6 +72,7 @@ export interface RoundDeps {
   /** The round loop's own tick cadence — same role as DriverDeps.tickIntervalSec. */
   tickIntervalSec: number;
   mergeGate?: MergeGate;
+  engineAgentDriveDeps?: TickDeps["engineAgentDriveDeps"];
   now?: () => Date;
   /** Injected sleep so tests can drive the loop without real wall-clock waits (same contract
    *  as driver.ts's DriverDeps.sleep). */
@@ -341,6 +342,9 @@ export class RoundScopedForge implements IForge {
   getPRReviews(pr: number, cap: number) {
     return this.inner.getPRReviews(pr, cap);
   }
+  getPRComments(pr: number, cap: number) {
+    return this.inner.getPRComments(pr, cap);
+  }
   getPRReviewThreads(pr: number, commentsCap: number) {
     return this.inner.getPRReviewThreads(pr, commentsCap);
   }
@@ -491,6 +495,9 @@ export class PoolScopedForge implements IForge {
   }
   getPRReviews(pr: number, cap: number) {
     return this.inner.getPRReviews(pr, cap);
+  }
+  getPRComments(pr: number, cap: number) {
+    return this.inner.getPRComments(pr, cap);
   }
   getPRReviewThreads(pr: number, commentsCap: number) {
     return this.inner.getPRReviewThreads(pr, commentsCap);
@@ -779,6 +786,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // exactOptionalPropertyTypes: only include optional keys when actually provided — an
     // explicit `undefined` is not the same as an omitted key under this tsconfig setting.
     ...(deps.mergeGate !== undefined ? { mergeGate: deps.mergeGate } : {}),
+    ...(deps.engineAgentDriveDeps !== undefined ? { engineAgentDriveDeps: deps.engineAgentDriveDeps } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.log !== undefined ? { log: deps.log } : {}),
     ...(over.forceDispatchPause !== undefined ? { forceDispatchPause: over.forceDispatchPause } : {}),
