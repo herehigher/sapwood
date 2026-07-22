@@ -282,6 +282,23 @@ export interface ApprovalEvidence {
   freshApprovingReviews: number;
   /** Fresh, OID-bound, trusted clean comments (#273, see freshTrustedCleanComments below). */
   freshTrustedSignals: number;
+  /** #286 (E4a, design #279 §2): the first optional field this interface grows past its original
+   *  two GitHub-review-shaped counts — engine-agent's own approval evidence. Every AC-manifest id
+   *  whose perAC status was `claim-accepted` (review/agent-output.ts's AgentReviewOutput) — the
+   *  agent found no code-verifiable evidence (no named, substantive, non-skipped test on the
+   *  discovery path, design #279 §4.1) but accepted the claim anyway (e.g. a doc/config change
+   *  with no natural test). Recorded here so an approval carries an explicit, auditable trail of
+   *  WHICH criteria were taken on trust rather than confirmed — never silently indistinguishable
+   *  from a fully-confirmed approval. Absent/undefined for every GitHub-review-based kind
+   *  (Codex/human/same-model-trusted never populate this) and for an engine-agent approval with
+   *  zero claim-accepted entries — an empty/absent list is NOT itself a signal (see
+   *  deriveApprovalResult, review/agent-output.ts). NOTE: this is the one documented exception to
+   *  this interface's own "approved" doc note ("at least one field is > 0") — an engine-agent
+   *  approval where every AC was `confirmed` (never `claim-accepted`) legitimately has BOTH
+   *  numeric fields at 0 and this array absent; the decisive fact for that kind is "zero findings
+   *  AND every AC accounted for," which the two GitHub-review-shaped counts above were never
+   *  designed to express. */
+  unreproducedClaims?: string[];
 }
 
 /**
@@ -719,8 +736,23 @@ export class SameModelTrustedReviewer implements Reviewer, ReviewerAdapter {
   }
 }
 
-/** A Reviewer implementation's discriminant (#54: shared by primary + fallback construction). */
-export type ReviewerKind = Reviewer["kind"];
+/** A Reviewer implementation's discriminant (#54: shared by primary + fallback construction).
+ *  #286 (E4a, design #279 §1): widened to ALSO include "engine-agent" — the LLM review-agent
+ *  kind (engine-agent.ts's EngineAgentReviewer) implements ONLY ReviewerAdapter, never the full
+ *  Reviewer interface (no triggerReview/verdictFromData half — engine-agent is PRIMARY-ONLY, see
+ *  config.ts's Reviewer.mode enum, which accepts "engine-agent" while reviewer.fallback's OWN
+ *  enum deliberately does not), so `Reviewer["kind"]` alone can no longer express every
+ *  ReviewerAdapter.kind value. Widening HERE (not narrowing ReviewerAdapter.kind's own type to
+ *  something smaller) keeps every existing `ReviewerKind`-typed surface — including
+ *  buildReviewerByKind's exhaustive switch below — a single source of truth for "every kind this
+ *  engine knows the NAME of." REVIEWER_KINDS/isReviewerKind (below) deliberately do NOT list
+ *  "engine-agent": it must never validate as a PERSISTED fallback kind (a DB
+ *  review_fallback_kind column can only ever have been written for one of the three ORIGINAL
+ *  Reviewer-implementing kinds — engine-agent was never legal there, config-rejected at parse,
+ *  #286's own config strictness batch), so a forged/corrupt "engine-agent" string at that read
+ *  boundary still fails closed to NO_FALLBACK_LOCK exactly like any other unknown string (see
+ *  reviewer.test.ts's coverage of isReviewerKind("engine-agent") === false). */
+export type ReviewerKind = Reviewer["kind"] | "engine-agent";
 
 /** Build a Reviewer instance for a given KIND (#54) — the shared factory `makeReviewer` (below)
  *  and the reviewer-fallback chain (cfg.reviewer.fallback) both call, so a fallback entry gets
@@ -760,6 +792,24 @@ export function buildReviewerByKind(
       // trustedReviewers EXTENDS the Codex-bot allowlist in this mode (public-repo hardening:
       // gate② acceptance is identity-checked, not merely non-author — Codex PR #42 P1).
       return new CodexReviewer(trustedReviewers, triggerCommand, doctrine);
+    case "engine-agent":
+      // #286 (E4a): engine-agent has NO legal construction path through this factory — it is not
+      // a `Reviewer` (no triggerReview/verdictFromData half; see ReviewerKind's own doc above),
+      // so this function (return type `Reviewer`) cannot produce one, only decline clearly. A
+      // real `EngineAgentReviewer` is built by engine-agent.ts's own factory
+      // (makeEngineAgentReviewer), given a deps object (materializer/runner/state accessors)
+      // this seam has no way to supply — #287 (E4b) is what wires that constructed adapter into
+      // the drive loop's engine-agent path. Throwing here (rather than silently building a
+      // Codex/human placeholder, or a Reviewer-shaped stub whose verdictFromData is permanently
+      // WAIT_REVIEW) keeps "this factory never silently mis-constructs" (#282's own AC) true for
+      // the new kind too: a caller that reaches this branch (e.g. makeReviewer with
+      // reviewer.mode: engine-agent, before #287 lands) gets a loud, specific error instead of a
+      // reviewer that LOOKS like it covers gate② but never can.
+      throw new Error(
+        'buildReviewerByKind: "engine-agent" is constructed via engine-agent.ts\'s makeEngineAgentReviewer, ' +
+          "not this factory (#287, E4b, wires it into the drive loop) — reviewer.mode: engine-agent has no " +
+          "primary-reviewer construction path here yet",
+      );
   }
   // #282 review round 2 (adopted P2): the ACTUAL compile-time exhaustiveness sentinel. `kind`'s
   // type here is `never` only if every ReviewerKind member was consumed by a case above — a
@@ -830,7 +880,13 @@ function isDecisive(action: ReviewAction): boolean {
 
 /** Every legal Reviewer kind — the single validation source for any kind string read back from
  *  OUTSIDE the guard write boundary (#54 R2, fable-review P2: the state DB is not guard-
- *  protected, so a persisted `review_fallback_kind` must be validated on read, never cast). */
+ *  protected, so a persisted `review_fallback_kind` must be validated on read, never cast).
+ *  #286 (E4a): "engine-agent" is DELIBERATELY absent from this list even though `ReviewerKind`
+ *  (above) now includes it — engine-agent is PRIMARY-ONLY (config.ts's reviewer.fallback enum
+ *  never accepts it, parse-rejected), so no legitimate code path ever persists it as a
+ *  `review_fallback_kind` value. Leaving it out here means a forged/corrupt "engine-agent"
+ *  string at this read boundary fails isReviewerKind exactly like any other unknown string
+ *  (fail-closed to NO_FALLBACK_LOCK) — see reviewer.test.ts. */
 export const REVIEWER_KINDS = ["different-model-codex", "same-model-trusted", "human"] as const;
 
 export function isReviewerKind(v: unknown): v is ReviewerKind {

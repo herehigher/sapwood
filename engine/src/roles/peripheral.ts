@@ -34,7 +34,7 @@ import {
   EMPTY_MCP_CONFIG_JSON,
   guardSettings,
   hasSessionInitLine,
-  parseCostUsd,
+  parseCostUsdOrNull,
   parseModelUsage,
   parseResultText,
   parseSessionInit,
@@ -228,11 +228,30 @@ export interface RoleSessionOpts {
    *  CLAUDE.md-family probe, `.claude/rules/**`, etc.) is the EXISTING mechanism, entirely
    *  unchanged — it simply reads from this directory instead of the default worktree path. */
   reviewCwd?: string;
+  /** #286 (E4a, design #279 §6): threaded straight through to worker.ts's
+   *  `ClaudeArgsOpts.maxBudgetUsd` (`--max-budget-usd`) — see that field's own doc for the
+   *  rationale (a review session's HARD per-session cost ceiling, distinct from a worker leg's
+   *  soft budget policy). Omitted -> no flag, unchanged behavior for every non-review-session
+   *  caller (today: only review-session.ts's `runReviewSession` ever sets this). Independent of
+   *  `reviewCwd` — this field is review-mode-agnostic-safe (a non-review role session could set
+   *  it too, though none does today). */
+  maxBudgetUsd?: number;
 }
 
 export interface RoleSessionResult {
   outcome: "done" | "failed" | "timeout";
   costUsd: number;
+  /** #302 review (Codex P1, cost cap): whether `costUsd` came from a REAL cost record in the
+   *  session transcript (worker.ts's `parseCostUsdOrNull` found a `type:"result"` line) vs. the
+   *  0-fallback for a transcript with none (e.g. a session killed before writing one). `false`
+   *  means `costUsd`'s 0 is a PLACEHOLDER, not a measurement — engine-agent.ts's retry-budget
+   *  arithmetic treats that as "spend unknown ⇒ no retry" (fail-closed; an unknown attempt-1
+   *  spend must never be read as \"$0 spent, full cap remains\"). Optional for the same reason as
+   *  resultText/scratchText/contextManifest (test fakes construct literals directly); a REAL
+   *  RoleRunner.run() result always sets it explicitly. Consumers treat ONLY an explicit `false`
+   *  as unknown — `undefined` (a legacy fake) reads as known, matching every other optional
+   *  field's fakes-keep-compiling convention here. */
+  costKnown?: boolean;
   modelUsage: ModelUsageEntry[];
   exitCode: number | null;
   /** The session/lane name this run used — callers key spend-ledger rows off it. */
@@ -585,6 +604,8 @@ export class RoleRunner {
         settings: settingsJson,
         allowedTools,
         disallowedTools,
+        // #286 (E4a): see RoleSessionOpts.maxBudgetUsd's own doc — additive, review-mode-agnostic.
+        ...(opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
         // Codex sol-high PR #300 review, P1 (load-bearing fix; settingSources tightened to ""
         // in a SECOND review round — see RoleSessionOpts.reviewCwd's own doc for the full
         // rationale, including the worker-real-HOME residual this closes): review sessions close
@@ -698,7 +719,11 @@ export class RoleRunner {
       }
 
       const jsonl = this.readJsonl(jsonlPath);
-      const costUsd = parseCostUsd(jsonl);
+      // #302 review (Codex P1, cost cap): parse once via the null-honest variant — `costUsd`
+      // keeps its 0-fallback shape for spend accounting, `costKnown` records whether a cost
+      // record actually existed (see RoleSessionResult.costKnown's doc).
+      const costOrNull = parseCostUsdOrNull(jsonl);
+      const costUsd = costOrNull ?? 0;
       const modelUsage = parseModelUsage(jsonl);
       // #110 PR1: the structured-output READ side — same jsonl scan parseCostUsd/parseModelUsage
       // already do, so this costs nothing extra to compute even for roles that don't consume it.
@@ -780,6 +805,7 @@ export class RoleRunner {
       return {
         outcome,
         costUsd,
+        costKnown: costOrNull !== null,
         modelUsage,
         exitCode,
         name,

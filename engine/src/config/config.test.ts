@@ -377,8 +377,13 @@ test("#13: produce-pr-and-stop is a merge.mode value, not a reviewer.mode value"
 });
 
 test("#13: reviewer.mode accepts same-model-trusted and human", () => {
+  // #286: same-model-trusted as PRIMARY now requires a non-empty trustedReviewers list (the
+  // primary-mode extension of the pre-existing fallback-only empty-trustedReviewers rejection,
+  // see the #286 same-model-trusted-empty tests below) — supply one here so this test still
+  // exercises only what it's named for (the enum accepting both values).
   assert.equal(
-    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: same-model-trusted }").reviewer.mode,
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: same-model-trusted, trustedReviewers: [bot] }").reviewer
+      .mode,
     "same-model-trusted",
   );
   assert.equal(parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: human }").reviewer.mode, "human");
@@ -432,6 +437,155 @@ test("#54 R2: the same fallback parses fine once trustedReviewers is non-empty, 
   assert.deepEqual(ok.reviewer.fallback, ["same-model-trusted"]);
   const humanOnly = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { fallback: [human] }");
   assert.deepEqual(humanOnly.reviewer.fallback, ["human"]);
+});
+
+// ── #286 (E4a, design #279 §7): reviewer.mode: engine-agent + reviewer.agent strictness batch ──
+
+// worker.model defaults to "opus" — reviewer.agent.model must differ (D5), so every fixture
+// below that isn't SPECIFICALLY testing the D5 collision pins worker.model to "sonnet".
+const BASE_ENGINE_AGENT =
+  "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: opus } }\n";
+
+test("#286: reviewer.mode: engine-agent + reviewer.agent parses with sane defaults", () => {
+  const cfg = parseConfig(BASE_ENGINE_AGENT);
+  assert.equal(cfg.reviewer.mode, "engine-agent");
+  assert.equal(cfg.reviewer.agent?.model, "opus");
+  assert.equal(cfg.reviewer.agent?.effort, "high");
+  assert.equal(cfg.reviewer.agent?.costCapUsd, 3);
+  assert.equal(cfg.reviewer.agent?.retryAfterSec, 900);
+  assert.equal(cfg.reviewer.agent?.promptFile, undefined);
+});
+
+test("#286: reviewer.mode: engine-agent REQUIRES reviewer.agent — missing ⇒ reject", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent }"),
+    /reviewer\.agent is not set|requires reviewer\.agent/,
+  );
+});
+
+test("#286: reviewer.agent REQUIRES agent.model — present block without model ⇒ reject", () => {
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent, agent: {} }"), /model/);
+});
+
+test("#286: reviewer.agent present while mode != engine-agent ⇒ reject (dead-config rejection)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: human, agent: { model: opus } }"),
+    /reviewer\.agent is set but reviewer\.mode is.*human/,
+  );
+  // Also rejected against the DEFAULT mode (different-model-codex), not just an explicit one.
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { agent: { model: opus } }"),
+    /reviewer\.agent is set but reviewer\.mode is.*different-model-codex/,
+  );
+});
+
+test("#286 (D5): reviewer.agent.model === worker.model ⇒ reject at parse", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: opus }\nreviewer: { mode: engine-agent, agent: { model: opus } }",
+      ),
+    /must differ from worker\.model/,
+  );
+});
+
+test("#286 (D5): reviewer.agent.model different from worker.model parses fine", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: opus } }",
+  );
+  assert.equal(cfg.reviewer.agent?.model, "opus");
+  assert.equal(cfg.worker.model, "sonnet");
+});
+
+test("#286: reviewer.fallback containing engine-agent ⇒ reject (enum excludes it)", () => {
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { fallback: [engine-agent] }"), /reviewer/);
+});
+
+test("#286: DUPLICATE kinds in reviewer.fallback ⇒ reject, for every kind", () => {
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { fallback: [human, human] }"), /duplicate/);
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { trustedReviewers: [bot], fallback: [same-model-trusted, human, same-model-trusted] }",
+      ),
+    /duplicate/,
+  );
+});
+
+test("#286: reviewer.fallback with distinct kinds (no duplicates) still parses fine", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { trustedReviewers: [bot], fallback: [same-model-trusted, human] }",
+  );
+  assert.deepEqual(cfg.reviewer.fallback, ["same-model-trusted", "human"]);
+});
+
+test("#286: PRIMARY mode: same-model-trusted with EMPTY trustedReviewers ⇒ reject (extends the fallback-only rule)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: same-model-trusted }"),
+    /silently inert|trustedReviewers/,
+  );
+});
+
+test("#286: reviewer.agent is .strict() — an agent.fallbackModel key rejects", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nreviewer: { mode: engine-agent, agent: { model: opus, fallbackModel: sonnet } }",
+      ),
+    /reviewer/,
+  );
+});
+
+test("#286 (design #279 §4.3): reviewer.mode: engine-agent with empty/absent ci.requiredChecks WARNS (console.warn), never rejects", () => {
+  const calls: unknown[][] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => calls.push(args);
+  try {
+    const cfg = parseConfig(BASE_ENGINE_AGENT);
+    assert.equal(cfg.reviewer.mode, "engine-agent");
+    assert.deepEqual(cfg.ci.requiredChecks, []);
+  } finally {
+    console.warn = original;
+  }
+  assert.equal(calls.length, 1);
+  assert.match(String(calls[0]![0]), /ci\.requiredChecks is empty/);
+});
+
+test("#286 (design #279 §4.3): reviewer.mode: engine-agent with ci.requiredChecks set does NOT warn", () => {
+  const calls: unknown[][] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => calls.push(args);
+  try {
+    parseConfig(`${BASE_ENGINE_AGENT}ci: { requiredChecks: [{ name: test }] }`);
+  } finally {
+    console.warn = original;
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("#286: ci.requiredChecks defaults empty; app defaults to github-actions", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.deepEqual(cfg.ci.requiredChecks, []);
+  const withCheck = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nci: { requiredChecks: [{ name: build }] }");
+  assert.deepEqual(withCheck.ci.requiredChecks, [{ name: "build", app: "github-actions" }]);
+  const withApp = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nci: { requiredChecks: [{ name: build, app: custom-app }] }");
+  assert.deepEqual(withApp.ci.requiredChecks, [{ name: "build", app: "custom-app" }]);
+});
+
+test("#286: reviewer.agent.promptFile resolves relative to the config file's directory (loadConfig), like worker.promptFile", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      cfgPath,
+      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\n" +
+        "reviewer: { mode: engine-agent, agent: { model: opus, promptFile: my-reviewer.md } }\n",
+    );
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.reviewer.agent?.promptFile, join(dir, "my-reviewer.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("overrides survive validation", () => {

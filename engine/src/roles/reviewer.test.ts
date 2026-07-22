@@ -1053,6 +1053,23 @@ test("isReviewerKind: accepts exactly the three Reviewer kinds, rejects anything
   assert.equal(isReviewerKind(42), false);
 });
 
+test('#286 (E4a): isReviewerKind rejects "engine-agent" — it must NOT validate as a persisted fallback kind (engine-agent is primary-only, never legal in review_fallback_kind)', () => {
+  assert.equal(isReviewerKind("engine-agent"), false);
+  assert.ok(!(REVIEWER_KINDS as readonly string[]).includes("engine-agent"));
+});
+
+test('#286 (E4a): buildReviewerByKind("engine-agent", ...) throws a clear, specific error naming makeEngineAgentReviewer/#287 — never silently mis-constructs a Codex/human/same-model-trusted reviewer', () => {
+  assert.throws(() => buildReviewerByKind("engine-agent", []), /makeEngineAgentReviewer|engine-agent/);
+  // Never falls through to CodexReviewer (the #282 exhaustiveness AC this factory guards).
+  try {
+    buildReviewerByKind("engine-agent", []);
+    assert.fail('expected buildReviewerByKind("engine-agent", ...) to throw');
+  } catch (e) {
+    assert.ok(e instanceof Error);
+    assert.doesNotMatch((e as Error).message, /^$/);
+  }
+});
+
 test("resolveReviewVerdict: no fallback configured -> always the primary's own verdict, no lock, no transition (unchanged behavior)", async () => {
   const primary = new ScriptedReviewer("different-model-codex", "WAIT_REVIEW");
   const result = await resolveReviewVerdict({

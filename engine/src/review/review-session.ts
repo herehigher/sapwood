@@ -42,6 +42,12 @@ export interface ReviewSessionOpts {
   model: string;
   effort: string;
   fallbackModel: string;
+  /** #286 (E4a, design #279 §6): threaded straight through to peripheral.ts's
+   *  `RoleSessionOpts.maxBudgetUsd` (`--max-budget-usd`) — engine-agent.ts sets this to the
+   *  remaining logical-review budget for the current attempt. Omitted -> no flag, unchanged
+   *  behavior for review-session.ts's other caller shapes (there are none today besides
+   *  engine-agent.ts). */
+  maxBudgetUsd?: number;
 }
 
 /** `"ran"` carries the session's own outcome (done/failed/timeout) verbatim via the spread
@@ -69,6 +75,8 @@ export async function runReviewSession(runner: Pick<RoleRunner, "run">, opts: Re
       effort: opts.effort,
       fallbackModel: opts.fallbackModel,
       reviewCwd: opts.materialize.treeDir,
+      // #286 (E4a): see ReviewSessionOpts.maxBudgetUsd's own doc.
+      ...(opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
       // No allowedTools/disallowedTools/proxy: RoleRunner.run() HARDCODES the whole review
       // profile (tool allow/deny, forced-hard guard, MCP/settings closure, no proxy) whenever
       // reviewCwd is set, and REFUSES any of those three fields being supplied alongside it —

@@ -1644,6 +1644,37 @@ export class State {
     return row.total;
   }
 
+  /** #286 (E4a, D5 runtime half): the PRODUCING lane's own RECORDED ACTUAL model(s) for an
+   *  issue — engine-agent.ts's runtime model-separation check reads this to compare against
+   *  `reviewer.agent.model`. Resolves the MOST RECENT `workers` row for `issue` (a lane may have
+   *  had multiple legs across resumes/fix rounds; the newest one is the one whose PR is under
+   *  review), then reads its DISTINCT `model` values from `spend_ledger` (the ONLY durable
+   *  storage of a lane's ACTUAL — not requested — model, populated by `recordSpend`/
+   *  `settleTerminalWorker` from the CLI's own stream-json report, worker.ts's parseModelUsage).
+   *
+   *  HONEST LIMITATION (documented, not a bug): `spend_ledger` rows are written only at a lane's
+   *  TERMINAL settlement (reclaim) — a lane still `driving` (its PR open, awaiting gate②, which
+   *  is exactly when a review would run) has NOT yet settled, so this legitimately returns `[]`
+   *  for it. `[]` reads as "worker actual unknown" at the call site (design #279 §6: "worker
+   *  actual unknown ⇒ unavailable" — a same-model verdict must never gate, so an UNKNOWN actual
+   *  fails closed exactly like a KNOWN-equal one, never optimistically treated as
+   *  "distinguishable"). Wiring an EARLIER, still-live signal (e.g. the session's own init-line
+   *  self-report, worker.ts's parseSessionInit) into a durable per-lane record is E4b's (#287)
+   *  concern, not this accessor's — see engine-agent.ts's own module doc for the accepted
+   *  residual this produces today. `'unknown'` rows (recordSpend's own fallback for a CLI report
+   *  with no model identifier) are excluded — an "unknown" actual is exactly as indistinguishable
+   *  as no row at all, never treated as a real, comparable model string. */
+  getWorkerActualModels(issue: number): string[] {
+    const lane = this.db.prepare("SELECT name FROM workers WHERE issue = ? ORDER BY started_at DESC LIMIT 1").get(issue) as
+      | { name: string }
+      | undefined;
+    if (!lane) return [];
+    const rows = this.db
+      .prepare("SELECT DISTINCT model FROM spend_ledger WHERE worker = ? AND model != 'unknown' ORDER BY model")
+      .all(lane.name) as { model: string }[];
+    return rows.map((r) => r.model);
+  }
+
   /** Cumulative spend for `now`'s UTC calendar day (spend_ledger sum, ts-prefix match). */
   dailySpendUsd(now: Date): number {
     const dayPrefix = now.toISOString().slice(0, 10); // YYYY-MM-DD

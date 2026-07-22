@@ -62,7 +62,18 @@ export class UnresumableLaneError extends Error {
  *  common drain case avoids it because a later `claude --resume` (reusing the untouched
  *  worktree in place) produces a real result line normally. */
 export function parseCostUsd(jsonl: string): number {
-  let cost = 0;
+  return parseCostUsdOrNull(jsonl) ?? 0;
+}
+
+/** #302 review (Codex P1, cost cap): the HONEST variant of `parseCostUsd` — `null` when the
+ *  transcript carries NO cost record at all (no parseable `type:"result"` line with a numeric
+ *  `total_cost_usd`, e.g. a session killed before it ever wrote one), vs. a real recorded number
+ *  (possibly a true $0). `parseCostUsd` (above) keeps its 0-fallback contract for the many spend-
+ *  accounting callers where under-counting an unknown is the accepted behavior; a caller whose
+ *  DECISION depends on the difference (engine-agent.ts's retry-budget arithmetic: an UNKNOWN
+ *  attempt-1 cost must never be treated as "$0 spent, full cap remains") reads this one. */
+export function parseCostUsdOrNull(jsonl: string): number | null {
+  let cost: number | null = null;
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
     if (!t.startsWith("{")) continue;
@@ -575,6 +586,19 @@ export interface ClaudeArgsOpts {
    *  ENGINE's own trusted worktree, never a reviewed PR's tree). NOTE: an empty string is a
    *  MEANINGFUL value here, not "unset" — see `claudeArgs`' own `!== undefined` check below. */
   settingSources?: string;
+  /** #286 (E4a, design #279 §6): `--max-budget-usd <value>` — a HARD per-session cost ceiling,
+   *  verified real against a live `claude` CLI (worker.ts's own `probeLlmPing` already uses it;
+   *  see that function's doc for the exact "Error: Exceeded USD budget (...)" failure shape).
+   *  Deliberately DISTINCT from the module-level "no --max-budget-usd" note on `claudeArgs`
+   *  itself, just below: that note is about the code-PRODUCING worker leg, whose budget is soft
+   *  (monitored + graceful handoff, PLAN.md) — a review session has no in-progress work to hand
+   *  off gracefully (D1: static-only, no code execution, bounded single-turn judgment), so a HARD
+   *  cap is the right shape there, not a contradiction of the worker's own soft-budget policy.
+   *  engine-agent.ts sets this to the REMAINING logical-review budget (reviewer.agent.costCapUsd
+   *  on attempt 1; the cap minus attempt 1's own recorded cost on a retry). Omitted -> no
+   *  `--max-budget-usd` flag at all, unchanged behavior for every other caller (worker/role
+   *  sessions never set this). */
+  maxBudgetUsd?: number;
 }
 
 /** #285: the `--mcp-config` value review sessions pass alongside `--strict-mcp-config` — an
@@ -637,6 +661,10 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     // truthy check would silently DROP the flag for an empty string, falling back to the CLI's
     // default (load everything) and defeating the entire closure this field exists for.
     ...(o.settingSources !== undefined ? ["--setting-sources", o.settingSources] : []),
+    // #286 (E4a): see ClaudeArgsOpts.maxBudgetUsd's own doc — a review session's HARD per-session
+    // cost ceiling, distinct from the worker's own soft budget policy this module's header note
+    // (above claudeArgs) documents.
+    ...(o.maxBudgetUsd !== undefined ? ["--max-budget-usd", String(o.maxBudgetUsd)] : []),
     "--output-format",
     "stream-json",
     "--include-hook-events",
