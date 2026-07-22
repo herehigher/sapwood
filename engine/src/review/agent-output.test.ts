@@ -168,6 +168,55 @@ test("validateAgentReviewOutput: a malformed finding (missing body) invalidates 
   assert.equal(out, null);
 });
 
+test("validateAgentReviewOutput (#302 review Codex P2): an EXTRA key on one finding invalidates the WHOLE output (exact {id, body} keys)", () => {
+  const out = validateAgentReviewOutput(
+    {
+      perAC: [
+        { id: "1-aaaaaaaa", status: "confirmed" },
+        { id: "2-bbbbbbbb", status: "confirmed" },
+      ],
+      findings: [{ id: "f1", body: "a real finding", severity: "P1" }],
+    },
+    MANIFEST,
+  );
+  assert.equal(out, null);
+});
+
+test("validateAgentReviewOutput (#302 review Codex P2): DUPLICATE finding ids invalidate the WHOLE output (finding id is E4c's audit/dedup key)", () => {
+  const out = validateAgentReviewOutput(
+    {
+      perAC: [
+        { id: "1-aaaaaaaa", status: "confirmed" },
+        { id: "2-bbbbbbbb", status: "confirmed" },
+      ],
+      findings: [
+        { id: "f1", body: "first finding" },
+        { id: "f1", body: "second finding reusing the id" },
+      ],
+    },
+    MANIFEST,
+  );
+  assert.equal(out, null);
+});
+
+test("validateAgentReviewOutput (#302 review Codex P2): DISTINCT finding ids with exact keys stay valid (the strictness additions reject only the new violations)", () => {
+  const out = validateAgentReviewOutput(
+    {
+      perAC: [
+        { id: "1-aaaaaaaa", status: "confirmed" },
+        { id: "2-bbbbbbbb", status: "confirmed" },
+      ],
+      findings: [
+        { id: "f1", body: "first finding" },
+        { id: "f2", body: "second finding" },
+      ],
+    },
+    MANIFEST,
+  );
+  assert.notEqual(out, null);
+  assert.equal(out!.findings.length, 2);
+});
+
 test("validateAgentReviewOutput: non-object / array / null raw -> null", () => {
   assert.equal(validateAgentReviewOutput(null, MANIFEST), null);
   assert.equal(validateAgentReviewOutput("a string", MANIFEST), null);

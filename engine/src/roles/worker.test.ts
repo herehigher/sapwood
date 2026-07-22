@@ -38,6 +38,7 @@ import {
   loadWorkerPromptTemplate,
   parseAssistantUsageDeltas,
   parseCostUsd,
+  parseCostUsdOrNull,
   parseModelUsage,
   parseResultText,
   parseSessionInit,
@@ -79,6 +80,14 @@ test("parseCostUsd: multiple results -> last wins; none -> 0; junk lines ignored
   assert.equal(parseCostUsd(`no json here\n{"type":"assistant"}`), 0);
   assert.equal(parseCostUsd(""), 0);
   assert.equal(parseCostUsd(`garbage{{{\n{"type":"result","total_cost_usd":0.2}`), 0.2);
+});
+
+test("parseCostUsdOrNull (#302 review Codex P1): null when NO cost record exists, distinct from a REAL recorded $0", () => {
+  assert.equal(parseCostUsdOrNull(""), null);
+  assert.equal(parseCostUsdOrNull(`no json here\n{"type":"assistant"}`), null);
+  assert.equal(parseCostUsdOrNull(`{"type":"result"}`), null); // result line but no cost field
+  assert.equal(parseCostUsdOrNull(`{"type":"result","total_cost_usd":0}`), 0); // honest zero
+  assert.equal(parseCostUsdOrNull(`{"type":"result","total_cost_usd":0.5}`), 0.5);
 });
 
 // ── #110 PR0: parseResultText — the read side for a role session's structured final-message

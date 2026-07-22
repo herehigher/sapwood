@@ -4,13 +4,16 @@
 // to `unavailable`; every setup/model-separation check fires before a session is even spawned
 // where possible; cost-remainder arithmetic and the retry-once contract are pinned directly.
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { parseConfig } from "../config/config.js";
 import type { IForge, PRReviewData } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import type { ApprovalResult, ReviewContext } from "../roles/reviewer.js";
 import type { AcSnapshot } from "./ac-snapshot.js";
-import { type EngineAgentReviewer, makeEngineAgentReviewer } from "./engine-agent.js";
+import { type EngineAgentReviewer, loadEngineReviewerPromptTemplate, makeEngineAgentReviewer } from "./engine-agent.js";
 import type { MaterializeResult } from "./materializer.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────────────────────
@@ -264,6 +267,30 @@ test("evaluate(): a crashed/timed-out attempt 1 (outcome != done) also counts as
   assert.equal(runner.calls.length, 2);
 });
 
+test("cost-cap fail-closed (#302 review Codex P1): a timed-out attempt 1 with NO cost record (costKnown: false, costUsd 0) gets NO retry -> unavailable, never a second full cap", async () => {
+  const { build, runner } = mkDeps({
+    // Only ONE queued result — a retry attempt would exhaust the queue and fail differently;
+    // the assertion on runner.calls.length pins that no second session was ever spawned.
+    runnerQueue: [mkSessionResult({ outcome: "timeout", costUsd: 0, costKnown: false, resultText: "" })],
+  });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "unavailable");
+  assert.match((result as { reason: string }).reason, /NO recorded cost/i);
+  assert.equal(runner.calls.length, 1);
+});
+
+test("cost-cap: an explicit costKnown: true with a REAL $0 cost still retries (the honest-zero case, distinct from unknown)", async () => {
+  const { build, runner } = mkDeps({
+    runnerQueue: [
+      mkSessionResult({ outcome: "failed", costUsd: 0, costKnown: true, resultText: "" }),
+      mkSessionResult({ resultText: ALL_CONFIRMED, costUsd: 0.5, costKnown: true }),
+    ],
+  });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "approved");
+  assert.equal(runner.calls.length, 2);
+});
+
 test("evaluate(): post-session model-separation re-check — the session's OWN modelUsage matches the worker's model -> unavailable, even with an otherwise-valid output (D5)", async () => {
   const { build, runner } = mkDeps({
     workerActualModels: [WORKER_MODEL],
@@ -278,6 +305,24 @@ test("evaluate(): post-session model-separation re-check — the session's OWN m
   assert.equal(result.kind, "unavailable");
   assert.match((result as { reason: string }).reason, /D5/);
   assert.equal(runner.calls.length, 1); // a same-model verdict is never retried either
+});
+
+test("post-session D5 (#302 review Codex P1): a session whose ONLY recorded model is the literal 'unknown' sentinel -> unavailable, even with a valid all-confirmed output (unidentifiable model must never gate)", async () => {
+  const { build, runner } = mkDeps({
+    workerActualModels: [WORKER_MODEL],
+    runnerQueue: [
+      mkSessionResult({
+        // parseModelUsage's no-identity sentinel — filtered on the reviewer side before the
+        // comparison, leaving an EMPTY reviewer list ⇒ the existing empty ⇒ unavailable branch.
+        modelUsage: [{ model: "unknown", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }],
+        resultText: ALL_CONFIRMED,
+      }),
+    ],
+  });
+  const result = await build().evaluate(ctx());
+  assert.equal(result.kind, "unavailable");
+  assert.match((result as { reason: string }).reason, /reviewer's own actual model is unknown/);
+  assert.equal(runner.calls.length, 1);
 });
 
 // ── evaluate(): cost-remainder arithmetic ───────────────────────────────────────────────────
@@ -363,6 +408,40 @@ test("evaluate(): the SNAPSHOTTED issue body reaches the session prompt inside <
   // The template renders fully — no {{issue-body}} (or any other) placeholder may survive into
   // a live session prompt (renderEngineReviewerPrompt's own fail-closed contract).
   assert.doesNotMatch(prompt, /\{\{[a-zA-Z0-9._-]+\}\}/);
+});
+
+// ── prompt template: placeholder completeness + whitespace tolerance (#302 review Codex P1) ──
+
+test("loadEngineReviewerPromptTemplate: a custom template MISSING a required placeholder throws at load, naming the missing one (#74 fail-fast)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "engine-agent-template-"));
+  const file = join(dir, "no-diff.md");
+  // issue-body / acceptance-criteria / doctrine present; {{diff}} missing.
+  writeFileSync(file, "review this\n{{issue-body}}\n{{acceptance-criteria}}\n{{doctrine}}\n");
+  assert.throws(() => loadEngineReviewerPromptTemplate(file), /missing required placeholder\(s\): \{\{diff\}\}/);
+});
+
+test("loadEngineReviewerPromptTemplate: whitespace placeholder forms ({{ issue-body }}) count as present, and construction over such a template succeeds", () => {
+  const dir = mkdtempSync(join(tmpdir(), "engine-agent-template-"));
+  const file = join(dir, "whitespace.md");
+  writeFileSync(file, "{{ diff }}\n{{ issue-body }}\n{{ acceptance-criteria }}\n{{ doctrine }}\n");
+  assert.doesNotThrow(() => loadEngineReviewerPromptTemplate(file));
+});
+
+test("evaluate(): a custom template using WHITESPACE placeholder forms renders fully — variables substituted, no {{...}} survives (#302 review Codex P1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "engine-agent-template-"));
+  const file = join(dir, "whitespace-render.md");
+  writeFileSync(file, "diff:\n{{ diff }}\nbody:\n{{ issue-body }}\nac:\n{{ acceptance-criteria }}\ndoctrine:\n{{ doctrine }}\n");
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+      `worker: { model: ${WORKER_MODEL} }\n` +
+      `reviewer: { mode: engine-agent, agent: { model: ${AGENT_MODEL}, promptFile: "${file}" } }\n`,
+  );
+  const { build, runner } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED })], cfg });
+  await build().evaluate(ctx());
+  const prompt = runner.calls[0]!.prompt;
+  assert.match(prompt, /the snapshotted issue body/); // SNAPSHOT.body substituted through {{ issue-body }}
+  assert.match(prompt, /first criterion/);
+  assert.doesNotMatch(prompt, /\{\{\s*[a-zA-Z0-9._-]+\s*\}\}/);
 });
 
 test("evaluate(): fallbackModel is 'none' — engine-agent never silently swaps models mid-session (D5)", async () => {

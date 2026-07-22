@@ -80,24 +80,57 @@ export function defaultEngineReviewerPromptPath(): string {
  *  missing/unreadable throws here, NAMING THE PATH, never a silent fallback to the shipped
  *  default. `configured` is `cfg.reviewer.agent.promptFile` — already resolved relative to the
  *  config file's directory by `loadConfig`, so by here it is effectively absolute. */
+/** #302 review (Codex P1, custom promptFile input completeness): every placeholder a template
+ *  MUST contain to be a usable engine-reviewer prompt — one per session input (issue #286's What:
+ *  diff + snapshotted body + AC ids + doctrine). A custom `promptFile` missing any of these would
+ *  silently review with an incomplete input set (e.g. no diff at all); validated fail-fast at
+ *  load/construction (#74 pattern), never discovered mid-review. */
+const REQUIRED_PROMPT_PLACEHOLDERS = ["diff", "issue-body", "acceptance-criteria", "doctrine"] as const;
+
+/** One shared placeholder pattern for BOTH validation (below) and rendering — internal whitespace
+ *  is tolerated (`{{ issue-body }}` ≡ `{{issue-body}}`, #302 review P1: the whitespace form used
+ *  to survive rendering as literal text) so the two can never disagree about what "contains a
+ *  placeholder" means. */
+const PROMPT_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z0-9._-]+)\s*\}\}/g;
+
 export function loadEngineReviewerPromptTemplate(configured: string | undefined): string {
-  if (configured === undefined) return readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  if (!existsSync(configured)) {
-    throw new Error(`reviewer.agent.promptFile not found: ${configured} — refusing to construct EngineAgentReviewer`);
+  let template: string;
+  if (configured === undefined) {
+    template = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
+  } else {
+    if (!existsSync(configured)) {
+      throw new Error(`reviewer.agent.promptFile not found: ${configured} — refusing to construct EngineAgentReviewer`);
+    }
+    try {
+      template = readFileSync(configured, "utf8");
+    } catch (e) {
+      throw new Error(`reviewer.agent.promptFile unreadable: ${configured} (${String(e)}) — refusing to construct EngineAgentReviewer`);
+    }
   }
-  try {
-    return readFileSync(configured, "utf8");
-  } catch (e) {
-    throw new Error(`reviewer.agent.promptFile unreadable: ${configured} (${String(e)}) — refusing to construct EngineAgentReviewer`);
+  // #302 review (Codex P1): validate placeholder COMPLETENESS at load time — applies to the
+  // shipped default too (a broken default is a bug this catches in every test run, not a special
+  // case). Whitespace forms count as present (same regex the renderer uses).
+  const present = new Set<string>();
+  for (const m of template.matchAll(PROMPT_PLACEHOLDER_RE)) present.add(m[1]!);
+  const missing = REQUIRED_PROMPT_PLACEHOLDERS.filter((p) => !present.has(p));
+  if (missing.length > 0) {
+    throw new Error(
+      `engine-reviewer prompt template ${configured ?? defaultEngineReviewerPromptPath()} is missing required ` +
+        `placeholder(s): ${missing.map((p) => `{{${p}}}`).join(", ")} — a template must consume every session ` +
+        "input (diff, issue-body, acceptance-criteria, doctrine); refusing to construct EngineAgentReviewer",
+    );
   }
+  return template;
 }
 
 /** Supported `{{var}}` substitutions for the engine-reviewer prompt — deliberately tiny (no
  *  template engine, mirrors worker.ts's own `renderPromptTemplate` philosophy) and FAILS CLOSED
  *  on any `{{...}}` token the map doesn't recognize, so a typo in a custom `promptFile` throws
- *  loudly rather than shipping literal `{{...}}` text into a live review session. */
+ *  loudly rather than shipping literal `{{...}}` text into a live review session. Internal
+ *  whitespace is tolerated (`{{ issue-body }}`, #302 review P1) via the SAME pattern the load-time
+ *  completeness check uses. */
 function renderEngineReviewerPrompt(template: string, vars: Readonly<Record<string, string>>): string {
-  return template.replace(/\{\{([a-zA-Z0-9._-]+)\}\}/g, (_match, name: string) => {
+  return template.replace(PROMPT_PLACEHOLDER_RE, (_match, name: string) => {
     if (!Object.hasOwn(vars, name)) {
       throw new Error(`engine-reviewer prompt template: unknown variable {{${name}}} — supported: ${Object.keys(vars).join(", ")}`);
     }
@@ -110,7 +143,12 @@ function renderEngineReviewerPrompt(template: string, vars: Readonly<Record<stri
  *   - `failed`    — the session RAN (attempt-shaped: it consumed budget) but produced no usable
  *                   verdict — a non-`done` outcome (crash/timeout) OR a `done` outcome whose
  *                   `resultText` failed schema validation. Carries the attempt's own recorded
- *                   cost so the caller can compute the retry's remaining budget.
+ *                   cost so the caller can compute the retry's remaining budget, and `costKnown`
+ *                   (#302 review, Codex P1): `false` means the transcript held NO cost record at
+ *                   all (RoleSessionResult.costKnown's doc) — the 0 in `costUsd` is a
+ *                   placeholder, so the caller must NOT compute a remainder from it (an unknown
+ *                   attempt-1 spend read as "$0 spent" would grant the retry a second FULL cap,
+ *                   violating the whole-logical-review cap, issue #286 AC#4).
  *   - `setup-unavailable` — the session never got a fair chance to run at all: `runReviewSession`
  *                   itself returned `unavailable` (a materialize/spawn-setup failure), OR the
  *                   POST-session model-separation re-check (D5) found the session's own actual
@@ -118,7 +156,7 @@ function renderEngineReviewerPrompt(template: string, vars: Readonly<Record<stri
  *                   or a same-model verdict is not something a second attempt fixes. */
 type AttemptOutcome =
   | { kind: "verdict"; result: ApprovalResult }
-  | { kind: "failed"; costUsd: number }
+  | { kind: "failed"; costUsd: number; costKnown: boolean }
   | { kind: "setup-unavailable"; reason: string };
 
 /**
@@ -222,6 +260,19 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     if (first.kind === "verdict") return first.result;
     if (first.kind === "setup-unavailable") return { kind: "unavailable", headOid, reason: first.reason };
 
+    // #302 review (Codex P1, cost cap): an attempt whose spend is UNKNOWN (no cost record in the
+    // transcript — e.g. a session killed before writing its result line) must NOT be treated as
+    // "$0 spent, full cap remains": the remainder arithmetic below would grant attempt 2 a second
+    // full cap, violating the whole-logical-review cap (issue #286 AC#4). Fail closed: no retry.
+    if (!first.costKnown) {
+      return {
+        kind: "unavailable",
+        headOid,
+        reason:
+          "engine-agent review attempt 1 failed with NO recorded cost (transcript carried no cost record) — " +
+          "its spend against the logical-review cap is unknown, so a retry cannot be budgeted (fail-closed, no retry)",
+      };
+    }
     const remainder = capUsd - first.costUsd;
     if (remainder <= 0) {
       return {
@@ -269,8 +320,12 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     if (outcome.kind === "unavailable") {
       return { kind: "setup-unavailable", reason: outcome.reason };
     }
+    // #302 review (Codex P1, cost cap): ONLY an explicit `costKnown: false` reads as unknown —
+    // `undefined` (a legacy test fake that never sets the optional field) reads as known, per
+    // RoleSessionResult.costKnown's own convention; a REAL RoleRunner.run() always sets it.
+    const costKnown = outcome.costKnown !== false;
     if (outcome.outcome !== "done") {
-      return { kind: "failed", costUsd: outcome.costUsd };
+      return { kind: "failed", costUsd: outcome.costUsd, costKnown };
     }
     // Runtime model-separation check, POST-session (D5): re-verify using the SESSION'S OWN
     // recorded actual modelUsage against the producing WORKER's own recorded actual model(s) —
@@ -281,8 +336,15 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     // model the worker leg ran under (e.g. a CLI-level model substitution outside this module's
     // control) — a verdict from an indistinguishable model must never gate, even though the
     // pre-session check (config-derived) already passed.
+    // #302 review (Codex P1, D5 unknown sentinel): worker.ts's parseModelUsage emits a model
+    // literally named "unknown" for records carrying no model identity. The WORKER side already
+    // filters it (state.getWorkerActualModels excludes 'unknown' rows) — filter the REVIEWER side
+    // identically BEFORE the comparison, or `["unknown"]` would read as a non-empty, overlapping-
+    // nothing list and pass as "distinguishable": an approval from an UNIDENTIFIABLE model. With
+    // the sentinel filtered, an all-unknown session leaves an EMPTY reviewer list and the
+    // existing empty ⇒ unavailable branch fires (fail-closed, same as an unknown worker actual).
     const postCheckFailure = this.modelSeparationUnavailableReason(
-      outcome.modelUsage.map((m) => m.model),
+      outcome.modelUsage.map((m) => m.model).filter((m) => m !== "unknown"),
       workerModels,
       "this engine-agent session's own recorded actual model vs the producing lane's",
     );
@@ -291,7 +353,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
     }
     const parsed = parseAgentReviewOutputText(outcome.resultText ?? "", snapshot.manifest);
     if (!parsed) {
-      return { kind: "failed", costUsd: outcome.costUsd };
+      return { kind: "failed", costUsd: outcome.costUsd, costKnown };
     }
     return { kind: "verdict", result: deriveApprovalResult(parsed, headOid) };
   }

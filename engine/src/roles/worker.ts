@@ -62,7 +62,18 @@ export class UnresumableLaneError extends Error {
  *  common drain case avoids it because a later `claude --resume` (reusing the untouched
  *  worktree in place) produces a real result line normally. */
 export function parseCostUsd(jsonl: string): number {
-  let cost = 0;
+  return parseCostUsdOrNull(jsonl) ?? 0;
+}
+
+/** #302 review (Codex P1, cost cap): the HONEST variant of `parseCostUsd` — `null` when the
+ *  transcript carries NO cost record at all (no parseable `type:"result"` line with a numeric
+ *  `total_cost_usd`, e.g. a session killed before it ever wrote one), vs. a real recorded number
+ *  (possibly a true $0). `parseCostUsd` (above) keeps its 0-fallback contract for the many spend-
+ *  accounting callers where under-counting an unknown is the accepted behavior; a caller whose
+ *  DECISION depends on the difference (engine-agent.ts's retry-budget arithmetic: an UNKNOWN
+ *  attempt-1 cost must never be treated as "$0 spent, full cap remains") reads this one. */
+export function parseCostUsdOrNull(jsonl: string): number | null {
+  let cost: number | null = null;
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
     if (!t.startsWith("{")) continue;

@@ -66,8 +66,10 @@ function isPerAcResult(v: unknown): v is PerAcResult {
  * `{id, status}` with `status` one of the three literals; `perAC`'s ids EXACTLY cover
  * `manifest`'s ids as a SET — an unknown id, a missing id, or a duplicate id all invalidate the
  * whole output (design #279 §2: "ids MUST exactly cover the AC-snapshot manifest ids"); the
- * `findings` array is validated element-wise via reviewer.ts's own `validateFindings` (reused,
- * never re-implemented — an empty array is valid, see that function's own doc).
+ * `findings` array is validated via `validateAgentFindings` (below) — reviewer.ts's shared
+ * `validateFindings` (reused as the base, never re-implemented; an empty array is valid, see that
+ * function's own doc) plus THIS layer's stricter requirements (exact `{id, body}` keys, unique
+ * ids — #302 review, Codex P2).
  *
  * Returns `null` on ANY violation — fail-closed, never a best-effort partial parse. This is the
  * ONE gate a session's raw output must clear before `deriveApprovalResult` (below) ever runs; a
@@ -92,10 +94,28 @@ export function validateAgentReviewOutput(raw: unknown, manifest: readonly Accep
   }
   if (seenIds.size !== manifestIds.size) return null; // missing id(s)
 
-  if (!validateFindings(obj.findings)) return null;
+  if (!validateAgentFindings(obj.findings)) return null;
   const findings = obj.findings as Finding[];
 
   return { perAC, findings };
+}
+
+/** #302 review (Codex P2, findings strictness): the ENGINE-AGENT layer's OWN stricter findings
+ *  validation — reviewer.ts's shared `validateFindings` (E1's contract for every reviewer kind)
+ *  stays untouched; this wraps it and adds what THIS session-output schema additionally requires:
+ *   - exact `{id, body}` keys per finding — an extra key on one finding invalidates the WHOLE
+ *     output (same no-partial-accept stance as `isPerAcResult` above);
+ *   - id UNIQUENESS within the array — a finding id is E4c's (#288) audit/dedup key, so a
+ *     duplicate must fail the whole output here, never be discovered downstream. */
+function validateAgentFindings(v: unknown): v is Finding[] {
+  if (!validateFindings(v)) return false;
+  const seen = new Set<string>();
+  for (const f of v) {
+    if (Object.keys(f).length !== 2) return false; // exact {id, body} — isFinding checked presence/types
+    if (seen.has(f.id)) return false; // duplicate finding id
+    seen.add(f.id);
+  }
+  return true;
 }
 
 /** Parse + validate the session's raw `resultText` (worker.ts's `parseResultText` output) in one

@@ -34,7 +34,7 @@ import {
   EMPTY_MCP_CONFIG_JSON,
   guardSettings,
   hasSessionInitLine,
-  parseCostUsd,
+  parseCostUsdOrNull,
   parseModelUsage,
   parseResultText,
   parseSessionInit,
@@ -241,6 +241,17 @@ export interface RoleSessionOpts {
 export interface RoleSessionResult {
   outcome: "done" | "failed" | "timeout";
   costUsd: number;
+  /** #302 review (Codex P1, cost cap): whether `costUsd` came from a REAL cost record in the
+   *  session transcript (worker.ts's `parseCostUsdOrNull` found a `type:"result"` line) vs. the
+   *  0-fallback for a transcript with none (e.g. a session killed before writing one). `false`
+   *  means `costUsd`'s 0 is a PLACEHOLDER, not a measurement — engine-agent.ts's retry-budget
+   *  arithmetic treats that as "spend unknown ⇒ no retry" (fail-closed; an unknown attempt-1
+   *  spend must never be read as \"$0 spent, full cap remains\"). Optional for the same reason as
+   *  resultText/scratchText/contextManifest (test fakes construct literals directly); a REAL
+   *  RoleRunner.run() result always sets it explicitly. Consumers treat ONLY an explicit `false`
+   *  as unknown — `undefined` (a legacy fake) reads as known, matching every other optional
+   *  field's fakes-keep-compiling convention here. */
+  costKnown?: boolean;
   modelUsage: ModelUsageEntry[];
   exitCode: number | null;
   /** The session/lane name this run used — callers key spend-ledger rows off it. */
@@ -708,7 +719,11 @@ export class RoleRunner {
       }
 
       const jsonl = this.readJsonl(jsonlPath);
-      const costUsd = parseCostUsd(jsonl);
+      // #302 review (Codex P1, cost cap): parse once via the null-honest variant — `costUsd`
+      // keeps its 0-fallback shape for spend accounting, `costKnown` records whether a cost
+      // record actually existed (see RoleSessionResult.costKnown's doc).
+      const costOrNull = parseCostUsdOrNull(jsonl);
+      const costUsd = costOrNull ?? 0;
       const modelUsage = parseModelUsage(jsonl);
       // #110 PR1: the structured-output READ side — same jsonl scan parseCostUsd/parseModelUsage
       // already do, so this costs nothing extra to compute even for roles that don't consume it.
@@ -790,6 +805,7 @@ export class RoleRunner {
       return {
         outcome,
         costUsd,
+        costKnown: costOrNull !== null,
         modelUsage,
         exitCode,
         name,
