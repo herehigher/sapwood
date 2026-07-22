@@ -307,6 +307,7 @@ test("driveEngineAgentReview: split-state reads (status0.state !== data0.state, 
 });
 
 test("#292 driveEngineAgentReview: instruction edit labels/comments once before CI, identity, WAL, or a paid session", async () => {
+  const filename = ".claude/rules/team/reviewer`\n\u202e.md";
   let latched = false;
   let fileReads = 0;
   let labelWrites = 0;
@@ -318,7 +319,7 @@ test("#292 driveEngineAgentReview: instruction edit labels/comments once before 
       getPRReviewData: async () => data({ labels: latched ? ["sapwood:needs-human"] : [] }),
       getPRChangedFiles: async () => {
         fileReads++;
-        return { files: [{ filename: ".claude/rules/team/reviewer.md" }], complete: true };
+        return { files: [{ filename }], complete: true };
       },
       addPRLabel: async () => {
         labelWrites++;
@@ -326,7 +327,7 @@ test("#292 driveEngineAgentReview: instruction edit labels/comments once before 
       },
       addPRComment: async (_pr, body) => {
         comments++;
-        assert.match(body, /\.claude\/rules\/team\/reviewer\.md.*#292/);
+        assert.match(body, /\.claude\/rules\/team\/reviewer\?\?\?\.md.*#292/);
       },
       getPRChecks: async () => {
         checkReads++;
@@ -340,7 +341,10 @@ test("#292 driveEngineAgentReview: instruction edit labels/comments once before 
   });
 
   const first = await driveEngineAgentReview(deps, 1, 2);
-  assert.equal(first.kind, "needs-human");
+  assert.deepEqual(first, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer???.md",
+  });
   assert.equal(fileReads, 1);
   assert.equal(labelWrites, 1);
   assert.equal(comments, 1);

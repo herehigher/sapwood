@@ -7,12 +7,12 @@ import { labelsInclude } from "../forge/labels.js";
  * glob subset. Git paths are case-sensitive, but reviewer instructions are consumed on
  * case-insensitive macOS/Windows checkouts too; case-folding makes a suspicious case variant
  * escalate safely. `*` matches within one path segment, while a whole `**` segment matches
- * zero or more segments.
+ * zero or more segments. NFC normalization makes canonically equivalent checkout names match.
  * Keeping this pure and zero-dependency makes the reviewer-authority trust boundary auditable.
  */
 export function instructionPathMatches(path: string, pattern: string): boolean {
-  path = path.toLowerCase();
-  pattern = pattern.toLowerCase();
+  path = path.normalize("NFC").toLowerCase();
+  pattern = pattern.normalize("NFC").toLowerCase();
   if (!pattern.includes("*")) return path === pattern;
   const pathSegments = path.split("/");
   const patternSegments = pattern.split("/");
@@ -55,7 +55,8 @@ export function matchedInstructionPaths(files: readonly PRChangedFile[], pattern
 }
 
 /** #292: shared result used by both reviewer kinds so instruction-authority escalation cannot
- * drift between the classic review trigger and the engine-agent paid-session preflight. */
+ * drift between the classic review trigger and the engine-agent paid-session preflight.
+ * Escalated `matchedPaths` are render-safe by contract for every downstream sink. */
 export type InstructionPathEscalationResult =
   | { kind: "clear" | "latched" }
   | { kind: "escalated"; matchedPaths: string[]; reason: "instruction-path-change" | "instruction-path-list-incomplete" }
@@ -65,7 +66,17 @@ function sanitizePathForComment(path: string): string {
   return [...path]
     .map((character) => {
       const code = character.charCodeAt(0);
-      return code <= 31 || code === 127 || character === "`" ? "?" : character;
+      return code <= 31 ||
+        code === 127 ||
+        character === "`" ||
+        code === 0x2028 ||
+        code === 0x2029 ||
+        code === 0x200e ||
+        code === 0x200f ||
+        (code >= 0x202a && code <= 0x202e) ||
+        (code >= 0x2066 && code <= 0x2069)
+        ? "?"
+        : character;
     })
     .join("");
 }
@@ -95,7 +106,7 @@ export async function escalateInstructionPathChanges(input: {
   } catch (error) {
     return { kind: "unavailable", reason: `instruction-path-files-unavailable: ${String(error)}` };
   }
-  const matchedPaths = changedFiles.complete ? matchedInstructionPaths(changedFiles.files, patterns) : [];
+  const matchedPaths = changedFiles.complete ? matchedInstructionPaths(changedFiles.files, patterns).map(sanitizePathForComment) : [];
   const incomplete = !changedFiles.complete;
   if (!incomplete && matchedPaths.length === 0) return { kind: "clear" };
 
@@ -113,7 +124,7 @@ export async function escalateInstructionPathChanges(input: {
           "The reviewer instruction graph may therefore be incomplete (instruction-path-list-incomplete, #292).",
       );
     } else {
-      const renderedPaths = matchedPaths.map((path) => `\`${sanitizePathForComment(path)}\``).join(", ");
+      const renderedPaths = matchedPaths.map((path) => `\`${path}\``).join(", ");
       await input.forge.addPRComment(
         input.pr,
         `Sapwood escalated this PR for human review because it changes reviewer instruction path(s): ${renderedPaths}. ` +

@@ -12,6 +12,10 @@ test("#292 instructionPathMatches: matching is checkout-safe case-insensitive an
   assert.equal(instructionPathMatches("rules/nested/a.md", "rules/*.md"), false);
 });
 
+test("#292 instructionPathMatches: an NFD checkout path matches its NFC-configured equivalent", () => {
+  assert.equal(instructionPathMatches(".claude/rules/cafe\u0301.md", ".claude/rules/caf\u00e9.md"), true);
+});
+
 test("#292 instructionPathMatches: consecutive globstars memoize pathological non-matches", () => {
   const pattern = `${Array.from({ length: 14 }, () => "**").join("/")}/CLAUDE.md`;
   assert.equal(instructionPathMatches("a/b/c/d/e/f/g/h/i/j/k/l/m/n/nope.md", pattern), false);
@@ -128,16 +132,22 @@ test("#292 escalation helper: an incomplete 3,000-file list escalates without pa
 
 test("#292 escalation helper: matched paths are defanged before rendering in an engine-authored comment", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const filename = ".claude/rules/evil`\n\u202e@user.md";
   let comment = "";
   const forge = {
-    getPRChangedFiles: async () => ({ files: [{ filename: ".claude/rules/evil`\n@user.md" }], complete: true }),
+    getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }),
     addPRLabel: async () => {},
     addPRComment: async (_pr: number, body: string) => {
       comment = body;
     },
   } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
 
-  assert.equal((await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg })).kind, "escalated");
-  assert.doesNotMatch(comment, /evil`|\n@user/);
-  assert.match(comment, /`\.claude\/rules\/evil\?\?@user\.md`/);
+  const result = await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg });
+  assert.deepEqual(result, {
+    kind: "escalated",
+    matchedPaths: [".claude/rules/evil???@user.md"],
+    reason: "instruction-path-change",
+  });
+  assert.doesNotMatch(comment, /evil`|\n|\u202e/);
+  assert.match(comment, /`\.claude\/rules\/evil\?\?\?@user\.md`/);
 });

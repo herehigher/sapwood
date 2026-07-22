@@ -100,6 +100,8 @@ test("#292: escalation.instructionPaths rejects silently inert non-canonical ent
     ["/CLAUDE.md", /canonical repo-relative paths/],
     ["../CLAUDE.md", /\.\. path segments/],
     ["docs/../CLAUDE.md", /\.\. path segments/],
+    [".", /must not contain \. path segments/],
+    [".claude/./rules/**", /must not contain \. path segments/],
     [".claude//rules/**", /empty \/\/ path segments/],
     [".claude/rules/", /must not end with/],
   ];

@@ -985,6 +985,9 @@ const InstructionPath = z.string().superRefine((path, ctx) => {
   if (path.split("/").includes("..")) {
     ctx.addIssue({ code: "custom", message: "escalation.instructionPaths entries must not contain .. path segments" });
   }
+  if (path.split("/").includes(".")) {
+    ctx.addIssue({ code: "custom", message: "entries must not contain . path segments — GitHub reports normalized paths" });
+  }
   if (path.includes("//")) {
     ctx.addIssue({ code: "custom", message: "escalation.instructionPaths entries must not contain empty // path segments" });
   }
