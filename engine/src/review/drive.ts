@@ -1,0 +1,435 @@
+// review/drive.ts (#287, E4b, design #279 §2) — drive ordering for the engine-agent reviewer
+// kind: attempt pins (decisive/unavailable), preflight (before any paid session), identity
+// resolution + WAL, and the post-session refetch. Composed into merge-driver.ts's
+// MergeDriver.driveOne (see that module's driveEngineAgentOne) as a SEPARATE code path, gated on
+// `reviewer.kind === "engine-agent"` — the three existing Reviewer kinds' behavior in driveOne is
+// completely untouched by this module (mechanical extract + additive branch, see merge-driver.ts's
+// own doc for the regression-pin stance).
+//
+// PRODUCTION REACHABILITY (read before assuming this runs anywhere real): engine-agent has NO
+// production construction path as of this PR. `reviewer.ts`'s `buildReviewerByKind("engine-agent")`
+// still THROWS (updated only to name #288/E4c as the enablement point) — so `makeReviewer(cfg)`
+// with `reviewer.mode: engine-agent` still throws at engine startup, and conductor.ts's real
+// wiring never constructs an `EngineAgentReviewer` to hand to `MergeDriverDeps.reviewer`. Every
+// behavior this module implements is proven ONLY via scripted-timeline tests that construct a
+// `MergeDriver` directly with an injected `EngineAgentReviewer`-shaped adapter + an injected
+// `auditDelivery` seam (see merge-driver.test.ts's engine-agent suite) — never through the real
+// config -> conductor -> driveOne path. This is deliberate, not an oversight: shipping a drive
+// path where a decisive verdict could reach merge/FIXABLE without a receipted audit comment would
+// violate E4c's ordering invariant (audit comment + delivery receipt land in #288). Independent of
+// that startup-time block, THIS module's own composition below fails closed a SECOND way: the
+// production `auditDelivery` seam (constructed by whatever future caller eventually wires this up)
+// is expected to always report `{ delivered: false }` until #288 replaces it with a real
+// implementation — see `driveEngineAgentReview`'s own doc on the audit step for why a
+// non-delivered decisive verdict can never reach `finalizeVerdict`.
+//
+// TREE-MANIFEST-HASH SEAM (documented scope note, design #279 §3's "tree manifest ... recorded in
+// the WAL record"): `ReviewerAdapter.evaluate()` (the generic interface this module drives against)
+// materializes internally and does not expose the resulting manifest — narrowing that seam would
+// mean widening `ReviewerAdapter` itself (a shared interface every reviewer kind implements) just
+// for one kind's WAL bookkeeping. Instead, `EngineAgentDriveDeps.onTreeManifest` is an OPTIONAL
+// side-channel: the code that constructs BOTH this module's deps AND the `EngineAgentReviewer`'s
+// own `materialize` closure (EngineAgentReviewerDeps.materialize, per that module's own "caller-
+// bound" doc) is expected to wire the same closure to also report the manifest hash here — see
+// merge-driver.test.ts for the wiring shape this expects. Until wired, `treeManifestHash` on the
+// WAL record simply stays `null` (honest: "not observed by this composition," never fabricated).
+
+import { createHash } from "node:crypto";
+import type { SapwoodConfig } from "../config/config.js";
+import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
+import { labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
+import type { ApprovalResult, ReviewerAdapter } from "../roles/reviewer.js";
+import { changesRequestedOnHead, deriveBlockingSignal } from "../roles/reviewer.js";
+import { requiredChecksSatisfied } from "./ci-evidence.js";
+
+/** The per-head engine-agent ATTEMPT PIN (design #279 §2 R3) — see state.ts's schema v24->v25
+ *  migration comment for the storage shape this mirrors exactly (4 fields, same as the design
+ *  doc's own sketch). */
+export interface AttemptPin {
+  head: string;
+  at: string;
+  runId: string;
+  kind: "decisive" | "unavailable";
+}
+
+/** The WAL record persisted BEFORE a review session spawns (design #279 §2/§8). */
+export interface EngineReviewWal {
+  runId: string;
+  head: string;
+  base: string;
+  diffHash: string;
+  treeManifestHash: string | null;
+  attemptStart: string;
+  decisiveOutcome: "approved" | "rejected" | null;
+}
+
+export type PreflightResult = { ok: true } | { ok: false; reason: string };
+
+/**
+ * design #279 §2's preflight gate, EVERY check before any paid session — checked in order (a
+ * caller only needs the FIRST failure reason; each is individually unit-tested in isolation).
+ * Deliberately does NOT check CI evidence (that's async — requiredChecksSatisfied, called
+ * separately by the caller with a fetched `getPRChecks` page) so this stays a pure, sync function.
+ */
+export function checkPreflight(input: {
+  status: PRStatus;
+  data: PRReviewData;
+  humanLabels: readonly string[];
+  holdLabels: readonly string[];
+}): PreflightResult {
+  if (input.data.state !== "OPEN") return { ok: false, reason: `pr-not-open:${input.data.state}` };
+  if (input.data.isDraft) return { ok: false, reason: "pr-is-draft" };
+  if (labelsIncludeAnySubstring(input.data.labels, input.humanLabels)) return { ok: false, reason: "human-label-present" };
+  if (labelsIncludeAny(input.data.labels, input.holdLabels)) return { ok: false, reason: "hold-label-present" };
+  if (input.status.mergeable !== "MERGEABLE") return { ok: false, reason: `not-mergeable:${input.status.mergeable}` };
+  if (input.data.unresolvedThreads > 0) return { ok: false, reason: "unresolved-threads" };
+  if (changesRequestedOnHead(input.data.reviews, input.data.headOid, input.data.author)) return { ok: false, reason: "changes-requested" };
+  return { ok: true };
+}
+
+/** sha256 hex of the raw diff text — the "D" of design #279 §2's H/B/D identity triple. */
+export function hashDiff(diffText: string): string {
+  return createHash("sha256").update(diffText).digest("hex");
+}
+
+export type IdentityResult = { kind: "resolved"; H: string; B: string; D: string; diffText: string } | { kind: "queue"; reason: string };
+
+/**
+ * design #279 §2 R2-6: resolve H (head) + B (base) + D (diff hash), then REFETCH status and
+ * require head==H ∧ base==B; one mismatch restarts resolution ONCE (using the fresh values from
+ * the mismatched refetch), a second mismatch queues this tick. Never throws — a forge failure at
+ * any step queues (same never-throws contract as merge-driver.ts's own forge reads).
+ *
+ * #303 review round 2 (P1, Codex gpt-5.6-sol high): the returned `diffText` is the EXACT text
+ * this function hashed into `D` from the WINNING round (the round whose refetch actually
+ * matched) — the caller (`driveEngineAgentReview`) threads it into the session as
+ * `ReviewContext.diffText`, so "session input diff === D" is true BY CONSTRUCTION rather than by
+ * the adapter fetching its own (potentially later, potentially different) copy. Design #279 §1:
+ * "the review object is the engine-supplied diff."
+ */
+export async function resolveIdentity(
+  forge: Pick<IForge, "getPRDiff" | "getPRStatus">,
+  pr: number,
+  status0: PRStatus,
+): Promise<IdentityResult> {
+  let H = status0.headOid;
+  let B = status0.baseOid ?? null;
+  for (let round = 0; round < 2; round++) {
+    if (B == null) return { kind: "queue", reason: "engine-agent: PRStatus.baseOid missing — cannot resolve identity" };
+    let diffText: string;
+    try {
+      diffText = await forge.getPRDiff(pr);
+    } catch (e) {
+      return { kind: "queue", reason: `engine-agent: diff fetch failed: ${String(e)}` };
+    }
+    const D = hashDiff(diffText);
+    let refetched: PRStatus;
+    try {
+      refetched = await forge.getPRStatus(pr);
+    } catch (e) {
+      return { kind: "queue", reason: `engine-agent: identity refetch failed: ${String(e)}` };
+    }
+    if (refetched.headOid === H && (refetched.baseOid ?? null) === B) {
+      return { kind: "resolved", H, B, D, diffText };
+    }
+    if (round === 1) return { kind: "queue", reason: "engine-agent: identity mismatch persisted after one restart" };
+    H = refetched.headOid;
+    B = refetched.baseOid ?? null;
+  }
+  /* c8 ignore next */
+  return { kind: "queue", reason: "engine-agent: identity resolution failed" }; // unreachable, loop always returns above
+}
+
+/** Whether a refetched status/data pair still matches the identity (H,B) a decisive verdict was
+ *  produced against, with nothing newly blocking and CI still green — design #279 §2's
+ *  post-session refetch gate, reused identically by the decisive-pin cheap-consume path.
+ *
+ *  #303 review round 2 (P1, Codex gpt-5.6-sol high): also requires `data.headOid === H` —
+ *  `status`/`data` are two INDEPENDENT reads (a `Promise.all` pair, or two separately-timed
+ *  fetches on the decisive-pin path) that can race a push exactly like `merge-driver.ts`'s
+ *  classic head-mismatch guard exists to catch. Without this, `status@H` (stale, pre-push) +
+ *  `data@H2` (fresh, post-push, and — critically — UNBLOCKED because the push's own commits
+ *  happen to carry no new thread/CR) would pass validation on `status`'s stale head while
+ *  actually reading a DIFFERENT generation's review data — a rejected verdict could then dispatch
+ *  a fix leg against H2 while carrying findings that were about H1. Checked ALONGSIDE the
+ *  existing `status.headOid !== H` check (either alone is sufficient to catch a plain head move;
+ *  together they catch the split-generation case where the two reads disagree with EACH OTHER,
+ *  not just with H). */
+export function refetchStillValid(
+  status: PRStatus,
+  data: PRReviewData,
+  H: string,
+  B: string,
+): { ok: true } | { ok: false; reason: string } {
+  if (status.headOid !== H) return { ok: false, reason: `head-moved:${status.headOid}` };
+  if (data.headOid !== H) return { ok: false, reason: `data-head-mismatch:${data.headOid}` };
+  if ((status.baseOid ?? null) !== B) return { ok: false, reason: `base-moved:${status.baseOid ?? "unknown"}` };
+  if (deriveBlockingSignal(data).blocked) return { ok: false, reason: "newly-blocking" };
+  if (!status.ciGreen) return { ok: false, reason: "ci-no-longer-green" };
+  return { ok: true };
+}
+
+/** `resolveReviewVerdict`-shaped synthetic action, so the caller (merge-driver.ts's
+ *  driveEngineAgentOne) can hand an engine-agent decisive result to the EXACT SAME
+ *  `finalizeVerdict` helper the classic Reviewer path already uses (deriveGate + mergeDecision +
+ *  the merge call) — zero duplicated gate/merge logic. */
+export function syntheticVerdictAction(kind: "approved" | "rejected"): "MERGE_OK" | "HANDLE_THREADS" {
+  return kind === "approved" ? "MERGE_OK" : "HANDLE_THREADS";
+}
+
+export type AuditDeliveryResult = { delivered: true } | { delivered: false; reason: string };
+
+/** The engine-agent drive composition's injected dependencies — one bound instance per lane
+ *  (worker `name`), mirroring the recordTrigger/recordFallback callback-injection pattern
+ *  merge-driver.ts's driveOne already uses for the classic Reviewer path. */
+export interface EngineAgentDriveDeps {
+  forge: IForge;
+  reviewerAdapter: Pick<ReviewerAdapter, "evaluate">;
+  cfg: SapwoodConfig;
+  now: () => Date;
+  newRunId: () => string;
+  getAttemptPin: () => AttemptPin | null;
+  recordAttemptPin: (pin: AttemptPin | null) => void;
+  getWal: () => EngineReviewWal | null;
+  recordWal: (wal: { runId: string; head: string; base: string; diffHash: string; attemptStart: string }) => void;
+  recordWalDecisiveOutcome: (runId: string, outcome: "approved" | "rejected") => void;
+  /** design #279 §3/§8: report the materializer's tree-manifest hash once known — see this
+   *  module's own header doc for why this is an optional side-channel rather than a
+   *  `ReviewerAdapter.evaluate()` return value. NOT invoked by `driveEngineAgentReview` itself —
+   *  it exists so the code that constructs BOTH these deps AND the `EngineAgentReviewer`'s own
+   *  `materialize` closure can wire the two together (the materialize closure fires this the
+   *  instant it observes a successful `MaterializeResult`, which happens-before the review
+   *  session spawns, since `evaluate()` always materializes before invoking the runner). The
+   *  handler is expected to resolve the CURRENT run via `getWal()` (no concurrent attempts share
+   *  a lane) and call `updateEngineReviewWalManifestHash` — see merge-driver.test.ts's wiring. */
+  onTreeManifest?: (manifestHash: string) => void;
+  /** E4c's (#288) audit-comment + delivery-receipt seam — see this module's header doc. In
+   *  production this is expected to ALWAYS resolve `{ delivered: false }` until #288 replaces it;
+   *  tests inject a fake that can succeed, to prove the downstream consume path. */
+  auditDelivery: (result: Extract<ApprovalResult, { kind: "approved" | "rejected" }>) => Promise<AuditDeliveryResult>;
+  ciChecksCap: number;
+}
+
+export type EngineAgentDriveOutcome =
+  | { kind: "queued"; reason: string }
+  | { kind: "merged"; headOid: string }
+  | { kind: "needs-human"; reason: string }
+  | { kind: "consume"; status: PRStatus; data: PRReviewData; verdict: { action: "MERGE_OK" | "HANDLE_THREADS"; headOid: string } };
+
+/**
+ * The full engine-agent drive-ordering pipeline (design #279 §2), EXCLUDING the final
+ * deriveGate/mergeDecision/merge-call step — that step is `finalizeVerdict` (merge-driver.ts),
+ * shared byte-for-byte with the classic Reviewer path. Returns `{kind:"consume", ...}` when (and
+ * only when) a decisive, delivered, refetch-validated verdict is ready to hand to
+ * `finalizeVerdict`; every other path returns `{kind:"queued"}` — this function NEVER calls
+ * `forge.mergePR` or dispatches a fix leg itself.
+ *
+ * Ordering (design #279 §2, exact): terminal-state check -> attempt-gate (pin) -> preflight ->
+ * identity -> WAL -> session (evaluate) -> audit -> refetch -> consume. See inline comments for
+ * where each step lives.
+ *
+ * #303 review round 1 (PM P1): TWO coherence checks guard against reviewing one commit and
+ * merging another — (1) immediately after identity resolves, `data0.headOid` must equal the
+ * resolved H, or this generation queues with NO WAL write and NO session spawn; (2) immediately
+ * before `auditDelivery`, a decisive verdict's OWN `headOid` must equal H, or it queues with the
+ * pin left 'unavailable' — a verdict is only ever consumed for the exact oid this attempt's
+ * pin/WAL carry (the #273 OID-binding lesson).
+ *
+ * #303 review round 2 (Codex gpt-5.6-sol high, adjudicated by PM, 3 P1):
+ *  - Terminal-state blindness: this function used to have NO equivalent of merge-driver.ts's own
+ *    early MERGED/split-state checks — a produce-pr-and-stop lane whose audited PR a human just
+ *    merged would loop `queued` forever (preflight's `pr-not-open:MERGED` reason, never a
+ *    terminal outcome). Fixed by fetching `status0`+`data0` TOGETHER at the very top (mirroring
+ *    the classic path's own `Promise.all`) and checking MERGED / split-state / CLOSED BEFORE the
+ *    attempt-pin check even runs — covering BOTH the decisive-pin-consume path and the
+ *    fresh-attempt path with the SAME single check, since both now read the SAME status0/data0.
+ *  - `refetchStillValid` gained `data.headOid === H` (see that function's own doc).
+ *  - The engine-supplied diff is now threaded end to end: `resolveIdentity` returns the exact
+ *    text it hashed into D, and `evaluate()` receives it as `ctx.diffText` — `EngineAgentReviewer`
+ *    never fetches its own diff anymore (engine-agent.ts, #303 review round 2).
+ */
+export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: number, issue: number): Promise<EngineAgentDriveOutcome> {
+  const now = deps.now();
+
+  let status0: PRStatus;
+  let data0: PRReviewData;
+  try {
+    [status0, data0] = await Promise.all([deps.forge.getPRStatus(pr), deps.forge.getPRReviewData(pr)]);
+  } catch (e) {
+    return { kind: "queued", reason: `engine-agent: gate-data-unavailable: ${String(e)}` };
+  }
+
+  // ── terminal-state handling (#303 review round 2 P1, merge-driver.ts's driveOne parity) ──────
+  // MERGED wins over everything else, checked on EITHER read (one may predate the merge) — an
+  // ALREADY-MERGED PR is terminal success, never re-gated (same rationale as the classic path's
+  // own check). Split-state reads (status0.state !== data0.state) never derive anything from a
+  // mixed pair — queue, re-read next tick, same "never gate from mixed reads" stance the classic
+  // path's own head-mismatch/state-mismatch guards take. A COHERENT CLOSED-without-merge is
+  // genuinely human territory — behaviorally the SAME outcome deriveGate's own fail-safe
+  // `prState !== OPEN -> HUMAN` rule would reach once a verdict exists; returned directly here
+  // since this point in the pipeline never derives one. Placed BEFORE the attempt-pin check so
+  // BOTH the decisive-pin-consume path and the fresh-attempt path share this ONE check against
+  // the SAME status0/data0 pair (no separate terminal-state gap on either path).
+  if (status0.state === "MERGED" || data0.state === "MERGED") {
+    return { kind: "merged", headOid: status0.headOid };
+  }
+  if (status0.state !== data0.state) {
+    return { kind: "queued", reason: `engine-agent: gate-state-mismatch: ci-state=${status0.state} review-state=${data0.state}` };
+  }
+  if (data0.state !== "OPEN") {
+    return { kind: "needs-human", reason: `engine-agent: gate:HUMAN:pr-state-${data0.state}` };
+  }
+
+  // ── attempt-gate: the per-head pin (design #279 §2 R3) ──────────────────────────────────────
+  let pin = deps.getAttemptPin();
+  if (pin && pin.head !== status0.headOid) {
+    // Head change clears the pin — same lifecycle as the classic review-trigger pin.
+    deps.recordAttemptPin(null);
+    pin = null;
+  }
+  if (pin?.kind === "decisive") {
+    // PERMANENT for this head: never re-run a session. Still attempt to CONSUME the already-
+    // decisive, already-delivered verdict on every tick (cheap — no paid session) — a transient
+    // merge failure or a refetch-race discard on an earlier tick must not permanently strand the
+    // lane once the race resolves (design #279 §2: "a transient merge failure clears nothing").
+    // Reuses the SAME status0/data0 fetched above (#303 review round 2) — no separate fetch.
+    const wal = deps.getWal();
+    if (!wal || wal.runId !== pin.runId || wal.head !== status0.headOid || wal.decisiveOutcome == null) {
+      return { kind: "queued", reason: "engine-agent: decisive pin has no matching delivered WAL record — anomaly, fail-closed" };
+    }
+    const revalidate = refetchStillValid(status0, data0, wal.head, wal.base);
+    if (!revalidate.ok) {
+      return { kind: "queued", reason: `engine-agent: decisive-pin consume attempt discarded this tick — ${revalidate.reason}` };
+    }
+    return {
+      kind: "consume",
+      status: status0,
+      data: data0,
+      verdict: { action: syntheticVerdictAction(wal.decisiveOutcome), headOid: wal.head },
+    };
+  }
+  if (pin?.kind === "unavailable") {
+    const retryAfterSec = deps.cfg.reviewer.agent?.retryAfterSec ?? 900;
+    const elapsedSec = (now.getTime() - Date.parse(pin.at)) / 1000;
+    if (elapsedSec < retryAfterSec) {
+      return { kind: "queued", reason: `engine-agent: backoff — ${Math.ceil(retryAfterSec - elapsedSec)}s remaining` };
+    }
+    // Backoff expired: this IS the primary-recovery probe — proceed to preflight below.
+  }
+
+  // ── preflight (design #279 §2): every gate BEFORE any paid session ─────────────────────────
+  // Reuses the SAME status0/data0 fetched above (#303 review round 2) — no separate fetch.
+  const preflight = checkPreflight({
+    status: status0,
+    data: data0,
+    humanLabels: deps.cfg.escalation.humanLabels,
+    holdLabels: deps.cfg.escalation.holdLabels,
+  });
+  if (!preflight.ok) return { kind: "queued", reason: `engine-agent: preflight failed: ${preflight.reason}` };
+
+  let checksPage: { checks: import("../forge/forge.js").PRCheckItem[] };
+  try {
+    checksPage = await deps.forge.getPRChecks(pr, deps.ciChecksCap);
+  } catch (e) {
+    return { kind: "queued", reason: `engine-agent: preflight CI-checks fetch failed: ${String(e)}` };
+  }
+  const ciEvidence = requiredChecksSatisfied(checksPage.checks, deps.cfg.ci.requiredChecks);
+  if (!ciEvidence.ok) {
+    return { kind: "queued", reason: `engine-agent: preflight CI-evidence not satisfied: ${ciEvidence.unsatisfied.join(", ")}` };
+  }
+
+  // ── identity resolution (design #279 §2 R2-6) ───────────────────────────────────────────────
+  const identity = await resolveIdentity(deps.forge, pr, status0);
+  if (identity.kind === "queue") return { kind: "queued", reason: identity.reason };
+  const { H, B, D, diffText } = identity;
+
+  // #303 review (PM P1): identity/session-input coherence. `data0` was fetched BEFORE identity
+  // resolution and is never refreshed by a mismatch-restart — so on a restart (resolveIdentity
+  // moved on to a NEW head H) or a plain race (the head moved between the data0 fetch and
+  // identity resolution, even with no restart), `data0.headOid` can silently diverge from the
+  // resolved H. `evaluate()` below is handed `ctx.data = data0` (the reviewer session judges
+  // `ctx.data.headOid`, the OLD head) while WAL/pin/consume all carry H (the NEW head) — a
+  // session that read one commit could gate a merge of another. Checked HERE, BEFORE the WAL
+  // write: an incoherent generation gets NO WAL record and NO session at all (never partially
+  // attempted) — this tick simply queues, and the NEXT tick re-fetches status0/data0/identity
+  // as one fresh, coherent generation. Never throws (same fail-closed-to-queue contract as
+  // every other step in this pipeline).
+  if (data0.headOid !== H) {
+    return {
+      kind: "queued",
+      reason: `engine-agent: identity/session-input incoherence — data0.headOid (${data0.headOid}) != resolved head H (${H}), refusing to spawn a session against mismatched inputs`,
+    };
+  }
+
+  // ── WAL persist, BEFORE spawning ────────────────────────────────────────────────────────────
+  const runId = deps.newRunId();
+  const attemptStart = now.toISOString();
+  deps.recordWal({ runId, head: H, base: B, diffHash: D, attemptStart });
+
+  // Provisional pin write (unavailable) BEFORE the session runs — cost containment: if the
+  // engine crashes/is killed mid-session, the next tick sees an unavailable pin (backoff), never
+  // an unpinned head that would re-attempt immediately. Upgraded to 'decisive' below only on a
+  // delivered decisive verdict.
+  deps.recordAttemptPin({ head: H, at: attemptStart, runId, kind: "unavailable" });
+
+  // ── session + validate (delegated to the injected ReviewerAdapter, E4a's own responsibility) ─
+  const approvalResult = await deps.reviewerAdapter.evaluate({ forge: deps.forge, pr, issue, data: data0, diffText });
+
+  if (approvalResult.kind === "unavailable" || approvalResult.kind === "pending") {
+    // Pin already recorded 'unavailable' above (same runId/at) — nothing further to persist.
+    // 'pending' is defensively routed here too: EngineAgentReviewer.evaluate() never actually
+    // produces it (E4a's own implementation only ever returns approved/rejected/unavailable),
+    // but a generic ReviewerAdapter could — never silently skip the pin/backoff for an
+    // actionable, non-decisive result.
+    const reason = approvalResult.kind === "unavailable" ? approvalResult.reason : "pending (no decisive artifact yet)";
+    return { kind: "queued", reason: `engine-agent: ${reason}` };
+  }
+
+  // #303 review (PM P1, defense in depth): the #273 OID-binding lesson applied to this internal
+  // seam — a `ReviewerAdapter.evaluate()` implementation computes its OWN `headOid` on the
+  // returned `ApprovalResult` (E4a's own contract), independent of the `H` this attempt's
+  // pin/WAL were opened against. Even though `ctx.data.headOid` was just proven === H above,
+  // nothing stops a (buggy, or future non-E4a) adapter from returning a DIFFERENT headOid on
+  // its verdict — and a verdict is only ever consumed for the EXACT oid the pin/WAL carry.
+  // Checked BEFORE `auditDelivery` / the decisive-pin upgrade: a mismatch here queues, the pin
+  // STAYS 'unavailable' (never promoted to permanent on an unverified oid), and `auditDelivery`
+  // is never called for a verdict that can't be trusted to be about H.
+  if (approvalResult.headOid !== H) {
+    return {
+      kind: "queued",
+      reason: `engine-agent: decisive verdict headOid (${approvalResult.headOid}) != this attempt's resolved head H (${H}) — refusing to consume (OID-binding violation, #273's lesson)`,
+    };
+  }
+
+  // ── audit: discover-before-post, record delivery (E4c/#288's own implementation) ───────────
+  // approved | rejected: a decisive verdict, but NOT YET consumable — see this module's header
+  // doc. `auditDelivery` not delivered ⇒ queue, no downstream action (design #279 §2's audit
+  // step: "post failure ⇒ queue, no downstream action"); the pin stays 'unavailable' (written
+  // above) so a repeat attempt is backoff-spaced rather than hammering the paid session again
+  // immediately merely because delivery, not the review itself, is what's broken.
+  const delivery = await deps.auditDelivery(approvalResult);
+  if (!delivery.delivered) {
+    return { kind: "queued", reason: `engine-agent: audit delivery unavailable — ${delivery.reason}` };
+  }
+
+  // Delivered: the decisive pin is now PERMANENT for H (design #279 §2) — never rerun, even if
+  // the refetch below discards THIS tick's consume attempt (the audit receipt, not a successful
+  // merge, is what makes the verdict permanent; see this module's header doc).
+  deps.recordAttemptPin({ head: H, at: attemptStart, runId, kind: "decisive" });
+  deps.recordWalDecisiveOutcome(runId, approvalResult.kind);
+
+  // ── post-session refetch (design #279 §2): discard the approval on ANY change ──────────────
+  let status1: PRStatus;
+  let data1: PRReviewData;
+  try {
+    [status1, data1] = await Promise.all([deps.forge.getPRStatus(pr), deps.forge.getPRReviewData(pr)]);
+  } catch (e) {
+    return { kind: "queued", reason: `engine-agent: post-session refetch failed: ${String(e)}` };
+  }
+  const revalidate = refetchStillValid(status1, data1, H, B);
+  if (!revalidate.ok) {
+    return { kind: "queued", reason: `engine-agent: post-session refetch discarded this tick's consume — ${revalidate.reason}` };
+  }
+
+  return { kind: "consume", status: status1, data: data1, verdict: { action: syntheticVerdictAction(approvalResult.kind), headOid: H } };
+}

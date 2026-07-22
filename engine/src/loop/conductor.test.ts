@@ -1013,6 +1013,33 @@ test("tick reclaim: a KEEP lane whose probe carries NO liveTelemetry (detached p
   st.close();
 });
 
+test("#287 (E4b, AC#1) tick reclaim: a KEEP lane's probe-carried actualModel is recorded durably onto the worker row — visible via getWorkerActualModels BEFORE any terminal reclaim", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-keep", 1);
+  assert.deepEqual(st.getWorkerActualModels(1), [], "nothing observed yet");
+  sup.probes["lane-keep"] = { ...DEFAULT_PROBE, actualModel: "claude-opus-4-8" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(
+    st.getWorkerActualModels(1),
+    ["claude-opus-4-8"],
+    "the lane is still `running` — this is the pre-terminal-settlement signal",
+  );
+  st.close();
+});
+
+test("#287 tick reclaim: a KEEP lane's probe carrying NO actualModel yet (session not initialized) never records anything", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-keep", 1);
+  sup.probes["lane-keep"] = { ...DEFAULT_PROBE }; // no actualModel field
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  assert.deepEqual(st.getWorkerActualModels(1), []);
+  st.close();
+});
+
 test("tick reclaim: DONE+PR (-> driving) clears any previously-persisted live telemetry — settled cost stays in spend_ledger, unchanged", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

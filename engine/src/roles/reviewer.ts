@@ -350,6 +350,16 @@ export interface ReviewContext {
   data?: PRReviewData;
   /** The engine-recorded trigger pin (see ReviewTriggerPin) — used by `evaluate` only. */
   pin?: ReviewTriggerPin;
+  /** #287 (E4b, #303 review round 2 P1): the ENGINE-SUPPLIED diff text (design #279 §1: "the
+   *  review object is the engine-supplied diff") — for the engine-agent kind, this is the EXACT
+   *  text `review/drive.ts`'s `resolveIdentity` hashed into the WAL-pinned diff hash D. An
+   *  adapter that live-fetches its own diff (e.g. via `ctx.forge.getPRDiff`) could review bytes
+   *  that differ from D if a push lands between WAL persist and the adapter's own fetch — this
+   *  field closes that gap by making the diff a CALLER-SUPPLIED input, never a second read the
+   *  adapter performs itself. `EngineAgentReviewer.evaluate` requires this (undefined ⇒
+   *  `unavailable`, fail closed) and never calls `getPRDiff`. Optional/unused by every other
+   *  `ReviewerAdapter` kind (Codex/human/same-model-trusted have no session to feed a diff into). */
+  diffText?: string;
 }
 
 /** The approval-only half of the pluggable review-gate seam (design #279 §1) — a `Reviewer`
@@ -805,10 +815,21 @@ export function buildReviewerByKind(
       // the new kind too: a caller that reaches this branch (e.g. makeReviewer with
       // reviewer.mode: engine-agent, before #287 lands) gets a loud, specific error instead of a
       // reviewer that LOOKS like it covers gate② but never can.
+      // #287 (E4b): merge-driver.ts's driveOne now HAS an engine-agent drive path
+      // (driveEngineAgentOne, composed from review/drive.ts) — but this factory still refuses to
+      // build the reviewer this mode needs, on purpose: the drive path only ever CONSUMES a
+      // decisive verdict once its injected `auditDelivery` seam reports success, and that seam
+      // has NO production implementation until #288 (E4c) ships the audit comment + delivery
+      // receipt. Constructing a real EngineAgentReviewer here (letting `reviewer.mode:
+      // engine-agent` actually start the engine) would be a dead end that can never merge/FIXABLE
+      // anything, and — worse — would look production-ready when it structurally cannot be until
+      // the audit chain exists. Throwing here keeps that honest: `sapwood run` with `reviewer.mode:
+      // engine-agent` fails loudly at startup, not silently at every drive tick.
       throw new Error(
         'buildReviewerByKind: "engine-agent" is constructed via engine-agent.ts\'s makeEngineAgentReviewer, ' +
-          "not this factory (#287, E4b, wires it into the drive loop) — reviewer.mode: engine-agent has no " +
-          "primary-reviewer construction path here yet",
+          "not this factory — reviewer.mode: engine-agent has no primary-reviewer construction path here yet. " +
+          "The drive-ordering machinery landed in #287 (E4b), but production enablement is gated on #288 (E4c: " +
+          "audit comment + delivery receipt) — that issue is what will replace this throw.",
       );
   }
   // #282 review round 2 (adopted P2): the ACTUAL compile-time exhaustiveness sentinel. `kind`'s

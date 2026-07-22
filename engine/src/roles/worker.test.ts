@@ -1742,6 +1742,50 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
   }
 });
 
+// ── #287 (E4b, AC#1): probe()'s early actual-model signal ──────────────────────────────────────
+
+test("#287: probe() reports actualModel from the session-init line's own self-report, as soon as it's observed — the earliest available signal, well before any terminal reclaim", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `echo '{"type":"system","subtype":"init","model":"claude-opus-4-8"}'`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
+        ``,
+      ].join("\n"),
+    );
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 287, title: "t", labels: [] });
+    let p = await s.probe(name);
+    for (let i = 0; i < 200 && p.actualModel == null; i++) {
+      await sleep(20);
+      p = await s.probe(name);
+    }
+    assert.equal(p.actualModel, "claude-opus-4-8");
+    await s.reclaim(name);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#287: probe() reports no actualModel before the init line has landed (honest 'not yet observed', never a guess)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, [`#!/usr/bin/env bash`, `for _ in $(seq 1 600); do sleep 1; done`, ``].join("\n"));
+    const s = sup(dir, bin);
+    const { name } = await s.dispatch({ number: 288, title: "t", labels: [] });
+    const p = await s.probe(name);
+    assert.equal(p.actualModel, undefined);
+    await s.reclaim(name);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("#155: contextTokens is deliberately NON-monotonic — a later, smaller assistant message (an auto-compact) drops it, never a running max", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

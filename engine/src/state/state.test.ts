@@ -2646,3 +2646,183 @@ test("forge proxy bundles: recordForgeProxyBundle is idempotent on hash — a se
   assert.equal(s.getForgeProxyBundle("h1")?.decisionRef, "first");
   s.close();
 });
+
+// ── #287 (E4b): actual-model early signal + engine-agent attempt pin/WAL ───────────────────────
+
+test("recordWorkerActualModel/getWorkerActualModels: an EARLY observed model is visible even with NO spend_ledger rows (the driving-lane gap #287 closes)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  assert.deepEqual(s.getWorkerActualModels(100), [], "nothing observed yet");
+  s.recordWorkerActualModel("lane-1", "claude-sonnet-4-5");
+  assert.deepEqual(s.getWorkerActualModels(100), ["claude-sonnet-4-5"]);
+  s.close();
+});
+
+test("recordWorkerActualModel: 'unknown' and empty strings are never recorded", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  s.recordWorkerActualModel("lane-1", "unknown");
+  s.recordWorkerActualModel("lane-1", "");
+  assert.deepEqual(s.getWorkerActualModels(100), []);
+  s.close();
+});
+
+test("recordWorkerActualModel: union-append, idempotent — recording the SAME model twice never duplicates", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "running", started_at: "t", ended_at: null });
+  s.recordWorkerActualModel("lane-1", "opus");
+  s.recordWorkerActualModel("lane-1", "opus");
+  s.recordWorkerActualModel("lane-1", "sonnet");
+  assert.deepEqual(s.getWorkerActualModels(100), ["opus", "sonnet"]);
+  s.close();
+});
+
+test("recordWorkerActualModel: a no-op for a name with no worker row (never throws)", () => {
+  const s = mem();
+  assert.doesNotThrow(() => s.recordWorkerActualModel("ghost", "opus"));
+  s.close();
+});
+
+test("getWorkerActualModels: UNIONS the early per-lane record with spend_ledger's settled models — never a duplicate, never dropping either source", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  s.recordWorkerActualModel("lane-1", "opus"); // the early signal
+  s.recordSpend("lane-1", 100, 1.5, "2026-01-01T00:00:00Z", [
+    { model: "opus", inputTokens: 1, outputTokens: 1, cacheCreationTokens: 0, cacheReadTokens: 0 },
+    { model: "haiku", inputTokens: 1, outputTokens: 1, cacheCreationTokens: 0, cacheReadTokens: 0 },
+  ]);
+  assert.deepEqual(s.getWorkerActualModels(100), ["haiku", "opus"]);
+  s.close();
+});
+
+test("recordEngineReviewAttemptPin/getEngineReviewAttemptPin: round-trips a pin exactly, null for a lane never pinned", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  assert.equal(s.getEngineReviewAttemptPin("lane-1"), null);
+  s.recordEngineReviewAttemptPin("lane-1", { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "unavailable" });
+  assert.deepEqual(s.getEngineReviewAttemptPin("lane-1"), {
+    head: "H1",
+    at: "2026-01-01T00:00:00.000Z",
+    runId: "run-1",
+    kind: "unavailable",
+  });
+  s.close();
+});
+
+test("recordEngineReviewAttemptPin(name, null): clears the pin — a head change's lifecycle", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  s.recordEngineReviewAttemptPin("lane-1", { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "decisive" });
+  s.recordEngineReviewAttemptPin("lane-1", null);
+  assert.equal(s.getEngineReviewAttemptPin("lane-1"), null);
+  s.close();
+});
+
+test("recordEngineReviewAttemptPin: engine_review_first_attempt_at is set ONCE per head and left untouched on every subsequent same-head write (the #54 failover clock's own companion)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  s.recordEngineReviewAttemptPin("lane-1", { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "unavailable" });
+  assert.equal(s.getWorker("lane-1")?.engine_review_first_attempt_at, "2026-01-01T00:00:00.000Z");
+  // A LATER attempt on the SAME head — 'at' advances, first_attempt_at must NOT.
+  s.recordEngineReviewAttemptPin("lane-1", { head: "H1", at: "2026-01-01T00:20:00.000Z", runId: "run-2", kind: "unavailable" });
+  assert.equal(
+    s.getWorker("lane-1")?.engine_review_first_attempt_at,
+    "2026-01-01T00:00:00.000Z",
+    "unchanged across retries on the same head",
+  );
+  assert.equal(s.getWorker("lane-1")?.engine_review_pin_at, "2026-01-01T00:20:00.000Z");
+  // A NEW head resets it.
+  s.recordEngineReviewAttemptPin("lane-1", { head: "H2", at: "2026-01-01T01:00:00.000Z", runId: "run-3", kind: "unavailable" });
+  assert.equal(s.getWorker("lane-1")?.engine_review_first_attempt_at, "2026-01-01T01:00:00.000Z");
+  s.close();
+});
+
+test("getEngineReviewAttemptPin: an unrecognized engine_review_pin_kind string fails closed to 'no pin' (read-boundary validation, mirrors review_fallback_kind's own stance)", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  s.recordEngineReviewAttemptPin("lane-1", { head: "H1", at: "2026-01-01T00:00:00.000Z", runId: "run-1", kind: "decisive" });
+  // Simulate a corrupt/forged column value directly.
+  (s as unknown as { db: DatabaseSync }).db.prepare("UPDATE workers SET engine_review_pin_kind = 'bogus' WHERE name = ?").run("lane-1");
+  assert.equal(s.getEngineReviewAttemptPin("lane-1"), null);
+  s.close();
+});
+
+test("recordEngineReviewWal/getEngineReviewWal: round-trips a WAL record, null for a lane never recorded", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  assert.equal(s.getEngineReviewWal("lane-1"), null);
+  s.recordEngineReviewWal("lane-1", { runId: "run-1", head: "H1", base: "B1", diffHash: "d1", attemptStart: "2026-01-01T00:00:00.000Z" });
+  assert.deepEqual(s.getEngineReviewWal("lane-1"), {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d1",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00.000Z",
+    decisiveOutcome: null,
+  });
+  s.close();
+});
+
+test("recordEngineReviewWal: upsert-by-worker_name — a FRESH attempt supersedes the prior one entirely (never append-only), clearing the old manifest hash/decisive outcome", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  s.recordEngineReviewWal("lane-1", { runId: "run-1", head: "H1", base: "B1", diffHash: "d1", attemptStart: "t1" });
+  s.updateEngineReviewWalManifestHash("lane-1", "run-1", "manifest-hash-1");
+  s.recordEngineReviewWalDecisiveOutcome("lane-1", "run-1", "approved");
+  assert.equal(s.getEngineReviewWal("lane-1")?.treeManifestHash, "manifest-hash-1");
+  // A NEW attempt (crash-restart / backoff-expiry retry) overwrites the row wholesale.
+  s.recordEngineReviewWal("lane-1", { runId: "run-2", head: "H1", base: "B1", diffHash: "d2", attemptStart: "t2" });
+  const wal = s.getEngineReviewWal("lane-1");
+  assert.equal(wal?.runId, "run-2");
+  assert.equal(wal?.treeManifestHash, null, "the prior attempt's manifest hash must not leak onto the new attempt");
+  assert.equal(wal?.decisiveOutcome, null);
+  s.close();
+});
+
+test("updateEngineReviewWalManifestHash/recordEngineReviewWalDecisiveOutcome: guarded by runId — a write for a SUPERSEDED runId never lands on the current row", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  s.recordEngineReviewWal("lane-1", { runId: "run-1", head: "H1", base: "B1", diffHash: "d1", attemptStart: "t1" });
+  s.recordEngineReviewWal("lane-1", { runId: "run-2", head: "H1", base: "B1", diffHash: "d2", attemptStart: "t2" }); // supersedes run-1
+  // A late-arriving completion for the SUPERSEDED run-1 must not corrupt run-2's row.
+  s.updateEngineReviewWalManifestHash("lane-1", "run-1", "stale-hash");
+  s.recordEngineReviewWalDecisiveOutcome("lane-1", "run-1", "approved");
+  const wal = s.getEngineReviewWal("lane-1");
+  assert.equal(wal?.runId, "run-2");
+  assert.equal(wal?.treeManifestHash, null);
+  assert.equal(wal?.decisiveOutcome, null);
+  s.close();
+});
+
+test("migration v24->current: a populated v24 DB (predating engine_review_wal/actual_models_json/engine_review_pin_*) opens with data intact, every new worker column NULL, engine_review_wal empty-but-usable, user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 24; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 24");
+    raw
+      .prepare("INSERT INTO workers (name, issue, session_id, state, started_at, ended_at, pr) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("lane-v24", 200, "sess-200", "driving", "2026-07-22T00:00:00Z", null, 950);
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.ok(SCHEMA_VERSION >= 25);
+    assert.equal(s.userVersion(), SCHEMA_VERSION);
+    const row = s.getWorker("lane-v24");
+    assert.equal(row?.issue, 200, "pre-existing data intact");
+    assert.equal(row?.actual_models_json, null);
+    assert.equal(row?.engine_review_pin_head, null);
+    assert.equal(s.getEngineReviewAttemptPin("lane-v24"), null);
+    assert.equal(s.getEngineReviewWal("lane-v24"), null);
+    // idempotent reopen
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    s2.close();
+    s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

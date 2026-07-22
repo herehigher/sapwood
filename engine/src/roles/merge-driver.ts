@@ -17,11 +17,29 @@
 // no reference to a MergeDriver, no `--add-dir` into the engine's data, and its `claude -p` is
 // launched with `gh pr merge`/`gh pr ready` in --disallowedTools (worker.ts claudeArgs) as
 // defense-in-depth on top of the guard hook's fail-closed Category-C block (guard.ts).
+//
+// #287 (E4b, design #279 §2): `driveOne` gained a SECOND, self-contained path for the
+// engine-agent reviewer kind (driveEngineAgentOne, near the bottom of this class) — attempt
+// pins, preflight, identity/WAL, and the post-session refetch (review/drive.ts's own
+// composition), converging on the SAME `finalizeVerdict` helper (extracted, mechanical, zero
+// behavior change for the three existing Reviewer kinds — see finalizeVerdict's own doc) the
+// classic path already used inline. See review/drive.ts's module header for why this path has
+// no production reachability yet (engine-agent stays un-constructable via buildReviewerByKind
+// until #288/E4c).
 
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, PRReviewData, PRStatus } from "../forge/forge.js";
 import { labelsInclude, labelsIncludeAny, labelsIncludeAnySubstring } from "../forge/labels.js";
-import type { ReviewAction, Reviewer, ReviewFailoverTransition, ReviewFallbackLock, ReviewTriggerPin } from "./reviewer.js";
+import type { EngineAgentDriveDeps } from "../review/drive.js";
+import { driveEngineAgentReview } from "../review/drive.js";
+import type {
+  ReviewAction,
+  Reviewer,
+  ReviewerAdapter,
+  ReviewFailoverTransition,
+  ReviewFallbackLock,
+  ReviewTriggerPin,
+} from "./reviewer.js";
 import { changesRequestedOnHead, NO_FALLBACK_LOCK, resolveReviewVerdict } from "./reviewer.js";
 
 export type Gate = "MERGE" | "WAIT" | "HUMAN" | "FIXABLE";
@@ -227,9 +245,17 @@ export function reviewSilenceDuration(input: {
   return silenceSec;
 }
 
+/** #287 (E4b): `driveOne`'s reviewer dep now additionally accepts the engine-agent kind —
+ *  `ReviewerAdapter`-only (no `triggerReview`/`verdictFromData` half; see reviewer.ts's own
+ *  `ReviewerKind` doc for why engine-agent was never a full `Reviewer`). `kind: "engine-agent"`
+ *  is what `driveOne` discriminates on to branch into `driveEngineAgentOne` — TypeScript narrows
+ *  `deps.reviewer` back down to plain `Reviewer` for the REST of `driveOne`'s body once that
+ *  branch has returned (discriminated union on the literal `kind` field). */
+export type MergeDriverReviewer = Reviewer | (Pick<ReviewerAdapter, "evaluate"> & { kind: "engine-agent" });
+
 export interface MergeDriverDeps {
   forge: IForge;
-  reviewer: Reviewer;
+  reviewer: MergeDriverReviewer;
   cfg: SapwoodConfig;
   /** Ordered reviewer-failover chain (cfg.reviewer.fallback, #54) — Reviewer instances, one per
    *  configured kind, built by the caller (reviewer.ts's makeFallbackReviewers). Empty/omitted
@@ -293,8 +319,18 @@ export class MergeDriver {
      *  every non-reentered lane) omits it: byte-for-byte the old behavior. */
     reentered?: boolean,
     recordVerdict?: (head: string, generation: number, coverageEstablished: boolean) => void,
+    /** #287 (E4b): the engine-agent drive-ordering context for THIS lane — everything
+     *  review/drive.ts's `driveEngineAgentReview` needs, bound to this one worker row by the
+     *  caller (same callback-injection pattern as `recordTrigger`/`fallback` above). Required
+     *  (fail-closed, `{kind:"queued", ...}`) when `this.deps.reviewer.kind === "engine-agent"`;
+     *  ignored otherwise (every existing call site omits it — byte-for-byte unaffected). */
+    engineAgent?: Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter">,
   ): Promise<DriveOutcome> {
     const { forge, reviewer, cfg } = this.deps;
+
+    if (reviewer.kind === "engine-agent") {
+      return this.driveEngineAgentOne(pr, issue, reviewer, engineAgent);
+    }
 
     let status: PRStatus;
     let data: PRReviewData;
@@ -507,6 +543,35 @@ export class MergeDriver {
       };
     };
 
+    return withSignals(await this.finalizeVerdict(pr, status, data, verdict));
+  }
+
+  /**
+   * #287 (E4b): EXTRACTED from driveOne's own tail — deriveGate + the WAIT/HUMAN/FIXABLE/MERGE
+   * branches + the final mergeDecision safety net + the actual `forge.mergePR` call. Mechanical
+   * extraction, ZERO behavior change for the classic Reviewer path (the pre-#287 code ran
+   * inline here; `merge-driver.test.ts`'s existing driveOne suite is the regression pin — every
+   * assertion passes unchanged): the only difference is this no longer wraps each return in
+   * `withSignals` (that wrapper is #54/#170-specific — reviewer-failover-transition /
+   * review-silence-escalation signals keyed off the CLASSIC `ReviewTriggerPin`, which the
+   * engine-agent path has no equivalent of yet — see review/drive.ts's own doc on its companion
+   * `engine_review_first_attempt_at` clock). The classic call site re-wraps this method's return
+   * in `withSignals` itself (unchanged shape); `driveEngineAgentOne` (below) calls this directly,
+   * with no signal wrapping — engine-agent's #54/#170-equivalent visibility is out of this PR's
+   * scope (documented deviation, PR body).
+   *
+   * `status`/`data` must already be a MUTUALLY CONSISTENT, freshly-fetched pair for the SAME
+   * head — this method does not re-verify that itself (both callers already guarantee it: the
+   * classic path via its own head-mismatch queue above, the engine-agent path via
+   * review/drive.ts's identity resolution + post-session refetch).
+   */
+  private async finalizeVerdict(
+    pr: number,
+    status: PRStatus,
+    data: PRReviewData,
+    verdict: { action: ReviewAction; headOid: string | null },
+  ): Promise<DriveOutcome> {
+    const { forge, cfg } = this.deps;
     const gate = deriveGate({
       ciGreen: status.ciGreen,
       ciRed: status.ciRed ?? false,
@@ -520,38 +585,38 @@ export class MergeDriver {
       prFixCap: cfg.lanes.prFixCap,
     });
 
-    if (gate === "WAIT") return withSignals({ kind: "queued", pr, reason: `gate-pending:${verdict.action}` });
-    if (gate === "HUMAN") return withSignals({ kind: "needs-human", pr, reason: `gate:${gate}:${verdict.action}` });
+    if (gate === "WAIT") return { kind: "queued", pr, reason: `gate-pending:${verdict.action}` };
+    if (gate === "HUMAN") return { kind: "needs-human", pr, reason: `gate:${gate}:${verdict.action}` };
     if (gate === "FIXABLE") {
       // produce-pr-and-stop (#246 AC): gates report FIXABLE, never act — no fix-leg dispatch,
       // no side effects. Same "stopped" outcome kind the MERGE gate already reuses below.
       if (cfg.merge.mode === "produce-pr-and-stop") {
-        return withSignals({ kind: "stopped", pr, reason: `gates-passed:FIXABLE:${verdict.action}` });
+        return { kind: "stopped", pr, reason: `gates-passed:FIXABLE:${verdict.action}` };
       }
-      return withSignals({
+      return {
         kind: "fixable",
         pr,
         reason: `gate:FIXABLE:${verdict.action}:unresolvedThreads=${data.unresolvedThreads}:ciRed=${status.ciRed ?? false}`,
         prescription: "findings",
-      });
+      };
     }
 
     // gate === "MERGE" from here on.
     if (cfg.merge.mode === "produce-pr-and-stop") {
-      return withSignals({ kind: "stopped", pr, reason: `gates-passed:${verdict.action}` });
+      return { kind: "stopped", pr, reason: `gates-passed:${verdict.action}` };
     }
 
     // Final safety net (0day's actual pre-merge re-check), evaluated on the SAME
     // freshly-fetched action/labels/state as the gate above — defense in depth, not a
     // duplicate: this is the function unit-tested for row-for-row bash parity.
     const decision = mergeDecision(verdict.action, data.labels.join(","), data.state, false, cfg.escalation.humanLabels);
-    if (decision === "WAIT") return withSignals({ kind: "queued", pr, reason: `merge-decision:${decision}` });
-    if (decision === "ESCALATE") return withSignals({ kind: "needs-human", pr, reason: `merge-decision:${decision}` });
+    if (decision === "WAIT") return { kind: "queued", pr, reason: `merge-decision:${decision}` };
+    if (decision === "ESCALATE") return { kind: "needs-human", pr, reason: `merge-decision:${decision}` };
 
     if (verdict.headOid == null) {
       // Should not happen when gate === MERGE (a verdict only reaches MERGE_OK with a headOid
       // attached) — fail-safe: refuse an unpinned merge rather than guess.
-      return withSignals({ kind: "needs-human", pr, reason: "refuse-unpinned-merge-no-head-oid" });
+      return { kind: "needs-human", pr, reason: "refuse-unpinned-merge-no-head-oid" };
     }
 
     // Defense in depth: #270 routes CONFLICTING through FIXABLE earlier, but if later changes
@@ -559,10 +624,10 @@ export class MergeDriver {
     // remains transient (normal right after a push) and queues here only.
     const mergeabilityAtMerge = (status as PRStatus).mergeable;
     if (mergeabilityAtMerge === "CONFLICTING") {
-      return withSignals({ kind: "needs-human", pr, reason: "merge-conflict" });
+      return { kind: "needs-human", pr, reason: "merge-conflict" };
     }
     if (mergeabilityAtMerge === "UNKNOWN") {
-      return withSignals({ kind: "queued", pr, reason: "mergeability-unknown" });
+      return { kind: "queued", pr, reason: "mergeability-unknown" };
     }
 
     try {
@@ -581,15 +646,46 @@ export class MergeDriver {
         try {
           const freshStatus = await forge.getPRStatus(pr);
           if (freshStatus.mergeable === "CONFLICTING" || freshStatus.mergeable === "UNKNOWN") {
-            return withSignals({ kind: "queued", pr, reason: `merge-failed-conflict-recheck: ${msg}` });
+            return { kind: "queued", pr, reason: `merge-failed-conflict-recheck: ${msg}` };
           }
         } catch {
           // Fail closed below: inability to prove conflict/UNKNOWN is never an infinite retry.
         }
-        return withSignals({ kind: "needs-human", pr, reason: `merge-failed-deterministic: ${msg}` });
+        return { kind: "needs-human", pr, reason: `merge-failed-deterministic: ${msg}` };
       }
-      return withSignals({ kind: "queued", pr, reason: `merge-failed-retry: ${msg}` });
+      return { kind: "queued", pr, reason: `merge-failed-retry: ${msg}` };
     }
-    return withSignals({ kind: "merged", pr, headOid: verdict.headOid });
+    return { kind: "merged", pr, headOid: verdict.headOid };
+  }
+
+  /**
+   * #287 (E4b, design #279 §2): the engine-agent drive path. Delegates the whole attempt-pin /
+   * preflight / identity-WAL / refetch pipeline to review/drive.ts's `driveEngineAgentReview`
+   * (see that module's own doc for the exact ordering and every fail-closed branch), then, only
+   * on a delivered + refetch-validated decisive verdict, converges on the SAME `finalizeVerdict`
+   * the classic path uses. Never throws (mirrors driveOne's own never-throws contract) — a
+   * missing `engineAgentDeps` fails closed to `queued` rather than crashing the tick loop.
+   */
+  private async driveEngineAgentOne(
+    pr: number,
+    issue: number,
+    reviewerAdapter: Extract<MergeDriverReviewer, { kind: "engine-agent" }>,
+    engineAgentDeps: Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter"> | undefined,
+  ): Promise<DriveOutcome> {
+    if (!engineAgentDeps) {
+      return { kind: "queued", pr, reason: "engine-agent: no drive context supplied for this lane (missing engineAgentDeps)" };
+    }
+    const outcome = await driveEngineAgentReview(
+      { ...engineAgentDeps, forge: this.deps.forge, cfg: this.deps.cfg, reviewerAdapter },
+      pr,
+      issue,
+    );
+    // #303 review round 2 (P1): terminal-state outcomes (merged/needs-human) map directly —
+    // same shape the classic path's own MERGED early-return already produces (no finalizeVerdict
+    // involvement, mirroring merge-driver.ts's own MERGED check above in the classic branch).
+    if (outcome.kind === "queued") return { kind: "queued", pr, reason: outcome.reason };
+    if (outcome.kind === "merged") return { kind: "merged", pr, headOid: outcome.headOid };
+    if (outcome.kind === "needs-human") return { kind: "needs-human", pr, reason: outcome.reason };
+    return this.finalizeVerdict(pr, outcome.status, outcome.data, outcome.verdict);
   }
 }
