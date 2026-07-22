@@ -228,6 +228,14 @@ export interface RoleSessionOpts {
    *  CLAUDE.md-family probe, `.claude/rules/**`, etc.) is the EXISTING mechanism, entirely
    *  unchanged — it simply reads from this directory instead of the default worktree path. */
   reviewCwd?: string;
+  /** #286 (E4a, design #279 §6): threaded straight through to worker.ts's
+   *  `ClaudeArgsOpts.maxBudgetUsd` (`--max-budget-usd`) — see that field's own doc for the
+   *  rationale (a review session's HARD per-session cost ceiling, distinct from a worker leg's
+   *  soft budget policy). Omitted -> no flag, unchanged behavior for every non-review-session
+   *  caller (today: only review-session.ts's `runReviewSession` ever sets this). Independent of
+   *  `reviewCwd` — this field is review-mode-agnostic-safe (a non-review role session could set
+   *  it too, though none does today). */
+  maxBudgetUsd?: number;
 }
 
 export interface RoleSessionResult {
@@ -585,6 +593,8 @@ export class RoleRunner {
         settings: settingsJson,
         allowedTools,
         disallowedTools,
+        // #286 (E4a): see RoleSessionOpts.maxBudgetUsd's own doc — additive, review-mode-agnostic.
+        ...(opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
         // Codex sol-high PR #300 review, P1 (load-bearing fix; settingSources tightened to ""
         // in a SECOND review round — see RoleSessionOpts.reviewCwd's own doc for the full
         // rationale, including the worker-real-HOME residual this closes): review sessions close

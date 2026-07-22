@@ -159,6 +159,53 @@ const Cost = z
   })
   .strict();
 
+// #286 (E4a, design #279 §7): reviewer.agent — the engine-agent reviewer kind's OWN config
+// block, present only when reviewer.mode: engine-agent (dead-config rejected otherwise, see
+// Reviewer's superRefine below). `model` is REQUIRED (no default) and parse-rejected when it
+// equals worker.model (D5, model separation) — checked at the TOP-LEVEL ConfigSchema.superRefine
+// below, since worker.model lives in a sibling section this scoped block can't see. `.strict()`:
+// NO `fallbackModel` field (design #279 §7's "all v2 strictness retained ... no fallbackModel")
+// — an engine-agent session's own resilience is the retry-once-within-budget path
+// (engine-agent.ts), never a model swap the way worker/role sessions get one.
+const ReviewerAgent = z
+  .object({
+    model: z.string().min(1),
+    effort: z.enum(["low", "medium", "high"]).default("high"),
+    // Same #74 promptFile pattern as worker.promptFile: unset -> the engine's shipped
+    // `engine/prompts/engine-reviewer.md`; a relative path resolves against the CONFIG FILE's
+    // directory (see loadConfig below). Never hardcode the prompt TEXT in source (CLAUDE.md's
+    // user-tunables-in-config rule) — this key is how an operator overrides it.
+    promptFile: z.string().optional(),
+    // Whole-LOGICAL-REVIEW cost cap (design #279 §6): attempt 1 gets this in full; a retry (on
+    // an invalid/unparseable first attempt) gets the REMAINDER, never a second full cap.
+    costCapUsd: z.number().finite().positive().default(3),
+    // Backoff between paid primary attempts on the SAME head after an `unavailable` verdict
+    // (design #279 §2's "UNAVAILABLE pin"). Positive int, conservative default: 15min.
+    retryAfterSec: z.number().int().positive().default(900),
+  })
+  .strict();
+
+// #286 (E4a, design #279 §4): CI execution-evidence config — which CheckRun name+App pairs
+// count as trusted execution evidence for a code-verifiable AC's `confirmed` status (a
+// same-named check from an UNTRUSTED app is not evidence, §4's R3 GraphQL-app-slug binding).
+// E4a ships the SCHEMA only (this PR's own scope note: "adding the schema here is fine and keeps
+// the [reviewer.mode: engine-agent + empty list] warning implementable"); E4b (#287) is the
+// actual CONSUMER — the getPRChecks query + deriveGate's CI-evidence chain.
+const Ci = z
+  .object({
+    requiredChecks: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1),
+            app: z.string().min(1).default("github-actions"),
+          })
+          .strict(),
+      )
+      .default([]),
+  })
+  .strict();
+
 const Reviewer = z
   .object({
     // The reviewer KIND (gate②'s "who reviews"). NOTE: produce-pr-and-stop was previously a
@@ -167,7 +214,11 @@ const Reviewer = z
     // produce-pr-and-stop is a legal combination). Narrowing this enum is additive/back-compat:
     // sapwood.config.yaml's checked-in `mode: different-model-codex` still parses; nothing ever
     // shipped `mode: produce-pr-and-stop` here.
-    mode: z.enum(["different-model-codex", "same-model-trusted", "human"]).default("different-model-codex"),
+    // #286 (E4a): "engine-agent" added — the engine-side LLM review agent (design #279).
+    // Deliberately NOT added to `fallback`'s own enum below (engine-agent is PRIMARY-ONLY; a
+    // same-model verdict gating its own producer via the failover path is exactly D5 exists to
+    // prevent) — the enum difference IS the parse-time rejection design #279 §7 calls for.
+    mode: z.enum(["different-model-codex", "same-model-trusted", "human", "engine-agent"]).default("different-model-codex"),
     // #156: the PR-comment text that requests a review (buildReviewTriggerComment in reviewer.ts).
     // Default matches today's hardcoded `@codex review` byte-for-byte. Lets an operator point the
     // trigger at any bot/reviewer entry point — the verdict PARSER stays Codex-shaped regardless
@@ -196,6 +247,10 @@ const Reviewer = z
     // #170: wall-clock age of a current-head, non-decisive review trigger before the engine
     // calls a human. Visibility only: the PR receives needs-human while gate② stays unchanged.
     escalateAfterSec: z.number().int().positive().default(86400),
+    // #286 (E4a): the engine-agent kind's own sub-config — see ReviewerAgent's doc above.
+    // Optional at the schema level (whether it's REQUIRED depends on `mode`, which isn't
+    // expressible as a bare zod field) — enforced below.
+    agent: ReviewerAgent.optional(),
   })
   .strict()
   .superRefine((r, ctx) => {
@@ -212,6 +267,57 @@ const Reviewer = z
           "reviewer.fallback contains same-model-trusted but reviewer.trustedReviewers is empty — " +
           "that fallback can never produce a verdict (fail-closed), so the failover would be " +
           "silently inert; add trustedReviewers logins or remove the entry",
+      });
+    }
+    // #286 (E4a): the SAME fail-closed rule, now ALSO applied to the PRIMARY mode (the original
+    // check above only ever looked at `fallback`) — a same-model-trusted PRIMARY with nobody
+    // trusted can never produce MERGE_OK either (SameModelTrustedReviewer.verdictFromData's own
+    // empty-list short-circuit), so shipping it silently would leave gate② queuing every PR
+    // forever with no signal, the exact failure mode the fallback check above already guards
+    // against for the failover position.
+    if (r.mode === "same-model-trusted" && r.trustedReviewers.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["mode"],
+        message:
+          "reviewer.mode is same-model-trusted but reviewer.trustedReviewers is empty — that mode " +
+          "can never produce a verdict (fail-closed), so gate② would be silently inert; add " +
+          "trustedReviewers logins or choose a different mode",
+      });
+    }
+    // #286: DUPLICATE kinds in `fallback` ⇒ reject, for every kind — a repeated entry is always
+    // either a copy-paste mistake or dead config (the SAME mode implementation would just be
+    // re-evaluated twice at the same failover position), never a legitimate ordering.
+    const seenFallbackKinds = new Set<string>();
+    for (const kind of r.fallback) {
+      if (seenFallbackKinds.has(kind)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["fallback"],
+          message: `reviewer.fallback contains a duplicate entry ("${kind}") — each fallback kind may appear at most once`,
+        });
+        break; // one issue names the problem; the whole array is rejected either way
+      }
+      seenFallbackKinds.add(kind);
+    }
+    // #286: reviewer.agent dead-config / required-for-mode rules (design #279 §7's "all v2
+    // strictness retained ... dead-config rejection").
+    if (r.mode === "engine-agent" && r.agent === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["agent"],
+        message:
+          "reviewer.mode is engine-agent but reviewer.agent is not set — engine-agent requires reviewer.agent (at minimum agent.model)",
+      });
+    }
+    if (r.mode !== "engine-agent" && r.agent !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["agent"],
+        message:
+          `reviewer.agent is set but reviewer.mode is "${r.mode}", not engine-agent — reviewer.agent is ` +
+          "only meaningful for the engine-agent mode; remove it or set mode: engine-agent (dead config is " +
+          "rejected, never silently ignored)",
       });
     }
   });
@@ -877,6 +983,9 @@ const ConfigSchemaRaw = z
     roles: Roles.default({}),
     proxy: ProxyConfig.default({}),
     envFailure: EnvFailure.default({}),
+    // #286 (E4a, design #279 §4): see Ci's own doc above — schema only this PR, E4b (#287)
+    // consumes it.
+    ci: Ci.default({}),
     escalation: z
       .object({
         humanLabels: z.array(z.string()).optional(),
@@ -1087,6 +1196,38 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
       }
     }
   });
+  // #286 (E4a, D5): the engine-agent reviewer's model must be DISTINGUISHABLE from the
+  // producing worker's CONFIGURED model at parse time — reviewer.agent lives in a sibling
+  // section from worker.model, so this cross-field check can only run here, after both are
+  // resolved (Reviewer's own superRefine, above, has no visibility into `worker`). This is the
+  // PARSE-TIME half of D5 (worker.model is the closest static proxy for "the model a lane will
+  // actually run" available before any session ever executes); the RUNTIME half — comparing
+  // against the producing lane's ACTUAL recorded model, which can differ from worker.model on a
+  // fallback-model switch — is engine-agent.ts's own job (evaluate()'s pre-/post-session
+  // checks), not expressible at config-parse time.
+  if (cfg.reviewer.mode === "engine-agent" && cfg.reviewer.agent && cfg.reviewer.agent.model === cfg.worker.model) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reviewer", "agent", "model"],
+      message:
+        `reviewer.agent.model ("${cfg.reviewer.agent.model}") must differ from worker.model ` +
+        `("${cfg.worker.model}") — a same-model review can never gate its own producer (D5, design #279); ` +
+        "choose a different Claude model for reviewer.agent.model.",
+    });
+  }
+  // #286 (E4a, design #279 §4.3): mode: engine-agent with an empty/absent ci.requiredChecks is
+  // legal (parse still succeeds — an operator may be mid-adoption) but WEAK: code-verifiable AC
+  // can then at best be claim-based (no trusted CI execution evidence exists to confirm against),
+  // never `confirmed`. A WARNING, not a rejection — console.warn is this module's existing
+  // parse-boundary channel for a non-fatal note (see resolveGoalFile's deprecation line above);
+  // there is no dedicated warning surface elsewhere in this file to reuse instead.
+  if (cfg.reviewer.mode === "engine-agent" && cfg.ci.requiredChecks.length === 0) {
+    console.warn(
+      "[sapwood:config] reviewer.mode is engine-agent but ci.requiredChecks is empty — code-verifiable " +
+        "acceptance criteria can at best be claim-based (no trusted CI execution evidence exists to confirm " +
+        "against, design #279 §4.3); configure ci.requiredChecks to enable confirmed verdicts.",
+    );
+  }
 });
 
 /** Parse + validate raw YAML/JSON text. Exported for testing without disk I/O. */
@@ -1182,6 +1323,10 @@ export function loadConfig(path?: string): SapwoodConfig {
   // #91: same rule for the retro prompt.
   if (cfg.roles.retro.promptFile !== undefined && !isAbsolute(cfg.roles.retro.promptFile)) {
     cfg.roles.retro.promptFile = resolve(dirname(file), cfg.roles.retro.promptFile);
+  }
+  // #286 (E4a): same rule for the engine-agent reviewer's own prompt file.
+  if (cfg.reviewer.agent?.promptFile !== undefined && !isAbsolute(cfg.reviewer.agent.promptFile)) {
+    cfg.reviewer.agent.promptFile = resolve(dirname(file), cfg.reviewer.agent.promptFile);
   }
   return cfg;
 }
