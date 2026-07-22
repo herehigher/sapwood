@@ -17,6 +17,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { labelsInclude, matchBlockedByLabel, matchPriorityLabel } from "../forge/labels.js";
 import { buildAcSnapshot, checkAcSnapshotDrift } from "../review/ac-snapshot.js";
+import type { EngineAgentDriveDeps } from "../review/drive.js";
 import type { DriveOutcome } from "../roles/merge-driver.js";
 import type { ReviewFallbackLock, ReviewTriggerPin } from "../roles/reviewer.js";
 import { isReviewerKind } from "../roles/reviewer.js";
@@ -579,6 +580,7 @@ export interface MergeGate {
      *  re-driven gate②. Optional — pre-#147 fakes still satisfy this type. */
     reentered?: boolean,
     recordVerdict?: (head: string, generation: number, coverageEstablished: boolean) => void,
+    engineAgent?: Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter">,
   ): Promise<DriveOutcome>;
 }
 
@@ -720,6 +722,9 @@ export interface TickDeps {
    *  no gate/merge activity this tick (pre-#13 behavior — M2 dogfood / callers that haven't
    *  wired a reviewer yet keep working unchanged). */
   mergeGate?: MergeGate;
+  /** #288: production engine-agent lane binding. Kept outside MergeGate because worker-row
+   *  identity/state access belongs to conductor; classic reviewer modes never call it. */
+  engineAgentDriveDeps?: (worker: WorkerRow, pr: number) => Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter">;
   /** #76 goal-based stop conditions: OR'd into the #75 PAUSE check below — same DISPATCH-only
    *  skip, just driven by the driver's stop-condition wind-down instead of the data/PAUSE file
    *  sentinel. Reclaim/drive (in-flight lanes, PR review/merge progression) are untouched either
@@ -2293,6 +2298,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // post-re-entry review signals when this is set.
         (w.gated_reentry_attempts ?? 0) > 0,
         (head, generation, coverageEstablished) => state.recordReviewVerdict(w.name, head, generation, coverageEstablished),
+        deps.engineAgentDriveDeps?.(w, pr),
       );
       // #54: announce a reviewer-failover switch/revert — structured event + PR comment.
       // driveOne reports the signal STATELESSLY every tick it holds (resolveReviewVerdict is

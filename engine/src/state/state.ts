@@ -774,10 +774,9 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       -- unbounded tree-shaped data this table was never meant to hold — see review/drive.ts's own
       -- doc for the write-ordering this hash is completed under). NULL until the materialize step
       -- completes (written by a SEPARATE update, still strictly before the review session spawns
-      -- — see review/drive.ts). decisive_outcome ('approved' | 'rejected') is written ONLY once
-      -- the audit-delivery seam (E4c, #288) reports success — see review/drive.ts's own doc for
-      -- why a decisive pin's PERMANENCE is independent of whether the SAME tick's consume step
-      -- raced (the audit receipt, not the consume outcome, is what makes a verdict permanent).
+      -- — see review/drive.ts). #288 writes decisive_outcome ('approved' | 'rejected') WAL-first,
+      -- before any audit-comment network post; only the separate receipt columns introduced by
+      -- v26 make the pin permanent and permit downstream consume.
       CREATE TABLE engine_review_wal (
         worker_name         TEXT PRIMARY KEY,
         run_id              TEXT NOT NULL,
@@ -788,6 +787,22 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         attempt_start       TEXT NOT NULL,
         decisive_outcome    TEXT
       );
+    `);
+  },
+  // 25 -> 26 (#288, E4c, design #279 §8): crash-safe engine-agent audit delivery.
+  //  - `review_artifact_json`: the validated, bounded review artifact used to render the
+  //    non-authoritative audit comment (per-AC rows, findings, actual session models, prompt
+  //    hash). Written with the decisive outcome BEFORE any network post, so restart can rebuild
+  //    exactly the same body without paying for another review session.
+  //  - `audit_comment_id`: GitHub's opaque top-level comment node id. Its presence is the durable
+  //    delivery receipt; prose is never a receipt and never a gate signal.
+  //  - `audit_delivered_at`: engine observation time for that receipt. Both receipt fields are
+  //    written in one run-id-guarded UPDATE, so a stale completion cannot receipt a newer WAL.
+  (db) => {
+    db.exec(`
+      ALTER TABLE engine_review_wal ADD COLUMN review_artifact_json TEXT;
+      ALTER TABLE engine_review_wal ADD COLUMN audit_comment_id TEXT;
+      ALTER TABLE engine_review_wal ADD COLUMN audit_delivered_at TEXT;
     `);
   },
 ];
@@ -1555,7 +1570,8 @@ export class State {
          ON CONFLICT(worker_name) DO UPDATE SET
            run_id = excluded.run_id, head = excluded.head, base = excluded.base,
            diff_hash = excluded.diff_hash, tree_manifest_hash = NULL,
-           attempt_start = excluded.attempt_start, decisive_outcome = NULL`,
+           attempt_start = excluded.attempt_start, decisive_outcome = NULL,
+           review_artifact_json = NULL, audit_comment_id = NULL, audit_delivered_at = NULL`,
       )
       .run(name, wal.runId, wal.head, wal.base, wal.diffHash, wal.attemptStart);
   }
@@ -1571,12 +1587,32 @@ export class State {
       .run(manifestHash, name, runId);
   }
 
-  /** #287 (E4b): record the DECISIVE outcome ('approved' | 'rejected') on `name`'s current WAL
-   *  row — written ONLY once the audit-delivery seam (E4c, #288) reports success (see
-   *  review/drive.ts's own doc for why decisive-pin permanence is independent of a later
-   *  refetch-race discard). Same `runId` guard as updateEngineReviewWalManifestHash. */
+  /** #287/#288: record the engine-derived decisive outcome WAL-first, before audit delivery.
+   *  This is recovery input, not permission to consume: only a runId-guarded audit receipt makes
+   *  the pin permanent. Same stale-run containment as updateEngineReviewWalManifestHash. */
   recordEngineReviewWalDecisiveOutcome(name: string, runId: string, outcome: "approved" | "rejected"): void {
     this.db.prepare("UPDATE engine_review_wal SET decisive_outcome = ? WHERE worker_name = ? AND run_id = ?").run(outcome, name, runId);
+  }
+
+  /** #288: persist the validated artifact and engine-derived decisive outcome before posting.
+   *  The runId guard is the same stale-attempt containment used by the manifest update. */
+  recordEngineReviewWalArtifact(name: string, runId: string, outcome: "approved" | "rejected", artifactJson: string): boolean {
+    const result = this.db
+      .prepare("UPDATE engine_review_wal SET decisive_outcome = ?, review_artifact_json = ? WHERE worker_name = ? AND run_id = ?")
+      .run(outcome, artifactJson, name, runId);
+    return result.changes === 1;
+  }
+
+  /** #288: durable audit delivery receipt. `true` means THIS run's row was updated; false means
+   *  it was superseded and the caller must fail closed rather than claiming delivery. */
+  recordEngineReviewAuditReceipt(name: string, runId: string, commentId: string, deliveredAt: string): boolean {
+    const result = this.db
+      .prepare(
+        "UPDATE engine_review_wal SET audit_comment_id = ?, audit_delivered_at = ? " +
+          "WHERE worker_name = ? AND run_id = ? AND review_artifact_json IS NOT NULL AND decisive_outcome IS NOT NULL",
+      )
+      .run(commentId, deliveredAt, name, runId);
+    return result.changes === 1;
   }
 
   /** #287 (E4b): the CURRENT engine-agent WAL record for `name`'s lane (the lane's most recent
@@ -1590,6 +1626,9 @@ export class State {
     treeManifestHash: string | null;
     attemptStart: string;
     decisiveOutcome: "approved" | "rejected" | null;
+    reviewArtifactJson: string | null;
+    auditCommentId: string | null;
+    auditDeliveredAt: string | null;
   } | null {
     const row = this.db.prepare("SELECT * FROM engine_review_wal WHERE worker_name = ?").get(name) as
       | {
@@ -1600,6 +1639,9 @@ export class State {
           tree_manifest_hash: string | null;
           attempt_start: string;
           decisive_outcome: string | null;
+          review_artifact_json: string | null;
+          audit_comment_id: string | null;
+          audit_delivered_at: string | null;
         }
       | undefined;
     if (!row) return null;
@@ -1612,6 +1654,9 @@ export class State {
       treeManifestHash: row.tree_manifest_hash,
       attemptStart: row.attempt_start,
       decisiveOutcome,
+      reviewArtifactJson: row.review_artifact_json,
+      auditCommentId: row.audit_comment_id,
+      auditDeliveredAt: row.audit_delivered_at,
     };
   }
 

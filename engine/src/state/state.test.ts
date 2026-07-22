@@ -2760,6 +2760,9 @@ test("recordEngineReviewWal/getEngineReviewWal: round-trips a WAL record, null f
     treeManifestHash: null,
     attemptStart: "2026-01-01T00:00:00.000Z",
     decisiveOutcome: null,
+    reviewArtifactJson: null,
+    auditCommentId: null,
+    auditDeliveredAt: null,
   });
   s.close();
 });
@@ -2792,6 +2795,22 @@ test("updateEngineReviewWalManifestHash/recordEngineReviewWalDecisiveOutcome: gu
   assert.equal(wal?.runId, "run-2");
   assert.equal(wal?.treeManifestHash, null);
   assert.equal(wal?.decisiveOutcome, null);
+  s.close();
+});
+
+test("#288 WAL artifact + audit receipt writes are runId-guarded and round-trip field-for-field", () => {
+  const s = mem();
+  s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  s.recordEngineReviewWal("lane-1", { runId: "run-2", head: "H", base: "B", diffHash: "D", attemptStart: "t" });
+  assert.equal(s.recordEngineReviewWalArtifact("lane-1", "stale", "approved", "{}"), false);
+  assert.equal(s.recordEngineReviewWalArtifact("lane-1", "run-2", "rejected", '{"perAC":[]}'), true);
+  assert.equal(s.recordEngineReviewAuditReceipt("lane-1", "stale", "IC0", "old"), false);
+  assert.equal(s.recordEngineReviewAuditReceipt("lane-1", "run-2", "IC2", "2026-01-01T00:00:00Z"), true);
+  const wal = s.getEngineReviewWal("lane-1");
+  assert.equal(wal?.decisiveOutcome, "rejected");
+  assert.equal(wal?.reviewArtifactJson, '{"perAC":[]}');
+  assert.equal(wal?.auditCommentId, "IC2");
+  assert.equal(wal?.auditDeliveredAt, "2026-01-01T00:00:00Z");
   s.close();
 });
 

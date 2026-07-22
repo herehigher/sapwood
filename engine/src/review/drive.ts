@@ -6,22 +6,14 @@
 // completely untouched by this module (mechanical extract + additive branch, see merge-driver.ts's
 // own doc for the regression-pin stance).
 //
-// PRODUCTION REACHABILITY (read before assuming this runs anywhere real): engine-agent has NO
-// production construction path as of this PR. `reviewer.ts`'s `buildReviewerByKind("engine-agent")`
-// still THROWS (updated only to name #288/E4c as the enablement point) — so `makeReviewer(cfg)`
-// with `reviewer.mode: engine-agent` still throws at engine startup, and conductor.ts's real
-// wiring never constructs an `EngineAgentReviewer` to hand to `MergeDriverDeps.reviewer`. Every
-// behavior this module implements is proven ONLY via scripted-timeline tests that construct a
-// `MergeDriver` directly with an injected `EngineAgentReviewer`-shaped adapter + an injected
-// `auditDelivery` seam (see merge-driver.test.ts's engine-agent suite) — never through the real
-// config -> conductor -> driveOne path. This is deliberate, not an oversight: shipping a drive
-// path where a decisive verdict could reach merge/FIXABLE without a receipted audit comment would
-// violate E4c's ordering invariant (audit comment + delivery receipt land in #288). Independent of
-// that startup-time block, THIS module's own composition below fails closed a SECOND way: the
-// production `auditDelivery` seam (constructed by whatever future caller eventually wires this up)
-// is expected to always report `{ delivered: false }` until #288 replaces it with a real
-// implementation — see `driveEngineAgentReview`'s own doc on the audit step for why a
-// non-delivered decisive verdict can never reach `finalizeVerdict`.
+// PRODUCTION REACHABILITY (#288/E4c): cli.ts's executable composition root constructs the real
+// EngineAgentReviewer and this module's per-lane deps through review/production.ts. The narrower
+// reviewer.ts `buildReviewerByKind` factory deliberately remains unable to build this kind because
+// its arguments cannot supply the materializer/runner/state/audit dependencies; classic modes
+// continue through that factory. The production `auditDelivery` persists the validated artifact,
+// discovers/posts the audit comment, and records a runId-guarded receipt. This module still enforces
+// the invariant locally: a non-receipted decisive result queues before finalizeVerdict can observe
+// it, regardless of which composition root supplied the dependencies.
 //
 // TREE-MANIFEST-HASH SEAM (documented scope note, design #279 §3's "tree manifest ... recorded in
 // the WAL record"): `ReviewerAdapter.evaluate()` (the generic interface this module drives against)
@@ -61,6 +53,9 @@ export interface EngineReviewWal {
   treeManifestHash: string | null;
   attemptStart: string;
   decisiveOutcome: "approved" | "rejected" | null;
+  reviewArtifactJson: string | null;
+  auditCommentId: string | null;
+  auditDeliveredAt: string | null;
 }
 
 export type PreflightResult = { ok: true } | { ok: false; reason: string };
@@ -189,6 +184,8 @@ export interface EngineAgentDriveDeps {
   now: () => Date;
   newRunId: () => string;
   getAttemptPin: () => AttemptPin | null;
+  /** #288/#54: first attempt clock persisted separately from retry backoff's latest pin time. */
+  getFirstAttemptAt?: () => string | null;
   recordAttemptPin: (pin: AttemptPin | null) => void;
   getWal: () => EngineReviewWal | null;
   recordWal: (wal: { runId: string; head: string; base: string; diffHash: string; attemptStart: string }) => void;
@@ -203,10 +200,12 @@ export interface EngineAgentDriveDeps {
    *  handler is expected to resolve the CURRENT run via `getWal()` (no concurrent attempts share
    *  a lane) and call `updateEngineReviewWalManifestHash` — see merge-driver.test.ts's wiring. */
   onTreeManifest?: (manifestHash: string) => void;
-  /** E4c's (#288) audit-comment + delivery-receipt seam — see this module's header doc. In
-   *  production this is expected to ALWAYS resolve `{ delivered: false }` until #288 replaces it;
-   *  tests inject a fake that can succeed, to prove the downstream consume path. */
+  /** E4c's (#288) audit-comment + delivery-receipt seam — production binds the crash-safe
+   *  discover/post/receipt implementation in production.ts; tests can inject the same contract. */
   auditDelivery: (result: Extract<ApprovalResult, { kind: "approved" | "rejected" }>) => Promise<AuditDeliveryResult>;
+  /** #288 restart path: deliver/reconcile solely from the WAL-persisted artifact, without
+   *  spawning another paid review session. */
+  reconcileAuditDelivery: () => Promise<AuditDeliveryResult>;
   ciChecksCap: number;
 }
 
@@ -287,6 +286,20 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     deps.recordAttemptPin(null);
     pin = null;
   }
+  // #288: a decisive artifact is WAL-persisted BEFORE its comment post. If the engine crashed
+  // after that point (including post-succeeded/receipt-lost), reconcile from the WAL now,
+  // before backoff and before any paid session. A successful receipt upgrades the existing pin;
+  // a failed reconciliation remains queued/backoff-contained below.
+  if (pin?.kind === "unavailable") {
+    const wal = deps.getWal();
+    if (wal && wal.runId === pin.runId && wal.head === status0.headOid && wal.decisiveOutcome !== null && wal.reviewArtifactJson !== null) {
+      const delivery = await deps.reconcileAuditDelivery();
+      if (delivery.delivered) {
+        deps.recordAttemptPin({ ...pin, kind: "decisive" });
+        pin = { ...pin, kind: "decisive" };
+      }
+    }
+  }
   if (pin?.kind === "decisive") {
     // PERMANENT for this head: never re-run a session. Still attempt to CONSUME the already-
     // decisive, already-delivered verdict on every tick (cheap — no paid session) — a transient
@@ -294,7 +307,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     // lane once the race resolves (design #279 §2: "a transient merge failure clears nothing").
     // Reuses the SAME status0/data0 fetched above (#303 review round 2) — no separate fetch.
     const wal = deps.getWal();
-    if (!wal || wal.runId !== pin.runId || wal.head !== status0.headOid || wal.decisiveOutcome == null) {
+    if (!wal || wal.runId !== pin.runId || wal.head !== status0.headOid || wal.decisiveOutcome == null || wal.auditCommentId == null) {
       return { kind: "queued", reason: "engine-agent: decisive pin has no matching delivered WAL record — anomaly, fail-closed" };
     }
     const revalidate = refetchStillValid(status0, data0, wal.head, wal.base);
@@ -401,6 +414,11 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
     };
   }
 
+  // WAL-first audit: persist the engine-derived disposition before any network post. The
+  // production callback persists the richer validated artifact alongside it; reconciliation
+  // only proceeds when both are present.
+  deps.recordWalDecisiveOutcome(runId, approvalResult.kind);
+
   // ── audit: discover-before-post, record delivery (E4c/#288's own implementation) ───────────
   // approved | rejected: a decisive verdict, but NOT YET consumable — see this module's header
   // doc. `auditDelivery` not delivered ⇒ queue, no downstream action (design #279 §2's audit
@@ -416,7 +434,6 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   // the refetch below discards THIS tick's consume attempt (the audit receipt, not a successful
   // merge, is what makes the verdict permanent; see this module's header doc).
   deps.recordAttemptPin({ head: H, at: attemptStart, runId, kind: "decisive" });
-  deps.recordWalDecisiveOutcome(runId, approvalResult.kind);
 
   // ── post-session refetch (design #279 §2): discard the approval on ANY change ──────────────
   let status1: PRStatus;

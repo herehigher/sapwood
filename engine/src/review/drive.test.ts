@@ -198,6 +198,9 @@ interface Recorded {
     treeManifestHash: string | null;
     attemptStart: string;
     decisiveOutcome: "approved" | "rejected" | null;
+    reviewArtifactJson: string | null;
+    auditCommentId: string | null;
+    auditDeliveredAt: string | null;
   } | null;
 }
 
@@ -205,6 +208,7 @@ function makeDeps(overrides: {
   forge?: Partial<IForge>;
   evaluate?: () => Promise<ApprovalResult>;
   auditDelivery?: EngineAgentDriveDeps["auditDelivery"];
+  reconcileAuditDelivery?: EngineAgentDriveDeps["reconcileAuditDelivery"];
   cfg?: SapwoodConfig;
   now?: () => Date;
   runIds?: string[];
@@ -231,12 +235,20 @@ function makeDeps(overrides: {
     },
     getWal: () => recorded.wal,
     recordWal: (wal) => {
-      recorded.wal = { ...wal, treeManifestHash: null, decisiveOutcome: null };
+      recorded.wal = {
+        ...wal,
+        treeManifestHash: null,
+        decisiveOutcome: null,
+        reviewArtifactJson: null,
+        auditCommentId: null,
+        auditDeliveredAt: null,
+      };
     },
     recordWalDecisiveOutcome: (runId, outcome) => {
       if (recorded.wal && recorded.wal.runId === runId) recorded.wal = { ...recorded.wal, decisiveOutcome: outcome };
     },
     auditDelivery: overrides.auditDelivery ?? (async () => ({ delivered: false, reason: "no #288 impl in this test" })),
+    reconcileAuditDelivery: overrides.reconcileAuditDelivery ?? (async () => ({ delivered: false, reason: "nothing to reconcile" })),
     ciChecksCap: 20,
   };
   return { deps, recorded };
@@ -263,6 +275,9 @@ test("driveEngineAgentReview: MERGED (data0.state) with a DECISIVE pin already p
     treeManifestHash: null,
     attemptStart: "2026-01-01T00:00:00.000Z",
     decisiveOutcome: "approved",
+    reviewArtifactJson: "{}",
+    auditCommentId: "C1",
+    auditDeliveredAt: "2026-01-01T00:00:01.000Z",
   };
   const outcome = await driveEngineAgentReview(deps, 1, 2);
   assert.deepEqual(outcome, { kind: "merged", headOid: "H1" });
@@ -492,10 +507,50 @@ test("driveEngineAgentReview: a decisive pin for the CURRENT head is PERMANENT �
     treeManifestHash: null,
     attemptStart: "2026-01-01T00:00:00.000Z",
     decisiveOutcome: "approved",
+    reviewArtifactJson: "{}",
+    auditCommentId: "C1",
+    auditDeliveredAt: "2026-01-01T00:00:01.000Z",
   };
   const outcome = await driveEngineAgentReview(deps, 1, 2);
   assert.equal(evaluated, false, "a decisive pin must never trigger a new paid session");
   assert.equal(outcome.kind, "consume");
+});
+
+test("#288 restart reconciliation upgrades an unavailable pin from WAL receipt discovery without rerunning the paid session", async () => {
+  let evaluated = 0;
+  const { deps, recorded } = makeDeps({
+    evaluate: async () => {
+      evaluated++;
+      return { kind: "unavailable", headOid: "H1", reason: "must not run" };
+    },
+    reconcileAuditDelivery: async () => {
+      if (recorded.wal) recorded.wal = { ...recorded.wal, auditCommentId: "IC1", auditDeliveredAt: "2026-01-01T00:00:01Z" };
+      return { delivered: true };
+    },
+  });
+  recorded.pin = { head: "H1", at: "2026-01-01T00:00:00Z", runId: "run-1", kind: "unavailable" };
+  recorded.wal = {
+    runId: "run-1",
+    head: "H1",
+    base: "B1",
+    diffHash: "d",
+    treeManifestHash: null,
+    attemptStart: "2026-01-01T00:00:00Z",
+    decisiveOutcome: "rejected",
+    reviewArtifactJson: JSON.stringify({
+      perAC: [],
+      findings: [{ id: "F1", body: "bug" }],
+      sessionActualModels: ["opus"],
+      promptHash: "p",
+    }),
+    auditCommentId: null,
+    auditDeliveredAt: null,
+  };
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.equal(evaluated, 0);
+  assert.equal(recorded.pin?.kind, "decisive");
+  assert.equal(outcome.kind, "consume");
+  if (outcome.kind === "consume") assert.equal(outcome.verdict.action, "HANDLE_THREADS");
 });
 
 test("driveEngineAgentReview: decisive pin consume — refetch mismatch discards THIS tick's consume, pin stays decisive (retried next tick)", async () => {
@@ -509,6 +564,9 @@ test("driveEngineAgentReview: decisive pin consume — refetch mismatch discards
     treeManifestHash: null,
     attemptStart: "2026-01-01T00:00:00.000Z",
     decisiveOutcome: "approved",
+    reviewArtifactJson: "{}",
+    auditCommentId: "C1",
+    auditDeliveredAt: "2026-01-01T00:00:01.000Z",
   };
   const outcome = await driveEngineAgentReview(deps, 1, 2);
   assert.equal(outcome.kind, "queued");
@@ -523,7 +581,7 @@ test("driveEngineAgentReview: approved verdict but audit delivery UNAVAILABLE ->
   const outcome = await driveEngineAgentReview(deps, 1, 2);
   assert.equal(outcome.kind, "queued");
   assert.equal(recorded.pin?.kind, "unavailable");
-  assert.equal(recorded.wal?.decisiveOutcome, null);
+  assert.equal(recorded.wal?.decisiveOutcome, "approved");
 });
 
 test("driveEngineAgentReview: approved + delivered + refetch clean -> consume with a MERGE_OK-shaped verdict, pin now PERMANENT decisive", async () => {

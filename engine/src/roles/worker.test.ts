@@ -2939,6 +2939,8 @@ test("defaultFixPromptPath: resolves to the shipped prompts/fix.md, which exists
   const content = readFileSync(p, "utf8");
   assert.match(content, /\{\{pr\.number\}\}/);
   assert.match(content, /\{\{issue\.number\}\}/);
+  assert.match(content, /mcp__forge__getPRAuditComments/);
+  assert.match(content, /findings are carried only by `getPRAuditComments`/);
 });
 
 test("loadFixPromptTemplate: unset fixPromptFile -> the shipped default (byte-identical)", () => {

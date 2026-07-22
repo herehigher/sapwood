@@ -21,6 +21,7 @@ import {
   parsePageInfo,
   parsePRChecksPage,
   parsePRComments,
+  parsePRCommentsPage,
   parsePRDetails,
   parsePRReactions,
   parsePRReviewsPage,
@@ -2327,6 +2328,29 @@ test("getPRReviewThreads: threads owner/repo/number/commentsCap through the Grap
   assert.ok(args.includes("number=9"));
   assert.ok(args.includes("commentsCap=15"));
   assert.ok(args.includes("after=null"));
+});
+
+test("#288 getPRComments is a bounded newest-comments GraphQL read and preserves opaque receipt ids", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  let seen: string[] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen = args;
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: { comments: { totalCount: 1, nodes: [{ id: "IC1", author: { login: "bot" }, createdAt: "t", body: "audit" }] } },
+        },
+      },
+    });
+  };
+  assert.deepEqual(await forge.getPRComments(9, 20), { comments: [{ id: "IC1", login: "bot", createdAt: "t", body: "audit" }], total: 1 });
+  assert.ok(seen.includes("number=9"));
+  assert.ok(seen.includes("cap=20"));
+  assert.deepEqual(parsePRCommentsPage(JSON.stringify({ data: { repository: { pullRequest: { comments: { nodes: [] } } } } })), {
+    comments: [],
+    total: 0,
+  });
 });
 
 // ── #247: fix-loop write methods — reply to / resolve a review thread ──────────────────────
