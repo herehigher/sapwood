@@ -25,8 +25,10 @@ is enforced structurally, not by asking the model nicely:
   tokenizes the command (shlex-equivalent splitting, recursing into `$()`/backtick
   substitutions), strips exec-prefixes (`env`, `npx`, leading assignments, etc.), and
   blocks any GitHub-overreach command a producer must never run: `gh pr merge`,
-  `gh pr review --approve`, `gh pr ready`, `gh release`, and the mutating `gh api`/
-  GraphQL equivalents. Opaque constructs a worker could hide anything inside —
+  `gh pr review --approve`, `gh pr ready`, `gh release`, `gh label`, `gh project`,
+  governance-changing `gh issue edit` flags, and the mutating `gh api`/GraphQL
+  equivalents. Plain issue title/body edits and issue/PR comments remain allowed.
+  Opaque constructs a worker could hide anything inside —
   `eval`, `sh -c`, an interpreter's `-e`/`-c`, process substitution — are blocked
   outright, fail-closed, rather than inspected.
 - **The merge is always executed by the conductor**, never the worker. Only
@@ -107,6 +109,10 @@ required capability shape, not its privilege rank.
 
 The asymmetry is compensated, but not erased, by several independent controls:
 
+- Under the owner ruling in #290, the #305 compensating controls now deny producer
+  label, milestone, and project-board mutations while preserving comment channels;
+  credential removal in #351 remains the endgame rather than a claim that argv
+  inspection removes ambient credentials.
 - `engine/src/roles/peripheral.ts` gives every issues-only role
   `ROLE_ALLOWED_TOOLS = "Read,Grep,Glob"` and a cross-source veto over `Bash` and write tools,
   strips forge credential variables in `peripheralSessionEnv()`, and leaves forge writes to
@@ -123,7 +129,9 @@ The asymmetry is compensated, but not erased, by several independent controls:
   permission patterns. It tokenizes command fragments and substitutions, rejects opaque
   execution such as `eval`, shell `-c`, interpreter eval flags, and process substitution, and
   blocks producer overreach through `gh pr merge`/`ready`, approving or requesting changes,
-  releases, sensitive REST mutations, and GraphQL mutations. The same guard protects
+  releases, label/milestone/project-board changes, sensitive REST mutations, and GraphQL
+  mutations. Plain issue title/body edits and issue/PR comment channels remain available.
+  The same guard protects
   human-merge-only files and engine control sentinels from recognized write vectors and confines
   guarded read-tool paths to the session worktree. Malformed guarded input fails closed.
 - `engine/src/roles/worker.ts` does not add the engine `data/` directory as a Claude tool

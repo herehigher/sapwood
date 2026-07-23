@@ -279,6 +279,8 @@ function checkOpaque(tokens: string[], fragment: string): string | null {
 // ── category C: gh overreach (producer ≠ merger) ─────────────────────────────
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const SENSITIVE_PATH_RE = /\/pulls\/[^/]+\/merge|\/releases/i;
+const ISSUE_GOVERNANCE_PATH_RE =
+  /(?:^|\/)repos\/[^/]+\/[^/]+\/(?:issues\/[^/]+\/labels(?:[/?#]|$)|labels(?:[/?#]|$)|issues\/\d+\/?(?:[?#].*)?$)/i;
 const ALLOWED_DELETE_PATH_RE = /\/git\/refs/i;
 const FIELD_FLAGS = new Set(["-f", "--field", "-F", "--raw-field"]);
 // gh api flags that consume the NEXT token as their value — must be skipped so the value
@@ -401,6 +403,12 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
   }
 
   if (!method || !MUTATING_METHODS.has(method)) return null;
+  if (pathToken && ISSUE_GOVERNANCE_PATH_RE.test(pathToken)) {
+    return `BLOCK [gh] api mutates issue labels/milestone/state: ${pathToken}`;
+  }
+  for (const _ of fragment.matchAll(new RegExp(ISSUE_GOVERNANCE_PATH_RE, "gi"))) {
+    return "BLOCK [gh] api mutates issue labels/milestone/state";
+  }
   if (method === "DELETE" && pathToken && ALLOWED_DELETE_PATH_RE.test(pathToken)) return null;
   if (pathToken && SENSITIVE_PATH_RE.test(pathToken)) {
     return pathToken.toLowerCase().includes("/releases")
@@ -428,6 +436,14 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
       return "BLOCK [gh] pr review --approve/--request-changes — producer must not review (producer≠reviewer)";
     }
   }
+  if (sub1 === "issue" && remaining[1]?.toLowerCase() === "edit") {
+    const governanceFlags = new Set(["--add-label", "--remove-label", "--milestone"]);
+    if (remaining.slice(2).some((t) => governanceFlags.has(t) || [...governanceFlags].some((flag) => t.startsWith(`${flag}=`)))) {
+      return "BLOCK [gh] issue edit label/milestone mutation — producer must not change dispatch state";
+    }
+  }
+  if (sub1 === "label") return "BLOCK [gh] label — producer must not mutate repository labels";
+  if (sub1 === "project") return "BLOCK [gh] project — producer must not mutate project-board state";
   if (sub1 === "release") return "BLOCK [gh] release — producer must not publish releases";
   if (sub1 === "api") return checkGhApi([tokens[0]!, ...remaining], fragment);
   return null;

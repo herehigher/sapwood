@@ -102,9 +102,22 @@ const CORE = [
   "gh api repos/o/r/releases -f t=v",
   "gh api graphql -f query='mutation { mergePullRequest }'",
   "gh api --hostname H graphql -f query='mutation{x}'",
+  "gh issue edit 1 --add-label hold",
+  "gh issue edit 1 --remove-label=ready --milestone M11",
+  "gh -R o/r issue edit 1 --milestone=M11",
+  "gh label delete hold",
+  "gh project item-edit --id item",
+  "gh api -X POST repos/o/r/issues/1/labels -f labels=hold",
+  "gh api -X DELETE repos/o/r/labels/hold",
+  "gh api -X PATCH repos/o/r/issues/1 -f milestone=11",
+  "uv run --with rich gh label delete hold",
   "gh pr view 1 --json state",
   "gh api repos/o/r/pulls/1",
   "gh pr list",
+  "gh issue edit 1 --title safe --body updated",
+  "gh issue comment 1 --body progress",
+  "gh pr comment 1 --body progress",
+  "gh api -X POST repos/o/r/issues/1/comments -f body=progress",
   "gh api graphql -f query='query{viewer{login}}'",
   "bash -c 'ls'",
   "bash -lc 'echo hi'",
@@ -128,6 +141,31 @@ function genCommand(rng: () => number): string {
   if (rng() < 0.25) cmd = cmd + " " + pick(["&&", ";", "|"]) + " " + pick(CORE);
   return cmd;
 }
+
+test("#352 corpus: governance mutations block even when wrapper-embedded; comments pass", () => {
+  const blocked = [
+    "gh issue edit 1 --add-label hold",
+    "gh -R o/r issue edit 1 --remove-label=ready --milestone M11",
+    "uv run --with rich gh label delete hold",
+    "poetry run gh project item-edit --id item",
+    "npx gh api -X POST repos/o/r/issues/1/labels -f labels=hold",
+    "stdbuf -oL gh api -X DELETE repos/o/r/labels/hold",
+    "env FOO=1 gh api -X PATCH repos/o/r/issues/1 -f milestone=11",
+  ];
+  for (const command of blocked) {
+    assert.equal(guardDecision("Bash", { command }, CWD).allow, false, `must block: ${command}`);
+  }
+
+  const allowed = [
+    "gh issue edit 1 --title safe --body updated",
+    "gh issue comment 1 --body progress",
+    "gh pr comment 1 --body progress",
+    "gh api -X POST repos/o/r/issues/1/comments -f body=progress",
+  ];
+  for (const command of allowed) {
+    assert.equal(guardDecision("Bash", { command }, CWD).allow, true, `must allow: ${command}`);
+  }
+});
 
 test("differential: sapwood is at least as strict as guard.py on opaque + Category C", (t) => {
   const bin = pythonAvailable();
