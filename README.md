@@ -11,6 +11,18 @@ self-merges and hopes for the best.
 > re-implemented from a proven private project; see [`docs/PLAN.md`](docs/PLAN.md)
 > for the full goals, architecture, and roadmap.
 
+## Why "sapwood"?
+
+In a tree, sapwood is the living layer between bark and heartwood — the only part
+of the trunk that grows. New wood forms there and, as it matures, hardens into
+heartwood: the stable core that holds the tree up.
+
+That is this loop. Bark — the fail-closed guard — protects the living layer from
+the outside. Sapwood is where the work grows: workers producing new code in
+parallel. Heartwood is `main` — and nothing becomes heartwood until it has passed
+the review gate and hardened. Growth at the edge, structure at the core,
+protection in between.
+
 ## Why it's different
 
 Most autonomous coding tools ask you to trust the model and let it merge. sapwood's
