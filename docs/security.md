@@ -91,6 +91,58 @@ It can catch naive or accidental exfiltration attempts and leave an audit trail,
 deliberate adversary can trivially evade lexical executable matching — for example with an
 interpreter one-liner or DNS exfiltration.
 
+## Worker denylist vs. peripheral allowlist: deliberate asymmetry
+
+The stronger-looking policy belongs to the narrower job by design. Issues-only peripheral
+sessions have a fixed contract: inspect repository context, return one validated structured
+message, and let deterministic engine code perform any forge write. They therefore need only
+`Read`/`Grep`/`Glob`, and `peripheral.ts` can deny `Bash` and every write tool outright. A
+code-producing worker has the opposite shape: it must edit arbitrary repositories and run their
+particular compiler, package manager, test runner, generator, and git workflow. A portable
+positive list of executable names would either reject ordinary build/test work or admit general
+interpreters and package runners that are themselves equivalent to open-ended execution.
+Sapwood therefore treats worker Bash as a broad capability and denies the governance actions
+and protected paths the producer must never reach. The policy paradigm follows the role's
+required capability shape, not its privilege rank.
+
+The asymmetry is compensated, but not erased, by several independent controls:
+
+- `engine/src/roles/peripheral.ts` gives every issues-only role
+  `ROLE_ALLOWED_TOOLS = "Read,Grep,Glob"` and a cross-source veto over `Bash` and write tools,
+  strips forge credential variables in `peripheralSessionEnv()`, and leaves forge writes to
+  validated engine code. Those sessions have no `gh` grant. This is **not** true of every role:
+  `engine/src/roles/worker.ts` deliberately gives an ordinary initial coding leg
+  `Bash(gh *)` and inherits the engine environment so the stock worker workflow can push and
+  open its PR. Only credential-free fix legs remove that grant
+  (`WORKER_ALLOWED_TOOLS_NO_GH`) and use `workerCredentialFreeEnv()` to strip token/config
+  variables, point `GH_CONFIG_DIR` at an empty per-lane directory, disable global/system git
+  config and terminal prompting, and drop `SSH_AUTH_SOCK`. Even that environment is not a
+  filesystem sandbox: arbitrary Node/npm code still runs with the operator's real home
+  directory and can read credentials stored there.
+- `engine/src/guard/guard.ts` judges the worker's actual Bash argv independently of the CLI
+  permission patterns. It tokenizes command fragments and substitutions, rejects opaque
+  execution such as `eval`, shell `-c`, interpreter eval flags, and process substitution, and
+  blocks producer overreach through `gh pr merge`/`ready`, approving or requesting changes,
+  releases, sensitive REST mutations, and GraphQL mutations. The same guard protects
+  human-merge-only files and engine control sentinels from recognized write vectors and confines
+  guarded read-tool paths to the session worktree. Malformed guarded input fails closed.
+- `engine/src/roles/worker.ts` does not mount the engine data directory into the worker, so the
+  model cannot manufacture the wrapper-owned completion sentinels or mutate engine state
+  through an added directory.
+- Merge authority remains a separate choke point. Only
+  `engine/src/roles/merge-driver.ts` calls `IForge.mergePR`, after the CI/review gates and a
+  final fresh decision; `engine/src/forge/forge.ts` pins the operation with
+  `--match-head-commit`. The worker has no reference to that driver or state path, while both
+  its CLI deny rules and the guard block direct merge commands.
+
+This is targeted governance containment, **not general Bash containment**. The denylist does
+not prove an unrecognized command harmless, inspect arbitrary script bodies, confine filesystem
+access performed by a subprocess, or stop a permitted interpreter/package runner from opening
+a socket. In particular it does not contain data exfiltration; see
+[Worker network egress: accepted blind spot](#worker-network-egress-accepted-blind-spot).
+The lexical egress tripwire described there is post-hoc evidence only, not a missing enforcement
+layer that this denylist silently supplies.
+
 ## Issues-only role sessions: read-only, worktree-confined, no shell (#110, #235)
 
 Workers are guarded by the argv-inspecting hook above. The round orchestrator's
