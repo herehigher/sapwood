@@ -108,6 +108,12 @@ class FakeForge implements IForge {
   async setBoardStatus(n: number, s: "backlog" | "ready" | "inProgress" | "done"): Promise<void> {
     this.boardSet.push([n, s]);
   }
+  async addSubIssue(): Promise<void> {
+    throw new Error("FakeForge.addSubIssue is not used by this test");
+  }
+  async getSubIssues() {
+    return [];
+  }
   async addLabel(n: number, l: string): Promise<void> {
     if (this.throwOnAddLabel) throw new Error("simulated forge failure");
     this.labelsAdded.push([n, l]);
