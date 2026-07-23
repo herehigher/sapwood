@@ -148,6 +148,7 @@ raw-text BODY block. Nothing may follow the last sentinel. The JSON block carrie
 ONLY — never put markdown or long text inside the JSON string; long text always goes in the
 BODY block below it, verbatim, never JSON-string-escaped (a body containing its own code
 fences would break JSON escaping, which is exactly why the two are separate).
+Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 
 ### If `{{po.mode}}` is `align`
 
@@ -156,26 +157,21 @@ The JSON metadata carries an array of one entry per issue you're proposing, each
 entirely, or emit an empty array, when you have none). If you're proposing zero issues this
 round, emit an empty array and NO BODY block:
 
-```
 <<<SAPWOOD_RESULT>>>
 {"issues": []}
 <<<END_SAPWOOD_RESULT>>>
-```
 
 With a concern and no proposals:
 
-```
 <<<SAPWOOD_RESULT>>>
 {"issues": [], "concerns": [{"issue": 42, "reason": "This issue's why/what contradicts the goal file's stated non-goal — see docs/PLAN.md's Decision #3."}]}
 <<<END_SAPWOOD_RESULT>>>
-```
 
 Otherwise, the BODY block carries EVERY issue's full body, each wrapped in its own
 `<<<ISSUE>>>`/`<<<END_ISSUE>>>` pair, in the SAME order as the `issues` array in the metadata —
 segment 1 is issue 1's body, segment 2 is issue 2's, and so on. Nothing but whitespace may sit
 before the first `<<<ISSUE>>>`, between two segments, or after the last `<<<END_ISSUE>>>`:
 
-```
 <<<SAPWOOD_RESULT>>>
 {"issues": [{"title": "Add the thing"}, {"title": "Document the thing"}]}
 <<<END_SAPWOOD_RESULT>>>
@@ -187,7 +183,6 @@ before the first `<<<ISSUE>>>`, between two segments, or after the last `<<<END_
 ... the ENTIRE body for "Document the thing" ...
 <<<END_ISSUE>>>
 <<<END_BODY>>>
-```
 
 ### If `{{po.mode}}` is `triage`
 
@@ -195,13 +190,11 @@ The JSON metadata carries the issue number plus an OPTIONAL `concerns` array (se
 concern" above — omit the key, or emit an empty array, when you have none; the only issue you
 may name is `{{issue.number}}` itself); the BODY block carries the entire revised issue body:
 
-```
 <<<SAPWOOD_RESULT>>>
 {"issue": {{issue.number}}}
 <<<END_SAPWOOD_RESULT>>>
 <<<BODY>>>
 ... the ENTIRE revised issue body, replacing the current one verbatim ...
 <<<END_BODY>>>
-```
 
 `issue` must be exactly `{{issue.number}}` — the issue you were asked to triage.

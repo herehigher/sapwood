@@ -61,12 +61,11 @@ End your final message with a JSON metadata block. Nothing may follow the last s
 Each comment's `body` is the ENTIRE comment text for that issue — short prose, no markdown
 code fences needed — so it travels directly as a JSON string; unlike a role handing back a
 whole revised issue body, there is no separate raw-text BODY block here.
+Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 
-```
 <<<SAPWOOD_RESULT>>>
 {"comments": [{"issue": 42, "body": "This round: 2 PRs merged, $4.20 of a $30 budget spent. Flagging for context while you triage this one."}]}
 <<<END_SAPWOOD_RESULT>>>
-```
 
 (`42` above is illustrative only — `issue` must be a real issue number from the needs-human
 list above.) `comments` is an array with one entry per issue you're briefing: `issue` must

@@ -104,14 +104,13 @@ block carrying the entire revised issue body. Nothing may follow the last sentin
 block carries METADATA ONLY — the revised body always goes in the separate BODY block,
 verbatim, never JSON-string-escaped (a body containing its own code fences would break JSON
 escaping, which is exactly why the two are separate).
+Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 
-```
 <<<SAPWOOD_RESULT>>>
 {"issue": {{issue.number}}}
 <<<END_SAPWOOD_RESULT>>>
 <<<BODY>>>
 ... the ENTIRE revised issue body, replacing the current one verbatim ...
 <<<END_BODY>>>
-```
 
 `issue` must be exactly `{{issue.number}}` — the issue you were briefed to repair.

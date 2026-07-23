@@ -47,11 +47,10 @@ mechanically before applying anything.
 
 End your final message with a JSON metadata block naming the issue numbers you selected, in any
 order. An empty array is a valid, complete answer (see "select none" above):
+Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 
-```
 <<<SAPWOOD_RESULT>>>
 {"selected": [123, 456]}
 <<<END_SAPWOOD_RESULT>>>
-```
 
 Nothing may follow the final sentinel — no BODY block, no trailing prose.

@@ -1,15 +1,6 @@
-// prompts.test.ts (#235 PR-B, F1 follow-up): snapshot tests for the role prompt templates under
-// engine/prompts/ — every prompt this issue's "role-scoped discretion" flip touches (po.md,
-// architect.md, plan-reviewer.md, plan-drafter.md, harvest.md) gets a content hash pinned here
-// (any future edit, intentional or not, must update the hash alongside it — the whole point of
-// a snapshot test) PLUS assertions on the specific new/retained language the issue's acceptance
-// criteria name. plan-drafter.md's flip landed one round later than the other four (a review
-// finding: the matrix grants it Read/Grep/Glob same as every peripheral role, but its prompt
-// still forbade opening a file) — same shape as the others, added here for the same reason.
-// retro.md gets ONLY a hash pin: item 3's "retro unchanged (already code-aware) — do not touch"
-// is itself a regression trip-wire this test enforces. po-pool.md is pinned too even though this
-// PR doesn't touch it (its non-negotiables never carried the "wanting to open a file" language
-// po.md did, so there was nothing to flip) — same trip-wire reasoning.
+// prompts.test.ts: snapshot tests for shipped role prompt templates under engine/prompts/.
+// Any future edit, intentional or not, must update the matching hash alongside it. Content
+// assertions below pin issue-specific language and structural output contracts.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -18,7 +9,7 @@ import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultRetroPromptPath } from "../retro/retro.js";
 import { defaultArchitectPromptPath } from "./architect.js";
-import { defaultPlanDrafterPromptPath, defaultPlanReviewerPromptPath } from "./plan-review.js";
+import { defaultPlanConfirmPromptPath, defaultPlanDrafterPromptPath, defaultPlanReviewerPromptPath } from "./plan-review.js";
 
 function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
@@ -31,34 +22,38 @@ function readPrompt(path: string): string {
 // ── Snapshot hashes — update deliberately, alongside a reviewed prompt edit, never casually ───
 
 const SNAPSHOT_HASHES: Record<string, string> = {
-  // #237: intentional edit — po.md now documents the optional `concerns` dissent field.
-  "po.md": "708e148423d5d4c6486031ed28c62239c791929457d97fb58f9156ce9d6d1ab5",
-  "architect.md": "897b46fd4d8803ad7b25dc1ec467f29a56139af80ed8b7bb44fc42624441cbc5",
-  // #283: intentional edit — mandatory checkbox acceptance-criteria language (design #279 §5).
-  "plan-reviewer.md": "ba26b2fe1a2bd8c807da46bcda279e331f9298cde01ff35221f4f163e23efc7b",
-  "plan-drafter.md": "9cf51940680400e7bb1dc98089c07b960d51fc56cd5698fa7ab692f25dc004da",
-  "harvest.md": "c05f0751f6087666860f7568c4613a208dc85f4c5e92ee792f88fc3b5a20ae98",
+  // #321: intentional edits — sentinel examples are plain text, never markdown-fenced.
+  "po.md": "d33d20062d903584608e0799e3d825cb7a0b1fea23c070a5c0271a82a7b8896e",
+  "architect.md": "08ae9bd5a164533d3d6c96b6a3c98e48c0fa666d41cc85b73d2457358d17f3b2",
+  "plan-reviewer.md": "4a91f393dc61f01d5ab1be3c51504ec92720f8842188e38332c0849538f927f7",
+  "plan-reviewer-confirm.md": "5502bd8c5c9196e51f0d45086ba256aa8ce8fd0eaf1249c57120fafe3e49aacf",
+  "plan-drafter.md": "2daa2a1f1e4d57acde6a8efafdb806cdb525631cd241d8fa1bfb08dae5914d4c",
+  "harvest.md": "8c5557b443f4ae01e39b8a2e612a9bae10b1d3b8c9de436162e8587ed99f3ac0",
   "retro.md": "d667893510d96a67e5e8041861daa2d6767e708acfeca2f98c498e09e6a21917",
-  "po-pool.md": "20ccec5f8a073f7424651c195c7b85ea685bfe2c2bf49dc9420755e9b2d60b1d",
+  "po-pool.md": "a5f51726e886ecaca53dfc9773e7403b602e3cb555cfb972bee2f15e54204d09",
 };
 
-test("prompt snapshot: po.md hash matches the pinned #235 PR-B revision", () => {
+test("prompt snapshot: po.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultPoPromptPath())), SNAPSHOT_HASHES["po.md"]);
 });
 
-test("prompt snapshot: architect.md hash matches the pinned #235 PR-B revision", () => {
+test("prompt snapshot: architect.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
 
-test("prompt snapshot: plan-reviewer.md hash matches the pinned #235 PR-B revision", () => {
+test("prompt snapshot: plan-reviewer.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultPlanReviewerPromptPath())), SNAPSHOT_HASHES["plan-reviewer.md"]);
 });
 
-test("prompt snapshot: plan-drafter.md hash matches the pinned #235 PR-B revision", () => {
+test("prompt snapshot: plan-reviewer-confirm.md hash matches the pinned revision", () => {
+  assert.equal(sha256(readPrompt(defaultPlanConfirmPromptPath())), SNAPSHOT_HASHES["plan-reviewer-confirm.md"]);
+});
+
+test("prompt snapshot: plan-drafter.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
 });
 
-test("prompt snapshot: harvest.md hash matches the pinned #235 PR-B revision", () => {
+test("prompt snapshot: harvest.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultHarvestPromptPath())), SNAPSHOT_HASHES["harvest.md"]);
 });
 
@@ -66,8 +61,29 @@ test("prompt snapshot (#235 AC item 3): retro.md is BYTE-IDENTICAL to its pre-#2
   assert.equal(sha256(readPrompt(defaultRetroPromptPath())), SNAPSHOT_HASHES["retro.md"]);
 });
 
-test("prompt snapshot: po-pool.md is unchanged — its non-negotiables never carried po.md's 'wanting to open a file' language, so #235 PR-B's flip has nothing to do there", () => {
+test("prompt snapshot: po-pool.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultPoolPromptPath())), SNAPSHOT_HASHES["po-pool.md"]);
+});
+
+test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
+  const prompts: ReadonlyArray<readonly [name: string, path: string, sentinelCount: number]> = [
+    ["plan-reviewer.md", defaultPlanReviewerPromptPath(), 2],
+    ["plan-reviewer-confirm.md", defaultPlanConfirmPromptPath(), 2],
+    ["plan-drafter.md", defaultPlanDrafterPromptPath(), 1],
+    ["po.md", defaultPoPromptPath(), 4],
+    ["po-pool.md", defaultPoolPromptPath(), 1],
+    ["architect.md", defaultArchitectPromptPath(), 2],
+    ["harvest.md", defaultHarvestPromptPath(), 1],
+  ];
+
+  for (const [name, path, sentinelCount] of prompts) {
+    const prompt = readPrompt(path);
+    assert.match(prompt, /Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence\./, name);
+    assert.equal(prompt.match(/^<<<SAPWOOD_RESULT>>>[ \t]*$/gm)?.length, sentinelCount, name);
+    assert.equal(prompt.match(/^<<<END_SAPWOOD_RESULT>>>[ \t]*$/gm)?.length, sentinelCount, name);
+    assert.doesNotMatch(prompt, /^ {0,3}(?:`{3,}|~{3,})[^\r\n]*\r?\n<<<SAPWOOD_RESULT>>>[ \t]*$/m, name);
+    assert.doesNotMatch(prompt, /^<<<(?:END_SAPWOOD_RESULT|END_BODY)>>>[ \t]*\r?\n {0,3}(?:`{3,}|~{3,})[ \t]*$/m, name);
+  }
 });
 
 // ── Content assertions — the specific #235 AC language, not just "the file changed somehow" ──
