@@ -126,14 +126,15 @@ The asymmetry is compensated, but not erased, by several independent controls:
   releases, sensitive REST mutations, and GraphQL mutations. The same guard protects
   human-merge-only files and engine control sentinels from recognized write vectors and confines
   guarded read-tool paths to the session worktree. Malformed guarded input fails closed.
-- `engine/src/roles/worker.ts` does not mount the engine data directory into the worker, so the
-  model cannot manufacture the wrapper-owned completion sentinels or mutate engine state
-  through an added directory.
+- `engine/src/roles/worker.ts` does not add the engine `data/` directory as a Claude tool
+  root (there is no `--add-dir data`), so the tool layer does not offer a path into it.
+  This is not Bash containment: worker Bash can reach `../../data`, exactly the residual
+  documented under [Sentinel isolation boundary](#sentinel-isolation-boundary-honest-statement).
 - Merge authority remains a separate choke point. Only
   `engine/src/roles/merge-driver.ts` calls `IForge.mergePR`, after the CI/review gates and a
   final fresh decision; `engine/src/forge/forge.ts` pins the operation with
-  `--match-head-commit`. The worker has no reference to that driver or state path, while both
-  its CLI deny rules and the guard block direct merge commands.
+  `--match-head-commit`. The worker has no reference to that driver, while both its CLI deny
+  rules and the guard block direct merge commands.
 
 This is targeted governance containment, **not general Bash containment**. The denylist does
 not prove an unrecognized command harmless, inspect arbitrary script bodies, confine filesystem

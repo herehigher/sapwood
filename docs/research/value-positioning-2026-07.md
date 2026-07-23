@@ -69,11 +69,11 @@ loop-engineering as methodological prior art, not shared category.
   the curve. This, plus the dogfood evidence chain (sapwood has built sapwood
   since M2, with a full audit trail of autonomous merges), is the moat.
 
-The defense is four layers deep, not one (undersold in the original synthesis):
-(a) worker receives no `gh` grant at all; (b) credential-free worker env cuts
-git/gh credential paths even if a grant leaked; (c) guard argv-level
-interception; (d) structural single point — only `merge-driver.ts` merges,
-behind branch protection and a distinct identity.
+The defense is layered, not one (undersold in the original synthesis):
+(a) ordinary coding legs carry `Bash(gh *)` and inherit the engine environment
+so they can push and open a PR; only fix legs are credential-free (#218/#247);
+(b) guard argv-level interception; (c) structural single point — only
+`merge-driver.ts` merges, behind branch protection and a distinct identity.
 
 ## 5. Honest weaknesses (revised)
 
