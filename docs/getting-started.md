@@ -85,6 +85,8 @@ You do not have to hand sapwood a live backlog and full merge authority on day o
 Choose the level whose risk boundary fits today, then step up **or step down** as often
 as you need. These are names for existing controls, not new engine modes: every active
 level keeps the same guard, cost ceilings, and configured review gate.
+`guard.mode: hard` is what makes the merge promises below enforceable rather than
+advisory; `soft` only logs commands that hard mode would block.
 
 Run `sapwood validate` after every config change. It loads and validates the config with
 zero side effects and reports either a one-line OK summary (including the effective
@@ -124,6 +126,8 @@ human decision.
   ```yaml
   engine:
     driver: tick
+  guard:
+    mode: hard
   lanes:
     max: 1
     roundDispatchCap: 1
@@ -157,6 +161,8 @@ merge remains yours.
   ```yaml
   engine:
     driver: rounds
+  guard:
+    mode: hard
   merge:
     mode: produce-pr-and-stop
   ```
@@ -172,8 +178,9 @@ merge remains yours.
 - **What you see:** complete rounds (alignment, architecture, gate⓪ plan review,
   execution, harvest, and retrospective), plus reviewed PRs queued for your merge
   decision. `sapwood status` remains available without a live session.
-- **Step up:** after the review and CI evidence earn your trust, change only
-  `merge.mode` to `conductor-merge` for L3.
+- **Step up:** after the review and CI evidence earn your trust, stop the run, change
+  only `merge.mode` to `conductor-merge` for L3, then restart. Config is loaded once
+  at `runEngine()` startup; editing YAML does not change a running conductor.
 - **Step down:** restore the L1 tick-driver profile, set both lane limits to `1`, and
   expose exactly one `Ready` issue. Returning to supervised work is routine risk
   management.
@@ -188,6 +195,8 @@ without waiting for a human click.
   ```yaml
   engine:
     driver: rounds
+  guard:
+    mode: hard
   merge:
     mode: conductor-merge
   ```
@@ -203,9 +212,10 @@ without waiting for a human click.
   run logs provide the operating view, while exceptions escalate to human attention.
 - **Step up:** L3 is the top of this ladder; increase scope or concurrency only through
   the existing `round.milestone`, `lanes.max`, and `lanes.roundDispatchCap` controls.
-- **Step down:** change only `merge.mode` back to `produce-pr-and-stop` for L2, or
-  restore the L1 profile for single-issue supervision. Reducing autonomy does not
-  discard state or bypass the review gate.
+- **Step down:** stop the run, change `merge.mode` back to `produce-pr-and-stop` for
+  L2 (or restore the L1 profile for single-issue supervision), then restart. Config
+  is loaded once at `runEngine()` startup; editing YAML does not change a running
+  conductor. Reducing autonomy does not discard state or bypass the review gate.
 
 ### Run shapes behind the levels
 
