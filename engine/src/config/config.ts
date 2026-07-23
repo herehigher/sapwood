@@ -182,6 +182,10 @@ const ReviewerAgent = z
     // Backoff between paid primary attempts on the SAME head after an `unavailable` verdict
     // (design #279 §2's "UNAVAILABLE pin"). Positive int, conservative default: 15min.
     retryAfterSec: z.number().int().positive().default(900),
+    // Maximum materialized review trees retained across non-live heads. Trees for in-flight or
+    // escalated WAL heads are excluded from collection, so evidence needed for human resolution
+    // can exceed this bound until that lane records a decisive outcome.
+    treeRetentionCap: z.number().int().positive().default(10),
   })
   .strict();
 

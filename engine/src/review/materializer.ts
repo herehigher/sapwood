@@ -172,10 +172,9 @@ const DENIED_CORE_SUBKEYS = new Set([
 const DENIED_REMOTE_SUBKEYS = new Set(["uploadpack", "receivepack"]);
 
 /** #284 AC: "local-config emptiness asserted at clone time." Reads `git config --local --list`
- *  from the freshly-cloned private clone and fails closed on anything outside the allowlist
- *  above. Called once, immediately after `createPrivateClone`'s clone step -- never re-checked
- *  per materialization (the clone is re-created fresh each time, see `createPrivateClone`'s own
- *  doc, so there is no window for config to drift between checks). */
+ *  from the private clone and fails closed on anything outside the allowlist above. Called after
+ *  every fresh clone and both before and after every reuse fetch: reuse is never treated as
+ *  evidence that config stayed clean between materialization attempts. */
 export async function assertLocalConfigClean(cloneDir: string): Promise<void> {
   let stdout: string;
   try {
@@ -252,6 +251,15 @@ export function buildCloneInvocation(sourceRepoDir: string, cloneDir: string, ba
   };
 }
 
+/** Reuse keeps the same config/environment isolation as the fresh-clone path and names the
+ *  source explicitly instead of trusting a mutable fetch refspec from local config. */
+export function buildFetchInvocation(cloneDir: string, baseEnv: NodeJS.ProcessEnv = process.env): GitInvocation {
+  return {
+    args: ["-C", cloneDir, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
+    env: gitIsolationEnv(baseEnv),
+  };
+}
+
 /** Pure builder, unit-pinned (#284 AC). Exact shape design #279 §3 specifies: `-C <clone>
  *  --work-tree=<tmpdir> checkout <H> -- .` under `GIT_CONFIG_GLOBAL=/dev/null
  *  GIT_CONFIG_SYSTEM=/dev/null`, `--no-replace-objects`, `-c core.symlinks=false`. All three
@@ -292,20 +300,36 @@ export interface PrivateCloneOptions {
   worktreeRoot: string;
 }
 
-/** Creates a FRESH engine-private bare clone every call (#284, E3a scope). Deliberately no
- *  incremental-fetch/reuse machinery: a fresh clone keeps "local config asserted empty at clone
- *  time" trivially true on every call (there is no window across rounds for config to drift, no
- *  stale `refs/replace/*` a prior round might have introduced, nothing to reconcile) --
- *  simplicity the design's own D6 rationale favors (near-zero security delta from more
- *  machinery). If clone cost becomes a real bottleneck for large repos, an incremental-update
- *  path is a follow-up, not part of this issue's AC. */
+/** Reuses a matching engine-private bare clone when every assertion succeeds. The fast path is
+ *  intentionally disposable: corrupt repo, wrong origin, dirty local config, or fetch failure
+ *  all fall back to rm + the original fresh-clone path. Correctness therefore never depends on
+ *  reuse, and D6's local-config assertion is repeated before every reused fetch rather than
+ *  trusting a clone merely because this module created it on an earlier attempt. */
 export async function createPrivateClone(opts: PrivateCloneOptions): Promise<PrivateClone> {
   const cloneDir = resolve(opts.cloneDir);
+  const sourceRepoDir = resolve(opts.sourceRepoDir);
   assertOutsideWorktreeMounts(cloneDir, opts.worktreeRoot);
+  if (existsSync(cloneDir)) {
+    try {
+      await assertLocalConfigClean(cloneDir);
+      const probe = await pexecFile("git", ["-C", cloneDir, "rev-parse", "--is-bare-repository"], { env: gitIsolationEnv() });
+      if (probe.stdout.trim() !== "true") throw new MaterializerError(`existing private clone at "${cloneDir}" is not bare`);
+      const origin = await pexecFile("git", ["-C", cloneDir, "remote", "get-url", "origin"], { env: gitIsolationEnv() });
+      if (origin.stdout.trim() !== sourceRepoDir) {
+        throw new MaterializerError(`existing private clone origin does not match "${sourceRepoDir}"`);
+      }
+      const { args, env } = buildFetchInvocation(cloneDir);
+      await pexecFile("git", args, { env });
+      await assertLocalConfigClean(cloneDir);
+      return { dir: cloneDir };
+    } catch {
+      // Optimization only: every doubt discards the clone and resumes at the proven fresh path.
+    }
+  }
   if (existsSync(cloneDir)) rmSync(cloneDir, { recursive: true, force: true });
   mkdirSync(dirname(cloneDir), { recursive: true });
 
-  const { args, env } = buildCloneInvocation(opts.sourceRepoDir, cloneDir);
+  const { args, env } = buildCloneInvocation(sourceRepoDir, cloneDir);
   try {
     await pexecFile("git", args, { env });
   } catch (err) {

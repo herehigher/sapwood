@@ -140,6 +140,7 @@ reviewer:
   #                     # resolve against this config file's directory; invalid files fail fast.
   #   costCapUsd: 3     # whole-logical-review cap; one retry receives only the remainder
   #   retryAfterSec: 900 # backoff between paid attempts on the same head after unavailable
+  #   treeRetentionCap: 10 # retained review trees; in-flight/escalated heads are excluded
 
 # Engine-agent execution evidence. Every pair must match a SUCCESS CheckRun on the reviewed head
 # from the named owning GitHub App; a same-named check from another app is not evidence. Empty is

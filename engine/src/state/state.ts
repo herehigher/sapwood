@@ -1678,6 +1678,19 @@ export class State {
     };
   }
 
+  /** Heads whose current lane WAL has not reached a decisive outcome. This is the minimal
+   *  read-only liveness view used by review-tree GC: both an in-flight attempt and a lane that
+   *  escalated to human resolution deliberately remain NULL and therefore retain their tree. */
+  getLiveEngineReviewHeads(): string[] {
+    const rows = this.db
+      .prepare(
+        "SELECT DISTINCT head FROM engine_review_wal " +
+          "WHERE decisive_outcome IS NULL OR decisive_outcome NOT IN ('approved', 'rejected') ORDER BY head",
+      )
+      .all() as { head: string }[];
+    return rows.map((row) => row.head);
+  }
+
   /** #155: refresh a still-`running` lane's LIVE per-probe telemetry trio (update-in-place —
    *  see the schema v10->v11 migration comment for why this is a dedicated pair of methods
    *  rather than routed through upsertWorker's full-row replace: a generic `{...w, ...changes}`
