@@ -274,7 +274,13 @@ test("#353 corpus: issue lifecycle verbs (close/reopen/transfer/delete) block ev
     assert.equal(guardDecision("Bash", { command }, CWD).allow, false, `must block: ${command}`);
   }
 
-  const allowed = ["gh issue comment 1 --body progress", "gh issue view 1", "gh issue list", "gh issue create --title x --body y"];
+  const allowed = [
+    "gh issue comment 1 --body progress",
+    "gh issue view 1",
+    "gh issue list",
+    "gh issue status",
+    "gh issue create --title x --body y",
+  ];
   for (const command of allowed) {
     assert.equal(guardDecision("Bash", { command }, CWD).allow, true, `must allow: ${command}`);
   }

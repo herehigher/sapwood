@@ -312,10 +312,11 @@ const ALLOW: string[] = [
   "gh issue edit 352 --remove-blocked-by 7",
   "gh issue edit 352 --add-blocking 8",
   "gh issue edit 352 --remove-blocking 8",
-  // #353: comment/view/list/create stay allowed — comment is the worker's refusal channel.
+  // #353: comment/view/list/status/create stay allowed — comment is the worker's refusal channel.
   "gh issue comment 352 --body progress",
   "gh issue view 352",
   "gh issue list",
+  "gh issue status",
   "gh issue create --title x --body y",
   "gh pr comment 149 --body progress",
   "gh api -X POST repos/o/r/issues/352/comments -f body=progress",
