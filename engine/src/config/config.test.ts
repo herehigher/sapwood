@@ -496,7 +496,22 @@ test("#286: reviewer.mode: engine-agent + reviewer.agent parses with sane defaul
   assert.equal(cfg.reviewer.agent?.effort, "high");
   assert.equal(cfg.reviewer.agent?.costCapUsd, 3);
   assert.equal(cfg.reviewer.agent?.retryAfterSec, 900);
+  assert.equal(cfg.reviewer.agent?.treeRetentionCap, 10);
   assert.equal(cfg.reviewer.agent?.promptFile, undefined);
+});
+
+test("#314: reviewer.agent.treeRetentionCap is configurable and must be a positive integer", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: opus, treeRetentionCap: 3 } }\n",
+  );
+  assert.equal(cfg.reviewer.agent?.treeRetentionCap, 3);
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { model: sonnet }\nreviewer: { mode: engine-agent, agent: { model: opus, treeRetentionCap: 0 } }\n",
+      ),
+    /treeRetentionCap/,
+  );
 });
 
 test("#286: reviewer.mode: engine-agent REQUIRES reviewer.agent — missing ⇒ reject", () => {

@@ -312,6 +312,7 @@ Gate② — who reviews a PR before it can merge.
 | `agent.promptFile` | shipped `engine/prompts/engine-reviewer.md` | Optional review prompt template. A relative path resolves against the config file's directory. A custom template must contain all mandatory placeholders: `{{diff}}`, `{{issue-body}}`, `{{acceptance-criteria}}`, and `{{doctrine}}`; missing any fails startup. A configured missing, unreadable, empty, or invalid template fails startup; it never falls back silently. |
 | `agent.costCapUsd` | `3` | Positive finite dollar cap for one logical review. The first attempt receives the cap; a single retry after invalid/unparseable output receives only the recorded remainder. Unknown first-attempt spend disables the retry fail-closed. |
 | `agent.retryAfterSec` | `900` (15min) | Positive-integer backoff between paid engine-agent attempts on the same head after an unavailable verdict. The unavailable pin's first-attempt clock still governs configured reviewer failover and human escalation. |
+| `agent.treeRetentionCap` | `10` | Maximum retained review trees across non-live heads. In-flight and escalated heads are always retained regardless of the cap; all trees for a head are deleted when its last live WAL row is decisively consumed. |
 
 A fallback-obtained approval is **advisory, never verdict-bearing** on its own: it's
 re-verified against live PR data through the recorded mode's own rules at every use, and

@@ -2783,6 +2783,22 @@ test("recordEngineReviewWal: upsert-by-worker_name — a FRESH attempt supersede
   s.close();
 });
 
+test("getLiveEngineReviewHeads: returns distinct non-decisive heads, fail-closed on an invalid outcome, and excludes decisive rows", () => {
+  const s = mem();
+  for (const name of ["lane-1", "lane-2", "lane-3"]) {
+    s.upsertWorker({ name, issue: 100, session_id: name, state: "driving", started_at: "t", ended_at: null, pr: 900 });
+  }
+  s.recordEngineReviewWal("lane-1", { runId: "r1", head: "H-live", base: "B", diffHash: "D", attemptStart: "t" });
+  s.recordEngineReviewWal("lane-2", { runId: "r2", head: "H-corrupt", base: "B", diffHash: "D", attemptStart: "t" });
+  s.recordEngineReviewWal("lane-3", { runId: "r3", head: "H-done", base: "B", diffHash: "D", attemptStart: "t" });
+  s.recordEngineReviewWalDecisiveOutcome("lane-3", "r3", "approved");
+  (s as unknown as { db: DatabaseSync }).db
+    .prepare("UPDATE engine_review_wal SET decisive_outcome = 'invalid' WHERE worker_name = 'lane-2'")
+    .run();
+  assert.deepEqual(s.getLiveEngineReviewHeads(), ["H-corrupt", "H-live"]);
+  s.close();
+});
+
 test("updateEngineReviewWalManifestHash/recordEngineReviewWalDecisiveOutcome: guarded by runId — a write for a SUPERSEDED runId never lands on the current row", () => {
   const s = mem();
   s.upsertWorker({ name: "lane-1", issue: 100, session_id: "s1", state: "driving", started_at: "t", ended_at: null, pr: 900 });

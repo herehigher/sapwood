@@ -22,14 +22,14 @@
 //      simply never in a worker's reach to begin with.
 //   2. `assertLocalConfigClean` — after cloning, the private clone's `git config --local --list`
 //      is asserted to contain ONLY the sections a plain `git clone --bare` is known to write
-//      (core/remote/branch), with a small denylist on top for specific dangerous subkeys (hooks
-//      path, filter/proxy/alternates helpers, ssh/askpass overrides, upload/receive-pack
-//      overrides) even within those allowed sections. Anything outside the allowlisted sections
+//      (core/remote/branch), with a small core denylist for specific dangerous subkeys (hooks
+//      path, filter/proxy/alternates helpers, ssh/askpass overrides) and a strict remote subkey
+//      allowlist. Anything outside the allowlisted sections
 //      fails closed — this is the "local config asserted EMPTY at clone time" AC, read as "empty
-//      of anything beyond the clone's own inert bookkeeping." The in-section denylist is a FIXED,
+//      of anything beyond the clone's own inert bookkeeping." The core denylist is a FIXED,
 //      known-dangerous-keys list, not a claim of exhaustively covering every future git config
-//      key that could ever gain exec/network capability — the section-level allowlist is the
-//      primary defense; this narrows further within it.
+//      key that could ever gain exec/network capability. The remote section instead permits only
+//      clone bookkeeping known to be inert; every unrecognized remote subkey fails closed.
 //
 // Instruction files (`CLAUDE.md`, `.claude/**`) are INCLUDED in the materialized tree — D7
 // reverses the earlier exclusion. There is no filtering/exclusion logic anywhere in this module
@@ -164,18 +164,18 @@ const DENIED_CORE_SUBKEYS = new Set([
   "gitproxy",
 ]);
 
-/** Within the allowed `remote` section, `uploadpack`/`receivepack` override the PROGRAM git
- *  invokes on the remote side of a fetch/push (`remote.<name>.uploadpack`/`.receivepack`) --
- *  exec-capable the same way the `core.*` denylist above is, just scoped to a different section
- *  (code review round 2, P3). Checked against the LAST dot-separated segment of the key, same as
- *  the `core.*` check, since a remote key's shape is `remote.<name>.<subkey>`. */
-const DENIED_REMOTE_SUBKEYS = new Set(["uploadpack", "receivepack"]);
+/** Within the allowed `remote` section, permit only the inert bookkeeping subkeys written by a
+ *  plain clone: the source URL and fetch refspec. Empirically, this repo's installed git writes
+ *  only `remote.origin.url` for a fresh local `git clone --bare`; `fetch` is the standard benign
+ *  data-only refspec key. Everything else -- including uploadpack/receivepack/vcs/proxy/pushurl
+ *  -- is unrecognized and fails closed. Checked against the LAST dot-separated segment since a
+ *  remote key's shape is `remote.<name>.<subkey>`. */
+const ALLOWED_REMOTE_SUBKEYS = new Set(["url", "fetch"]);
 
 /** #284 AC: "local-config emptiness asserted at clone time." Reads `git config --local --list`
- *  from the freshly-cloned private clone and fails closed on anything outside the allowlist
- *  above. Called once, immediately after `createPrivateClone`'s clone step -- never re-checked
- *  per materialization (the clone is re-created fresh each time, see `createPrivateClone`'s own
- *  doc, so there is no window for config to drift between checks). */
+ *  from the private clone and fails closed on anything outside the allowlist above. Called after
+ *  every fresh clone and both before and after every reuse fetch: reuse is never treated as
+ *  evidence that config stayed clean between materialization attempts. */
 export async function assertLocalConfigClean(cloneDir: string): Promise<void> {
   let stdout: string;
   try {
@@ -208,9 +208,10 @@ export async function assertLocalConfigClean(cloneDir: string): Promise<void> {
         `private clone local config at "${cloneDir}" sets dangerous "core.${lastSegment}" -- refusing to use this clone`,
       );
     }
-    if (section === "remote" && DENIED_REMOTE_SUBKEYS.has(lastSegment)) {
+    if (section === "remote" && !ALLOWED_REMOTE_SUBKEYS.has(lastSegment)) {
       throw new MaterializerError(
-        `private clone local config at "${cloneDir}" sets dangerous "remote.*.${lastSegment}" (key "${key}") -- refusing to use this clone`,
+        `private clone local config at "${cloneDir}" has unrecognized remote subkey "${lastSegment}" (key "${key}") -- ` +
+          "expected only remote.*.url/fetch; refusing to use this clone",
       );
     }
   }
@@ -252,16 +253,28 @@ export function buildCloneInvocation(sourceRepoDir: string, cloneDir: string, ba
   };
 }
 
+/** Reuse keeps the same config/environment isolation as the fresh-clone path, disables hooks
+ *  command-locally, and names both the source and a full mirror refspec explicitly instead of
+ *  trusting mutable local config. */
+export function buildFetchInvocation(cloneDir: string, baseEnv: NodeJS.ProcessEnv = process.env): GitInvocation {
+  return {
+    args: ["-C", cloneDir, "-c", "core.hooksPath=/dev/null", "fetch", "--prune", "origin", "+refs/*:refs/*"],
+    env: gitIsolationEnv(baseEnv),
+  };
+}
+
 /** Pure builder, unit-pinned (#284 AC). Exact shape design #279 §3 specifies: `-C <clone>
  *  --work-tree=<tmpdir> checkout <H> -- .` under `GIT_CONFIG_GLOBAL=/dev/null
- *  GIT_CONFIG_SYSTEM=/dev/null`, `--no-replace-objects`, `-c core.symlinks=false`. All three
- *  flags are load-bearing and independently tested (dropping any one fails a pinned test AND,
+ *  GIT_CONFIG_SYSTEM=/dev/null`, `--no-replace-objects`, `-c core.symlinks=false`, and
+ *  `-c core.hooksPath=/dev/null`. All four controls are load-bearing and independently tested
+ *  (dropping any one fails a pinned test AND,
  *  for `--no-replace-objects`/`core.symlinks=false`, a behavioral fixture test): dropping
  *  `--no-replace-objects` would let a `refs/replace/*` substitution silently swap in different
  *  content for the SAME oid; dropping `core.symlinks=false` would let a tracked symlink
  *  materialize as a real OS symlink (a read-containment escape hatch for anything walking the
- *  tree later); dropping the env isolation would let an ambient global/system git config inject
- *  hooks/filters this checkout would otherwise never look at. */
+ *  tree later); dropping the hooks override would let an attacker-controlled reused clone run
+ *  `post-checkout`; dropping the env isolation would let an ambient global/system git config
+ *  inject hooks/filters this checkout would otherwise never look at. */
 export function buildCheckoutInvocation(
   cloneDir: string,
   treeDir: string,
@@ -269,7 +282,21 @@ export function buildCheckoutInvocation(
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): GitInvocation {
   return {
-    args: ["-C", cloneDir, "--work-tree", treeDir, "--no-replace-objects", "-c", "core.symlinks=false", "checkout", oid, "--", "."],
+    args: [
+      "-C",
+      cloneDir,
+      "--work-tree",
+      treeDir,
+      "--no-replace-objects",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "core.symlinks=false",
+      "checkout",
+      oid,
+      "--",
+      ".",
+    ],
     env: gitIsolationEnv(baseEnv),
   };
 }
@@ -292,20 +319,36 @@ export interface PrivateCloneOptions {
   worktreeRoot: string;
 }
 
-/** Creates a FRESH engine-private bare clone every call (#284, E3a scope). Deliberately no
- *  incremental-fetch/reuse machinery: a fresh clone keeps "local config asserted empty at clone
- *  time" trivially true on every call (there is no window across rounds for config to drift, no
- *  stale `refs/replace/*` a prior round might have introduced, nothing to reconcile) --
- *  simplicity the design's own D6 rationale favors (near-zero security delta from more
- *  machinery). If clone cost becomes a real bottleneck for large repos, an incremental-update
- *  path is a follow-up, not part of this issue's AC. */
+/** Reuses a matching engine-private bare clone when every assertion succeeds. The fast path is
+ *  intentionally disposable: corrupt repo, wrong origin, dirty local config, or fetch failure
+ *  all fall back to rm + the original fresh-clone path. Correctness therefore never depends on
+ *  reuse, and D6's local-config assertion is repeated before every reused fetch rather than
+ *  trusting a clone merely because this module created it on an earlier attempt. */
 export async function createPrivateClone(opts: PrivateCloneOptions): Promise<PrivateClone> {
   const cloneDir = resolve(opts.cloneDir);
+  const sourceRepoDir = resolve(opts.sourceRepoDir);
   assertOutsideWorktreeMounts(cloneDir, opts.worktreeRoot);
+  if (existsSync(cloneDir)) {
+    try {
+      await assertLocalConfigClean(cloneDir);
+      const probe = await pexecFile("git", ["-C", cloneDir, "rev-parse", "--is-bare-repository"], { env: gitIsolationEnv() });
+      if (probe.stdout.trim() !== "true") throw new MaterializerError(`existing private clone at "${cloneDir}" is not bare`);
+      const origin = await pexecFile("git", ["-C", cloneDir, "remote", "get-url", "origin"], { env: gitIsolationEnv() });
+      if (origin.stdout.trim() !== sourceRepoDir) {
+        throw new MaterializerError(`existing private clone origin does not match "${sourceRepoDir}"`);
+      }
+      const { args, env } = buildFetchInvocation(cloneDir);
+      await pexecFile("git", args, { env });
+      await assertLocalConfigClean(cloneDir);
+      return { dir: cloneDir };
+    } catch {
+      // Optimization only: every doubt discards the clone and resumes at the proven fresh path.
+    }
+  }
   if (existsSync(cloneDir)) rmSync(cloneDir, { recursive: true, force: true });
   mkdirSync(dirname(cloneDir), { recursive: true });
 
-  const { args, env } = buildCloneInvocation(opts.sourceRepoDir, cloneDir);
+  const { args, env } = buildCloneInvocation(sourceRepoDir, cloneDir);
   try {
     await pexecFile("git", args, { env });
   } catch (err) {

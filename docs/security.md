@@ -511,12 +511,17 @@ hardcoded (not caller-overridable) for every review session:
   materialized directory that doesn't exist at spawn time gets (every setup failure maps to a
   `session-unavailable` outcome, never a silent degraded run).
 
-**Projection sanitization contract.** `review/materializer.ts` creates a fresh engine-private bare
-clone outside every worker worktree and materializes the pinned head into a temporary plain tree.
-Every git operation ignores global/system config; clone-local config is allowlisted and dangerous
-exec-capable keys fail closed; checkout disables replacement objects and materializes symlinks as
-plain text; the resulting tree contains no `.git` directory, the requested OID is verified after
-checkout, and a hashed manifest of the resulting tree is recorded. Instruction files remain
+**Projection sanitization contract.** `review/materializer.ts` creates an engine-private bare clone
+outside every worker worktree and materializes the pinned head into a temporary plain tree. That
+private clone may be reused only after its origin identity matches the requested source and its
+allowlisted local config is re-asserted clean both before and after an env-isolated, hooks-disabled
+fetch with an explicit mirror refspec; any failed assertion or operation discards it and falls back
+to a fresh clone. Every git operation ignores global/system config, and hooks are disabled
+command-locally on both fetch and checkout. Dangerous exec-capable clone-local keys fail closed,
+and the remote section is restricted to an explicit `url`/`fetch` subkey allowlist;
+checkout also disables replacement objects and materializes symlinks as plain text; the resulting
+tree contains no `.git` directory, the requested OID is verified after checkout, and a hashed
+manifest of the resulting tree is recorded. Instruction files remain
 present by design. Their authority risk is handled by the
 instruction-path escalation below, while the closed session profile above prevents project MCP or
 settings files in that producer-controlled tree from gaining an execution channel.
