@@ -253,6 +253,33 @@ test("#352 corpus: governance mutations block even when wrapper-embedded; commen
   }
 });
 
+test("#353 corpus: issue lifecycle verbs (close/reopen/transfer/delete) block even when wrapper-embedded; comment/view/list/create pass", () => {
+  const blocked = [
+    "gh issue close 1",
+    "gh issue reopen 1",
+    "gh issue transfer 1 o/r2",
+    "gh issue delete 1 --yes",
+    "gh issue -R o/r close 1",
+    "gh -R o/r issue reopen 1",
+    "gh issue --repo o/r transfer 1 o/r2",
+    "uv run --with rich gh issue delete 1",
+    "env FOO=1 gh issue close 1",
+    // REST/graphql equivalents — already blocked by #352's mutation checks.
+    "gh api -X PATCH repos/o/r/issues/1 -f state=closed",
+    "gh api -X PATCH repos/o/r/issues/1 -f state=open",
+    'gh api graphql -f query=\'mutation { transferIssue(input: {issueId: "1", newOwner: "o2"}) { issue { id } } }\'',
+    "gh api graphql -f query='mutation { deleteIssue(input: {issueId: \"1\"}) { clientMutationId } }'",
+  ];
+  for (const command of blocked) {
+    assert.equal(guardDecision("Bash", { command }, CWD).allow, false, `must block: ${command}`);
+  }
+
+  const allowed = ["gh issue comment 1 --body progress", "gh issue view 1", "gh issue list", "gh issue create --title x --body y"];
+  for (const command of allowed) {
+    assert.equal(guardDecision("Bash", { command }, CWD).allow, true, `must allow: ${command}`);
+  }
+});
+
 test("differential: sapwood is at least as strict as guard.py on opaque + Category C", (t) => {
   const bin = pythonAvailable();
   if (!bin || !existsSync(GUARD_PY)) {
