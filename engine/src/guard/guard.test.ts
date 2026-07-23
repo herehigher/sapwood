@@ -192,6 +192,23 @@ const BLOCK: [string, string, string][] = [
   ["gh api -X POST repos/o/r/%72eleases -f tag_name=v1", CWD, "release"],
   ["gh api -X PATCH repos/o/r/issues/%zz", CWD, "opaque"],
   ["gh api -X PATCH repos/o/r/issues/%5", CWD, "opaque"],
+  // #353: producer must not alter the issue lifecycle — close/reopen/transfer/delete are
+  // the same mutations #352 blocks at REST/graphql, reached via the high-level CLI verb.
+  ["gh issue close 352", CWD, "issue lifecycle"],
+  ["gh issue reopen 352", CWD, "issue lifecycle"],
+  ["gh issue transfer 352 o/r", CWD, "issue lifecycle"],
+  ["gh issue delete 352 --yes", CWD, "issue lifecycle"],
+  ["gh issue -R o/r close 5", CWD, "issue lifecycle"],
+  ["gh -R o/r issue reopen 5", CWD, "issue lifecycle"],
+  ["gh issue --repo o/r transfer 5 o/r2", CWD, "issue lifecycle"],
+  ["uv run --with rich gh issue delete 5", CWD, "issue lifecycle"],
+  // #353: confirm the REST/graphql equivalents were already blocked by #352 — close/reopen
+  // are the same `issues/<n>` state PATCH ISSUE_GOVERNANCE_PATH_RE already matches; transfer
+  // and delete have no REST endpoint on GitHub, only graphql mutations already caught upstream.
+  ["gh api -X PATCH repos/o/r/issues/352 -f state=closed", CWD, "labels/milestone/state"],
+  ["gh api -X PATCH repos/o/r/issues/352 -f state=open", CWD, "labels/milestone/state"],
+  ['gh api graphql -f query=\'mutation { transferIssue(input: {issueId: "1", newOwner: "o2"}) { issue { id } } }\'', CWD, "graphql"],
+  ["gh api graphql -f query='mutation { deleteIssue(input: {issueId: \"1\"}) { clientMutationId } }'", CWD, "graphql"],
   // #81: defense-in-depth for the KILL_SWITCH / PAUSE control sentinels (fable gate② follow-up
   // to #80) — direct Bash vectors (touch/rm/redirect) plus relative-path traversal.
   ["touch data/KILL_SWITCH", CWD, "write-path"],
@@ -295,11 +312,12 @@ const ALLOW: string[] = [
   "gh issue edit 352 --remove-blocked-by 7",
   "gh issue edit 352 --add-blocking 8",
   "gh issue edit 352 --remove-blocking 8",
-  "gh issue close 352",
-  "gh issue reopen 352",
-  "gh issue transfer 352 o/r",
-  "gh issue delete 352 --yes",
+  // #353: comment/view/list/status/create stay allowed — comment is the worker's refusal channel.
   "gh issue comment 352 --body progress",
+  "gh issue view 352",
+  "gh issue list",
+  "gh issue status",
+  "gh issue create --title x --body y",
   "gh pr comment 149 --body progress",
   "gh api -X POST repos/o/r/issues/352/comments -f body=progress",
   "gh api -X POST repos/o/r/issues/%35/%63omments -f body=progress",

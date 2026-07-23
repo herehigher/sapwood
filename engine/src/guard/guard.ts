@@ -296,6 +296,10 @@ const ISSUE_EDIT_GOVERNANCE_FLAGS = new Set([
   "--remove-parent",
   "--parent",
 ]);
+// #353: the issue lifecycle is engine/human-owned (dispatch consumes the OPEN-issue queue).
+// `Closes #N` auto-close on merge is GitHub-native, not a gh call, so the worker never
+// legitimately needs these verbs. `comment`/`view`/`list`/`status`/`create` stay ungoverned.
+const ISSUE_LIFECYCLE_VERBS = new Set(["close", "reopen", "transfer", "delete"]);
 // gh api flags that consume the NEXT token as their value — must be skipped so the value
 // isn't mistaken for the endpoint (e.g. `gh api --hostname HOST graphql ...`).
 const GH_API_VALUE_FLAGS = new Set([
@@ -479,6 +483,12 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
     ) {
       return "BLOCK [gh] issue edit label/milestone/board/relation mutation — producer must not change dispatch state";
     }
+  }
+  // #353: `gh issue close|reopen|transfer|delete` are the same lifecycle mutations #352
+  // blocks at the REST/graphql layer, reached through the high-level CLI verb instead.
+  if (sub1 === "issue" && ISSUE_LIFECYCLE_VERBS.has(subcommand[0]?.toLowerCase() ?? "")) {
+    const verb = subcommand[0]!.toLowerCase();
+    return `BLOCK [gh] issue ${verb} — producer must not alter the issue lifecycle (engine/human-owned)`;
   }
   if (sub1 === "label") return "BLOCK [gh] label — producer must not mutate repository labels";
   if (sub1 === "project") return "BLOCK [gh] project — producer must not mutate project-board state";

@@ -26,18 +26,24 @@ is enforced structurally, not by asking the model nicely:
   substitutions), strips exec-prefixes (`env`, `npx`, leading assignments, etc.), and
   blocks any GitHub-overreach command a producer must never run: `gh pr merge`,
   `gh pr review --approve`, `gh pr ready`, `gh release`, `gh label`, `gh project`,
-  governance-changing `gh issue edit` flags, and the mutating `gh api`/GraphQL
-  equivalents. REST path tokens are decoded strictly before matching and malformed
-  path escapes fail closed; the mixed command scan decodes valid percent pairs
-  best-effort while preserving stray `%` in API field values. Plain issue title/body
-  edits remain allowed. Issue/PR comment API calls, including values containing stray
-  `%`, remain allowed when the scanned command contains no protected REST path.
-  Residual allow surface: assignees, `--title`/`--body` (`-b`/`-F`), and native
+  governance-changing `gh issue edit` flags, `gh issue close`/`reopen`/`transfer`/`delete`,
+  and the mutating `gh api`/GraphQL equivalents. REST path tokens are decoded strictly
+  before matching and malformed path escapes fail closed; the mixed command scan decodes
+  valid percent pairs best-effort while preserving stray `%` in API field values. Plain
+  issue title/body edits remain allowed. Issue/PR comment API calls, including values
+  containing stray `%`, remain allowed when the scanned command contains no protected
+  REST path. Residual allow surface: assignees, `--title`/`--body` (`-b`/`-F`), and native
   `--add-blocked-by`/`--remove-blocked-by`/`--add-blocking`/`--remove-blocking`
   relations remain allowed because no sapwood gate reads those relations (dispatch
-  ordering uses `blocked-by:#N` labels, already covered by `--add-label`/`--remove-label`);
-  `gh issue close`/`reopen`/`transfer`/`delete` also remain allowed outside the #290
-  adjudicated scope, pending reviewer adjudication.
+  ordering uses `blocked-by:#N` labels, already covered by `--add-label`/`--remove-label`).
+  Under #290/#353, the issue lifecycle itself (close/reopen/transfer/delete) is
+  engine/human-owned: the worker's `gh issue close|reopen|transfer|delete` is blocked at
+  the same high-level-CLI-verb layer as the `edit` governance flags, symmetric with the
+  REST/GraphQL mutations #352 already blocks underneath it (`gh api -X PATCH
+  repos/*/issues/<n>` state changes match `ISSUE_GOVERNANCE_PATH_RE`; GitHub has no REST
+  transfer/delete endpoint, so those reach the guard only as `gh api graphql` mutations,
+  already caught by the graphql-mutation check). `gh issue comment`/`view`/`list`/`status`/
+  `create` remain allowed — comment is the worker's refuse/hand-back channel.
   Opaque constructs a worker could hide anything inside —
   `eval`, `sh -c`, an interpreter's `-e`/`-c`, process substitution — are blocked
   outright, fail-closed, rather than inspected.
