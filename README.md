@@ -5,7 +5,10 @@
 sapwood turns a GitHub backlog into merged, reviewed code: *issues in → reviewed
 PRs out*. It is a [Claude Code](https://claude.com/claude-code) plugin that drives
 self-directed development through a real governance layer — not a black box that
-self-merges and hopes for the best.
+self-merges and hopes for the best. Adopt it at the level you trust today, then step
+up or down through the [L0–L3 autonomy ladder](docs/getting-started.md#l0l3-autonomy-ladder):
+read-only preview, one supervised issue, human-merged PRs, or governed unattended
+merge.
 
 > Status: **early development** (pre-v1). The framework is being extracted and
 > re-implemented from a proven private project; see [`docs/PLAN.md`](docs/PLAN.md)
@@ -108,7 +111,7 @@ flowchart LR
 ## Documentation
 
 - [`docs/getting-started.md`](docs/getting-started.md) — install, `sapwood init`, the
-  first-run trust ramp, slash commands, writing a `Ready` issue.
+  L0–L3 autonomy ladder, slash commands, writing a `Ready` issue.
 - [`docs/configuration.md`](docs/configuration.md) — every config key, default, and
   semantics.
 - [`docs/security.md`](docs/security.md) — the trust/governance model: guard hook,

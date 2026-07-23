@@ -79,68 +79,165 @@ Edit the `sapwood.config.yaml` init wrote — at minimum, set `board.owner`,
 Every other key has a sensible default. See [`configuration.md`](configuration.md) for
 the full reference.
 
-## First-run trust ramp
+## L0–L3 autonomy ladder
 
-Don't point sapwood at a live backlog and walk away. Ramp up in stages:
+You do not have to hand sapwood a live backlog and full merge authority on day one.
+Choose the level whose risk boundary fits today, then step up **or step down** as often
+as you need. These are names for existing controls, not new engine modes: every active
+level keeps the same guard, cost ceilings, and configured review gate.
+`guard.mode: hard` is what makes the merge promises below enforceable rather than
+advisory; `soft` only logs commands that hard mode would block.
 
-1. **`sapwood validate`** — load and validate your config with zero side effects:
-   ```
-   sapwood validate
-   ```
-   Reports either a one-line OK summary (with the effective `lanes.max`,
-   `guard.mode`, `merge.mode`) or every validation issue, one per line. Run this after
-   any config edit.
+Run `sapwood validate` after every config change. It loads and validates the config with
+zero side effects and reports either a one-line OK summary (including the effective
+`lanes.max`, `guard.mode`, and `merge.mode`) or every validation issue:
 
-2. **`sapwood run --dry-run`** — see what the engine *would* do, without doing it:
-   ```
-   sapwood run --dry-run
-   ```
-   Resolves config, lists the `Ready` issues that would be dispatch candidates (a rough
-   upper bound — it assumes empty lanes and skips the in-flight/anti-starvation checks a
-   real tick applies), and prints a cost estimate (candidates × `worker.budgetUsdSoft`,
-   against `cost.dailyBudgetUsd`). No worker is spawned and no state is written — safe
-   to run repeatedly.
+```
+sapwood validate
+```
 
-3. **`sapwood run`** (steady state) — as of #106, this drives the **round
-   orchestrator** by default (`engine.driver: rounds`): a round dispatches a batch
-   (claim → worker → PR → review gate → merge, same tick engine underneath), then
-   runs peripheral roles around it — goal alignment, architecture review, gate⓪ plan
-   review, harvest, retrospective — before opening the next round. It ticks
-   indefinitely until a signal (Ctrl-C / SIGTERM — the in-flight round always finishes,
-   harvest included, before the process exits) or a configured
-   [stop condition](configuration.md#stop) fires. There's no `--once`/`--until-idle`
-   equivalent for a round — passing either flag under the rounds default is an
-   **error** (exit 1, before anything dispatches), never silently ignored; the error
-   names the fix (see step 4 below if you want that shape for your first run, or use
-   `--stop-after-issues`/`--stop-after-prs`/`--stop-on-milestone` to bound a rounds
-   run). For "just work milestone M, stop when it's done" — the most common bounded
-   run — `--milestone M` is a shortcut for scoping dispatch to M **and** stopping once
-   M is complete, in one flag (see [`configuration.md#stop`](configuration.md#stop)).
+### L0 — Observe
 
-4. **The M4 tick-driver escape hatch** — set `engine.driver: tick` in
-   `sapwood.config.yaml` to run the pre-#106 loop driver instead (no peripherals):
-   ```
-   engine:
-     driver: tick
-   ```
-   With `driver: tick`, the same first-run staging `--once`/`--until-idle` flags from
-   pre-#106 apply:
-   - **`sapwood run --once`** — dispatch one wave, then hand back the terminal. Leave
-     exactly one issue `Ready` on the board and run `sapwood run --once`. This runs a
-     single tick (reclaim → drive → resume → dispatch) and exits. Note what that does NOT mean:
-     the dispatched worker keeps running **detached in the background** after the CLI
-     returns — its TDD work, the PR, and the review gate all happen later, driven by
-     subsequent ticks. Watch it with `sapwood status`, and run `sapwood run --once`
-     again (or move to `--until-idle`) to drive the resulting PR through the gate.
-   - **`sapwood run --until-idle`** — the "watch one issue end-to-end" mode: keeps
-     ticking until nothing is in flight and nothing new dispatches, then exits cleanly
-     — with one `Ready` issue this is claim → worker → PR → review gate → merge,
-     supervised to completion. Also good for a bounded batch run.
-   - **`sapwood run`** (daemon / "forever" mode) — ticks on
-     `cfg.engine.tickIntervalSec`'s cadence indefinitely, same signal/stop-condition
-     exit as the round orchestrator above, minus the peripherals.
+**Promise:** inspect the candidate work and estimated exposure without letting sapwood
+act.
 
-At every stage, `sapwood status` (below) tells you what's happening without needing a
+- **Exact config/flags:** keep the config you want to evaluate and run
+  `sapwood run --dry-run`. To evaluate a named profile, use
+  `sapwood run --dry-run --config PATH`.
+- **Risk profile:** read-only preview. No worker is spawned and no state is written.
+- **What you see:** the `Ready` issues that would be dispatch candidates and a cost
+  estimate (`worker.budgetUsdSoft` × candidate count, compared with
+  `cost.dailyBudgetUsd`). The candidate list is a rough upper bound: dry-run assumes
+  empty lanes and omits the live tick's in-flight and anti-starvation checks.
+- **Step up:** choose L1's single-issue profile, leave exactly one issue `Ready`, and
+  supervise it with `sapwood run --until-idle`.
+- **Step down:** from any higher level, return here by stopping the active run and using
+  `sapwood run --dry-run`. Repeated previews are a normal operating choice, not a
+  failed rollout.
+
+### L1 — Supervise one issue
+
+**Promise:** watch one issue travel from claim to a reviewed PR while merge remains a
+human decision.
+
+- **Exact config/flags:** leave exactly one issue `Ready`, use this profile, then run
+  `sapwood run --until-idle`:
+
+  ```yaml
+  engine:
+    driver: tick
+  guard:
+    mode: hard
+  lanes:
+    max: 1
+    roundDispatchCap: 1
+  merge:
+    mode: produce-pr-and-stop
+  ```
+
+  `--until-idle` is available only with `engine.driver: tick`.
+- **Risk profile:** sapwood changes the issue/board, runs one coding worker, pushes its
+  branch, opens a PR, and drives the configured review gate, but it never calls the
+  merge API. Keeping exactly one issue `Ready` is the dispatch-scope boundary;
+  `lanes.max: 1` limits concurrency but does not by itself limit the run to one issue.
+- **What you see:** the end-to-end lifecycle in the terminal, `sapwood status`, and
+  GitHub. Once the gates pass, the reviewed PR and its lane wait for your merge; keep
+  the command running, merge the PR, and it exits after the engine observes that no
+  lane remains in flight and nothing else can dispatch.
+- **Step up:** move to L2 by restoring `engine.driver: rounds` (or removing the
+  override), choosing the concurrency you want, and retaining
+  `merge.mode: produce-pr-and-stop`.
+- **Step down:** stop the run, move any extra issue out of `Ready`, and return to L0
+  dry-run previews. Repeating L1 for each issue is also a fully supported steady
+  operating level.
+
+### L2 — Delegate work, keep merge
+
+**Promise:** let sapwood run its normal governed development rounds while every final
+merge remains yours.
+
+- **Exact config/flags:** use the default round driver with human merge authority:
+
+  ```yaml
+  engine:
+    driver: rounds
+  guard:
+    mode: hard
+  merge:
+    mode: produce-pr-and-stop
+  ```
+
+  Run `sapwood run`, or start with a bounded invocation such as
+  `sapwood run --stop-after-prs 1`. See [stop conditions](configuration.md#stop);
+  count thresholds are floors checked at tick boundaries, so a crossing tick may
+  already have dispatched up to `lanes.roundDispatchCap` additional lanes.
+- **Risk profile:** sapwood may claim and implement multiple issues up to the configured
+  `lanes.max` and `lanes.roundDispatchCap`, open PRs, and compute/report both review
+  gates. `produce-pr-and-stop` prevents the engine from merging; a human merges each
+  gated PR.
+- **What you see:** complete rounds (alignment, architecture, gate⓪ plan review,
+  execution, harvest, and retrospective), plus reviewed PRs queued for your merge
+  decision. `sapwood status` remains available without a live session.
+- **Step up:** after the review and CI evidence earn your trust, stop the run, change
+  only `merge.mode` to `conductor-merge` for L3, then restart. Config is loaded once
+  at `runEngine()` startup; editing YAML does not change a running conductor.
+- **Step down:** restore the L1 tick-driver profile, set both lane limits to `1`, and
+  expose exactly one `Ready` issue. Returning to supervised work is routine risk
+  management.
+
+### L3 — Governed unattended merge
+
+**Promise:** let sapwood carry eligible issues through independent review and merge
+without waiting for a human click.
+
+- **Exact config/flags:** use the default driver and merge mode:
+
+  ```yaml
+  engine:
+    driver: rounds
+  guard:
+    mode: hard
+  merge:
+    mode: conductor-merge
+  ```
+
+  Run `sapwood run`. A bounded unattended run can use an existing stop control, for
+  example `sapwood run --milestone "M"` to scope dispatch to that exact milestone and
+  wind down when it is complete.
+- **Risk profile:** this is the highest-autonomy level. Once gate① (CI) and gate② (the
+  configured fresh non-author review) pass, the conductor squash-merges the exact
+  reviewed head. The producer still cannot review, approve, or merge its own work;
+  guard enforcement, cost ceilings, pause, and the kill switch remain active.
+- **What you see:** issues move through the board to reviewed, merged PRs; status and
+  run logs provide the operating view, while exceptions escalate to human attention.
+- **Step up:** L3 is the top of this ladder; increase scope or concurrency only through
+  the existing `round.milestone`, `lanes.max`, and `lanes.roundDispatchCap` controls.
+- **Step down:** stop the run, change `merge.mode` back to `produce-pr-and-stop` for
+  L2 (or restore the L1 profile for single-issue supervision), then restart. Config
+  is loaded once at `runEngine()` startup; editing YAML does not change a running
+  conductor. Reducing autonomy does not discard state or bypass the review gate.
+
+### Run shapes behind the levels
+
+The default `engine.driver: rounds` runs a complete round indefinitely until a signal
+(Ctrl-C / SIGTERM — the in-flight round always finishes, harvest included) or a
+configured [stop condition](configuration.md#stop) fires. A round has no
+`--once`/`--until-idle` equivalent; passing either flag with the rounds driver is an
+error before dispatch. `--milestone NAME` is the common bounded-round shortcut: it
+scopes dispatch to that exact milestone and stops when the milestone is complete.
+
+The L1 profile uses `engine.driver: tick`, the bare loop without peripherals. Its run
+shapes are:
+
+- `sapwood run --once` runs one reclaim → drive → resume → dispatch tick and exits.
+  A dispatched worker remains detached in the background; later ticks are needed to
+  drive its PR through the gate.
+- `sapwood run --until-idle` keeps ticking until no lane is in flight and nothing new
+  dispatches, then exits.
+- `sapwood run` ticks on `engine.tickIntervalSec` indefinitely, with the same
+  signal/stop-condition exit behavior as the round driver.
+
+At every level, `sapwood status` (below) tells you what's happening without needing a
 live session, and `/sapwood-stop` is always available to freeze or gently pause the
 engine — see [`security.md`](security.md) for exactly what each control does.
 
