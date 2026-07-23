@@ -96,16 +96,20 @@ export interface EgressSuspect {
 }
 
 const EGRESS_SNIPPET_MAX_CHARS = 200;
+export const MAX_EGRESS_SUSPECTS_PER_LEG = 20;
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-/** Splits only on ordinary shell command separators outside quotes. This deliberately does not
- *  interpret substitutions, redirects, heredocs, or data flowing through a pipe: the tripwire
- *  is a small lexical signal, not a shell parser or containment mechanism. */
+/** Splits only on ordinary shell command separators outside quotes. On an unquoted heredoc or
+ *  here-string operator (`<<`/`<<<`), fragments through that line are retained, then scanning
+ *  stops at its newline so body data is never treated as commands. This deliberately over-skips
+ *  every later line in the same tool call; false negatives are acceptable for this monitor-only
+ *  lexical signal. Separators before that newline still end fragments normally. */
 function shellFragments(command: string): string[] {
   const fragments: string[] = [];
   let start = 0;
   let quote: "'" | '"' | null = null;
   let escaped = false;
+  let lineHasHeredoc = false;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
     if (escaped) {
@@ -124,10 +128,14 @@ function shellFragments(command: string): string[] {
       quote = ch;
       continue;
     }
+    if (ch === "<" && command[i + 1] === "<") {
+      lineHasHeredoc = true;
+    }
     if (ch === ";" || ch === "&" || ch === "|" || ch === "\n") {
       const fragment = command.slice(start, i).trim();
       if (fragment) fragments.push(fragment);
       start = i + 1;
+      if (ch === "\n" && lineHasHeredoc) return fragments;
     }
   }
   const tail = command.slice(start).trim();
@@ -195,9 +203,29 @@ function fragmentExecutable(fragment: string): string | null {
       }
       if (!word.startsWith("-")) break;
       i++;
+      if (word.startsWith("--") && word.includes("=")) continue;
       if (
-        (prefix === "env" && (word === "-u" || word === "--unset")) ||
-        (prefix === "sudo" && ["-C", "-D", "-g", "-h", "-p", "-R", "-T", "-t", "-u"].includes(word))
+        (prefix === "env" && ["-u", "--unset", "-S", "--split-string"].includes(word)) ||
+        (prefix === "sudo" &&
+          [
+            "-C",
+            "-D",
+            "-g",
+            "-h",
+            "-p",
+            "-R",
+            "-T",
+            "-t",
+            "-u",
+            "--close-from",
+            "--chdir",
+            "--group",
+            "--host",
+            "--prompt",
+            "--role",
+            "--type",
+            "--user",
+          ].includes(word))
       ) {
         i++; // option argument; an absent one simply reaches end and produces no hit
       }
@@ -209,12 +237,18 @@ function fragmentExecutable(fragment: string): string | null {
   return executable.split("/").filter(Boolean).at(-1) ?? null;
 }
 
+export interface EgressSuspectScan {
+  hits: EgressSuspect[];
+  truncated: boolean;
+}
+
 /** #304: scans Bash `tool_use` blocks from stream-json and returns deduplicated lexical hits.
  *  Only executable position is considered (after leading assignments plus ordinary `env`/
  *  `sudo` prefixes); suspect names appearing in arguments are intentionally ignored. Same
  *  tolerance as the sibling parsers: malformed/partial lines and malformed blocks are skipped
- *  silently. This is a post-hoc tripwire, never a deny decision. */
-export function scanEgressSuspects(jsonl: string, suspectCommands: readonly string[]): EgressSuspect[] {
+ *  silently. Collection stops at the engine-owned per-leg cap, bounding both evidence and its
+ *  dedup set. This is a post-hoc tripwire, never a deny decision. */
+export function scanEgressSuspects(jsonl: string, suspectCommands: readonly string[]): EgressSuspectScan {
   const suspects = new Set(suspectCommands);
   const hits: EgressSuspect[] = [];
   const seen = new Set<string>();
@@ -248,10 +282,11 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
         if (seen.has(key)) continue;
         seen.add(key);
         hits.push({ executable, snippet });
+        if (hits.length === MAX_EGRESS_SUSPECTS_PER_LEG) return { hits, truncated: true };
       }
     }
   }
-  return hits;
+  return { hits, truncated: false };
 }
 
 /** #110 PR0: the READ side for a role session's structured final-message output. Extracts the
@@ -1240,8 +1275,14 @@ export class WorkerSupervisor implements Supervisor {
   private recordEgressSuspects(worker: string, issue: number, legJsonl: string): void {
     if (!this.deps.state) return;
     try {
-      for (const suspect of scanEgressSuspects(legJsonl, this.deps.cfg.worker.egressSuspectCommands)) {
+      const scan = scanEgressSuspects(legJsonl, this.deps.cfg.worker.egressSuspectCommands);
+      for (const suspect of scan.hits) {
         this.deps.state.appendEvent("egress-suspect", { worker, issue, ...suspect });
+      }
+      if (scan.truncated) {
+        this.log(
+          `[sapwood:worker] lane ${worker}: egress tripwire evidence capped at ${MAX_EGRESS_SUSPECTS_PER_LEG} suspects for this leg`,
+        );
       }
     } catch (e) {
       this.log(`[sapwood:worker] lane ${worker}: egress tripwire failed (non-fatal): ${String(e)}`);

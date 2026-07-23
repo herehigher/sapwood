@@ -135,6 +135,7 @@ export const ROUND_ARTIFACT_EVENT_KINDS = [
   "drive-stopped",
   "drive-no-pr",
   "plan-review-escalated",
+  "egress-suspect",
   "handoff",
   "ceiling-escalated",
   "gated-reentry",
@@ -260,6 +261,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
         driveNoPr++;
         break;
       case "plan-review-escalated":
+      case "egress-suspect":
         addNeedsHuman(p.issue);
         break;
       case "handoff":
