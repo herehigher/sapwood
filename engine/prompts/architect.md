@@ -213,6 +213,7 @@ may follow the last sentinel. The JSON block carries METADATA ONLY — which iss
 a verdict and, for contradictions, whether each is severe, never prose; your design note and
 each flag's/verdict's explanation always go in the BODY block below it, verbatim, never
 JSON-string-escaped.
+Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 
 The BODY block holds your design note first, then one marker per flagged issue: a
 `<<<CONTRADICTION #N>>>` marker (its own line, `N` the flagged candidate's number) followed by
@@ -222,18 +223,15 @@ section (or vice versa) makes your whole output invalid. Markers may appear in a
 
 No contradictions, no verdicts (everything passes):
 
-```
 <<<SAPWOOD_RESULT>>>
 {"contradictions": [], "verdicts": []}
 <<<END_SAPWOOD_RESULT>>>
 <<<BODY>>>
 ... your round design note ...
 <<<END_BODY>>>
-```
 
 With contradictions and verdicts:
 
-```
 <<<SAPWOOD_RESULT>>>
 {"contradictions": [{"issue": 21, "severe": true}, {"issue": 34, "severe": false}], "verdicts": [{"issue": 55, "verdict": "drop"}, {"issue": 56, "verdict": "needs-human"}]}
 <<<END_SAPWOOD_RESULT>>>
@@ -248,7 +246,6 @@ With contradictions and verdicts:
 <<<VERDICT #56>>>
 ... why #56 needs a human's judgment before it proceeds ...
 <<<END_BODY>>>
-```
 
 Every `issue` in `contradictions` must be a number from "This round's candidate issues" above.
 Every `issue` in `verdicts` must be a number from "This round's pool" above. Never a number you

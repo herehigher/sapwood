@@ -128,23 +128,20 @@ BODY block. Nothing may follow the last sentinel. The JSON block carries METADAT
 never put markdown or long text inside the JSON string; long text always goes in the
 separate BODY block below it, verbatim, never JSON-string-escaped (a body containing its
 own code fences would break JSON escaping, which is exactly why the two are separate).
+Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 
-```
 <<<SAPWOOD_RESULT>>>
 {"decision": "approve", "issue": {{issue.number}}}
 <<<END_SAPWOOD_RESULT>>>
-```
 
 — or, with a body revision / for `draft_request` / for `verify_na`:
 
-```
 <<<SAPWOOD_RESULT>>>
 {"decision": "draft_request", "issue": {{issue.number}}}
 <<<END_SAPWOOD_RESULT>>>
 <<<BODY>>>
 ... your brief, or the corrected issue body, or your explanation — per the decision above ...
 <<<END_BODY>>>
-```
 
 `decision` must be exactly one of `"approve"`, `"draft_request"`, `"verify_na"`. `issue`
 must be exactly `{{issue.number}}` — the issue this pass is reviewing, not any other

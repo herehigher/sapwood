@@ -85,23 +85,20 @@ End your final message with a JSON metadata block, optionally followed by a raw-
 block. Nothing may follow the last sentinel. The JSON block carries METADATA ONLY — never put
 markdown or long text inside the JSON string; long text always goes in the separate BODY
 block below it, verbatim, never JSON-string-escaped.
+Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence.
 
-```
 <<<SAPWOOD_RESULT>>>
 {"decision": "confirm", "issue": {{issue.number}}}
 <<<END_SAPWOOD_RESULT>>>
-```
 
 — or, for `invalidate`:
 
-```
 <<<SAPWOOD_RESULT>>>
 {"decision": "invalidate", "issue": {{issue.number}}}
 <<<END_SAPWOOD_RESULT>>>
 <<<BODY>>>
 ... what drifted, and what an adequate plan now needs to account for ...
 <<<END_BODY>>>
-```
 
 `decision` must be exactly one of `"confirm"`, `"invalidate"`. `issue` must be exactly
 {{issue.number}} — the issue this pass is confirming, not any other number you may have
