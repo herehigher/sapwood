@@ -53,6 +53,7 @@ import {
   WORKER_DISALLOWED_TOOLS,
   WorkerSupervisor,
   workerCredentialFreeEnv,
+  workerOrdinaryGhEnv,
 } from "./worker.js";
 
 const cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
@@ -3655,6 +3656,219 @@ test("workerCredentialFreeEnv: pure unit — composes the exact env shape (GH_CO
     else process.env.SSH_AUTH_SOCK = previous.SSH_AUTH_SOCK;
     if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previous.GH_TOKEN;
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #356: an ordinary (non-credentialFree) worker lane's `gh` is pointed at fresh, empty,
+// per-lane GH_CONFIG_DIR/XDG_DATA_HOME directories — closing the gh-alias/gh-extension bypass
+// of guard.ts's Category-C first-token matching (a `gh alias set nuke 'issue delete'` then
+// `gh nuke 352` runs `gh issue delete` under a first token the guard never recognizes). See
+// workerOrdinaryGhEnv's own doc for the full rationale and the empirical read-only-gh probe
+// this relies on (PR #356 body has the transcript). Unlike the credentialFree tests above, GH_TOKEN
+// and every other env var stay inherited — an ordinary lane legitimately needs its forge
+// credential.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("workerOrdinaryGhEnv: pure unit — redirects GH_CONFIG_DIR/XDG_DATA_HOME only, preserves every other env var (GH_TOKEN included)", () => {
+  const previous = { GH_TOKEN: process.env.GH_TOKEN, GH_CONFIG_DIR: process.env.GH_CONFIG_DIR, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
+  try {
+    process.env.GH_TOKEN = "worker-forge-token";
+    process.env.GH_CONFIG_DIR = "/poison/gh-config";
+    process.env.XDG_DATA_HOME = "/poison/xdg-data";
+    const env = workerOrdinaryGhEnv("/tmp/fake-gh-config-dir", "/tmp/fake-gh-data-dir");
+    assert.equal(env.GH_CONFIG_DIR, "/tmp/fake-gh-config-dir");
+    assert.equal(env.XDG_DATA_HOME, "/tmp/fake-gh-data-dir");
+    assert.equal(env.GH_TOKEN, "worker-forge-token", "an ordinary lane keeps its forge credential — unlike workerCredentialFreeEnv");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("dispatch: an ORDINARY (non-credentialFree) lane's spawn env pins GH_CONFIG_DIR at a fresh, empty, per-lane directory while keeping GH_TOKEN (#356)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const release = join(dir, "release-stub");
+  const previousGhToken = process.env.GH_TOKEN;
+  try {
+    process.env.GH_TOKEN = "worker-forge-token";
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    // No proxy opt at all — today's entire production dispatch path.
+    const { name } = await s.dispatch({ number: 1, title: "t", labels: [] });
+    await waitForFile(join(dir, "env.seen"), "ordinary dispatch env was not published");
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    assert.match(envText, /^GH_TOKEN=worker-forge-token$/m, "an ordinary lane keeps GH_TOKEN — only gh's OWN lookup dirs are redirected");
+    const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="));
+    assert.ok(ghConfigDirLine, "GH_CONFIG_DIR must be set for an ordinary lane too");
+    const ghConfigDir = ghConfigDirLine!.slice("GH_CONFIG_DIR=".length);
+    assert.equal(ghConfigDir, join(dir, `${name}.gh-config-empty`));
+    assert.ok(existsSync(ghConfigDir), "the GH_CONFIG_DIR path must actually exist as a directory");
+    assert.deepEqual(
+      readdirSync(ghConfigDir),
+      [],
+      "GH_CONFIG_DIR must be a FRESH, EMPTY directory — never the operator's real $HOME/.config/gh",
+    );
+    // #244/#356: the scratch directory is cleaned up once the lane exits (onExit) — same
+    // lifecycle credentialFree's already uses.
+    writeFileSync(release, "");
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && existsSync(ghConfigDir); i++) await sleep(20);
+    assert.ok(
+      !existsSync(ghConfigDir),
+      "the scratch directory is cleaned up once the lane exits (onExit), same lifecycle as credentialFree's",
+    );
+    s.dispose();
+  } finally {
+    if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previousGhToken;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: an ORDINARY lane's pinned GH_CONFIG_DIR is READ-ONLY — no new file (e.g. a gh-alias-set config.yml) can be created in it (#356)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const release = join(dir, "release-stub");
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    await s.dispatch({ number: 2, title: "t", labels: [] });
+    await waitForFile(join(dir, "env.seen"), "ordinary dispatch env was not published");
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    const ghConfigDir = envText
+      .split("\n")
+      .find((l) => l.startsWith("GH_CONFIG_DIR="))!
+      .slice("GH_CONFIG_DIR=".length);
+    // #356's neutralization mechanism: read-only makes `gh alias set`'s own config.yml write fail
+    // closed with "permission denied" (empirically verified against a real gh binary — PR #356
+    // body). Assert the underlying fs property directly rather than shelling out to gh.
+    assert.throws(
+      () => writeFileSync(join(ghConfigDir, "config.yml"), "aliases:\n  nuke: issue delete\n"),
+      /EACCES|EPERM/,
+      "GH_CONFIG_DIR must be read-only — a write into it (what `gh alias set` does) must fail",
+    );
+    writeFileSync(release, "");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: an ORDINARY lane's extension/data directory (XDG_DATA_HOME, gh's confirmed extension-install root) is pinned at a fresh, read-only, per-lane directory (#356)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const release = join(dir, "release-stub");
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { name } = await s.dispatch({ number: 3, title: "t", labels: [] });
+    await waitForFile(join(dir, "env.seen"), "ordinary dispatch env was not published");
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    const dataDirLine = envText.split("\n").find((l) => l.startsWith("XDG_DATA_HOME="));
+    assert.ok(dataDirLine, "XDG_DATA_HOME must be set for an ordinary lane — gh's confirmed extension-install root env var");
+    const ghDataDir = dataDirLine!.slice("XDG_DATA_HOME=".length);
+    assert.equal(ghDataDir, join(dir, `${name}.gh-data-empty`));
+    assert.ok(existsSync(ghDataDir), "the XDG_DATA_HOME path must actually exist as a directory");
+    assert.deepEqual(
+      readdirSync(ghDataDir),
+      [],
+      "XDG_DATA_HOME must be a FRESH, EMPTY directory — never the operator's real ~/.local/share/gh/extensions",
+    );
+    // Same neutralization mechanism as GH_CONFIG_DIR: read-only means `gh extension install`
+    // (which writes under $XDG_DATA_HOME/gh/extensions) fails closed (empirically verified
+    // against a real gh binary — PR #356 body: "mkdir ... permission denied").
+    assert.throws(
+      () => mkdirSync(join(ghDataDir, "gh")),
+      /EACCES|EPERM/,
+      "XDG_DATA_HOME must be read-only — gh extension install's own mkdir must fail",
+    );
+    writeFileSync(release, "");
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    for (let i = 0; i < 400 && existsSync(ghDataDir); i++) await sleep(20);
+    assert.ok(!existsSync(ghDataDir), "the extension scratch directory is cleaned up once the lane exits (onExit)");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: credentialFree path is BYTE-IDENTICAL to pre-#356 behavior — no XDG_DATA_HOME, GH_CONFIG_DIR stays writable (#356 must not touch the credentialFree branch)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const release = join(dir, "release-stub");
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "p",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+    });
+    const { handle } = fakeWorkerProxyHandle();
+    await s.dispatch({ number: 4, title: "t", labels: [] }, undefined, {
+      proxy: { mint: async () => handle as never, credentialFree: true },
+    });
+    await waitForFile(join(dir, "env.seen"), "credentialFree dispatch env was not published");
+    const envText = readFileSync(join(dir, "env.seen"), "utf8");
+    assert.doesNotMatch(
+      envText,
+      /^XDG_DATA_HOME=/m,
+      "credentialFree never gets an XDG_DATA_HOME pin — #356 is scoped to ORDINARY lanes only",
+    );
+    const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="))!;
+    const ghConfigDir = ghConfigDirLine.slice("GH_CONFIG_DIR=".length);
+    // credentialFree's own directory stays writable (never chmod'd) — #356 leaves this branch alone.
+    assert.doesNotThrow(
+      () => writeFileSync(join(ghConfigDir, "probe"), "x"),
+      "credentialFree's GH_CONFIG_DIR must remain writable, unchanged by #356",
+    );
+    writeFileSync(release, "");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

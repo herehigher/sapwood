@@ -18,6 +18,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   type Dirent,
   existsSync,
@@ -1171,6 +1172,53 @@ export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv 
   return env;
 }
 
+/** #356: pins `gh`'s OWN config-lookup and extension-data-lookup directories at fresh, empty,
+ *  per-lane scratch directories for an ORDINARY (credentialed, non-`credentialFree`) worker
+ *  lane — every production dispatch today. Closes a structural bypass of guard.ts's Category-C
+ *  rules: `checkCategoryC` (engine/src/guard/guard.ts) keys off the FIRST TOKEN after `gh` in a
+ *  Bash command; a `gh` user alias (`gh alias set nuke 'issue delete'` then `gh nuke 352`) or an
+ *  installed `gh` extension expands to a denied subcommand under a first token the guard never
+ *  recognizes, defeating EVERY Category-C rule. The PM ruling (#356) is to remove the surface at
+ *  the ENV level rather than add a guard-side token-matching arms race: an ordinary lane's `gh`
+ *  is pointed at directories that (a) can never contain a pre-existing operator alias/extension
+ *  and (b) are read-only, so nothing new can be created in-session either.
+ *
+ *  UNLIKE `workerCredentialFreeEnv`, this does NOT strip GH_TOKEN or any other env var — an
+ *  ordinary lane legitimately needs its forge credential to push branches and open PRs (same
+ *  "workers unlike peripherals" posture this file already documents). Only `gh`'s own two
+ *  on-disk lookup paths are redirected:
+ *    - `GH_CONFIG_DIR` -> `ghConfigDir`: gh's hosts/config/ALIAS store (`gh alias set` writes
+ *      here). A fresh, empty directory means no pre-existing operator alias is ever visible.
+ *    - `XDG_DATA_HOME` -> `ghDataDir`: confirmed EMPIRICALLY (not guessed — PR #356 body records
+ *      the probe) as the env var `gh` v2.95 honors for its extension install root on macOS/Linux
+ *      (`$XDG_DATA_HOME/gh/extensions`); NOT `GH_CONFIG_DIR`. A fresh, empty directory hides any
+ *      pre-existing operator extension.
+ *  Both directories are made read-only by the caller (dispatch()/resume(), via `chmodSync`)
+ *  BEFORE this env is ever handed to a spawned process — a read-only `GH_CONFIG_DIR` makes `gh
+ *  alias set` fail closed with "permission denied" (config.yml cannot be created), and a
+ *  read-only `XDG_DATA_HOME` makes `gh extension install` fail the same way (mkdir permission
+ *  denied), verified empirically against this repo (PR #356 body).
+ *
+ *  CRITICAL empirical finding (this function's own precondition — PR #356 body has the full
+ *  probe transcript): a read-only, empty `GH_CONFIG_DIR` does NOT break ordinary credentialed
+ *  `gh` reads. `gh repo view` / `gh issue view` / `gh pr list`, run with `GH_TOKEN` set and
+ *  `GH_CONFIG_DIR` pointed at a read-only empty directory, all succeeded against this repo — gh's
+ *  read paths authenticate purely off `GH_TOKEN` and never attempt to write to the config dir
+ *  when no host is stored there. Had that NOT held, this function's design would have needed to
+ *  fall back to a writable-but-empty directory instead; it did hold, so the stronger (read-only)
+ *  posture is what ships.
+ *
+ *  HONEST SCOPE — same residual as `workerCredentialFreeEnv`'s own doc: this closes `gh`'s own
+ *  alias/extension surface, not arbitrary code's. A worker's `Bash(node *)`/`Bash(npm *)` grant
+ *  can still invoke a `gh`-shaped binary of its own construction directly (never actually
+ *  invoking the real `gh`, so guard.ts's `gh`-prefixed matching was never the relevant boundary
+ *  for that case regardless) — orthogonal to what this function addresses. guard.ts itself is
+ *  human-merge-only and untouched by #356; a guard-side alias/extension token-matching layer is
+ *  documented there as optional, deferred defense-in-depth, not required by this fix. */
+export function workerOrdinaryGhEnv(ghConfigDir: string, ghDataDir: string): NodeJS.ProcessEnv {
+  return { ...process.env, GH_CONFIG_DIR: ghConfigDir, XDG_DATA_HOME: ghDataDir };
+}
+
 interface Lane {
   child: ChildProcess;
   issue: number;
@@ -1200,12 +1248,17 @@ interface Lane {
    *  ONE place a lane's process truly terminates (mirrors peripheral.ts's RoleRunner.run()
    *  teardown-in-every-outcome stance, adapted to WorkerSupervisor's long-lived-lane shape). */
   proxyHandle?: ForgeProxyHandle;
-  /** #244 (Codex sol-high PR #260 review round 2, P2): the fresh, empty, per-lane scratch
-   *  directory `workerCredentialFreeEnv` pointed `GH_CONFIG_DIR` at — undefined unless
-   *  `opts.proxy.credentialFree` was set (dispatch() only creates it in that case). Removed
-   *  (best-effort) in onExit and in the spawn-failure cleanup path, alongside the lane's own
-   *  jsonl/sentinels — never left behind as directory litter under stateDir. */
+  /** #244/#356: the fresh, empty, per-lane `GH_CONFIG_DIR` scratch directory — ALWAYS created
+   *  now (credentialFree: writable, via `workerCredentialFreeEnv`; ordinary: read-only, via
+   *  `workerOrdinaryGhEnv`). Removed (best-effort) in onExit and in the spawn-failure cleanup
+   *  path, alongside the lane's own jsonl/sentinels — never left behind as directory litter
+   *  under stateDir. */
   ghConfigDir?: string;
+  /** #356: the fresh, empty, per-lane extension/data scratch directory `workerOrdinaryGhEnv`
+   *  pointed `XDG_DATA_HOME` at — set ONLY for an ordinary (non-`credentialFree`) lane (a
+   *  credentialFree leg has no `Bash(gh *)` grant at all, so `gh`'s extension surface is moot
+   *  for it). Removed the same way and at the same points as `ghConfigDir`. */
+  ghDataDir?: string;
 }
 
 export class WorkerSupervisor implements Supervisor {
@@ -1293,12 +1346,15 @@ export class WorkerSupervisor implements Supervisor {
     }
   }
 
-  /** #244 (Codex sol-high PR #260 review round 2, P2): best-effort removal of a lane's
-   *  credentialFree GH_CONFIG_DIR scratch directory — undefined `dir` (the common, non-
-   *  credentialFree case) is a no-op. Called from BOTH cleanup paths a lane can exit through
-   *  (onExit and the spawn-failure branch) so the directory is never left behind as litter
-   *  under stateDir regardless of how the lane's run ended. Logged, never thrown — a cleanup
-   *  failure must not mask the lane's own real outcome. */
+  /** #244/#356 (Codex sol-high PR #260 review round 2, P2): best-effort removal of a lane's `gh`
+   *  scratch directory — undefined `dir` is a no-op. Generic over WHICH scratch dir: called for
+   *  both the `GH_CONFIG_DIR` directory (credentialFree AND, since #356, ordinary lanes) and the
+   *  ordinary-lane `XDG_DATA_HOME`/extension directory. Called from BOTH cleanup paths a lane can
+   *  exit through (onExit and the spawn-failure branch) so nothing is left behind as litter under
+   *  stateDir regardless of how the lane's run ended. A directory made read-only (#356's ordinary-
+   *  lane posture) is still removable here — an EMPTY directory's removal needs write permission
+   *  on its PARENT (stateDir), not on the read-only directory itself. Logged, never thrown — a
+   *  cleanup failure must not mask the lane's own real outcome. */
   private removeGhConfigDir(dir: string | undefined, laneName: string): void {
     if (!dir) return;
     try {
@@ -1388,12 +1444,26 @@ export class WorkerSupervisor implements Supervisor {
         this.log(`[sapwood:forge-proxy] lane ${laneName}: mint failed (non-fatal, proxy unattached): ${reason}`);
       }
     }
-    // #244 (Codex sol-high PR #260 review, P1): a fresh, empty, per-lane GH_CONFIG_DIR — created
-    // regardless of whether credentialFree ends up true (cheap, and keeps the directory's
-    // lifecycle tied to the lane's own stateDir rather than conditioned on opts). Only actually
-    // pointed at by the spawn env when credentialFree is set (workerCredentialFreeEnv below).
+    // #244 (Codex sol-high PR #260 review, P1) / #356: a fresh, empty, per-lane GH_CONFIG_DIR —
+    // created for EVERY lane now (see workerOrdinaryGhEnv's doc for why: the #356 ruling closes
+    // the gh alias/extension bypass of guard.ts's Category-C rules at the env level for ordinary
+    // credentialed lanes too, not just credentialFree ones).
+    //   - credentialFree=true: unchanged pre-#356 behavior — mkdir only, left writable, pointed
+    //     at by workerCredentialFreeEnv (which also strips every forge/git credential env var).
+    //   - credentialFree=false/omitted (the ORDINARY lane — today's entire production dispatch
+    //     path): #356 — mkdir'd alongside a same-shape per-lane extension/data directory
+    //     (ghDataDir), then BOTH chmod'd read-only before spawn (verified empirically not to
+    //     break legit credentialed `gh` reads — see workerOrdinaryGhEnv's doc / PR #356 body).
     const ghConfigDir = this.path(laneName, "gh-config-empty");
-    if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
+    const ghDataDir = this.path(laneName, "gh-data-empty");
+    if (opts?.proxy?.credentialFree) {
+      mkdirSync(ghConfigDir, { recursive: true });
+    } else {
+      mkdirSync(ghConfigDir, { recursive: true });
+      mkdirSync(ghDataDir, { recursive: true });
+      chmodSync(ghConfigDir, 0o500);
+      chmodSync(ghDataDir, 0o500);
+    }
     // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
@@ -1428,11 +1498,12 @@ export class WorkerSupervisor implements Supervisor {
     // needs an absolute root to compare against Claude Code's absolute tool_input paths.
     // #244: baseEnv is credential-stripped (workerCredentialFreeEnv, #260 review: env vars +
     // GH_CONFIG_DIR + GIT_CONFIG_GLOBAL/SYSTEM + GIT_TERMINAL_PROMPT + no SSH_AUTH_SOCK) ONLY
-    // when opts.proxy.credentialFree is explicitly set — every other caller (today's entire
-    // production dispatch path) keeps inheriting process.env verbatim, unchanged from pre-#244
-    // behavior (worker.test.ts's own regression: "unlike peripherals, workers legitimately [need
-    // GH_TOKEN]").
-    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : process.env;
+    // when opts.proxy.credentialFree is explicitly set. #356: every OTHER caller (today's entire
+    // production dispatch path) still inherits process.env verbatim — GH_TOKEN included
+    // (worker.test.ts's own regression: "unlike peripherals, workers legitimately [need
+    // GH_TOKEN]") — EXCEPT GH_CONFIG_DIR/XDG_DATA_HOME, which workerOrdinaryGhEnv now redirects
+    // to this lane's own fresh, read-only, empty directories (see that function's doc for why).
+    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : workerOrdinaryGhEnv(ghConfigDir, ghDataDir);
     const child = spawn(this.bin, args, {
       detached: true,
       stdio: ["ignore", jsonlFd, jsonlFd],
@@ -1457,7 +1528,11 @@ export class WorkerSupervisor implements Supervisor {
       estimateBaselineUsd: 0,
       jsonlLegOffset: 0,
       ...(proxyHandle ? { proxyHandle } : {}),
-      ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
+      // #356: ghConfigDir is now created for every lane (see above) — always recorded so onExit/
+      // spawn-failure cleanup removes it regardless of credentialFree. ghDataDir only exists for
+      // the ordinary (non-credentialFree) branch.
+      ghConfigDir,
+      ...(opts?.proxy?.credentialFree ? {} : { ghDataDir }),
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -1492,9 +1567,11 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      // #244 (Codex sol-high PR #260 review round 2, P2): the per-lane GH_CONFIG_DIR scratch
-      // directory is lane-scoped litter otherwise — clean it up on this path too, not just onExit.
+      // #244 (Codex sol-high PR #260 review round 2, P2) / #356: the per-lane GH_CONFIG_DIR (and,
+      // for an ordinary lane, XDG_DATA_HOME) scratch directory is lane-scoped litter otherwise —
+      // clean it up on this path too, not just onExit.
       this.removeGhConfigDir(lane.ghConfigDir, laneName);
+      this.removeGhConfigDir(lane.ghDataDir, laneName);
       throw new Error(`worker spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     // Post-spawn error (rare) must not crash the host — route to a failed exit.
@@ -1656,6 +1733,7 @@ export class WorkerSupervisor implements Supervisor {
     const jsonlLegOffset = Buffer.byteLength(priorJsonl);
     const jsonlFd = openSync(jsonlPath, "a"); // append: preserve the pre-handoff stream
     const ghConfigDir = this.path(name, "gh-config-empty");
+    const ghDataDir = this.path(name, "gh-data-empty");
     // #245 round-2 (A4): mint / mkdir(GH_CONFIG_DIR) / claudeArgs / the durable intent-write below
     // are ALL "post-mint, pre-lane-registration" — a failure ANYWHERE in this block (not just the
     // intent-write) must tear down an already-minted proxy and remove an already-created
@@ -1688,10 +1766,17 @@ export class WorkerSupervisor implements Supervisor {
           this.log(`[sapwood:forge-proxy] lane ${name}: mint failed (non-fatal, proxy unattached): ${reason}`);
         }
       }
-      // #245: same fresh/empty per-lane GH_CONFIG_DIR scratch directory dispatch() creates —
-      // created regardless of whether credentialFree ends up true (cheap; lifecycle tied to this
-      // lane's own stateDir). Only actually pointed at by the spawn env when credentialFree is set.
-      if (opts?.proxy?.credentialFree) mkdirSync(ghConfigDir, { recursive: true });
+      // #245/#356: same fresh/empty per-lane GH_CONFIG_DIR (and, for an ordinary lane, extension/
+      // data) scratch directory dispatch() creates — see dispatch()'s own comment +
+      // workerOrdinaryGhEnv's doc for the #356 rationale (ordinary lanes get theirs read-only).
+      if (opts?.proxy?.credentialFree) {
+        mkdirSync(ghConfigDir, { recursive: true });
+      } else {
+        mkdirSync(ghConfigDir, { recursive: true });
+        mkdirSync(ghDataDir, { recursive: true });
+        chmodSync(ghConfigDir, 0o500);
+        chmodSync(ghDataDir, 0o500);
+      }
       const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
       args = claudeArgs({
         prompt,
@@ -1747,14 +1832,18 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
+      // #356: both dirs are now always created above (ordinary branch too) — removeGhConfigDir
+      // no-ops harmlessly on whichever one this failure occurred before creating.
+      this.removeGhConfigDir(ghConfigDir, name);
+      this.removeGhConfigDir(ghDataDir, name);
       throw e;
     }
     let child: ChildProcess;
     // #245: baseEnv is credential-stripped (workerCredentialFreeEnv) ONLY when
-    // opts.proxy.credentialFree is explicitly set — every other resume() caller keeps inheriting
-    // process.env verbatim, unchanged from pre-#245 behavior.
-    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : process.env;
+    // opts.proxy.credentialFree is explicitly set. #356: every other resume() caller still
+    // inherits process.env verbatim (GH_TOKEN included) EXCEPT GH_CONFIG_DIR/XDG_DATA_HOME,
+    // which workerOrdinaryGhEnv redirects to this lane's own fresh, read-only, empty directories.
+    const baseEnv = opts?.proxy?.credentialFree ? workerCredentialFreeEnv(ghConfigDir) : workerOrdinaryGhEnv(ghConfigDir, ghDataDir);
     try {
       // SAPWOOD_WORKTREE_ROOT (#235 PR-A): same lane/worktree as the original dispatch — a
       // resumed leg must keep Read/Grep/Glob confined too, not just the fresh-dispatch path.
@@ -1777,7 +1866,8 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
+      this.removeGhConfigDir(ghConfigDir, name);
+      this.removeGhConfigDir(ghDataDir, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(e)}`);
     }
     const lane: Lane = {
@@ -1795,7 +1885,10 @@ export class WorkerSupervisor implements Supervisor {
       estimateBaselineUsd,
       jsonlLegOffset,
       ...(proxyHandle ? { proxyHandle } : {}),
-      ...(opts?.proxy?.credentialFree ? { ghConfigDir } : {}),
+      // #356: ghConfigDir always exists now; ghDataDir only for the ordinary (non-credentialFree)
+      // branch.
+      ghConfigDir,
+      ...(opts?.proxy?.credentialFree ? {} : { ghDataDir }),
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
@@ -1838,7 +1931,8 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree ? ghConfigDir : undefined, name);
+      this.removeGhConfigDir(ghConfigDir, name);
+      this.removeGhConfigDir(ghDataDir, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     child.on("error", () => this.onExit(name, 1));
@@ -2041,9 +2135,11 @@ export class WorkerSupervisor implements Supervisor {
           ),
         );
     }
-    // #244 (Codex sol-high PR #260 review round 2, P2): same cleanup as the spawn-failure path —
-    // a no-op unless this lane actually got a credentialFree GH_CONFIG_DIR.
+    // #244/#356: same cleanup as the spawn-failure path — ghConfigDir is set for every lane now;
+    // ghDataDir only for an ordinary (non-credentialFree) one (removeGhConfigDir no-ops on
+    // undefined).
     this.removeGhConfigDir(lane.ghConfigDir, name);
+    this.removeGhConfigDir(lane.ghDataDir, name);
     try {
       closeSync(lane.jsonlFd);
     } catch {
