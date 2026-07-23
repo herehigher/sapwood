@@ -33,8 +33,11 @@ The trading domain stays behind in 0day. sapwood is the method, not the money.
   where issue authors are trusted — matching 0day's proven context.
 - **Long-term arc:** evolve into a **governance layer for AI-led development** —
   pluggable forge (GitLab/Gitea), pluggable reviewer, public-repo hardening
-  (untrusted-input safe), a real supervisor, and eventually a dashboard. v1
-  architecture must keep these as *extensions, not rewrites*.
+  (untrusted-input safe), a real supervisor, and eventually a dashboard. The forge
+  goal is deliberately scoped: v1 isolates GitHub calls, but its board, review,
+  check-ownership, search, relation, and sub-issue semantics are GitHub-shaped. A
+  second forge reuses the portable subset and semantically ports the rest; it is
+  not promised as an endpoint swap.
 - **Dogfooding is the proof and the pitch:** from M2 onward, sapwood builds
   sapwood — every remaining feature is driven through sapwood's own loop. The
   flagship demonstration is **sapwood building its own dashboard (v0.2)**: a
@@ -102,12 +105,18 @@ sapwood/
 
 **Engine design notes**
 
-- **`IForge` interface before M2.** ~8 methods (`getReadyIssues`, `claimIssue`,
-  `setBoardStatus`, `openPR`, `getPRStatus`, `mergePR`, `addLabel`, `detectOwnerKind`).
-  All `conductor.ts` calls go through it; v1 impl is `GithubForge`. Makes GitLab/Gitea
-  an implementation, not a rewrite. Removes every 0day hard-coding (`PROJECT_NUMBER`,
-  `user(...)` vs `organization(...)`, literal `"Ready"/"In Progress"/"Done"`,
-  trusted-reviewer login) into config.
+- **`IForge` seam (audited 2026-07-23, #307).** The pre-M2 intent was ~8 methods;
+  the shipped interface is 44. Of those, 25 are portable forge primitives (issues,
+  comments, string labels, PRs/MRs, branches/commits/diffs, milestones, and summarized
+  CI/merge status) and 19 encode GitHub semantics: ProjectV2 lanes/field mutations,
+  the review-thread and raw-check models, `gh search` syntax, issue relations, native
+  sub-issues, and GraphQL node-ID operations. `GithubForge` still provides a useful
+  isolation seam for runtime orchestration and loop forge operations; init-time auth
+  checks and provisioning use the `gh`/`ghText` helper directly. GitLab/Gitea would be
+  a semantic port, not an endpoint swap. Do not regroup or abstract the interface while
+  there is exactly one implementation; revisit the boundary when a second forge is
+  actually scheduled. Config still removes 0day's repository-specific hard-coding
+  (`PROJECT_NUMBER`, owner kind, literal board lane names, trusted-reviewer login).
 - **SQLite (WAL) state.** Replaces 0day's non-atomic `jq` read-modify-write with no
   locking (`loop_conductor.sh:738-762`). Conductor stays single-writer-serial;
   WAL gives atomic writes + concurrent reads (for `sapwood status`). Fully durable

@@ -101,8 +101,12 @@ so they can push and open a PR; only fix legs are credential-free (#218/#247);
    layer). The usable form of the principle is forward-looking: *new features
    default to restraint; no new machinery without necessity* (the existing
    marginal-complexity principle — reaffirmed, not invented here).
-6. **IForge drift**: ~40 methods vs the "~8" design intent; the
-   "GitLab/Gitea = implementation, not rewrite" promise needs re-scoping — #307.
+6. **IForge drift (audited in #307)**: 44 methods vs the "~8" design intent;
+   25 expose portable forge primitives and 19 encode GitHub semantics. The seam
+   isolates runtime orchestration and loop forge operations; init-time auth checks
+   and provisioning use the `gh`/`ghText` helper directly. GitLab/Gitea would be a
+   semantic port, not an endpoint swap; interface regrouping waits until a second
+   forge is actually scheduled.
 7. Pre-v1, zero external users, against 70k★/58k★/9k★ neighbors. Star counts
    are treated as weak category-heat signals only — they measure developer
    virality, not governance-buyer intent, and must not carry strong conclusions.
