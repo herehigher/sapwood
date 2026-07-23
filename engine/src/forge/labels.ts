@@ -13,6 +13,11 @@ export function workflowLabelDefaults(prefix: string) {
     verifyNa: `${normalizedPrefix}verify:n/a`,
     planApproved: `${normalizedPrefix}plan:approved`,
     originAgent: `${normalizedPrefix}origin:agent`,
+    // #310: a human applies split to request one decomposition generation; the engine applies
+    // decomposed to retire the parent as a tracking container. Both are prefix-aware workflow
+    // facts, but only decomposed has an engine write path.
+    split: `${normalizedPrefix}split`,
+    decomposed: `${normalizedPrefix}decomposed`,
     // #212: round-pool membership — applied by the aligning phase's pool-selection pass,
     // consumed by the executing phase's dispatch-scoping wrapper (round.ts's PoolScopedForge).
     roundPool: `${normalizedPrefix}round:pool`,

@@ -1626,6 +1626,14 @@ export function extractVerificationPlan(body: string): string | null {
   return sections.length ? sections.join("\n\n") : null;
 }
 
+/** Extract only explicit Verification sections. #310 keeps this distinct from
+ * extractVerificationPlan's historical Verification-or-Acceptance compatibility shape:
+ * a dispatchable implementation issue needs both checkbox AC and concrete verification steps. */
+export function extractVerificationSection(body: string): string | null {
+  const sections = extractMarkdownSections(body, /verification/);
+  return sections.length ? sections.join("\n\n") : null;
+}
+
 /** True if the issue carries a verification plan (Decision #8): verify:n/a label OR a
  *  Verification/Acceptance section in the body. Fail-closed: no signal -> false. */
 export function hasVerificationPlan(body: string, labels: string[], verifyNaLabel: string): boolean {
@@ -1755,8 +1763,12 @@ export function findOpenPrNumber(prs: { number: number; body: string }[], issue:
 
 type ReadyCfg = {
   board: { owner: string; repo: string; statusField: string; status: { ready: string } };
-  labels: { verifyNa: string; planApproved: string; needsHuman: string; blocked: string };
+  labels: { verifyNa: string; planApproved: string; needsHuman: string; blocked: string; decomposed?: string };
 };
+
+function isDecomposed(labels: string[], l: ReadyCfg["labels"]): boolean {
+  return l.decomposed !== undefined && labelsInclude(labels, l.decomposed);
+}
 
 /**
  * gate⓪ (#88, amending Decision #8 per #77's 2026-07-09 comment): a verification plan must
@@ -1786,6 +1798,7 @@ type ReadyCfg = {
  * checkbox-shaped AC set by design.
  */
 function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
+  if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
   // #94 Codex retro-review P2: BOTH dispatch-path labels on one issue is a state the
   // plan-reviewer prompt forbids ("never apply both") — it can only arise from a stale or
@@ -1794,7 +1807,12 @@ function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): 
   // for a human to remove one of the two labels.
   if (labelsInclude(labels, l.verifyNa) && labelsInclude(labels, l.planApproved)) return false;
   if (labelsInclude(labels, l.verifyNa)) return true;
-  return extractVerificationPlan(body) != null && extractAcceptanceCriteria(body) != null && labelsInclude(labels, l.planApproved);
+  return (
+    extractVerificationPlan(body) != null &&
+    extractVerificationSection(body) != null &&
+    extractAcceptanceCriteria(body) != null &&
+    labelsInclude(labels, l.planApproved)
+  );
 }
 
 /** Ready-lane + OPEN + this repo + gate⓪-dispatchable (#88). The dispatch work-queue. */
@@ -1828,6 +1846,7 @@ export function selectReadyIssues(project: ParsedProject, cfg: ReadyCfg): Issue[
  *  labels). The verifyNa check below covers it explicitly by construction. Otherwise: needs
  *  review unless already `planApproved`. */
 function needsPlanReview(labels: string[], l: ReadyCfg["labels"]): boolean {
+  if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
   if (labelsInclude(labels, l.verifyNa)) return false; // doc-gate path OR the mixed state — neither is reviewable
   return !labelsInclude(labels, l.planApproved);
@@ -1868,6 +1887,7 @@ export function selectPlanReviewCandidates(project: ParsedProject, cfg: ReadyCfg
  *  the exact self-healing loop #214 exists to build, reached automatically rather than requiring
  *  a special case. */
 function isPoolEligible(labels: string[], l: ReadyCfg["labels"]): boolean {
+  if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
   if (labelsInclude(labels, l.verifyNa) && labelsInclude(labels, l.planApproved)) return false;
   return true;
@@ -1902,6 +1922,7 @@ export function selectPoolEligibleIssues(project: ParsedProject, cfg: ReadyCfg):
  *  already has SOME plan section is excluded too — triage's whole job is to fill the gap, not
  *  to re-draft an existing plan (that quality judgment belongs to gate⓪'s plan-reviewer). */
 function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
+  if (isDecomposed(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
   if (labelsInclude(labels, l.verifyNa)) return false;
   return extractVerificationPlan(body) == null;

@@ -61,6 +61,65 @@ export function isUnresolvedContext(metadata: unknown): metadata is UnresolvedCo
   return UnresolvedContextSchema.safeParse(metadata).success;
 }
 
+// #310: PO decompose is intentionally one two-arm result, not a staged state machine. Long
+// child bodies remain in the raw BODY segment; this metadata only carries bounded identities,
+// ordering, remainder honesty, and the set-level coverage declaration.
+export const DecomposeChildMetadataSchema = z
+  .object({
+    title: z.string().min(1),
+    kind: z.enum(["ready", "remainder"]),
+    blockedBy: z.array(z.number().int().nonnegative()).default([]),
+    unresolvedContext: UnresolvedContextSchema.shape.unresolvedContext.optional(),
+    informationNeeded: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((child, ctx) => {
+    const hasRemainderFields = child.unresolvedContext !== undefined && child.informationNeeded !== undefined;
+    if (child.kind === "remainder" && !hasRemainderFields) {
+      ctx.addIssue({
+        code: "custom",
+        message: "remainder children require unresolvedContext and informationNeeded",
+      });
+    }
+    if (child.kind === "ready" && (child.unresolvedContext !== undefined || child.informationNeeded !== undefined)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "ready children must not carry remainder-only unresolved fields",
+      });
+    }
+  });
+
+const CoverageMappingSchema = z
+  .object({
+    parentIntent: z.string().min(1),
+    children: z.array(z.number().int().nonnegative()).min(1),
+  })
+  .strict();
+
+export const DecomposeOutputMetadataSchema = z.discriminatedUnion("outcome", [
+  z
+    .object({
+      outcome: z.literal("decomposed"),
+      children: z.array(DecomposeChildMetadataSchema).min(1),
+      coverage: z
+        .object({
+          mappings: z.array(CoverageMappingSchema).min(1),
+          remainders: z.array(z.number().int().nonnegative()),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      outcome: z.literal("unresolved"),
+      reason: z.string().min(1),
+      unresolvedContext: UnresolvedContextSchema.shape.unresolvedContext,
+    })
+    .strict(),
+]);
+
+export type DecomposeOutputMetadata = z.infer<typeof DecomposeOutputMetadataSchema>;
+
 // SENTINEL CONTAINMENT (dual-review round 1, P1 — fable + Codex): the BODY segment's raw-text
 // nature means a body whose markdown content itself contains a sentinel string (realistic —
 // issue #110's own body documents these very sentinels) would otherwise be SILENTLY TRUNCATED

@@ -348,6 +348,20 @@ test("orderForDispatch: the plain `blocked` escalation label is held out of disp
   );
 });
 
+test("#310 orderForDispatch: decomposed tracking parents are never dispatched even if a stale Ready read supplies one", () => {
+  const cfg = mkCfg();
+  assert.deepEqual(
+    orderForDispatch(
+      [
+        { number: 1, title: "child", labels: [] },
+        { number: 2, title: "parent", labels: [cfg.labels.decomposed] },
+      ],
+      cfg,
+    ).map((issue) => issue.number),
+    [1],
+  );
+});
+
 test("tick dispatch: claim happens before launch; a claim failure spawns no worker", async () => {
   const st = new State(":memory:");
   const sup = new FakeSupervisor();

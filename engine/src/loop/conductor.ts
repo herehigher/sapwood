@@ -837,6 +837,7 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
   // not just reserve/needs-human (Codex P2, PR #30).
   const reserveish = [cfg.labels.reserve, ...cfg.escalation.humanLabels];
   return ready
+    .filter((i) => !labelsInclude(i.labels, cfg.labels.decomposed))
     .filter((i) => !hasReserveLabel(i.labels, reserveish))
     .filter((i) => labelsBlockers(i.labels, cfg.labels.prefix).length === 0)
     .map((i) => ({ i, rank: issuePriority(i.labels, cfg.labels.prefix) }))

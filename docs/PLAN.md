@@ -775,6 +775,7 @@ write, and today's decision weight.
 
 | Role | Output fields → engine write | Validation (`engine/src/…`) | Decision weight |
 |------|------------------------------|-----------------------------|-----------------|
+| **PO / decompose (#310)** | `outcome:"decomposed"` + bounded child set + coverage mapping → fence parent (`decomposed`, Todo, no round-pool), then `createIssue`, child governance labels/comments, `addSubIssue`, and one parent coverage comment. `outcome:"unresolved"` → advisory parent comment only. | `DecomposeOutputMetadataSchema` (strict two-branch union) + `validateDecomposeOutput`: `maxChildren`, exact body cardinality, unique titles, complete/in-range coverage and dependency indices, ready-child acceptance criteria + verification section, and honest planless remainder metadata. The proposal set is journaled before child creation and reconciled by body marker and receipts. | **Medium, pre-Ready** — the session chooses backlog child boundaries, but cannot make any child dispatchable: every child starts outside Ready; planless remainders also receive `needs-human`. The parent fence is engine-computed from the human `split` signature, never session-selected. |
 | **plan-reviewer** | `decision`∈{approve, draft_request, verify_na} + `issue` + optional body → `updateIssueBody` + `addLabel(plan:approved)` (approve); `addLabel(needs-human)`+`addLabel(verify:n/a)`+`addIssueComment` (verify_na); routes to drafter **and posts the reviewer brief via `addIssueComment`** before the drafter runs (draft_request) — `plan-review.ts:352-384` | `validateReviewerOutput` (`plan-review.ts:164`): `PlanReviewerMetadataSchema` (strict zod) **+ content invariant** — `extractVerificationPlan` must find a plan in the approved body **+** issue-number match to the expected candidate | **High** — `plan:approved` is the gate⓪ dispatch key; a false approve dispatches an unverifiable issue. Deepest validation (schema + content + identity). |
 | **plan-drafter** | `issue` + body (revised issue body, required) → `updateIssueBody` only — `plan-review.ts:422` | `validateDrafterOutput` (`plan-review.ts:205`): `PlanDrafterMetadataSchema` (strict) + non-empty body + issue-number match **+ content invariant** — `extractVerificationPlan` must find a verification/acceptance section in the drafted body (`plan-review.ts:224-226`) | **Medium** — writes the body but **never** the `plan:approved` label (author ≠ approver, #77 Amendment 2); the reviewer must independently re-approve before dispatch, so the drafter's write is always re-gated. |
 | **PO / aligning** | *align mode:* `issues:[{title}]` + per-issue bodies → `createIssue` + `addLabel(origin:agent)` + `addLabel(needs-human)` when planless + `addIssueComment` — `align.ts:291-304`. *triage mode:* `issue` + drafted body → `updateIssueBody` + `addIssueComment` — `align.ts:351`. *both modes, #237:* optional `concerns:[{issue, reason}]` alongside the deliverable above → `addIssueComment` only, via `dissent.ts::postConcerns` (triage concerns dropped if their decision was itself discarded — stale-hash refusal / decision-lost — 2026-07-18 adjudication finding 6) | *align:* `validateAlignOutput` (`align.ts:138`): `AlignMetadataSchema` (strict) + per-issue body split; **post-write plan check** — a planless creation earns `needs-human` at creation time (`align.ts:297-304`). *triage:* `validateTriageOutput` (`align.ts:184`): `TriageMetadataSchema` (strict) + issue match + non-empty body — **deliberately no plan invariant** (pre-#110 semantics preserved): the drafted body is written via `updateIssueBody` first, then a plan-conditional success comment (`align.ts:351-356`); a still-planless draft records `triage-degraded` (no label, no success comment) and re-matches triage next round. *concerns (#237):* `dissent.ts::validateConcerns` — **set cross-check**, same doctrine as harvest's below: every `issue` must be inside the session's own injected view — the rendered backlog-digest subset for ALIGN mode; the target issue ONLY for TRIAGE mode (narrowed 2026-07-18, finding 7, to match the prompt's own contract) — or the whole batch is rejected; one concern per issue per session | **Low (pre-Ready)** — a created issue structurally cannot carry a dispatch label (engine applies labels, session has no channel); planless creations are fenced `needs-human`, planless triage drafts stay undispatchable via gate⓪'s `plan:approved` requirement; degrade proceeds (low stakes, next round retries). *concerns:* **lowest possible — comment-only, by construction.** No schema field a concern carries maps to any label/status/dispatch write path (there is none in `dissent.ts` to map to); delivery is idempotent by a deterministic marker (issue + a hash of the concern's wording **and** the concerned issue's body at post time, so a why/what edit re-arms the same worded concern — including an edit this SAME engine made, since the outcome, `body-changed`, deliberately carries no human-attribution claim). A missing durable receipt behind an already-live marker is reconciled in place rather than lost (finding 3), and `dissent.ts::reconcileDurableConcerns` (2026-07-19 round-2 adjudication, findings 1+2) durably sweeps the SAME thing across the whole ledger every round — the backstop for a concern whose decision reached its terminal receipt before `postConcerns` ever delivered it — always attributed to that decision's own original round, never the round the sweep runs in. Adjudication (`closed`/`external-reply`/`body-changed`) runs as its own round-level scan, unconditional on `roles.po.enabled` (finding 5); `closed` and `body-changed` are BOTH neutral/unattributed (2026-07-19, finding 3 — the conductor's own `Closes #N` merges can close an issue exactly like a human would), leaving `external-reply` as the only outcome with any actor claim at all (and even that is "not this engine," never "a human specifically"). |
@@ -1201,6 +1202,35 @@ card IS the endorsement; nothing downstream re-litigates it outside that channel
 confirmation step is the product, not a limitation to be automated away** — it is
 the one place autonomy is deliberately bounded by design, matching the positioning
 statement's "humans own why/what at Ready" (Security & trust model, above).
+
+**PO decomposition and issue granularity (#310).** A human may apply the prefix-aware
+`split` label to an oversized issue. One issues-only PO session returns a bounded set of
+minimal dispatchable children plus a parent-intent coverage statement; a mixed set of
+Ready-able children and honest, planless coarse remainders is a successful partial
+decomposition. A child is minimal when one lane and one PR complete it and its acceptance
+criteria are verifiable by that PR's CI plus gate②. The prompt additionally prefers one
+worker-soft-budget session, no more than the configurable AC-count hint, and minimal sibling
+file overlap; these remain heuristics rather than scheduling gates.
+
+Before any child creation, the validated proposal set is journaled, then the parent is moved
+to Todo, stripped only of the round-pool label, and fenced with `decomposed`. It then remains
+a human-visible tracking container: every engine ingestion path ignores it, native sub-issue
+relations provide the authoritative tree, and the engine neither closes it nor removes the
+fence. Children carry `origin:agent` and never inherit Ready; moving each child to Ready is
+the human why/what signature. Remainders are partitioned along every discernible boundary,
+each naming its own missing input, and follow the ordinary planless `needs-human` path.
+Further generations always require a fresh human split act on one remainder; v1 has no
+automatic recursion.
+
+GitHub is also the external intake interface: an upstream tool creates an issue in this
+repository, applies `origin:agent`, and supplies checkbox acceptance criteria plus a
+verification plan (or the human-adjudicated `verify:n/a` path). There is no second intake
+database or API contract.
+
+Set-level architect escalation remains deferred. File it only if sustained evidence appears
+in one or more of these signals: gate⓪ bounce rate on decomposed children; human edit/delete
+rate before the Ready signature; decomposed-child `fix_rounds` versus baseline; or parent
+reopens after close.
 
 **gate⓪ — the verification-plan quality gate (locked 2026-07-09, amends Decision
 #8).** Decision #8 enforced plan *presence* (dispatch refuses a plan-less issue) and

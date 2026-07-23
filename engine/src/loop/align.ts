@@ -41,7 +41,9 @@ import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.j
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { issuePriority } from "./conductor.js";
+import { runDecompositionPass } from "./decompose.js";
 import { type Concern, ConcernSchema, postConcerns, validateConcerns } from "./dissent.js";
+import { createIssueProposals, normalizeProposalTitle, proposalMarker } from "./issue-creation.js";
 import { type PeripheralStub, removeRoundPoolLabel } from "./round.js";
 
 /** #89's round convention (same shape as plan-review.ts's planReviewMarker): the round
@@ -58,21 +60,7 @@ export function proposalId(roundId: number, index: number, title: string): strin
   return `${roundId}-${index}-${titleHash}`;
 }
 
-export function proposalMarker(id: string): string {
-  return `<!-- sapwood:proposal:${id} -->`;
-}
-
-/** Mechanical duplicate guard only: case, compatibility forms, punctuation, and whitespace
- *  do not make two otherwise-identical titles distinct. Semantic duplication remains a PO
- *  judgment problem (#215). */
-export function normalizeProposalTitle(title: string): string {
-  return title
-    .normalize("NFKC")
-    .toLocaleLowerCase("en-US")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-}
+export { normalizeProposalTitle, proposalMarker } from "./issue-creation.js";
 
 export function defaultPoPromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -184,7 +172,7 @@ export async function buildBacklogDigest(forge: IForge, cfg: SapwoodConfig): Pro
   let issues: Issue[];
   try {
     const allIssues = await forge.listOpenIssues();
-    issues = filterIssuesByMilestone(allIssues, cfg.round.milestone);
+    issues = filterIssuesByMilestone(allIssues, cfg.round.milestone).filter((issue) => !labelsInclude(issue.labels, cfg.labels.decomposed));
   } catch (e) {
     return {
       text: BACKLOG_READ_FAILED,
@@ -391,6 +379,16 @@ function proposalProgress(
   const createdIssues = new Map<string, number>();
   const commentedIds = new Set<string>();
   for (const event of events) {
+    // #310 reuses these exact proposal journal/receipt EVENT KINDS for scoped decompose
+    // batches. The ordinary round-goal proposal reader owns only unscoped records.
+    if (
+      typeof event.payload === "object" &&
+      event.payload !== null &&
+      "scope" in event.payload &&
+      typeof (event.payload as { scope?: unknown }).scope === "string"
+    ) {
+      continue;
+    }
     const payloadRound =
       typeof event.payload === "object" && event.payload !== null && "round_id" in event.payload
         ? (event.payload as { round_id?: unknown }).round_id
@@ -1437,6 +1435,17 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         return { marker: mark };
       }
 
+      // #310: human-fired oversized issues are handled before the ordinary backlog digest so a
+      // successfully fenced tracking parent is not shown to po-align/triage in this same phase.
+      try {
+        const preDecomposeOpenIssues = await deps.forge.listOpenIssues();
+        await runDecompositionPass(deps, roundId, preDecomposeOpenIssues);
+      } catch (error) {
+        // The ordinary backlog digest below owns its existing explicit failure contract. A
+        // decomposition discovery read/session failure must not prevent triage from proceeding.
+        (deps.log ?? console.error)(`[sapwood:po] decomposition pass degraded open: ${String(error)}`);
+      }
+
       // Compute at align invocation time from the full injected forge backlog. Milestone scope
       // belongs only to the digest; reconciliation/title dedup below must see every open issue.
       // Reuse the same snapshot for triage prompt rendering later in this phase.
@@ -1676,45 +1685,46 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // stop creation rather than turn into duplicates.
       const openIssues = createdIssues.length > 0 ? await deps.forge.listOpenIssues() : [];
       const knownOpenIssues = [...openIssues];
-      for (const { proposalId: id, title, body } of createdIssues) {
-        if (terminalIds.has(id)) {
-          const issue = priorProgress.createdIssues.get(id);
-          if (issue !== undefined) alignSummaryCreated.push({ issue, title, hasPlan: extractVerificationPlan(body) != null });
-          continue;
-        }
-        const marker = proposalMarker(id);
-        const reconciled = knownOpenIssues.find((issue) => issue.body?.includes(marker));
-        if (reconciled) {
-          const hasPlan = extractVerificationPlan(body) != null;
-          await applyProposalGovernance(reconciled.number, hasPlan, id, priorProgress.commentedIds.has(id));
-          deps.state.appendEvent("proposal-created", { round_id: roundId, proposalId: id, issue: reconciled.number, reconciled: true });
-          terminalIds.add(id);
-          alignSummaryCreated.push({ issue: reconciled.number, title, hasPlan });
-          continue;
-        }
-        const normalizedTitle = normalizeProposalTitle(title);
-        const collision = knownOpenIssues.find((issue) => normalizeProposalTitle(issue.title) === normalizedTitle);
-        if (collision) {
+      const created = await createIssueProposals({
+        forge: deps.forge,
+        proposals: createdIssues.map((proposal) => ({ id: proposal.proposalId, title: proposal.title, body: proposal.body })),
+        knownOpenIssues,
+        terminalIds,
+        createdIssues: priorProgress.createdIssues,
+        markerFor: proposalMarker,
+        normalizeTitle: normalizeProposalTitle,
+        applyGovernance: async ({ proposal, issue }) => {
+          await applyProposalGovernance(
+            issue,
+            extractVerificationPlan(proposal.body) != null,
+            proposal.id,
+            priorProgress.commentedIds.has(proposal.id),
+          );
+        },
+        onCreated: ({ proposal, issue, reconciled }) => {
+          deps.state.appendEvent("proposal-created", {
+            round_id: roundId,
+            proposalId: proposal.id,
+            issue,
+            ...(reconciled ? { reconciled: true } : {}),
+          });
+        },
+        onSkipped: (proposal, collision) => {
           deps.state.appendEvent("proposal-skipped", {
             round_id: roundId,
-            proposalId: id,
-            title,
+            proposalId: proposal.id,
+            title: proposal.title,
             reason: "normalized-title-collision",
             existingIssue: collision.number,
           });
-          terminalIds.add(id);
-          continue;
-        }
-        const markedBody = `${body}\n\n${marker}`;
-        const issueNumber = await deps.forge.createIssue(title, markedBody);
-        knownOpenIssues.push({ number: issueNumber, title, labels: [], body: markedBody });
-        const hasPlan = extractVerificationPlan(body) != null;
-        await applyProposalGovernance(issueNumber, hasPlan, id, priorProgress.commentedIds.has(id));
-        // A receipt means both creation AND its load-bearing governance writes completed.
-        // A crash before this append is reconciled by the body marker on the next run.
-        deps.state.appendEvent("proposal-created", { round_id: roundId, proposalId: id, issue: issueNumber });
-        terminalIds.add(id);
-        alignSummaryCreated.push({ issue: issueNumber, title, hasPlan });
+        },
+      });
+      for (const result of created) {
+        alignSummaryCreated.push({
+          issue: result.issue,
+          title: result.proposal.title,
+          hasPlan: extractVerificationPlan(result.proposal.body) != null,
+        });
       }
 
       // #232 F3 (Codex sol high review of PR #249): the ORIGINAL shape here — one receipt

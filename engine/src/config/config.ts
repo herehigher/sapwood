@@ -376,6 +376,10 @@ const Labels = z
     // session creates. Config-driven like every sibling label here — never a hardcoded
     // string at the call site (fable PR #101 P3).
     originAgent: z.string().optional(),
+    // #310: split is the human firing signal; decomposed is the engine's permanent parent
+    // fence. Both follow labels.prefix like every other workflow label.
+    split: z.string().optional(),
+    decomposed: z.string().optional(),
     // #212: round-pool membership label — applied by the aligning phase's pool-selection pass
     // (align.ts's selectRoundPool), consumed by the executing phase's dispatch-scoping wrapper
     // (round.ts's PoolScopedForge). Same omitted-default pattern as every sibling label above.
@@ -513,6 +517,14 @@ const Roles = z
     // CONFIG FILE's directory (see loadConfig below), not the CLI's cwd.
     po: RoleSession.extend({
       promptFile: z.string().optional(),
+      // #310: the decompose sub-mode has a distinct prompt but shares the PO role posture and
+      // model settings. Same #74 path semantics as every other roles.* prompt file.
+      decomposePromptFile: z.string().optional(),
+      // One firing can create only this many children, including coarse remainders.
+      maxChildren: z.number().int().positive().default(8),
+      // Prompt-only granularity heuristic. Gate⓪'s hard checks remain plan + non-empty checkbox
+      // AC extraction; this hint never becomes a scheduling estimate or hard dispatch gate.
+      acceptanceCriteriaHint: z.number().int().positive().default(5),
       // #212 (gate① F1): the round-pool SELECTION session's own prompt — a distinct file from
       // promptFile above (align/triage), same #74 pattern: unset -> the engine's shipped
       // `prompts/po-pool.md`; a relative path resolves against the CONFIG FILE's directory (see
@@ -1175,6 +1187,8 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
     verifyNa: cfg.labels.verifyNa ?? defaults.verifyNa,
     planApproved: cfg.labels.planApproved ?? defaults.planApproved,
     originAgent: cfg.labels.originAgent ?? defaults.originAgent,
+    split: cfg.labels.split ?? defaults.split,
+    decomposed: cfg.labels.decomposed ?? defaults.decomposed,
     roundPool: cfg.labels.roundPool ?? defaults.roundPool,
   };
   cfg.labels = resolvedLabels;
@@ -1222,6 +1236,8 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
     ["labels.verifyNa", cfg.labels.verifyNa],
     ["labels.planApproved", cfg.labels.planApproved],
     ["labels.originAgent", cfg.labels.originAgent],
+    ["labels.split", cfg.labels.split],
+    ["labels.decomposed", cfg.labels.decomposed],
     ...cfg.escalation.humanLabels.map((label, i): [string, string] => [`escalation.humanLabels[${i}]`, label]),
   ];
   for (const [key, value] of otherLabels) {
@@ -1373,6 +1389,9 @@ export function loadConfig(path?: string): SapwoodConfig {
   // #89: same rule for the PO prompt.
   if (cfg.roles.po.promptFile !== undefined && !isAbsolute(cfg.roles.po.promptFile)) {
     cfg.roles.po.promptFile = resolve(dirname(file), cfg.roles.po.promptFile);
+  }
+  if (cfg.roles.po.decomposePromptFile !== undefined && !isAbsolute(cfg.roles.po.decomposePromptFile)) {
+    cfg.roles.po.decomposePromptFile = resolve(dirname(file), cfg.roles.po.decomposePromptFile);
   }
   // #212: same rule for the PO's round-pool SELECTION prompt (a distinct file from promptFile).
   if (cfg.roles.po.poolPromptFile !== undefined && !isAbsolute(cfg.roles.po.poolPromptFile)) {
