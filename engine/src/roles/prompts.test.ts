@@ -81,8 +81,8 @@ test("shipped role prompts (#321): sentinel examples are plain text with no adja
     assert.match(prompt, /Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence\./, name);
     assert.equal(prompt.match(/^<<<SAPWOOD_RESULT>>>[ \t]*$/gm)?.length, sentinelCount, name);
     assert.equal(prompt.match(/^<<<END_SAPWOOD_RESULT>>>[ \t]*$/gm)?.length, sentinelCount, name);
-    assert.doesNotMatch(prompt, /^```[ \t]*\n<<<SAPWOOD_RESULT>>>/m, name);
-    assert.doesNotMatch(prompt, /^<<<END_SAPWOOD_RESULT>>>[ \t]*\n```[ \t]*$/m, name);
+    assert.doesNotMatch(prompt, /^ {0,3}(?:`{3,}|~{3,})[^\r\n]*\r?\n<<<SAPWOOD_RESULT>>>[ \t]*$/m, name);
+    assert.doesNotMatch(prompt, /^<<<(?:END_SAPWOOD_RESULT|END_BODY)>>>[ \t]*\r?\n {0,3}(?:`{3,}|~{3,})[ \t]*$/m, name);
   }
 });
 
