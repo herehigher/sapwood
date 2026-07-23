@@ -28,7 +28,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   "plan-reviewer.md": "4a91f393dc61f01d5ab1be3c51504ec92720f8842188e38332c0849538f927f7",
   "plan-reviewer-confirm.md": "5502bd8c5c9196e51f0d45086ba256aa8ce8fd0eaf1249c57120fafe3e49aacf",
   "plan-drafter.md": "2daa2a1f1e4d57acde6a8efafdb806cdb525631cd241d8fa1bfb08dae5914d4c",
-  "harvest.md": "8c5557b443f4ae01e39b8a2e612a9bae10b1d3b8c9de436162e8587ed99f3ac0",
+  "harvest.md": "59fb5fb1a8a3bebb2429c878c309caffe3105a3f9a32262268b7a14525026d4b",
   "retro.md": "d667893510d96a67e5e8041861daa2d6767e708acfeca2f98c498e09e6a21917",
   "po-pool.md": "a5f51726e886ecaca53dfc9773e7403b602e3cb555cfb972bee2f15e54204d09",
 };

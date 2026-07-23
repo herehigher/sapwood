@@ -36,6 +36,7 @@ test("assembleRoundArtifact: an empty ledger produces an empty-but-valid artifac
   assert.equal(parsed.spendUsd, 0);
   assert.equal(parsed.roundBudgetUsd, 30);
   assert.deepEqual(parsed.escalations, { needsHuman: [], ceiling: 0, driveNoPr: 0 });
+  assert.deepEqual(parsed.egressSuspects, []);
   assert.equal(parsed.align, null);
   assert.deepEqual(parsed.retro, { opened: null, degraded: null });
   assert.deepEqual(parsed.concerns, []); // #237: no objections this round is the normal case
@@ -363,7 +364,7 @@ test("buildRoundArtifact: reads events since round.started_at + cumulative spend
   state.close();
 });
 
-test("buildRoundArtifact (#341): egress-suspect events enter the harvest/needs-attention artifact path", () => {
+test("buildRoundArtifact (#341 round 2): egress-suspect events are informational and never needs-human", () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("egress-suspect", {
@@ -374,7 +375,15 @@ test("buildRoundArtifact (#341): egress-suspect events enter the harvest/needs-a
   });
   const artifact = buildRoundArtifact(state, round, 30, null);
   assert.ok(ROUND_ARTIFACT_EVENT_KINDS.includes("egress-suspect"));
-  assert.deepEqual(artifact.escalations.needsHuman, [304]);
+  assert.deepEqual(artifact.egressSuspects, [
+    {
+      worker: "lane-304",
+      issue: 304,
+      executable: "curl",
+      snippet: "curl https://example.invalid",
+    },
+  ]);
+  assert.deepEqual(artifact.escalations.needsHuman, []);
   state.close();
 });
 
