@@ -14,6 +14,7 @@ import { type DecomposeOutputMetadata, DecomposeOutputMetadataSchema, parseStruc
 import { type Concern, ConcernSchema, postConcerns } from "./dissent.js";
 import {
   createIssueProposals,
+  hasProposalMarkerTrailer,
   type IssueCreationProposal,
   type IssueCreationResult,
   normalizeProposalTitle,
@@ -254,6 +255,7 @@ interface DecomposeJournal {
   coverage: z.infer<typeof PersistedCoverageSchema>;
   terminalIds: Set<string>;
   created: Map<string, number>;
+  pendingCreated: Map<string, number>;
   commentedIds: Set<string>;
   collisionEscalated: boolean;
 }
@@ -300,6 +302,7 @@ function decomposeProgress(state: State, parent: number): DecomposeProgress {
         coverage: parsed.data.coverage,
         terminalIds: new Set(),
         created: new Map(),
+        pendingCreated: new Map(),
         commentedIds: new Set(),
         collisionEscalated: false,
       };
@@ -327,18 +330,31 @@ function decomposeProgress(state: State, parent: number): DecomposeProgress {
     if (journal.terminalIds.has(parsed.data.proposalId)) {
       throw new Error(`multiple terminal events for decomposition proposal ${parsed.data.proposalId}`);
     }
-    journal.terminalIds.add(parsed.data.proposalId);
     if (event.kind === "proposal-created") {
       const created = parsed.data as z.infer<typeof DecomposeCreatedSchema>;
-      if ([...journal.created.values()].includes(created.issue)) {
+      if (journal.pendingCreated.has(created.proposalId)) {
+        throw new Error(`multiple terminal events for decomposition proposal ${created.proposalId}`);
+      }
+      if ([...journal.pendingCreated.values()].includes(created.issue)) {
         throw new Error(`duplicate decomposition issue receipt for issue #${created.issue}`);
       }
-      journal.created.set(created.proposalId, created.issue);
+      journal.pendingCreated.set(created.proposalId, created.issue);
     } else {
       const skipped = parsed.data as z.infer<typeof DecomposeSkippedSchema>;
-      if (skipped.reason !== "normalized-title-collision-needs-human") {
+      if (
+        skipped.reason !== "normalized-title-collision-needs-human" &&
+        skipped.reason !== "proposal-created-receipt-live-mismatch-needs-human"
+      ) {
         throw new Error(`unsupported skipped decomposition proposal ${skipped.proposalId}`);
       }
+      if (
+        journal.terminalIds.has(skipped.proposalId) ||
+        (journal.pendingCreated.has(skipped.proposalId) && skipped.reason !== "proposal-created-receipt-live-mismatch-needs-human")
+      ) {
+        throw new Error(`multiple terminal events for decomposition proposal ${skipped.proposalId}`);
+      }
+      journal.pendingCreated.delete(skipped.proposalId);
+      journal.terminalIds.add(skipped.proposalId);
       journal.collisionEscalated = true;
     }
   }
@@ -383,6 +399,9 @@ function decomposeProgress(state: State, parent: number): DecomposeProgress {
     }
     for (const terminal of journal.terminalIds) {
       if (!ids.has(terminal)) throw new Error(`unknown terminal decomposition proposal ${terminal} for parent #${parent}`);
+    }
+    for (const pending of journal.pendingCreated.keys()) {
+      if (!ids.has(pending)) throw new Error(`unknown terminal decomposition proposal ${pending} for parent #${parent}`);
     }
     for (const commented of journal.commentedIds) {
       if (!ids.has(commented)) throw new Error(`unknown commented decomposition proposal ${commented} for parent #${parent}`);
@@ -449,6 +468,50 @@ async function escalateFencedCollision(
   });
   journal.terminalIds.add(error.proposal.id);
   journal.collisionEscalated = true;
+}
+
+async function verifyCreatedReceipts(deps: DecomposeDeps, parent: Issue, journal: DecomposeJournal): Promise<void> {
+  for (const [proposalId, issue] of journal.pendingCreated) {
+    const proposal = journal.proposals.find((candidate) => candidate.proposalId === proposalId)!;
+    const [meta, body] = await Promise.all([deps.forge.getIssueMeta(issue), deps.forge.getIssueBody(issue)]);
+    const marker = proposalMarker(proposalId);
+    const titleMatches = normalizeProposalTitle(meta.title) === normalizeProposalTitle(proposal.title);
+    const trailerMatches = hasProposalMarkerTrailer(body, marker);
+    if (!titleMatches || !trailerMatches) {
+      const evidenceMarker = `<!-- sapwood:decompose-collision:${parent.number}:${journal.roundId}:${proposalId} -->`;
+      if (!labelsInclude(parent.labels, deps.cfg.labels.needsHuman)) {
+        await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);
+      }
+      const comments = await deps.forge.getIssueComments(parent.number);
+      if (!comments.some((comment) => comment.body.includes(evidenceMarker))) {
+        await deps.forge.addIssueComment(
+          parent.number,
+          `PO decomposition stopped after the parent fence because durable proposal-created receipt for ` +
+            `"${proposal.title}" points at live issue #${issue}, which does not match the proposal. ` +
+            `Expected normalized title "${normalizeProposalTitle(proposal.title)}" and exact terminal trailer ` +
+            `"${marker}"; observed normalized title "${normalizeProposalTitle(meta.title)}", ` +
+            `title match=${titleMatches}, trailer match=${trailerMatches}. No recovery writes were made to the ` +
+            `unverified issue; human reconciliation is required.\n\n${evidenceMarker}`,
+        );
+      }
+      deps.state.appendEvent("proposal-skipped", {
+        round_id: journal.roundId,
+        scope: decomposeScope(parent.number),
+        parent: parent.number,
+        proposalId,
+        title: proposal.title,
+        reason: "proposal-created-receipt-live-mismatch-needs-human",
+        existingIssue: issue,
+      });
+      journal.pendingCreated.delete(proposalId);
+      journal.terminalIds.add(proposalId);
+      journal.collisionEscalated = true;
+      return;
+    }
+    journal.pendingCreated.delete(proposalId);
+    journal.terminalIds.add(proposalId);
+    journal.created.set(proposalId, issue);
+  }
 }
 
 async function reconcileJournal(deps: DecomposeDeps, parent: Issue, journal: DecomposeJournal, openIssues: Issue[]): Promise<void> {
@@ -606,6 +669,10 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
   for (const parent of [...recoveries, ...candidates]) {
     const progress = decomposeProgress(deps.state, parent.number);
     const existing = progress.journal;
+    if (existing) {
+      await verifyCreatedReceipts(deps, parent, existing);
+      if (existing.collisionEscalated) continue;
+    }
     if (labelsInclude(parent.labels, deps.cfg.labels.decomposed)) {
       if (existing && !(await journalIsFullyReconciled(deps, parent, existing))) {
         await reconcileJournal(deps, parent, existing, await deps.forge.listOpenIssues());
@@ -779,6 +846,7 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
         coverage: validated.metadata.coverage,
         terminalIds: new Set(),
         created: new Map(),
+        pendingCreated: new Map(),
         commentedIds: new Set(),
         collisionEscalated: false,
       },

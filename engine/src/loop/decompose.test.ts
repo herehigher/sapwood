@@ -62,6 +62,7 @@ function fakeForge(parent: Issue) {
   let failAttachOnce = false;
   let collisionOnFenceTitle: string | null = null;
   let throwAfterCommentFor: number | null = null;
+  let failIssueFetchFor: number | null = null;
   const forge = {
     order,
     issues,
@@ -79,6 +80,9 @@ function fakeForge(parent: Issue) {
     },
     set throwAfterCommentOnceFor(value: number | null) {
       throwAfterCommentFor = value;
+    },
+    set failIssueFetchOnceFor(value: number | null) {
+      failIssueFetchFor = value;
     },
     async setBoardStatus(issue: number, status: string) {
       order.push(`status:${issue}:${status}`);
@@ -120,6 +124,21 @@ function fakeForge(parent: Issue) {
     },
     async getIssueBody(issue: number) {
       return issues.find((item) => item.number === issue)?.body ?? "";
+    },
+    async getIssueMeta(issue: number) {
+      if (failIssueFetchFor === issue) {
+        failIssueFetchFor = null;
+        throw new Error("transient issue fetch failure");
+      }
+      const found = issues.find((item) => item.number === issue);
+      if (!found) throw new Error(`issue #${issue} not found`);
+      return {
+        number: found.number,
+        title: found.title,
+        state: "OPEN" as const,
+        labels: [...found.labels],
+        updatedAt: "2026-01-01T00:00:00Z",
+      };
     },
     async listOpenIssues() {
       return [...issues];
@@ -652,4 +671,120 @@ test("durable decomposition replay is independent of current maxChildren config 
   });
   await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg: narrower, runner: new Runner("unused") }, 19, fake.issues);
   assert.equal(fake.order.filter((item) => item.startsWith("create:")).length, 2);
+});
+
+test("replay rejects a schema-valid proposal-created receipt pointing at an unrelated live issue before recovery writes", async () => {
+  const parent: Issue = { number: 27, title: "Fenced wrong receipt", body: "big", labels: [cfg.labels.decomposed] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  const proposals = persistDecomposedSet(state, 19, parent.number);
+  fake.issues.push({ number: 999, title: "Unrelated issue", body: "right shape, wrong content", labels: [] });
+  fake.labels.set(999, []);
+  state.appendEvent("proposal-created", {
+    round_id: 19,
+    scope: `decompose:#${parent.number}`,
+    parent: parent.number,
+    proposalId: proposals[0]!.proposalId,
+    issue: 999,
+  });
+
+  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 20, fake.issues);
+
+  assert.equal(
+    fake.order.some((write) => write === "attach:999" || write.startsWith("label:999:")),
+    false,
+  );
+  assert.ok(fake.labels.get(parent.number)!.includes(cfg.labels.needsHuman));
+  assert.match(fake.comments.get(parent.number)![0]!.body, /#999/);
+  assert.match(fake.comments.get(parent.number)![0]!.body, /title match=false, trailer match=false/);
+  const escalated = state.eventsAfterId(0, ["proposal-skipped"]);
+  assert.equal(escalated.length, 1);
+  assert.equal((escalated[0]!.payload as { existingIssue: number }).existingIssue, 999);
+  const writesAfterEscalation = fake.order.length;
+  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 21, fake.issues);
+  assert.equal(fake.order.length, writesAfterEscalation, "the durable escalation makes later replay a write-free no-op");
+});
+
+test("replay admits correct proposal-created receipts after exact trailer and normalized-title verification", async () => {
+  const parent: Issue = { number: 28, title: "Fenced correct receipts", body: "big", labels: [cfg.labels.decomposed] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  const proposals = persistDecomposedSet(state, 20, parent.number);
+  for (const [index, proposal] of proposals.entries()) {
+    const issue = 700 + index;
+    fake.issues.push({
+      number: issue,
+      title: index === 0 ? " READY child! " : proposal.title,
+      body: `${proposal.body}\n\n${proposalMarker(proposal.proposalId)}`,
+      labels: [],
+    });
+    fake.labels.set(issue, []);
+    state.appendEvent("proposal-created", {
+      round_id: 20,
+      scope: `decompose:#${parent.number}`,
+      parent: parent.number,
+      proposalId: proposal.proposalId,
+      issue,
+    });
+  }
+
+  const narrower = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    roles: { po: { maxChildren: 1 } },
+  });
+  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg: narrower, runner: new Runner("unused") }, 21, fake.issues);
+
+  assert.equal(
+    fake.order.some((write) => write.startsWith("create:")),
+    false,
+  );
+  assert.ok(fake.order.includes(`label:701:${cfg.labels.prefix}blocked-by:#700`));
+  assert.ok(fake.order.includes("attach:700"));
+  assert.ok(fake.order.includes("attach:701"));
+  assert.match(fake.comments.get(parent.number)![0]!.body, /#700/);
+  assert.match(fake.comments.get(parent.number)![0]!.body, /#701/);
+});
+
+test("transient live fetch failure propagates before receipt admission and rerun retries", async () => {
+  const parent: Issue = { number: 29, title: "Fenced transient receipt", body: "big", labels: [cfg.labels.decomposed] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  const proposals = persistDecomposedSet(state, 21, parent.number, {
+    proposals: [
+      {
+        proposalId: decomposeProposalId(21, parent.number, 0, "Ready child"),
+        index: 0,
+        title: "Ready child",
+        body: readyBody,
+        kind: "ready",
+        blockedBy: [],
+      },
+    ],
+    coverage: { mappings: [{ parentIntent: "Core behavior", children: [0] }], remainders: [] },
+  });
+  fake.issues.push({
+    number: 800,
+    title: proposals[0]!.title,
+    body: `${proposals[0]!.body}\n\n${proposalMarker(proposals[0]!.proposalId)}`,
+    labels: [],
+  });
+  fake.labels.set(800, []);
+  state.appendEvent("proposal-created", {
+    round_id: 21,
+    scope: `decompose:#${parent.number}`,
+    parent: parent.number,
+    proposalId: proposals[0]!.proposalId,
+    issue: 800,
+  });
+  fake.failIssueFetchOnceFor = 800;
+
+  await assert.rejects(
+    () => runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 22, fake.issues),
+    /transient issue fetch failure/,
+  );
+  assert.deepEqual(fake.order, []);
+  assert.equal(state.eventsAfterId(0, ["proposal-skipped"]).length, 0);
+
+  await runDecompositionPass({ forge: fake as unknown as IForge, state, cfg, runner: new Runner("unused") }, 23, fake.issues);
+  assert.ok(fake.order.includes("attach:800"));
 });
