@@ -45,7 +45,7 @@ export const UnresolvedContextSchema = z
          *  no reason is exactly as unaccountable as a decision with no rationale, and this
          *  schema exists specifically to avoid the alternative (a manufactured decision) without
          *  trading it for an equally silent abstention. */
-        reason: z.string().min(1),
+        reason: z.string().trim().min(1),
       })
       .strict(),
   })
@@ -60,6 +60,65 @@ export type UnresolvedContext = z.infer<typeof UnresolvedContextSchema>;
 export function isUnresolvedContext(metadata: unknown): metadata is UnresolvedContext {
   return UnresolvedContextSchema.safeParse(metadata).success;
 }
+
+// #310: PO decompose is intentionally one two-arm result, not a staged state machine. Long
+// child bodies remain in the raw BODY segment; this metadata only carries bounded identities,
+// ordering, remainder honesty, and the set-level coverage declaration.
+export const DecomposeChildMetadataSchema = z
+  .object({
+    title: z.string().trim().min(1).max(256),
+    kind: z.enum(["ready", "remainder"]),
+    blockedBy: z.array(z.number().int().nonnegative()).default([]),
+    unresolvedContext: UnresolvedContextSchema.shape.unresolvedContext.optional(),
+    informationNeeded: z.string().trim().min(1).optional(),
+  })
+  .strict()
+  .superRefine((child, ctx) => {
+    const hasRemainderFields = child.unresolvedContext !== undefined && child.informationNeeded !== undefined;
+    if (child.kind === "remainder" && !hasRemainderFields) {
+      ctx.addIssue({
+        code: "custom",
+        message: "remainder children require unresolvedContext and informationNeeded",
+      });
+    }
+    if (child.kind === "ready" && (child.unresolvedContext !== undefined || child.informationNeeded !== undefined)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "ready children must not carry remainder-only unresolved fields",
+      });
+    }
+  });
+
+const CoverageMappingSchema = z
+  .object({
+    parentIntent: z.string().trim().min(1),
+    children: z.array(z.number().int().nonnegative()).min(1),
+  })
+  .strict();
+
+export const DecomposeOutputMetadataSchema = z.discriminatedUnion("outcome", [
+  z
+    .object({
+      outcome: z.literal("decomposed"),
+      children: z.array(DecomposeChildMetadataSchema).min(1),
+      coverage: z
+        .object({
+          mappings: z.array(CoverageMappingSchema).min(1),
+          remainders: z.array(z.number().int().nonnegative()),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      outcome: z.literal("unresolved"),
+      reason: z.string().trim().min(1),
+      unresolvedContext: UnresolvedContextSchema.shape.unresolvedContext,
+    })
+    .strict(),
+]);
+
+export type DecomposeOutputMetadata = z.infer<typeof DecomposeOutputMetadataSchema>;
 
 // SENTINEL CONTAINMENT (dual-review round 1, P1 — fable + Codex): the BODY segment's raw-text
 // nature means a body whose markdown content itself contains a sentinel string (realistic —

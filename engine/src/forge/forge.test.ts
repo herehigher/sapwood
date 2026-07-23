@@ -10,6 +10,7 @@ import {
   ENGINE_COMMENT_MARKER,
   extractAcceptanceCriteria,
   extractVerificationPlan,
+  extractVerificationSection,
   fetchAllReviewThreads,
   findItemId,
   findOpenPrNumber,
@@ -387,6 +388,11 @@ Not part of the plan.`;
 
 Run \`npm test\` and inspect the output.`,
   );
+});
+
+test("#310 extractVerificationSection: an Acceptance-criteria section alone is not concrete verification", () => {
+  assert.equal(extractVerificationSection("## Acceptance criteria\n\n- [ ] works"), null);
+  assert.equal(extractVerificationSection("## Verification plan\n\n- Run npm test"), "## Verification plan\n\n- Run npm test");
 });
 
 test("extractVerificationPlan: nested ### Verification is included fully and overlap is not duplicated", () => {
@@ -1014,6 +1020,15 @@ const GATE0_AC_PROJECT_JSON = JSON.stringify({
               labels: ["verify:n/a"],
               body: "no plan needed",
             },
+            // #64: plan:approved + checkbox AC, but no explicit Verification section. Historical
+            // extractVerificationPlan compatibility sees Acceptance as a plan; #310's gate⓪
+            // extension still rejects it because no concrete verification steps exist.
+            {
+              number: 64,
+              title: "AC but no verification steps",
+              labels: ["plan:approved"],
+              body: "## Acceptance criteria\n\n- [ ] one",
+            },
           ].map((it: { number: number; title: string; labels: string[]; body: string }) => ({
             id: `ITEM_${it.number}`,
             content: {
@@ -1038,7 +1053,7 @@ test("isDispatchable: #283 — a malformed/empty checkbox AC set on a non-verify
   assert.deepEqual(
     ready.map((i) => i.number).sort((a, b) => a - b),
     [60, 63],
-    "#61 (AC heading, no checkboxes) and #62 (no AC heading) are excluded; #63 (verify:n/a) is exempt",
+    "#61/#62 malformed AC and #64 missing verification are excluded; #63 (verify:n/a) is exempt",
   );
 });
 
@@ -1751,6 +1766,29 @@ test("selectPlanTriageCandidates: only OPEN issues that are genuinely plan-less 
     candidates.map((i) => i.number),
     [42],
   );
+});
+
+test("#310 blindness: decomposed parents are excluded from Ready dispatch, pool eligibility, plan review, and plan triage", () => {
+  const decomposedCfg = {
+    ...cfg,
+    labels: { ...cfg.labels, decomposed: "decomposed" },
+  };
+  const item = {
+    itemId: "D310",
+    number: 310,
+    title: "tracking parent",
+    state: "OPEN",
+    body: "## Acceptance criteria\n- [ ] x\n\n## Verification plan\n- npm test",
+    repo: "herehigher/sapwood",
+    labels: ["decomposed", "plan:approved"],
+    status: "Ready",
+    milestone: null,
+  };
+  const project = { projectId: "P", statusFieldId: "F", options: [], items: [item], placements: [] };
+  assert.deepEqual(selectReadyIssues(project, decomposedCfg), []);
+  assert.deepEqual(selectPoolEligibleIssues(project, decomposedCfg), []);
+  assert.deepEqual(selectPlanReviewCandidates(project, decomposedCfg), []);
+  assert.deepEqual(selectPlanTriageCandidates({ ...project, items: [{ ...item, body: "planless" }] }, decomposedCfg), []);
 });
 
 test("selectPlanTriageCandidates: unlike selectPlanReviewCandidates, a NON-Ready-lane plan-less issue is still a candidate (triage runs before Ready, not after)", () => {

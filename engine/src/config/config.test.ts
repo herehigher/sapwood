@@ -419,6 +419,31 @@ test("#212 gate② P1-1: a distinct labels.roundPool value (including the shippe
   assert.doesNotThrow(() => parseConfig(`${base}labels: { roundPool: sapwood:my-custom-pool }`));
 });
 
+test("#310 gate② P1-2: split cannot alias originAgent and autonomously recurse", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(() => parseConfig(`${base}labels: { split: SAPWOOD:ORIGIN:AGENT }`), /labels\.split.*collides with labels\.originAgent/is);
+});
+
+test("#310 gate② P1-2: decomposed cannot alias originAgent and permanently fence every agent child", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}labels: { decomposed: SAPWOOD:ORIGIN:AGENT }`),
+    /labels\.decomposed.*collides with labels\.originAgent/is,
+  );
+});
+
+test("#310 gate② P1-2: split and decomposed reject aliases with each other and hold/escalation labels", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}labels: { split: custom, decomposed: CUSTOM }`),
+    /labels\.(split|decomposed).*collides with labels\.(decomposed|split)/is,
+  );
+  assert.throws(
+    () => parseConfig(`${base}labels: { split: reviewing }\nescalation: { holdLabels: [REVIEWING] }`),
+    /labels\.split.*collides with escalation\.holdLabels/is,
+  );
+});
+
 // ── #156: reviewer.triggerCommand — user-defined review trigger entry point ─────────────────
 
 test("#156: reviewer.triggerCommand defaults to `@codex review` (byte-for-byte today's hardcoded trigger)", () => {
@@ -900,12 +925,27 @@ test("roles.po: promptFile unset by default, model/effort defaulted, strict sche
   assert.equal(cfg.roles.po.model, "sonnet");
   assert.equal(cfg.roles.po.effort, "medium");
   assert.equal(cfg.roles.po.backlogDigestMaxChars, 20_000);
+  assert.equal(cfg.roles.po.decomposePromptFile, undefined);
+  assert.equal(cfg.roles.po.maxChildren, 8);
+  assert.equal(cfg.roles.po.acceptanceCriteriaHint, 5);
   const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFile: prompts/custom-po.md, model: opus, effort: high } }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFile: prompts/custom-po.md, decomposePromptFile: prompts/custom-decompose.md, maxChildren: 6, acceptanceCriteriaHint: 4, model: opus, effort: high } }",
   );
   assert.equal(over.roles.po.promptFile, "prompts/custom-po.md");
+  assert.equal(over.roles.po.decomposePromptFile, "prompts/custom-decompose.md");
+  assert.equal(over.roles.po.maxChildren, 6);
+  assert.equal(over.roles.po.acceptanceCriteriaHint, 4);
   assert.equal(over.roles.po.model, "opus");
   assert.equal(over.roles.po.effort, "high");
+});
+
+test("roles.po decomposition bounds are positive integers", () => {
+  for (const setting of ["maxChildren: 0", "maxChildren: 1.5", "acceptanceCriteriaHint: 0"]) {
+    assert.throws(
+      () => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { ${setting} } }`),
+      /greater than 0|integer/,
+    );
+  }
 });
 
 test("roles.po.backlogDigestMaxChars: accepts a bounded override and rejects values too small for explicit placeholders", () => {
@@ -931,6 +971,18 @@ test("roles.po.promptFile: a relative path resolves against the config file's di
     writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { promptFile: my-po.md } }\n");
     const cfg = loadConfig(cfgPath);
     assert.equal(cfg.roles.po.promptFile, join(dir, "my-po.md"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("roles.po.decomposePromptFile: a relative path resolves against the config file's directory", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+  try {
+    const cfgPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { po: { decomposePromptFile: po-decompose.md } }\n");
+    const cfg = loadConfig(cfgPath);
+    assert.equal(cfg.roles.po.decomposePromptFile, join(dir, "po-decompose.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

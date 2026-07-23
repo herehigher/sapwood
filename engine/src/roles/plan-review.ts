@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { extractAcceptanceCriteria, extractVerificationPlan } from "../forge/forge.js";
+import { extractAcceptanceCriteria, extractVerificationPlan, extractVerificationSection } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { PeripheralStub } from "../loop/round.js";
 import type { State } from "../state/state.js";
@@ -207,7 +207,7 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
   }
   if (decision === "approve") {
     const bodyToCheck = block.body ?? currentBody;
-    if (extractVerificationPlan(bodyToCheck) == null) {
+    if (extractVerificationPlan(bodyToCheck) == null || extractVerificationSection(bodyToCheck) == null) {
       return { ok: false, reason: "approve claim's issue body has no verification/acceptance plan section" };
     }
     // #283 (M10, E2, design #279 §5, D4): mandatory checkbox AC. `plan:approved` is the ONLY
@@ -250,7 +250,7 @@ export function validateDrafterOutput(text: string, expectedIssue: number): Draf
   if (block.body === undefined || block.body.trim() === "") {
     return { ok: false, reason: "drafted output requires a non-empty BODY block" };
   }
-  if (extractVerificationPlan(block.body) == null) {
+  if (extractVerificationPlan(block.body) == null || extractVerificationSection(block.body) == null) {
     return { ok: false, reason: "drafted body has no verification/acceptance plan section" };
   }
   // #283 (M10, E2, design #279 §5, D4): the drafter's deliverable is re-reviewed by a fresh
@@ -687,7 +687,7 @@ async function confirmOneIssue(
   // session. A miss skips the confirm session entirely — zero session cost — and seeds the
   // ORDINARY draft-cycle machinery directly with a deterministic, engine-authored brief, exactly
   // as if a full reviewer had just bounced with "draft_request".
-  if (extractVerificationPlan(currentBody) == null) {
+  if (extractVerificationPlan(currentBody) == null || extractVerificationSection(currentBody) == null) {
     await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
       decision: {
         decision: "draft_request",

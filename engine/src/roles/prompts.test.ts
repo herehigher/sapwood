@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
+import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultRetroPromptPath } from "../retro/retro.js";
 import { defaultArchitectPromptPath } from "./architect.js";
@@ -25,12 +26,13 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #321: intentional edits — sentinel examples are plain text, never markdown-fenced.
   "po.md": "d33d20062d903584608e0799e3d825cb7a0b1fea23c070a5c0271a82a7b8896e",
   "architect.md": "08ae9bd5a164533d3d6c96b6a3c98e48c0fa666d41cc85b73d2457358d17f3b2",
-  "plan-reviewer.md": "4a91f393dc61f01d5ab1be3c51504ec92720f8842188e38332c0849538f927f7",
+  "plan-reviewer.md": "138223d62a4137861b65ea07fec52cc938605c66b0234e5b3e5d51e6b2bbe41d",
   "plan-reviewer-confirm.md": "5502bd8c5c9196e51f0d45086ba256aa8ce8fd0eaf1249c57120fafe3e49aacf",
   "plan-drafter.md": "2daa2a1f1e4d57acde6a8efafdb806cdb525631cd241d8fa1bfb08dae5914d4c",
   "harvest.md": "59fb5fb1a8a3bebb2429c878c309caffe3105a3f9a32262268b7a14525026d4b",
   "retro.md": "d667893510d96a67e5e8041861daa2d6767e708acfeca2f98c498e09e6a21917",
   "po-pool.md": "a5f51726e886ecaca53dfc9773e7403b602e3cb555cfb972bee2f15e54204d09",
+  "po-decompose.md": "b5f5564e6839f59a00ed96cea063ff35a6fe27da3f1a5fb775b6e59b7295bb01",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
@@ -65,6 +67,10 @@ test("prompt snapshot: po-pool.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultPoolPromptPath())), SNAPSHOT_HASHES["po-pool.md"]);
 });
 
+test("prompt snapshot: po-decompose.md hash matches the pinned revision", () => {
+  assert.equal(sha256(readPrompt(defaultPoDecomposePromptPath())), SNAPSHOT_HASHES["po-decompose.md"]);
+});
+
 test("shipped role prompts (#321): sentinel examples are plain text with no adjacent markdown fences", () => {
   const prompts: ReadonlyArray<readonly [name: string, path: string, sentinelCount: number]> = [
     ["plan-reviewer.md", defaultPlanReviewerPromptPath(), 2],
@@ -72,6 +78,7 @@ test("shipped role prompts (#321): sentinel examples are plain text with no adja
     ["plan-drafter.md", defaultPlanDrafterPromptPath(), 1],
     ["po.md", defaultPoPromptPath(), 4],
     ["po-pool.md", defaultPoolPromptPath(), 1],
+    ["po-decompose.md", defaultPoDecomposePromptPath(), 2],
     ["architect.md", defaultArchitectPromptPath(), 2],
     ["harvest.md", defaultHarvestPromptPath(), 1],
   ];

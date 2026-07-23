@@ -169,6 +169,8 @@ reviewer:
 #   verifyNa: "sapwood:verify:n/a"
 #   planApproved: "sapwood:plan:approved"
 #   originAgent: sapwood:origin:agent
+#   split: sapwood:split       # human firing signal; the engine only reads it
+#   decomposed: sapwood:decomposed # engine fence on a retired tracking parent; human removal only
 #   roundPool: sapwood:round:pool
 #                              # #212: round-pool membership (applied by the aligning phase's
 #                              # selection pass, cleared by the engine at round close — see
@@ -199,6 +201,10 @@ reviewer:
 #       # round-pool selection (#212)
 #     # promptFile: prompts/my-po.md
 #     #                   Unset = the engine's shipped prompts/po.md (align + triage).
+#     # decomposePromptFile: prompts/my-po-decompose.md
+#     #                   Unset = the engine's shipped prompts/po-decompose.md.
+#     maxChildren: 8      # hard cap per human split firing, including coarse remainders
+#     acceptanceCriteriaHint: 5 # prompt-only per-child AC-count heuristic; not a dispatch gate
 #     # poolPromptFile: prompts/my-po-pool.md
 #     #                   #212: a SEPARATE prompt for the round-pool SELECTION session (choosing
 #     #                   which of this round's top candidate issues actually belong in the

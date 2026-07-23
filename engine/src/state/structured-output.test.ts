@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   BODY_BLOCK_END,
   BODY_BLOCK_START,
+  DecomposeOutputMetadataSchema,
   isUnresolvedContext,
   parseStructuredBlock,
   RESULT_BLOCK_END,
@@ -23,6 +24,35 @@ test("UnresolvedContextSchema: a reason-bearing unresolvedContext validates as a
 
 test("UnresolvedContextSchema: an empty reason fails (an abstention with no reason is as unaccountable as an ungrounded decision)", () => {
   assert.equal(UnresolvedContextSchema.safeParse({ unresolvedContext: { reason: "" } }).success, false);
+  assert.equal(UnresolvedContextSchema.safeParse({ unresolvedContext: { reason: "   " } }).success, false);
+});
+
+test("DecomposeOutputMetadataSchema trims accepted title/coverage/evidence strings and rejects forge-invalid title length", () => {
+  const parsed = DecomposeOutputMetadataSchema.parse({
+    outcome: "decomposed",
+    children: [
+      {
+        title: "  child  ",
+        kind: "remainder",
+        blockedBy: [],
+        unresolvedContext: { reason: "  missing fact  " },
+        informationNeeded: "  owner name  ",
+      },
+    ],
+    coverage: { mappings: [{ parentIntent: "  intent  ", children: [0] }], remainders: [0] },
+  });
+  assert.equal(parsed.children[0]!.title, "child");
+  assert.equal(parsed.children[0]!.unresolvedContext!.reason, "missing fact");
+  assert.equal(parsed.children[0]!.informationNeeded, "owner name");
+  assert.equal(parsed.coverage.mappings[0]!.parentIntent, "intent");
+  assert.equal(
+    DecomposeOutputMetadataSchema.safeParse({
+      outcome: "decomposed",
+      children: [{ title: "x".repeat(257), kind: "ready", blockedBy: [] }],
+      coverage: { mappings: [{ parentIntent: "intent", children: [0] }], remainders: [] },
+    }).success,
+    false,
+  );
 });
 
 test("UnresolvedContextSchema: strict — an extra field (e.g. a smuggled decision) fails", () => {
