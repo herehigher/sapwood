@@ -69,11 +69,20 @@ class FakeForge implements IForge {
   }
   async setBoardStatus(): Promise<void> {}
   subIssues = new Map<number, Array<{ number: number; title: string; state: "OPEN" | "CLOSED" }>>();
+  subIssueParents = new Map<number, number>();
   async addSubIssue(parent: number, child: number): Promise<void> {
+    const existingParent = this.subIssueParents.get(child);
+    if (existingParent !== undefined && existingParent !== parent) {
+      throw new Error(
+        `Failed to add sub-issue #${child} to parent #${parent}. ` +
+          "Issue may not contain duplicate sub-issues and Sub issue may only have one parent",
+      );
+    }
     const children = this.subIssues.get(parent) ?? [];
     if (!children.some((candidate) => candidate.number === child)) {
       children.push({ number: child, title: `Issue #${child}`, state: "OPEN" });
       this.subIssues.set(parent, children);
+      this.subIssueParents.set(child, parent);
     }
   }
   async getSubIssues(parent: number) {
@@ -177,15 +186,19 @@ class FakeForge implements IForge {
   }
 }
 
-test("#311 FakeForge stores native sub-issues idempotently by parent", async () => {
+test("#311 FakeForge reconciles same-parent duplicate adds but rejects a second parent with GitHub's fingerprint", async () => {
   const forge = new FakeForge();
   await forge.addSubIssue(11, 12);
-  await forge.addSubIssue(11, 12);
+  await assert.doesNotReject(forge.addSubIssue(11, 12));
   await forge.addSubIssue(11, 13);
   assert.deepEqual(await forge.getSubIssues(11), [
     { number: 12, title: "Issue #12", state: "OPEN" },
     { number: 13, title: "Issue #13", state: "OPEN" },
   ]);
+  await assert.rejects(
+    forge.addSubIssue(99, 12),
+    /Failed to add sub-issue.*Issue may not contain duplicate sub-issues.*Sub issue may only have one parent/,
+  );
   assert.deepEqual(await forge.getSubIssues(99), []);
 });
 

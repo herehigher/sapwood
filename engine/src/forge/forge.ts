@@ -1079,7 +1079,7 @@ export class GithubForge implements IForge {
     ]);
     const ids = parseSubIssueIds(idsOut, parent, child);
     try {
-      await this.gh([
+      const mutationOut = await this.gh([
         "api",
         "graphql",
         "-f",
@@ -1089,6 +1089,7 @@ export class GithubForge implements IForge {
         "-f",
         `childId=${ids.childId}`,
       ]);
+      parseAddSubIssueResponse(mutationOut, ids.parentId, ids.childId);
     } catch (error) {
       if (!isSubIssueAlreadyParentedError(error)) throw error;
       const children = await this.getSubIssues(parent);
@@ -1098,19 +1099,37 @@ export class GithubForge implements IForge {
   }
 
   async getSubIssues(parent: number): Promise<SubIssue[]> {
-    const out = await this.gh([
-      "api",
-      "graphql",
-      "-f",
-      `query=${SUB_ISSUES_QUERY}`,
-      "-f",
-      `owner=${this.cfg.board.owner}`,
-      "-f",
-      `repo=${this.repo()}`,
-      "-F",
-      `parent=${parent}`,
-    ]);
-    return parseSubIssues(out, parent);
+    const children: SubIssue[] = [];
+    const seenCursors = new Set<string>();
+    let after: string | null = null;
+    while (true) {
+      const out = await this.gh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${SUB_ISSUES_QUERY}`,
+        "-f",
+        `owner=${this.cfg.board.owner}`,
+        "-f",
+        `repo=${this.repo()}`,
+        "-F",
+        `parent=${parent}`,
+        // First page: -F passes the literal `null` as JSON null. Later pages: the cursor is
+        // an opaque string -> -f (raw), so a number-/bool-looking cursor isn't mistyped by -F.
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ]);
+      const page = parseSubIssuesPage(out, parent);
+      children.push(...page.children);
+      if (!page.hasNextPage) return children;
+      if (!page.endCursor) {
+        throw new Error(`getSubIssues: response for parent #${parent} has a next page but no end cursor`);
+      }
+      if (seenCursors.has(page.endCursor)) {
+        throw new Error(`getSubIssues: response for parent #${parent} repeated pagination cursor ${page.endCursor}`);
+      }
+      seenCursors.add(page.endCursor);
+      after = page.endCursor;
+    }
   }
 
   async searchIssues(query: string, cap: number): Promise<IssueSearchResult[]> {
@@ -1434,12 +1453,13 @@ mutation($parentId: ID!, $childId: ID!) {
   }
 }`;
 
-/** #311: one parent's bounded native sub-issue connection. */
+/** #311: one page of a parent's native sub-issue connection. */
 export const SUB_ISSUES_QUERY = `
-query($owner: String!, $repo: String!, $parent: Int!) {
+query($owner: String!, $repo: String!, $parent: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     issue(number: $parent) {
-      subIssues(first: 100) {
+      subIssues(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
         nodes { number title state }
       }
     }
@@ -1461,24 +1481,63 @@ export function parseSubIssueIds(json: string, parent: number, child: number): {
   return { parentId, childId };
 }
 
-export function parseSubIssues(json: string, parent: number): SubIssue[] {
+function parseAddSubIssueResponse(json: string, parentId: string, childId: string): void {
+  let data: {
+    data?: { addSubIssue?: { issue?: { id?: unknown } | null; subIssue?: { id?: unknown } | null } | null };
+  };
+  try {
+    data = JSON.parse(json) as typeof data;
+  } catch (error) {
+    throw new Error("addSubIssue: mutation returned malformed JSON", { cause: error });
+  }
+  const returnedParentId = data.data?.addSubIssue?.issue?.id;
+  const returnedChildId = data.data?.addSubIssue?.subIssue?.id;
+  if (returnedParentId !== parentId || returnedChildId !== childId) {
+    throw new Error(
+      `addSubIssue: mutation response did not confirm the requested relation (expected parent ${parentId} and child ${childId})`,
+    );
+  }
+}
+
+function parseSubIssuesPage(json: string, parent: number): { children: SubIssue[]; hasNextPage: boolean; endCursor: string | null } {
   const data = JSON.parse(json) as {
     data?: {
       repository?: {
-        issue?: { subIssues?: { nodes?: { number?: unknown; title?: unknown; state?: unknown }[] | null } | null } | null;
+        issue?: {
+          subIssues?: {
+            nodes?: { number?: unknown; title?: unknown; state?: unknown }[] | null;
+            pageInfo?: { hasNextPage?: unknown; endCursor?: unknown } | null;
+          } | null;
+        } | null;
       } | null;
     };
   };
   const issue = data.data?.repository?.issue;
   if (!issue) throw new Error(`getSubIssues: parent issue #${parent} was not found in the configured repository`);
-  const nodes = issue.subIssues?.nodes;
+  const connection = issue.subIssues;
+  const nodes = connection?.nodes;
   if (!Array.isArray(nodes)) throw new Error(`getSubIssues: malformed subIssues response for parent #${parent}`);
-  return nodes.map((node) => {
+  const children = nodes.map<SubIssue>((node) => {
     if (typeof node.number !== "number" || typeof node.title !== "string" || (node.state !== "OPEN" && node.state !== "CLOSED")) {
       throw new Error(`getSubIssues: malformed child in response for parent #${parent}`);
     }
     return { number: node.number, title: node.title, state: node.state };
   });
+  const pageInfo = connection?.pageInfo;
+  const hasNextPage = pageInfo?.hasNextPage;
+  const endCursor = pageInfo?.endCursor;
+  if (pageInfo == null || typeof hasNextPage !== "boolean" || (endCursor !== null && typeof endCursor !== "string")) {
+    throw new Error(`getSubIssues: malformed pageInfo response for parent #${parent}`);
+  }
+  return {
+    children,
+    hasNextPage: typeof hasNextPage === "boolean" ? hasNextPage : false,
+    endCursor: typeof endCursor === "string" ? endCursor : null,
+  };
+}
+
+export function parseSubIssues(json: string, parent: number): SubIssue[] {
+  return parseSubIssuesPage(json, parent).children;
 }
 
 function isSubIssueAlreadyParentedError(error: unknown): boolean {
