@@ -517,7 +517,8 @@ private clone may be reused only after its origin identity matches the requested
 allowlisted local config is re-asserted clean both before and after an env-isolated, hooks-disabled
 fetch with an explicit mirror refspec; any failed assertion or operation discards it and falls back
 to a fresh clone. Every git operation ignores global/system config, and hooks are disabled
-command-locally on both fetch and checkout. Dangerous exec-capable clone-local keys fail closed;
+command-locally on both fetch and checkout. Dangerous exec-capable clone-local keys fail closed,
+and the remote section is restricted to an explicit `url`/`fetch` subkey allowlist;
 checkout also disables replacement objects and materializes symlinks as plain text; the resulting
 tree contains no `.git` directory, the requested OID is verified after checkout, and a hashed
 manifest of the resulting tree is recorded. Instruction files remain

@@ -22,14 +22,14 @@
 //      simply never in a worker's reach to begin with.
 //   2. `assertLocalConfigClean` — after cloning, the private clone's `git config --local --list`
 //      is asserted to contain ONLY the sections a plain `git clone --bare` is known to write
-//      (core/remote/branch), with a small denylist on top for specific dangerous subkeys (hooks
-//      path, filter/proxy/alternates helpers, ssh/askpass overrides, upload/receive-pack
-//      overrides) even within those allowed sections. Anything outside the allowlisted sections
+//      (core/remote/branch), with a small core denylist for specific dangerous subkeys (hooks
+//      path, filter/proxy/alternates helpers, ssh/askpass overrides) and a strict remote subkey
+//      allowlist. Anything outside the allowlisted sections
 //      fails closed — this is the "local config asserted EMPTY at clone time" AC, read as "empty
-//      of anything beyond the clone's own inert bookkeeping." The in-section denylist is a FIXED,
+//      of anything beyond the clone's own inert bookkeeping." The core denylist is a FIXED,
 //      known-dangerous-keys list, not a claim of exhaustively covering every future git config
-//      key that could ever gain exec/network capability — the section-level allowlist is the
-//      primary defense; this narrows further within it.
+//      key that could ever gain exec/network capability. The remote section instead permits only
+//      clone bookkeeping known to be inert; every unrecognized remote subkey fails closed.
 //
 // Instruction files (`CLAUDE.md`, `.claude/**`) are INCLUDED in the materialized tree — D7
 // reverses the earlier exclusion. There is no filtering/exclusion logic anywhere in this module
@@ -164,12 +164,13 @@ const DENIED_CORE_SUBKEYS = new Set([
   "gitproxy",
 ]);
 
-/** Within the allowed `remote` section, `uploadpack`/`receivepack` override the PROGRAM git
- *  invokes on the remote side of a fetch/push (`remote.<name>.uploadpack`/`.receivepack`) --
- *  exec-capable the same way the `core.*` denylist above is, just scoped to a different section
- *  (code review round 2, P3). Checked against the LAST dot-separated segment of the key, same as
- *  the `core.*` check, since a remote key's shape is `remote.<name>.<subkey>`. */
-const DENIED_REMOTE_SUBKEYS = new Set(["uploadpack", "receivepack"]);
+/** Within the allowed `remote` section, permit only the inert bookkeeping subkeys written by a
+ *  plain clone: the source URL and fetch refspec. Empirically, this repo's installed git writes
+ *  only `remote.origin.url` for a fresh local `git clone --bare`; `fetch` is the standard benign
+ *  data-only refspec key. Everything else -- including uploadpack/receivepack/vcs/proxy/pushurl
+ *  -- is unrecognized and fails closed. Checked against the LAST dot-separated segment since a
+ *  remote key's shape is `remote.<name>.<subkey>`. */
+const ALLOWED_REMOTE_SUBKEYS = new Set(["url", "fetch"]);
 
 /** #284 AC: "local-config emptiness asserted at clone time." Reads `git config --local --list`
  *  from the private clone and fails closed on anything outside the allowlist above. Called after
@@ -207,9 +208,10 @@ export async function assertLocalConfigClean(cloneDir: string): Promise<void> {
         `private clone local config at "${cloneDir}" sets dangerous "core.${lastSegment}" -- refusing to use this clone`,
       );
     }
-    if (section === "remote" && DENIED_REMOTE_SUBKEYS.has(lastSegment)) {
+    if (section === "remote" && !ALLOWED_REMOTE_SUBKEYS.has(lastSegment)) {
       throw new MaterializerError(
-        `private clone local config at "${cloneDir}" sets dangerous "remote.*.${lastSegment}" (key "${key}") -- refusing to use this clone`,
+        `private clone local config at "${cloneDir}" has unrecognized remote subkey "${lastSegment}" (key "${key}") -- ` +
+          "expected only remote.*.url/fetch; refusing to use this clone",
       );
     }
   }

@@ -251,6 +251,33 @@ test("assertLocalConfigClean: fails closed on remote.origin.uploadpack even thou
   }
 });
 
+test("assertLocalConfigClean: rejects unrecognized remote.origin vcs/proxy/pushurl subkeys", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+
+    for (const subkey of ["vcs", "proxy", "pushurl"]) {
+      git(cloneDir, ["config", "--local", `remote.origin.${subkey}`, "evil"]);
+      await assert.rejects(
+        () => assertLocalConfigClean(cloneDir),
+        new RegExp(`unrecognized remote subkey "${subkey}"`),
+        `remote.origin.${subkey} must fail closed`,
+      );
+      git(cloneDir, ["config", "--local", "--unset", `remote.origin.${subkey}`]);
+    }
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
 test("createPrivateClone: matching clone is reused and fetch-updated", async () => {
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
   const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
@@ -361,6 +388,30 @@ test("createPrivateClone: config-clean is re-asserted on every reuse and asserti
     await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
     await assert.doesNotReject(() => assertLocalConfigClean(cloneDir), "the fallback re-clone left no poisoned config");
     assert.equal(existsSync(join(cloneDir, "must-be-removed")), false, "assertion failure discarded the reused clone");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("createPrivateClone: remote.origin.vcs in a reused clone falls back to a fresh clean clone", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    git(cloneDir, ["config", "--local", "remote.origin.vcs", "evil"]);
+    writeFileSync(join(cloneDir, "must-be-removed"), "dirty clone marker\n");
+
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+
+    assert.equal(existsSync(join(cloneDir, "must-be-removed")), false, "dirty clone was discarded for a fresh clone");
+    await assert.doesNotReject(() => assertLocalConfigClean(cloneDir), "the fallback re-clone has clean local config");
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(cloneRoot, { recursive: true, force: true });
