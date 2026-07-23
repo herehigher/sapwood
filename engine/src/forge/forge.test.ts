@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
 import { defaultIssueTemplatePath } from "../loop/init.js";
 import {
+  ADD_SUB_ISSUE_MUTATION,
   assemblePRReviewData,
   countUnresolvedThreads,
   ENGINE_COMMENT_MARKER,
@@ -33,13 +34,98 @@ import {
   parseReviewThreadCommentsTail,
   parseReviewThreadsPage,
   parseSearchIssues,
+  parseSubIssues,
   projectQuery,
+  SUB_ISSUE_IDS_QUERY,
+  SUB_ISSUES_QUERY,
   selectPlanReviewCandidates,
   selectPlanTriageCandidates,
   selectPoolEligibleIssues,
   selectReadyIssues,
   selectUnplacedIssues,
 } from "./forge.js";
+
+const SUB_ISSUE_IDS_JSON = JSON.stringify({
+  data: { repository: { parent: { id: "I_parent" }, child: { id: "I_child" } } },
+});
+const SUB_ISSUES_JSON = JSON.stringify({
+  data: {
+    repository: {
+      issue: { subIssues: { nodes: [{ number: 12, title: "Child", state: "OPEN" }] } },
+    },
+  },
+});
+const DUPLICATE_SUB_ISSUE_ERROR =
+  "GraphQL: Failed to add sub-issue #12 to parent #11. Issue may not contain duplicate sub-issues and Sub issue may only have one parent";
+
+test("#311 GithubForge.addSubIssue resolves same-repo node ids then emits the exact node-id mutation argv", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return seen.length === 1 ? SUB_ISSUE_IDS_JSON : JSON.stringify({ data: { addSubIssue: {} } });
+  };
+
+  await forge.addSubIssue(11, 12);
+
+  assert.deepEqual(seen, [
+    ["api", "graphql", "-f", `query=${SUB_ISSUE_IDS_QUERY}`, "-f", "owner=o", "-f", "repo=r", "-F", "parent=11", "-F", "child=12"],
+    ["api", "graphql", "-f", `query=${ADD_SUB_ISSUE_MUTATION}`, "-f", "parentId=I_parent", "-f", "childId=I_child"],
+  ]);
+  assert.doesNotMatch(ADD_SUB_ISSUE_MUTATION, /subIssueUrl|replaceParent/);
+  assert.match(SUB_ISSUE_IDS_QUERY, /repository\(owner: \$owner, name: \$repo\)/);
+});
+
+test("#311 GithubForge.getSubIssues emits the exact repo-scoped read argv and parses display fields", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    return SUB_ISSUES_JSON;
+  };
+
+  assert.deepEqual(await forge.getSubIssues(11), [{ number: 12, title: "Child", state: "OPEN" }]);
+  assert.deepEqual(seen, [["api", "graphql", "-f", `query=${SUB_ISSUES_QUERY}`, "-f", "owner=o", "-f", "repo=r", "-F", "parent=11"]]);
+});
+
+test("#311 GithubForge.addSubIssue reconciles GitHub's duplicate VALIDATION error when the intended child is attached", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  let call = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    call++;
+    if (call === 1) return SUB_ISSUE_IDS_JSON;
+    if (call === 2) throw new Error(DUPLICATE_SUB_ISSUE_ERROR);
+    return SUB_ISSUES_JSON;
+  };
+
+  await assert.doesNotReject(forge.addSubIssue(11, 12));
+  assert.equal(call, 3);
+});
+
+test("#311 GithubForge.addSubIssue preserves the duplicate VALIDATION error when the child is attached elsewhere", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  let call = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    call++;
+    if (call === 1) return SUB_ISSUE_IDS_JSON;
+    if (call === 2) throw new Error(DUPLICATE_SUB_ISSUE_ERROR);
+    return JSON.stringify({ data: { repository: { issue: { subIssues: { nodes: [] } } } } });
+  };
+
+  await assert.rejects(forge.addSubIssue(11, 12), new RegExp(DUPLICATE_SUB_ISSUE_ERROR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(call, 3);
+});
+
+test("#311 parseSubIssues fails closed on a malformed child", () => {
+  assert.throws(
+    () => parseSubIssues(JSON.stringify({ data: { repository: { issue: { subIssues: { nodes: [{ number: 12 }] } } } } }), 11),
+    /malformed child/,
+  );
+});
 
 test("#292 parsePRChangedFiles: flattens paginated results and preserves rename old/new paths", () => {
   assert.deepEqual(

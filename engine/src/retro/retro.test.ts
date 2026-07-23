@@ -649,6 +649,12 @@ class MinimalForge implements IForge {
   }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
+  async addSubIssue(): Promise<void> {
+    throw new Error("MinimalForge.addSubIssue is not used by this test");
+  }
+  async getSubIssues() {
+    return [];
+  }
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
   async addPRLabel(): Promise<void> {}

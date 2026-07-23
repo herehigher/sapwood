@@ -68,6 +68,17 @@ class FakeForge implements IForge {
     this.ready = this.ready.filter((i) => i.number !== issue);
   }
   async setBoardStatus(): Promise<void> {}
+  subIssues = new Map<number, Array<{ number: number; title: string; state: "OPEN" | "CLOSED" }>>();
+  async addSubIssue(parent: number, child: number): Promise<void> {
+    const children = this.subIssues.get(parent) ?? [];
+    if (!children.some((candidate) => candidate.number === child)) {
+      children.push({ number: child, title: `Issue #${child}`, state: "OPEN" });
+      this.subIssues.set(parent, children);
+    }
+  }
+  async getSubIssues(parent: number) {
+    return this.subIssues.get(parent) ?? [];
+  }
   addLabelCalls: Array<[number, string]> = [];
   async addLabel(n: number, l: string): Promise<void> {
     this.addLabelCalls.push([n, l]);
@@ -165,6 +176,18 @@ class FakeForge implements IForge {
     return this.planTriageCandidates;
   }
 }
+
+test("#311 FakeForge stores native sub-issues idempotently by parent", async () => {
+  const forge = new FakeForge();
+  await forge.addSubIssue(11, 12);
+  await forge.addSubIssue(11, 12);
+  await forge.addSubIssue(11, 13);
+  assert.deepEqual(await forge.getSubIssues(11), [
+    { number: 12, title: "Issue #12", state: "OPEN" },
+    { number: 13, title: "Issue #13", state: "OPEN" },
+  ]);
+  assert.deepEqual(await forge.getSubIssues(99), []);
+});
 
 class FakeSupervisor implements Supervisor {
   probes: Record<string, LaneProbe> = {};

@@ -334,6 +334,12 @@ export class RoundScopedForge implements IForge {
   getIssueRelations(issue: number, cap: number) {
     return this.inner.getIssueRelations(issue, cap);
   }
+  addSubIssue(parent: number, child: number) {
+    return this.inner.addSubIssue(parent, child);
+  }
+  getSubIssues(parent: number) {
+    return this.inner.getSubIssues(parent);
+  }
   searchIssues(query: string, cap: number) {
     return this.inner.searchIssues(query, cap);
   }
@@ -491,6 +497,12 @@ export class PoolScopedForge implements IForge {
   }
   getIssueRelations(issue: number, cap: number) {
     return this.inner.getIssueRelations(issue, cap);
+  }
+  addSubIssue(parent: number, child: number) {
+    return this.inner.addSubIssue(parent, child);
+  }
+  getSubIssues(parent: number) {
+    return this.inner.getSubIssues(parent);
   }
   searchIssues(query: string, cap: number) {
     return this.inner.searchIssues(query, cap);

@@ -331,6 +331,15 @@ export interface IForge {
    *  `timelineItems(itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT])` return the expected
    *  shape). */
   getIssueRelations(issue: number, cap: number): Promise<IssueRelations>;
+  /** #311: attach `child` beneath `parent` using GitHub's native sub-issue relation. Both
+   *  arguments are issue numbers in this forge's configured repository: GithubForge resolves
+   *  both through one repository-scoped query and mutates by node id, never by `subIssueUrl`,
+   *  so a cross-repository child is unrepresentable at this seam. Crash-rerun safe: GitHub's
+   *  duplicate-add VALIDATION error is reconciled with getSubIssues(parent), succeeding only
+   *  when the intended relation already exists. This method never reparents. */
+  addSubIssue(parent: number, child: number): Promise<void>;
+  /** #311: native children of `parent`, read from this forge's configured repository. */
+  getSubIssues(parent: number): Promise<SubIssue[]>;
   /** #234: `gh search issues` scoped to this forge's own repo (never caller-controlled — the
    *  query is opaque GitHub search syntax, this forge always adds `--repo owner/repo` itself) —
    *  the proxy's `search_issues` tool. Capped server-side (`--limit cap`). */
@@ -427,6 +436,14 @@ export interface IssueRelations {
   linkedPRs: RelatedRef[];
   crossReferences: RelatedRef[];
   truncated: boolean;
+}
+
+/** #311: one native GitHub sub-issue. The seam deliberately exposes only same-repository
+ *  issue numbers and display fields; opaque node ids never escape GithubForge. */
+export interface SubIssue {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED";
 }
 
 /** #234: one `gh search issues` match — see IForge.searchIssues' doc. */
@@ -1045,6 +1062,57 @@ export class GithubForge implements IForge {
     return parseIssueRelations(out, cap, `${this.cfg.board.owner}/${this.repo()}`);
   }
 
+  async addSubIssue(parent: number, child: number): Promise<void> {
+    const idsOut = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${SUB_ISSUE_IDS_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `parent=${parent}`,
+      "-F",
+      `child=${child}`,
+    ]);
+    const ids = parseSubIssueIds(idsOut, parent, child);
+    try {
+      await this.gh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${ADD_SUB_ISSUE_MUTATION}`,
+        "-f",
+        `parentId=${ids.parentId}`,
+        "-f",
+        `childId=${ids.childId}`,
+      ]);
+    } catch (error) {
+      if (!isSubIssueAlreadyParentedError(error)) throw error;
+      const children = await this.getSubIssues(parent);
+      if (children.some((candidate) => candidate.number === child)) return;
+      throw error;
+    }
+  }
+
+  async getSubIssues(parent: number): Promise<SubIssue[]> {
+    const out = await this.gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${SUB_ISSUES_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `parent=${parent}`,
+    ]);
+    return parseSubIssues(out, parent);
+  }
+
   async searchIssues(query: string, cap: number): Promise<IssueSearchResult[]> {
     // #234 F1 (PR #252 review, P1, reproduced live): `query` is CALLER-CONTROLLED (a role
     // session's tool argument) and `gh`'s pflag parser treats ANY `--`-prefixed argv token as a
@@ -1346,6 +1414,82 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
     value: { singleSelectOptionId: $optionId }
   }) { projectV2Item { id } }
 }`;
+
+/** #311: resolve both issue-number inputs inside exactly this configured repository. */
+export const SUB_ISSUE_IDS_QUERY = `
+query($owner: String!, $repo: String!, $parent: Int!, $child: Int!) {
+  repository(owner: $owner, name: $repo) {
+    parent: issue(number: $parent) { id }
+    child: issue(number: $child) { id }
+  }
+}`;
+
+/** #311: node-id-only mutation. Intentionally omits both `subIssueUrl` (cross-repo escape)
+ *  and `replaceParent` (this seam never reparents). */
+export const ADD_SUB_ISSUE_MUTATION = `
+mutation($parentId: ID!, $childId: ID!) {
+  addSubIssue(input: {issueId: $parentId, subIssueId: $childId}) {
+    issue { id }
+    subIssue { id }
+  }
+}`;
+
+/** #311: one parent's bounded native sub-issue connection. */
+export const SUB_ISSUES_QUERY = `
+query($owner: String!, $repo: String!, $parent: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $parent) {
+      subIssues(first: 100) {
+        nodes { number title state }
+      }
+    }
+  }
+}`;
+
+export function parseSubIssueIds(json: string, parent: number, child: number): { parentId: string; childId: string } {
+  const data = JSON.parse(json) as {
+    data?: { repository?: { parent?: { id?: unknown } | null; child?: { id?: unknown } | null } | null };
+  };
+  const parentId = data.data?.repository?.parent?.id;
+  const childId = data.data?.repository?.child?.id;
+  if (typeof parentId !== "string" || parentId.length === 0) {
+    throw new Error(`addSubIssue: parent issue #${parent} was not found in the configured repository`);
+  }
+  if (typeof childId !== "string" || childId.length === 0) {
+    throw new Error(`addSubIssue: child issue #${child} was not found in the configured repository`);
+  }
+  return { parentId, childId };
+}
+
+export function parseSubIssues(json: string, parent: number): SubIssue[] {
+  const data = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        issue?: { subIssues?: { nodes?: { number?: unknown; title?: unknown; state?: unknown }[] | null } | null } | null;
+      } | null;
+    };
+  };
+  const issue = data.data?.repository?.issue;
+  if (!issue) throw new Error(`getSubIssues: parent issue #${parent} was not found in the configured repository`);
+  const nodes = issue.subIssues?.nodes;
+  if (!Array.isArray(nodes)) throw new Error(`getSubIssues: malformed subIssues response for parent #${parent}`);
+  return nodes.map((node) => {
+    if (typeof node.number !== "number" || typeof node.title !== "string" || (node.state !== "OPEN" && node.state !== "CLOSED")) {
+      throw new Error(`getSubIssues: malformed child in response for parent #${parent}`);
+    }
+    return { number: node.number, title: node.title, state: node.state };
+  });
+}
+
+function isSubIssueAlreadyParentedError(error: unknown): boolean {
+  const value = error as { message?: unknown; stderr?: unknown };
+  const text = [value?.message, value?.stderr].filter((part): part is string => typeof part === "string").join("\n");
+  return (
+    text.includes("Failed to add sub-issue") &&
+    text.includes("Issue may not contain duplicate sub-issues") &&
+    text.includes("Sub issue may only have one parent")
+  );
+}
 
 /** Parse the project query response. Owner-kind agnostic: reads data.user ?? data.organization. */
 export function parseProject(json: string, statusField: string): ParsedProject {

@@ -53,6 +53,12 @@ class FakeForge implements IForge {
   }
   async claimIssue(): Promise<void> {}
   async setBoardStatus(): Promise<void> {}
+  async addSubIssue(): Promise<void> {
+    throw new Error("FakeForge.addSubIssue is not used by this test");
+  }
+  async getSubIssues() {
+    return [];
+  }
   addLabelCalls: Array<[number, string]> = [];
   async addLabel(n: number, l: string): Promise<void> {
     this.addLabelCalls.push([n, l]);
