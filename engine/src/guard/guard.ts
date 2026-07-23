@@ -279,8 +279,23 @@ function checkOpaque(tokens: string[], fragment: string): string | null {
 // ── category C: gh overreach (producer ≠ merger) ─────────────────────────────
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const SENSITIVE_PATH_RE = /\/pulls\/[^/]+\/merge|\/releases/i;
+const ISSUE_GOVERNANCE_PATH_RE =
+  /(?:^|\/)repos\/[^/]+\/[^/]+\/(?:issues\/[^/]+\/(?:labels|sub_issues?)(?:[/?#]|$)|labels(?:[/?#]|$)|issues\/\d+\/?(?:[?#].*)?$|milestones(?:\/\d+)?(?:[/?#]|$))/i;
 const ALLOWED_DELETE_PATH_RE = /\/git\/refs/i;
 const FIELD_FLAGS = new Set(["-f", "--field", "-F", "--raw-field"]);
+const ISSUE_EDIT_GOVERNANCE_FLAGS = new Set([
+  "--add-label",
+  "--remove-label",
+  "--milestone",
+  "-m",
+  "--remove-milestone",
+  "--add-project",
+  "--remove-project",
+  "--add-sub-issue",
+  "--remove-sub-issue",
+  "--remove-parent",
+  "--parent",
+]);
 // gh api flags that consume the NEXT token as their value — must be skipped so the value
 // isn't mistaken for the endpoint (e.g. `gh api --hostname HOST graphql ...`).
 const GH_API_VALUE_FLAGS = new Set([
@@ -297,9 +312,9 @@ const GH_API_VALUE_FLAGS = new Set([
   "--preview",
 ]);
 
-function ghSkipGlobalFlags(tokens: string[]): string[] {
+function ghSkipGlobalFlags(tokens: string[], startIndex = 1): string[] {
   const withValue = new Set(["-R", "--repo"]);
-  let i = 1;
+  let i = startIndex;
   while (i < tokens.length) {
     const tok = tokens[i]!;
     if (!tok.startsWith("-")) break;
@@ -314,6 +329,10 @@ function ghSkipGlobalFlags(tokens: string[]): string[] {
     i += 1;
   }
   return tokens.slice(i);
+}
+
+function decodePercentPairsLenient(value: string): string {
+  return value.replace(/%[0-9A-Fa-f]{2}/g, (pair) => String.fromCharCode(Number.parseInt(pair.slice(1), 16)));
 }
 
 function checkGhApi(tokens: string[], fragment: string): string | null {
@@ -366,7 +385,20 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
   }
   if (method === null && (hasField || hasInput)) method = "POST";
 
-  if (pathToken && pathToken.toLowerCase().replace(/^\/+|\/+$/g, "") === "graphql") {
+  let canonicalPathToken = pathToken;
+  try {
+    // GitHub decodes REST paths once. Match that behavior exactly: never loop over
+    // a decoded result (so `%2525` remains `%25`, rather than becoming `%`).
+    canonicalPathToken = pathToken === null ? null : decodeURIComponent(pathToken);
+  } catch {
+    return "BLOCK [gh] api REST endpoint has malformed percent-encoding — path is opaque (fail-closed)";
+  }
+  // The fragment is a secondary scan over mixed paths and field values. Decode valid
+  // percent pairs once, but preserve stray/partial `%` literally so benign values such
+  // as `90% done` cannot make an otherwise-parseable endpoint opaque.
+  const canonicalFragment = decodePercentPairsLenient(fragment);
+
+  if (canonicalPathToken && canonicalPathToken.toLowerCase().replace(/^\/+|\/+$/g, "") === "graphql") {
     const fieldValues: string[] = [];
     let j = 2;
     while (j < tokens.length) {
@@ -401,13 +433,19 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
   }
 
   if (!method || !MUTATING_METHODS.has(method)) return null;
-  if (method === "DELETE" && pathToken && ALLOWED_DELETE_PATH_RE.test(pathToken)) return null;
-  if (pathToken && SENSITIVE_PATH_RE.test(pathToken)) {
-    return pathToken.toLowerCase().includes("/releases")
-      ? `BLOCK [gh] api mutates releases: ${pathToken}`
-      : `BLOCK [gh] api mutates PR merge: ${pathToken}`;
+  if (canonicalPathToken && ISSUE_GOVERNANCE_PATH_RE.test(canonicalPathToken)) {
+    return `BLOCK [gh] api mutates issue labels/milestone/state: ${canonicalPathToken}`;
   }
-  for (const m of fragment.matchAll(new RegExp(SENSITIVE_PATH_RE, "gi"))) {
+  for (const _ of canonicalFragment.matchAll(new RegExp(ISSUE_GOVERNANCE_PATH_RE, "gi"))) {
+    return "BLOCK [gh] api mutates issue labels/milestone/state";
+  }
+  if (method === "DELETE" && canonicalPathToken && ALLOWED_DELETE_PATH_RE.test(canonicalPathToken)) return null;
+  if (canonicalPathToken && SENSITIVE_PATH_RE.test(canonicalPathToken)) {
+    return canonicalPathToken.toLowerCase().includes("/releases")
+      ? `BLOCK [gh] api mutates releases: ${canonicalPathToken}`
+      : `BLOCK [gh] api mutates PR merge: ${canonicalPathToken}`;
+  }
+  for (const m of canonicalFragment.matchAll(new RegExp(SENSITIVE_PATH_RE, "gi"))) {
     return m[0]!.toLowerCase().includes("/releases") ? "BLOCK [gh] api mutates releases" : "BLOCK [gh] api mutates PR merge";
   }
   return null;
@@ -418,16 +456,32 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
   const remaining = ghSkipGlobalFlags(tokens);
   if (remaining.length === 0) return null;
   const sub1 = remaining[0]!.toLowerCase();
-  if (sub1 === "pr" && remaining.length >= 2) {
-    const sub2 = remaining[1]!.toLowerCase();
+  const subcommand = ghSkipGlobalFlags(remaining);
+  if (sub1 === "pr" && subcommand.length >= 1) {
+    const sub2 = subcommand[0]!.toLowerCase();
     if (sub2 === "merge") return "BLOCK [gh] pr merge — producer must not merge";
     if (sub2 === "ready") return "BLOCK [gh] pr ready — producer must not promote its own PR";
     // producer ≠ reviewer: a worker must not approve / request-changes (gate② is a fresh
     // non-author review). A plain `gh pr review --comment` is fine.
-    if (sub2 === "review" && remaining.some((t) => t === "--approve" || t === "-a" || t === "--request-changes" || t === "-r")) {
+    if (sub2 === "review" && subcommand.some((t) => t === "--approve" || t === "-a" || t === "--request-changes" || t === "-r")) {
       return "BLOCK [gh] pr review --approve/--request-changes — producer must not review (producer≠reviewer)";
     }
   }
+  if (sub1 === "issue" && subcommand[0]?.toLowerCase() === "edit") {
+    if (
+      subcommand
+        .slice(1)
+        .some((t) =>
+          [...ISSUE_EDIT_GOVERNANCE_FLAGS].some(
+            (flag) => t === flag || t.startsWith(`${flag}=`) || (flag.length === 2 && t.startsWith(flag) && t.length > flag.length),
+          ),
+        )
+    ) {
+      return "BLOCK [gh] issue edit label/milestone/board/relation mutation — producer must not change dispatch state";
+    }
+  }
+  if (sub1 === "label") return "BLOCK [gh] label — producer must not mutate repository labels";
+  if (sub1 === "project") return "BLOCK [gh] project — producer must not mutate project-board state";
   if (sub1 === "release") return "BLOCK [gh] release — producer must not publish releases";
   if (sub1 === "api") return checkGhApi([tokens[0]!, ...remaining], fragment);
   return null;
