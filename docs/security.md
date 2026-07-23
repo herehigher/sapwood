@@ -28,6 +28,12 @@ is enforced structurally, not by asking the model nicely:
   `gh pr review --approve`, `gh pr ready`, `gh release`, `gh label`, `gh project`,
   governance-changing `gh issue edit` flags, and the mutating `gh api`/GraphQL
   equivalents. Plain issue title/body edits and issue/PR comments remain allowed.
+  Residual allow surface: assignees, `--title`/`--body` (`-b`/`-F`), and native
+  `--add-blocked-by`/`--remove-blocked-by`/`--add-blocking`/`--remove-blocking`
+  relations remain allowed because no sapwood gate reads those relations (dispatch
+  ordering uses `blocked-by:#N` labels, already covered by `--add-label`/`--remove-label`);
+  `gh issue close`/`reopen`/`transfer`/`delete` also remain allowed outside the #290
+  adjudicated scope, pending reviewer adjudication.
   Opaque constructs a worker could hide anything inside —
   `eval`, `sh -c`, an interpreter's `-e`/`-c`, process substitution — are blocked
   outright, fail-closed, rather than inspected.

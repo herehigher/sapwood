@@ -283,6 +283,18 @@ const ISSUE_GOVERNANCE_PATH_RE =
   /(?:^|\/)repos\/[^/]+\/[^/]+\/(?:issues\/[^/]+\/labels(?:[/?#]|$)|labels(?:[/?#]|$)|issues\/\d+\/?(?:[?#].*)?$)/i;
 const ALLOWED_DELETE_PATH_RE = /\/git\/refs/i;
 const FIELD_FLAGS = new Set(["-f", "--field", "-F", "--raw-field"]);
+const ISSUE_EDIT_GOVERNANCE_FLAGS = new Set([
+  "--add-label",
+  "--remove-label",
+  "--milestone",
+  "-m",
+  "--remove-milestone",
+  "--add-project",
+  "--remove-project",
+  "--add-sub-issue",
+  "--remove-sub-issue",
+  "--parent",
+]);
 // gh api flags that consume the NEXT token as their value — must be skipped so the value
 // isn't mistaken for the endpoint (e.g. `gh api --hostname HOST graphql ...`).
 const GH_API_VALUE_FLAGS = new Set([
@@ -437,9 +449,16 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
     }
   }
   if (sub1 === "issue" && remaining[1]?.toLowerCase() === "edit") {
-    const governanceFlags = new Set(["--add-label", "--remove-label", "--milestone"]);
-    if (remaining.slice(2).some((t) => governanceFlags.has(t) || [...governanceFlags].some((flag) => t.startsWith(`${flag}=`)))) {
-      return "BLOCK [gh] issue edit label/milestone mutation — producer must not change dispatch state";
+    if (
+      remaining
+        .slice(2)
+        .some((t) =>
+          [...ISSUE_EDIT_GOVERNANCE_FLAGS].some(
+            (flag) => t === flag || t.startsWith(`${flag}=`) || (flag.length === 2 && t.startsWith(flag) && t.length > flag.length),
+          ),
+        )
+    ) {
+      return "BLOCK [gh] issue edit label/milestone/board/relation mutation — producer must not change dispatch state";
     }
   }
   if (sub1 === "label") return "BLOCK [gh] label — producer must not mutate repository labels";
