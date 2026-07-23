@@ -50,6 +50,7 @@ import {
   shellSingleQuote,
   spawnClaudeSession,
   WORKER_ALLOWED_TOOLS_NO_GH,
+  WORKER_DISALLOWED_TOOLS,
   WorkerSupervisor,
   workerCredentialFreeEnv,
 } from "./worker.js";
@@ -3662,6 +3663,15 @@ test("WORKER_ALLOWED_TOOLS_NO_GH: byte-identical to WORKER_ALLOWED_TOOLS minus B
   assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Bash\(git \*\)/);
   assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Read/);
   assert.match(WORKER_ALLOWED_TOOLS_NO_GH, /Write/);
+});
+
+// #350: pin the FULL deny-list string so an accidental future edit (e.g. dropping a pattern
+// while adding another) fails loudly. The permission layer is intentionally broader than
+// guard.ts's argv-layer block: it denies the whole `gh pr review`/`gh release` verbs, while
+// the guard only blocks the `--approve`/`--request-changes` argv shapes — out of scope for
+// this constant.
+test("WORKER_DISALLOWED_TOOLS: exact deny-list value — merge/ready (pre-existing) plus review/release (#350)", () => {
+  assert.equal(WORKER_DISALLOWED_TOOLS, "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*)");
 });
 
 // #244 (Codex sol-high PR #260 review, P2): fail-closed policy — credentialFree + a failed mint

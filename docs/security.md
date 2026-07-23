@@ -150,6 +150,13 @@ The asymmetry is compensated, but not erased, by several independent controls:
   The same guard protects
   human-merge-only files and engine control sentinels from recognized write vectors and confines
   guarded read-tool paths to the session worktree. Malformed guarded input fails closed.
+  Since #350, `engine/src/roles/worker.ts`'s `WORKER_DISALLOWED_TOOLS` also denies `gh pr
+  review*` and `gh release*` at the CLI permission layer (alongside the pre-existing `gh pr
+  merge*`/`gh pr ready*`). This is intentionally broader than the guard's argv block, not a
+  duplicate of it: the permission layer denies the entire `gh pr review` and `gh release`
+  verbs — including `gh pr review --comment` — while the guard's argv block only stops
+  `--approve`/`--request-changes`. The producer's actual comment channels remain `gh pr
+  comment` and `gh issue comment`, both left open by both layers.
 - `engine/src/roles/worker.ts` does not add the engine `data/` directory as a Claude tool
   root (there is no `--add-dir data`), so the tool layer does not offer a path into it.
   This is not Bash containment: worker Bash can reach `../../data`, exactly the residual

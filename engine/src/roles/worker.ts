@@ -816,7 +816,11 @@ export const EMPTY_MCP_CONFIG_JSON = JSON.stringify({ mcpServers: {} });
  *  string to compose with, rather than re-typing it. Byte-identical to claudeArgs' own prior
  *  inline defaults — zero behavior change for every caller that doesn't reference these. */
 export const WORKER_ALLOWED_TOOLS = "Read,Edit,Write,Bash(git *),Bash(gh *),Bash(npm *),Bash(node *),Bash(npx *)";
-export const WORKER_DISALLOWED_TOOLS = "Bash(gh pr merge*),Bash(gh pr ready*)";
+/** #350: defense-in-depth on top of the guard's argv-layer block (guard.ts) — neither `gh pr
+ *  review` nor `gh release` is needed by any stock worker workflow, so denying them here too
+ *  costs nothing while narrowing the CLI-permission surface. The guard stays the primary,
+ *  wrapper-bypass-resistant boundary; this is the permission layer, out of scope for guard.ts. */
+export const WORKER_DISALLOWED_TOOLS = "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*)";
 /** #244 (Codex sol-high PR #260 review, P1): the credential-free worker leg's own `--allowedTools`
  *  base — WORKER_ALLOWED_TOOLS with `Bash(gh *)` dropped. Once `workerCredentialFreeEnv` severs
  *  `gh`'s on-disk/env credential reach, the grant itself should stop offering `gh` at all — a
