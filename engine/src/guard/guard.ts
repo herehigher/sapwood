@@ -280,7 +280,7 @@ function checkOpaque(tokens: string[], fragment: string): string | null {
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const SENSITIVE_PATH_RE = /\/pulls\/[^/]+\/merge|\/releases/i;
 const ISSUE_GOVERNANCE_PATH_RE =
-  /(?:^|\/)repos\/[^/]+\/[^/]+\/(?:issues\/[^/]+\/labels(?:[/?#]|$)|labels(?:[/?#]|$)|issues\/\d+\/?(?:[?#].*)?$)/i;
+  /(?:^|\/)repos\/[^/]+\/[^/]+\/(?:issues\/[^/]+\/(?:labels|sub_issues?)(?:[/?#]|$)|labels(?:[/?#]|$)|issues\/\d+\/?(?:[?#].*)?$|milestones(?:\/\d+)?(?:[/?#]|$))/i;
 const ALLOWED_DELETE_PATH_RE = /\/git\/refs/i;
 const FIELD_FLAGS = new Set(["-f", "--field", "-F", "--raw-field"]);
 const ISSUE_EDIT_GOVERNANCE_FLAGS = new Set([
@@ -293,6 +293,7 @@ const ISSUE_EDIT_GOVERNANCE_FLAGS = new Set([
   "--remove-project",
   "--add-sub-issue",
   "--remove-sub-issue",
+  "--remove-parent",
   "--parent",
 ]);
 // gh api flags that consume the NEXT token as their value — must be skipped so the value
@@ -311,9 +312,9 @@ const GH_API_VALUE_FLAGS = new Set([
   "--preview",
 ]);
 
-function ghSkipGlobalFlags(tokens: string[]): string[] {
+function ghSkipGlobalFlags(tokens: string[], startIndex = 1): string[] {
   const withValue = new Set(["-R", "--repo"]);
-  let i = 1;
+  let i = startIndex;
   while (i < tokens.length) {
     const tok = tokens[i]!;
     if (!tok.startsWith("-")) break;
@@ -438,20 +439,21 @@ function checkCategoryC(tokens: string[], fragment: string): string | null {
   const remaining = ghSkipGlobalFlags(tokens);
   if (remaining.length === 0) return null;
   const sub1 = remaining[0]!.toLowerCase();
-  if (sub1 === "pr" && remaining.length >= 2) {
-    const sub2 = remaining[1]!.toLowerCase();
+  const subcommand = ghSkipGlobalFlags(remaining);
+  if (sub1 === "pr" && subcommand.length >= 1) {
+    const sub2 = subcommand[0]!.toLowerCase();
     if (sub2 === "merge") return "BLOCK [gh] pr merge — producer must not merge";
     if (sub2 === "ready") return "BLOCK [gh] pr ready — producer must not promote its own PR";
     // producer ≠ reviewer: a worker must not approve / request-changes (gate② is a fresh
     // non-author review). A plain `gh pr review --comment` is fine.
-    if (sub2 === "review" && remaining.some((t) => t === "--approve" || t === "-a" || t === "--request-changes" || t === "-r")) {
+    if (sub2 === "review" && subcommand.some((t) => t === "--approve" || t === "-a" || t === "--request-changes" || t === "-r")) {
       return "BLOCK [gh] pr review --approve/--request-changes — producer must not review (producer≠reviewer)";
     }
   }
-  if (sub1 === "issue" && remaining[1]?.toLowerCase() === "edit") {
+  if (sub1 === "issue" && subcommand[0]?.toLowerCase() === "edit") {
     if (
-      remaining
-        .slice(2)
+      subcommand
+        .slice(1)
         .some((t) =>
           [...ISSUE_EDIT_GOVERNANCE_FLAGS].some(
             (flag) => t === flag || t.startsWith(`${flag}=`) || (flag.length === 2 && t.startsWith(flag) && t.length > flag.length),
