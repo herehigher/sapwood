@@ -251,25 +251,28 @@ export function buildCloneInvocation(sourceRepoDir: string, cloneDir: string, ba
   };
 }
 
-/** Reuse keeps the same config/environment isolation as the fresh-clone path and names the
- *  source explicitly instead of trusting a mutable fetch refspec from local config. */
+/** Reuse keeps the same config/environment isolation as the fresh-clone path, disables hooks
+ *  command-locally, and names both the source and a full mirror refspec explicitly instead of
+ *  trusting mutable local config. */
 export function buildFetchInvocation(cloneDir: string, baseEnv: NodeJS.ProcessEnv = process.env): GitInvocation {
   return {
-    args: ["-C", cloneDir, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
+    args: ["-C", cloneDir, "-c", "core.hooksPath=/dev/null", "fetch", "--prune", "origin", "+refs/*:refs/*"],
     env: gitIsolationEnv(baseEnv),
   };
 }
 
 /** Pure builder, unit-pinned (#284 AC). Exact shape design #279 §3 specifies: `-C <clone>
  *  --work-tree=<tmpdir> checkout <H> -- .` under `GIT_CONFIG_GLOBAL=/dev/null
- *  GIT_CONFIG_SYSTEM=/dev/null`, `--no-replace-objects`, `-c core.symlinks=false`. All three
- *  flags are load-bearing and independently tested (dropping any one fails a pinned test AND,
+ *  GIT_CONFIG_SYSTEM=/dev/null`, `--no-replace-objects`, `-c core.symlinks=false`, and
+ *  `-c core.hooksPath=/dev/null`. All four controls are load-bearing and independently tested
+ *  (dropping any one fails a pinned test AND,
  *  for `--no-replace-objects`/`core.symlinks=false`, a behavioral fixture test): dropping
  *  `--no-replace-objects` would let a `refs/replace/*` substitution silently swap in different
  *  content for the SAME oid; dropping `core.symlinks=false` would let a tracked symlink
  *  materialize as a real OS symlink (a read-containment escape hatch for anything walking the
- *  tree later); dropping the env isolation would let an ambient global/system git config inject
- *  hooks/filters this checkout would otherwise never look at. */
+ *  tree later); dropping the hooks override would let an attacker-controlled reused clone run
+ *  `post-checkout`; dropping the env isolation would let an ambient global/system git config
+ *  inject hooks/filters this checkout would otherwise never look at. */
 export function buildCheckoutInvocation(
   cloneDir: string,
   treeDir: string,
@@ -277,7 +280,21 @@ export function buildCheckoutInvocation(
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): GitInvocation {
   return {
-    args: ["-C", cloneDir, "--work-tree", treeDir, "--no-replace-objects", "-c", "core.symlinks=false", "checkout", oid, "--", "."],
+    args: [
+      "-C",
+      cloneDir,
+      "--work-tree",
+      treeDir,
+      "--no-replace-objects",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "core.symlinks=false",
+      "checkout",
+      oid,
+      "--",
+      ".",
+    ],
     env: gitIsolationEnv(baseEnv),
   };
 }

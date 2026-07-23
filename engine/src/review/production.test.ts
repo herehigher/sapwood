@@ -51,7 +51,7 @@ test("#314 review-tree sweep retains a NULL-outcome WAL head even when it is old
   }
 });
 
-test("#314 decisive-outcome production hook deletes only that WAL head's review trees", () => {
+test("#314 decisive-outcome production hook retains same-head trees until every lane is decisive", () => {
   const root = mkdtempSync(join(tmpdir(), "sapwood-review-trees-"));
   const state = new State(":memory:");
   const head = "a".repeat(40);
@@ -60,8 +60,10 @@ test("#314 decisive-outcome production hook deletes only that WAL head's review 
     mkdirSync(join(root, `${head}-one`));
     mkdirSync(join(root, `${head}-two`));
     mkdirSync(join(root, `${other}-keep`));
-    state.upsertWorker({ name: "lane", issue: 1, session_id: "s", state: "driving", started_at: "t", ended_at: null, pr: 2 });
-    state.recordEngineReviewWal("lane", { runId: "run", head, base: other, diffHash: "d", attemptStart: "t" });
+    state.upsertWorker({ name: "lane-a", issue: 1, session_id: "s-a", state: "driving", started_at: "t", ended_at: null, pr: 2 });
+    state.upsertWorker({ name: "lane-b", issue: 2, session_id: "s-b", state: "driving", started_at: "t", ended_at: null, pr: 3 });
+    state.recordEngineReviewWal("lane-a", { runId: "run-a", head, base: other, diffHash: "d-a", attemptStart: "t" });
+    state.recordEngineReviewWal("lane-b", { runId: "run-b", head, base: other, diffHash: "d-b", attemptStart: "t" });
     const cfg = ConfigSchema.parse({
       board: { owner: "o", repo: "r", projectNumber: 1 },
       worker: { model: "sonnet" },
@@ -74,8 +76,10 @@ test("#314 decisive-outcome production hook deletes only that WAL head's review 
       { run: async () => assert.fail("not called") },
       { reviewTreeRoot: root },
     );
-    production.driveDepsForLane(state.getWorker("lane")!, 2).recordWalDecisiveOutcome("run", "rejected");
+    production.driveDepsForLane(state.getWorker("lane-a")!, 2).recordWalDecisiveOutcome("run-a", "rejected");
+    assert.deepEqual(readdirSync(root).sort(), [`${head}-one`, `${head}-two`, `${other}-keep`].sort());
 
+    production.driveDepsForLane(state.getWorker("lane-b")!, 3).recordWalDecisiveOutcome("run-b", "approved");
     assert.deepEqual(readdirSync(root), [`${other}-keep`]);
   } finally {
     state.close();

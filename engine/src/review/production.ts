@@ -188,7 +188,8 @@ export function makeProductionEngineAgent(
         state.recordEngineReviewWalDecisiveOutcome(worker.name, runId, outcome);
         try {
           const wal = state.getEngineReviewWal(worker.name);
-          if (wal?.runId === runId && wal.decisiveOutcome === outcome) deleteReviewTreesForHead(treeRoot, wal.head, log);
+          if (wal?.runId === runId && wal.decisiveOutcome === outcome && !state.getLiveEngineReviewHeads().includes(wal.head))
+            deleteReviewTreesForHead(treeRoot, wal.head, log);
         } catch (err) {
           gcWarning(log, `resolve decisive WAL head for worker ${worker.name}`, err);
         }
