@@ -111,10 +111,11 @@ sapwood/
   CI/merge status) and 19 encode GitHub semantics: ProjectV2 lanes/field mutations,
   the review-thread and raw-check models, `gh search` syntax, issue relations, native
   sub-issues, and GraphQL node-ID operations. `GithubForge` still provides a useful
-  isolation seam—all engine forge calls cross it—but GitLab/Gitea would be a semantic
-  port, not an endpoint swap. Do not regroup or abstract the interface while there is
-  exactly one implementation; revisit the boundary when a second forge is actually
-  scheduled. Config still removes 0day's repository-specific hard-coding
+  isolation seam for runtime orchestration and loop forge operations; init-time auth
+  checks and provisioning use the `gh`/`ghText` helper directly. GitLab/Gitea would be
+  a semantic port, not an endpoint swap. Do not regroup or abstract the interface while
+  there is exactly one implementation; revisit the boundary when a second forge is
+  actually scheduled. Config still removes 0day's repository-specific hard-coding
   (`PROJECT_NUMBER`, owner kind, literal board lane names, trusted-reviewer login).
 - **SQLite (WAL) state.** Replaces 0day's non-atomic `jq` read-modify-write with no
   locking (`loop_conductor.sh:738-762`). Conductor stays single-writer-serial;
