@@ -3666,8 +3666,10 @@ test("WORKER_ALLOWED_TOOLS_NO_GH: byte-identical to WORKER_ALLOWED_TOOLS minus B
 });
 
 // #350: pin the FULL deny-list string so an accidental future edit (e.g. dropping a pattern
-// while adding another) fails loudly. Permission-layer defense-in-depth on top of guard.ts's
-// argv-layer block of the same four command shapes — out of scope for this constant.
+// while adding another) fails loudly. The permission layer is intentionally broader than
+// guard.ts's argv-layer block: it denies the whole `gh pr review`/`gh release` verbs, while
+// the guard only blocks the `--approve`/`--request-changes` argv shapes — out of scope for
+// this constant.
 test("WORKER_DISALLOWED_TOOLS: exact deny-list value — merge/ready (pre-existing) plus review/release (#350)", () => {
   assert.equal(WORKER_DISALLOWED_TOOLS, "Bash(gh pr merge*),Bash(gh pr ready*),Bash(gh pr review*),Bash(gh release*)");
 });
