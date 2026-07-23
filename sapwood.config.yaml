@@ -76,6 +76,11 @@ worker:
   #                   per model alias; your file REPLACES it entirely, no merging). Missing/
   #                   malformed file = startup error, never a silent fallback.
   heartbeatStaleSecs: 180 # heartbeat older than this => worker considered dead
+  # egressSuspectCommands: [curl, wget, nc, ncat, netcat, socat, ssh, scp, sftp, rsync, ftp, telnet]
+  #                   Monitor-only lexical tripwire over completed worker Bash calls. Matches
+  #                   executable position and records an event; never blocks. git, gh, and
+  #                   package managers are deliberately absent: they are loop-owned or
+  #                   governed flows, not useful default signals. See docs/security.md.
   # promptFile: prompts/my-worker.md
   #                   #74: override the worker prompt with your own template file. Relative
   #                   paths resolve against THIS config file's directory. Supported {{vars}}:

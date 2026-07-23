@@ -143,11 +143,13 @@ export {
   claudeArgs,
   defaultPromptPath,
   discoverClaudeBin,
+  type EgressSuspect,
   guardSettings,
   loadWorkerPromptTemplate,
   parseCostUsd,
   parseModelUsage,
   renderPromptTemplate,
+  scanEgressSuspects,
   type WorkerDeps,
   WorkerSupervisor,
 } from "./roles/worker.js";

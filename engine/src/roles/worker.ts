@@ -87,6 +87,173 @@ export function parseCostUsdOrNull(jsonl: string): number | null {
   return cost;
 }
 
+/** #304: one lexically suspicious Bash executable observed in a completed worker leg's
+ *  stream-json transcript. `snippet` is evidence, not a command to replay, and is capped so a
+ *  single tool call cannot inflate the events ledger without bound. */
+export interface EgressSuspect {
+  executable: string;
+  snippet: string;
+}
+
+const EGRESS_SNIPPET_MAX_CHARS = 200;
+const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Splits only on ordinary shell command separators outside quotes. This deliberately does not
+ *  interpret substitutions, redirects, heredocs, or data flowing through a pipe: the tripwire
+ *  is a small lexical signal, not a shell parser or containment mechanism. */
+function shellFragments(command: string): string[] {
+  const fragments: string[] = [];
+  let start = 0;
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === ";" || ch === "&" || ch === "|" || ch === "\n") {
+      const fragment = command.slice(start, i).trim();
+      if (fragment) fragments.push(fragment);
+      start = i + 1;
+    }
+  }
+  const tail = command.slice(start).trim();
+  if (tail) fragments.push(tail);
+  return fragments;
+}
+
+/** Small word lexer for executable position only. Quotes group a word and are removed; no shell
+ *  expansion is attempted. Malformed trailing quotes simply leave the accumulated word usable. */
+function shellWords(fragment: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  const flush = (): void => {
+    if (word.length > 0) words.push(word);
+    word = "";
+  };
+  for (const ch of fragment) {
+    if (escaped) {
+      word += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (/\s/.test(ch)) {
+      flush();
+    } else {
+      word += ch;
+    }
+  }
+  if (escaped) word += "\\";
+  flush();
+  return words;
+}
+
+function fragmentExecutable(fragment: string): string | null {
+  const words = shellWords(fragment);
+  let i = 0;
+  const skipAssignments = (): void => {
+    while (i < words.length && SHELL_ASSIGNMENT.test(words[i]!)) i++;
+  };
+  skipAssignments();
+  while (i < words.length && (words[i] === "env" || words[i] === "sudo")) {
+    const prefix = words[i++]!;
+    while (i < words.length) {
+      const word = words[i]!;
+      if (SHELL_ASSIGNMENT.test(word)) {
+        i++;
+        continue;
+      }
+      if (word === "--") {
+        i++;
+        break;
+      }
+      if (!word.startsWith("-")) break;
+      i++;
+      if (
+        (prefix === "env" && (word === "-u" || word === "--unset")) ||
+        (prefix === "sudo" && ["-C", "-D", "-g", "-h", "-p", "-R", "-T", "-t", "-u"].includes(word))
+      ) {
+        i++; // option argument; an absent one simply reaches end and produces no hit
+      }
+    }
+    skipAssignments();
+  }
+  const executable = words[i];
+  if (!executable) return null;
+  return executable.split("/").filter(Boolean).at(-1) ?? null;
+}
+
+/** #304: scans Bash `tool_use` blocks from stream-json and returns deduplicated lexical hits.
+ *  Only executable position is considered (after leading assignments plus ordinary `env`/
+ *  `sudo` prefixes); suspect names appearing in arguments are intentionally ignored. Same
+ *  tolerance as the sibling parsers: malformed/partial lines and malformed blocks are skipped
+ *  silently. This is a post-hoc tripwire, never a deny decision. */
+export function scanEgressSuspects(jsonl: string, suspectCommands: readonly string[]): EgressSuspect[] {
+  const suspects = new Set(suspectCommands);
+  const hits: EgressSuspect[] = [];
+  const seen = new Set<string>();
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // partial/garbage line — ignore (stream may be mid-write)
+    }
+    if (obj.type !== "assistant") continue;
+    const message = obj.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+      const b = block as Record<string, unknown>;
+      if (b.type !== "tool_use" || b.name !== "Bash") continue;
+      const input = b.input;
+      if (!input || typeof input !== "object" || Array.isArray(input)) continue;
+      const command = (input as Record<string, unknown>).command;
+      if (typeof command !== "string") continue;
+      for (const fragment of shellFragments(command)) {
+        const executable = fragmentExecutable(fragment);
+        if (!executable || !suspects.has(executable)) continue;
+        const snippet = fragment.slice(0, EGRESS_SNIPPET_MAX_CHARS);
+        const key = `${executable}\0${snippet}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        hits.push({ executable, snippet });
+      }
+    }
+  }
+  return hits;
+}
+
 /** #110 PR0: the READ side for a role session's structured final-message output. Extracts the
  *  `result` string from the LAST `type:"result"` line of a stream-json transcript — the same
  *  line parseCostUsd/parseModelUsage already treat as authoritative. Mirrors parseCostUsd's
@@ -1067,6 +1234,20 @@ export class WorkerSupervisor implements Supervisor {
     }
   }
 
+  /** #304: best-effort monitor-only recording at the lane-end jsonl read already used for
+   *  terminal accounting. Scanner failures and event-write failures share one allow-direction
+   *  catch: the terminal sentinel has already landed, and observability can never alter it. */
+  private recordEgressSuspects(worker: string, issue: number, legJsonl: string): void {
+    if (!this.deps.state) return;
+    try {
+      for (const suspect of scanEgressSuspects(legJsonl, this.deps.cfg.worker.egressSuspectCommands)) {
+        this.deps.state.appendEvent("egress-suspect", { worker, issue, ...suspect });
+      }
+    } catch (e) {
+      this.log(`[sapwood:worker] lane ${worker}: egress tripwire failed (non-fatal): ${String(e)}`);
+    }
+  }
+
   /** #244 (Codex sol-high PR #260 review round 2, P2): best-effort removal of a lane's
    *  credentialFree GH_CONFIG_DIR scratch directory — undefined `dir` (the common, non-
    *  credentialFree case) is a no-op. Called from BOTH cleanup paths a lane can exit through
@@ -1921,6 +2102,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
     };
     this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: exitCode });
+    this.recordEgressSuspects(name, issue, legJsonl);
     // A resumed child may terminate before the conductor persists DB=running. Keep its durable
     // adoption marker through that window; probe removes it after the terminal outcome is read
     // on the next ordinary running-lane reclaim tick.
