@@ -11,12 +11,20 @@ import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../r
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import type { State } from "../state/state.js";
 import { type DecomposeOutputMetadata, DecomposeOutputMetadataSchema, parseStructuredBlock } from "../state/structured-output.js";
-import { postConcerns } from "./dissent.js";
-import { createIssueProposals, type IssueCreationProposal, normalizeProposalTitle, proposalMarker } from "./issue-creation.js";
+import { type Concern, ConcernSchema, postConcerns } from "./dissent.js";
+import {
+  createIssueProposals,
+  type IssueCreationProposal,
+  type IssueCreationResult,
+  normalizeProposalTitle,
+  ProposalTitleCollisionError,
+  proposalMarker,
+} from "./issue-creation.js";
 import { removeRoundPoolLabel } from "./round.js";
 
 const ISSUE_BODY_START = "<<<ISSUE>>>";
 const ISSUE_BODY_END = "<<<END_ISSUE>>>";
+const RESERVED_PROPOSAL_MARKER_NAMESPACE = "<!-- sapwood:proposal:";
 
 export function defaultPoDecomposePromptPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -49,6 +57,10 @@ function decomposeFiringMarker(issue: Issue): string {
     .digest("hex")
     .slice(0, 16);
   return `<!-- sapwood:decompose-firing:${issue.number}:${whyWhatSignature} -->`;
+}
+
+function decomposeConcernReason(reason: string, unresolvedContextReason: string, firingMarker: string): string {
+  return `PO decomposition concern (advisory only): ${reason}\n\nUnresolved context: ${unresolvedContextReason}\n\n${firingMarker}`;
 }
 
 function splitBodies(raw: string, count: number): string[] | null {
@@ -114,6 +126,9 @@ export function validateDecomposeOutput(text: string, maxChildren: number): Deco
   for (let i = 0; i < metadata.children.length; i++) {
     const child = metadata.children[i]!;
     const body = bodies[i]!;
+    if (child.title.includes(RESERVED_PROPOSAL_MARKER_NAMESPACE) || body.includes(RESERVED_PROPOSAL_MARKER_NAMESPACE)) {
+      return { ok: false, reason: `child ${i} uses the reserved sapwood proposal-marker namespace` };
+    }
     const normalized = normalizeProposalTitle(child.title);
     if (titles.has(normalized)) return { ok: false, reason: `duplicate child title at index ${i}` };
     titles.add(normalized);
@@ -151,20 +166,84 @@ const PersistedChildSchema = z
   .object({
     proposalId: z.string().min(1),
     index: z.number().int().nonnegative(),
-    title: z.string().min(1),
+    title: z.string().trim().min(1).max(256),
     body: z.string().min(1),
     kind: z.enum(["ready", "remainder"]),
     blockedBy: z.array(z.number().int().nonnegative()),
   })
   .strict();
 
-const DecomposeSetSchema = z
+const PersistedCoverageSchema = z
   .object({
+    mappings: z
+      .array(
+        z
+          .object({
+            parentIntent: z.string().trim().min(1),
+            children: z.array(z.number().int().nonnegative()).min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+    remainders: z.array(z.number().int().nonnegative()),
+  })
+  .strict();
+
+const DecomposedSetSchema = z
+  .object({
+    // Optional only for recovery of a valid journal written by the immediately preceding
+    // #310 producer commit; all new writes include the explicit discriminator below.
+    outcome: z.literal("decomposed").optional(),
     round_id: z.number().int().positive(),
     scope: z.string().min(1),
     parent: z.number().int().positive(),
     proposals: z.array(PersistedChildSchema).min(1),
-    coverage: z.unknown(),
+    coverage: PersistedCoverageSchema,
+  })
+  .strict();
+
+const UnresolvedSetSchema = z
+  .object({
+    outcome: z.literal("unresolved"),
+    round_id: z.number().int().positive(),
+    scope: z.string().min(1),
+    parent: z.number().int().positive(),
+    firingMarker: z.string().min(1),
+    reason: z.string().trim().min(1),
+    unresolvedContextReason: z.string().trim().min(1),
+    proposals: z.tuple([]),
+    concerns: z.array(ConcernSchema).length(1),
+  })
+  .strict();
+
+const DecomposeSetSchema = z.union([DecomposedSetSchema, UnresolvedSetSchema]);
+const DecomposeCreatedSchema = z
+  .object({
+    round_id: z.number().int().positive(),
+    scope: z.string().min(1),
+    parent: z.number().int().positive(),
+    proposalId: z.string().min(1),
+    issue: z.number().int().positive(),
+    reconciled: z.boolean().optional(),
+  })
+  .strict();
+const DecomposeSkippedSchema = z
+  .object({
+    round_id: z.number().int().positive(),
+    scope: z.string().min(1),
+    parent: z.number().int().positive(),
+    proposalId: z.string().min(1),
+    title: z.string().min(1),
+    reason: z.string().min(1),
+    existingIssue: z.number().int().positive(),
+  })
+  .strict();
+const DecomposeCommentSchema = z
+  .object({
+    round_id: z.number().int().positive(),
+    scope: z.string().min(1),
+    parent: z.number().int().positive(),
+    proposalId: z.string().min(1),
   })
   .strict();
 
@@ -172,21 +251,48 @@ interface DecomposeJournal {
   roundId: number;
   parent: number;
   proposals: z.infer<typeof PersistedChildSchema>[];
-  coverage: unknown;
+  coverage: z.infer<typeof PersistedCoverageSchema>;
   terminalIds: Set<string>;
   created: Map<string, number>;
+  commentedIds: Set<string>;
+  collisionEscalated: boolean;
 }
 
-function latestJournal(state: State, parent: number): DecomposeJournal | null {
+interface DecomposeProgress {
+  journal: DecomposeJournal | null;
+  unresolved: Map<string, { roundId: number; concerns: Concern[] }>;
+}
+
+function decomposeProgress(state: State, parent: number): DecomposeProgress {
   const scope = decomposeScope(parent);
-  const events = state.eventsAfterId(0, ["proposal-set-persisted", "proposal-created", "proposal-skipped"]);
+  const events = state.eventsAfterId(0, ["proposal-set-persisted", "proposal-created", "proposal-skipped", "proposal-comment-posted"]);
   let journal: DecomposeJournal | null = null;
+  const unresolved = new Map<string, { roundId: number; concerns: Concern[] }>();
   for (const event of events) {
     const payload = event.payload as Record<string, unknown>;
-    if (payload.scope !== scope) continue;
+    if (payload.scope !== scope && payload.parent !== parent) continue;
     if (event.kind === "proposal-set-persisted") {
       const parsed = DecomposeSetSchema.safeParse(payload);
       if (!parsed.success) throw new Error(`malformed decomposition proposal set for parent #${parent}`);
+      if (parsed.data.parent !== parent || parsed.data.scope !== scope) {
+        throw new Error(`decomposition proposal set scope/parent mismatch for parent #${parent}`);
+      }
+      if (parsed.data.outcome === "unresolved") {
+        const concern = parsed.data.concerns[0]!;
+        if (concern.issue !== parent) throw new Error(`unresolved decomposition concern targets the wrong parent #${concern.issue}`);
+        if (!new RegExp(`^<!-- sapwood:decompose-firing:${parent}:[0-9a-f]{16} -->$`).test(parsed.data.firingMarker)) {
+          throw new Error(`invalid unresolved decomposition firing marker for parent #${parent}`);
+        }
+        if (concern.reason !== decomposeConcernReason(parsed.data.reason, parsed.data.unresolvedContextReason, parsed.data.firingMarker)) {
+          throw new Error(`unresolved decomposition concern evidence does not match its persisted decision for parent #${parent}`);
+        }
+        if (unresolved.has(parsed.data.firingMarker)) {
+          throw new Error(`multiple unresolved decomposition decisions for one firing of parent #${parent}`);
+        }
+        unresolved.set(parsed.data.firingMarker, { roundId: parsed.data.round_id, concerns: parsed.data.concerns });
+        continue;
+      }
+      if (journal !== null) throw new Error(`multiple decomposition proposal sets for parent #${parent}`);
       journal = {
         roundId: parsed.data.round_id,
         parent,
@@ -194,22 +300,100 @@ function latestJournal(state: State, parent: number): DecomposeJournal | null {
         coverage: parsed.data.coverage,
         terminalIds: new Set(),
         created: new Map(),
+        commentedIds: new Set(),
+        collisionEscalated: false,
       };
       continue;
     }
-    if (!journal) continue;
-    const proposalId = typeof payload.proposalId === "string" ? payload.proposalId : null;
-    if (!proposalId) continue;
-    journal.terminalIds.add(proposalId);
-    if (event.kind === "proposal-created" && typeof payload.issue === "number") journal.created.set(proposalId, payload.issue);
+    if (!journal) throw new Error(`decomposition terminal event exists without a proposal set for parent #${parent}`);
+    if (event.kind === "proposal-comment-posted") {
+      const parsed = DecomposeCommentSchema.safeParse(payload);
+      if (!parsed.success) throw new Error(`malformed decomposition proposal-comment-posted record for parent #${parent}`);
+      if (parsed.data.parent !== parent || parsed.data.scope !== scope || parsed.data.round_id !== journal.roundId) {
+        throw new Error(`decomposition proposal-comment-posted scope/parent/round mismatch for parent #${parent}`);
+      }
+      if (journal.commentedIds.has(parsed.data.proposalId)) {
+        throw new Error(`multiple proposal-comment-posted events for decomposition proposal ${parsed.data.proposalId}`);
+      }
+      journal.commentedIds.add(parsed.data.proposalId);
+      continue;
+    }
+    const parsed =
+      event.kind === "proposal-created" ? DecomposeCreatedSchema.safeParse(payload) : DecomposeSkippedSchema.safeParse(payload);
+    if (!parsed.success) throw new Error(`malformed decomposition ${event.kind} record for parent #${parent}`);
+    if (parsed.data.parent !== parent || parsed.data.scope !== scope || parsed.data.round_id !== journal.roundId) {
+      throw new Error(`decomposition ${event.kind} scope/parent/round mismatch for parent #${parent}`);
+    }
+    if (journal.terminalIds.has(parsed.data.proposalId)) {
+      throw new Error(`multiple terminal events for decomposition proposal ${parsed.data.proposalId}`);
+    }
+    journal.terminalIds.add(parsed.data.proposalId);
+    if (event.kind === "proposal-created") {
+      const created = parsed.data as z.infer<typeof DecomposeCreatedSchema>;
+      if ([...journal.created.values()].includes(created.issue)) {
+        throw new Error(`duplicate decomposition issue receipt for issue #${created.issue}`);
+      }
+      journal.created.set(created.proposalId, created.issue);
+    } else {
+      const skipped = parsed.data as z.infer<typeof DecomposeSkippedSchema>;
+      if (skipped.reason !== "normalized-title-collision-needs-human") {
+        throw new Error(`unsupported skipped decomposition proposal ${skipped.proposalId}`);
+      }
+      journal.collisionEscalated = true;
+    }
   }
-  return journal;
+  if (journal) {
+    const ids = new Set<string>();
+    const all = new Set(journal.proposals.map((_, index) => index));
+    const covered = new Set<number>();
+    const remainders = new Set(journal.coverage.remainders);
+    journal.proposals.forEach((proposal, index) => {
+      if (
+        proposal.index !== index ||
+        proposal.proposalId !== decomposeProposalId(journal!.roundId, parent, index, proposal.title) ||
+        ids.has(proposal.proposalId)
+      ) {
+        throw new Error(`invalid persisted decomposition proposal identity for parent #${parent} at index ${index}`);
+      }
+      ids.add(proposal.proposalId);
+      for (const blocker of proposal.blockedBy) {
+        if (!all.has(blocker) || blocker === index) {
+          throw new Error(`invalid persisted blockedBy index ${blocker} for parent #${parent} child ${index}`);
+        }
+      }
+      if (proposal.kind === "ready" && remainders.has(index)) {
+        throw new Error(`persisted ready child ${index} is listed as a remainder for parent #${parent}`);
+      }
+      if (proposal.kind === "remainder" && !remainders.has(index)) {
+        throw new Error(`persisted remainder child ${index} is missing from coverage for parent #${parent}`);
+      }
+    });
+    for (const mapping of journal.coverage.mappings) {
+      for (const child of mapping.children) {
+        if (!all.has(child)) throw new Error(`persisted coverage references out-of-range child ${child} for parent #${parent}`);
+        covered.add(child);
+      }
+    }
+    for (const remainder of journal.coverage.remainders) {
+      if (!all.has(remainder)) throw new Error(`persisted coverage references out-of-range remainder ${remainder} for parent #${parent}`);
+      covered.add(remainder);
+    }
+    for (const index of all) {
+      if (!covered.has(index)) throw new Error(`persisted coverage omits child ${index} for parent #${parent}`);
+    }
+    for (const terminal of journal.terminalIds) {
+      if (!ids.has(terminal)) throw new Error(`unknown terminal decomposition proposal ${terminal} for parent #${parent}`);
+    }
+    for (const commented of journal.commentedIds) {
+      if (!ids.has(commented)) throw new Error(`unknown commented decomposition proposal ${commented} for parent #${parent}`);
+    }
+  }
+  return { journal, unresolved };
 }
 
 function coverageComment(parent: number, journal: DecomposeJournal): string {
   const byIndex = new Map(journal.proposals.map((p) => [p.index, p]));
-  const coverage = journal.coverage as { mappings?: Array<{ parentIntent: string; children: number[] }>; remainders?: number[] };
-  const lines = (coverage.mappings ?? []).map(
+  const lines = journal.coverage.mappings.map(
     (mapping) =>
       `- ${mapping.parentIntent} → ${mapping.children
         .map((i) => {
@@ -219,7 +403,7 @@ function coverageComment(parent: number, journal: DecomposeJournal): string {
         })
         .join(", ")}`,
   );
-  const remainders = (coverage.remainders ?? []).map((i) => {
+  const remainders = journal.coverage.remainders.map((i) => {
     const child = byIndex.get(i);
     const number = child ? journal.created.get(child.proposalId) : undefined;
     return number === undefined ? `child ${i + 1}` : `#${number}`;
@@ -231,68 +415,105 @@ function coverageComment(parent: number, journal: DecomposeJournal): string {
   );
 }
 
-async function reconcileJournal(deps: DecomposeDeps, parent: Issue, journal: DecomposeJournal, openIssues: Issue[]): Promise<void> {
-  const commented = new Set(
-    deps.state
-      .eventsAfterId(0, ["proposal-comment-posted"])
-      .filter((event) => (event.payload as Record<string, unknown>).scope === decomposeScope(parent.number))
-      .map((event) => (event.payload as Record<string, unknown>).proposalId)
-      .filter((id): id is string => typeof id === "string"),
-  );
-  const results = await createIssueProposals({
-    forge: deps.forge,
-    proposals: journal.proposals.map((p): IssueCreationProposal => ({ id: p.proposalId, title: p.title, body: p.body })),
-    knownOpenIssues: [...openIssues],
-    terminalIds: journal.terminalIds,
-    createdIssues: journal.created,
-    markerFor: proposalMarker,
-    normalizeTitle: normalizeProposalTitle,
-    applyGovernance: async ({ proposal, issue }) => {
-      const child = journal.proposals.find((p) => p.proposalId === proposal.id)!;
-      await deps.forge.addLabel(issue, deps.cfg.labels.originAgent);
-      if (child.kind === "remainder") await deps.forge.addLabel(issue, deps.cfg.labels.needsHuman);
-      if (!commented.has(proposal.id)) {
-        await deps.forge.addIssueComment(
-          issue,
-          child.kind === "remainder"
-            ? `Created as a coarse remainder of #${parent.number}; ${deps.cfg.labels.needsHuman} keeps it on the planless backlog path.`
-            : `Created as a Ready-able child of #${parent.number}; a human still moves it to Ready.`,
-        );
-        try {
-          deps.state.appendEvent("proposal-comment-posted", {
-            round_id: journal.roundId,
-            scope: decomposeScope(parent.number),
-            proposalId: proposal.id,
-          });
-        } catch {
-          // Match align's accepted rare-duplicate tradeoff if this best-effort receipt alone
-          // fails after the comment has already landed.
-        }
-      }
-    },
-    onCreated: ({ proposal, issue, reconciled }) => {
-      deps.state.appendEvent("proposal-created", {
-        round_id: journal.roundId,
-        scope: decomposeScope(parent.number),
-        parent: parent.number,
-        proposalId: proposal.id,
-        issue,
-        ...(reconciled ? { reconciled: true } : {}),
-      });
-      journal.created.set(proposal.id, issue);
-    },
-    onSkipped: (proposal, collision) => {
-      deps.state.appendEvent("proposal-skipped", {
-        round_id: journal.roundId,
-        scope: decomposeScope(parent.number),
-        parent: parent.number,
-        proposalId: proposal.id,
-        title: proposal.title,
-        reason: "normalized-title-collision",
-        existingIssue: collision.number,
-      });
-    },
+function proposalGovernanceMarker(proposalId: string): string {
+  return `<!-- sapwood:decompose-governance:${proposalId} -->`;
+}
+
+async function escalateFencedCollision(
+  deps: DecomposeDeps,
+  parent: Issue,
+  journal: DecomposeJournal,
+  error: ProposalTitleCollisionError,
+): Promise<void> {
+  const marker = `<!-- sapwood:decompose-collision:${parent.number}:${journal.roundId}:${error.proposal.id} -->`;
+  if (!labelsInclude(parent.labels, deps.cfg.labels.needsHuman)) {
+    await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);
+  }
+  const comments = await deps.forge.getIssueComments(parent.number);
+  if (!comments.some((comment) => comment.body.includes(marker))) {
+    await deps.forge.addIssueComment(
+      parent.number,
+      `PO decomposition stopped after the parent fence because proposed child "${error.proposal.title}" ` +
+        `collides with existing open issue #${error.collision.number}. No colliding proposal was silently skipped; ` +
+        `human reconciliation is required.\n\n${marker}`,
+    );
+  }
+  deps.state.appendEvent("proposal-skipped", {
+    round_id: journal.roundId,
+    scope: decomposeScope(parent.number),
+    parent: parent.number,
+    proposalId: error.proposal.id,
+    title: error.proposal.title,
+    reason: "normalized-title-collision-needs-human",
+    existingIssue: error.collision.number,
   });
+  journal.terminalIds.add(error.proposal.id);
+  journal.collisionEscalated = true;
+}
+
+async function reconcileJournal(deps: DecomposeDeps, parent: Issue, journal: DecomposeJournal, openIssues: Issue[]): Promise<void> {
+  if (journal.collisionEscalated) return;
+  let results: IssueCreationResult[];
+  try {
+    results = await createIssueProposals({
+      forge: deps.forge,
+      proposals: journal.proposals.map((p): IssueCreationProposal => ({ id: p.proposalId, title: p.title, body: p.body })),
+      knownOpenIssues: [...openIssues],
+      terminalIds: journal.terminalIds,
+      createdIssues: journal.created,
+      markerFor: proposalMarker,
+      normalizeTitle: normalizeProposalTitle,
+      collisionPolicy: "reject",
+      applyGovernance: async ({ proposal, issue }) => {
+        const child = journal.proposals.find((p) => p.proposalId === proposal.id)!;
+        await deps.forge.addLabel(issue, deps.cfg.labels.originAgent);
+        if (child.kind === "remainder") await deps.forge.addLabel(issue, deps.cfg.labels.needsHuman);
+        const marker = proposalGovernanceMarker(proposal.id);
+        const comments = await deps.forge.getIssueComments(issue);
+        if (!comments.some((comment) => comment.body.includes(marker))) {
+          await deps.forge.addIssueComment(
+            issue,
+            (child.kind === "remainder"
+              ? `Created as a coarse remainder of #${parent.number}; ${deps.cfg.labels.needsHuman} keeps it on the planless backlog path.`
+              : `Created as a Ready-able child of #${parent.number}; a human still moves it to Ready.`) + `\n\n${marker}`,
+          );
+        }
+        if (!journal.commentedIds.has(proposal.id)) {
+          try {
+            deps.state.appendEvent("proposal-comment-posted", {
+              round_id: journal.roundId,
+              scope: decomposeScope(parent.number),
+              parent: parent.number,
+              proposalId: proposal.id,
+            });
+            journal.commentedIds.add(proposal.id);
+          } catch {
+            // Bookkeeping only. The live marker is the idempotency source and reconciles later.
+          }
+        }
+      },
+      onCreated: ({ proposal, issue, reconciled }) => {
+        deps.state.appendEvent("proposal-created", {
+          round_id: journal.roundId,
+          scope: decomposeScope(parent.number),
+          parent: parent.number,
+          proposalId: proposal.id,
+          issue,
+          ...(reconciled ? { reconciled: true } : {}),
+        });
+        journal.created.set(proposal.id, issue);
+      },
+      onSkipped: () => {
+        throw new Error("decompose collisionPolicy=reject unexpectedly skipped a proposal");
+      },
+    });
+  } catch (error) {
+    if (error instanceof ProposalTitleCollisionError) {
+      await escalateFencedCollision(deps, parent, journal, error);
+      return;
+    }
+    throw error;
+  }
   for (const result of results) journal.created.set(result.proposal.id, result.issue);
 
   // Dependency labels and native relations are independently idempotent reconciliation writes.
@@ -333,6 +554,7 @@ async function reconcileJournal(deps: DecomposeDeps, parent: Issue, journal: Dec
 }
 
 async function journalIsFullyReconciled(deps: DecomposeDeps, parent: Issue, journal: DecomposeJournal): Promise<boolean> {
+  if (journal.collisionEscalated) return true;
   if (journal.created.size !== journal.proposals.length) return false;
   const childNumbers = new Set(journal.created.values());
   const nativeChildren = await deps.forge.getSubIssues(parent.number);
@@ -378,14 +600,15 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
   const template = loadRolePromptTemplate(deps.cfg.roles.po.decomposePromptFile, defaultPoDecomposePromptPath());
   const candidates = openIssues.filter((issue) => isDecomposeCandidate(issue, deps.cfg));
   const recoveries = openIssues.filter(
-    (issue) => labelsInclude(issue.labels, deps.cfg.labels.decomposed) && latestJournal(deps.state, issue.number) !== null,
+    (issue) => labelsInclude(issue.labels, deps.cfg.labels.decomposed) && decomposeProgress(deps.state, issue.number).journal !== null,
   );
 
   for (const parent of [...recoveries, ...candidates]) {
-    const existing = latestJournal(deps.state, parent.number);
+    const progress = decomposeProgress(deps.state, parent.number);
+    const existing = progress.journal;
     if (labelsInclude(parent.labels, deps.cfg.labels.decomposed)) {
       if (existing && !(await journalIsFullyReconciled(deps, parent, existing))) {
-        await reconcileJournal(deps, parent, existing, openIssues);
+        await reconcileJournal(deps, parent, existing, await deps.forge.listOpenIssues());
       }
       continue;
     }
@@ -393,11 +616,28 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
       // Persist-first recovery: the validated set exists, but the process stopped before the
       // fence completed. Retry only the deterministic fence, never the paid PO judgment.
       if (await applyParentFence(deps, parent)) {
-        await reconcileJournal(deps, { ...parent, labels: [...parent.labels, deps.cfg.labels.decomposed] }, existing, openIssues);
+        await reconcileJournal(
+          deps,
+          { ...parent, labels: [...parent.labels, deps.cfg.labels.decomposed] },
+          existing,
+          await deps.forge.listOpenIssues(),
+        );
       }
       continue;
     }
     const firingMarker = decomposeFiringMarker(parent);
+    const unresolvedReplay = progress.unresolved.get(firingMarker);
+    if (unresolvedReplay) {
+      await postConcerns({
+        forge: deps.forge,
+        state: deps.state,
+        cfg: deps.cfg,
+        roundId: unresolvedReplay.roundId,
+        concerns: unresolvedReplay.concerns,
+        ...(deps.log !== undefined ? { log: deps.log } : {}),
+      });
+      continue;
+    }
     const existingComments = await deps.forge.getIssueComments(parent.number);
     if (existingComments.some((comment) => comment.body.includes(firingMarker))) continue;
 
@@ -447,19 +687,38 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
       continue;
     }
     if (validated.outcome === "unresolved") {
+      const concerns: Concern[] = [
+        {
+          issue: parent.number,
+          reason: decomposeConcernReason(validated.metadata.reason, validated.metadata.unresolvedContext.reason, firingMarker),
+        },
+      ];
+      try {
+        deps.state.appendEvent("proposal-set-persisted", {
+          outcome: "unresolved",
+          round_id: roundId,
+          scope: decomposeScope(parent.number),
+          parent: parent.number,
+          firingMarker,
+          reason: validated.metadata.reason,
+          unresolvedContextReason: validated.metadata.unresolvedContext.reason,
+          proposals: [],
+          concerns,
+        });
+      } catch (error) {
+        await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);
+        await deps.forge.addIssueComment(
+          parent.number,
+          `PO decomposition unresolved decision failed to persist; its concern was not delivered. Evidence: ${String(error)}`,
+        );
+        continue;
+      }
       await postConcerns({
         forge: deps.forge,
         state: deps.state,
         cfg: deps.cfg,
         roundId,
-        concerns: [
-          {
-            issue: parent.number,
-            reason:
-              `PO decomposition concern (advisory only): ${validated.metadata.reason}\n\n` +
-              `Unresolved context: ${validated.metadata.unresolvedContext.reason}\n\n${firingMarker}`,
-          },
-        ],
+        concerns,
         ...(deps.log !== undefined ? { log: deps.log } : {}),
       });
       continue;
@@ -473,8 +732,25 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
       kind: child.kind,
       blockedBy: child.blockedBy,
     }));
+    const liveOpenIssues = await deps.forge.listOpenIssues();
+    const preflightCollision = proposals
+      .map((proposal) => ({
+        proposal,
+        collision: liveOpenIssues.find((issue) => normalizeProposalTitle(issue.title) === normalizeProposalTitle(proposal.title)),
+      }))
+      .find((entry) => entry.collision !== undefined);
+    if (preflightCollision?.collision) {
+      await deps.forge.addLabel(parent.number, deps.cfg.labels.needsHuman);
+      await deps.forge.addIssueComment(
+        parent.number,
+        `PO decomposition created zero children and did not fence the parent because proposed child ` +
+          `"${preflightCollision.proposal.title}" collides with existing open issue #${preflightCollision.collision.number}.`,
+      );
+      continue;
+    }
     try {
       deps.state.appendEvent("proposal-set-persisted", {
+        outcome: "decomposed",
         round_id: roundId,
         scope: decomposeScope(parent.number),
         parent: parent.number,
@@ -503,8 +779,10 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
         coverage: validated.metadata.coverage,
         terminalIds: new Set(),
         created: new Map(),
+        commentedIds: new Set(),
+        collisionEscalated: false,
       },
-      openIssues,
+      await deps.forge.listOpenIssues(),
     );
   }
 }

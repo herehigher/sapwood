@@ -419,6 +419,31 @@ test("#212 gate② P1-1: a distinct labels.roundPool value (including the shippe
   assert.doesNotThrow(() => parseConfig(`${base}labels: { roundPool: sapwood:my-custom-pool }`));
 });
 
+test("#310 gate② P1-2: split cannot alias originAgent and autonomously recurse", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(() => parseConfig(`${base}labels: { split: SAPWOOD:ORIGIN:AGENT }`), /labels\.split.*collides with labels\.originAgent/is);
+});
+
+test("#310 gate② P1-2: decomposed cannot alias originAgent and permanently fence every agent child", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}labels: { decomposed: SAPWOOD:ORIGIN:AGENT }`),
+    /labels\.decomposed.*collides with labels\.originAgent/is,
+  );
+});
+
+test("#310 gate② P1-2: split and decomposed reject aliases with each other and hold/escalation labels", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.throws(
+    () => parseConfig(`${base}labels: { split: custom, decomposed: CUSTOM }`),
+    /labels\.(split|decomposed).*collides with labels\.(decomposed|split)/is,
+  );
+  assert.throws(
+    () => parseConfig(`${base}labels: { split: reviewing }\nescalation: { holdLabels: [REVIEWING] }`),
+    /labels\.split.*collides with escalation\.holdLabels/is,
+  );
+});
+
 // ── #156: reviewer.triggerCommand — user-defined review trigger entry point ─────────────────
 
 test("#156: reviewer.triggerCommand defaults to `@codex review` (byte-for-byte today's hardcoded trigger)", () => {

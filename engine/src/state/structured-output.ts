@@ -45,7 +45,7 @@ export const UnresolvedContextSchema = z
          *  no reason is exactly as unaccountable as a decision with no rationale, and this
          *  schema exists specifically to avoid the alternative (a manufactured decision) without
          *  trading it for an equally silent abstention. */
-        reason: z.string().min(1),
+        reason: z.string().trim().min(1),
       })
       .strict(),
   })
@@ -66,11 +66,11 @@ export function isUnresolvedContext(metadata: unknown): metadata is UnresolvedCo
 // ordering, remainder honesty, and the set-level coverage declaration.
 export const DecomposeChildMetadataSchema = z
   .object({
-    title: z.string().min(1),
+    title: z.string().trim().min(1).max(256),
     kind: z.enum(["ready", "remainder"]),
     blockedBy: z.array(z.number().int().nonnegative()).default([]),
     unresolvedContext: UnresolvedContextSchema.shape.unresolvedContext.optional(),
-    informationNeeded: z.string().min(1).optional(),
+    informationNeeded: z.string().trim().min(1).optional(),
   })
   .strict()
   .superRefine((child, ctx) => {
@@ -91,7 +91,7 @@ export const DecomposeChildMetadataSchema = z
 
 const CoverageMappingSchema = z
   .object({
-    parentIntent: z.string().min(1),
+    parentIntent: z.string().trim().min(1),
     children: z.array(z.number().int().nonnegative()).min(1),
   })
   .strict();
@@ -112,7 +112,7 @@ export const DecomposeOutputMetadataSchema = z.discriminatedUnion("outcome", [
   z
     .object({
       outcome: z.literal("unresolved"),
-      reason: z.string().min(1),
+      reason: z.string().trim().min(1),
       unresolvedContext: UnresolvedContextSchema.shape.unresolvedContext,
     })
     .strict(),

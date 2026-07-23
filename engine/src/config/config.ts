@@ -1253,6 +1253,40 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
       });
     }
   }
+  // #310 gate②: the human-written split firing signal and the engine-written decomposed fence
+  // must not alias one another or any protected workflow/provenance/escalation label. An alias
+  // with originAgent makes an agent child recursively fire itself; an alias between decomposed
+  // and originAgent makes every agent child look permanently fenced.
+  const decomposeCollisionTargets: Array<[string, string]> = [
+    ["labels.inProgress", cfg.labels.inProgress],
+    ["labels.needsHuman", cfg.labels.needsHuman],
+    ["labels.blocked", cfg.labels.blocked],
+    ["labels.reserve", cfg.labels.reserve],
+    ["labels.verifyNa", cfg.labels.verifyNa],
+    ["labels.planApproved", cfg.labels.planApproved],
+    ["labels.originAgent", cfg.labels.originAgent],
+    ["labels.roundPool", cfg.labels.roundPool],
+    ...cfg.escalation.humanLabels.map((label, i): [string, string] => [`escalation.humanLabels[${i}]`, label]),
+    ...cfg.escalation.holdLabels.map((label, i): [string, string] => [`escalation.holdLabels[${i}]`, label]),
+  ];
+  const decomposeLabels: Array<["split" | "decomposed", string, string, string]> = [
+    ["split", cfg.labels.split, "labels.decomposed", cfg.labels.decomposed],
+    ["decomposed", cfg.labels.decomposed, "labels.split", cfg.labels.split],
+  ];
+  for (const [name, label, siblingKey, siblingValue] of decomposeLabels) {
+    for (const [key, value] of [[siblingKey, siblingValue] as [string, string], ...decomposeCollisionTargets]) {
+      if (labelsInclude([value], label)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["labels", name],
+          message:
+            `labels.${name} ("${label}") collides with ${key} ("${value}") — the decomposition ` +
+            `firing signal, one-way fence, engine-written, escalation/hold, and provenance labels ` +
+            `must be case-insensitively distinct; use a distinct value for labels.${name}.`,
+        });
+      }
+    }
+  }
   // #248: escalation.holdLabels (human-applied WAIT tier) must be DISTINCT from every
   // engine-written/human-escalation label — collapsing them would let applying/removing one
   // label silently double as the other tier's signal, losing the "one fact, one bit" property
