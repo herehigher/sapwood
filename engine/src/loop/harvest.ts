@@ -93,6 +93,7 @@ export function defaultHarvestPromptPath(): string {
  *  variable set still renders (renderFactsTemplate fails closed on unknown vars). */
 export function factVars(artifact: RoundArtifact, artifactMd: string): Record<string, string> {
   const needsHuman = artifact.escalations.needsHuman;
+  const egressSuspects = artifact.egressSuspects;
   return {
     "round.id": String(artifact.roundId),
     "round.artifact": artifactMd,
@@ -103,6 +104,9 @@ export function factVars(artifact: RoundArtifact, artifactMd: string): Record<st
     "round.roundBudgetUsd": artifact.roundBudgetUsd.toFixed(2),
     "round.needsHumanCount": String(needsHuman.length),
     "round.needsHumanList": needsHuman.length > 0 ? needsHuman.map((n) => `#${n}`).join(", ") : "(none)",
+    "round.egressSuspectCount": String(egressSuspects.length),
+    "round.egressSuspectList":
+      egressSuspects.length > 0 ? egressSuspects.map((s) => `issue #${s.issue}: ${s.executable}`).join(", ") : "(none)",
   };
 }
 

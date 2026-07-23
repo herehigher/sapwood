@@ -13,6 +13,8 @@ recompute, re-aggregate, or second-guess any of it: your job starts where these 
 Issues currently needing a human (`needs-human`, escalated this round — your briefing
 targets): {{round.needsHumanCount}} — {{round.needsHumanList}}
 
+Informational egress suspects (never briefing targets): {{round.egressSuspectCount}} — {{round.egressSuspectList}}
+
 ## You have no GitHub write access at all
 
 You never call `gh`, and no tool call of yours reaches GitHub. Every comment you produce is

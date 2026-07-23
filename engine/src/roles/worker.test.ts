@@ -36,6 +36,7 @@ import {
   guardSettings,
   loadFixPromptTemplate,
   loadWorkerPromptTemplate,
+  MAX_EGRESS_SUSPECTS_PER_LEG,
   parseAssistantUsageDeltas,
   parseCostUsd,
   parseCostUsdOrNull,
@@ -45,6 +46,7 @@ import {
   parseToolUsage,
   probeLlmPing,
   renderPromptTemplate,
+  scanEgressSuspects,
   shellSingleQuote,
   spawnClaudeSession,
   WORKER_ALLOWED_TOOLS_NO_GH,
@@ -88,6 +90,115 @@ test("parseCostUsdOrNull (#302 review Codex P1): null when NO cost record exists
   assert.equal(parseCostUsdOrNull(`{"type":"result"}`), null); // result line but no cost field
   assert.equal(parseCostUsdOrNull(`{"type":"result","total_cost_usd":0}`), 0); // honest zero
   assert.equal(parseCostUsdOrNull(`{"type":"result","total_cost_usd":0.5}`), 0.5);
+});
+
+const bashToolUseLine = (command: string): string =>
+  JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command } }] } });
+
+test("scanEgressSuspects (#304): detects configured executables, absolute paths, env/assignment prefixes, and later fragments", () => {
+  const jsonl = [
+    bashToolUseLine("curl https://example.invalid/a"),
+    bashToolUseLine("/usr/bin/wget https://example.invalid/b"),
+    bashToolUseLine("TOKEN=x env MODE=test /opt/bin/nc example.invalid 443"),
+    bashToolUseLine("git status && sudo -n /usr/local/bin/scp artifact host:/tmp/artifact"),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, ["curl", "wget", "nc", "scp"]), {
+    hits: [
+      { executable: "curl", snippet: "curl https://example.invalid/a" },
+      { executable: "wget", snippet: "/usr/bin/wget https://example.invalid/b" },
+      { executable: "nc", snippet: "TOKEN=x env MODE=test /opt/bin/nc example.invalid 443" },
+      { executable: "scp", snippet: "sudo -n /usr/local/bin/scp artifact host:/tmp/artifact" },
+    ],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#304): governed git/gh/package-manager flows and suspect names in arguments are non-hits", () => {
+  const jsonl = [
+    bashToolUseLine("git push origin HEAD"),
+    bashToolUseLine("gh pr view 304"),
+    bashToolUseLine("npm install"),
+    bashToolUseLine("printf '%s' curl"),
+    bashToolUseLine("echo https://example.invalid/wget"),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, ["curl", "wget"]), { hits: [], truncated: false });
+});
+
+test("scanEgressSuspects (#304): deduplicates executable+snippet and caps snippets at 200 characters", () => {
+  const longCommand = `curl https://example.invalid/${"x".repeat(240)}`;
+  const jsonl = [bashToolUseLine("curl same"), bashToolUseLine("curl same"), bashToolUseLine(longCommand)].join("\n");
+  const { hits, truncated } = scanEgressSuspects(jsonl, ["curl"]);
+  assert.equal(hits.length, 2);
+  assert.equal(truncated, false);
+  assert.deepEqual(hits[0], { executable: "curl", snippet: "curl same" });
+  assert.equal(hits[1]?.executable, "curl");
+  assert.equal(hits[1]?.snippet.length, 200);
+  assert.equal(hits[1]?.snippet, longCommand.slice(0, 200));
+});
+
+test("scanEgressSuspects (#304): malformed jsonl, malformed tool blocks, and empty input are skipped silently", () => {
+  const jsonl = [
+    "garbage{{{",
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: null }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { command: "curl x" } }] } }),
+    bashToolUseLine("curl https://example.invalid"),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, ["curl"]), {
+    hits: [{ executable: "curl", snippet: "curl https://example.invalid" }],
+    truncated: false,
+  });
+  assert.deepEqual(scanEgressSuspects("", ["curl"]), { hits: [], truncated: false });
+});
+
+test("scanEgressSuspects (#341): heredoc and here-string bodies are data, never commands", () => {
+  assert.deepEqual(
+    scanEgressSuspects(
+      [
+        bashToolUseLine("cat > x.sh <<'EOF'\ncurl https://example.invalid/body\nEOF"),
+        bashToolUseLine("cat <<< 'curl https://example.invalid/here-string'\ncurl https://example.invalid/skipped"),
+      ].join("\n"),
+      ["curl"],
+    ),
+    { hits: [], truncated: false },
+  );
+});
+
+test("scanEgressSuspects (#341): a genuine suspect after a heredoc-free semicolon still hits", () => {
+  assert.deepEqual(scanEgressSuspects(bashToolUseLine("printf ready; curl https://example.invalid/real"), ["curl"]), {
+    hits: [{ executable: "curl", snippet: "curl https://example.invalid/real" }],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#341): sudo/env arg-taking options cannot shift option arguments into executable position", () => {
+  const jsonl = [
+    bashToolUseLine("sudo --user ftp apt-get update"),
+    bashToolUseLine("sudo -u ftp curl x"),
+    bashToolUseLine("sudo --user=ftp curl y"),
+    bashToolUseLine("env --unset=TOKEN curl z"),
+    bashToolUseLine("env -S 'curl split'"),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, ["curl", "ftp"]), {
+    hits: [
+      { executable: "curl", snippet: "sudo -u ftp curl x" },
+      { executable: "curl", snippet: "sudo --user=ftp curl y" },
+      { executable: "curl", snippet: "env --unset=TOKEN curl z" },
+    ],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#341): per-leg evidence stops at the engine cap", () => {
+  const jsonl = Array.from({ length: MAX_EGRESS_SUSPECTS_PER_LEG + 5 }, (_, i) =>
+    bashToolUseLine(`curl https://example.invalid/${i}`),
+  ).join("\n");
+  const scan = scanEgressSuspects(jsonl, ["curl"]);
+  assert.equal(scan.hits.length, MAX_EGRESS_SUSPECTS_PER_LEG);
+  assert.equal(scan.truncated, true);
+  assert.deepEqual(scan.hits.at(-1), {
+    executable: "curl",
+    snippet: `curl https://example.invalid/${MAX_EGRESS_SUSPECTS_PER_LEG - 1}`,
+  });
 });
 
 // ── #110 PR0: parseResultText — the read side for a role session's structured final-message
@@ -857,6 +968,113 @@ test("dispatch -> stub claude runs -> .done sentinel + parsed cost; probe sees D
     assert.deepEqual(probe.modelUsage, [
       { model: "claude-stub", inputTokens: 12, outputTokens: 34, cacheReadTokens: 0, cacheCreationTokens: 0 },
     ]);
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#304 wiring: a completed lane records one egress-suspect event through the existing state path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  try {
+    const toolLine = bashToolUseLine("curl https://example.invalid/upload");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${toolLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    state = new State(join(dir, "state.sqlite"));
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name } = await s.dispatch({ number: 304, title: "egress", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["egress-suspect"]), [
+      {
+        kind: "egress-suspect",
+        payload: { worker: name, issue: 304, executable: "curl", snippet: "curl https://example.invalid/upload" },
+      },
+    ]);
+    assert.equal((await s.probe(name)).done, true);
+    s.dispose();
+  } finally {
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#341 wiring: a completed lane writes at most the per-leg egress cap and logs truncation once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  try {
+    const toolLines = Array.from({ length: MAX_EGRESS_SUSPECTS_PER_LEG + 5 }, (_, i) =>
+      bashToolUseLine(`curl https://example.invalid/${i}`),
+    );
+    const transcript = toolLines.map((line) => `echo '${line}'`).join("\n");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\n${transcript}\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    const logs: string[] = [];
+    state = new State(join(dir, "state.sqlite"));
+    const s = new WorkerSupervisor({
+      cfg,
+      log: (line) => logs.push(line),
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name } = await s.dispatch({ number: 304, title: "egress cap", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    const events = state.eventsSince("1970-01-01T00:00:00.000Z", ["egress-suspect"]);
+    assert.equal(events.length, MAX_EGRESS_SUSPECTS_PER_LEG);
+    assert.equal(
+      logs.filter(
+        (line) =>
+          line.includes(`egress tripwire evidence capped at ${MAX_EGRESS_SUSPECTS_PER_LEG} suspects`) && line.includes(`lane ${name}`),
+      ).length,
+      1,
+    );
+    assert.equal((await s.probe(name)).done, true);
+    s.dispose();
+  } finally {
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#304 fail-safe: an egress event write failure is logged but cannot change a completed lane's outcome", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const toolLine = bashToolUseLine("curl https://example.invalid/upload");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${toolLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    const logs: string[] = [];
+    const s = new WorkerSupervisor({
+      cfg,
+      log: (line) => logs.push(line),
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state: {
+        appendEvent: () => {
+          throw new Error("events unavailable");
+        },
+      },
+    });
+    const { name } = await s.dispatch({ number: 304, title: "egress", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    const probe = await s.probe(name);
+    assert.equal(probe.done, true);
+    assert.equal(probe.failed, false);
+    assert.ok(logs.some((line) => line.includes("egress tripwire failed (non-fatal)") && line.includes("events unavailable")));
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

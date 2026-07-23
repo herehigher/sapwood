@@ -24,6 +24,21 @@ import { z } from "zod";
 import { holdLabelDefault, labelsInclude, normalizeLabel, SAPWOOD_LABEL_PREFIX, workflowLabelDefaults } from "../forge/labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 
+export const DEFAULT_EGRESS_SUSPECT_COMMANDS = [
+  "curl",
+  "wget",
+  "nc",
+  "ncat",
+  "netcat",
+  "socat",
+  "ssh",
+  "scp",
+  "sftp",
+  "rsync",
+  "ftp",
+  "telnet",
+] as const;
+
 const Board = z
   .object({
     // Removes 0day's hard-coded PROJECT_NUMBER / user-vs-org / literal status names.
@@ -94,6 +109,10 @@ const Worker = z
     // 0 disables automatic resume; the initial leg is not counted here.
     maxResumes: z.number().int().min(0).default(2),
     heartbeatStaleSecs: z.number().int().positive().default(180),
+    // #304: lexical, post-hoc tripwire over each completed worker leg's stream-json Bash
+    // tool calls. This table is operator-tunable because repo-governed egress-capable commands
+    // differ; worker.ts records matching executables as events but never blocks the lane.
+    egressSuspectCommands: z.array(z.string()).default([...DEFAULT_EGRESS_SUSPECT_COMMANDS]),
     // #74: file-based worker prompt. A relative path is resolved against the CONFIG FILE's
     // directory (see loadConfig), so the same config works no matter what cwd the CLI runs
     // from. Unset (default) -> the shipped preset at the engine package's `prompts/worker.md`

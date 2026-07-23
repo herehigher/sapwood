@@ -70,6 +70,18 @@ export const RoundArtifactSchema = z
         driveNoPr: z.number().int().nonnegative(),
       })
       .strict(),
+    egressSuspects: z
+      .array(
+        z
+          .object({
+            worker: z.string(),
+            issue: z.number().int(),
+            executable: z.string(),
+            snippet: z.string(),
+          })
+          .strict(),
+      )
+      .default([]),
     handoffs: z.number().int().nonnegative(),
     degradedPhases: z.array(
       z
@@ -135,6 +147,7 @@ export const ROUND_ARTIFACT_EVENT_KINDS = [
   "drive-stopped",
   "drive-no-pr",
   "plan-review-escalated",
+  "egress-suspect",
   "handoff",
   "ceiling-escalated",
   "gated-reentry",
@@ -215,6 +228,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
   let reviewerFallbackReverts = 0;
   const needsHumanSet = new Set<number>();
   const needsHumanOrder: number[] = [];
+  const egressSuspects: Array<{ worker: string; issue: number; executable: string; snippet: string }> = [];
   let ceiling = 0;
   let driveNoPr = 0;
   let handoffs = 0;
@@ -261,6 +275,14 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
         break;
       case "plan-review-escalated":
         addNeedsHuman(p.issue);
+        break;
+      case "egress-suspect":
+        egressSuspects.push({
+          worker: p.worker as string,
+          issue: p.issue as number,
+          executable: p.executable as string,
+          snippet: p.snippet as string,
+        });
         break;
       case "handoff":
         handoffs++;
@@ -370,6 +392,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
     retries: { gatedReentries, gatedReentryCapped, rollbacksRecovered, rollbacksEscalated },
     reviewRounds: { reviewerFallbackSwitches, reviewerFallbackReverts },
     escalations: { needsHuman: needsHumanOrder, ceiling, driveNoPr },
+    egressSuspects,
     handoffs,
     degradedPhases,
     roundStops,
@@ -435,6 +458,10 @@ export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
       `Hard-ceiling escalations: ${artifact.escalations.ceiling}`,
       `Drive-no-PR: ${artifact.escalations.driveNoPr}`,
     ]),
+    section(
+      "Egress suspects (informational)",
+      artifact.egressSuspects.map((s) => `- #${s.issue} (${s.worker}): ${s.executable} — ${s.snippet}`),
+    ),
     section("Handoffs", [`Soft-budget handoffs: ${artifact.handoffs}`]),
     section(
       "Degraded phases",

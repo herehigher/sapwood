@@ -66,6 +66,31 @@ The mode reaches the guard hook via a spawn-time environment variable
 worker-writable settings file — so a worker cannot weaken its own guard mode by editing
 config mid-run.
 
+## Worker network egress: accepted blind spot
+
+sapwood's containment is action-side. The guard prevents a producer from approving or
+merging its own work, protects security-bearing write paths, and confines guarded read-tool
+calls to the worker's worktree. The conductor separately owns review and merge actions.
+Those controls do **not** contain network egress from arbitrary commands a worker runs
+through `Bash`. A worker that can execute `curl`, open a socket, or run an equivalent program
+can send repository or environment data to an external endpoint.
+
+That gap is an accepted boundary, not an isolation feature waiting to be implied by the rest
+of the model. sapwood targets trusted repos first, and by owner decision does not place worker
+sessions in a network-isolated sandbox or proxy. Operators must therefore treat worker Bash
+egress as an explicit blind spot when deciding which repositories, host credentials, and
+environment data are safe to expose to a run.
+
+The engine adds a monitor-only lexical tripwire at lane end. It scans the completed leg's
+existing Claude stream-json log for Bash tool calls whose executable matches
+`worker.egressSuspectCommands`, then writes deduplicated `egress-suspect` events through the
+ordinary events ledger. Detection is post-hoc and fail-safe in the allow direction: it never
+denies a command, holds a lane, adds `needs-human`, or changes the worker outcome, and a scan or
+event-write failure is logged without becoming a gate. This is a **tripwire, not containment**.
+It can catch naive or accidental exfiltration attempts and leave an audit trail, but a
+deliberate adversary can trivially evade lexical executable matching — for example with an
+interpreter one-liner or DNS exfiltration.
+
 ## Issues-only role sessions: read-only, worktree-confined, no shell (#110, #235)
 
 Workers are guarded by the argv-inspecting hook above. The round orchestrator's

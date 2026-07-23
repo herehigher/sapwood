@@ -177,6 +177,28 @@ test("worker.maxResumes (#172): non-negative integer, default 2, 0 disables resu
   assert.throws(() => parseConfig(`${base}worker: { maxResumes: 1.5 }`), /maxResumes/i);
 });
 
+test("worker.egressSuspectCommands (#304): shipped defaults parse and an override replaces them", () => {
+  const base = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+  assert.deepEqual(parseConfig(base).worker.egressSuspectCommands, [
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "ftp",
+    "telnet",
+  ]);
+  assert.deepEqual(parseConfig(`${base}worker: { egressSuspectCommands: [fetch, custom-client] }`).worker.egressSuspectCommands, [
+    "fetch",
+    "custom-client",
+  ]);
+});
+
 test("board.status.backlog is overridable and the status object remains strict", () => {
   const cfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7, status: { backlog: Triage } }");
   assert.equal(cfg.board.status.backlog, "Triage");

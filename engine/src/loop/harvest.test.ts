@@ -168,7 +168,14 @@ test("defaultHarvestPromptPath: resolves to the shipped prompts/harvest.md, whic
   // #123: the shipped prompt consumes the round ARTIFACT block (plus the briefing-target list);
   // the individual fact vars remain SUPPORTED by factVars for custom promptFiles, but the
   // shipped template no longer spells each number out.
-  for (const v of ["{{round.id}}", "{{round.artifact}}", "{{round.needsHumanCount}}", "{{round.needsHumanList}}"]) {
+  for (const v of [
+    "{{round.id}}",
+    "{{round.artifact}}",
+    "{{round.needsHumanCount}}",
+    "{{round.needsHumanList}}",
+    "{{round.egressSuspectCount}}",
+    "{{round.egressSuspectList}}",
+  ]) {
     assert.ok(body.includes(v), `harvest.md should reference ${v}`);
   }
   // #110 PR3: the session has no gh grant it acts on — every comment travels through the
@@ -239,15 +246,29 @@ test("factVars (#123): {{round.artifact}} carries the rendered md verbatim; the 
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("merged", { worker: "lane-a", issue: 1, pr: 10, headOid: "h1" });
   state.appendEvent("drive-needs-human", { worker: "lane-b", issue: 6, pr: 12, reason: "r" });
+  const withoutEgress = factVars(buildRoundArtifact(state, round, 30, null), "THE-ARTIFACT-MD");
+  assert.equal(withoutEgress["round.egressSuspectCount"], "0");
+  assert.equal(withoutEgress["round.egressSuspectList"], "(none)");
+  state.appendEvent("egress-suspect", {
+    worker: "lane-304",
+    issue: 304,
+    executable: "curl",
+    snippet: "curl https://example.invalid",
+  });
   const artifact = buildRoundArtifact(state, round, 30, null);
   const vars = factVars(artifact, "THE-ARTIFACT-MD");
   assert.equal(vars["round.artifact"], "THE-ARTIFACT-MD");
   assert.equal(vars["round.prsMerged"], "1");
   assert.equal(vars["round.needsHumanList"], "#6");
+  assert.equal(vars["round.egressSuspectCount"], "1");
+  assert.equal(vars["round.egressSuspectList"], "issue #304: curl");
   // Both a pre-#123 custom template and the shipped one render without an unknown-var throw.
   // biome-ignore lint/suspicious/noTemplateCurlyInString: this is the literal template syntax under test.
   renderFactsTemplate("r{{round.id}}: {{round.prsOpened}}/{{round.prsMerged}} ${{round.spentUsd}}", vars);
-  renderFactsTemplate("{{round.artifact}} targets: {{round.needsHumanList}}", vars);
+  renderFactsTemplate(
+    "{{round.artifact}} targets: {{round.needsHumanList}} egress: {{round.egressSuspectCount}} — {{round.egressSuspectList}}",
+    vars,
+  );
   state.close();
 });
 
