@@ -381,7 +381,18 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
   }
   if (method === null && (hasField || hasInput)) method = "POST";
 
-  if (pathToken && pathToken.toLowerCase().replace(/^\/+|\/+$/g, "") === "graphql") {
+  let canonicalPathToken = pathToken;
+  let canonicalFragment = fragment;
+  try {
+    // GitHub decodes REST paths once. Match that behavior exactly: never loop over
+    // a decoded result (so `%2525` remains `%25`, rather than becoming `%`).
+    canonicalPathToken = pathToken === null ? null : decodeURIComponent(pathToken);
+    canonicalFragment = decodeURIComponent(fragment);
+  } catch {
+    return "BLOCK [gh] api REST endpoint has malformed percent-encoding — path is opaque (fail-closed)";
+  }
+
+  if (canonicalPathToken && canonicalPathToken.toLowerCase().replace(/^\/+|\/+$/g, "") === "graphql") {
     const fieldValues: string[] = [];
     let j = 2;
     while (j < tokens.length) {
@@ -416,19 +427,19 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
   }
 
   if (!method || !MUTATING_METHODS.has(method)) return null;
-  if (pathToken && ISSUE_GOVERNANCE_PATH_RE.test(pathToken)) {
-    return `BLOCK [gh] api mutates issue labels/milestone/state: ${pathToken}`;
+  if (canonicalPathToken && ISSUE_GOVERNANCE_PATH_RE.test(canonicalPathToken)) {
+    return `BLOCK [gh] api mutates issue labels/milestone/state: ${canonicalPathToken}`;
   }
-  for (const _ of fragment.matchAll(new RegExp(ISSUE_GOVERNANCE_PATH_RE, "gi"))) {
+  for (const _ of canonicalFragment.matchAll(new RegExp(ISSUE_GOVERNANCE_PATH_RE, "gi"))) {
     return "BLOCK [gh] api mutates issue labels/milestone/state";
   }
-  if (method === "DELETE" && pathToken && ALLOWED_DELETE_PATH_RE.test(pathToken)) return null;
-  if (pathToken && SENSITIVE_PATH_RE.test(pathToken)) {
-    return pathToken.toLowerCase().includes("/releases")
-      ? `BLOCK [gh] api mutates releases: ${pathToken}`
-      : `BLOCK [gh] api mutates PR merge: ${pathToken}`;
+  if (method === "DELETE" && canonicalPathToken && ALLOWED_DELETE_PATH_RE.test(canonicalPathToken)) return null;
+  if (canonicalPathToken && SENSITIVE_PATH_RE.test(canonicalPathToken)) {
+    return canonicalPathToken.toLowerCase().includes("/releases")
+      ? `BLOCK [gh] api mutates releases: ${canonicalPathToken}`
+      : `BLOCK [gh] api mutates PR merge: ${canonicalPathToken}`;
   }
-  for (const m of fragment.matchAll(new RegExp(SENSITIVE_PATH_RE, "gi"))) {
+  for (const m of canonicalFragment.matchAll(new RegExp(SENSITIVE_PATH_RE, "gi"))) {
     return m[0]!.toLowerCase().includes("/releases") ? "BLOCK [gh] api mutates releases" : "BLOCK [gh] api mutates PR merge";
   }
   return null;

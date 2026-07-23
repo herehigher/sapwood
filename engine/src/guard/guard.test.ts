@@ -182,6 +182,16 @@ const BLOCK: [string, string, string][] = [
   ["gh api --method=post repos/o/r/milestones -f title=M12", CWD, "labels/milestone/state"],
   ["gh api -X delete https://api.github.com/repos/o/r/milestones/17", CWD, "labels/milestone/state"],
   ["gh api -X pUt 'repos/o/r/milestones/17?state=closed' -f title=M12", CWD, "labels/milestone/state"],
+  ["gh api -X POST repos/o/r/issues/5/sub%5Fissues -F sub_issue_id=6", CWD, "labels/milestone/state"],
+  ["gh api -X PATCH repos/o/r/%6Dilestones/17 -f title=x", CWD, "labels/milestone/state"],
+  ["gh api -X PATCH repos/o/r/issues/%35 -f milestone=1", CWD, "labels/milestone/state"],
+  ["uv run --with rich gh api -X POST repos/o/r/issues/5/sub%5Fissues -F sub_issue_id=6", CWD, "labels/milestone/state"],
+  ["gh api -X PATCH https://api.github.com/repos/o/r/%6Dilestones/17?state=open -f title=x", CWD, "labels/milestone/state"],
+  ["gh api -X PATCH safe/path -f probe=/repos/o/r/%6Dilestones/17", CWD, "labels/milestone/state"],
+  ["gh api -X PUT repos/o/r/pulls/1/%6Derge", CWD, "merge"],
+  ["gh api -X POST repos/o/r/%72eleases -f tag_name=v1", CWD, "release"],
+  ["gh api -X PATCH repos/o/r/issues/%zz", CWD, "opaque"],
+  ["gh api -X PATCH repos/o/r/issues/%5", CWD, "opaque"],
   // #81: defense-in-depth for the KILL_SWITCH / PAUSE control sentinels (fable gate② follow-up
   // to #80) — direct Bash vectors (touch/rm/redirect) plus relative-path traversal.
   ["touch data/KILL_SWITCH", CWD, "write-path"],
@@ -228,6 +238,7 @@ const ALLOW: string[] = [
   "gh api repos/o/r/pulls/149",
   "gh pr review 149 --comment -b ok", // commenting is fine; only approve/request-changes blocked
   "gh api -X DELETE repos/o/r/git/refs/heads/feat-x",
+  "gh api -X DELETE repos/o/r/git/%72efs/heads/feat-x",
   "gh -R o/r pr view 5 --json state",
   "gh -R o/r pr list",
   "gh api --method=GET repos/o/r/pulls/1",
@@ -291,6 +302,8 @@ const ALLOW: string[] = [
   "gh issue comment 352 --body progress",
   "gh pr comment 149 --body progress",
   "gh api -X POST repos/o/r/issues/352/comments -f body=progress",
+  "gh api -X POST repos/o/r/issues/%35/%63omments -f body=progress",
+  "gh api -X PATCH repos/o/r/issues/%2535 -f body=updated",
   "gh api repos/o/r/issues/352",
   "gh api -X PATCH repos/o/r/issues/abc -f body=updated",
   // #81 guardrails: benign touch/paths that merely resemble the sentinels must still pass

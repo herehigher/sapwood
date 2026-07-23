@@ -130,6 +130,14 @@ const CORE = [
   "gh api -X PATCH repos/o/r/issues/1/sub_issues/priority -F sub_issue_id=2",
   "gh api -X PATCH repos/o/r/milestones/17 -f title=M12",
   "gh api -X POST repos/o/r/milestones -f title=M12",
+  "gh api -X POST repos/o/r/issues/1/sub%5Fissues -F sub_issue_id=2",
+  "gh api -X PATCH repos/o/r/%6Dilestones/17 -f title=M12",
+  "gh api -X PATCH repos/o/r/issues/%31 -f milestone=11",
+  "gh api -X PATCH repos/o/r/issues/%zz",
+  "gh api -X POST repos/o/r/issues/%31/%63omments -f body=progress",
+  "gh api -X PUT repos/o/r/pulls/1/%6Derge",
+  "gh api -X POST repos/o/r/%72eleases -f tag_name=v1",
+  "gh api -X DELETE repos/o/r/git/%72efs/heads/feat-x",
   "uv run --with rich gh label delete hold",
   "gh pr view 1 --json state",
   "gh api repos/o/r/pulls/1",
@@ -205,6 +213,16 @@ test("#352 corpus: governance mutations block even when wrapper-embedded; commen
     "gh api --method=post repos/o/r/milestones -f title=M12",
     "gh api -X delete https://api.github.com/repos/o/r/milestones/17",
     "gh api -X pUt 'repos/o/r/milestones/17?state=closed' -f title=M12",
+    "gh api -X POST repos/o/r/issues/1/sub%5Fissues -F sub_issue_id=2",
+    "gh api -X PATCH repos/o/r/%6Dilestones/17 -f title=M12",
+    "gh api -X PATCH repos/o/r/issues/%31 -f milestone=11",
+    "uv run --with rich gh api -X POST repos/o/r/issues/1/sub%5Fissues -F sub_issue_id=2",
+    "gh api -X PATCH https://api.github.com/repos/o/r/%6Dilestones/17?state=open -f title=M12",
+    "gh api -X PATCH safe/path -f probe=/repos/o/r/%6Dilestones/17",
+    "gh api -X PUT repos/o/r/pulls/1/%6Derge",
+    "gh api -X POST repos/o/r/%72eleases -f tag_name=v1",
+    "gh api -X PATCH repos/o/r/issues/%zz",
+    "gh api -X PATCH repos/o/r/issues/%5",
   ];
   for (const command of blocked) {
     assert.equal(guardDecision("Bash", { command }, CWD).allow, false, `must block: ${command}`);
@@ -221,6 +239,8 @@ test("#352 corpus: governance mutations block even when wrapper-embedded; commen
     "gh issue comment 1 --body progress",
     "gh pr comment 1 --body progress",
     "gh api -X POST repos/o/r/issues/1/comments -f body=progress",
+    "gh api -X POST repos/o/r/issues/%31/%63omments -f body=progress",
+    "gh api -X DELETE repos/o/r/git/%72efs/heads/feat-x",
   ];
   for (const command of allowed) {
     assert.equal(guardDecision("Bash", { command }, CWD).allow, true, `must allow: ${command}`);
