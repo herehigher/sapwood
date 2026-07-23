@@ -241,6 +241,12 @@ test("#352 corpus: governance mutations block even when wrapper-embedded; commen
     "gh api -X POST repos/o/r/issues/1/comments -f body=progress",
     "gh api -X POST repos/o/r/issues/%31/%63omments -f body=progress",
     "gh api -X DELETE repos/o/r/git/%72efs/heads/feat-x",
+    'gh api repos/o/r/issues -f "title=90% done"',
+    'gh api -X POST repos/o/r/issues/1/comments -f "body=progress 90% complete"',
+    'gh api graphql -f "query=query { viewer { login } }" -f "q=90% done"',
+    'gh api repos/o/r/issues -f "title=progress%"',
+    'gh api -X POST repos/o/r/issues/1/comments -f "body=progress % complete"',
+    'gh api repos/o/r/issues -f "title=progress%zzdone"',
   ];
   for (const command of allowed) {
     assert.equal(guardDecision("Bash", { command }, CWD).allow, true, `must allow: ${command}`);

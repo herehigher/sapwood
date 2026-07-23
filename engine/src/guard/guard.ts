@@ -331,6 +331,10 @@ function ghSkipGlobalFlags(tokens: string[], startIndex = 1): string[] {
   return tokens.slice(i);
 }
 
+function decodePercentPairsLenient(value: string): string {
+  return value.replace(/%[0-9A-Fa-f]{2}/g, (pair) => String.fromCharCode(Number.parseInt(pair.slice(1), 16)));
+}
+
 function checkGhApi(tokens: string[], fragment: string): string | null {
   let method: string | null = null;
   let hasField = false;
@@ -382,15 +386,17 @@ function checkGhApi(tokens: string[], fragment: string): string | null {
   if (method === null && (hasField || hasInput)) method = "POST";
 
   let canonicalPathToken = pathToken;
-  let canonicalFragment = fragment;
   try {
     // GitHub decodes REST paths once. Match that behavior exactly: never loop over
     // a decoded result (so `%2525` remains `%25`, rather than becoming `%`).
     canonicalPathToken = pathToken === null ? null : decodeURIComponent(pathToken);
-    canonicalFragment = decodeURIComponent(fragment);
   } catch {
     return "BLOCK [gh] api REST endpoint has malformed percent-encoding — path is opaque (fail-closed)";
   }
+  // The fragment is a secondary scan over mixed paths and field values. Decode valid
+  // percent pairs once, but preserve stray/partial `%` literally so benign values such
+  // as `90% done` cannot make an otherwise-parseable endpoint opaque.
+  const canonicalFragment = decodePercentPairsLenient(fragment);
 
   if (canonicalPathToken && canonicalPathToken.toLowerCase().replace(/^\/+|\/+$/g, "") === "graphql") {
     const fieldValues: string[] = [];

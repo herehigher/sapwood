@@ -27,8 +27,11 @@ is enforced structurally, not by asking the model nicely:
   blocks any GitHub-overreach command a producer must never run: `gh pr merge`,
   `gh pr review --approve`, `gh pr ready`, `gh release`, `gh label`, `gh project`,
   governance-changing `gh issue edit` flags, and the mutating `gh api`/GraphQL
-  equivalents; percent-encoded REST paths are canonicalized before matching. Plain
-  issue title/body edits and issue/PR comments remain allowed.
+  equivalents. REST path tokens are decoded strictly before matching and malformed
+  path escapes fail closed; the mixed command scan decodes valid percent pairs
+  best-effort while preserving stray `%` in API field values. Plain issue title/body
+  edits remain allowed. Issue/PR comment API calls, including values containing stray
+  `%`, remain allowed when the scanned command contains no protected REST path.
   Residual allow surface: assignees, `--title`/`--body` (`-b`/`-F`), and native
   `--add-blocked-by`/`--remove-blocked-by`/`--add-blocking`/`--remove-blocking`
   relations remain allowed because no sapwood gate reads those relations (dispatch

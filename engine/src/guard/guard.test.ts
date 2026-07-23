@@ -304,6 +304,12 @@ const ALLOW: string[] = [
   "gh api -X POST repos/o/r/issues/352/comments -f body=progress",
   "gh api -X POST repos/o/r/issues/%35/%63omments -f body=progress",
   "gh api -X PATCH repos/o/r/issues/%2535 -f body=updated",
+  'gh api repos/o/r/issues -f "title=90% done"',
+  'gh api -X POST repos/o/r/issues/5/comments -f "body=progress 90% complete"',
+  'gh api graphql -f "query=query { viewer { login } }" -f "q=90% done"',
+  'gh api repos/o/r/issues -f "title=progress%"',
+  'gh api -X POST repos/o/r/issues/5/comments -f "body=progress % complete"',
+  'gh api repos/o/r/issues -f "title=progress%zzdone"',
   "gh api repos/o/r/issues/352",
   "gh api -X PATCH repos/o/r/issues/abc -f body=updated",
   // #81 guardrails: benign touch/paths that merely resemble the sentinels must still pass
