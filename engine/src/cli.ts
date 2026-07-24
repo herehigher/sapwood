@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
-import { DEFAULT_CONFIG_PATHS, loadConfig, type SapwoodConfig } from "./config/config.js";
+import { configHash, DEFAULT_CONFIG_PATHS, dashboardConfigSubset, loadConfig, type SapwoodConfig } from "./config/config.js";
 import { loadPricingTable } from "./config/pricing.js";
 import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
@@ -891,6 +891,16 @@ export function buildTickFixLegResume(
   };
 }
 
+/** #206 (frontend-design.md §11): the run boundary in the event stream. Replay derives run
+ *  GROUPING from this event — never from the `engine_session` gap heuristic, which serves the
+ *  wall-clock ceiling and deliberately resets on quiet gaps. Appended once per process start,
+ *  before anything else this run writes (so it also anchors the #154 run-spend ledger position),
+ *  carrying the ALLOWLISTED config subset (never the resolved object — see
+ *  dashboardConfigSubset) plus a hash of the full config for change detection across runs. */
+function appendRunStarted(state: Pick<State, "appendEvent">, cfg: SapwoodConfig): void {
+  state.appendEvent("run-started", { config: dashboardConfigSubset(cfg), configHash: configHash(cfg) });
+}
+
 /** The M4 tick-driver path (`driver.ts`'s `runDriver`) — unchanged behavior, kept reachable via
  *  `engine.driver: tick` (#106's explicit escape hatch) now that the round orchestrator
  *  (runRoundsEngine below) is the default. */
@@ -911,6 +921,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // buildTickFixLegResume's own doc for the tick driver's round 0 / phase "tick" audit identity.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
+  appendRunStarted(state, cfg);
   const forge = overrides.forge ?? new GithubForge(cfg);
   // #253: the tick driver's TickDeps.fixLegResume — undefined (no handle/listener/token/journal
   // write/argv change on any production session — see buildTickFixLegResume's own doc for the
@@ -1024,6 +1035,7 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // built once here the way the tick driver's fixLegResume is.
   const renderFixPrompt = buildRenderFixPrompt(cfg);
   const state = overrides.state ?? new State();
+  appendRunStarted(state, cfg);
   const forge = overrides.forge ?? new GithubForge(cfg);
   const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log }) : null;
   const engineAgent = engineReviewRunner

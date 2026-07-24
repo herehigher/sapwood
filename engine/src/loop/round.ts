@@ -36,6 +36,17 @@ export type PeripheralPhase = Exclude<RoundPhase, "executing" | "closed">;
 
 const SEQUENCE: readonly RoundPhase[] = ["aligning", "architecting", "plan_review", "executing", "harvesting", "retro", "closed"];
 
+/** #206 (frontend-design.md §11): the round state machine's replay trail — "round R entered
+ *  phase P". `rounds.phase` is an in-place UPDATE, so without this event history has no record
+ *  that a round was ever *in* a phase, and the dashboard's phase strip (plus §8's spend
+ *  phase-bucketing) reconstructs entirely from it. Emitted by whichever process ENTERS the
+ *  phase (see the call site), so no crash window can drop a phase the round actually ran.
+ *  Appended caller-side, like every other event in this loop: state methods never self-append
+ *  (state.ts). */
+function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, phase: RoundPhase): void {
+  state.appendEvent("round-phase", { round_id: roundId, phase });
+}
+
 /** One externalized-artifact-producing peripheral role session — STUBBED in #86 (the real
  *  role runner/prompts are a follow-up issue). Rerun-not-resume (#77 decision 4): run() is
  *  ALWAYS invoked fresh, never resuming a prior attempt's mid-session state — idempotency is
@@ -1140,6 +1151,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       while (SEQUENCE[idx] !== "closed") {
         const phase = SEQUENCE[idx]!;
+        // On ENTRY, not on transition (#206, gate② P1): the event means "this round entered
+        // phase X", so it is emitted by whichever process actually enters it. That closes every
+        // crash window at once — a crash after startRound (or after any advanceRoundPhase)
+        // leaves the round resumable AT that phase, and the restart re-enters it and says so.
+        // The cost is a duplicate whenever a phase is genuinely re-run (rerun-not-resume, #77
+        // dec. 4), which the replay fold absorbs as a no-op; the alternative direction — a phase
+        // the round entered but the trail never recorded — is unreconstructable.
+        appendRoundPhase(deps.state, round.round_id, phase);
         if (phase === "executing") {
           workersThisRound = await runExecuting(round, phase !== startedPhase);
           ranExecuting = true;
@@ -1227,6 +1246,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           /* state write failed too — tickErrors still counts it */
         }
       }
+      // The terminal `closed` — the one phase the loop above never "enters" (the while guard
+      // excludes it). BEFORE closeRound, unlike the entry emissions: once the row is `done`, no
+      // resume ever revisits this round, so a crash between the two must lose the close (which
+      // the resume path redoes) rather than the event (which nothing would).
+      appendRoundPhase(deps.state, round.round_id, "closed");
       deps.state.closeRound(round.round_id, closedAt);
       roundsClosed++;
       // #125 idle-round precondition: record whether THIS round dispatched nothing — the gate
