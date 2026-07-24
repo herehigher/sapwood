@@ -877,7 +877,11 @@ Wire details the frontend can rely on:
   the counts partition the ledger; events before the first round belong to none.
 - Anything outside `/api/` is a static: a real file under `dashboard/dist`, else
   the `index.html` shell (the app is client-routed). `/api/*` never falls back —
-  an unknown API path is an honest JSON 404.
+  an unknown API path is an honest JSON 404. "Under `dist`" is checked against
+  **real** paths on both sides (the root is realpath'd once at startup): a
+  textual `../` is refused before the filesystem is touched, and a symlink
+  anywhere under `dist` that resolves outside it is refused too, rather than
+  followed or laundered into the shell fallback.
 
 Five things about it are decisions, not implementation detail:
 

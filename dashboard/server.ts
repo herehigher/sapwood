@@ -16,7 +16,7 @@
 // It deliberately imports the ENGINE's own State/config rather than re-querying SQLite itself:
 // §8 requires that `sapwood status` and the dashboard can never disagree about engine state, and
 // that only holds if both read through the same module.
-import { createReadStream, existsSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { loadConfig, type SapwoodConfig } from "../engine/src/config/config.js";
@@ -417,21 +417,44 @@ const CONTENT_TYPES: Record<string, string> = {
   ".webmanifest": "application/manifest+json",
 };
 
-/** Serve one file out of the vite build. Anything that is not a real file under `root` falls
- *  back to `index.html` (the app is client-routed, so `/round/12` is a page, not a 404) — but
- *  ONLY after the resolved path is proven to be inside `root`, so a traversal can neither read
- *  out of the tree nor be laundered into the fallback. `/api/*` never gets here at all. */
+const inside = (root: string, path: string): boolean => path === root || path.startsWith(root + sep);
+
+/** `path`'s REAL location if it is a file that, after symlink resolution, still lives under
+ *  `root` — else null. `root` is itself realpath'd at startup, so this compares real to real.
+ *  A lexical check alone is not enough: `resolve()` collapses `..` textually, but a symlink
+ *  ANYWHERE under `dist` is a lexically-innocent path whose target `statSync` and
+ *  `createReadStream` would both happily follow out of the tree (Codex P2). */
+function realFileUnder(root: string, path: string): string | null {
+  try {
+    const real = realpathSync(path);
+    return inside(root, real) && statSync(real).isFile() ? real : null;
+  } catch {
+    return null; // missing, or a broken link
+  }
+}
+
+/** Serve one file out of the vite build. A path that simply is not a file falls back to
+ *  `index.html` (the app is client-routed, so `/round/12` is a page, not a 404). A path that
+ *  ESCAPES the root — textually or through a symlink — gets neither: it is refused outright, so
+ *  an escape is never laundered into the fallback. `/api/*` never gets here at all. */
 function serveStatic(root: string, pathname: string, res: ServerResponse): void {
   let file: string | null = null;
   try {
     const candidate = resolve(root, `.${decodeURIComponent(pathname)}`);
-    if (candidate === root || candidate.startsWith(root + sep)) {
-      file = existsSync(candidate) && statSync(candidate).isFile() ? candidate : join(root, "index.html");
+    if (!inside(root, candidate)) {
+      file = null; // textual ../ escape — refused before the filesystem is touched at all
+    } else if (!existsSync(candidate)) {
+      file = realFileUnder(root, join(root, "index.html")); // a client-routed path
+    } else {
+      const real = realpathSync(candidate);
+      // Exists, so it resolves to something: refuse it if that something is outside the root,
+      // and treat a directory (including `/` itself) as a client-routed path.
+      file = !inside(root, real) ? null : statSync(real).isFile() ? real : realFileUnder(root, join(root, "index.html"));
     }
   } catch {
-    file = null; // malformed percent-encoding — not a path we will guess at
+    file = null; // malformed percent-encoding, or a link that vanished mid-resolve
   }
-  if (file === null || !existsSync(file)) {
+  if (file === null) {
     const payload = JSON.stringify({ error: `not found: ${pathname}` });
     res.writeHead(404, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });
     res.end(payload);
@@ -463,7 +486,17 @@ export async function createDashboardServer(opts: DashboardServerOptions): Promi
     config = null; // reported as null fields, never fatal — the DB read is the point
   }
   const ctx: Ctx = { state, config, now: opts.now ?? (() => new Date()) };
-  const staticRoot = resolve(opts.staticDir ?? join(import.meta.dirname, "dist"));
+  // Realpath'd ONCE here so every request compares a real path against a real root. Without it
+  // the comparison is real-vs-lexical and breaks wherever an ancestor is itself a link (macOS
+  // `/var` -> `/private/var`, a symlinked deploy dir). An unbuilt `dist` cannot be resolved yet;
+  // the lexical path is a fine stand-in, since nothing under a missing root exists either.
+  const configuredRoot = resolve(opts.staticDir ?? join(import.meta.dirname, "dist"));
+  let staticRoot = configuredRoot;
+  try {
+    staticRoot = realpathSync(configuredRoot);
+  } catch {
+    /* not built — every static request 404s, which is what "no build" should look like */
+  }
 
   // The write route is REGISTERED per config, not hidden per config: with `dashboard.controls`
   // false there is no such route to POST at, which is what makes the spectator posture

@@ -6,7 +6,7 @@
 // state), the statics, and the posture invariants: the SQLite handle stays read-only even with
 // a write route registered, and the listener binds loopback.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -614,6 +614,30 @@ test("dashboard/dist statics are served from the same server, and /api keeps pre
     // No escaping the static root — an encoded traversal at a file that really exists next to
     // dist must not be readable, and must not be laundered into the SPA fallback either.
     assert.equal((await fetch(`${fx.origin}/%2e%2e%2fsecret.txt`)).status, 404);
+  } finally {
+    fx.close();
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("a symlink under dist pointing outside it is refused, not followed", async () => {
+  const outer = mkdtempSync(join(tmpdir(), "sapwood-dist-"));
+  const dist = join(outer, "dist");
+  mkdirSync(dist, { recursive: true });
+  writeFileSync(join(outer, "secret.txt"), "not yours", "utf8");
+  writeFileSync(join(dist, "index.html"), "<!doctype html><title>sapwood</title>", "utf8");
+  // Both shapes: a link AT a file outside the root, and a link at the directory holding it —
+  // the second one has a lexically-innocent request path all the way to the last segment.
+  symlinkSync(join(outer, "secret.txt"), join(dist, "leak.txt"));
+  symlinkSync(outer, join(dist, "up"));
+  const fx = await fixture(undefined, { staticDir: dist });
+  try {
+    for (const path of ["/leak.txt", "/up/secret.txt"]) {
+      const res = await fetch(`${fx.origin}${path}`);
+      assert.equal(res.status, 404, `${path} escaped the static root`);
+      assert.doesNotMatch(await res.text(), /not yours/, `${path} leaked the file's contents`);
+    }
+    assert.equal((await fetch(`${fx.origin}/`)).status, 200, "ordinary serving is unaffected");
   } finally {
     fx.close();
     rmSync(outer, { recursive: true, force: true });
