@@ -3058,3 +3058,82 @@ test("spendByModelForDay groups the day's ledger by model, biggest spender first
   assert.deepEqual(s.spendByModelForDay(new Date("2026-07-25T00:00:00.000Z")), [], "a quiet day groups to nothing");
   s.close();
 });
+
+// ── #360: the dashboard's remaining read transports (spend paging, the rounds spine) ───────
+
+test("spendPage pages the ledger ascending by id, rows verbatim", () => {
+  const s = mem();
+  const models = (model: string): ModelUsageEntry[] => [
+    { model, inputTokens: 100, outputTokens: 20, cacheReadTokens: 900, cacheCreationTokens: 40 },
+  ];
+  s.recordSpend("w1", 86, 1.25, "2026-07-24T11:30:00.000Z", models("opus"));
+  s.recordSpend("w2", 88, 0.75, "2026-07-24T11:31:00.000Z", models("sonnet"));
+  s.recordSpend("w3", 90, 0.5, "2026-07-24T11:32:00.000Z");
+
+  const first = s.spendPage(0, 2);
+  assert.deepEqual(
+    first.map((r) => r.id),
+    [1, 2],
+  );
+  assert.deepEqual(first[0], {
+    id: 1,
+    ts: "2026-07-24T11:30:00.000Z",
+    worker: "w1",
+    issue: 86,
+    usd: 1.25,
+    model: "opus",
+    inputTokens: 100,
+    outputTokens: 20,
+    cacheReadTokens: 900,
+    cacheCreationTokens: 40,
+  });
+  assert.equal(s.spendPage(2, 10)[0]?.model, "unknown", "a model-less leg keeps recordSpend's own 'unknown' row");
+  assert.deepEqual(s.spendPage(3, 10), [], "past the tail is empty, not an error");
+  s.close();
+});
+
+test("listRounds is the rounds spine: every row, artifact left-joined, cursors and event counts", () => {
+  const s = mem();
+  // Round 1: two events inside its window, closed WITH an artifact.
+  s.appendEvent("before", {}); // id 1 — belongs to no round
+  const r1 = s.startRound("2026-07-24T10:00:00.000Z");
+  s.appendEvent("dispatched", { issue: 86 });
+  s.appendEvent("merged", { pr: 94 });
+  s.closeRound(r1.round_id, "2026-07-24T11:00:00.000Z");
+  s.saveRoundArtifact(r1.round_id, 1, JSON.stringify({ roundId: 1, merged: [94] }), "2026-07-24T11:00:01.000Z");
+  // Round 2: one event, closed WITHOUT an artifact (the crash-between-close-and-save case).
+  const r2 = s.startRound("2026-07-24T12:00:00.000Z");
+  s.appendEvent("dispatched", { issue: 88 });
+  s.closeRound(r2.round_id, "2026-07-24T13:00:00.000Z");
+  // Round 3: still open, no events yet.
+  s.startRound("2026-07-24T14:00:00.000Z");
+
+  const rounds = s.listRounds();
+  assert.deepEqual(
+    rounds.map((r) => r.roundId),
+    [1, 2, 3],
+    "ascending, and an artifact-less round is NOT dropped",
+  );
+
+  assert.deepEqual(rounds[0], {
+    roundId: 1,
+    status: "done",
+    startedAt: "2026-07-24T10:00:00.000Z",
+    endedAt: "2026-07-24T11:00:00.000Z",
+    startEventId: 1,
+    startSpendId: 0,
+    eventCount: 2,
+    schemaVersion: 1,
+    artifact: { roundId: 1, merged: [94] },
+  });
+
+  assert.equal(rounds[1]!.schemaVersion, null, "no artifact — tally-less, honestly");
+  assert.equal(rounds[1]!.artifact, null);
+  assert.equal(rounds[1]!.eventCount, 1);
+  assert.equal(rounds[1]!.startEventId, 3);
+
+  assert.equal(rounds[2]!.status, "in_progress");
+  assert.equal(rounds[2]!.endedAt, null);
+  assert.equal(rounds[2]!.eventCount, 0, "an open round with no events of its own counts none");
+  s.close();
+});

@@ -852,17 +852,48 @@ lands as a separate human-authored change.
   and opens the browser. Read-only DB handle; safe to run beside a live engine
   (WAL mode).
 
-### Server — what has landed (#142)
+### Server — what has landed (#142, completed by #360)
 
-`dashboard/server.ts` exists and serves the two READ routes: `GET
-/api/loop/state` and `GET /api/events?after=&limit=`. `createDashboardServer({
-dbPath, configPath, port })` opens `State` in `readOnly` mode, binds
-`127.0.0.1` (default port 4517), and dispatches through a pathname→method route
-table that `/api/spend`, `/api/rounds` and the gated `POST /api/control` (#360)
-register into. There is no CLI entry point yet — until `sapwood dashboard`
-lands, the server is started from code.
+`dashboard/server.ts` serves the whole §8 surface: the four READ routes (`GET
+/api/loop/state`, `GET /api/events?after=&limit=`, `GET
+/api/spend?after=&limit=`, `GET /api/rounds`), the single gated `POST
+/api/control`, and the `dashboard/dist` statics.
+`createDashboardServer({ dbPath, configPath, port, staticDir })` opens `State`
+in `readOnly` mode, binds `127.0.0.1` (default port 4517), and dispatches
+through a pathname→method route table. There is no CLI entry point yet — until
+`sapwood dashboard` lands, the server is started from code.
 
-Three things about it are decisions, not implementation detail:
+Wire details the frontend can rely on:
+
+- Both paged feeds answer `{ <name>: [...], "lastId": n }` — `events` for
+  `/api/events`, `spend` for `/api/spend` — with the same `after`/`limit`
+  contract, a shared 1000-row page cap, and a `lastId` that an empty tail
+  leaves at the caller's own cursor rather than rewinding to 0.
+- `/api/rounds` is unpaged: one row per round is a chapter index, not a feed.
+  Every `rounds` row appears, artifact-less ones included, with
+  `schemaVersion`/`artifact` both `null` when there is no artifact (render
+  tally-less, never skip the round). `eventCount` is the round's slice of the
+  ledger — its own `startEventId` exclusive to the *next* round's inclusive, so
+  the counts partition the ledger; events before the first round belong to none.
+- Anything outside `/api/` is a static: a real file under `dashboard/dist`, else
+  the `index.html` shell (the app is client-routed). `/api/*` never falls back —
+  an unknown API path is an honest JSON 404.
+
+Five things about it are decisions, not implementation detail:
+
+- **The write route is registered, not hidden.** `dashboard.controls` (#210)
+  decides whether `/api/control` exists at all; `false` — *and an unreadable
+  config*, fail-closed — means a 404, so the spectator posture is structural.
+  The route defends itself server-side: `X-Sapwood-Control` (which forces a
+  preflight this server never grants), an `application/json` content-type (so a
+  no-preflight form POST cannot reach a verb), and an `Origin` that, when
+  present, must be this server's. Its verb allowlist is exactly `start`,
+  `pause`, `resume`, `stop` — `estop` joins it in the same change that lands the
+  #293 `EMERGENCY_STOP` sentinel, never before, because a verb that reports
+  success while signalling nothing is worse than a 400. The only effect is
+  creating/removing the engine's own `PAUSE`/`KILL_SWITCH` files, and the reply
+  is the engine state read back *after* the signal (`stop` answers `stopping`
+  while lanes drain), so the UI renders the real transition.
 
 - **The config surface is an allowlist**, `CONFIG_ALLOWLIST` in the same file —
   the §3 E groups' named leaves plus the per-role `model`/`effort` keys. A
@@ -870,10 +901,14 @@ Three things about it are decisions, not implementation detail:
   no-secrets guarantee survives config growth.
 - **The engine-state derivation lives server-side only** and reads the engine's
   own `State`/config rather than re-querying SQLite, so `sapwood status` and the
-  dashboard cannot drift apart. Its four dashboard-only reads (`lastTickAt`,
-  `countEvents`, `eventsPage`, `spendByModelForDay`) are read-only additions to
-  `engine/src/state/state.ts` — notably `lastTickAt`, which reads the heartbeat
-  without the write `engineSessionStart` performs.
+  dashboard cannot drift apart — the control route's reply goes through that
+  same derivation. Its six dashboard-only reads (`lastTickAt`, `countEvents`,
+  `eventsPage`, `spendByModelForDay`, `spendPage`, `listRounds`) are read-only
+  additions to `engine/src/state/state.ts` — notably `lastTickAt`, which reads
+  the heartbeat without the write `engineSessionStart` performs.
+- **The SQLite handle stays read-only even now that a write route exists.** The
+  control verbs write files, never rows; a write attempted through the handle
+  still throws, and the test suite asserts it after a successful control call.
 - **`spend.runUsd` is `null`** until follow-up #206's `run-started` event
   persists the #154 run anchor (today it exists only in engine-process memory).
   The header meter therefore falls back whole to the daily tier, exactly as §3 A

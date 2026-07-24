@@ -1079,6 +1079,38 @@ export interface RoundRow {
   start_spend_id?: number;
 }
 
+/** One `spend_ledger` row as the dashboard reads it (State.spendPage, #360) — the stored
+ *  columns verbatim, token counts camelCased to match the rest of the §8 wire. */
+export interface SpendLedgerRow {
+  id: number;
+  ts: string;
+  worker: string;
+  issue: number;
+  usd: number;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
+/** One `rounds` row with its artifact left-joined (State.listRounds, #360). `schemaVersion` and
+ *  `artifact` are BOTH null for a round that never got one — the reader's cue to render the
+ *  round without an outcome tally rather than to skip it. */
+export interface RoundListRow {
+  roundId: number;
+  status: RoundStatus;
+  startedAt: string;
+  endedAt: string | null;
+  /** #123 cursors, from the ROUNDS row — the replay chapter window. Not artifact fields. */
+  startEventId: number;
+  startSpendId: number;
+  eventCount: number;
+  schemaVersion: number | null;
+  /** The validated artifact JSON, parsed and verbatim (docs/round-artifact.md is its contract). */
+  artifact: unknown;
+}
+
 /** #231: one engine-controlled input channel's read record for one peripheral session attempt —
  *  see the schema v13->v14 migration comment for the full table-shape rationale. `attempt` is
  *  populated by the CALLER from State.nextInputManifestAttempt (itself derived from durable
@@ -2629,6 +2661,44 @@ export class State {
     return rows.map((r) => ({ model: r.model, usd: r.usd, inputTokens: r.inputTokens, outputTokens: r.outputTokens }));
   }
 
+  /** One ascending page of the RAW spend ledger — §8's `/api/spend` transport (#360), the same
+   *  id-cursor paging contract eventsPage gives events, so replay can walk both feeds with one
+   *  cursor discipline. Rows are the ledger's own columns, nothing derived: a spend panel that
+   *  wants a total sums these, it never asks the server for a number it cannot re-derive. */
+  spendPage(afterId: number, limit: number): SpendLedgerRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+         FROM spend_ledger WHERE id > ? ORDER BY id LIMIT ?`,
+      )
+      .all(afterId, limit) as unknown as {
+      id: number;
+      ts: string;
+      worker: string;
+      issue: number;
+      usd: number;
+      model: string;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+    }[];
+    // Re-shaped into ordinary objects for the same null-prototype reason spendByModelForDay
+    // documents, and camelCased to match every other token count on the §8 wire.
+    return rows.map((r) => ({
+      id: r.id,
+      ts: r.ts,
+      worker: r.worker,
+      issue: r.issue,
+      usd: r.usd,
+      model: r.model,
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      cacheReadTokens: r.cache_read_tokens,
+      cacheCreationTokens: r.cache_creation_tokens,
+    }));
+  }
+
   // ── #123: round summary artifact (round_artifacts, migration 9->10) ─────────────────────
 
   /** Upsert the FINAL round artifact row — one per round (round_id is the PK), so a crash-rerun
@@ -2654,6 +2724,66 @@ export class State {
       | { schema_version: number; json: string }
       | undefined;
     return row ? { schemaVersion: row.schema_version, json: row.json } : undefined;
+  }
+
+  /** Every round, ascending, with its artifact LEFT-JOINed — §8's `/api/rounds` (#360).
+   *
+   *  The `rounds` table is the SPINE, not `round_artifacts`: a round that closed without an
+   *  artifact (pre-#123 history, or a crash between closeRound and saveRoundArtifact) is still
+   *  a round that happened, and dropping it would silently shorten the replay timeline. Such a
+   *  row comes back with `schemaVersion: null` / `artifact: null` and renders tally-less.
+   *
+   *  `eventCount` is the round's own slice of the ledger — its #123 start cursor exclusive, the
+   *  NEXT round's start cursor inclusive (the newest event id for the last round). That keeps
+   *  the counts a partition of the ledger rather than the unbounded `id > cursor` window
+   *  round-artifact.ts uses at close time, when there is no next round yet. Events before the
+   *  first round belong to no round and are counted by none. */
+  listRounds(): RoundListRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.round_id, r.status, r.started_at, r.ended_at, r.start_event_id, r.start_spend_id,
+                a.schema_version, a.json,
+                (SELECT COUNT(*) FROM events e
+                  WHERE e.id > r.start_event_id
+                    AND e.id <= COALESCE(
+                      (SELECT MIN(n.start_event_id) FROM rounds n WHERE n.round_id > r.round_id),
+                      (SELECT COALESCE(MAX(id), 0) FROM events))) AS event_count
+         FROM rounds r LEFT JOIN round_artifacts a ON a.round_id = r.round_id
+         ORDER BY r.round_id`,
+      )
+      .all() as unknown as {
+      round_id: number;
+      status: RoundStatus;
+      started_at: string;
+      ended_at: string | null;
+      start_event_id: number;
+      start_spend_id: number;
+      schema_version: number | null;
+      json: string | null;
+      event_count: number;
+    }[];
+    return rows.map((r) => {
+      let artifact: unknown = null;
+      if (r.json !== null) {
+        try {
+          artifact = JSON.parse(r.json);
+        } catch {
+          /* engine-written and schema-validated before storage — a corrupt row degrades to the
+             artifact-less rendering, never a 500 for the whole timeline */
+        }
+      }
+      return {
+        roundId: r.round_id,
+        status: r.status,
+        startedAt: r.started_at,
+        endedAt: r.ended_at,
+        startEventId: r.start_event_id,
+        startSpendId: r.start_spend_id,
+        eventCount: r.event_count,
+        schemaVersion: artifact === null ? null : r.schema_version,
+        artifact,
+      };
+    });
   }
 
   /** Where the derived markdown VIEW of a round's artifact lives on disk — null for an

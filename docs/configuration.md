@@ -78,7 +78,7 @@ the dashboard reads them; no engine behavior depends on them.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `controls` | `true` | Does this deployment's dashboard **drive** the loop or only watch it? `true` shows the Operations verbs (start/pause/resume/stop) and serves their `POST /api/control` route. `false` = pure spectator: the buttons are absent and the route refuses, so a read-only deployment (a shared screen, a demo, a recorded walkthrough) cannot be clicked into touching the loop. A capability gate for the deployment as a whole, never a per-user permission model — sapwood has no user accounts. |
+| `controls` | `true` | Does this deployment's dashboard **drive** the loop or only watch it? `true` shows the Operations verbs (start/pause/resume/stop) and serves their `POST /api/control` route. `false` = pure spectator: the buttons are absent and the route is **not registered at all** (404, not a refusal), so a read-only deployment (a shared screen, a demo, a recorded walkthrough) cannot be clicked into touching the loop. A config the server cannot read is treated the same way — fail-closed, no write route. A capability gate for the deployment as a whole, never a per-user permission model — sapwood has no user accounts. |
 
 ## `lanes`
 
