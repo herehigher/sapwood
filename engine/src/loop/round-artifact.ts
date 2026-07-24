@@ -286,21 +286,39 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
         break;
       case "plan-review-escalated":
         addNeedsHuman(p.issue);
-        // #374 review (Codex sol-high finding 4, P2): ALSO a degraded-phase signal — this event
-        // fires on a GENUINE plan-reviewer/plan-drafter/confirm session failure (an env-classified
-        // attempt never reaches here at all; peripheral.ts's runSessionWithRetry returns early
-        // with envParked, and plan-review.ts's three call sites check that flag and return before
-        // ever emitting this event — see plan-review.ts's own doc). So this is EXACTLY the
-        // "unrecognized systemic failure" signal round.ts's empty-spin breaker exists to catch,
-        // and previously never fed into degradedPhases at all — a plan-review-only quota storm
-        // (one whose text classifyEnvFailure doesn't recognize) could never trip the breaker.
-        // Payload shape differs from the other `*-degraded` events (round_id/issue/reason, no
-        // outcome/session) — adapted to the shared shape here rather than widening it.
-        degradedPhases.push({
-          phase: "plan_review",
-          outcome: "escalated",
-          session: `issue#${String(p.issue ?? "unknown")}`,
-        });
+        // #374 review (Codex sol-high finding 4, P2): ALSO a degraded-phase signal — an
+        // env-classified attempt never reaches here at all (peripheral.ts's runSessionWithRetry
+        // returns early with envParked, and plan-review.ts's three session call sites check that
+        // flag and return before ever emitting this event — see plan-review.ts's own doc). So a
+        // GENUINE session failure here is exactly the "unrecognized systemic failure" signal
+        // round.ts's empty-spin breaker exists to catch, and previously never fed into
+        // degradedPhases at all — a plan-review-only quota storm (one whose text
+        // classifyEnvFailure doesn't recognize) could never trip the breaker.
+        //
+        // #374 review (Codex sol-high verify-pass finding 3, P1 — corrects this doc's own
+        // over-broad original claim): this event does NOT *only* fire on a genuine session
+        // failure — plan-review.ts's `escalate()` ALSO fires it for "self-heal exhausted after N
+        // draft→re-review cycle(s)" (reviewOneIssue's cycle-bound check), a LOOP-level outcome
+        // where every reviewer/drafter session along the way actually ran cleanly and produced a
+        // validly-decided verdict; the provider is demonstrably healthy, the draft cycle simply
+        // hit its configured cap. Counting THAT toward the breaker would be a false-park source:
+        // a perfectly normal, provider-healthy escalation misread as evidence of an outage.
+        // plan-review.ts now tags every emission site with `origin` (`"session-failure"` from the
+        // three runSessionWithRetry degradePayload closures, `"cycle-exhausted"` from escalate()
+        // itself) precisely so this assembler can tell them apart — only `"session-failure"`
+        // counts as a degraded-phase signal here; `"cycle-exhausted"` (or any other/missing
+        // origin, fail-CLOSED toward NOT counting — the breaker must under-fire on an ambiguous
+        // signal, never over-fire) still populates needsHuman (addNeedsHuman above) but never
+        // degradedPhases. Payload shape otherwise differs from the other `*-degraded` events
+        // (round_id/issue/reason/origin, no outcome/session) — adapted to the shared shape here
+        // rather than widening it.
+        if (p.origin === "session-failure") {
+          degradedPhases.push({
+            phase: "plan_review",
+            outcome: "escalated",
+            session: `issue#${String(p.issue ?? "unknown")}`,
+          });
+        }
         break;
       case "egress-suspect":
         egressSuspects.push({

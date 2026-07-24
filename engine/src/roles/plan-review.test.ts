@@ -517,10 +517,14 @@ test("createPlanReviewStub #110: reviewer output with no structured block at all
   assert.ok(/structured output/.test(comment), "the escalation comment names the malformed-output reason");
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string };
+  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string; origin?: string };
   assert.equal(payload.round_id, 3);
   assert.equal(payload.issue, 33);
   assert.ok(/structured output/.test(payload.reason));
+  // #374 review (Codex sol-high verify-pass finding 3, P1): invalid-output-twice is still a
+  // genuine session failure for this purpose (the isValid-hook path shares runSessionWithRetry's
+  // one degradeEvent with the crash/timeout path) — origin tags it the same way.
+  assert.equal(payload.origin, "session-failure");
   state.close();
 });
 
@@ -649,10 +653,14 @@ test("createPlanReviewStub #104: escalate() (maxDraftCycles exhausted) appends a
   await stub.run({ roundId: 7, phase: "plan_review", marker: null });
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string };
+  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string; origin?: string };
   assert.equal(payload.round_id, 7);
   assert.equal(payload.issue, 13);
   assert.ok(/exhausted/.test(payload.reason));
+  // #374 review (Codex sol-high verify-pass finding 3, P1): a maxDraftCycles exhaustion is a
+  // LOOP-level outcome, not a session failure — every reviewer/drafter session here ran cleanly.
+  // round-artifact.ts's assembler relies on this exact tag to keep it OUT of degradedPhases.
+  assert.equal(payload.origin, "cycle-exhausted");
   state.close();
 });
 
@@ -667,9 +675,13 @@ test("createPlanReviewStub #104: escalate() from a reviewer-session-failed-twice
   await stub.run({ roundId: 2, phase: "plan_review", marker: null });
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { round_id: number; issue: number };
+  const payload = events[0]!.payload as { round_id: number; issue: number; origin?: string };
   assert.equal(payload.round_id, 2);
   assert.equal(payload.issue, 31);
+  // #374 review (Codex sol-high verify-pass finding 3, P1): a genuine session failure (crashed
+  // twice) — round-artifact.ts's assembler relies on this exact tag to count it INTO
+  // degradedPhases (the empty-spin breaker's own signal).
+  assert.equal(payload.origin, "session-failure");
   state.close();
 });
 
@@ -1337,9 +1349,12 @@ test("createPlanReviewStub (#214): a confirm session that fails TWICE escalates 
   assert.ok(comment.includes(planReviewMarker(round.round_id)));
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { round_id: number; issue: number };
+  const payload = events[0]!.payload as { round_id: number; issue: number; origin?: string };
   assert.equal(payload.round_id, round.round_id);
   assert.equal(payload.issue, 300);
+  // #374 review (Codex sol-high verify-pass finding 3, P1): a genuine confirm session failure —
+  // must count toward the empty-spin breaker via round-artifact.ts's origin filter.
+  assert.equal(payload.origin, "session-failure");
   state.close();
 });
 

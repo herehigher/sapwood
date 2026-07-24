@@ -112,14 +112,29 @@ function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, ph
  *  under-triggers, never over-triggers, the breaker — the safer direction for a new safety
  *  mechanism — and item 1's env-classification path plus the ceiling-breach gate remain the
  *  primary defenses regardless; a sustained outage spans many rounds, and it only takes N
- *  CONSECUTIVE rounds where every configured phase actually ran to trip. */
+ *  CONSECUTIVE rounds where every configured phase actually ran to trip.
+ *
+ *  #374 review (Codex sol-high verify-pass finding 3, P2 — narrows an over-broad false-park
+ *  source): `artifact.retro.degraded` (retro.ts's `retro-pr-degraded` event) is DELIBERATELY
+ *  never treated as retro-phase degradation here — retro.ts's openProposalPR (the only place
+ *  that event fires) runs ONLY after the retro SESSION already returned `outcome === "done"`
+ *  with a validated proposal (see retro.ts's own call site: `if (result.outcome === "done") {
+ *  ... if (scratch.kind === "proposal") await openProposalPR(...) }`). Its failure modes
+ *  (branch-verification miss, openPR throwing) are exclusively POST-session forge/git
+ *  infrastructure problems — proof the LLM/provider is fine, the exact opposite of what this
+ *  breaker exists to detect. A genuine retro SESSION failure is already captured correctly, via
+ *  the `retro-degraded` event (a completely separate emission site, gated on the session's own
+ *  outcome/isValid) folding into `artifact.degradedPhases` through the loop just above — that
+ *  path is untouched. Counting `retro.degraded` here too would double up on a signal that can
+ *  only ever mean "the session succeeded, something else broke", turning an unrelated forge/git
+ *  hiccup into a false contributor toward parking the whole engine. The breaker must UNDER-fire
+ *  on an ambiguous signal, never over-fire on a well-understood one. */
 export function isRoundFullyDegraded(cfg: SapwoodConfig, artifact: RoundArtifact, roundId: number): boolean {
   const degradedRoundPhases = new Set<PeripheralPhase>();
   for (const d of artifact.degradedPhases) {
     const rp = DEGRADED_PHASE_TO_ROUND_PHASE[d.phase];
     if (rp) degradedRoundPhases.add(rp);
   }
-  if (artifact.retro.degraded != null) degradedRoundPhases.add("retro");
 
   const requiredPhases: PeripheralPhase[] = [];
   if (cfg.roles.po.enabled || cfg.roles.po.poolSelection) requiredPhases.push("aligning");
@@ -777,7 +792,25 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
    *  it is a REAL, PAID API call, and a simultaneous quota park + daily-budget/wall-clock breach
    *  must never keep spending past the hard ceiling just to test recovery. The free forge probe
    *  is unaffected either way (conductor.ts's own stance: an IForge read is a genuine, zero-cost
-   *  recovery signal regardless of ceiling state); duration-based escalation is unaffected too. */
+   *  recovery signal regardless of ceiling state); duration-based escalation is unaffected too.
+   *
+   *  #374 review (Codex sol-high verify-pass finding 2, P2): this loop's OWN exit condition is
+   *  ceiling/park state alone — it has no notion of the run's FINAL stop conditions
+   *  (stop.onMilestoneComplete etc, checkFinalMilestone/checkFinalSpend just below). Without a
+   *  re-check, a milestone that completes EXTERNALLY while the engine sits parked would never be
+   *  noticed: this loop keeps waiting for ceiling/park to clear (which, for a permanently-broken
+   *  provider, may be never) instead of recognizing the run is already, independently, done. The
+   *  re-check sits right before the wait at the BOTTOM of the loop (not the top) — deliberately:
+   *  the common case (nothing parked, no ceiling breach) already returns immediately above without
+   *  ever waiting, and the outer caller ALSO runs both checks just before invoking this function
+   *  (see its own call site) — re-checking again on that already-clear fast path would be a
+   *  redundant network call every round boundary for zero benefit. Placed here, the extra check
+   *  only ever fires on an iteration that is actually ABOUT to sit out a wait for recovery — the
+   *  exact situation the bug this closes is about. Same re-check every standby wake already
+   *  performs (below). Referencing checkFinalSpend/checkFinalMilestone here before their own
+   *  `const` declarations further down this closure is safe: this function is only ever CALLED
+   *  later (line ~1305, well after both are assigned), so by the time this body actually
+   *  executes, both names are long past their TDZ. */
   const waitForDispatchClear = async (): Promise<void> => {
     for (;;) {
       if (signalled || deps.state.isKillSwitchActive()) return;
@@ -849,6 +882,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       const parkClearToOpen = !deps.state.isParked() || (llmGreenLight && deps.state.parkRow("forge") == null);
       if (ceilingReasons.length === 0 && parkClearToOpen) return;
+
+      // #374 review (Codex sol-high verify-pass finding 2, P2): about to actually sit out a wait
+      // for ceiling/park to clear — re-check the run's FINAL stop condition first. A hit here
+      // means the run is independently done regardless of whether recovery ever comes; return
+      // immediately (no sleep) so the caller's own post-call finalStopHit check (see its site)
+      // stops the run cleanly instead of looping forever on a park that may never clear.
+      checkFinalSpend();
+      await checkFinalMilestone();
+      if (finalStopHit) return;
 
       if (signalled) return;
       await interTickWait(deps.tickIntervalSec * 1000);
@@ -1305,6 +1347,16 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           await waitForDispatchClear();
           if (signalled) {
             return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
+          }
+          // #374 review (Codex sol-high verify-pass finding 2, P2): waitForDispatchClear now
+          // returns EARLY (before ceiling/park actually clear) the instant a final stop condition
+          // fires inside its own wait loop — and even when it returns because ceiling/park
+          // genuinely cleared, the SAME wake could be the moment a milestone completed
+          // externally. Either way, a hit here must stop the run cleanly BEFORE standby or
+          // startRound ever run — never silently fall through into opening a pointless
+          // post-recovery round.
+          if (finalStopHit) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
           }
         }
 

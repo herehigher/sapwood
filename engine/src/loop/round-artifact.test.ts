@@ -133,15 +133,45 @@ test("assembleRoundArtifact: round-stop hits and *-degraded events map to named 
   ]);
 });
 
-test("assembleRoundArtifact #374 review (Codex sol-high finding 4): plan-review-escalated is BOTH a needs-human escalation AND a degraded-phase signal", () => {
-  const events = [{ kind: "plan-review-escalated", payload: { round_id: 1, issue: 42, reason: "reviewer session failed twice (failed)" } }];
+test("assembleRoundArtifact #374 review (Codex sol-high finding 4): plan-review-escalated with origin 'session-failure' is BOTH a needs-human escalation AND a degraded-phase signal", () => {
+  const events = [
+    {
+      kind: "plan-review-escalated",
+      payload: { round_id: 1, issue: 42, reason: "reviewer session failed twice (failed)", origin: "session-failure" },
+    },
+  ];
   const artifact = assembleRoundArtifact(events, meta, 0, 30);
   // Existing behavior (unchanged): still counts as a needs-human escalation.
   assert.deepEqual(artifact.escalations.needsHuman, [42]);
-  // NEW: previously plan-review-escalated fell into the switch's `default: break` case and never
+  // Previously plan-review-escalated fell into the switch's `default: break` case and never
   // appeared in degradedPhases at all — a plan-review-only quota storm the classifier didn't
-  // recognize could never trip round.ts's empty-spin breaker. Now it does.
+  // recognize could never trip round.ts's empty-spin breaker. Now it does, but ONLY when the
+  // event's own origin says it's a genuine session failure (see the next test for the converse).
   assert.deepEqual(artifact.degradedPhases, [{ phase: "plan_review", outcome: "escalated", session: "issue#42" }]);
+});
+
+test("assembleRoundArtifact #374 review (Codex sol-high verify-pass finding 3, P1): plan-review-escalated with origin 'cycle-exhausted' is STILL a needs-human escalation but NEVER a degraded-phase signal", () => {
+  // A legitimate self-heal-exhausted outcome (plan-review.ts's escalate(), reviewOneIssue's own
+  // maxDraftCycles cap) — every reviewer/drafter session along the way ran cleanly; this is not
+  // evidence of an outage and must never feed the empty-spin breaker.
+  const events = [
+    {
+      kind: "plan-review-escalated",
+      payload: { round_id: 1, issue: 43, reason: "self-heal exhausted after 2 draft→re-review cycle(s)", origin: "cycle-exhausted" },
+    },
+  ];
+  const artifact = assembleRoundArtifact(events, meta, 0, 30);
+  assert.deepEqual(artifact.escalations.needsHuman, [43], "still surfaces as a needs-human hold — a human genuinely must adjudicate it");
+  assert.deepEqual(artifact.degradedPhases, [], "never counted as a degraded-phase signal — the sessions themselves all succeeded");
+});
+
+test("assembleRoundArtifact #374 review (Codex sol-high verify-pass finding 3, P1): plan-review-escalated with NO origin at all (unknown/legacy payload shape) fails CLOSED toward NOT counting as degraded", () => {
+  // Fail-closed toward under-firing (never over-firing) on an ambiguous/missing signal — the
+  // breaker's own stated doctrine (round.ts's isRoundFullyDegraded doc).
+  const events = [{ kind: "plan-review-escalated", payload: { round_id: 1, issue: 44, reason: "some legacy reason" } }];
+  const artifact = assembleRoundArtifact(events, meta, 0, 30);
+  assert.deepEqual(artifact.escalations.needsHuman, [44]);
+  assert.deepEqual(artifact.degradedPhases, []);
 });
 
 test("assembleRoundArtifact: retro-pr-opened/-degraded populate the retro section, last event wins", () => {

@@ -1180,6 +1180,41 @@ test("createAligningStub #374 review (Codex sol-high finding 6): once an earlier
   state.close();
 });
 
+test("createAligningStub #374 review (Codex sol-high verify-pass finding 1, P1): an ARMED recovery round (park ALREADY open before this pass) still runs the FIRST triage candidate for real — it IS the canary — never skips on pre-existing park state alone", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [
+    { number: 90, title: "a", labels: [], body: "" },
+    { number: 91, title: "b", labels: [], body: "" },
+  ];
+  const cfg = mkCfg();
+  // #90's session succeeds cleanly (the provider IS actually back) -> triaged normally.
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-90", triageResultText(90, "## Verification\n- a")),
+    doneResult("po-triage-91", triageResultText(91, "## Verification\n- b")),
+  ]);
+  const state = new State(":memory:");
+  // Simulates round.ts's round-opening gate having ARMED this round via a green
+  // probeLlmReachable ping — the ping only arms the round to open, it never clears the episode
+  // outright (round.ts's own canary doctrine). If the loop guard skipped on "a park row exists"
+  // (the pre-fix behavior), #90 would never even get a chance to prove recovery.
+  state.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 10, phase: "aligning", marker: null });
+  // BOTH candidates got a real session — #90's success cleared the park, so #91 proceeds
+  // normally too (never gated on the STALE pre-pass park state).
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-triage", "po-triage"],
+    "the pre-existing park never suppressed dispatch — both candidates ran",
+  );
+  assert.equal(state.isParked(), false, "#90's 'done' outcome cleared the episode");
+  assert.ok(forge.issueCommentsPosted.some(([n]) => n === 90));
+  assert.ok(forge.issueCommentsPosted.some(([n]) => n === 91));
+  state.close();
+});
+
 // ── marker-idempotence across a re-run (rerun-not-resume, #77 decision 4) ───────────────────
 
 test("createAligningStub: re-running the SAME round after a marker was already set drafts nothing twice", async () => {

@@ -2285,6 +2285,27 @@ test("isRoundFullyDegraded (the retro-only false positive this finding fixes): o
   assert.equal(isRoundFullyDegraded(cfg, artifact, 1), false);
 });
 
+test("isRoundFullyDegraded #374 review (Codex sol-high verify-pass finding 3, P2): artifact.retro.degraded (a POST-session branch-verify/openPR failure) never counts as retro-phase degradation, even when every OTHER required phase genuinely degraded", () => {
+  // retro.ts's openProposalPR (the only site that ever sets artifact.retro.degraded) runs ONLY
+  // after the retro SESSION already returned outcome:"done" with a validated proposal — this
+  // artifact shape is exactly what a real "session succeeded, git push/openPR then failed"
+  // round looks like: every OTHER required phase truly failed (a real quota storm elsewhere),
+  // but retro's own session was fine. Without this fix, line-122's old `artifact.retro.degraded
+  // != null` check would have added "retro" to degradedRoundPhases too, making every required
+  // phase appear degraded — a false "fully degraded" verdict manufactured from a signal that
+  // PROVES the provider was reachable.
+  const cfg = mkCfg();
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review")],
+    retro: { opened: null, degraded: { branch: "b", title: "t", reason: "openPR failed for verified-pushed branch" } },
+  });
+  assert.equal(
+    isRoundFullyDegraded(cfg, artifact, 1),
+    false,
+    "retro's own session succeeded — the round is NOT fully degraded even though three other phases genuinely are",
+  );
+});
+
 test("isRoundFullyDegraded: a disabled role is EXCLUDED from the required set — degrading everything else still counts as fully degraded", () => {
   const cfg = mkCfg({ roles: { architect: { enabled: false } } });
   const artifact = mkArtifact({
@@ -2477,6 +2498,43 @@ test("runRounds #374: the round-opening gate resumes via the EXISTING probe path
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("runRounds #374 review (Codex sol-high verify-pass finding 2, P2): stop.onMilestoneComplete completing EXTERNALLY while llm-parked ends the run cleanly — waitForDispatchClear never waits forever for a recovery that may never come, and never opens a pointless post-recovery round", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // round 1 has no dispatch work — opens unconditionally, closes idle
+  // Loop-top check before round 2 (the `!round` branch's OWN checkFinalMilestone, run BEFORE
+  // waitForDispatchClear): 1 (no hit). Then waitForDispatchClear's own re-check, once per wait
+  // iteration: 1 (still no hit) on the first iteration, then 0 (hit) on the second — the
+  // milestone completes DURING the wait, not before it.
+  forge.milestoneOpenCounts = [1, 1, 0];
+  const state = new State(":memory:");
+  // Pre-seed an OPEN llm park with NO probeLlmReachable wired (disabled-consumer rule, #168) —
+  // the episode can never auto-clear via ping, simulating a provider that stays down. Without
+  // this fix, waitForDispatchClear's own loop has no notion of the run's final stop condition
+  // and would spin on ceiling/park state alone forever, even though the run is already,
+  // independently, done.
+  state.enterPark("llm", "quota exhausted", null, "2026-07-24T00:00:00.000Z");
+  const sleepCalls: number[] = [];
+  let stop = (): void => {};
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    // Safety net: if the fix regresses (final stop never re-checked inside the wait loop), this
+    // loop spins forever waiting for a park that never clears — bail via signal so the
+    // stoppedBy/rounds assertions below fail instead of hanging the suite.
+    if (sleepCalls.length >= 5) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 1, stop: { onMilestoneComplete: "M4" } });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
+  assert.equal(result.rounds, 1, "only round 1 closed — round 2 never opened once the milestone was noticed mid-wait");
+  assert.equal(state.isParked(), true, "the run stopped WITHOUT the park ever clearing — never waited for recovery");
+  state.close();
 });
 
 // ── #212: round-pool dispatch scoping, round-close label cleanup, removeLabel containment ────

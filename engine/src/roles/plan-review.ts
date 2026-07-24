@@ -448,14 +448,32 @@ async function reviewOneIssue(
    *  LOOP-level degradation (maxDraftCycles exhausted) where no session-retry helper already
    *  owns firing that event. Session-validity degradations (reviewer/drafter, below) instead
    *  get the event from runSessionWithRetry's own `degradeEvent` and call `escalateForge` alone,
-   *  so the SAME event never fires twice for the same degradation. */
+   *  so the SAME event never fires twice for the same degradation.
+   *
+   *  #374 review (Codex sol-high verify-pass finding 3, P1 — narrows an over-broad false-park
+   *  source): this function's ONLY caller (self-heal exhausted after maxDraftCycles, below) is a
+   *  cycle-exhaustion — every reviewer/drafter session along the way ran cleanly and produced a
+   *  validly-decided verdict; the loop simply hit its configured cap. That is a legitimate,
+   *  provider-healthy outcome, structurally distinct from the SAME event's OTHER emission sites
+   *  (runSessionWithRetry's own `degradeEvent` in the reviewer/drafter/confirm sessions below),
+   *  which fire only on a genuine session failure (crashed/timed out, or invalid output twice).
+   *  `origin: "cycle-exhausted"` on the payload lets round-artifact.ts's assembler tell the two
+   *  apart — see its own doc for why only `"session-failure"` counts toward the empty-spin
+   *  breaker's degraded-phase signal. Hardcoded (not a parameter) because this helper has
+   *  exactly one call site today; a future second LOOP-level (non-session) escalation reason
+   *  would still correctly report the same origin. */
   const escalate = async (reason: string): Promise<void> => {
     await escalateForge(reason);
     // Contained: a state-write failure here must never undo the forge label/comment above,
     // which already externalized the escalation — same fail-toward-more-work stance as every
     // other appendEvent call site in this codebase.
     try {
-      deps.state.appendEvent("plan-review-escalated", { round_id: roundId, issue: issue.number, reason });
+      deps.state.appendEvent("plan-review-escalated", {
+        round_id: roundId,
+        issue: issue.number,
+        reason,
+        origin: "cycle-exhausted",
+      });
     } catch {
       /* state write failed — the forge label/comment above already externalized it */
     }
@@ -495,10 +513,14 @@ async function reviewOneIssue(
         // session, attempt) key this writes under.
         contextManifest: { roundId, phase: "plan_review", record: (key, json, at) => deps.state.recordContextManifest(key, json, at) },
         degradeEvent: "plan-review-escalated",
+        // #374 review (Codex sol-high verify-pass finding 3, P1): this fires ONLY on a genuine
+        // reviewer session failure (crashed/timed out, or invalid output twice) — see escalate()'s
+        // own doc above for the origin-tagging contract this distinguishes from.
         degradePayload: (result) => ({
           round_id: roundId,
           issue: issue.number,
           reason: reviewerDegradeReason(result, issue.number, currentBody),
+          origin: "session-failure",
         }),
         degradeMessage: (result) =>
           `[sapwood:plan-review] round ${roundId} issue #${issue.number} cycle ${cycle}: ` +
@@ -655,10 +677,13 @@ async function reviewOneIssue(
       // #236: same record-every-attempt wiring as the reviewer session above.
       contextManifest: { roundId, phase: "plan_review", record: (key, json, at) => deps.state.recordContextManifest(key, json, at) },
       degradeEvent: "plan-review-escalated",
+      // #374 review (Codex sol-high verify-pass finding 3, P1): genuine drafter session failure
+      // only — see escalate()'s own doc for the origin-tagging contract.
       degradePayload: (result) => ({
         round_id: roundId,
         issue: issue.number,
         reason: drafterDegradeReason(result, issue.number),
+        origin: "session-failure",
       }),
       degradeMessage: (result) =>
         `[sapwood:plan-review] round ${roundId} issue #${issue.number} cycle ${cycle}: ` + `${drafterDegradeReason(result, issue.number)}`,
@@ -806,7 +831,14 @@ async function confirmOneIssue(
     // #236: same record-every-attempt wiring as reviewOneIssue's own sessions.
     contextManifest: { roundId, phase: "plan_review", record: (key, json, at) => deps.state.recordContextManifest(key, json, at) },
     degradeEvent: "plan-review-escalated",
-    degradePayload: (r) => ({ round_id: roundId, issue: issue.number, reason: confirmDegradeReason(r, issue.number) }),
+    // #374 review (Codex sol-high verify-pass finding 3, P1): genuine confirm session failure
+    // only — see escalate()'s own doc (reviewOneIssue, above) for the origin-tagging contract.
+    degradePayload: (r) => ({
+      round_id: roundId,
+      issue: issue.number,
+      reason: confirmDegradeReason(r, issue.number),
+      origin: "session-failure",
+    }),
     degradeMessage: (r) =>
       `[sapwood:plan-review] round ${roundId} issue #${issue.number} confirm: ${confirmDegradeReason(r, issue.number)}`,
     isValid: (r) => validateConfirmOutput(r.resultText ?? "", issue.number).ok,
