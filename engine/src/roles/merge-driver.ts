@@ -207,6 +207,14 @@ export type DriveOutcome = (
   /** #170: stateless visibility signal for an aged, current-head non-decisive review. The
    *  conductor applies the PR label + event; label presence suppresses this on later ticks. */
   reviewSilenceEscalation?: { head: string; silenceSec: number };
+  /** #294: stateless hold observation for this pass — whether a configured hold label
+   *  (`escalation.holdLabels`, exact case-insensitive identity per #248 G3) currently gates
+   *  this PR, and the matching label in its on-PR casing. Reported on every pass that evaluates the
+   *  gate, same contract as reviewerTransition: the conductor derives the pr-held/pr-released
+   *  TRANSITION against the durable event log (dedup-the-event-not-the-signal), because
+   *  MergeDriver deliberately never touches State. Gate behavior is untouched — deriveGate's
+   *  own holdLabels WAIT check remains the sole scheduling effect of a hold. */
+  holdObservation?: { held: boolean; label?: string };
 };
 
 /** #170: pure aging decision. A configured failover gets its full evaluation window first;
@@ -559,10 +567,15 @@ export class MergeDriver {
         fallbackConfigured: (this.deps.fallbackReviewers?.length ?? 0) > 0,
         failoverAfterSec: cfg.reviewer.failoverAfterSec,
       });
+      // #294: which PR label (if any) matches a configured hold label — exact case-insensitive
+      // identity, the same G3 rule deriveGate's own holdLabels check uses; never substring.
+      // Reported in on-PR casing so the event payload names the label a human actually applied.
+      const heldLabel = data.labels.find((l) => cfg.escalation.holdLabels.some((h) => h.toLowerCase() === l.toLowerCase()));
       return {
         ...outcome,
         ...(resolved.transition ? { reviewerTransition: resolved.transition } : {}),
         ...(silenceSec != null ? { reviewSilenceEscalation: { head: data.headOid, silenceSec } } : {}),
+        holdObservation: { held: heldLabel != null, ...(heldLabel != null ? { label: heldLabel } : {}) },
       };
     };
 
