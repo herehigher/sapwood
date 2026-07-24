@@ -932,6 +932,23 @@ export function extractFailureText(jsonl: string): string {
   return out.join("\n");
 }
 
+/** #374 review (PM P2): a sanity horizon on the reset-time hint — see extractRateLimitResetAt's
+ *  own doc for why this exists. `resetsAt` is UNTRUSTED third-party input feeding a scheduling
+ *  decision (env-failure.ts's probeDueWithHint) that can otherwise wait forever: if the CLI ever
+ *  emitted milliseconds instead of seconds (a units mismatch lands ~1000x too far out — e.g.
+ *  epoch ms 1784885400000 treated as seconds and re-multiplied by 1000 lands in the year 58652),
+ *  or the value were simply corrupted, or local clock skew were severe, the naive hint could sit
+ *  centuries in the future — and probeDueWithHint would then withhold EVERY future probe
+ *  permanently (escalatePark still fires once at the duration threshold, but nothing ever probes
+ *  again afterward: the engine sits parked forever with no path back except a human clearing it
+ *  by hand). The real quota tiers observed are 5-hour and weekly; 48h comfortably covers both
+ *  with margin. A candidate hint further than this from `nowMs` is rejected here, at the single
+ *  extraction site every downstream consumer (conductor.ts's worker-leg park entry, peripheral.ts's
+ *  role-session park entry, round.ts's round-opening gate) reads from — so the fallback ("treat
+ *  as absent, use ordinary bounded-exponential backoff instead") is uniform and automatic, with
+ *  no per-consumer clamping needed. */
+export const MAX_RATE_LIMIT_RESET_HORIZON_MS = 48 * 60 * 60 * 1000;
+
 /** #374 (dogfood F16/F17): the Claude CLI's own structured rate-limit telemetry line —
  *  `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":<epoch
  *  seconds>,"rateLimitType":"five_hour",...}}` — captured verbatim in a real session transcript
@@ -944,10 +961,12 @@ export function extractFailureText(jsonl: string): string {
  *  widening that function's classification surface.
  *
  *  Returns the LAST "rejected" record's `resetsAt` converted to epoch MILLISECONDS, or `null`
- *  when no such record is present, every record found has a non-"rejected" status, or a line
- *  fails to parse — tolerant by construction (never throws): an absent hint simply means the
- *  ordinary bounded backoff schedule applies, exactly the pre-#374 behavior. */
-export function extractRateLimitResetAt(jsonl: string): number | null {
+ *  when no such record is present, every record found has a non-"rejected" status, a line fails
+ *  to parse, OR the resulting hint is further than MAX_RATE_LIMIT_RESET_HORIZON_MS beyond `nowMs`
+ *  (see that constant's own doc) — tolerant by construction (never throws): an absent hint
+ *  simply means the ordinary bounded backoff schedule applies, exactly the pre-#374 behavior.
+ *  `nowMs` defaults to the real current time; overridable for tests. */
+export function extractRateLimitResetAt(jsonl: string, nowMs: number = Date.now()): number | null {
   let resetAtMs: number | null = null;
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
@@ -966,6 +985,7 @@ export function extractRateLimitResetAt(jsonl: string): number | null {
       resetAtMs = resetsAt * 1000;
     }
   }
+  if (resetAtMs != null && resetAtMs - nowMs > MAX_RATE_LIMIT_RESET_HORIZON_MS) return null;
   return resetAtMs;
 }
 

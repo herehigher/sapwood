@@ -2327,6 +2327,43 @@ test("extractRateLimitResetAt: empty input -> null", () => {
   assert.equal(extractRateLimitResetAt(""), null);
 });
 
+// ── #374 review (PM P2): the sanity horizon — an untrusted third-party timestamp must never be
+//    able to withhold every future probe permanently. ──────────────────────────────────────────
+
+test("extractRateLimitResetAt: a hint within the 48h horizon is honored", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const resetsAtSec = Math.floor(nowMs / 1000) + 6 * 3600; // 6h out — a real five_hour-ish tier
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${resetsAtSec}}}`;
+  assert.equal(extractRateLimitResetAt(jsonl, nowMs), resetsAtSec * 1000);
+});
+
+test("extractRateLimitResetAt: resetsAt accidentally in epoch-MILLISECONDS scale (a units mismatch) lands ~1000x too far out -> treated as ABSENT (null), never a centuries-long stall", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  // A real epoch-ms value (already ~1784885400000) misread as seconds and re-multiplied by 1000
+  // by this function lands far beyond the 48h horizon — exactly the failure mode the horizon
+  // check exists to catch, regardless of which specific unit confusion produced it.
+  const msMistakenForSeconds = 1784885400000;
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${msMistakenForSeconds}}}`;
+  assert.equal(extractRateLimitResetAt(jsonl, nowMs), null);
+});
+
+test("extractRateLimitResetAt: a hint exactly AT the 48h horizon is honored; one second past it is rejected", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const atHorizonSec = Math.floor(nowMs / 1000) + 48 * 3600;
+  const pastHorizonSec = atHorizonSec + 1;
+  const atJsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${atHorizonSec}}}`;
+  const pastJsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${pastHorizonSec}}}`;
+  assert.equal(extractRateLimitResetAt(atJsonl, nowMs), atHorizonSec * 1000);
+  assert.equal(extractRateLimitResetAt(pastJsonl, nowMs), null);
+});
+
+test("extractRateLimitResetAt: a hint in the PAST (already-elapsed reset) is honored unchanged — only an over-future hint is rejected", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const pastSec = Math.floor(nowMs / 1000) - 3600; // 1h ago
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${pastSec}}}`;
+  assert.equal(extractRateLimitResetAt(jsonl, nowMs), pastSec * 1000);
+});
+
 test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTANT text + a non-env failure -> task failure, no env classification, no park", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

@@ -1234,6 +1234,28 @@ test("runSessionWithRetry + envFailure: a non-classified attempt CLEARS an alrea
   assert.deepEqual(state.events[0]![1], { source: "llm", enteredAt: "2026-07-24T00:00:00Z", via: "role-session" });
 });
 
+test("runSessionWithRetry + envFailure (PM review P3): a TIMEOUT outcome does NOT clear an open llm episode — a killed-for-hanging session proves nothing about provider reachability", async () => {
+  const runner = new FakeRunner([mkResult({ outcome: "timeout" })]);
+  const state = new FakeState();
+  const park = new FakePark();
+  park.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
+  const result = await runSessionWithRetry({ ...mkOpts(runner, state, undefined), envFailure: { patterns: envPatterns, park } });
+  assert.equal(result.outcome, "timeout");
+  assert.equal(park.clearCalls.length, 0, "a timeout never clears — only a real done/failed terminal outcome does");
+  assert.deepEqual(park.parkRow("llm")?.reason, "prior quota storm", "the episode is untouched, not cleared or re-entered");
+  assert.equal(
+    state.events.some(([kind]) => kind === "park-resumed"),
+    false,
+  );
+  // The ordinary retry-then-degrade path still proceeds normally (envFailure only intercepts
+  // classified attempts; an unclassified timeout falls through to it unchanged).
+  assert.equal(runner.calls.length, 2);
+  assert.equal(
+    state.events.some(([kind]) => kind === "test-degraded"),
+    true,
+  );
+});
+
 test("runSessionWithRetry + envFailure: no open episode + a non-classified result -> no-op (no clearPark call, no event)", async () => {
   const runner = new FakeRunner([mkResult({ outcome: "done" })]);
   const state = new FakeState();

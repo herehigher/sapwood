@@ -1133,13 +1133,19 @@ export interface RetriedSession {
    *     doubles the exact churn #374's dogfood run observed), no `degradeEvent` (the durable
    *     `role-env-failure` event this fires IS the record — a `*-degraded` event would
    *     misclassify an environment outage as a role/task failure).
-   *   - A NON-classified attempt (an ordinary failure, a timeout, OR a "done" outcome), while an
-   *     "llm" episode is open, CLEARS it (mirrors conductor.ts's settleCanary's non-env-
-   *     classified branch: any session that reaches the provider at all proves it's back) —
-   *     the "resume when the provider answers again" half of #374. Role sessions never carry a
-   *     forge signature in practice (no Bash/gh grant to produce one), so only "llm" is checked
-   *     here; a "forge" episode (opened by a worker leg) is left for conductor.ts's own forge
-   *     probe to clear, unaffected either way. */
+   *   - A NON-classified DONE or FAILED attempt (the CLI ran to completion and reported
+   *     something, one way or the other), while an "llm" episode is open, CLEARS it (mirrors
+   *     conductor.ts's settleCanary's non-env-classified branch: any session that reaches the
+   *     provider at all proves it's back) — the "resume when the provider answers again" half of
+   *     #374. A non-classified TIMEOUT does NOT clear (PM review P3): a timeout means this
+   *     runner's own heartbeat monitor killed a HUNG process, which proves nothing about whether
+   *     the provider actually answered — the same "an inconclusive outcome proves nothing" stance
+   *     conductor.ts's releaseCanaryInconclusive already takes for a worker-lane canary drained
+   *     mid-flight. A timeout neither parks nor clears; the episode's disposition is simply left
+   *     as-is for the next attempt to decide. Role sessions never carry a forge signature in
+   *     practice (no Bash/gh grant to produce one), so only "llm" is checked here; a "forge"
+   *     episode (opened by a worker leg) is left for conductor.ts's own forge probe to clear,
+   *     unaffected either way. */
   envFailure?: {
     patterns: EnvFailurePatterns;
     /** Separate from `state` above (see this field's own doc) — the park-episode methods this
@@ -1221,9 +1227,21 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
   };
   // #374: classify ONE attempt's result against opts.envFailure (when wired). Returns the
   // classified source (park entered/extended, caller must stop — no retry, no degrade) or null
-  // (ordinary outcome — a still-open "llm" episode is cleared here as a side effect, since ANY
-  // non-classified attempt proves the provider answered). No-op (always null) when opts.envFailure
-  // is omitted — byte-identical to pre-#374 behavior.
+  // (ordinary outcome — a still-open "llm" episode is cleared here as a side effect, since a
+  // non-classified DONE or FAILED attempt proves the provider answered). No-op (always null) when
+  // opts.envFailure is omitted — byte-identical to pre-#374 behavior.
+  //
+  // #374 review (PM P3): a TIMEOUT outcome is deliberately EXCLUDED from the clear — unlike a
+  // clean process exit (done or an ordinary failed, either of which means the CLI ran to
+  // completion and reported something), a timeout means this runner's own heartbeat monitor
+  // KILLED a hung process; that says nothing about whether the provider actually answered (a
+  // network stall, a wedged tool call, or even a quota outage manifesting as a hang rather than
+  // a clean rejection are all indistinguishable from here). Clearing a genuine quota park on a
+  // mere timeout would be weaker evidence than this codebase's own bar for "the provider is
+  // back" (conductor.ts's settleCanary clears only on a REAL terminal outcome, never an
+  // inconclusive one — see releaseCanaryInconclusive's doc for the same "a drain/timeout proves
+  // nothing" stance for worker-lane canaries). A timeout therefore neither parks NOR clears here
+  // — the episode's disposition is left exactly as it was, for the next attempt to decide.
   const handleEnvFailure = (result: RoleSessionResult): EnvFailureSource | null => {
     if (!opts.envFailure) return null;
     const source = classifyEnvFailure(result.failureText ?? "", opts.envFailure.patterns);
@@ -1238,6 +1256,7 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
       }
       return source;
     }
+    if (result.outcome === "timeout") return null;
     const llm = opts.envFailure.park.parkRow("llm");
     if (llm) {
       opts.envFailure.park.clearPark("llm");
