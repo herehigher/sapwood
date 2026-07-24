@@ -34,7 +34,11 @@ start: it names failure classes this repo's reviewers have flagged more than onc
 - **Respect this repo's own protected-path rules.** If the repo's contributor docs
   (CLAUDE.md, CONTRIBUTING, etc.) mark certain files as human-only or
   human-merge-only and the issue requires changing them, stop and leave a comment
-  explaining why instead of proceeding.
+  explaining why instead of proceeding. One deliberate exception: an issue whose
+  acceptance criteria ask you to *deliver a paste-ready patch/diff* for such a path
+  (for a human to apply) does not require changing it — produce the patch artifact in
+  an unprotected location (PR body or a plain file the AC names) and land the rest of
+  the work normally. Never apply the edit yourself.
 - **Never merge your own PR, approve your own review, or mark it ready-for-merge.**
   The conductor's merge driver (CI green + a fresh non-author review) owns that
   decision, not you.
