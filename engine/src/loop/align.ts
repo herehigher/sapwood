@@ -1793,25 +1793,22 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const triageWorkNumbers = [...triageCandidates.map((issue) => issue.number), ...recoveryOnlyNumbers];
       for (let triageIdx = 0; triageIdx < triageWorkNumbers.length; triageIdx++) {
         const number = triageWorkNumbers[triageIdx]!;
-        // #374 review (Codex sol-high finding 6, P2): once an EARLIER issue this same pass
-        // classified quota/429 and parked the "llm" episode, every REMAINING triage candidate
-        // would otherwise still launch its own doomed session (one per issue) — a cheap, single
-        // check here skips them all with ONE trail note instead of N wasted attempts. A resumed
-        // (durably-decided, no fresh session) candidate is skipped too — simpler and safer than
-        // distinguishing it, and it costs nothing (its decision already landed; it re-executes
-        // cleanly next round).
-        if (deps.state.parkRow("llm") != null) {
-          (deps.log ?? console.error)(
-            `[sapwood:po] round ${roundId}: llm park active — skipping ${triageWorkNumbers.length - triageIdx} ` +
-              `remaining triage candidate(s) this pass`,
-          );
-          break;
-        }
         const resumed = triageJournal.decisions.get(number);
         let validated: TriageValidation;
         let expectedHash: string;
         let attempt: number;
         let bodyAlreadyCommitted: boolean;
+        // #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a recovery canary
+        // starvation the original finding-6 fix introduced): set ONLY when THIS iteration's OWN
+        // fresh session dispatch comes back env-classified — NEVER pre-checked against "a park
+        // row merely exists" before dispatching. The first (and every) candidate always gets a
+        // real attempt; only once one of them actually observes a classified quota/429 does the
+        // loop stop for the REST. Gating on pre-existing park state instead would let an ARMED
+        // recovery round (round.ts's green-ping canary, which only arms the round to open — it
+        // never clears the episode outright) skip every candidate before any of them had a
+        // chance to prove recovery, wedging the engine parked forever. A resumed (durably-
+        // decided, no fresh session) candidate can never set this — it dispatches nothing.
+        let sawEnvPark = false;
 
         if (resumed) {
           // #232 gate② F2: a terminal event only resolves THIS decision when its attempt
@@ -1949,6 +1946,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
             envFailure: envFailureHook(deps.cfg, deps.state),
           });
+          sawEnvPark = triageResult.envParked === true;
           validated =
             triageResult.outcome === "done"
               ? validateTriageOutput(triageResult.resultText ?? "", issue.number, triageInView)
@@ -1966,6 +1964,13 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           // isValid-driven retry+degrade above (triage-degraded fired there) — nothing further
           // to do: no write, no success comment, the candidate re-matches next round.
           alignSummaryTriaged.push({ issue: number, drafted: false });
+          if (sawEnvPark) {
+            (deps.log ?? console.error)(
+              `[sapwood:po] round ${roundId}: llm park active — skipping ${triageWorkNumbers.length - triageIdx - 1} ` +
+                `remaining triage candidate(s) this pass`,
+            );
+            break;
+          }
           continue;
         }
         // #232: write-ahead acceptance — the validated decision is durably recorded BEFORE any

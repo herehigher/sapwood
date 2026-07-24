@@ -737,13 +737,48 @@ test("createPlanReviewStub #374 review (Codex sol-high finding 6): once an earli
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
   await stub.run({ roundId: 5, phase: "plan_review", marker: null });
-  // Only issue #30's session ever dispatched — #31/#32 were skipped once the park was entered.
-  assert.equal(runner.calls.length, 1, "the park check runs BEFORE dispatching each remaining pool member's session");
+  // Issue #30's session dispatched normally (it IS this pass's canary) and classified; #31/#32
+  // were skipped ONLY once THAT attempt itself came back env-parked — never pre-checked against
+  // "a park row exists" before dispatching (see reviewOneIssue's own doc for why that distinction
+  // matters).
+  assert.equal(runner.calls.length, 1, "only #30 dispatched — #31/#32 skipped once #30's OWN attempt classified");
   assert.equal(state.isParked(), true);
   assert.equal(state.parkRow("llm")?.source, "llm");
   // Neither #31 nor #32 got any forge write at all (no escalation, no label, no comment).
   assert.equal(forge.issueLabels[31], undefined);
   assert.equal(forge.issueLabels[32], undefined);
+  state.close();
+});
+
+test("createPlanReviewStub #374 review (Codex sol-high verify-pass finding 1, P1): an ARMED recovery round (park ALREADY open before this pass) still runs the FIRST pool member for real — it IS the canary — never skips on pre-existing park state alone", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [
+    { number: 40, title: "a", labels: [ROUND_POOL_LABEL] },
+    { number: 41, title: "b", labels: [ROUND_POOL_LABEL] },
+  ];
+  forge.issueBodies[40] = PLAN_BODY;
+  forge.issueBodies[41] = PLAN_BODY;
+  const cfg = mkCfg();
+  // #40's session succeeds cleanly (the provider IS actually back) -> approve.
+  const runner = new ScriptedRunner([
+    { result: doneResult("r-40", sapwoodResult({ decision: "approve", issue: 40 })) },
+    { result: doneResult("r-41", sapwoodResult({ decision: "approve", issue: 41 })) },
+  ]);
+  const state = new State(":memory:");
+  // Simulates round.ts's round-opening gate having ARMED this round via a green
+  // probeLlmReachable ping — the ping only arms the round to open, it never clears the episode
+  // outright (round.ts's own canary doctrine). If the loop guard skipped on "a park row exists"
+  // (the pre-fix behavior), #40 would never even get a chance to prove recovery.
+  state.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 6, phase: "plan_review", marker: null });
+  // BOTH issues got a real session — #40's success cleared the park, so #41 proceeds normally
+  // too (never gated on the STALE pre-pass park state).
+  assert.equal(runner.calls.length, 2, "the pre-existing park never suppressed dispatch — both pool members ran");
+  assert.equal(state.isParked(), false, "#40's 'done' outcome cleared the episode");
+  assert.ok(forge.issueLabels[40]!.includes("plan:approved"));
+  assert.ok(forge.issueLabels[41]!.includes("plan:approved"));
   state.close();
 });
 

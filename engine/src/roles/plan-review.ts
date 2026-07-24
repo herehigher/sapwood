@@ -417,6 +417,17 @@ function approvedThisRound(state: State, roundId: number, issueNumber: number): 
  *  verdict reuses this exact draft→re-review cycle (reviewer brief -> drafter -> re-review, same
  *  maxDraftCycles cap, same escalation path) rather than a bespoke copy of it. Cycle 1 onward runs
  *  a completely normal reviewer session, seed or not. */
+/** #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a recovery canary starvation):
+ *  returns `true` when THIS call's own session(s) observed a classified env failure (park
+ *  entered/extended) this pass, `false` otherwise (approved / verify_na / self-heal-exhausted /
+ *  a genuine session failure — none of which say anything about provider reachability).
+ *  createPlanReviewStub's loop uses this — NOT "does a park row currently exist" — to decide
+ *  whether to skip the REMAINING pool members: the first item in any pass must always run for
+ *  real (it IS the canary — a "done" outcome clears an open park, a classified one extends it),
+ *  so gating on pre-existing park state would let an armed recovery round (a green
+ *  probeLlmReachable ping that only ARMS the round, never clears the episode outright — see
+ *  round.ts's own canary doctrine) skip every session before any of them ever had a chance to
+ *  prove recovery, wedging the engine parked forever. */
 async function reviewOneIssue(
   deps: PlanReviewDeps,
   issue: Issue,
@@ -424,7 +435,7 @@ async function reviewOneIssue(
   drafterTemplate: string,
   roundId: number,
   seed?: { decision: ReviewerDecision; trailEntry: string },
-): Promise<void> {
+): Promise<boolean> {
   const l = deps.cfg.labels;
   const maxCycles = deps.cfg.roles.planReviewer.maxDraftCycles;
   const now = deps.now ?? ((): Date => new Date());
@@ -506,7 +517,7 @@ async function reviewOneIssue(
         // needs-human, NO plan-review-escalated (that event is for a genuine review failure, not
         // an environment outage).
         trail.push(`cycle ${cycle}: plan-reviewer session ${reviewResult.name} -> environment park (provider outage)`);
-        return;
+        return true;
       }
 
       const validated: ReviewerValidation =
@@ -519,7 +530,7 @@ async function reviewOneIssue(
         // runSessionWithRetry already appended the plan-review-escalated STATE event above (on
         // its own second invalid/failed attempt) — only the forge-visible half is still needed.
         await escalateForge(validated.reason);
-        return;
+        return false;
       }
       decision = validated.decision;
       trail.push(`cycle ${cycle}: plan-reviewer session ${reviewResult.name} -> ${decision.decision}`);
@@ -542,7 +553,7 @@ async function reviewOneIssue(
         /* contained — benign either ordering, see the comment above; the label write proceeds */
       }
       await deps.forge.addLabel(issue.number, l.planApproved);
-      return; // outcome 1 — approved, done
+      return false; // outcome 1 — approved, done
     }
 
     if (decision.decision === "verify_na") {
@@ -607,13 +618,13 @@ async function reviewOneIssue(
       } catch {
         /* contained — the labels+comment already landed; the hold stands without its event */
       }
-      return; // outcome 3 (verify:n/a proposal) — a human resolves it
+      return false; // outcome 3 (verify:n/a proposal) — a human resolves it
     }
 
     // Outcome 2: request-a-draft. At the cycle bound already -> self-heal exhausted, escalate.
     if (cycle >= maxCycles) {
       await escalate(`self-heal exhausted after ${maxCycles} draft→re-review cycle(s)`);
-      return;
+      return false;
     }
 
     // The validated BODY block IS the brief — no comment-freshness snapshot/refetch needed
@@ -659,7 +670,7 @@ async function reviewOneIssue(
       // #374: same stance as the reviewer branch above — the engine parked instead of
       // escalating; this issue gets no drafted revision THIS pass, it re-matches next round.
       trail.push(`cycle ${cycle}: plan-drafter session ${drafterResult.name} -> environment park (provider outage)`);
-      return;
+      return true;
     }
 
     const draftValidated: DrafterValidation =
@@ -670,12 +681,16 @@ async function reviewOneIssue(
     if (!draftValidated.ok) {
       trail.push(`cycle ${cycle}: plan-drafter session ${drafterResult.name} -> ${draftValidated.reason}`);
       await escalateForge(draftValidated.reason);
-      return;
+      return false;
     }
     trail.push(`cycle ${cycle}: plan-drafter session ${drafterResult.name} -> drafted a revised body`);
     await deps.forge.updateIssueBody(issue.number, draftValidated.body);
     // Loop back -> re-run the reviewer against the drafter's edit (body refetched above).
   }
+  // Unreachable in practice (the loop always returns via one of the branches above before this
+  // point — the cycle>=maxCycles check guarantees it) — kept only so TypeScript can see every
+  // path returns a value.
+  return false;
 }
 
 /** #214: one pool member's lightweight freshness re-confirm — a PRIOR-round `plan:approved`
@@ -700,6 +715,10 @@ async function reviewOneIssue(
  *  gate② review's forge.ts fix widened pool eligibility to include it) OR an approved issue whose
  *  checkbox AC set has since gone missing/malformed both skip the session entirely and go
  *  straight to the draft cycle, deterministically. */
+/** #374 review (Codex sol-high verify-pass finding 1): returns `true` when an env-classified
+ *  park was observed this pass — either from this function's OWN confirm session, or
+ *  (recursively) from a reviewOneIssue call it delegates to (the self-heal skip paths and the
+ *  "invalidate" branch). Same contract as reviewOneIssue's own return — see its doc. */
 async function confirmOneIssue(
   deps: PlanReviewDeps,
   issue: Issue,
@@ -707,7 +726,7 @@ async function confirmOneIssue(
   reviewerTemplate: string,
   drafterTemplate: string,
   roundId: number,
-): Promise<void> {
+): Promise<boolean> {
   const now = deps.now ?? ((): Date => new Date());
   const currentBody = await deps.forge.getIssueBody(issue.number);
 
@@ -724,7 +743,7 @@ async function confirmOneIssue(
   // ORDINARY draft-cycle machinery directly with a deterministic, engine-authored brief, exactly
   // as if a full reviewer had just bounced with "draft_request".
   if (extractVerificationPlan(currentBody) == null || extractVerificationSection(currentBody) == null) {
-    await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
+    return await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
       decision: {
         decision: "draft_request",
         issue: issue.number,
@@ -735,7 +754,6 @@ async function confirmOneIssue(
       },
       trailEntry: "confirm: skipped — approved body has no verification plan section",
     });
-    return;
   }
   // #283/#301 review (P2 F6): the SAME self-healing check above, symmetrically extended to the
   // checkbox acceptance-criteria set. Without this, an already-approved issue whose AC section
@@ -748,7 +766,7 @@ async function confirmOneIssue(
   // exists to prevent, just for the AC set instead. Same fix shape: skip the confirm session
   // entirely and seed the ordinary draft-cycle machinery directly.
   if (extractAcceptanceCriteria(currentBody) == null) {
-    await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
+    return await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
       decision: {
         decision: "draft_request",
         issue: issue.number,
@@ -759,7 +777,6 @@ async function confirmOneIssue(
       },
       trailEntry: "confirm: skipped — approved body has no checkbox acceptance-criteria set",
     });
-    return;
   }
 
   const currentIssue: Issue = { ...issue, body: currentBody };
@@ -800,7 +817,7 @@ async function confirmOneIssue(
     // #374: same stance as reviewOneIssue's reviewer/drafter branches — the engine parked
     // instead of escalating; this issue gets no confirm verdict THIS pass, it re-matches next
     // round (plan:approved is untouched either way).
-    return;
+    return true;
   }
 
   const validated: ConfirmValidation =
@@ -815,17 +832,17 @@ async function confirmOneIssue(
     await escalateNeedsHuman(deps, issue, roundId, validated.reason, [
       `confirm: plan-reviewer(confirm) session ${result.name} -> ${validated.reason}`,
     ]);
-    return;
+    return false;
   }
 
   if (validated.decision === "confirm") {
-    return; // zero forge writes — the plan still holds, nothing to do
+    return false; // zero forge writes — the plan still holds, nothing to do
   }
 
   // invalidate -> feed the SAME machinery an unadjudicated draft_request would (existing caps,
   // existing escalation) via reviewOneIssue's seed. The confirm session's BODY block IS the
   // brief (validateConfirmOutput already required it non-empty for "invalidate").
-  await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
+  return await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId, {
     decision: { decision: "draft_request", issue: issue.number, body: validated.body! },
     trailEntry: `confirm: plan-reviewer(confirm) session ${result.name} -> invalidate`,
   });
@@ -870,24 +887,31 @@ export function createPlanReviewStub(deps: PlanReviewDeps): PeripheralStub {
         const confirmTemplate = loadRolePromptTemplate(deps.cfg.roles.planReviewer.confirmPromptFile, defaultPlanConfirmPromptPath());
         for (let i = 0; i < poolMembers.length; i++) {
           const issue = poolMembers[i]!;
-          // #374 review (Codex sol-high finding 6, P2): once an EARLIER issue this same pass
-          // classified quota/429 and parked the "llm" episode, every REMAINING pool member would
-          // otherwise still launch its own doomed session (one per issue) — a cheap, single
-          // check here skips them all with ONE trail note instead of N wasted attempts.
-          if (deps.state.parkRow("llm") != null) {
+          if (labelsInclude(issue.labels, l.verifyNa)) continue; // class 4: doc-gate path, untouched
+          let sawEnvPark: boolean;
+          if (!labelsInclude(issue.labels, l.planApproved)) {
+            sawEnvPark = await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId); // class 1
+          } else if (approvedThisRound(deps.state, roundId, issue.number)) {
+            continue; // class 3: skip, no session at all — nothing to observe
+          } else {
+            sawEnvPark = await confirmOneIssue(deps, issue, confirmTemplate, reviewerTemplate, drafterTemplate, roundId); // class 2
+          }
+          // #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a recovery canary
+          // starvation the original finding-6 fix introduced): checked AFTER dispatching, never
+          // BEFORE — the first (and every) pool member always gets a real attempt; only once
+          // THIS PASS's own attempt comes back env-classified do the REMAINING members get
+          // skipped. Gating on "a park row merely exists" (the original fix) would have let an
+          // ARMED recovery round (round.ts's green-ping canary, which only arms the round to
+          // open — it never clears the episode outright) skip every session before any of them
+          // had a chance to prove recovery, wedging the engine parked forever (ping -> open ->
+          // skip everything -> close still-parked -> ping again, ad infinitum).
+          if (sawEnvPark) {
             (deps.log ?? console.error)(
-              `[sapwood:plan-review] round ${roundId}: llm park active — skipping ${poolMembers.length - i} ` +
+              `[sapwood:plan-review] round ${roundId}: llm park active — skipping ${poolMembers.length - i - 1} ` +
                 `remaining pool member(s) this pass`,
             );
             break;
           }
-          if (labelsInclude(issue.labels, l.verifyNa)) continue; // class 4: doc-gate path, untouched
-          if (!labelsInclude(issue.labels, l.planApproved)) {
-            await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId); // class 1
-            continue;
-          }
-          if (approvedThisRound(deps.state, roundId, issue.number)) continue; // class 3: skip
-          await confirmOneIssue(deps, issue, confirmTemplate, reviewerTemplate, drafterTemplate, roundId); // class 2
         }
       }
       return { marker: planReviewMarker(roundId) };
