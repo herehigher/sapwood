@@ -1,10 +1,12 @@
-// server.test.ts (#142): the read-only dashboard data server. Covers the two GET routes
+// server.test.ts (#142, extended in #360): the dashboard data server. Covers the whole surface
 // docs/frontend-design.md §8 locks — the engine-state derivation (all seven words plus the
-// "staleness beats PAUSE" precedence rule), /api/events paging, the /api/loop/state field
-// shape, the config allowlist (the no-secrets guarantee is structural, not a promise), and
-// the two posture invariants: the SQLite handle is read-only and the listener binds loopback.
+// "staleness beats PAUSE" precedence rule), the four read routes' paging and field shapes, the
+// config allowlist (the no-secrets guarantee is structural, not a promise), the single gated
+// write route (verb allowlist, same-origin defences, sentinel-only side effects, post-signal
+// state), the statics, and the posture invariants: the SQLite handle stays read-only even with
+// a write route registered, and the listener binds loopback.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -327,12 +329,326 @@ test("the server binds 127.0.0.1 only, never 0.0.0.0", async () => {
   }
 });
 
-test("unknown routes 404 and non-GET methods 405 (no write surface exists yet — #360)", async () => {
+test("unknown api routes 404 and wrong methods 405", async () => {
   const fx = await fixture();
   try {
     assert.equal((await fetch(`${fx.origin}/api/nope`)).status, 404);
-    assert.equal((await fetch(`${fx.origin}/api/control`, { method: "POST" })).status, 404);
     assert.equal((await fetch(`${fx.origin}/api/loop/state`, { method: "POST" })).status, 405);
+    assert.equal((await fetch(`${fx.origin}/api/control`)).status, 405); // the write route is POST-only
+  } finally {
+    fx.close();
+  }
+});
+
+// ── /api/spend paging (§8, #360) ───────────────────────────────────────────────────────────
+
+const seedSpend = (s: State) => {
+  for (let i = 1; i <= 5; i++) {
+    s.recordSpend(`w${i}`, 80 + i, i / 4, `2026-07-24T11:0${i}:00.000Z`, [
+      { model: "opus", inputTokens: 100 * i, outputTokens: 10 * i, cacheReadTokens: 5, cacheCreationTokens: 7 },
+    ]);
+  }
+};
+
+test("/api/spend pages ascending by id and reports lastId, rows verbatim", async () => {
+  const fx = await fixture(seedSpend);
+  try {
+    const first = await getJson(fx, "/api/spend?after=0&limit=2");
+    assert.deepEqual(
+      first.spend.map((r: { id: number }) => r.id),
+      [1, 2],
+    );
+    assert.equal(first.lastId, 2);
+    assert.deepEqual(first.spend[0], {
+      id: 1,
+      ts: "2026-07-24T11:01:00.000Z",
+      worker: "w1",
+      issue: 81,
+      usd: 0.25,
+      model: "opus",
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheReadTokens: 5,
+      cacheCreationTokens: 7,
+    });
+
+    const next = await getJson(fx, `/api/spend?after=${first.lastId}&limit=2`);
+    assert.deepEqual(
+      next.spend.map((r: { id: number }) => r.id),
+      [3, 4],
+    );
+    assert.equal(next.lastId, 4);
+  } finally {
+    fx.close();
+  }
+});
+
+test("/api/spend: an empty tail keeps the caller's cursor, and defaults match /api/events", async () => {
+  const fx = await fixture(seedSpend);
+  try {
+    const tail = await getJson(fx, "/api/spend?after=5");
+    assert.deepEqual(tail.spend, []);
+    assert.equal(tail.lastId, 5);
+
+    const all = await getJson(fx, "/api/spend");
+    assert.equal(all.spend.length, 5);
+    assert.equal(all.lastId, 5);
+  } finally {
+    fx.close();
+  }
+});
+
+test("/api/spend rejects malformed paging params, exactly as /api/events does", async () => {
+  const fx = await fixture(seedSpend);
+  try {
+    for (const q of ["?after=-1", "?after=abc", "?limit=0", "?limit=-3", "?limit=nope"]) {
+      assert.equal((await fetch(`${fx.origin}/api/spend${q}`)).status, 400, `expected 400 for ${q}`);
+    }
+  } finally {
+    fx.close();
+  }
+});
+
+// ── /api/rounds (§8, #360) ─────────────────────────────────────────────────────────────────
+
+test("/api/rounds serves every rounds row — artifact-less ones included — ascending", async () => {
+  const fx = await fixture((s) => {
+    const r1 = s.startRound("2026-07-24T10:00:00.000Z");
+    s.appendEvent("dispatched", { issue: 86 });
+    s.appendEvent("merged", { pr: 94 });
+    s.closeRound(r1.round_id, "2026-07-24T11:00:00.000Z");
+    s.saveRoundArtifact(r1.round_id, 1, JSON.stringify({ roundId: 1, merged: [94] }), "2026-07-24T11:00:01.000Z");
+    // The crash-between-closeRound-and-saveRoundArtifact shape (and all pre-#123 history).
+    const r2 = s.startRound("2026-07-24T12:00:00.000Z");
+    s.appendEvent("dispatched", { issue: 88 });
+    s.closeRound(r2.round_id, "2026-07-24T13:00:00.000Z");
+  });
+  try {
+    const body = await getJson(fx, "/api/rounds");
+    assert.deepEqual(
+      body.rounds.map((r: { roundId: number }) => r.roundId),
+      [1, 2],
+      "the rounds table is the spine — an artifact-less round is a row, not a gap",
+    );
+    assert.deepEqual(body.rounds[0], {
+      roundId: 1,
+      status: "done",
+      startedAt: "2026-07-24T10:00:00.000Z",
+      endedAt: "2026-07-24T11:00:00.000Z",
+      // #123 cursors — rounds-row fields the server joins in, NOT artifact fields
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: 1,
+      artifact: { roundId: 1, merged: [94] },
+    });
+    assert.equal(body.rounds[1].schemaVersion, null, "renders tally-less rather than fabricating one");
+    assert.equal(body.rounds[1].artifact, null);
+    assert.equal(body.rounds[1].startEventId, 2);
+    assert.equal(body.rounds[1].eventCount, 1);
+  } finally {
+    fx.close();
+  }
+});
+
+test("/api/rounds is an empty list on a fresh DB, never an error", async () => {
+  const fx = await fixture();
+  try {
+    assert.deepEqual((await getJson(fx, "/api/rounds")).rounds, []);
+  } finally {
+    fx.close();
+  }
+});
+
+// ── POST /api/control (§8 / §3 Operations, #360) ───────────────────────────────────────────
+
+const ticking = (s: State) => s.engineSessionStart(new Date(), 900);
+
+test("POST /api/control accepts exactly the four verbs; estop and garbage are 400", async () => {
+  const fx = await fixture(ticking);
+  try {
+    for (const verb of ["start", "pause", "resume", "stop"]) {
+      assert.equal((await control(fx, verb)).status, 200, `${verb} should be allowlisted`);
+    }
+    // estop stays OFF the allowlist until the #293 EMERGENCY_STOP engine sentinel exists.
+    assert.equal((await control(fx, "estop")).status, 400);
+    for (const verb of ["", "STOP", "restart", 7, null, { verb: "stop" }]) {
+      assert.equal((await control(fx, verb)).status, 400, `unexpected acceptance of ${JSON.stringify(verb)}`);
+    }
+    assert.equal((await control(fx, undefined)).status, 400, "a bodyless request names no verb");
+    const notJson = await fetch(`${fx.origin}/api/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-sapwood-control": "1" },
+      body: "{oops",
+    });
+    assert.equal(notJson.status, 400);
+  } finally {
+    fx.close();
+  }
+});
+
+test("POST /api/control requires the X-Sapwood-Control header and a JSON content-type", async () => {
+  const fx = await fixture(ticking);
+  try {
+    const noHeader = await fetch(`${fx.origin}/api/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ verb: "pause" }),
+    });
+    assert.equal(noHeader.status, 403);
+
+    const wrongType = await fetch(`${fx.origin}/api/control`, {
+      method: "POST",
+      headers: { "content-type": "text/plain", "x-sapwood-control": "1" },
+      body: JSON.stringify({ verb: "pause" }),
+    });
+    assert.equal(wrongType.status, 415);
+
+    // A cross-origin page that somehow got past the preflight still fails the Origin check.
+    const foreign = await control(fx, "pause", {
+      headers: { "content-type": "application/json", "x-sapwood-control": "1", origin: "http://evil.example" },
+    });
+    assert.equal(foreign.status, 403);
+
+    assert.equal(existsSync(join(fx.dir, "PAUSE")), false, "a rejected request must have no side effect");
+  } finally {
+    fx.close();
+  }
+});
+
+test("POST /api/control's only effect is sentinel create/remove, and it answers with the post-signal state", async () => {
+  const fx = await fixture(ticking);
+  const pausePath = join(fx.dir, "PAUSE");
+  const killPath = join(fx.dir, "KILL_SWITCH");
+  try {
+    assert.deepEqual(await (await control(fx, "pause")).json(), { state: "paused" });
+    assert.equal(existsSync(pausePath), true);
+
+    assert.deepEqual(await (await control(fx, "resume")).json(), { state: "running" });
+    assert.equal(existsSync(pausePath), false);
+
+    // Stop reports the REAL transition — no lanes here, so the drain is already over.
+    assert.deepEqual(await (await control(fx, "stop")).json(), { state: "stopped" });
+    assert.equal(existsSync(killPath), true);
+
+    // Start clears BOTH sentinels so the next tick runs.
+    writeFileSync(pausePath, "", "utf8");
+    assert.deepEqual(await (await control(fx, "start")).json(), { state: "running" });
+    assert.equal(existsSync(killPath), false);
+    assert.equal(existsSync(pausePath), false);
+  } finally {
+    fx.close();
+  }
+});
+
+test("POST /api/control stop reports `stopping` while lanes are still draining (never an optimistic flip)", async () => {
+  const fx = await fixture((s) => {
+    ticking(s);
+    s.upsertWorker({ name: "w1", issue: 86, session_id: "s1", state: "running", started_at: "2026-07-24T11:00:00.000Z", ended_at: null });
+  });
+  try {
+    assert.deepEqual(await (await control(fx, "stop")).json(), { state: "stopping" });
+    // ...and the same word the shared derivation gives `sapwood status`.
+    assert.equal((await getJson(fx, "/api/loop/state")).engine.state, "stopping");
+  } finally {
+    fx.close();
+  }
+});
+
+test("dashboard.controls: false removes the route structurally — 404, not a hidden button", async () => {
+  const fx = await fixture(ticking, { controls: false });
+  try {
+    assert.equal((await control(fx, "pause")).status, 404);
+    assert.equal((await fetch(`${fx.origin}/api/control`)).status, 404);
+    assert.equal(existsSync(join(fx.dir, "PAUSE")), false);
+    assert.equal((await fetch(`${fx.origin}/api/loop/state`)).status, 200, "the read surface is untouched");
+  } finally {
+    fx.close();
+  }
+});
+
+test("an unreadable config leaves the write route unregistered (fail-closed)", async () => {
+  const fx = await fixture(ticking, { config: false });
+  try {
+    assert.equal((await control(fx, "pause")).status, 404);
+  } finally {
+    fx.close();
+  }
+});
+
+test("no control request can write through the SQLite handle — it stays read-only", async () => {
+  const fx = await fixture(ticking);
+  try {
+    assert.equal((await control(fx, "pause")).status, 200);
+    assert.throws(() => fx.state.appendEvent("merged", { pr: 1 }), /readonly|read-only|attempt to write/i);
+  } finally {
+    fx.close();
+  }
+});
+
+// ── static serving (§8, #360) ──────────────────────────────────────────────────────────────
+
+test("dashboard/dist statics are served from the same server, and /api keeps precedence", async () => {
+  const outer = mkdtempSync(join(tmpdir(), "sapwood-dist-"));
+  const dist = join(outer, "dist");
+  mkdirSync(join(dist, "assets"), { recursive: true });
+  writeFileSync(join(outer, "secret.txt"), "not yours", "utf8"); // a real file OUTSIDE the root
+  writeFileSync(join(dist, "index.html"), "<!doctype html><title>sapwood</title>", "utf8");
+  writeFileSync(join(dist, "assets", "app.js"), "export const x = 1;\n", "utf8");
+  const fx = await fixture(undefined, { staticDir: dist });
+  try {
+    const index = await fetch(`${fx.origin}/`);
+    assert.equal(index.status, 200);
+    assert.match(index.headers.get("content-type") ?? "", /text\/html/);
+    assert.match(await index.text(), /sapwood/);
+
+    const asset = await fetch(`${fx.origin}/assets/app.js`);
+    assert.equal(asset.status, 200);
+    assert.match(asset.headers.get("content-type") ?? "", /javascript/);
+
+    // A client-routed path falls back to the SPA shell; the API namespace never does.
+    assert.equal((await fetch(`${fx.origin}/round/12`)).status, 200);
+    assert.equal((await fetch(`${fx.origin}/api/nope`)).status, 404);
+    assert.equal((await fetch(`${fx.origin}/api/loop/state`)).status, 200);
+
+    // No escaping the static root — an encoded traversal at a file that really exists next to
+    // dist must not be readable, and must not be laundered into the SPA fallback either.
+    assert.equal((await fetch(`${fx.origin}/%2e%2e%2fsecret.txt`)).status, 404);
+  } finally {
+    fx.close();
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("a symlink under dist pointing outside it is refused, not followed", async () => {
+  const outer = mkdtempSync(join(tmpdir(), "sapwood-dist-"));
+  const dist = join(outer, "dist");
+  mkdirSync(dist, { recursive: true });
+  writeFileSync(join(outer, "secret.txt"), "not yours", "utf8");
+  writeFileSync(join(dist, "index.html"), "<!doctype html><title>sapwood</title>", "utf8");
+  // Both shapes: a link AT a file outside the root, and a link at the directory holding it —
+  // the second one has a lexically-innocent request path all the way to the last segment.
+  symlinkSync(join(outer, "secret.txt"), join(dist, "leak.txt"));
+  symlinkSync(outer, join(dist, "up"));
+  const fx = await fixture(undefined, { staticDir: dist });
+  try {
+    for (const path of ["/leak.txt", "/up/secret.txt"]) {
+      const res = await fetch(`${fx.origin}${path}`);
+      assert.equal(res.status, 404, `${path} escaped the static root`);
+      assert.doesNotMatch(await res.text(), /not yours/, `${path} leaked the file's contents`);
+    }
+    assert.equal((await fetch(`${fx.origin}/`)).status, 200, "ordinary serving is unaffected");
+  } finally {
+    fx.close();
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("statics 404 honestly when dashboard/dist has not been built", async () => {
+  const fx = await fixture(undefined, { staticDir: join(tmpdir(), "sapwood-no-such-dist") });
+  try {
+    assert.equal((await fetch(`${fx.origin}/`)).status, 404);
+    assert.equal((await fetch(`${fx.origin}/api/loop/state`)).status, 200, "the API works with or without a build");
   } finally {
     fx.close();
   }
@@ -346,13 +662,24 @@ function baseConfig(): Record<string, unknown> {
 
 interface Fixture {
   origin: string;
+  /** The DB's data dir — where the PAUSE/KILL_SWITCH sentinels live. */
+  dir: string;
   state: State;
   server: Server;
   close: () => void;
 }
 
+interface FixtureOpts {
+  config?: boolean;
+  killSwitch?: boolean;
+  pause?: boolean;
+  /** Written as `dashboard.controls` — omitted leaves the schema default (true). */
+  controls?: boolean;
+  staticDir?: string;
+}
+
 /** A temp-dir DB seeded through a WRITABLE handle, then served through a read-only one. */
-async function fixture(seed?: (s: State) => void, opts: { config?: boolean; killSwitch?: boolean } = {}): Promise<Fixture> {
+async function fixture(seed?: (s: State) => void, opts: FixtureOpts = {}): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-"));
   const dbPath = join(dir, "sapwood.sqlite");
   const writable = new State(dbPath);
@@ -362,18 +689,26 @@ async function fixture(seed?: (s: State) => void, opts: { config?: boolean; kill
   // The kill switch is a file sentinel in the DB's own data dir (State.killSwitchPath) — touch
   // it the same way an operator or `/sapwood-stop` would, so isKillSwitchActive() reads true.
   if (opts.killSwitch) writeFileSync(join(dir, "KILL_SWITCH"), "", "utf8");
+  if (opts.pause) writeFileSync(join(dir, "PAUSE"), "", "utf8");
 
   let configPath: string | undefined;
   if (opts.config !== false) {
     configPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(configPath, JSON.stringify(baseConfig()), "utf8"); // JSON is valid YAML
+    const cfg = opts.controls === undefined ? baseConfig() : { ...baseConfig(), dashboard: { controls: opts.controls } };
+    writeFileSync(configPath, JSON.stringify(cfg), "utf8"); // JSON is valid YAML
   } else {
     configPath = join(dir, "missing.yaml");
   }
 
-  const { server, state, port } = await createDashboardServer({ dbPath, configPath, port: 0 });
+  const { server, state, port } = await createDashboardServer({
+    dbPath,
+    configPath,
+    port: 0,
+    ...(opts.staticDir === undefined ? {} : { staticDir: opts.staticDir }),
+  });
   return {
     origin: `http://127.0.0.1:${port}`,
+    dir,
     state,
     server,
     close: () => {
@@ -382,6 +717,16 @@ async function fixture(seed?: (s: State) => void, opts: { config?: boolean; kill
       rmSync(dir, { recursive: true, force: true });
     },
   };
+}
+
+/** A well-formed control request: the two same-origin headers §8 requires, and nothing else. */
+function control(fx: Fixture, verb: unknown, init: RequestInit = {}): Promise<Response> {
+  return fetch(`${fx.origin}/api/control`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-sapwood-control": "1" },
+    body: JSON.stringify({ verb }),
+    ...init,
+  });
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: test-side JSON, asserted field by field below
