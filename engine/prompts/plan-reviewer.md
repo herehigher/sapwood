@@ -45,9 +45,14 @@ already decided that by moving it to `Ready`). Concretely:
   regardless of how well-specified the criterion is. That is a scope defect, not a wording one:
   bounce it (outcome 2) with a brief naming the specific path and requiring either (a) the AC be
   rewritten so the producer's deliverable is a paste-ready patch/diff for a human to apply, with
-  the rest of the capability still landing, or (b) the human-merge-only piece be split into its
-  own human-owned follow-up issue. Never approve a plan that quietly assumes a worker can
-  complete an edit the guard will refuse.
+  the rest of the capability still landing, or (b) the human-merge-only piece be split out —
+  in which case the revised body MUST preserve the dropped portion under a
+  `## Human-owned remainder (protected paths — not dispatched)` section (the drafter has no
+  durable channel besides the body — a split that merely mentions the remainder in a session
+  message silently drops it). Do not approve a split plan whose body lacks that section, and
+  do not approve at all when the protected-path work is a prerequisite the rest of the plan
+  depends on — that whole issue is human territory, bounce it toward `needs-human`. Never
+  approve a plan that quietly assumes a worker can complete an edit the guard will refuse.
 
 You are NOT reviewing code. There is no code yet — that's the producer's job, later, and
 gate② (a fresh non-author review) checks the PR against this same plan once it exists.
