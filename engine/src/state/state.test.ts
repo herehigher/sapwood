@@ -2917,3 +2917,93 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #142: dashboard reads (docs/frontend-design.md §8) ──────────────────────────────────────
+
+test("lastTickAt reads the heartbeat WITHOUT moving it (a spectator must not reset the session)", () => {
+  const s = mem();
+  assert.equal(s.lastTickAt(), null, "no session row yet — the engine has never ticked here");
+
+  s.engineSessionStart(new Date("2026-07-24T10:00:00.000Z"), 900);
+  assert.equal(s.lastTickAt(), "2026-07-24T10:00:00.000Z");
+  // Reading twice must not touch last_tick_at — engineSessionStart is the ONLY writer.
+  assert.equal(s.lastTickAt(), "2026-07-24T10:00:00.000Z");
+  s.close();
+});
+
+test("countEvents counts one kind only (§8's ring count)", () => {
+  const s = mem();
+  assert.equal(s.countEvents("merged"), 0);
+  s.appendEvent("merged", { pr: 1 });
+  s.appendEvent("dispatched", { issue: 2 });
+  s.appendEvent("merged", { pr: 3 });
+  assert.equal(s.countEvents("merged"), 2);
+  assert.equal(s.countEvents("dispatched"), 1);
+  s.close();
+});
+
+test("eventsPage pages ascending by id across every kind, with id/ts/payload", () => {
+  const s = mem();
+  for (let i = 1; i <= 5; i++) s.appendEvent(`kind-${i}`, { n: i });
+
+  const first = s.eventsPage(0, 2);
+  assert.deepEqual(
+    first.map((e) => e.id),
+    [1, 2],
+  );
+  assert.deepEqual(first[0], { id: 1, ts: first[0]!.ts, kind: "kind-1", payload: { n: 1 } });
+  assert.ok(first[0]!.ts.length > 0);
+
+  assert.deepEqual(
+    s.eventsPage(2, 2).map((e) => e.kind),
+    ["kind-3", "kind-4"],
+  );
+  assert.deepEqual(s.eventsPage(5, 10), [], "past the tail is empty, not an error");
+  s.close();
+});
+
+test("eventsPage serves a corrupt payload as null rather than failing the whole page", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "s.sqlite");
+    const s = new State(dbPath);
+    s.appendEvent("merged", { pr: 1 });
+    s.close();
+
+    const raw = new DatabaseSync(dbPath);
+    raw.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run("2026-07-24T00:00:00Z", "legacy", "not json");
+    raw.close();
+
+    const s2 = new State(dbPath);
+    const page = s2.eventsPage(0, 10);
+    assert.equal(page.length, 2);
+    assert.deepEqual(page[0]!.payload, { pr: 1 });
+    assert.equal(page[1]!.payload, null);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("spendByModelForDay groups the day's ledger by model, biggest spender first", () => {
+  const s = mem();
+  const models = (model: string, i: number, o: number): ModelUsageEntry[] => [
+    { model, inputTokens: i, outputTokens: o, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ];
+  s.recordSpend("w1", 1, 1.25, "2026-07-24T11:30:00.000Z", models("opus", 100, 20));
+  s.recordSpend("w2", 2, 0.75, "2026-07-24T12:00:00.000Z", models("sonnet", 50, 10));
+  s.recordSpend("w3", 3, 2.0, "2026-07-24T13:00:00.000Z", models("opus", 200, 40));
+  s.recordSpend("w4", 4, 99.0, "2026-07-23T23:59:59.000Z", models("opus", 1, 1)); // yesterday
+
+  assert.deepEqual(s.spendByModelForDay(new Date("2026-07-24T18:00:00.000Z")), [
+    { model: "opus", usd: 3.25, inputTokens: 300, outputTokens: 60 },
+    { model: "sonnet", usd: 0.75, inputTokens: 50, outputTokens: 10 },
+  ]);
+  // Same day window as dailySpendUsd — the group sums and the headline can never disagree.
+  assert.equal(
+    s.spendByModelForDay(new Date("2026-07-24T18:00:00.000Z")).reduce((a, r) => a + r.usd, 0),
+    s.dailySpendUsd(new Date("2026-07-24T18:00:00.000Z")),
+  );
+  assert.deepEqual(s.spendByModelForDay(new Date("2026-07-25T00:00:00.000Z")), [], "a quiet day groups to nothing");
+  s.close();
+});

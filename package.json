@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "description": "sapwood — the autonomous coding loop with governance built in",
   "workspaces": [
-    "engine"
+    "engine",
+    "dashboard"
   ],
   "engines": {
     "node": ">=24.0.0"
@@ -13,7 +14,7 @@
     "typecheck": "npm run -ws typecheck",
     "lint": "biome ci .",
     "test": "npm run -ws test",
-    "build": "npm run -ws build"
+    "build": "npm run -ws --if-present build"
   },
   "license": "MIT",
   "devDependencies": {
