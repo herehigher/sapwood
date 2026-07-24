@@ -105,6 +105,12 @@ cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
   roundBudgetUsd: 30
   dailyBudgetUsd: 100
 
+# dashboard:
+#   controls: true # v0.2 dashboard operations verbs (start/pause/resume/stop) and the
+#                  # POST /api/control route (frontend-design.md 3/8, key added by #210's
+#                  # schema work on PR #366). false = pure-spectator dashboard: the control
+#                  # route is not registered (404) and no control buttons render.
+
 reviewer:
   # different-model-codex: 0day-style gate② (fresh non-author Codex review) — default.
   # same-model-trusted | human | engine-agent are the other reviewer kinds.
