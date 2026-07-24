@@ -27,16 +27,27 @@
 // event is a RECORD for the dashboard fold, never a gate. Existing escalation and gating
 // behavior is byte-identical with this module present or absent.
 //
-// EXACTLY ONCE, WITHOUT A NEW LATCH COLUMN. The dedupe is a COUNT fold over the ledger itself
-// (`openEscalations` below): per `(source, issue)` key, escalations minus resolutions. That
-// choice — rather than a "resolved" set or a new `escalation_resolved` column — is what makes
-// RE-escalation work: an issue that escalates, gets resolved by a human, and escalates AGAIN is
-// genuinely open a second time, and a one-way set would leave that second row stuck on the strip
-// forever (exactly the bug this module exists to kill). The append IS the latch, so a `kill -9`
-// strictly between the observation and the append leaves NOTHING durable: the rerun simply
-// re-observes and appends once (#295 AC2). At most one event per key per sweep, so even a key
-// that somehow accrued two open escalations converges over successive rounds rather than
-// emitting in a burst.
+// EXACTLY ONCE, WITHOUT A NEW LATCH COLUMN. The dedupe is a LAST-EVENT-WINS fold over the ledger
+// itself (`openEscalations` below): per `(source, issue)` key, the key is open iff the newest
+// event for it is an escalation rather than a resolution. That choice — rather than a "resolved"
+// set or a new `escalation_resolved` column — is what makes RE-escalation work: an issue that
+// escalates, gets resolved by a human, and escalates AGAIN is genuinely open a second time, and
+// a one-way set would leave that second row stuck on the strip forever (exactly the bug this
+// module exists to kill). The append IS the latch, so a `kill -9` strictly between the
+// observation and the append leaves NOTHING durable: the rerun simply re-observes and appends
+// once (#295 AC2).
+//
+// gate② round 2: last-event-wins REPLACED an earlier escalations-minus-resolutions COUNT fold,
+// which was wrong for repeat-emitting kinds. `gated-reentry-capped-label-failed` is a
+// retry-until-success stream — conductor.ts's GATED RECLAIM deliberately re-enters that branch
+// every tick until the label lands — so N emissions describe ONE thing waiting on a human, and a
+// counting fold would have demanded N separate resolutions to clear a single strip row. The
+// deliberate trade this accepts: if the engine keeps re-emitting an escalation for something the
+// outside world has ALREADY settled (only reachable when label writes are failing every tick
+// against an externally-merged PR), each round re-opens and re-resolves it, one event per round.
+// That is noisy but honest — it is an accurate description of a broken forge — and it is
+// strictly preferable to suppressing re-opens after a terminal `merged`/`closed`, which would
+// resurrect the permanent-zombie bug the moment a closed issue is reopened and re-escalates.
 //
 // LABEL ABSENCE IS ONLY A HUMAN ACT IF THE ENGINE PROVABLY APPLIED THE LABEL. This is the one
 // non-obvious rule here, and it is this codebase's OWN existing doctrine (see state.ts's
@@ -53,10 +64,11 @@
 //   - `drive-needs-human` -> proven IFF its own payload says so (`labeled: 1`); it is the one
 //     kind that records the outcome, and its `labeled: 0` case is precisely the invisible class
 //     named above.
-//   - best-effort or never-labels (`ceiling-escalated` and `rollback-escalated` both
-//     `.catch(() => {})` the addLabel; `env-failure-preserved` applies NO label at all, by #168
-//     contract) -> NOT proven. These clear via issue-closed / PR-merged-or-closed only, which is
-//     still strictly more clearing than the zero paths they have today.
+//   - best-effort, never-labels, or label-FAILED (`ceiling-escalated` and `rollback-escalated`
+//     both `.catch(() => {})` the addLabel; `env-failure-preserved` applies NO label at all, by
+//     #168 contract; `gated-reentry-capped-label-failed` IS the label failure) -> NOT proven.
+//     These clear via issue-closed / PR-merged-or-closed only, which is still strictly more
+//     clearing than the zero paths they have today.
 //
 // ponytail: no `via: "board-fixed"` observation, though issue #295's sketch names one. Tracing
 // the classes above, NONE of them is signalled by a board column — escalation in this engine is
@@ -92,6 +104,14 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
   "ceiling-escalated": "never",
   "rollback-escalated": "never",
   "env-failure-preserved": "never",
+  // gate② round 2: the capped branch's own label FAILURE is a distinct attention item
+  // (frontend-design.md §3 flags it by name) and a strictly worse zombie than the capped event
+  // beside it — the two are mutually exclusive (conductor.ts's GATED RECLAIM `continue`s past
+  // the capped append when addLabel throws), and this path additionally never latches, so the
+  // row fails `gated_escalation_labeled = 1` forever and NO engine event will ever move that
+  // issue again. `never`, necessarily: the label write is precisely what failed, so its absence
+  // is the engine's own footprint, not a human's.
+  "gated-reentry-capped-label-failed": "never",
 };
 
 const RESOLVED_KIND = "escalation-resolved";
@@ -124,37 +144,27 @@ function payloadNumber(payload: Record<string, unknown> | null, key: string): nu
  *  `unadjudicatedConcerns`). A malformed event (no numeric `issue`) is skipped, never thrown —
  *  same best-effort-bookkeeping stance the rest of this codebase's journals take. */
 export function openEscalations(events: readonly { kind: string; payload: unknown }[]): Map<string, OpenEscalation> {
-  const openCount = new Map<string, number>();
-  const latest = new Map<string, OpenEscalation>();
+  const open = new Map<string, OpenEscalation>();
   for (const e of events) {
     const payload = (e.payload ?? null) as Record<string, unknown> | null;
     const issue = payloadNumber(payload, "issue");
     if (issue === undefined) continue;
     if (e.kind === RESOLVED_KIND) {
       const source = typeof payload?.source === "string" ? payload.source : undefined;
-      if (source === undefined) continue;
-      const key = `${source}:${issue}`;
-      openCount.set(key, Math.max(0, (openCount.get(key) ?? 0) - 1));
+      if (source !== undefined) open.delete(`${source}:${issue}`);
       continue;
     }
     const proof = ESCALATION_SOURCES[e.kind];
     if (proof === undefined) continue;
-    const key = `${e.kind}:${issue}`;
     const pr = payloadNumber(payload, "pr");
     // The LATEST escalation's own facts win: a re-escalation may carry a different PR, and the
     // stale one would send the observation below at a PR this escalation is not about.
-    latest.set(key, {
+    open.set(`${e.kind}:${issue}`, {
       source: e.kind,
       issue,
       ...(pr !== undefined ? { pr } : {}),
       labelProven: proof === "always" || (proof === "payload" && payload?.labeled === 1),
     });
-    openCount.set(key, (openCount.get(key) ?? 0) + 1);
-  }
-  const open = new Map<string, OpenEscalation>();
-  for (const [key, count] of openCount) {
-    const esc = latest.get(key);
-    if (count > 0 && esc !== undefined) open.set(key, esc);
   }
   return open;
 }

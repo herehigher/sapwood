@@ -249,8 +249,9 @@ later event moves that issue (`dispatched`, `merged`, `gated-reentry`) —
 **or, since #295, when `escalation-resolved` reports the human resolved it
 outside the loop entirely.** That event is what makes the empty-strip
 contract survivable: the 2026-07-21 audit found most escalation classes had
-no clearing path at all (`gated-reentry-capped`, merged-path
-`rollback-escalated` and `drive-needs-human` with `labeled: 0` are one-way
+no clearing path at all (`gated-reentry-capped`,
+`gated-reentry-capped-label-failed`, merged-path `rollback-escalated` and
+`drive-needs-human` with `labeled: 0` are one-way
 latches; `resume-capped`, `resume-undecidable`, `ceiling-escalated`,
 `env-failure-preserved` and the no-PR escalations cleared only on a
 re-dispatch that a hand-merge or a hand-closed issue never triggers), so a

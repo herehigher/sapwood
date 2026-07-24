@@ -244,6 +244,24 @@ test("openEscalations: a best-effort-label kind (ceiling-escalated) is never lab
   assert.equal(open.get("ceiling-escalated:7")?.labelProven, false);
 });
 
+test("openEscalations: a REPEAT-emitting kind collapses to ONE open item, not one per emission (gate② round 2)", () => {
+  // gated-reentry-capped-label-failed is a retry-until-success stream (conductor.ts's GATED
+  // RECLAIM re-enters the branch every tick until the label lands), so N emissions are ONE
+  // thing waiting on a human — a counting fold would demand N resolutions to clear one row.
+  const open = openEscalations([
+    { kind: "gated-reentry-capped-label-failed", payload: { worker: "w1", issue: 7, pr: 12, attempts: 2, error: "boom" } },
+    { kind: "gated-reentry-capped-label-failed", payload: { worker: "w1", issue: 7, pr: 12, attempts: 2, error: "boom" } },
+    { kind: "gated-reentry-capped-label-failed", payload: { worker: "w1", issue: 7, pr: 12, attempts: 2, error: "boom" } },
+  ]);
+  assert.equal(open.size, 1);
+  assert.deepEqual(open.get("gated-reentry-capped-label-failed:7"), {
+    source: "gated-reentry-capped-label-failed",
+    issue: 7,
+    pr: 12,
+    labelProven: false, // the label write is exactly what failed — absence proves nothing
+  });
+});
+
 test("openEscalations: a malformed payload (no issue) is skipped, never thrown", () => {
   const open = openEscalations([
     { kind: "resume-capped", payload: { worker: "w1" } },
@@ -433,6 +451,53 @@ test("reconcileEscalations: drive-needs-human with labeled:0 is NOT resolved by 
   await reconcileEscalations(forge, state, mkCfg());
 
   assert.deepEqual(resolvedEvents(logged), []);
+  state.close();
+});
+
+test("reconcileEscalations: a hand-merged PR resolves gated-reentry-capped-label-failed (gate② round 2 — the label-retry zombie)", async () => {
+  // The capped branch's addLabel threw, so `gated-reentry-capped` never fired and the row keeps
+  // failing GATED RECLAIM's `gated_escalation_labeled = 1` test forever: no engine event will
+  // ever move this issue again. A hand-merge is the only thing that can end it.
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("gated-reentry-capped-label-failed", { worker: "w1", issue: 7, pr: 12, attempts: 2, error: "boom" });
+  forge.prStates[12] = "MERGED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "gated-reentry-capped-label-failed", via: "merged" }]);
+  assert.deepEqual(forge.writes, []);
+  state.close();
+});
+
+test("reconcileEscalations: gated-reentry-capped-label-failed is NOT resolved by label absence — the label write is what failed", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("gated-reentry-capped-label-failed", { worker: "w1", issue: 7, pr: 12, attempts: 2, error: "boom" });
+  forge.issueLabels[7] = []; // absent precisely BECAUSE the engine could not apply it
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  state.close();
+});
+
+test("reconcileEscalations: a per-tick label-retry STREAM resolves exactly once, not once per emission (gate② round 2)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const cfg = mkCfg();
+  for (let i = 0; i < 5; i++) {
+    state.appendEvent("gated-reentry-capped-label-failed", { worker: "w1", issue: 7, pr: 12, attempts: 2, error: "boom" });
+  }
+  forge.prStates[12] = "MERGED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, cfg);
+  await reconcileEscalations(forge, state, cfg); // and the sweep after it stays silent
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "gated-reentry-capped-label-failed", via: "merged" }]);
   state.close();
 });
 
