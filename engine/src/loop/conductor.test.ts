@@ -2409,7 +2409,57 @@ test("tick: KILL_SWITCH drain — a driving lane AT the fix-rounds cap is TERMIN
     // Evidence: the drain reason (fix-capped, not the daily-budget variant) is on the record.
     const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
     assert.match(ev!.payload.reason, /drain-fix-rounds-capped:2\/2/);
+    // #375 review round 3 (P2): the pre-terminal evidence comment landed too, naming the drain
+    // reason (kill-switch), the fix-rounds spent/cap, and the #147 gated-reentry recovery path —
+    // a human landing on this needs-human issue is never left with zero explanation.
+    assert.equal(forge.issueComments.length, 1);
+    assert.equal(forge.issueComments[0]![0], 2);
+    assert.match(forge.issueComments[0]![1], /kill-switch drain/);
+    assert.match(forge.issueComments[0]![1], /drain-fix-rounds-capped:2\/2/);
+    assert.match(forge.issueComments[0]![1], /2 fix round\(s\) spent of 2/);
+    assert.match(forge.issueComments[0]![1], /#147 gated reentry/);
     assert.equal(st.activeWorkers().length, 0); // #375 AC2: wind-down's activeWorkers()===0 loop can now exit
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: KILL_SWITCH drain — a failed EVIDENCE COMMENT (label already succeeded) leaves the row `driving` too (#375 review round 3, P2): never a terminal upsert with no explanation, retried on the very next tick", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window
+
+    // Tick 2: the label write succeeds, but the evidence comment fails — the row must stay
+    // `driving` (never a needs-human issue with zero explanation of why the engine gave up).
+    forge.throwOnAddIssueComment = true;
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r2.escalated, [], "a failed evidence-comment write must NOT count as drained");
+    assert.equal(st.getWorker("lane-a")?.state, "driving", "stays driving — never a terminal upsert without the evidence comment");
+    assert.notEqual(st.getWorker("lane-a")?.gated_escalation_labeled, 1, "no terminal latch yet");
+    assert.deepEqual(forge.issueComments, [], "the failed comment attempt left no partial trace");
+    const failEv = st.latestEvent("drain-driving-escalation-comment-failed") as { payload: { reason: string; error: string } } | undefined;
+    assert.match(failEv!.payload.reason, /drain-fix-rounds-capped:2\/2/);
+
+    // Tick 3: forge recovers — retried immediately (same still-elapsed breach window, no fresh
+    // window needed). The re-attempted label call is a harmless idempotent duplicate.
+    forge.throwOnAddIssueComment = false;
+    const r3 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r3.escalated, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "failed");
+    assert.equal(st.getWorker("lane-a")?.gated_escalation_labeled, 1);
+    assert.equal(forge.issueComments.length, 1);
+    assert.match(forge.issueComments[0]![1], /drain-fix-rounds-capped:2\/2/);
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

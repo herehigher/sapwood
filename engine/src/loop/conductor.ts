@@ -1182,6 +1182,42 @@ async function drainThenEscalate(
         state.appendEvent("drain-driving-escalation-label-failed", { worker: w.name, issue: w.issue, pr: w.pr, reason, error: String(e) });
         continue; // stays `driving`, no latch — the next drain tick retries this whole branch
       }
+      // #375 review round 3 (P2, Codex PR #388 verify pass): the evidence comment — WHY the
+      // engine gave up (the drain reason: kill-switch vs ceiling; fix-rounds spent vs cap; the
+      // specific budget/admission blocker) and HOW to undo it (#147 gated reentry, including the
+      // repeat-reentry trail escalateNeedsHuman's own callers preserve) — gets the SAME
+      // forge-before-terminal-upsert treatment as the label: label -> comment -> terminal upsert,
+      // mirroring the FIXABLE cap-exhausted branch exactly. A comment-write failure must not
+      // silently swallow this row into a needs-human issue with zero explanation (the preserved-
+      // evidence stance every other escalation in this file honors) — leave it `driving` (no
+      // upsert, no latch) and retry the WHOLE branch next tick; a re-attempt re-posts the label
+      // harmlessly (GitHub's addLabel is idempotent), same accepted stance as the cap-exhausted
+      // branch's own no-new-dedup-machinery ruling.
+      const gatedAttempts = w.gated_reentry_attempts ?? 0;
+      const reentryNote =
+        gatedAttempts > 0
+          ? `This is gated-reentry attempt ${gatedAttempts}/${cfg.lanes.gatedReentryCap} for this PR. ` +
+            (gatedAttempts >= cfg.lanes.gatedReentryCap
+              ? capHitEscalationNote(cfg)
+              : `Remove \`${cfg.labels.needsHuman}\` again once resolved to retry (#147 gated reentry).`)
+          : `Remove \`${cfg.labels.needsHuman}\` once resolved to reclaim the same PR (#147 gated reentry).`;
+      try {
+        await forge.addIssueComment(
+          w.issue,
+          `sapwood: ${reasons.join("+")} drain (#375) — PR #${w.pr} could not progress this tick ` +
+            `(${reason}), ${fixRounds} fix round(s) spent of ${cfg.lanes.prFixCap}. Escalating to ` +
+            `\`${cfg.labels.needsHuman}\` rather than wedge the bounded drain. ${reentryNote}`,
+        );
+      } catch (e) {
+        state.appendEvent("drain-driving-escalation-comment-failed", {
+          worker: w.name,
+          issue: w.issue,
+          pr: w.pr,
+          reason,
+          error: String(e),
+        });
+        continue; // stays `driving`, no latch — the next drain tick retries this whole branch
+      }
       state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
       state.appendEvent("drive-needs-human", { worker: w.name, issue: w.issue, pr: w.pr, reason, labeled: 1 });
       escalated.push(w.name);
