@@ -868,7 +868,19 @@ export function createPlanReviewStub(deps: PlanReviewDeps): PeripheralStub {
         const reviewerTemplate = loadRolePromptTemplate(deps.cfg.roles.planReviewer.promptFile, defaultPlanReviewerPromptPath());
         const drafterTemplate = loadRolePromptTemplate(deps.cfg.roles.planDrafter.promptFile, defaultPlanDrafterPromptPath());
         const confirmTemplate = loadRolePromptTemplate(deps.cfg.roles.planReviewer.confirmPromptFile, defaultPlanConfirmPromptPath());
-        for (const issue of poolMembers) {
+        for (let i = 0; i < poolMembers.length; i++) {
+          const issue = poolMembers[i]!;
+          // #374 review (Codex sol-high finding 6, P2): once an EARLIER issue this same pass
+          // classified quota/429 and parked the "llm" episode, every REMAINING pool member would
+          // otherwise still launch its own doomed session (one per issue) — a cheap, single
+          // check here skips them all with ONE trail note instead of N wasted attempts.
+          if (deps.state.parkRow("llm") != null) {
+            (deps.log ?? console.error)(
+              `[sapwood:plan-review] round ${roundId}: llm park active — skipping ${poolMembers.length - i} ` +
+                `remaining pool member(s) this pass`,
+            );
+            break;
+          }
           if (labelsInclude(issue.labels, l.verifyNa)) continue; // class 4: doc-gate path, untouched
           if (!labelsInclude(issue.labels, l.planApproved)) {
             await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId); // class 1

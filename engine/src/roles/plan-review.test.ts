@@ -713,6 +713,40 @@ test("createPlanReviewStub: processes every candidate issue, independently", asy
   state.close();
 });
 
+test("createPlanReviewStub #374 review (Codex sol-high finding 6): once an earlier issue classifies quota/429 and parks, remaining pool members are SKIPPED — no doomed per-issue sessions", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [
+    { number: 30, title: "a", labels: [ROUND_POOL_LABEL] },
+    { number: 31, title: "b", labels: [ROUND_POOL_LABEL] },
+    { number: 32, title: "c", labels: [ROUND_POOL_LABEL] },
+  ];
+  forge.issueBodies[30] = PLAN_BODY;
+  forge.issueBodies[31] = PLAN_BODY;
+  forge.issueBodies[32] = PLAN_BODY;
+  const cfg = mkCfg();
+  const quotaResult: RoleSessionResult = {
+    outcome: "failed",
+    costUsd: 0,
+    modelUsage: [],
+    exitCode: 1,
+    name: "r-30",
+    failureText: "hit your session limit",
+  };
+  const runner = new ScriptedRunner([{ result: quotaResult }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 5, phase: "plan_review", marker: null });
+  // Only issue #30's session ever dispatched — #31/#32 were skipped once the park was entered.
+  assert.equal(runner.calls.length, 1, "the park check runs BEFORE dispatching each remaining pool member's session");
+  assert.equal(state.isParked(), true);
+  assert.equal(state.parkRow("llm")?.source, "llm");
+  // Neither #31 nor #32 got any forge write at all (no escalation, no label, no comment).
+  assert.equal(forge.issueLabels[31], undefined);
+  assert.equal(forge.issueLabels[32], undefined);
+  state.close();
+});
+
 // ── template rendering + loading (unit) ─────────────────────────────────────────────────────
 
 test("renderRolePrompt: substitutes issue + config + extra vars; fails closed on an unknown var", () => {

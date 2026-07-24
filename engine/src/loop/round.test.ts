@@ -30,6 +30,7 @@ import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import {
   buildFixLegResume,
+  isRoundFullyDegraded,
   noopPeripheralStub,
   type PeripheralPhase,
   type PeripheralStub,
@@ -40,7 +41,7 @@ import {
   removeRoundPoolLabel,
   runRounds,
 } from "./round.js";
-import { RoundArtifactSchema } from "./round-artifact.js";
+import { type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
 
 class FakeForge implements IForge {
   async listUnplacedIssues() {
@@ -2222,7 +2223,158 @@ test("#168: RoundDeps.probeLlmReachable omitted -> a pre-parked (llm) episode is
   state.close();
 });
 
+// ── #374 review (Codex sol-high finding 5): isRoundFullyDegraded — pure unit tests ───────────
+
+const mkArtifact = (over: Partial<RoundArtifact> = {}): RoundArtifact => ({
+  schemaVersion: 1,
+  roundId: 1,
+  startedAt: "2026-07-24T00:00:00Z",
+  endedAt: "2026-07-24T00:05:00Z",
+  dispatches: [],
+  merges: [],
+  prsOpened: 0,
+  prsMerged: 0,
+  issuesClosed: 0,
+  spendUsd: 0,
+  roundBudgetUsd: 30,
+  retries: { gatedReentries: 0, gatedReentryCapped: 0, rollbacksRecovered: 0, rollbacksEscalated: 0 },
+  reviewRounds: { reviewerFallbackSwitches: 0, reviewerFallbackReverts: 0 },
+  escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
+  egressSuspects: [],
+  handoffs: 0,
+  degradedPhases: [],
+  roundStops: [],
+  retro: { opened: null, degraded: null },
+  align: null,
+  concerns: [],
+  concernsReconciled: [],
+  ...over,
+});
+
+const degradedPhase = (phase: string): { phase: string; outcome: string; session: string } => ({
+  phase,
+  outcome: "failed",
+  session: "s",
+});
+
+test("isRoundFullyDegraded: a TOTAL quota storm (every default-enabled phase degrades) -> true", () => {
+  const cfg = mkCfg();
+  const totalStorm = mkArtifact({
+    degradedPhases: [
+      degradedPhase("po-align"),
+      degradedPhase("architect"),
+      degradedPhase("plan_review"),
+      degradedPhase("harvest"),
+      degradedPhase("retro"),
+    ],
+    escalations: { needsHuman: [1], ceiling: 0, driveNoPr: 0 }, // makes harvesting REQUIRED too
+  });
+  assert.equal(isRoundFullyDegraded(cfg, totalStorm, 1), true);
+
+  // A PARTIAL storm (harvesting/retro still fine) is NOT fully degraded.
+  const partial = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review")],
+    escalations: { needsHuman: [1], ceiling: 0, driveNoPr: 0 },
+  });
+  assert.equal(isRoundFullyDegraded(cfg, partial, 1), false);
+});
+
+test("isRoundFullyDegraded (the retro-only false positive this finding fixes): only retro degrades, everything else fine -> false", () => {
+  const cfg = mkCfg();
+  const artifact = mkArtifact({ retro: { opened: null, degraded: { branch: "b", title: "t", reason: "push failed" } } });
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), false);
+});
+
+test("isRoundFullyDegraded: a disabled role is EXCLUDED from the required set — degrading everything else still counts as fully degraded", () => {
+  const cfg = mkCfg({ roles: { architect: { enabled: false } } });
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("plan_review"), degradedPhase("retro")],
+    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 }, // harvesting stays unrequired (nothing to brief)
+  });
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), true);
+});
+
+test("isRoundFullyDegraded: aligning is EXCLUDED from the required set when BOTH po.enabled and po.poolSelection are off (no session can ever run there)", () => {
+  const cfg = mkCfg({ roles: { po: { enabled: false, poolSelection: false } } });
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
+  });
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), true);
+});
+
+test("isRoundFullyDegraded: harvesting is required ONLY when this round's own artifact shows something to brief (escalations.needsHuman non-empty)", () => {
+  const cfg = mkCfg();
+  const noNeedsHuman = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
+    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
+  });
+  assert.equal(isRoundFullyDegraded(cfg, noNeedsHuman, 1), true, "harvesting not required — nothing to brief");
+
+  const withNeedsHumanButHarvestFine = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
+    escalations: { needsHuman: [7], ceiling: 0, driveNoPr: 0 },
+  });
+  assert.equal(
+    isRoundFullyDegraded(cfg, withNeedsHumanButHarvestFine, 1),
+    false,
+    "harvesting IS required now (something to brief) but didn't degrade",
+  );
+});
+
+test("isRoundFullyDegraded: retro is required ONLY on its own cadence turn (roundId % everyNRounds === 0)", () => {
+  const cfg = mkCfg({ roles: { retro: { everyNRounds: 5 } } });
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review")],
+  });
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 7), true, "round 7 isn't retro's turn (7 % 5 !== 0) — retro not required");
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 10), false, "round 10 IS retro's turn (10 % 5 === 0) — retro required, didn't degrade");
+});
+
+test("isRoundFullyDegraded: every role disabled (nothing was even configured to run a session) -> false, never a degenerate true", () => {
+  const cfg = mkCfg({
+    roles: {
+      po: { enabled: false, poolSelection: false },
+      architect: { enabled: false },
+      planReviewer: { enabled: false },
+      harvest: { enabled: false },
+      retro: { enabled: false },
+    },
+  });
+  const artifact = mkArtifact();
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), false);
+});
+
 // ── #374: the empty-spin breaker + the round-opening gate (F16: 145 empty rounds, no bound) ──
+
+/** #374 review (Codex sol-high finding 5): isRoundFullyDegraded requires EVERY peripheral phase
+ *  the round was actually configured to run a session for to degrade, not any single one — so a
+ *  test simulating F16's total-outage scenario must degrade ALL FIVE phases. Note the plan_review
+ *  fake's "plan-review-escalated" event ALSO populates artifact.escalations.needsHuman (finding
+ *  4: it's dual-role — needs-human AND degraded-phase), which is what makes harvesting REQUIRED
+ *  too (isRoundFullyDegraded only requires it when there's something to brief) — so harvesting
+ *  degrades here as well, matching a genuine total-storm scenario where nothing succeeds. Each
+ *  stub appends the SAME durable event round-artifact.ts's degradedPhases already scans for.
+ *  Shared by both #374 tests below. */
+function mkFullyDegradingPeripherals(log: Array<{ phase: PeripheralPhase; marker: string | null }>, state: State) {
+  const degrade = (phase: PeripheralPhase, kind: string, payload: (roundId: number) => Record<string, unknown>) => ({
+    async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+      log.push({ phase, marker: ctx.marker });
+      state.appendEvent(kind, payload(ctx.roundId));
+      return { marker: `${phase}-r${ctx.roundId}` };
+    },
+  });
+  return {
+    aligning: degrade("aligning", "po-degraded", (round_id) => ({ round_id, outcome: "failed", session: `po-${round_id}` })),
+    architecting: degrade("architecting", "architect-degraded", (round_id) => ({
+      round_id,
+      outcome: "failed",
+      session: `arch-${round_id}`,
+    })),
+    plan_review: degrade("plan_review", "plan-review-escalated", (round_id) => ({ round_id, issue: 1, reason: "session failed twice" })),
+    harvesting: degrade("harvesting", "harvest-degraded", (round_id) => ({ round_id, outcome: "failed", session: `harvest-${round_id}` })),
+    retro: degrade("retro", "retro-degraded", (round_id) => ({ round_id, outcome: "failed", session: `retro-${round_id}` })),
+  };
+}
 
 test("runRounds #374: N consecutive degraded, dispatch-empty rounds force a park; round 3 is WITHHELD (no unbounded round churn) until a human intervenes", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
@@ -2231,18 +2383,9 @@ test("runRounds #374: N consecutive degraded, dispatch-empty rounds force a park
     const state = new State(join(dir, "sapwood.sqlite"));
     const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
     // Simulates F16's own root cause: an UNCLASSIFIED systemic role-session failure (a text
-    // classifyEnvFailure simply doesn't recognize) — the aligning phase "degrades" every round,
-    // appending the SAME durable event round-artifact.ts's degradedPhases already scans for.
-    const degradingPeripherals = {
-      ...allPeripherals(log),
-      aligning: {
-        async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
-          log.push({ phase: "aligning" as PeripheralPhase, marker: ctx.marker });
-          state.appendEvent("po-degraded", { round_id: ctx.roundId, outcome: "failed", session: `s-${ctx.roundId}` });
-          return { marker: `aligning-r${ctx.roundId}` };
-        },
-      },
-    };
+    // classifyEnvFailure simply doesn't recognize) — EVERY peripheral phase "degrades" every
+    // round (isRoundFullyDegraded requires all of them, see mkFullyDegradingPeripherals's doc).
+    const degradingPeripherals = mkFullyDegradingPeripherals(log, state);
     // Polls the durable park state itself (never a magic sleep-call COUNT, which is timing-
     // fragile — the exact number of sleep calls per round can shift with unrelated engine
     // changes): the very FIRST sleep call observed AFTER the breaker has parked the engine
@@ -2286,16 +2429,7 @@ test("runRounds #374: the round-opening gate resumes via the EXISTING probe path
     const forge = new FakeForge();
     const state = new State(join(dir, "sapwood.sqlite"));
     const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
-    const degradingPeripherals = {
-      ...allPeripherals(log),
-      aligning: {
-        async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
-          log.push({ phase: "aligning" as PeripheralPhase, marker: ctx.marker });
-          state.appendEvent("po-degraded", { round_id: ctx.roundId, outcome: "failed", session: `s-${ctx.roundId}` });
-          return { marker: `aligning-r${ctx.roundId}` };
-        },
-      },
-    };
+    const degradingPeripherals = mkFullyDegradingPeripherals(log, state);
     let probeCalls = 0;
     // A CONTROLLED, advancing fake clock — required here (unlike test 1 above, which exits via
     // KILL_SWITCH before any wall-clock-based check matters): the gate's probeDueWithHint check

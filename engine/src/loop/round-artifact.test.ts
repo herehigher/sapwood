@@ -112,6 +112,7 @@ test("assembleRoundArtifact: round-stop hits and *-degraded events map to named 
     { kind: "round-stop", payload: { round_id: 1, name: "roundDispatchCap", detail: "dispatched 2" } },
     { kind: "po-degraded", payload: { round_id: 1, outcome: "failed", session: "s1", reason: "x" } },
     { kind: "triage-degraded", payload: { round_id: 1, issue: 9, outcome: "no-plan-after-draft" } },
+    { kind: "pool-degraded", payload: { round_id: 1, outcome: "failed", session: "s5", reason: "y" } },
     { kind: "architect-degraded", payload: { round_id: 1, outcome: "done", session: "s2" } },
     { kind: "harvest-degraded", payload: { round_id: 1, outcome: "done", session: "s3", attempts: 2 } },
     { kind: "retro-degraded", payload: { round_id: 1, outcome: "failed", session: "s4" } },
@@ -123,10 +124,24 @@ test("assembleRoundArtifact: round-stop hits and *-degraded events map to named 
     // outcome is recorded VERBATIM when the payload carries one; "unknown" is only the
     // missing-field fallback (session here — triage-degraded's payload has no session field).
     { phase: "po-triage", outcome: "no-plan-after-draft", session: "unknown" },
+    // #374 review (Codex sol-high finding 4): pool-degraded (align.ts's po-pool selection
+    // session) is now captured too — previously entirely absent from this artifact.
+    { phase: "po-pool", outcome: "failed", session: "s5" },
     { phase: "architect", outcome: "done", session: "s2" },
     { phase: "harvest", outcome: "done", session: "s3" },
     { phase: "retro", outcome: "failed", session: "s4" },
   ]);
+});
+
+test("assembleRoundArtifact #374 review (Codex sol-high finding 4): plan-review-escalated is BOTH a needs-human escalation AND a degraded-phase signal", () => {
+  const events = [{ kind: "plan-review-escalated", payload: { round_id: 1, issue: 42, reason: "reviewer session failed twice (failed)" } }];
+  const artifact = assembleRoundArtifact(events, meta, 0, 30);
+  // Existing behavior (unchanged): still counts as a needs-human escalation.
+  assert.deepEqual(artifact.escalations.needsHuman, [42]);
+  // NEW: previously plan-review-escalated fell into the switch's `default: break` case and never
+  // appeared in degradedPhases at all — a plan-review-only quota storm the classifier didn't
+  // recognize could never trip round.ts's empty-spin breaker. Now it does.
+  assert.deepEqual(artifact.degradedPhases, [{ phase: "plan_review", outcome: "escalated", session: "issue#42" }]);
 });
 
 test("assembleRoundArtifact: retro-pr-opened/-degraded populate the retro section, last event wins", () => {

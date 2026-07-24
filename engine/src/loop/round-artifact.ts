@@ -167,12 +167,23 @@ export const ROUND_ARTIFACT_EVENT_KINDS = [
   "align-summary",
   // #237: PO-dissent concerns actually delivered this round (dissent.ts's postConcerns).
   "concern-posted",
+  // #374 review (Codex sol-high finding 4, P2): align.ts's po-pool selection session's own
+  // degrade event — previously entirely ABSENT from this list, so a pool-selection-only quota
+  // storm (roles.po.poolSelection: true) never showed up in degradedPhases at all, and
+  // round.ts's empty-spin breaker could never see it.
+  "pool-degraded",
 ];
 
-/** Maps a `*-degraded` event kind to the human-readable phase name recorded in the artifact. */
+/** Maps a `*-degraded` event kind to the human-readable phase name recorded in the artifact.
+ *  #374 review (Codex sol-high finding 4): "pool-degraded" added (see ROUND_ARTIFACT_EVENT_KINDS'
+ *  own doc) — mapped to "po-pool", a DISTINCT phase name from "po-align"/"po-triage" even though
+ *  all three run inside the SAME round-phase slot (round.ts's "aligning") — degradedPhases stays
+ *  a fine-grained, per-session-kind record; round.ts's own fully-degraded computation is what
+ *  groups these back down to the round-phase level. */
 const DEGRADE_PHASE_BY_KIND: Record<string, string> = {
   "po-degraded": "po-align",
   "triage-degraded": "po-triage",
+  "pool-degraded": "po-pool",
   "architect-degraded": "architect",
   "harvest-degraded": "harvest",
   "retro-degraded": "retro",
@@ -275,6 +286,21 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
         break;
       case "plan-review-escalated":
         addNeedsHuman(p.issue);
+        // #374 review (Codex sol-high finding 4, P2): ALSO a degraded-phase signal — this event
+        // fires on a GENUINE plan-reviewer/plan-drafter/confirm session failure (an env-classified
+        // attempt never reaches here at all; peripheral.ts's runSessionWithRetry returns early
+        // with envParked, and plan-review.ts's three call sites check that flag and return before
+        // ever emitting this event — see plan-review.ts's own doc). So this is EXACTLY the
+        // "unrecognized systemic failure" signal round.ts's empty-spin breaker exists to catch,
+        // and previously never fed into degradedPhases at all — a plan-review-only quota storm
+        // (one whose text classifyEnvFailure doesn't recognize) could never trip the breaker.
+        // Payload shape differs from the other `*-degraded` events (round_id/issue/reason, no
+        // outcome/session) — adapted to the shared shape here rather than widening it.
+        degradedPhases.push({
+          phase: "plan_review",
+          outcome: "escalated",
+          session: `issue#${String(p.issue ?? "unknown")}`,
+        });
         break;
       case "egress-suspect":
         egressSuspects.push({
@@ -346,6 +372,7 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
       }
       case "po-degraded":
       case "triage-degraded":
+      case "pool-degraded":
       case "architect-degraded":
       case "harvest-degraded":
       case "retro-degraded":

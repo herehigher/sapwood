@@ -2364,6 +2364,40 @@ test("extractRateLimitResetAt: a hint in the PAST (already-elapsed reset) is hon
   assert.equal(extractRateLimitResetAt(jsonl, nowMs), pastSec * 1000);
 });
 
+// ── #374 review (Codex sol-high finding 8): the horizon clamp only bounds the FUTURE side — a
+//    corrupted resetsAt (e.g. -1e20) sits arbitrarily far in the PAST and must never survive to
+//    reach a downstream `new Date(...).toISOString()` call, which THROWS on an Invalid Date. ────
+
+test("extractRateLimitResetAt: a wildly corrupted resetsAt (-1e20) is outside JS's valid Date range -> rejected (null), never a value that would crash a downstream toISOString()", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":-1e20}}`;
+  const result = extractRateLimitResetAt(jsonl, nowMs);
+  assert.equal(result, null);
+});
+
+test("extractRateLimitResetAt: a Date-valid but ancient value (millennia in the past) is still honored — only OUT-OF-RANGE values are rejected, not merely large-magnitude-but-legal ones", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  // ~8000 years before the epoch in seconds, comfortably within Date's ~273,790-year range once
+  // converted to ms — legal, just very old; probeDueWithHint reads this as "probe immediately".
+  const ancientSec = -8000 * 365 * 24 * 3600;
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${ancientSec}}}`;
+  const result = extractRateLimitResetAt(jsonl, nowMs);
+  assert.equal(result, ancientSec * 1000);
+  assert.doesNotThrow(() => new Date(result!).toISOString());
+});
+
+test("extractRateLimitResetAt: a resetsAt exactly at the Date-valid boundary is honored; one unit past it is rejected", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const validBoundarySec = 8_640_000_000_000_000 / 1000; // exactly at the ECMAScript Date limit
+  const pastBoundarySec = validBoundarySec + 1;
+  const validJsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${validBoundarySec}}}`;
+  const invalidJsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${pastBoundarySec}}}`;
+  // The boundary value itself is far beyond the 48h future horizon, so it's rejected on THAT
+  // basis too — this test only asserts neither call throws and the out-of-range one is null.
+  assert.doesNotThrow(() => extractRateLimitResetAt(validJsonl, nowMs));
+  assert.equal(extractRateLimitResetAt(invalidJsonl, nowMs), null);
+});
+
 test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTANT text + a non-env failure -> task failure, no env classification, no park", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

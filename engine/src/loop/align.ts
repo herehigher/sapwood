@@ -1791,7 +1791,22 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // path needs; no `Issue` object is required for it.
       const recoveryOnlyNumbers = [...triageJournal.decisions.keys()].filter((n) => !candidatesByNumber.has(n));
       const triageWorkNumbers = [...triageCandidates.map((issue) => issue.number), ...recoveryOnlyNumbers];
-      for (const number of triageWorkNumbers) {
+      for (let triageIdx = 0; triageIdx < triageWorkNumbers.length; triageIdx++) {
+        const number = triageWorkNumbers[triageIdx]!;
+        // #374 review (Codex sol-high finding 6, P2): once an EARLIER issue this same pass
+        // classified quota/429 and parked the "llm" episode, every REMAINING triage candidate
+        // would otherwise still launch its own doomed session (one per issue) — a cheap, single
+        // check here skips them all with ONE trail note instead of N wasted attempts. A resumed
+        // (durably-decided, no fresh session) candidate is skipped too — simpler and safer than
+        // distinguishing it, and it costs nothing (its decision already landed; it re-executes
+        // cleanly next round).
+        if (deps.state.parkRow("llm") != null) {
+          (deps.log ?? console.error)(
+            `[sapwood:po] round ${roundId}: llm park active — skipping ${triageWorkNumbers.length - triageIdx} ` +
+              `remaining triage candidate(s) this pass`,
+          );
+          break;
+        }
         const resumed = triageJournal.decisions.get(number);
         let validated: TriageValidation;
         let expectedHash: string;

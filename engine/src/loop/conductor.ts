@@ -1338,13 +1338,14 @@ async function reclaimTerminalLane(
     settleCanary(state, w.name, envSource != null, iso);
     if (envSource) {
       const reason = summarizeFailureText(p.failureText ?? "");
-      // #374: thread the CLI's own structured reset-time hint (when present) into the episode's
-      // scheduling input — see env-failure.ts's probeDueWithHint and the schema v26->v27
-      // migration's doc comment. Only meaningful for an llm-sourced episode (a forge outage
-      // carries no such hint), but harmless to pass through unconditionally — enterPark simply
-      // stores whatever it's given, and a forge classification's p.rateLimitResetAtMs is always
-      // undefined in practice (a forge signature never co-occurs with a rate-limit telemetry line).
-      const resetHintAtIso = p.rateLimitResetAtMs != null ? new Date(p.rateLimitResetAtMs).toISOString() : null;
+      // #374 review (Codex sol-high finding 7): thread the CLI's own structured reset-time hint
+      // ONLY when THIS episode is llm-sourced — see env-failure.ts's probeDueWithHint and the
+      // schema v26->v27 migration's doc comment. A forge-classified failure whose transcript
+      // ALSO happens to carry rate-limit telemetry (both signatures can appear in the same
+      // captured output — e.g. a worker that hit quota earlier in its run and a forge outage
+      // later) must NOT suppress the FREE forge probe until an unrelated llm timestamp elapses;
+      // the hint is llm-specific scheduling input, never a forge one.
+      const resetHintAtIso = envSource === "llm" && p.rateLimitResetAtMs != null ? new Date(p.rateLimitResetAtMs).toISOString() : null;
       state.enterPark(envSource, reason, w.issue, iso(), resetHintAtIso);
       state.appendEvent("env-failure", { worker: w.name, issue: w.issue, source: envSource, reason, hasPr: p.hasPr });
     }

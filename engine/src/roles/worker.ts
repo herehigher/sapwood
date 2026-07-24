@@ -949,6 +949,17 @@ export function extractFailureText(jsonl: string): string {
  *  no per-consumer clamping needed. */
 export const MAX_RATE_LIMIT_RESET_HORIZON_MS = 48 * 60 * 60 * 1000;
 
+/** #374 review (Codex sol-high finding 8): the ECMAScript spec's OWN hard limit on valid `Date`
+ *  values — exactly ±100,000,000 days (≈273,790 years) from the epoch (MDN's documented bound,
+ *  never a tunable). `new Date(ms)` for any `ms` outside this range silently constructs an
+ *  Invalid Date, and calling `.toISOString()` on one THROWS a RangeError — a corrupted or
+ *  adversarial `resetsAt` (e.g. `-1e20`) survives the future-horizon check above (it can sit
+ *  arbitrarily far in the PAST, which that check never bounds) and would otherwise reach exactly
+ *  that call in conductor.ts's/peripheral.ts's `new Date(rateLimitResetAtMs).toISOString()` —
+ *  crashing the reclaim/park path itself. Bounding by this constant closes that crash
+ *  unconditionally, in both directions, at the single extraction site. */
+const JS_DATE_VALID_RANGE_MS = 8_640_000_000_000_000;
+
 /** #374 (dogfood F16/F17): the Claude CLI's own structured rate-limit telemetry line —
  *  `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":<epoch
  *  seconds>,"rateLimitType":"five_hour",...}}` — captured verbatim in a real session transcript
@@ -962,10 +973,14 @@ export const MAX_RATE_LIMIT_RESET_HORIZON_MS = 48 * 60 * 60 * 1000;
  *
  *  Returns the LAST "rejected" record's `resetsAt` converted to epoch MILLISECONDS, or `null`
  *  when no such record is present, every record found has a non-"rejected" status, a line fails
- *  to parse, OR the resulting hint is further than MAX_RATE_LIMIT_RESET_HORIZON_MS beyond `nowMs`
- *  (see that constant's own doc) — tolerant by construction (never throws): an absent hint
- *  simply means the ordinary bounded backoff schedule applies, exactly the pre-#374 behavior.
- *  `nowMs` defaults to the real current time; overridable for tests. */
+ *  to parse, the resulting value falls outside JS_DATE_VALID_RANGE_MS in EITHER direction (finding
+ *  8 — never lets a corrupted/adversarial value reach a downstream `.toISOString()` and throw),
+ *  OR the value is further than MAX_RATE_LIMIT_RESET_HORIZON_MS in the FUTURE beyond `nowMs` (see
+ *  that constant's own doc) — tolerant by construction (never throws): an absent hint simply
+ *  means the ordinary bounded backoff schedule applies, exactly the pre-#374 behavior. A value
+ *  merely far in the PAST (but still Date-valid) is honored unchanged — that just means "probe
+ *  immediately", never a reason to reject. `nowMs` defaults to the real current time; overridable
+ *  for tests. */
 export function extractRateLimitResetAt(jsonl: string, nowMs: number = Date.now()): number | null {
   let resetAtMs: number | null = null;
   for (const line of jsonl.split("\n")) {
@@ -985,7 +1000,9 @@ export function extractRateLimitResetAt(jsonl: string, nowMs: number = Date.now(
       resetAtMs = resetsAt * 1000;
     }
   }
-  if (resetAtMs != null && resetAtMs - nowMs > MAX_RATE_LIMIT_RESET_HORIZON_MS) return null;
+  if (resetAtMs == null) return null;
+  if (!Number.isFinite(resetAtMs) || Math.abs(resetAtMs) > JS_DATE_VALID_RANGE_MS) return null;
+  if (resetAtMs - nowMs > MAX_RATE_LIMIT_RESET_HORIZON_MS) return null;
   return resetAtMs;
 }
 

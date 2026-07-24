@@ -1133,18 +1133,21 @@ export interface RetriedSession {
    *     doubles the exact churn #374's dogfood run observed), no `degradeEvent` (the durable
    *     `role-env-failure` event this fires IS the record — a `*-degraded` event would
    *     misclassify an environment outage as a role/task failure).
-   *   - A NON-classified DONE or FAILED attempt (the CLI ran to completion and reported
-   *     something, one way or the other), while an "llm" episode is open, CLEARS it (mirrors
-   *     conductor.ts's settleCanary's non-env-classified branch: any session that reaches the
-   *     provider at all proves it's back) — the "resume when the provider answers again" half of
-   *     #374. A non-classified TIMEOUT does NOT clear (PM review P3): a timeout means this
-   *     runner's own heartbeat monitor killed a HUNG process, which proves nothing about whether
-   *     the provider actually answered — the same "an inconclusive outcome proves nothing" stance
-   *     conductor.ts's releaseCanaryInconclusive already takes for a worker-lane canary drained
-   *     mid-flight. A timeout neither parks nor clears; the episode's disposition is simply left
-   *     as-is for the next attempt to decide. Role sessions never carry a forge signature in
-   *     practice (no Bash/gh grant to produce one), so only "llm" is checked here; a "forge"
-   *     episode (opened by a worker leg) is left for conductor.ts's own forge probe to clear,
+   *   - A non-classified "done" attempt (the CLI ran to completion and produced a coherent
+   *     structured reply), while an "llm" episode is open, CLEARS it (mirrors conductor.ts's
+   *     settleCanary's non-env-classified branch: a real completed session proves the provider
+   *     is back) — the "resume when the provider answers again" half of #374. Neither a
+   *     non-classified "failed" NOR a "timeout" clears (Codex sol-high review finding 3/P3,
+   *     tightened from an earlier "any non-timeout" version): for a systemic failure
+   *     classifyEnvFailure doesn't recognize (the empty-spin breaker's own reason for existing),
+   *     an unclassified "failed" is the SAME text that caused the park — clearing on it would
+   *     let the breaker self-cancel in an unbounded ~N-round duty cycle. A "timeout" means this
+   *     runner's own heartbeat monitor killed a HUNG process, proving nothing about provider
+   *     reachability either way (the same "an inconclusive outcome proves nothing" stance
+   *     conductor.ts's releaseCanaryInconclusive already takes for a drained worker-lane
+   *     canary). See handleEnvFailure's own doc (below) for the full trade-off. Only "llm" is
+   *     checked for clearing — a "forge" episode (opened by a worker leg, or by retro's own git/
+   *     gh access classifying as forge) is left for conductor.ts's own forge probe to clear,
    *     unaffected either way. */
   envFailure?: {
     patterns: EnvFailurePatterns;
@@ -1226,28 +1229,39 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
     }
   };
   // #374: classify ONE attempt's result against opts.envFailure (when wired). Returns the
-  // classified source (park entered/extended, caller must stop — no retry, no degrade) or null
-  // (ordinary outcome — a still-open "llm" episode is cleared here as a side effect, since a
-  // non-classified DONE or FAILED attempt proves the provider answered). No-op (always null) when
-  // opts.envFailure is omitted — byte-identical to pre-#374 behavior.
+  // classified source (park entered/extended, caller must stop — no retry, no degrade) or null.
+  // No-op (always null) when opts.envFailure is omitted — byte-identical to pre-#374 behavior.
   //
-  // #374 review (PM P3): a TIMEOUT outcome is deliberately EXCLUDED from the clear — unlike a
-  // clean process exit (done or an ordinary failed, either of which means the CLI ran to
-  // completion and reported something), a timeout means this runner's own heartbeat monitor
-  // KILLED a hung process; that says nothing about whether the provider actually answered (a
-  // network stall, a wedged tool call, or even a quota outage manifesting as a hang rather than
-  // a clean rejection are all indistinguishable from here). Clearing a genuine quota park on a
-  // mere timeout would be weaker evidence than this codebase's own bar for "the provider is
-  // back" (conductor.ts's settleCanary clears only on a REAL terminal outcome, never an
-  // inconclusive one — see releaseCanaryInconclusive's doc for the same "a drain/timeout proves
-  // nothing" stance for worker-lane canaries). A timeout therefore neither parks NOR clears here
-  // — the episode's disposition is left exactly as it was, for the next attempt to decide.
+  // #374 review (Codex sol-high finding 3, P1 — closes a self-cancel loop): ONLY a "done"
+  // outcome clears an open "llm" episode (tightened from an earlier "any non-timeout" version).
+  // For a systemic failure classifyEnvFailure doesn't recognize (the empty-spin breaker's own
+  // reason for existing), the VERY NEXT attempt after the round-opening gate lets a round
+  // through produces the exact SAME unclassified "failed" text that caused the park in the first
+  // place — clearing on THAT would resume dispatch immediately, degrade again next round,
+  // re-trip the breaker at ~N-round intervals forever: the identical unbounded churn #374 exists
+  // to eliminate, just at a slower duty cycle. Only a completed "done" is unambiguous evidence
+  // the provider answered; a bare "failed" (unclassified) is exactly as consistent with "still
+  // broken" as with "recovered but this task itself failed for an unrelated reason". TRADE-OFF
+  // (documented, not silently accepted): if the provider genuinely recovers but every SESSION
+  // keeps failing for a real, unrelated bug, the park persists until either some session
+  // eventually succeeds OR duration-based escalation notifies a human (env-failure.ts's
+  // parkEscalateAfterSec) — bounded and honest, never a silent wedge. A TIMEOUT outcome is
+  // likewise excluded (this runner's own heartbeat monitor killed a HUNG process, proving
+  // nothing about provider reachability either way — the same "an inconclusive outcome proves
+  // nothing" stance conductor.ts's releaseCanaryInconclusive already takes for a drained
+  // worker-lane canary). Neither a timeout nor an unclassified failure parks OR clears here —
+  // the episode's disposition is simply left as-is for the next attempt to decide.
   const handleEnvFailure = (result: RoleSessionResult): EnvFailureSource | null => {
     if (!opts.envFailure) return null;
     const source = classifyEnvFailure(result.failureText ?? "", opts.envFailure.patterns);
     if (source) {
       const reason = summarizeRoleFailureText(result.failureText ?? "");
-      const resetHintAtIso = result.rateLimitResetAtMs != null ? new Date(result.rateLimitResetAtMs).toISOString() : null;
+      // #374 review (Codex sol-high finding 7): thread the reset-time hint ONLY when THIS
+      // episode is llm-sourced — a role session's own transcript classifying as "forge" (retro
+      // is the one role with git/write access) must never suppress the FREE forge probe behind
+      // an unrelated llm timestamp, same reasoning as conductor.ts's worker-leg site.
+      const resetHintAtIso =
+        source === "llm" && result.rateLimitResetAtMs != null ? new Date(result.rateLimitResetAtMs).toISOString() : null;
       opts.envFailure.park.enterPark(source, reason, null, iso(), resetHintAtIso);
       try {
         opts.state.appendEvent("role-env-failure", { role: opts.session.roleId, session: result.name, source, reason });
@@ -1256,7 +1270,7 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
       }
       return source;
     }
-    if (result.outcome === "timeout") return null;
+    if (result.outcome !== "done") return null;
     const llm = opts.envFailure.park.parkRow("llm");
     if (llm) {
       opts.envFailure.park.clearPark("llm");

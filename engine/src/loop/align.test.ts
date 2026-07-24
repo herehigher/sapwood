@@ -1141,6 +1141,45 @@ test("createAligningStub: triage processes every candidate independently", async
   state.close();
 });
 
+test("createAligningStub #374 review (Codex sol-high finding 6): once an earlier triage candidate classifies quota/429 and parks, remaining candidates are SKIPPED — no doomed per-issue sessions", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [
+    { number: 60, title: "a", labels: [], body: "" },
+    { number: 61, title: "b", labels: [], body: "" },
+    { number: 62, title: "c", labels: [], body: "" },
+  ];
+  const cfg = mkCfg();
+  const quotaResult: RoleSessionResult = {
+    outcome: "failed",
+    costUsd: 0,
+    modelUsage: [],
+    exitCode: 1,
+    name: "po-triage-60",
+    failureText: "hit your session limit",
+  };
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])), // po-align itself succeeds cleanly
+    quotaResult, // po-triage's FIRST candidate (#60) classifies quota/429 -> parks
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 9, phase: "aligning", marker: null });
+  // po-align (1 call) + ONLY #60's triage attempt (1 call) — #61/#62 skipped once parked.
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-triage"],
+  );
+  assert.equal(state.isParked(), true);
+  assert.equal(state.parkRow("llm")?.source, "llm");
+  assert.equal(
+    forge.issueCommentsPosted.some(([n]) => n === 61 || n === 62),
+    false,
+    "#61/#62 got no forge write at all",
+  );
+  state.close();
+});
+
 // ── marker-idempotence across a re-run (rerun-not-resume, #77 decision 4) ───────────────────
 
 test("createAligningStub: re-running the SAME round after a marker was already set drafts nothing twice", async () => {
