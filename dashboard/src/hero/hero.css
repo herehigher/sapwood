@@ -1,0 +1,242 @@
+/*
+ * Hero stage styling — frontend-design.md §5 tokens, §6 stage.
+ *
+ * Everything ambient lives here (§6: "Ambient — CSS only"); anime.js owns only the
+ * event-driven transitions. Colour never carries state alone: the ✓/✕ glyphs and the
+ * lane/gate labels in stage.tsx are the redundant channel.
+ */
+
+.hero {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  transition: opacity var(--beat) ease;
+}
+
+/* §6: ceiling breach / PAUSE / kill switch — the stage dims and all ambient stops. */
+.hero[data-dimmed="true"] {
+  opacity: 0.45;
+}
+
+.hero[data-dimmed="true"] * {
+  animation: none !important;
+}
+
+/* ---- Type roles ---------------------------------------------------------- */
+
+.hero-phase,
+.hero-label {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  fill: var(--bark-text);
+}
+
+.hero-node-label {
+  font-family: var(--font-body);
+  font-size: 12px;
+  fill: var(--sapwood);
+}
+
+.hero-num {
+  font-family: var(--font-data);
+  font-size: 11px;
+  fill: var(--bark-text);
+}
+
+.hero-small {
+  font-size: 10px;
+}
+
+.hero-ring-count {
+  font-family: var(--font-display);
+  font-size: var(--text-4);
+  font-weight: 600;
+  fill: var(--sapwood);
+}
+
+/* ---- Structure ----------------------------------------------------------- */
+
+.hero-well {
+  fill: none;
+  stroke: var(--bark);
+  stroke-opacity: 0.25;
+}
+
+.hero-pool-chip rect {
+  fill: var(--sap);
+  fill-opacity: 0.22;
+}
+
+.hero-channel {
+  stroke: var(--bark);
+  stroke-opacity: 0.35;
+  stroke-width: 2;
+}
+
+.hero-arm,
+.hero-fixloop,
+.hero-return,
+.hero-branch {
+  fill: none;
+  stroke: var(--bark);
+  stroke-opacity: 0.4;
+  stroke-width: 2;
+}
+
+.hero-return {
+  stroke-dasharray: 4 6;
+}
+
+.hero-branch {
+  stroke: var(--rust);
+  stroke-opacity: 0.6;
+}
+
+.hero-escalation circle {
+  fill: none;
+  stroke: var(--rust);
+  stroke-width: 2;
+}
+
+.hero-gate rect {
+  fill: var(--panel);
+  stroke: var(--bark);
+  stroke-opacity: 0.4;
+}
+
+/*
+ * §6: the checkpoints are ONE calm waiting area. They breathe together while a PR waits and
+ * never render per-gate progress — v0.2 persists no gate substate to render.
+ */
+.hero-gate[data-state="waiting"] rect {
+  animation: hero-breathe 3.2s ease-in-out infinite;
+}
+
+.hero-gate.is-merged rect {
+  stroke: var(--moss);
+  stroke-opacity: 1;
+}
+
+/* ---- Lane states --------------------------------------------------------- */
+
+.hero-lane[data-phase="writing"] .hero-channel,
+.hero-lane[data-phase="fixing"] .hero-channel {
+  stroke: var(--sap);
+  stroke-opacity: 1;
+  animation: hero-shimmer 3.4s linear infinite;
+  stroke-dasharray: 10 6;
+}
+
+.hero-lane[data-phase="driving"] .hero-channel {
+  stroke: var(--sap);
+  stroke-opacity: 0.5;
+}
+
+.hero-lane[data-phase="failed"] .hero-channel {
+  stroke: var(--rust);
+  stroke-opacity: 0.8;
+}
+
+/* ---- Rings --------------------------------------------------------------- */
+
+.hero-ring {
+  fill: none;
+  stroke: var(--bark);
+  stroke-opacity: 0.4;
+  stroke-width: 1.5;
+}
+
+.hero-ring[data-current="true"] {
+  stroke: var(--sap);
+  stroke-opacity: 1;
+}
+
+/* §6 ambient: the outermost ring breathes at low amplitude while any lane is running. */
+.hero[data-running="true"] .hero-ring[data-current="true"] {
+  animation: hero-breathe 3.6s ease-in-out infinite;
+}
+
+/* ---- Droplets ------------------------------------------------------------ */
+
+.hero-droplet circle {
+  fill: var(--sap);
+}
+
+.hero-droplet[data-at="needs-human"] circle,
+.hero-droplet[data-failed="true"] circle {
+  fill: var(--rust);
+}
+
+.hero-droplet[data-at="trunk"] circle {
+  fill: var(--moss);
+}
+
+.hero-mark {
+  font-family: var(--font-body);
+  font-size: 12px;
+  fill: var(--rust);
+}
+
+.hero-badge {
+  font-family: var(--font-body);
+  fill: var(--bark-text);
+}
+
+/* ---- Reserved nodes ------------------------------------------------------ */
+
+/*
+ * §6/§11: the planning and reflection nodes are drawn but never lit — no persisted event
+ * carries the round phase cursor yet, and a node that animates without a data source is
+ * exactly the fake progress the motion spec forbids.
+ */
+.hero-reserved {
+  opacity: 0.4;
+}
+
+.hero-reserved circle {
+  fill: none;
+  stroke: var(--bark);
+  stroke-dasharray: 3 3;
+}
+
+.hero-reserved-note {
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-style: italic;
+  fill: var(--bark-text);
+}
+
+/* ---- Ambient ------------------------------------------------------------- */
+
+@keyframes hero-breathe {
+  0%,
+  100% {
+    stroke-opacity: 0.4;
+  }
+  50% {
+    stroke-opacity: 0.9;
+  }
+}
+
+@keyframes hero-shimmer {
+  to {
+    stroke-dashoffset: -32;
+  }
+}
+
+/*
+ * §6: reduced motion kills the ambient outright — app.css already clamps durations, but a
+ * 1 ms shimmer looping forever is still motion. `data-motion` mirrors the media query so the
+ * manual/replay path degrades identically.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .hero * {
+    animation: none !important;
+  }
+}
+
+.hero[data-motion="reduced"] * {
+  animation: none !important;
+}

@@ -1,9 +1,16 @@
 import { useEvents, useLoopState } from "./api/queries.ts";
+import { Hero } from "./hero/Hero.tsx";
+
+/** §3 E: the config drawer is an allowlisted key/value map; read defensively until it exists. */
+const configNumber = (config: Record<string, unknown> | undefined, key: string, fallback: number): number => {
+  const value = config?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+};
 
 /**
- * Scaffold shell. The §3 modules (hero, lane board, feed, cost strip, config drawer)
- * land in their own issues; this renders just enough of the §8 payloads to prove the
- * data layer polls and re-renders, and to exercise the §5 tokens.
+ * Scaffold shell. The remaining §3 modules (lane board, cost strip, config drawer) land in
+ * their own issues; this renders the hero (§6, module B) plus just enough of the §8 payloads
+ * to prove the data layer polls and re-renders, and to exercise the §5 tokens.
  */
 export function App() {
   const loop = useLoopState();
@@ -11,6 +18,15 @@ export function App() {
 
   return (
     <main className="stack">
+      <section className="panel" style={{ gridColumn: "1 / -1" }}>
+        <Hero
+          events={events.data?.events ?? []}
+          lanesMax={loop.data?.lanes.max ?? null}
+          engine={loop.data?.engine.state ?? "stopped"}
+          fixCap={configNumber(loop.data?.config, "lanes.prFixCap", 2)}
+        />
+      </section>
+
       <section className="panel">
         <h1>sapwood</h1>
         {loop.isPending && <p className="muted">connecting…</p>}

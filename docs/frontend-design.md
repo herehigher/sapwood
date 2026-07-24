@@ -528,6 +528,31 @@ animates. The hero must never lag behind the state it claims to show.
 rings appear without stroke animation; ambient shimmer off. The scene remains
 fully legible — motion is commentary, never the only carrier of state.
 
+Amended 2026-07-24 (#144, hero implementation). Two facts the shipped hero
+establishes:
+
+- **The planning trio and SUMMARY / RETRO ship drawn but never lit.** The
+  design above has them lit from the round phase cursor, but no *persisted*
+  source carries it — `round-phase` is still a pending engine follow-up
+  (§11), and `rounds.phase` reaches the UI only through `/api/loop/state`,
+  which does not replay. Lighting them from that would be live-only motion in
+  a scene whose every other pixel replays, and inventing it outright is
+  exactly the fake progress this section forbids. They render dimmed and
+  captioned "planning roles — coming with rounds"; the `round-phase` event
+  is the single change that turns them on, and until it lands nothing on the
+  stage may drive them.
+- **The send-back reason word is derived, not read.** `drive-fixup.reason` is
+  an engine gate string (`gate:FIXABLE:merge-conflict`,
+  `gate:FIXABLE:<verdict>:unresolvedThreads=N:ciRed=<bool>`) and the
+  `prescription` field never reaches the event payload. The three words come
+  from mapping that string — merge-conflict → "merge conflict", `ciRed=true`
+  → "checks failed", otherwise "review findings" — and an unrecognised reason
+  falls back to "review findings" rather than guessing a cause. The mapper
+  belongs with the rest of the §7 map once `copy.ts` lands.
+
+The reason word is also held by the **entity, not the channel**: a mid-fix
+`handoff` frees the lane, and `fix-leg-resumed` must re-light the same state.
+
 **Replay mode** drives the identical scene from history: a transport
 (play/pause, speed ×1/×4/×16, scrub bar) replaces the polling source. The
 **unit of replay is the round** (§11): the scrubber spans one round's event
