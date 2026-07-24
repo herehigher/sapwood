@@ -2505,6 +2505,71 @@ export class State {
     return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM spend_ledger").get() as { m: number }).m;
   }
 
+  // ── #142: dashboard reads (docs/frontend-design.md §8) ─────────────────────────────────
+  //
+  // Four PURE READS the dashboard's read-only handle needs and nothing else in the engine has
+  // an equivalent of. They live here rather than in dashboard/server.ts so there is exactly one
+  // module that knows this schema's SQL — §8's requirement that `sapwood status` and the
+  // dashboard "can never disagree" is only structural if neither re-derives the other's queries.
+
+  /** The engine session's liveness heartbeat, READ-ONLY — the staleness input to §8's engine-state
+   *  derivation. Deliberately NOT engineSessionStart(), which WRITES (it refreshes the heartbeat
+   *  and may reset the session): a spectator reading the clock must never move it. `null` means
+   *  no session row exists at all — the engine has never ticked against this DB. */
+  lastTickAt(): string | null {
+    const row = this.db.prepare("SELECT last_tick_at FROM engine_session WHERE id = 1").get() as { last_tick_at: string } | undefined;
+    return row?.last_tick_at ?? null;
+  }
+
+  /** How many events of one kind the ledger holds — §8's ring count is COUNT(kind='merged').
+   *  A COUNT rather than eventsAfterId(0, [kind]).length so a growing history never costs a
+   *  JSON.parse per row for a number the caller only wants to display. */
+  countEvents(kind: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = ?").get(kind) as { n: number }).n;
+  }
+
+  /** One ascending page of the RAW event ledger — §8's `/api/events` transport. Unlike
+   *  eventsAfterId (kind-filtered, id/ts dropped) the dashboard needs every kind plus the id
+   *  (the poll cursor) and ts (the replay clock), so this deliberately takes no kinds filter.
+   *  A row whose payload is not parseable JSON is served as `null` rather than throwing — one
+   *  corrupt legacy row must not make the whole feed unreadable. */
+  eventsPage(afterId: number, limit: number): { id: number; ts: string; kind: string; payload: unknown }[] {
+    const rows = this.db.prepare("SELECT id, ts, kind, payload FROM events WHERE id > ? ORDER BY id LIMIT ?").all(afterId, limit) as {
+      id: number;
+      ts: string;
+      kind: string;
+      payload: string;
+    }[];
+    return rows.map((r) => {
+      let payload: unknown = null;
+      try {
+        payload = JSON.parse(r.payload);
+      } catch {
+        /* corrupt row — served as null, never a 500 for the whole page */
+      }
+      return { id: r.id, ts: r.ts, kind: r.kind, payload };
+    });
+  }
+
+  /** `now`'s UTC calendar day of spend, grouped by model — §8's `spend.byModel`. Same day
+   *  window as dailySpendUsd (ts-prefix match), so the group sums and the headline total can
+   *  never disagree. KNOWN CEILING (recordSpend's own shape, not this query's): a settlement
+   *  writes one row per model but puts the leg's whole `usd` on the FIRST row, so a multi-model
+   *  leg attributes its cost to one of its models while the token counts stay per-model. */
+  spendByModelForDay(now: Date): { model: string; usd: number; inputTokens: number; outputTokens: number }[] {
+    const dayPrefix = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    const rows = this.db
+      .prepare(
+        `SELECT model, COALESCE(SUM(usd), 0) AS usd,
+                COALESCE(SUM(input_tokens), 0) AS inputTokens, COALESCE(SUM(output_tokens), 0) AS outputTokens
+         FROM spend_ledger WHERE ts LIKE ? GROUP BY model ORDER BY usd DESC, model`,
+      )
+      .all(`${dayPrefix}%`) as unknown as { model: string; usd: number; inputTokens: number; outputTokens: number }[];
+    // Re-shaped into ordinary objects: node:sqlite hands back null-prototype rows, which
+    // deep-equal comparisons (and any structuredClone-style consumer) treat as a different type.
+    return rows.map((r) => ({ model: r.model, usd: r.usd, inputTokens: r.inputTokens, outputTokens: r.outputTokens }));
+  }
+
   // ── #123: round summary artifact (round_artifacts, migration 9->10) ─────────────────────
 
   /** Upsert the FINAL round artifact row — one per round (round_id is the PK), so a crash-rerun

@@ -848,6 +848,38 @@ lands as a separate human-authored change.
   and opens the browser. Read-only DB handle; safe to run beside a live engine
   (WAL mode).
 
+### Server — what has landed (#142)
+
+`dashboard/server.ts` exists and serves the two READ routes: `GET
+/api/loop/state` and `GET /api/events?after=&limit=`. `createDashboardServer({
+dbPath, configPath, port })` opens `State` in `readOnly` mode, binds
+`127.0.0.1` (default port 4517), and dispatches through a pathname→method route
+table that `/api/spend`, `/api/rounds` and the gated `POST /api/control` (#360)
+register into. There is no CLI entry point yet — until `sapwood dashboard`
+lands, the server is started from code.
+
+Three things about it are decisions, not implementation detail:
+
+- **The config surface is an allowlist**, `CONFIG_ALLOWLIST` in the same file —
+  the §3 E groups' named leaves plus the per-role `model`/`effort` keys. A
+  config key added later is not served unless someone adds it there, so the
+  no-secrets guarantee survives config growth.
+- **The engine-state derivation lives server-side only** and reads the engine's
+  own `State`/config rather than re-querying SQLite, so `sapwood status` and the
+  dashboard cannot drift apart. Its four dashboard-only reads (`lastTickAt`,
+  `countEvents`, `eventsPage`, `spendByModelForDay`) are read-only additions to
+  `engine/src/state/state.ts` — notably `lastTickAt`, which reads the heartbeat
+  without the write `engineSessionStart` performs.
+- **`spend.runUsd` is `null`** until follow-up #206's `run-started` event
+  persists the #154 run anchor (today it exists only in engine-process memory).
+  The header meter therefore falls back whole to the daily tier, exactly as §3 A
+  already specifies — no new machinery, and no mixed-tier fraction.
+
+The server is Node-side and the vite frontend is not, so the package carries two
+tsconfigs — `tsconfig.json` (bundler resolution, DOM) for `src/`, and
+`tsconfig.server.json` (NodeNext, no DOM) for `server.ts`; `npm run typecheck`
+runs both. The CI gap noted above applies to it unchanged.
+
 ## 10. Deferred (v0.3+)
 
 - **Config editing** — needs a config write path + auth story; contradicts
