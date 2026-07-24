@@ -764,6 +764,20 @@ test("MergeDriver.driveOne: PR already MERGED (by a human) -> merged outcome, no
   assert.deepEqual(forge.merged, []); // recognized as merged; no second merge attempt
 });
 
+test("MergeDriver.driveOne (#294, Codex P2 round 2): a manually-merged PR still carrying its hold label reports NOT held — terminal outcome, the episode closes with pr-released instead of dangling", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, state: "MERGED" };
+  forge.reviewData = { ...forge.reviewData, state: "MERGED", labels: ["Sapwood:Hold"] };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new FakeReviewer(),
+    cfg: mkCfg({ escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood:hold"] } }),
+  });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "merged");
+  assert.deepEqual(outcome.holdObservation, { held: false });
+});
+
 test("MergeDriver.driveOne: merge raced — only ONE read saw MERGED yet -> still merged, wins over head-mismatch queue", async () => {
   const forge = new FakeForge();
   // Status read landed after the human merge (MERGED, head moved to the merge result);

@@ -382,7 +382,13 @@ export class MergeDriver {
     // territory. Checked on EITHER read: one may predate the merge, and this must win over
     // the head-mismatch queue below (a merged PR never re-gates).
     if (status.state === "MERGED" || data.state === "MERGED") {
-      return observed({ kind: "merged", pr, headOid: status.headOid });
+      // #294 (Codex P2, round 2): a merged PR is TERMINAL — the conductor marks the lane done on
+      // this very outcome and never drives it again, so a live-label observation here could
+      // announce a pr-held no later pass can ever release (manual merge of a still-held PR, or
+      // the documented stale-data race above). Report NOT-held unconditionally instead: any
+      // standing hold label on a merged PR is moot, and held:false lets the conductor close a
+      // previously-announced episode with pr-released on this final pass.
+      return { kind: "merged", pr, headOid: status.headOid, holdObservation: { held: false } };
     }
 
     // #246 review round 1 (C4, Codex sol-high PR #264 round 2): the two reads can disagree on
