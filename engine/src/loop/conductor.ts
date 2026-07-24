@@ -941,6 +941,24 @@ async function reportRetainedWorktree(
     .catch(() => {});
 }
 
+/** #210 (docs/frontend-design.md §11 follow-up 4): the resolution signal for a retained
+ *  worktree. Nothing else marks a retained folder as dealt with — the dashboard's
+ *  Needs-attention strip would carry the row forever — and the engine already owns the path, so
+ *  the filesystem it manages IS the signal: once the folder is gone (the human salvaged or
+ *  discarded it), append `worktree-released` once, mirroring `worktree-retained`'s payload. No
+ *  acknowledge UI is invented, and no forge call is made — this is a pure state+disk scan.
+ *
+ *  Runs on every tick (the first tick of a run covers startup). Dedupe is the event log itself
+ *  (see State.unreleasedRetainedWorktrees): a released path drops out of the scan until the same
+ *  path is retained again, so repeat ticks AND restarts emit nothing further. `exists` is
+ *  injectable for tests only. Never throws — an unreadable path just stays retained. */
+export function releaseVanishedWorktrees(state: State, exists: (path: string) => boolean = existsSync): void {
+  for (const { worker, issue, worktreePath } of state.unreleasedRetainedWorktrees()) {
+    if (exists(worktreePath)) continue;
+    state.appendEvent("worktree-released", { worker, issue, worktreePath });
+  }
+}
+
 /** Label-first/latch-second handling for a resume spawn whose outcome is unknowable after a
  *  crash. Shared by proactive marker inspection and resume()'s typed-error backstop. */
 async function escalateUndecidableResume(
@@ -1722,6 +1740,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const now = deps.now ?? (() => new Date());
   const iso = () => now().toISOString();
   const threshold = cfg.worker.heartbeatStaleSecs;
+
+  // #210: retained-worktree release scan — before the kill-switch gate on purpose. It is an
+  // OBSERVATION of state the engine already owns (no forge call, no spawn, no board write), and
+  // a human clearing a folder mid-drain must still clear the Needs-attention row.
+  releaseVanishedWorktrees(state);
 
   // #245 round-2 fix A3: reconcile any driving-row fix-leg spawn intent BEFORE the kill-switch
   // gate — see reconcileDrivingFixIntents' own doc for the crash window this repairs.

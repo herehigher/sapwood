@@ -761,6 +761,20 @@ const Logging = z
   })
   .strict();
 
+// #210 (docs/frontend-design.md §11 follow-up 5): the dashboard's own knobs. Schema only for
+// now — the v0.2 dashboard reads them; nothing in the engine does yet.
+const Dashboard = z
+  .object({
+    // Gates the Operations verbs (start/pause/resume/stop) and the `POST /api/control` route
+    // that serves them. Default `true`: the dashboard the round-2 amendment designed drives the
+    // loop, not just watches it. `false` = a pure-SPECTATOR dashboard — buttons absent and the
+    // route refuses, so a read-only deployment (a shared screen, a demo) cannot be clicked into
+    // touching the loop. A gate, not a permission model: it says what this deployment offers,
+    // never who may use it.
+    controls: z.boolean().default(true),
+  })
+  .strict();
+
 // #76: goal-based stop conditions — the loop driver's FINAL break conditions ("when is this run
 // complete"). All optional; absent = today's behavior exactly (the driver only stops on a signal,
 // --once, or --until-idle idleness). CLI --stop-after-issues/--stop-after-prs/--stop-on-milestone
@@ -1036,6 +1050,7 @@ const ConfigSchemaRaw = z
     board: Board,
     engine: Engine.default({}),
     logging: Logging.default({}),
+    dashboard: Dashboard.default({}),
     lanes: Lanes.default({}),
     worker: Worker.default({}),
     guard: Guard.default({}),

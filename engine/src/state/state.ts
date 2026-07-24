@@ -2461,6 +2461,35 @@ export class State {
     return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
   }
 
+  /** #210: every retained worktree path whose LATEST retention has not been released yet — the
+   *  input to conductor.ts's releaseVanishedWorktrees scan (docs/frontend-design.md §11
+   *  follow-up 4). Identity is the `worktreePath`, not the lane name (lane names are reused
+   *  slots), and the decision is "what is the newest event for this path" rather than "was this
+   *  path ever released": a slot recycled at the same path is retained again, and that fresh
+   *  retention must be able to resolve on its own. Null paths are excluded — they are
+   *  unmatchable by construction, which is exactly why the engine never emits one (see
+   *  conductor.ts's reportRetainedWorktree). The event log itself is the dedupe memory, so the
+   *  scan is restart-safe with no in-memory flag. */
+  unreleasedRetainedWorktrees(): { worker: string; issue: number; worktreePath: string }[] {
+    // Bare columns alongside a single MAX() come from the max row (documented SQLite behavior),
+    // so each group carries its LATEST event's kind and payload fields.
+    const rows = this.db
+      .prepare(
+        `SELECT json_extract(payload, '$.worker') AS worker,
+                json_extract(payload, '$.issue') AS issue,
+                json_extract(payload, '$.worktreePath') AS worktreePath,
+                kind, MAX(id)
+         FROM events
+         WHERE kind IN ('worktree-retained', 'worktree-released')
+           AND json_extract(payload, '$.worktreePath') IS NOT NULL
+         GROUP BY json_extract(payload, '$.worktreePath')`,
+      )
+      .all() as unknown as { worker: string; issue: number; worktreePath: string; kind: string }[];
+    return rows
+      .filter((r) => r.kind === "worktree-retained")
+      .map((r) => ({ worker: r.worker, issue: r.issue, worktreePath: r.worktreePath }));
+  }
+
   latestEvent(kind: string): { kind: string; payload: unknown } | undefined {
     const row = this.db.prepare("SELECT kind, payload FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1").get(kind) as
       | { kind: string; payload: string }

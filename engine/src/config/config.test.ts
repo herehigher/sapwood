@@ -1564,3 +1564,29 @@ test("proxy: caps fed into a GraphQL first:/last: argument reject a value above 
     assert.doesNotThrow(() => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nproxy:\n  caps: { ${key}: 100 }\n`));
   }
 });
+
+// ── #210 (frontend-design §11 follow-up 5): dashboard.controls — the gate on the dashboard's
+//   Operations verbs (start/pause/resume/stop) and their POST /api/control route. Ships true
+//   (the dashboard the round-2 amendment designed drives the loop); false = pure spectator. ──
+
+test("#210: dashboard.controls defaults to true, round-trips true/false through loadConfig, and stays strict", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-config-dashboard-"));
+  try {
+    const write = (name: string, body: string) => {
+      const p = join(dir, name);
+      writeFileSync(p, `board: { owner: a, repo: r, projectNumber: 1 }\n${body}`);
+      return p;
+    };
+    assert.equal(loadConfig(write("absent.yaml", "")).dashboard.controls, true, "absent -> controls on");
+    assert.equal(loadConfig(write("on.yaml", "dashboard: { controls: true }\n")).dashboard.controls, true);
+    assert.equal(loadConfig(write("off.yaml", "dashboard: { controls: false }\n")).dashboard.controls, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ndashboard: { control: false }"),
+    /control|[Uu]nrecognized/,
+    "a typo'd key is rejected, not silently dropped — unknown-key strictness is untouched",
+  );
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ndashboard: { controls: yes-please }"));
+});

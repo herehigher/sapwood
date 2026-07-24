@@ -960,8 +960,8 @@ the overlay is the named boundary.
    (board query / forge response) — never an extra GitHub call. Powers the
    §3 C hover tooltips offline and in replay; entities without a
    title-bearing event degrade to no tooltip.
-4. **`worktree-released` event** (#210, round-2 amendment) — payload
-   `{ worker, issue, worktreePath }`, mirroring `worktree-retained`'s.
+4. **`worktree-released` event** (#210, round-2 amendment) — **LANDED** —
+   payload `{ worker, issue, worktreePath }`, mirroring `worktree-retained`'s.
    Emission: on tick/startup the engine checks each retained path it has
    recorded; when the folder no longer exists (the human cleaned it up), it
    appends the event once. Matching for the §3 Needs-attention clear is
@@ -970,9 +970,14 @@ the overlay is the named boundary.
    matched and its row therefore never auto-clears — the engine must not
    emit retention without a path going forward. Purpose: the strip's only
    missing resolution signal, replay-consistent like every event.
-5. **`dashboard.controls` config key** (#210, round-2 amendment) — boolean,
-   default `true`, added to the strict config schema; gates the §3
-   Operations verbs and the §8 `POST /api/control` route.
+   Dedupe is the event log itself (the newest of the two kinds for a given
+   path decides), so repeat ticks and restarts emit nothing further — and a
+   lane slot recycled at the same path can be retained, and resolve, again.
+5. **`dashboard.controls` config key** (#210, round-2 amendment) —
+   **LANDED** — boolean, default `true`, in the strict config schema
+   (`docs/configuration.md`); gates the §3 Operations verbs and the §8
+   `POST /api/control` route. `false` = pure-spectator dashboard. Schema
+   only: the dashboard reads it, the engine does not.
 6. **`EMERGENCY_STOP` sentinel** (#293, third amendment) — immediate hard
    stop, no drain window: detection hard-kills every running/fixing lane's
    process group in the same tick via the existing kill path, with the
