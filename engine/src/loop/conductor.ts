@@ -1530,7 +1530,10 @@ async function reconcileDrivingFixIntents(
         continue;
       }
       state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
-      state.appendEvent("fix-leg-undecidable", { worker: w.name, issue: w.issue });
+      // #295 (Codex P2, PR #371): `pr` rides along so the escalation-resolution sweep can
+      // observe an external merge/close of this lane's PR — without it the sweep could only
+      // ever see issue closure or label removal for this source.
+      state.appendEvent("fix-leg-undecidable", { worker: w.name, issue: w.issue, ...(w.pr != null ? { pr: w.pr } : {}) });
     }
     // "none": nothing to reconcile.
   }

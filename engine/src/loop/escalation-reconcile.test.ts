@@ -576,3 +576,76 @@ test("reconcileEscalations: makes zero forge WRITES across every resolution path
   assert.deepEqual(forge.writes, []);
   state.close();
 });
+
+// ── #295 review round 2 (Codex P1): retry streams never reopen a terminally-resolved item ────
+
+test("openEscalations (#295 r2): a retry re-emission AFTER a merged/closed resolution stays closed — exactly-once for retrying sources", () => {
+  const events = [
+    { kind: "gated-reentry-capped-label-failed", payload: { issue: 5, pr: 50 } },
+    { kind: "escalation-resolved", payload: { issue: 5, pr: 50, source: "gated-reentry-capped-label-failed", via: "merged" } },
+    // The label write keeps failing tick over tick — the SAME unresolved-write retry stream.
+    { kind: "gated-reentry-capped-label-failed", payload: { issue: 5, pr: 50 } },
+    { kind: "gated-reentry-capped-label-failed", payload: { issue: 5, pr: 50 } },
+  ];
+  assert.equal(openEscalations(events).size, 0, "the terminal (merged) resolution suppresses every later same-pr retry");
+});
+
+test("openEscalations (#295 r2): label-removed is NOT terminal — a later re-escalation genuinely reopens", () => {
+  const events = [
+    { kind: "resume-capped", payload: { issue: 6 } },
+    { kind: "escalation-resolved", payload: { issue: 6, source: "resume-capped", via: "label-removed" } },
+    { kind: "resume-capped", payload: { issue: 6 } }, // the lane re-escalated after the human's clear
+  ];
+  const open = openEscalations(events);
+  assert.equal(open.size, 1);
+  assert.equal(open.get("resume-capped:6")?.issue, 6);
+});
+
+test("openEscalations (#295 r2): a DIFFERENT pr after a terminal resolution is a new episode (F15 repointing), not a retry", () => {
+  const events = [
+    { kind: "gated-reentry-capped-label-failed", payload: { issue: 5, pr: 50 } },
+    { kind: "escalation-resolved", payload: { issue: 5, pr: 50, source: "gated-reentry-capped-label-failed", via: "merged" } },
+    { kind: "gated-reentry-capped-label-failed", payload: { issue: 5, pr: 72 } },
+  ];
+  const open = openEscalations(events);
+  assert.equal(open.size, 1);
+  assert.equal(open.get("gated-reentry-capped-label-failed:5")?.pr, 72);
+});
+
+test("reconcileEscalations (#295 r2): duplicate escalation-resolved never appended for a merged retrying source across two sweeps", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("gated-reentry-capped-label-failed", { worker: "w1", issue: 5, pr: 50 });
+  forge.prStates[50] = "MERGED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+  // The retry stream keeps emitting between sweeps (the addLabel is still failing).
+  state.appendEvent("gated-reentry-capped-label-failed", { worker: "w1", issue: 5, pr: 50 });
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.equal(resolvedEvents(logged).length, 1, "exactly one resolution, ever, for the one terminal fact");
+  state.close();
+});
+
+// ── #295 review round 2 (Codex P2): fix-leg-undecidable joins the source table ───────────────
+
+test("reconcileEscalations (#295 r2): fix-leg-undecidable resolves via external PR merge, and via label removal (label-proven by contract)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("fix-leg-undecidable", { worker: "w1", issue: 8, pr: 80 });
+  forge.prStates[80] = "MERGED";
+  const logged = tapEvents(state);
+  await reconcileEscalations(forge, state, mkCfg());
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 8, pr: 80, source: "fix-leg-undecidable", via: "merged" }]);
+
+  const state2 = new State(":memory:");
+  const forge2 = new FakeForge();
+  state2.appendEvent("fix-leg-undecidable", { worker: "w2", issue: 9, pr: 90 });
+  forge2.issueLabels[9] = []; // human removed needs-human; PR still open
+  const logged2 = tapEvents(state2);
+  await reconcileEscalations(forge2, state2, mkCfg());
+  assert.deepEqual(resolvedEvents(logged2), [{ issue: 9, pr: 90, source: "fix-leg-undecidable", via: "label-removed" }]);
+  state.close();
+  state2.close();
+});

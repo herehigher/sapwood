@@ -112,6 +112,13 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
   // issue again. `never`, necessarily: the label write is precisely what failed, so its absence
   // is the engine's own footprint, not a human's.
   "gated-reentry-capped-label-failed": "never",
+  // #295 review round 2 (Codex P2): the fix-leg spawn-uncertainty escalation
+  // (conductor.ts's reconcileDrivingFixIntents "unconfirmed" branch). `always`: the event is
+  // emitted strictly AFTER its own addLabel succeeded (a failed write `continue`s with only the
+  // companion `-label-failed` event, which stays out of this table for the same reason
+  // gated-reentry-capped-label-failed does). Its payload carries `pr` (the driving lane's own),
+  // so an external merge/close of that PR resolves it like every other pr-bearing source.
+  "fix-leg-undecidable": "always",
 };
 
 const RESOLVED_KIND = "escalation-resolved";
@@ -145,21 +152,42 @@ function payloadNumber(payload: Record<string, unknown> | null, key: string): nu
  *  same best-effort-bookkeeping stance the rest of this codebase's journals take. */
 export function openEscalations(events: readonly { kind: string; payload: unknown }[]): Map<string, OpenEscalation> {
   const open = new Map<string, OpenEscalation>();
+  // #295 review round 2 (Codex P1 — exactly-once for RETRYING sources): a source that re-emits
+  // its escalation event every tick while a companion write keeps failing (e.g.
+  // gated-reentry-capped-label-failed) would otherwise REOPEN the escalation after a terminal
+  // resolution — merged/closed resolves it, the next tick's retry event re-enters `open`, the
+  // next sweep appends a SECOND escalation-resolved, ad infinitum. A merged/closed PR (or
+  // closed issue) is a TERMINAL fact: a later same-key event about the SAME pr can only ever be
+  // a retry stream, never a genuine re-escalation, so it is suppressed here. `label-removed` is
+  // deliberately NOT terminal — a human removing the label and the lane later re-escalating is
+  // the one genuine reopen this fold must keep honoring. A later event carrying a DIFFERENT pr
+  // (lane repointed — the F15 shape) is a genuinely new episode and clears the suppression.
+  const terminal = new Map<string, number | undefined>();
   for (const e of events) {
     const payload = (e.payload ?? null) as Record<string, unknown> | null;
     const issue = payloadNumber(payload, "issue");
     if (issue === undefined) continue;
     if (e.kind === RESOLVED_KIND) {
       const source = typeof payload?.source === "string" ? payload.source : undefined;
-      if (source !== undefined) open.delete(`${source}:${issue}`);
+      if (source !== undefined) {
+        open.delete(`${source}:${issue}`);
+        if (payload?.via === "merged" || payload?.via === "closed") {
+          terminal.set(`${source}:${issue}`, payloadNumber(payload, "pr"));
+        }
+      }
       continue;
     }
     const proof = ESCALATION_SOURCES[e.kind];
     if (proof === undefined) continue;
     const pr = payloadNumber(payload, "pr");
+    const key = `${e.kind}:${issue}`;
+    if (terminal.has(key)) {
+      if (terminal.get(key) === pr) continue; // retry stream after a terminal resolution — never reopens
+      terminal.delete(key); // different pr: a genuinely new episode
+    }
     // The LATEST escalation's own facts win: a re-escalation may carry a different PR, and the
     // stale one would send the observation below at a PR this escalation is not about.
-    open.set(`${e.kind}:${issue}`, {
+    open.set(key, {
       source: e.kind,
       issue,
       ...(pr !== undefined ? { pr } : {}),
