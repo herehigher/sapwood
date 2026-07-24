@@ -559,7 +559,7 @@ precisely because they convey what actually happens: **CI**, **retro**,
 performed at that node. The kinds — counted by the
 map, never by this prose: an earlier hard-coded "33" here had already
 drifted past #180's park/environment family, proving §2's own rule
-(`run-started`/`round-phase` remain pending their engine issue; **every
+(`run-started`/`round-phase` shipped with #206; **every
 engine PR that adds an event kind must extend this map; make it a gate②
 checklist item**):
 
@@ -854,8 +854,9 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
   deferred to v0.3 (§11). A round is fully replayable the moment it closes.
 - **Honest "On hold" rendering** — blocked on the hold-visibility events
   (#294, §11 follow-up #7); until then held PRs render as waiting.
-- **Config replay** — becomes possible once `run-started` carries a
-  resolved-config snapshot (§11); v0.2 keeps the config drawer live-only.
+- **Config replay** — unblocked by #206 (`run-started` now carries the
+  allowlisted snapshot, §11), but still deferred: v0.2 keeps the config
+  drawer live-only.
   (The earlier "replayable cost panels" deferral is superseded: `spend_ledger`
   is itself the historical source — no event-payload folding needed, §11.)
 
@@ -874,9 +875,9 @@ mutable snapshot or outside the engine's own DB is live-only.
 |---|---|---|
 | `events` | append-only, id-ordered | **Yes** — the replay stream itself |
 | `spend_ledger` | append-only, id-ordered | **Yes** — settled cost at any cursor is `SUM(usd)` up to it |
-| `rounds.phase` | in-place UPDATE (`advanceRoundPhase` appends no event) | **Not today** — needs the `round-phase` event below |
+| `rounds.phase` | in-place UPDATE, mirrored by an append-only `round-phase` event (#206) | **Yes** — fold the events, never read the mutable row |
 | live telemetry (`est_cost_usd`, `contextTokens`, token split) | overwritten per probe, cleared when the lane leaves `running` (#155) | **Never** — the history never existed. Est never replays; settled only (§3 E's settled/est grammar is the same line) |
-| resolved config | read at startup, unversioned | Live-only until `run-started` snapshots it |
+| resolved config | read at startup, snapshotted (allowlisted subset + hash) into `run-started` (#206) | **Yes**, for the allowlisted keys — anything outside that list stays live-only |
 | backlog / board | external GitHub state | Live-only |
 
 ### Round identity & the replay unit
@@ -942,7 +943,12 @@ the overlay is the named boundary.
    { round_id, phase })` covering the **full trail**: the initial `aligning`
    at round open, every `advanceRoundPhase` transition, and the terminal
    `closed`; without it the hero's phase lighting cannot replay and the
-   §8 spend phase-bucketing has no windows.
+   §8 spend phase-bucketing has no windows. **Shipped** (round.ts): the
+   event is appended *before* the `rounds` row is updated, so a crash
+   between the two loses the phase write, never the trail — a rerun then
+   re-appends the same `{round_id, phase}`. **Consumers must fold
+   idempotently**: duplicates are expected (rerun-not-resume, #77 dec. 4)
+   and are deliberately not deduplicated by the engine.
 2. **`run-started` event** (#206) — appended once at CLI startup, payload
    `{ config: <allowlisted subset>, configHash }` — the same allowlist the
    config drawer serves (§3 E); a hash alone cannot power historical
@@ -953,7 +959,14 @@ the overlay is the named boundary.
    dashboard server cannot compute `spend.runUsd` (§8) until this event's
    adjacent ledger position persists the anchor. Until it lands, the header
    meter runs whole on the daily tier (§3 A's existing fallback path — no
-   new machinery).
+   new machinery). **Shipped** (cli.ts, both drivers): appended once per
+   process start, before anything else that run writes. The allowlist is
+   `dashboardConfigSubset()` in `engine/src/config/config.ts` — the single
+   list this event and `/api/status`'s own `config` key (§8) both read, so
+   the drawer never has to re-derive it (and a config key added later is
+   absent from both until someone lists it). `configHash` is a SHA-256 over the
+   **full** resolved config with keys sorted, so key order in the YAML
+   never shows up as a config change.
 3. **Titles in event payloads** (#207, design-director amendment) —
    `dispatched` carries the issue title, PR-producing/merging events carry
    the PR title, read from data the engine already holds at those moments

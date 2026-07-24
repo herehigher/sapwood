@@ -36,6 +36,15 @@ export type PeripheralPhase = Exclude<RoundPhase, "executing" | "closed">;
 
 const SEQUENCE: readonly RoundPhase[] = ["aligning", "architecting", "plan_review", "executing", "harvesting", "retro", "closed"];
 
+/** #206 (frontend-design.md §11): the round state machine's replay trail. `rounds.phase` is an
+ *  in-place UPDATE, so without this event history has no record that a round was ever *in* a
+ *  phase — and the dashboard's phase strip (and §8's spend phase-bucketing) reconstructs
+ *  entirely from it. Appended caller-side, like every other event in this loop: state methods
+ *  never self-append (state.ts). */
+function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, phase: RoundPhase): void {
+  state.appendEvent("round-phase", { round_id: roundId, phase });
+}
+
 /** One externalized-artifact-producing peripheral role session — STUBBED in #86 (the real
  *  role runner/prompts are a follow-up issue). Rerun-not-resume (#77 decision 4): run() is
  *  ALWAYS invoked fresh, never resuming a prior attempt's mid-session state — idempotency is
@@ -1126,6 +1135,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         }
 
         round = deps.state.startRound(iso());
+        appendRoundPhase(deps.state, round.round_id, "aligning");
       }
 
       const startedPhase = round.phase; // captured once — the freshBatch test for `executing`
@@ -1155,6 +1165,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         }
         idx++;
         const nextPhase = SEQUENCE[idx]!;
+        // BEFORE the UPDATE, deliberately (#206): a crash between the two must lose the phase
+        // write, never the event — a rerun then appends the event twice (harmless, the replay
+        // fold is idempotent), whereas the other order would leave a phase the trail never
+        // recorded and the hero's phase strip could not reconstruct.
+        appendRoundPhase(deps.state, round.round_id, nextPhase);
         deps.state.advanceRoundPhase(round.round_id, nextPhase, iso());
         round = deps.state.getRound(round.round_id)!;
       }

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_GOAL_FILE, loadConfig, parseConfig } from "./config.js";
+import { configHash, DEFAULT_GOAL_FILE, dashboardConfigSubset, loadConfig, parseConfig } from "./config.js";
 
 test("applies defaults when only required board fields given", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
@@ -1563,4 +1563,62 @@ test("proxy: caps fed into a GraphQL first:/last: argument reject a value above 
     // exactly 100 is still valid
     assert.doesNotThrow(() => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nproxy:\n  caps: { ${key}: 100 }\n`));
   }
+});
+
+// ── #206: the run-started config snapshot (frontend-design.md §3 E / §11) ────────────────────
+
+test("dashboardConfigSubset: carries the drawer's groups + the per-role model/effort captions", () => {
+  const subset = dashboardConfigSubset(parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n"));
+  assert.equal(subset.board.owner, "a");
+  assert.equal(subset.lanes.roundDispatchCap, 6);
+  assert.equal(subset.worker.budgetUsdSoft, 10);
+  assert.equal(subset.guard.mode, "hard");
+  assert.equal(subset.cost.dailyBudgetUsd, 100);
+  assert.equal(subset.reviewer.mode, "different-model-codex");
+  assert.equal(subset.merge.mode, "conductor-merge");
+  assert.equal(subset.labels.needsHuman, "sapwood:needs-human");
+  // §3 C/§6 captions read these — the allowlist "must include" them (frontend-design.md §3 E).
+  assert.equal(subset.roles.architect.model, "sonnet");
+  assert.equal(subset.roles.retro.effort, "medium");
+  assert.equal(subset.worker.model, "opus");
+});
+
+test("dashboardConfigSubset: unlisted keys never leave the engine — no local paths, no proxy block", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-subset-"));
+  try {
+    const file = join(dir, "sapwood.config.yaml");
+    writeFileSync(
+      file,
+      "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+        "logging: { path: logs/secret-place.log }\n" +
+        "proxy: { enabled: true }\n" +
+        "worker: { pricingFile: pricing.yaml }\n",
+    );
+    const cfg = loadConfig(file);
+    const subset = dashboardConfigSubset(cfg) as Record<string, unknown>;
+    // loadConfig resolves these to ABSOLUTE local paths (this machine's directory layout) —
+    // the same leak #167 keeps off GitHub comments must not reach the dashboard either.
+    assert.equal(subset.proxy, undefined);
+    assert.equal(subset.logging, undefined);
+    assert.equal(subset.goal, undefined);
+    assert.equal(subset.doctrine, undefined);
+    const serialized = JSON.stringify(subset);
+    assert.ok(!serialized.includes(dir), `no local filesystem path leaked: ${serialized}`);
+    assert.ok(!serialized.includes("pricingFile"));
+    assert.ok(!serialized.includes("promptFile"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("configHash: stable for identical config (key order included), changes when config changes", () => {
+  const a = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 4 }\n");
+  const b = parseConfig("lanes: { max: 4 }\nboard: { projectNumber: 1, repo: r, owner: a }\n");
+  assert.equal(configHash(a), configHash(b), "same resolved config, different key order -> same hash");
+  const c = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 5 }\n");
+  assert.notEqual(configHash(a), configHash(c));
+  // The hash covers the FULL resolved config, not just the allowlisted subset — a change to a
+  // key the drawer never shows still marks the run as differently-configured.
+  const d = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlanes: { max: 4 }\nlogging: { teeToStderr: false }\n");
+  assert.notEqual(configHash(a), configHash(d));
 });
