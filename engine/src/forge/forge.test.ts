@@ -754,6 +754,7 @@ test("findOpenPrForIssue: passes an explicit high --limit (gh's default 30 would
   // --limit 30 would drop, making probe() report hasPr=false and wrongly escalate the lane.
   const prs = Array.from({ length: 40 }, (_, i) => ({
     number: 100 - i,
+    title: `PR title ${i}`,
     body: i === 34 ? "Fixes #46" : `unrelated PR body ${i}`,
   }));
   // Stub the one gh choke point (instance property shadows the private prototype method) —
@@ -762,11 +763,21 @@ test("findOpenPrForIssue: passes an explicit high --limit (gh's default 30 would
     seen.push(args);
     return JSON.stringify(prs);
   };
-  assert.equal(await forge.findOpenPrForIssue(46), 100 - 34); // the 35th PR is found, not dropped
+  // #207: the ref carries the matched row's own title, off this SAME list read (no extra call).
+  assert.deepEqual(await forge.findOpenPrForIssue(46), { number: 100 - 34, title: "PR title 34" }); // the 35th PR is found, not dropped
   assert.equal(seen.length, 1);
   const limitIdx = seen[0]!.indexOf("--limit");
   assert.ok(limitIdx >= 0, "an explicit --limit is passed (never gh's default 30)");
   assert.ok(Number(seen[0]![limitIdx + 1]) >= 200, "limit is high enough to cover deep PR lists");
+});
+
+test("#207 findOpenPrForIssue: a list read without titles still resolves the PR, with no `title` key invented", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => JSON.stringify([{ number: 11, body: "Fixes #46" }]);
+  const ref = await forge.findOpenPrForIssue(46);
+  assert.deepEqual(ref, { number: 11 });
+  assert.ok(!Object.hasOwn(ref!, "title"));
 });
 
 test("readStartupReconcileData returns board placements plus open PR bodies using read-only gh calls", async () => {

@@ -473,3 +473,28 @@ test("persistRoundArtifact: a real on-disk State writes the markdown view to dat
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("#207 assembleRoundArtifact: mixed pre-/post-#207 payloads fold identically — the new title fields are ignored, their absence never throws", () => {
+  const events = [
+    // Pre-#207 shapes (no titles anywhere) — must still fold exactly as before.
+    { kind: "dispatched", payload: { worker: "lane-old", issue: 1 } },
+    { kind: "reclaim-done", payload: { worker: "lane-old", issue: 1, next: "DRIVING" } },
+    { kind: "merged", payload: { worker: "lane-old", issue: 1, pr: 10, headOid: "h1" } },
+    // Post-#207 shapes, same events plus the additive title fields.
+    { kind: "dispatched", payload: { worker: "lane-new", issue: 2, issueTitle: "feat: titles in payloads" } },
+    { kind: "reclaim-done", payload: { worker: "lane-new", issue: 2, next: "DRIVING", prTitle: "feat: titles in payloads" } },
+    { kind: "merged", payload: { worker: "lane-new", issue: 2, pr: 11, headOid: "h2" } },
+  ];
+  const artifact = assembleRoundArtifact(events, meta, 4, 30);
+  // The artifact contract is unchanged by #207 (titles live in events, not here — that's #123's
+  // shape and deliberately out of scope): numbers-only rows, both halves folding the same way.
+  assert.deepEqual(artifact.dispatches, [
+    { issue: 1, worker: "lane-old" },
+    { issue: 2, worker: "lane-new" },
+  ]);
+  assert.deepEqual(artifact.merges, [
+    { issue: 1, worker: "lane-old", pr: 10 },
+    { issue: 2, worker: "lane-new", pr: 11 },
+  ]);
+  assert.equal(artifact.prsOpened, 2);
+});

@@ -1054,8 +1054,11 @@ export interface WorkerDeps {
    *  Optional and additive: when provided it also derives hasPr (a number means yes); when
    *  omitted, probe() falls back to the legacy hasOpenPr-only boolean path (prNumber stays
    *  undefined — a driving lane rescued that way can't be gated/merged until a number is
-   *  known, conductor.ts fails that lane safe rather than guessing). */
-  findOpenPr?: (issue: number) => Promise<number | null>;
+   *  known, conductor.ts fails that lane safe rather than guessing).
+   *  #207: returns the PR's `title` alongside its number when the forge supplied one (it rides
+   *  the same open-PR list read; see GithubForge.findOpenPrForIssue) — that title is what the
+   *  lane's `reclaim-done` event carries as `prTitle`. Title-less refs stay fully supported. */
+  findOpenPr?: (issue: number) => Promise<{ number: number; title?: string } | null>;
   /** Worker prompt for an issue. Default: a minimal imperative skeleton. */
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
@@ -2225,11 +2228,15 @@ export class WorkerSupervisor implements Supervisor {
     const issue = this.laneIssue(name);
     let hasPr = false;
     let prNumber: number | undefined;
+    let prTitle: string | undefined;
     if (issue != null) {
       if (this.deps.findOpenPr) {
-        const n = await this.deps.findOpenPr(issue);
-        hasPr = n != null;
-        if (n != null) prNumber = n;
+        const ref = await this.deps.findOpenPr(issue);
+        hasPr = ref != null;
+        if (ref != null) {
+          prNumber = ref.number;
+          prTitle = ref.title;
+        }
       } else {
         hasPr = await this.deps.hasOpenPr(issue);
       }
@@ -2273,6 +2280,7 @@ export class WorkerSupervisor implements Supervisor {
       costUsd,
       modelUsage,
       ...(prNumber != null ? { prNumber } : {}),
+      ...(prTitle != null ? { prTitle } : {}),
       ...(liveTelemetry ? { liveTelemetry } : {}),
       ...(failureText !== undefined ? { failureText } : {}),
       ...(resultText !== undefined ? { resultText } : {}),

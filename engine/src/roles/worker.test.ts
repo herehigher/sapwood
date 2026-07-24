@@ -1093,7 +1093,7 @@ test("probe: #13 findOpenPr (when provided) supplies prNumber and derives hasPr 
       hasOpenPr: async () => {
         throw new Error("legacy path must not be used when findOpenPr is provided");
       },
-      findOpenPr: async (issue) => (issue === 8 ? 42 : null),
+      findOpenPr: async (issue) => (issue === 8 ? { number: 42, title: "feat: the lane's PR" } : null),
       renderPrompt: () => "test prompt",
       heartbeatMs: 50,
       guardHookPath: mkHook(dir),
@@ -1103,6 +1103,8 @@ test("probe: #13 findOpenPr (when provided) supplies prNumber and derives hasPr 
     const probe = await s.probe(name);
     assert.equal(probe.hasPr, true);
     assert.equal(probe.prNumber, 42);
+    // #207: the title rides the same ref, straight onto the probe the reclaim event reads.
+    assert.equal(probe.prTitle, "feat: the lane's PR");
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

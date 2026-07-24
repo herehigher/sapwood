@@ -78,6 +78,14 @@ export interface PRStatus {
    *  every other PRStatus consumer (deriveGate, mergeDecision, the classic Reviewer kinds) never
    *  reads it. */
   baseOid?: string;
+  /** #207 (frontend-design §11 follow-up): the PR's own title — carried so the merge path can
+   *  stamp `prTitle` onto the `merged` event, which is where the dashboard's hover tooltips read
+   *  it from (it never queries GitHub, so tooltips must work offline and in replay). Sourced
+   *  from a `--json title` field added to the SAME `gh pr view` read this status already makes —
+   *  never an extra call. ADDITIVE and OPTIONAL, same convention as `ciRed`/`baseOid` above:
+   *  absent on any pre-#207 fixture/fake, and every consumer treats a missing title as "no
+   *  tooltip" rather than an error. */
+  title?: string;
 }
 
 /** #292: one rename-aware entry from GitHub's pull-request files API. The old path is retained
@@ -634,10 +642,11 @@ export class GithubForge implements IForge {
       "--limit",
       "200",
       "--json",
-      "number,body",
+      // #207: `title` added to this SAME list read (not a new call) — see OpenPrBody.title.
+      "number,title,body",
     ]);
-    const prs = JSON.parse(out) as { number: number; body?: string }[];
-    return prs.map((pr) => ({ number: pr.number, body: pr.body ?? "" }));
+    const prs = JSON.parse(out) as { number: number; title?: string; body?: string }[];
+    return prs.map((pr) => ({ number: pr.number, body: pr.body ?? "", ...(pr.title !== undefined ? { title: pr.title } : {}) }));
   }
 
   async claimIssue(issue: number): Promise<void> {
@@ -716,7 +725,8 @@ export class GithubForge implements IForge {
       "--json",
       // #287 (E4b): baseRefOid added — a real `gh pr view --json` field (verified against a live
       // `gh` binary), giving PRStatus.baseOid without switching this call to raw GraphQL.
-      "number,headRefOid,baseRefOid,state,mergeable,statusCheckRollup",
+      // #207: `title` added to this SAME read (not a new call) — see PRStatus.title's own doc.
+      "number,title,headRefOid,baseRefOid,state,mergeable,statusCheckRollup",
     ]);
     return parsePRStatus(out);
   }
@@ -849,10 +859,16 @@ export class GithubForge implements IForge {
    *  selection is fail-closed on ambiguity — see findOpenPrNumber for the full precedence
    *  (closing keywords > oldest-among-closing > a single unambiguous bare `#N` mention;
    *  multiple bare mentions -> null, the lane queues rather than gating a guessed PR). */
-  async findOpenPrForIssue(issue: number): Promise<number | null> {
+  async findOpenPrForIssue(issue: number): Promise<OpenPrRef | null> {
     // listOpenPrBodies owns the shared --state open/--limit 200 read used by startup
     // reconciliation too. The residual >200-open-PR fail-safe documented in #50 remains.
-    return findOpenPrNumber(await this.listOpenPrBodies(), issue);
+    const prs = await this.listOpenPrBodies();
+    const number = findOpenPrNumber(prs, issue);
+    if (number == null) return null;
+    // #207: the title rides the row this SAME list read already returned — selection stays
+    // findOpenPrNumber's job (unchanged, still pure and number-only).
+    const title = prs.find((pr) => pr.number === number)?.title;
+    return { number, ...(title !== undefined ? { title } : {}) };
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
@@ -1362,6 +1378,18 @@ export interface BoardPlacement {
 export interface OpenPrBody {
   number: number;
   body: string;
+  /** #207: the PR's title, from a `--json title` field added to the SAME `gh pr list` read this
+   *  shape already comes from — never an extra call. Optional: absent on any pre-#207
+   *  fixture/fake, and the only consumer (findOpenPrForIssue -> the lane's `reclaim-done`
+   *  payload) degrades to "no tooltip" when it's missing. */
+  title?: string;
+}
+
+/** #207: an open PR identified for a lane — its number plus, when the forge supplied one, its
+ *  title. The number is what gates/merges; the title only ever reaches an event payload. */
+export interface OpenPrRef {
+  number: number;
+  title?: string;
 }
 
 export interface StartupReconcileData {
@@ -1979,6 +2007,8 @@ export function parsePageInfo(json: string): { hasNextPage: boolean; endCursor: 
 export function parsePRStatus(json: string): PRStatus {
   const d = JSON.parse(json) as {
     number: number;
+    // #207: additive — absent on any pre-#207 fixture (see PRStatus.title's own doc).
+    title?: string;
     headRefOid: string;
     // #287 (E4b): additive — absent on any pre-#287 fixture (see PRStatus.baseOid's own doc).
     baseRefOid?: string;
@@ -2016,6 +2046,7 @@ export function parsePRStatus(json: string): PRStatus {
     ciGreen,
     ciRed,
     ...(d.baseRefOid !== undefined ? { baseOid: d.baseRefOid } : {}),
+    ...(d.title !== undefined ? { title: d.title } : {}),
   };
 }
 

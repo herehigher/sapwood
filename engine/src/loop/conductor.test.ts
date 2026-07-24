@@ -6061,3 +6061,68 @@ test("tick (B4): unconfirmed-intent escalation with a FAILING label write does N
   assert.equal(retried.gated_escalation_labeled, 1);
   st.close();
 });
+
+// ── #207: issue/PR titles persisted in event payloads (frontend-design §11 follow-up) ────────
+// The dashboard renders number tooltips from the ledger alone (never a live GitHub read), so
+// the titles must be carried by the events themselves — sourced ONLY from data the same code
+// path already fetched. Each test therefore pins the relevant fake's call count too.
+
+test("#207 tick DISPATCH: the dispatched event carries the board row's issueTitle, with no extra board read", async () => {
+  const st = new State(":memory:");
+  const sup = new FakeSupervisor();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 7, title: "feat(engine): persist issue/PR titles", labels: ["prio:3-feature"] }];
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["dispatched"]);
+  assert.equal(events.length, 1);
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the asserted event payload to exist.
+  assert.equal((events[0]?.payload as { issueTitle?: string }).issueTitle, "feat(engine): persist issue/PR titles");
+  assert.equal(forge.readyReads, 1, "the title rides the board row already read — never a second query");
+  st.close();
+});
+
+test("#207 tick RECLAIM: reclaim-done into DRIVING carries the probe's prTitle (the PR-opened transition)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55, prTitle: "fix(loop): drain before kill" };
+  const gate = new FakeMergeGate();
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  assert.equal(events.length, 1);
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the asserted event payload to exist.
+  assert.equal((events[0]?.payload as { next?: string; prTitle?: string }).next, "DRIVING");
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the asserted event payload to exist.
+  assert.equal((events[0]?.payload as { prTitle?: string }).prTitle, "fix(loop): drain before kill");
+  st.close();
+});
+
+test("#207 tick RECLAIM: a probe without a prTitle (pre-#207 wiring) omits the field rather than writing null", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: new FakeMergeGate() });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  assert.equal(events.length, 1);
+  assert.ok(!Object.hasOwn(events[0]!.payload as Record<string, unknown>, "prTitle"));
+  st.close();
+});
+
+test("#207 tick RECLAIM: a rescued (reclaim-failed -> DRIVING) lane carries prTitle too", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, failed: true, hasPr: true, prNumber: 55, prTitle: "feat: rescued lane" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: new FakeMergeGate() });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-failed"]);
+  assert.equal(events.length, 1);
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the asserted event payload to exist.
+  assert.equal((events[0]?.payload as { next?: string }).next, "DRIVING");
+  // biome-ignore lint/correctness/noUnsafeOptionalChaining: this test requires the asserted event payload to exist.
+  assert.equal((events[0]?.payload as { prTitle?: string }).prTitle, "feat: rescued lane");
+  st.close();
+});

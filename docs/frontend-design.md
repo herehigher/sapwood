@@ -845,7 +845,8 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
 - ~~Issue-title enrichment~~ — **un-deferred** by the design-director
   amendment: titles now ride event payloads written by the engine (§3 C,
   §11 follow-up #3); no GitHub read from the dashboard server was ever
-  needed. Only pre-amendment events lack tooltips.
+  needed. Pre-amendment events lack tooltips — as does `merged`, whose own
+  `prTitle` is still the human-merge-only residual noted at §11 #3.
 - **Per-gate progress in the hero** — needs the engine to persist gate
   substate (a `gate-advanced` event); v0.2 renders the review passage as one
   waiting state (§6).
@@ -960,6 +961,19 @@ the overlay is the named boundary.
    (board query / forge response) — never an extra GitHub call. Powers the
    §3 C hover tooltips offline and in replay; entities without a
    title-bearing event degrade to no tooltip.
+   **Landed:** `dispatched.issueTitle` (from the tick's own `getReadyIssues`
+   row, ordinary and park-canary dispatch alike) and `prTitle` on all three
+   PR-opened transitions — `reclaim-done`, `reclaim-failed`, `reclaim-dead`
+   — sourced from the lane probe's open-PR lookup, which now selects
+   `title` in the `gh pr list` read it already made. Every field is
+   **omitted, never null**, when the source has no title.
+   **Residual:** `merged.prTitle` is *not* wired. Its only in-path source is
+   `PRStatus.title` (added here, and selected by `getPRStatus`'s existing
+   `gh pr view`), but plumbing it onto the event means editing
+   `merge-driver.ts`'s `DriveOutcome` — a **human-merge-only** path the
+   guard denies to workers at the write layer (security.md). Until a human
+   makes that three-line change, a merged PR's tooltip falls back to the
+   `prTitle` on that lane's earlier PR-opened event.
 4. **`worktree-released` event** (#210, round-2 amendment) — payload
    `{ worker, issue, worktreePath }`, mirroring `worktree-retained`'s.
    Emission: on tick/startup the engine checks each retained path it has

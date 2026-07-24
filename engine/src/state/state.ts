@@ -2179,7 +2179,7 @@ export class State {
    *  including the case where no `source` episode row exists to attach to (the UPDATE matches
    *  zero rows -> the whole registration, worker row included, rolls back and this throws;
    *  a canary must never exist without the episode it is testing). */
-  registerCanaryDispatch(row: WorkerRow, source: EnvFailureSource): void {
+  registerCanaryDispatch(row: WorkerRow, source: EnvFailureSource, issueTitle?: string): void {
     this.db.exec("BEGIN");
     try {
       this.upsertWorker(row);
@@ -2187,7 +2187,10 @@ export class State {
       if (res.changes === 0) {
         throw new Error(`registerCanaryDispatch: no open ${source} park episode to attach canary ${row.name} to`);
       }
-      this.appendEvent("dispatched", { worker: row.name, issue: row.issue });
+      // #207: a canary dispatch is still a dispatch — its event carries the board row's title
+      // (passed in by the caller, which holds it) exactly like the ordinary path's does, so the
+      // dashboard never has a tooltip hole on park-canary lanes. Omitted when absent.
+      this.appendEvent("dispatched", { worker: row.name, issue: row.issue, ...(issueTitle != null ? { issueTitle } : {}) });
       this.appendEvent("park-canary", { worker: row.name, issue: row.issue });
       this.db.exec("COMMIT");
     } catch (e) {

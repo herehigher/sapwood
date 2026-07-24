@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { DEFAULT_CONFIG_PATHS, loadConfig, type SapwoodConfig } from "./config/config.js";
 import { loadPricingTable } from "./config/pricing.js";
-import { GithubForge, type IForge, type Issue } from "./forge/forge.js";
+import { GithubForge, type IForge, type Issue, type OpenPrRef } from "./forge/forge.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import { unadjudicatedConcerns } from "./loop/dissent.js";
 import { type DriverResult, runDriver, type StopConditionHit, type StopConfig, type StopMode } from "./loop/driver.js";
@@ -841,7 +841,7 @@ export function roundsExitCode(result: Pick<RoundsResult, "stoppedBy">): number 
  *  there; a test-injected bare-IForge fake falls back to "no open PR found", which is fine
  *  because those tests never dispatch a worker (no ready issues) — this only exists so
  *  EngineOverrides can type `forge` as the general `IForge` interface. */
-function findOpenPrForIssue(forge: IForge, issue: number): Promise<number | null> {
+function findOpenPrForIssue(forge: IForge, issue: number): Promise<OpenPrRef | null> {
   const withPr = forge as Partial<Pick<GithubForge, "findOpenPrForIssue">>;
   return typeof withPr.findOpenPrForIssue === "function" ? withPr.findOpenPrForIssue(issue) : Promise.resolve(null);
 }
