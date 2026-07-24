@@ -227,7 +227,10 @@ defined **semantically, not by sentence wording**: a kind whose event
 only some payloads qualify (the entry owns its own condition — no side
 list to drift, and gate②'s existing extend-the-map checklist item curates
 the flag with the sentence). Flagged today: `drive-needs-human`,
-`rollback-escalated`, `plan-review-escalated`, `gated-reentry-capped`,
+`rollback-escalated`, `plan-review-escalated`, `verify-na-proposed` (#296 —
+the gate⓪ "not separately verifiable" proposal: labels and comment land
+automatically, but only a person accepts or rejects it; issue-scoped, so the
+existing issue-scoped clears below resolve the row), `gated-reentry-capped`,
 `gated-reentry-capped-label-failed`, `worktree-retained`,
 `park-escalated`, `env-failure-preserved` (that path deliberately leaves
 the lane failed — the preserved PR needs a manual drive),
@@ -615,6 +618,7 @@ checklist item**):
 | `triage-degraded` | A planning session had trouble — some issues keep their old plans |
 | `no-plan-after-draft` | Issue #{issue} still has no usable plan after a drafting attempt |
 | `plan-review-escalated` | Issue #{issue}'s plan needs a human — automated review couldn't approve it |
+| `verify-na-proposed` | Issue #{issue} proposed as not separately verifiable — a person decides |
 | `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
 | `gated-reentry-capped` | Issue #{issue} was unblocked too many times without landing — flagged for a human |
 | `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |

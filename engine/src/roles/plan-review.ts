@@ -579,6 +579,19 @@ async function reviewOneIssue(
         : "";
       await deps.forge.addIssueComment(issue.number, `${decision.body}${cleanupNote}\n\n${marker}`);
       await deps.forge.addLabel(issue.number, l.verifyNa);
+      // #296: the durable, event-fed half of this hold — the ONLY genuine "a person must
+      // adjudicate" outcome this file produced without an event, so no event-backed surface
+      // (the dashboard needs-attention strip, frontend-design.md §3) could ever show it.
+      // Emitted AFTER both label writes, unlike the approve branch's write-ahead: the
+      // fix-rounds-capped doctrine — an escalation event may only claim what provably landed.
+      // A failed label write therefore appends nothing and the whole proposal simply repeats
+      // next round. Contained like the approve branch's append: the forge escalation is already
+      // durably posted, so a state-write failure must not unwind it or the rest of the pool pass.
+      try {
+        deps.state.appendEvent("verify-na-proposed", { round_id: roundId, issue: issue.number });
+      } catch {
+        /* contained — the labels+comment already landed; the hold stands without its event */
+      }
       return; // outcome 3 (verify:n/a proposal) — a human resolves it
     }
 
