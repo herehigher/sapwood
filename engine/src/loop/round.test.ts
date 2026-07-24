@@ -350,6 +350,27 @@ test("runRounds: a fresh phase always gets a null marker (first attempt)", async
   deps.state.close();
 });
 
+test("runRounds #206: a full round leaves a round-phase event trail — every phase it entered, in order, aligning -> closed", async () => {
+  const { sleep } = mkSleepSpy();
+  const deps = baseDeps({ sleep });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1);
+  // The replay spine (frontend-design.md §11): rounds.phase is an in-place UPDATE, so this
+  // trail is the ONLY history of the round state machine the dashboard can fold.
+  assert.deepEqual(deps.state.eventsSince("1970-01-01T00:00:00.000Z", ["round-phase"]), [
+    { kind: "round-phase", payload: { round_id: 1, phase: "aligning" } },
+    { kind: "round-phase", payload: { round_id: 1, phase: "architecting" } },
+    { kind: "round-phase", payload: { round_id: 1, phase: "plan_review" } },
+    { kind: "round-phase", payload: { round_id: 1, phase: "executing" } },
+    { kind: "round-phase", payload: { round_id: 1, phase: "harvesting" } },
+    { kind: "round-phase", payload: { round_id: 1, phase: "retro" } },
+    { kind: "round-phase", payload: { round_id: 1, phase: "closed" } },
+  ]);
+  deps.state.close();
+});
+
 test("runRounds #123: a closed round leaves a persisted, schema-valid round artifact with endedAt set", async () => {
   const { sleep } = mkSleepSpy();
   const deps = baseDeps({ sleep });
@@ -1129,6 +1150,62 @@ test("runRounds crash-rerun: an in_progress round resumes AT its persisted phase
     // treated as a fresh first attempt.
     assert.equal(log[0]?.marker, "m1");
     assert.equal(result.rounds, 1);
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #206 crash-rerun: a re-entered phase appends a DUPLICATE round-phase event, not a throw (no dedup machinery)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    // A crash MID-PHASE (#77 dec. 4's rerun-not-resume): plan_review was entered — its event is
+    // already in the trail — and the engine died inside it. The restart reruns the whole phase,
+    // so it is entered a second time and says so a second time.
+    const round = state.startRound("2026-07-09T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "plan_review", "2026-07-09T00:01:00.000Z");
+    state.appendEvent("round-phase", { round_id: round.round_id, phase: "plan_review" });
+    state.close();
+
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const deps = baseDeps({ forge: new FakeForge(), state: state2, sleep });
+    const stopSafety = boundedStopOnPhase(deps, 3); // plan_review, harvesting, retro
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.equal(result.rounds, 1, "the duplicate is tolerated — the round still closed");
+    const trail = state2.eventsSince("1970-01-01T00:00:00.000Z", ["round-phase"]).map((e) => (e.payload as { phase: string }).phase);
+    // Two "plan_review" entries, no dedup: the replay fold is idempotent (same phase again =
+    // no-op), so tolerating the duplicate is cheaper than machinery to prevent it.
+    assert.deepEqual(trail, ["plan_review", "plan_review", "executing", "harvesting", "retro", "closed"]);
+    state2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #206 crash-rerun (gate② P1): a round that crashed between startRound and its FIRST event still gets its initial 'aligning' — the trail is never missing a phase the round entered", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const { sleep } = mkSleepSpy();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    // The round-open crash window: startRound() committed, the process died before anything
+    // else. The row is in_progress at 'aligning' with ZERO events — and openRound() resumes it
+    // through the branch that never opens a new round, so entry-time emission is the only thing
+    // that can still record 'aligning'.
+    state.startRound("2026-07-09T00:00:00.000Z");
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["round-phase"]), [], "the crash left no trail at all");
+    state.close();
+
+    const state2 = new State(join(dir, "sapwood.sqlite"));
+    const deps = baseDeps({ forge: new FakeForge(), state: state2, sleep });
+    const stopSafety = boundedStopOnPhase(deps, 5);
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.equal(result.rounds, 1);
+    const trail = state2.eventsSince("1970-01-01T00:00:00.000Z", ["round-phase"]).map((e) => (e.payload as { phase: string }).phase);
+    assert.deepEqual(trail, ["aligning", "architecting", "plan_review", "executing", "harvesting", "retro", "closed"]);
     state2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

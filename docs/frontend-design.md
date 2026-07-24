@@ -366,7 +366,17 @@ below are unchanged:
 | `--bark-text` | `#A6957C` | Muted text (AA-passing on both grounds) |
 | `--sap` | `#E8A33D` | Amber — the *activity* color: flowing tokens, running lanes, spend meter |
 | `--moss` | `#8FA36B` | Success: merged, CI green, healthy engine dot |
-| `--rust` | `#C05A2E` | Failure/escalation: failed lanes, `needs-human`, ceiling breach |
+| `--rust` | `#D9713F` | Failure/escalation: failed lanes, `needs-human`, ceiling breach |
+
+Amended 2026-07-24 (#143, token implementation): the dark `--rust` moved from the
+originally-specced `#C05A2E` to `#D9713F`. `#C05A2E` measures 3.82:1 on
+`--heartwood` and 3.46:1 on `--panel` — below AA as text, and `--rust` *is* text
+("failed", "needs human"). The quality floor's "adjust the failing side" rule
+applies; `#D9713F` is the same hue one step lighter and clears AA on both grounds
+(5.14:1 / 4.66:1). All 20 text-on-ground pairs now pass — `npm run contrast -w
+dashboard` prints the table, and `dashboard/src/tokens.test.ts` fails the build if
+any pair regresses. Both themes live in a single `light-dark(light, dark)`
+declaration per token, so a theme cannot silently drift from its twin.
 
 Rules: `--sap` means "in motion", `--moss` means "done well", `--rust` means
 "a person should look" — never decorative use of any of the three. Rings are
@@ -559,7 +569,7 @@ precisely because they convey what actually happens: **CI**, **retro**,
 performed at that node. The kinds — counted by the
 map, never by this prose: an earlier hard-coded "33" here had already
 drifted past #180's park/environment family, proving §2's own rule
-(`run-started`/`round-phase` remain pending their engine issue; **every
+(`run-started`/`round-phase` shipped with #206; **every
 engine PR that adds an event kind must extend this map; make it a gate②
 checklist item**):
 
@@ -802,9 +812,10 @@ configuration.
 ## 9. Tech architecture
 
 ```
-dashboard/            # new npm workspace — implementer MUST add "dashboard" to root
-                      # package.json "workspaces" (currently ["engine"] only), or root
-                      # -ws build/test/typecheck silently skip the package and CI lies
+dashboard/            # npm workspace — listed in root package.json "workspaces"
+                      # alongside "engine" (#143). Omitting it makes root -ws
+                      # build/test/typecheck silently skip the package while CI reports green
+  index.html  vite.config.ts
   server.ts           # node:http + node:sqlite, ~150 LOC, no deps
   src/
     api/              # fetch + TanStack Query hooks (poll 3 s)  ── the data layer
@@ -813,8 +824,16 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
     components/       # Header, NeedsAttention, LaneBoard, Feed, CostStrip,
                       # ConfigDrawer, Controls (the §3 verbs + confirm flow)
     copy.ts           # §7 — the single copy map
+    fonts/            # the one bundled display face (Fraunces, latin subset woff2)
+    contrast.ts       # §5 quality-floor checker — test assertion + `npm run contrast`
     tokens.css  app.css
 ```
+
+CI (`.github/workflows/ci.yml`) invokes checks per workspace
+(`npm --workspace engine …`) rather than via `-ws`, so adding the workspace alone
+does **not** put the dashboard in CI — the workflow needs matching
+`--workspace dashboard` steps. That file is human-merge-only (security.md), so it
+lands as a separate human-authored change.
 
 - **Build:** Vite + React + TypeScript; `vite build` output embedded in the
   plugin package. Dev: `vite` proxying `/api` to the local server.
@@ -854,8 +873,9 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
   deferred to v0.3 (§11). A round is fully replayable the moment it closes.
 - **Honest "On hold" rendering** — blocked on the hold-visibility events
   (#294, §11 follow-up #7); until then held PRs render as waiting.
-- **Config replay** — becomes possible once `run-started` carries a
-  resolved-config snapshot (§11); v0.2 keeps the config drawer live-only.
+- **Config replay** — unblocked by #206 (`run-started` now carries the
+  allowlisted snapshot, §11), but still deferred: v0.2 keeps the config
+  drawer live-only.
   (The earlier "replayable cost panels" deferral is superseded: `spend_ledger`
   is itself the historical source — no event-payload folding needed, §11.)
 
@@ -874,9 +894,9 @@ mutable snapshot or outside the engine's own DB is live-only.
 |---|---|---|
 | `events` | append-only, id-ordered | **Yes** — the replay stream itself |
 | `spend_ledger` | append-only, id-ordered | **Yes** — settled cost at any cursor is `SUM(usd)` up to it |
-| `rounds.phase` | in-place UPDATE (`advanceRoundPhase` appends no event) | **Not today** — needs the `round-phase` event below |
+| `rounds.phase` | in-place UPDATE, mirrored by an append-only `round-phase` event (#206) | **Yes** — fold the events, never read the mutable row |
 | live telemetry (`est_cost_usd`, `contextTokens`, token split) | overwritten per probe, cleared when the lane leaves `running` (#155) | **Never** — the history never existed. Est never replays; settled only (§3 E's settled/est grammar is the same line) |
-| resolved config | read at startup, unversioned | Live-only until `run-started` snapshots it |
+| resolved config | read at startup, snapshotted (allowlisted subset + hash) into `run-started` (#206) | **Yes**, for the allowlisted keys — anything outside that list stays live-only |
 | backlog / board | external GitHub state | Live-only |
 
 ### Round identity & the replay unit
@@ -942,7 +962,13 @@ the overlay is the named boundary.
    { round_id, phase })` covering the **full trail**: the initial `aligning`
    at round open, every `advanceRoundPhase` transition, and the terminal
    `closed`; without it the hero's phase lighting cannot replay and the
-   §8 spend phase-bucketing has no windows.
+   §8 spend phase-bucketing has no windows. **Shipped** (round.ts): the
+   event means *"round R entered phase P"* and is emitted by whichever
+   process actually enters it — including a restart resuming a crashed
+   round at its persisted phase — so no crash window can drop a phase the
+   round really ran. **Consumers must fold idempotently**: a re-run phase
+   says so twice (rerun-not-resume, #77 dec. 4) and the engine deliberately
+   does not deduplicate.
 2. **`run-started` event** (#206) — appended once at CLI startup, payload
    `{ config: <allowlisted subset>, configHash }` — the same allowlist the
    config drawer serves (§3 E); a hash alone cannot power historical
@@ -953,7 +979,14 @@ the overlay is the named boundary.
    dashboard server cannot compute `spend.runUsd` (§8) until this event's
    adjacent ledger position persists the anchor. Until it lands, the header
    meter runs whole on the daily tier (§3 A's existing fallback path — no
-   new machinery).
+   new machinery). **Shipped** (cli.ts, both drivers): appended once per
+   process start, before anything else that run writes. The allowlist is
+   `dashboardConfigSubset()` in `engine/src/config/config.ts` — the single
+   list this event and `/api/status`'s own `config` key (§8) both read, so
+   the drawer never has to re-derive it (and a config key added later is
+   absent from both until someone lists it). `configHash` is a SHA-256 over the
+   **full** resolved config with keys sorted, so key order in the YAML
+   never shows up as a config change.
 3. **Titles in event payloads** (#207, design-director amendment) —
    `dispatched` carries the issue title, PR-producing/merging events carry
    the PR title, read from data the engine already holds at those moments
