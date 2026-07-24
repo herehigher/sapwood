@@ -39,6 +39,7 @@ import {
   nextRoundId,
   orderForDispatch,
   type ReclaimResult,
+  releaseVanishedWorktrees,
   resumeDecision,
   type Supervisor,
   startFixLeg,
@@ -6060,4 +6061,117 @@ test("tick (B4): unconfirmed-intent escalation with a FAILING label write does N
   assert.equal(retried.state, "failed");
   assert.equal(retried.gated_escalation_labeled, 1);
   st.close();
+});
+
+// ── #210 (frontend-design §11 follow-up 4): worktree-released — the Needs-attention strip's
+//   only resolution signal for a retained worktree. The engine already owns the retained path,
+//   so the filesystem it manages IS the signal: on tick/startup, a retained folder that is gone
+//   (the human salvaged/discarded it) appends the event ONCE. ──
+
+const RELEASE_SINCE = "1970-01-01T00:00:00Z";
+const releasedPaths = (st: State) =>
+  st.eventsSince(RELEASE_SINCE, ["worktree-released"]).map((e) => (e.payload as { worktreePath: string }).worktreePath);
+
+test("#210: worktree-released fires once per cleaned-up retained path — never while the folder exists, never twice, and never across a restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-released-"));
+  const dbPath = join(dir, "state.db");
+  const gone = join(dir, "lane-gone");
+  const here = join(dir, "lane-here");
+  mkdirSync(gone);
+  mkdirSync(here);
+  try {
+    const st = new State(dbPath);
+    st.appendEvent("worktree-retained", { worker: "lane-gone", issue: 11, worktreePath: gone });
+    st.appendEvent("worktree-retained", { worker: "lane-here", issue: 12, worktreePath: here });
+
+    releaseVanishedWorktrees(st);
+    assert.deepEqual(releasedPaths(st), [], "both folders still on disk — nothing is resolved yet");
+
+    rmSync(gone, { recursive: true, force: true }); // the human cleaned it up
+    releaseVanishedWorktrees(st);
+    const first = st.eventsSince(RELEASE_SINCE, ["worktree-released"]);
+    assert.equal(first.length, 1);
+    assert.deepEqual(first[0]!.payload, { worker: "lane-gone", issue: 11, worktreePath: gone }, "mirrors worktree-retained's payload");
+
+    releaseVanishedWorktrees(st); // same tick's worth of work again
+    assert.deepEqual(releasedPaths(st), [gone], "no repeat emission while the row stays resolved");
+    st.close();
+
+    // Restart: the durable event log itself is the memory — a fresh State must not re-emit.
+    const restarted = new State(dbPath);
+    releaseVanishedWorktrees(restarted);
+    assert.deepEqual(releasedPaths(restarted), [gone], "dedupe survives a restart (no in-memory flag involved)");
+
+    rmSync(here, { recursive: true, force: true });
+    releaseVanishedWorktrees(restarted);
+    assert.deepEqual(releasedPaths(restarted), [gone, here], "each path resolves on its own, when its own folder goes");
+    restarted.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#210: a lane slot re-retained at the SAME path after release resolves again — the latest event per path decides, not 'ever released'", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-released-reuse-"));
+  const lane = join(dir, "lane-1");
+  try {
+    const st = new State(":memory:");
+    st.appendEvent("worktree-retained", { worker: "lane-1", issue: 20, worktreePath: lane });
+    releaseVanishedWorktrees(st); // never created on disk -> resolved immediately
+    assert.deepEqual(releasedPaths(st), [lane]);
+
+    // The lane slot is reused (lane names AND their paths are recycled) and retained again.
+    mkdirSync(lane, { recursive: true });
+    st.appendEvent("worktree-retained", { worker: "lane-1", issue: 21, worktreePath: lane });
+    releaseVanishedWorktrees(st);
+    assert.deepEqual(releasedPaths(st), [lane], "still on disk — the fresh retention is unresolved");
+
+    rmSync(lane, { recursive: true, force: true });
+    releaseVanishedWorktrees(st);
+    const events = st.eventsSince(RELEASE_SINCE, ["worktree-released"]);
+    assert.equal(events.length, 2, "the second retention gets its own release");
+    assert.equal((events[1]!.payload as { issue: number }).issue, 21, "carrying the LATEST retention's worker/issue");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#210: a retention with a null worktreePath is unmatchable and is never released (the engine must not emit one)", async () => {
+  const st = new State(":memory:");
+  st.appendEvent("worktree-retained", { worker: "lane-null", issue: 30, worktreePath: null });
+  releaseVanishedWorktrees(st);
+  assert.deepEqual(releasedPaths(st), [], "a null path can never be matched — it must never be emitted in the first place");
+
+  // ...and the retention the conductor actually emits always carries one.
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dirty", 31);
+  sup.probes["lane-dirty"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
+  sup.reclaimResults["lane-dirty"] = { worktreePath: "/abs/worktrees/lane-dirty", worktreeRetained: true };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const retained = st.eventsSince(RELEASE_SINCE, ["worktree-retained"]);
+  assert.equal(retained.length, 2);
+  assert.equal((retained[1]!.payload as { worktreePath: string | null }).worktreePath, "/abs/worktrees/lane-dirty");
+  st.close();
+});
+
+test("#210: tick() itself runs the release scan — the strip clears without a dedicated sweep call", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-released-tick-"));
+  const lane = join(dir, "lane-tick");
+  try {
+    const st = new State(":memory:");
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    mkdirSync(lane);
+    st.appendEvent("worktree-retained", { worker: "lane-tick", issue: 40, worktreePath: lane });
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.deepEqual(releasedPaths(st), [], "folder still there");
+    rmSync(lane, { recursive: true, force: true });
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.deepEqual(releasedPaths(st), [lane]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
