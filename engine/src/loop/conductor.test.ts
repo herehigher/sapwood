@@ -2464,6 +2464,72 @@ test("tick DRIVE (#375 regression): a driving lane's fix leg dispatches normally
   }
 });
 
+// ── #375 review round 1 (P1): the CEILING (daily-budget/wall-clock) drain path must use THIS
+// TICK's own OBSERVED DRIVE outcome, never the kill-switch path's heuristic — DRIVE already ran
+// this same tick (it precedes the CEILING section), so what actually happened to a driving lane
+// is known, not merely inferred from its historical fix_rounds. ──────────────────────────────
+
+test("tick: CEILING drain (daily-budget breach) — a driving lane admission-blocked THIS TICK (ceiling blocks its FIXUP spawn) is escalated past the drain window, using OBSERVED evidence (#375 review round 1, P1)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55); // fix_rounds 0 — the admission block is the ONLY reason it's stuck
+  st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // over a tiny daily cap, same UTC day as `clock`
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 } });
+  let clock = new Date("2026-07-20T00:00:00Z");
+  const now = () => clock;
+  const tickOpts = {
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg,
+    mergeGate: gate,
+    now,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+
+  const r1 = await tick(tickOpts);
+  assert.equal(r1.ceilingBreached, true);
+  assert.equal(r1.driven[0]?.kind, "queued");
+  assert.match((r1.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:ceiling/);
+  assert.deepEqual(r1.escalated, []); // just breached — still within the drain window
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+
+  clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, breach still standing
+  const r2 = await tick(tickOpts);
+  assert.deepEqual(r2.escalated, ["lane-a"]);
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
+  assert.match(ev!.payload.reason, /drain-ceiling-admission-blocked:fix-rounds=0/);
+  st.close();
+});
+
+test("tick: CEILING drain (daily-budget breach) — a driving lane in WAIT this tick (fix_rounds>0 from a PAST fix leg, but no NEW fixable finding — its rework is done, just awaiting re-review) is NEVER escalated, even past the drain window: it can still merge for free the instant review lands (#375 review round 1, P1 — the exact false positive the old heuristic would have produced on this path)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 }); // needed a fix leg before, but...
+  st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // daily cap breached
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate:WAIT_REVIEW" }; // ...its fix leg is DONE, just awaiting re-review
+  const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 } });
+  let clock = new Date("2026-07-20T00:00:00Z");
+  const now = () => clock;
+  const tickOpts = { forge, state: st, supervisor: sup, cfg, mergeGate: gate, now };
+
+  await tick(tickOpts); // detect breach
+  clock = new Date(clock.getTime() + 61_000); // past the drain window, breach still standing
+  const r2 = await tick(tickOpts);
+
+  assert.deepEqual(r2.escalated, []); // the OLD heuristic (fix_rounds>0 && dailyBudgetBreached) would wrongly escalate this
+  assert.equal(st.getWorker("lane-a")?.state, "driving"); // untouched — free to merge once review lands
+  assert.deepEqual(forge.labelsAdded, []);
+  st.close();
+});
+
 // ── #75: PAUSE — the gentle tier. Unlike the kill switch, a paused tick does NOT drain or
 // freeze: reclaim + DRIVE (existing lanes' PR review/merge progression) proceed exactly as
 // normal. Only the DISPATCH phase (new-lane creation) is skipped. ──

@@ -342,14 +342,23 @@ export function fixLegAdmissionBlockReason(input: {
 }
 
 /** #375 AC2: is a `driving` lane TERMINAL-for-drain — i.e. can it NEVER make forward progress
- *  while DRIVE stays frozen (an active kill switch skips the whole DRIVE loop, #69) or while
- *  the current ceiling breach persists (the daily-budget/wall-clock drain path shares this same
- *  bounded-drain machinery, drainThenEscalate)? A `driving` lane has no live process — nothing
- *  for supervisor.requestHandoff/reclaim to act on — so unlike `running`/`fixing` lanes it can
- *  only ever be "drained" by forcing it to a terminal state outright. Waiting on one instead
- *  would wedge the bounded drain forever (PLAN.md "drain before kill, never a permanent wedge"),
- *  exactly the dogfood-observed spin (#375: KILL_SWITCH set while a FIXABLE driving lane sat
- *  blocked -> wind-down's `activeWorkers() === 0` loop never terminated).
+ *  while DRIVE stays frozen (an active kill switch skips the whole DRIVE loop entirely, #69)?
+ *  A `driving` lane has no live process — nothing for supervisor.requestHandoff/reclaim to act
+ *  on — so unlike `running`/`fixing` lanes it can only ever be "drained" by forcing it to a
+ *  terminal state outright. Waiting on one instead would wedge the bounded drain forever
+ *  (PLAN.md "drain before kill, never a permanent wedge"), exactly the dogfood-observed spin
+ *  (#375: KILL_SWITCH set while a FIXABLE driving lane sat blocked -> wind-down's
+ *  `activeWorkers() === 0` loop never terminated).
+ *
+ *  #375 review round 1 (P1): this heuristic is for the KILL-SWITCH caller ONLY
+ *  (`DrivingDrainMode`'s `"heuristic"` arm) — it is the only evidence available when DRIVE never
+ *  ran at all this tick. It must NOT be reused for the ceiling/daily-budget/wall-clock drain
+ *  path, where DRIVE already ran THIS SAME tick before the ceiling section: there, a `driving`
+ *  lane with `fixRounds > 0` sitting in WAIT (its fix leg already done, awaiting re-review) can
+ *  still merge for free the instant review lands, and this heuristic cannot see that — it would
+ *  force-escalate a perfectly healthy lane merely for having needed a fix leg in the past. The
+ *  ceiling path instead consults `driveFixBlockedLanes`, the OBSERVED set THIS tick's DRIVE loop
+ *  itself populated (`DrivingDrainMode`'s `"observed"` arm) — ground truth, not an inference.
  *
  *  Two structural, LOCALLY-derivable facts, either sufficient — deliberately NOT a live
  *  gate.driveOne() re-evaluation: a drain path must stay cheap and safe, never a second source
@@ -1027,6 +1036,33 @@ async function escalateUndecidableResume(
   return { kind: "capped", worker: worker.name, issue: worker.issue, attempts };
 }
 
+/** #375 review round 1 (P1): which of the two `drainThenEscalate` callers is asking, and what
+ *  evidence each one actually HAS about a `driving` lane's fix-leg status — these are NOT
+ *  interchangeable, because the two callers see fundamentally different worlds:
+ *
+ *   - `"heuristic"` (the #69 kill-switch gate): tick() returns before DRIVE ever runs under an
+ *     active switch (the whole point of the gate — see its own comment), so there is no live
+ *     information about what a `driving` lane's CURRENT gate is. `dailyBudgetBreached` (a pure,
+ *     forge-free read — safe inside a kill-switch-frozen tick) plus the lane's own durable
+ *     `fix_rounds` is the only evidence available, fed to `drivingLaneTerminalForDrain`'s
+ *     heuristic (see that function's own doc for exactly what it infers and why).
+ *   - `"observed"` (the CEILING/daily-budget/wall-clock path): DRIVE already ran THIS SAME tick,
+ *     before the ceiling section (conductor.ts's DRIVE loop precedes CEILING) — a ceiling breach
+ *     blocks new dispatch/resume/fix-leg-admission, but NOT drive/merge progression, so a
+ *     `driving` lane with `fix_rounds > 0` sitting in WAIT (its fix leg already done, awaiting
+ *     re-review) can still merge for free the instant review lands; DRIVE's own FIXABLE branch
+ *     only re-fires on a NEW finding, never while merely waiting. The `drivingLaneTerminalForDrain`
+ *     heuristic cannot distinguish that from a genuinely-still-blocked lane and would force-
+ *     escalate it — a regression versus pre-#375 behavior, where a ceiling breach let `driving`
+ *     lanes complete naturally via DRIVE. `blockedLanes` is the fix: the EXACT set of lane names
+ *     whose own fixable branch, THIS tick, actually observed a ceiling-caused admission block or
+ *     a genuine fix-rounds-cap exhaustion (populated inline in the DRIVE loop, see
+ *     `driveFixBlockedLanes`) — ground truth, not an inference, so only lanes DRIVE itself just
+ *     proved stuck are ever escalated here. */
+export type DrivingDrainMode =
+  | { mode: "heuristic"; dailyBudgetBreached: boolean }
+  | { mode: "observed"; blockedLanes: ReadonlySet<string> };
+
 /** The bounded drain (PLAN.md Security model: drain before kill, always). Shared by the #69
  *  global kill-switch gate and the #14 cost-ceiling breach path in tick(): record the breach
  *  (first detection only — see State.recordCeilingBreach's INSERT OR IGNORE), ask every
@@ -1037,15 +1073,10 @@ async function escalateUndecidableResume(
  *
  *  #375 AC2: `driving` lanes join the SAME bounded escalation, past the SAME window — but never
  *  the drain-REQUEST step above (no live process, nothing for requestHandoff/reclaim to act on).
- *  A `driving` lane only ever reaches the escalation step, and only when
- *  `drivingLaneTerminalForDrain` says it can never make forward progress on its own (see that
- *  function's own doc): otherwise a healthy MERGE-/WAIT-gated PR would get force-escalated
- *  merely for outliving one ceiling breach. `dailyBudgetBreached` is passed in rather than
- *  derived from `reasons` here — the kill-switch caller's `reasons` is always exactly
- *  `["kill-switch"]` (#69's own contract, unchanged), so it carries no daily-budget signal on
- *  its own; both callers compute it the identical way (evaluateCeiling / a bare
- *  budgetExceeded(dailySpendUsd, dailyBudgetUsd) read — pure, no forge call, safe inside a
- *  kill-switch-frozen tick). */
+ *  A `driving` lane only ever reaches the escalation step, and only when `drivingDrain` (see its
+ *  own doc — the two callers' evidence differs fundamentally) says it can never make forward
+ *  progress on its own: otherwise a healthy MERGE-/WAIT-gated PR would get force-escalated
+ *  merely for outliving one ceiling breach. */
 async function drainThenEscalate(
   forge: IForge,
   state: State,
@@ -1054,7 +1085,7 @@ async function drainThenEscalate(
   reasons: CeilingReason[],
   nowDate: Date,
   iso: () => string,
-  dailyBudgetBreached: boolean,
+  drivingDrain: DrivingDrainMode,
 ): Promise<{ drainRequested: string[]; escalated: string[] }> {
   state.recordCeilingBreach(reasons, nowDate);
   const drainRequested: string[] = [];
@@ -1100,20 +1131,27 @@ async function drainThenEscalate(
       escalated.push(w.name);
     }
     // #375 AC2: a `driving` lane whose only next DRIVE action is a fresh fix leg that can never
-    // be admitted right now (fix-capped, or daily-budget-blocked — round budget is no longer in
-    // the mix at all per #375 item 1) is drained here too, past this SAME window, exactly like
-    // DRIVE's own fix-rounds-cap branch would escalate it (#246) — just one drain window early,
-    // since DRIVE itself never gets to run while this breach/kill-switch stands. Reuses
+    // be admitted right now (fix-capped, or budget-blocked) is drained here too, past this SAME
+    // window, exactly like DRIVE's own fix-rounds-cap branch would escalate it (#246) — just one
+    // drain window early on the kill-switch path (DRIVE never gets to run while the switch
+    // stands), or confirmed by THIS SAME tick's own DRIVE pass on the ceiling path (see
+    // `DrivingDrainMode`'s own doc for why the two callers cannot share one predicate). Reuses
     // escalateNeedsHuman outright (same label-then-terminal-upsert-then-event contract, same
     // gated-reentry comment for a repeat escalation) rather than a second inline copy of it.
     for (const w of state.drivingWorkers()) {
       const fixRounds = w.fix_rounds ?? 0;
-      if (!drivingLaneTerminalForDrain(fixRounds, cfg.lanes.prFixCap, dailyBudgetBreached)) continue;
+      const terminal =
+        drivingDrain.mode === "heuristic"
+          ? drivingLaneTerminalForDrain(fixRounds, cfg.lanes.prFixCap, drivingDrain.dailyBudgetBreached)
+          : drivingDrain.blockedLanes.has(w.name);
+      if (!terminal) continue;
       if (w.pr == null) continue; // a PR-less driving row is DRIVE's own fail-safe, not drain's
       const reason =
         fixRounds >= cfg.lanes.prFixCap
           ? `drain-fix-rounds-capped:${fixRounds}/${cfg.lanes.prFixCap}`
-          : `drain-daily-budget-blocked:fix-rounds=${fixRounds}`;
+          : drivingDrain.mode === "heuristic"
+            ? `drain-daily-budget-blocked:fix-rounds=${fixRounds}`
+            : `drain-ceiling-admission-blocked:fix-rounds=${fixRounds}`;
       await escalateNeedsHuman(forge, state, cfg, w, w.pr, reason, iso);
       escalated.push(w.name);
     }
@@ -1897,7 +1935,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       ["kill-switch"],
       now(),
       iso,
-      killSwitchDailyBudgetBreached,
+      // #375 review round 1 (P1): DRIVE never runs under an active kill switch (this branch
+      // returns before it) — the heuristic is the ONLY evidence this caller can ever have. See
+      // `DrivingDrainMode`'s own doc for why the ceiling-path caller below must NOT share it.
+      { mode: "heuristic", dailyBudgetBreached: killSwitchDailyBudgetBreached },
     );
     return {
       reclaimed,
@@ -2286,6 +2327,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   down, in deps.mergeGate.driveOne (merge-driver.ts), invoked ONLY from here. Omitted
   //   mergeGate -> driving lanes stay driving with no gate/merge activity (pre-#13 behavior).
   const driven: DrivenOutcome[] = [];
+  // #375 review round 1 (P1): lanes whose OWN fixable branch, THIS tick, actually hit a
+  // ceiling-caused admission block or a genuine fix-rounds-cap exhaustion — the OBSERVED truth
+  // DRIVE just produced, as opposed to the `drivingLaneTerminalForDrain` heuristic the
+  // kill-switch path is stuck guessing with (DRIVE never runs there at all). Consulted only by
+  // the CEILING section's own `drainThenEscalate` call, below, once this tick's DRIVE loop has
+  // finished populating it — see that call site's own comment for why the two callers must NOT
+  // share one predicate.
+  const driveFixBlockedLanes = new Set<string>();
   // #375 (PM adjudication, option (a)-minimal): fix legs for an ALREADY-OPEN PR are EXEMPT
   // from cost.roundBudgetUsd — round budget paces NEW dispatch only (see the DISPATCH phase's
   // own `overBudget` below, a completely separate read against the SAME config key; that one
@@ -2555,6 +2604,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               const reason = `fix-leg-admission-blocked:${admissionBlock}`;
               state.appendEvent("fix-leg-dispatch-blocked", { worker: w.name, issue: w.issue, pr, blockReason: admissionBlock });
               driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason });
+              // #375 review round 1 (P1): ONLY a ceiling-caused block belongs in the observed
+              // set the CEILING section's drain consults below — `paused`/`park`/`run-spend-stop`
+              // are separate, typically human-controlled or self-healing conditions, unrelated to
+              // the daily-budget/wall-clock breach that triggers that drain at all (first-match-
+              // wins in fixLegAdmissionBlockReason means a paused+breached tick reports "paused"
+              // here, correctly excluding it — that lane isn't stuck for a BUDGET reason).
+              if (admissionBlock === "ceiling") driveFixBlockedLanes.add(w.name);
               break;
             }
             try {
@@ -2587,6 +2643,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // can no longer wedge a fix leg, and the daily-budget/pause/park/run-spend-stop
           // reasons are handled entirely by the admission-block check above, which leaves the
           // lane `driving`+queued without ever reaching `action === "ESCALATE"` at all.)
+          // #375 review round 1 (P1): this IS the observed, this-tick truth that the lane is
+          // fix-rounds-capped — add it to the CEILING section's drain set unconditionally
+          // (regardless of which sub-branch below it falls into: labeled+commented+terminal, or
+          // stuck `driving`+queued on a transient forge-write failure). A write-failure retry
+          // would normally converge on its own next tick, but if THIS SAME tick also happens to
+          // be past the ceiling drain window, there is no reason to make it wait an extra tick
+          // for what DRIVE already proved true right here.
+          driveFixBlockedLanes.add(w.name);
           // Cap exhausted. Hard rule (#69/#147 forge-before-terminal-upsert): the needs-human
           // label AND the escalation comment (naming rounds spent + the standing signal) land
           // BEFORE the terminal upsert. A label-write failure leaves the row untouched (still
@@ -2654,10 +2718,6 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   let drainRequested: string[] = [];
   let escalated: string[] = [];
   if (ceilingBreached) {
-    // #375 AC2: `ceilingReasons` already carries "daily-budget" when it's the live cause (it's
-    // evaluateCeiling's own output, evaluated fresh a few lines up) — no separate read needed
-    // here, unlike the kill-switch caller above (which never reaches evaluateCeiling at all).
-    const dailyBudgetBreached = ceilingReasons.includes("daily-budget");
     ({ drainRequested, escalated } = await drainThenEscalate(
       forge,
       state,
@@ -2666,7 +2726,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       ceilingReasons,
       nowDate,
       iso,
-      dailyBudgetBreached,
+      // #375 review round 1 (P1): DRIVE already ran THIS tick (it precedes this CEILING
+      // section) — the heuristic `drivingLaneTerminalForDrain` uses on the kill-switch path
+      // would false-positive here (a fix-capped-from-history lane sitting in WAIT_REVIEW can
+      // still merge for free the moment review lands; DRIVE's ESCALATE only fires on a NEW
+      // finding). Pass the OBSERVED set instead — lane names whose own fixable branch, THIS
+      // tick, actually hit a ceiling-caused admission block or a genuine cap exhaustion (see
+      // `driveFixBlockedLanes`'s own doc, and `DrivingDrainMode`'s).
+      { mode: "observed", blockedLanes: driveFixBlockedLanes },
     ));
   } else {
     // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / kill switch
