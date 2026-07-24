@@ -1995,19 +1995,23 @@ test("runRounds standby: an outstanding pending-rollback row counts as work — 
   state.close();
 });
 
-test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-standby ends the run within one backoff step — never an eternal probe loop (Codex P2 on PR #150)", async () => {
+test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY before standby ever engages ends the run immediately — never an eternal probe loop (Codex P2 on PR #150)", async () => {
   const forge = new FakeForge();
-  forge.ready = []; // empty board — standby engages after the idle first round
-  // Loop-top checks before rounds 1 and 2: 1 open (no hit); the post-wake re-check INSIDE
-  // standby: 0 (hit). cfg.round.milestone is unset, so neither executing nor the probe consumes
-  // any of these counts — they all belong to checkFinalMilestone.
+  forge.ready = []; // empty board — standby would otherwise engage after the idle first round
+  // Loop-top check before round 1: 1 open (no hit). Loop-top check before round 2's gate: 1
+  // open (no hit). #374 review (Codex sol-high verify-pass finding 2, P2): waitForDispatchClear's
+  // OWN success/fast-path return (nothing ever parked here) never re-checks internally — the
+  // call site's UNCONDITIONAL post-return re-check is what catches the completed milestone here,
+  // BEFORE standby ever gets a chance to engage (a strict improvement over the pre-finding-2
+  // behavior, which only noticed this after standby's own first backoff wait).
   forge.milestoneOpenCounts = [1, 1, 0];
   let stop = (): void => {};
   const sleepCalls: number[] = [];
   const sleep = async (ms: number): Promise<void> => {
     sleepCalls.push(ms);
-    // Safety net: if the fix regresses (final stop never re-checked mid-standby), the loop would
-    // probe forever — bail via signal so the stoppedBy assertion below fails instead of hanging.
+    // Safety net: if the fix regresses (final stop never re-checked after the recovery-clear
+    // path), the loop would probe forever — bail via signal so the stoppedBy assertion below
+    // fails instead of hanging.
     if (sleepCalls.length >= 4) stop();
   };
   const deps = baseDeps({
@@ -2023,10 +2027,16 @@ test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-stan
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
-  assert.equal(result.rounds, 1, "only the idle first round — the run ended from inside standby");
-  // Sleep 1 = the idle round's throttle wait; sleep 2 = exactly ONE backoff step before the
-  // completed milestone was noticed.
-  assert.deepEqual(sleepCalls, [5000, 5000]);
+  assert.equal(result.rounds, 1, "only the idle first round — round 2's gate found the hit before standby ever ran");
+  // Sleep 1 = the idle round's own per-tick throttle wait (unrelated to standby) — round 2's gate
+  // resolves the milestone hit the INSTANT waitForDispatchClear returns, with no further wait at
+  // all: standby never engages, so there is no second (backoff) sleep call this time.
+  assert.deepEqual(sleepCalls, [5000]);
+  assert.equal(
+    deps.state.eventsAfterId(0, ["standby-wait"]).length,
+    0,
+    "standby never engaged — the recovery-clear re-check resolved it first",
+  );
   deps.state.close();
 });
 
@@ -2391,7 +2401,19 @@ function mkFullyDegradingPeripherals(log: Array<{ phase: PeripheralPhase; marker
       outcome: "failed",
       session: `arch-${round_id}`,
     })),
-    plan_review: degrade("plan_review", "plan-review-escalated", (round_id) => ({ round_id, issue: 1, reason: "session failed twice" })),
+    // #374 review (Codex sol-high verify-pass finding 3, P1): `origin: "session-failure"` is
+    // REQUIRED now — round-artifact.ts's assembler only counts a plan-review-escalated event
+    // toward degradedPhases when the emitter tagged it as a genuine session failure (never a
+    // legitimate cycle-exhausted escalation, and never a payload with no origin at all — see
+    // round-artifact.ts's own doc). Omitting it here would silently stop this fixture from ever
+    // registering as a degraded phase, breaking every test built on mkFullyDegradingPeripherals's
+    // "all five phases genuinely failed" premise.
+    plan_review: degrade("plan_review", "plan-review-escalated", (round_id) => ({
+      round_id,
+      issue: 1,
+      reason: "session failed twice",
+      origin: "session-failure",
+    })),
     harvesting: degrade("harvesting", "harvest-degraded", (round_id) => ({ round_id, outcome: "failed", session: `harvest-${round_id}` })),
     retro: degrade("retro", "retro-degraded", (round_id) => ({ round_id, outcome: "failed", session: `retro-${round_id}` })),
   };
@@ -2535,6 +2557,67 @@ test("runRounds #374 review (Codex sol-high verify-pass finding 2, P2): stop.onM
   assert.equal(result.rounds, 1, "only round 1 closed — round 2 never opened once the milestone was noticed mid-wait");
   assert.equal(state.isParked(), true, "the run stopped WITHOUT the park ever clearing — never waited for recovery");
   state.close();
+});
+
+test("runRounds #374 review (Codex sol-high verify-pass finding 2, P2): a milestone that completes EXACTLY on the recovery-CLEAR iteration (the green probeLlmReachable ping that arms round 3 back open) still stops the run — never opens the pointless post-recovery round", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const degradingPeripherals = mkFullyDegradingPeripherals(log, state);
+    let probeCalls = 0;
+    // Same fixture as "the round-opening gate resumes via the EXISTING probe path" above: rounds
+    // 1-2 fully degrade -> the empty-spin breaker parks (llm); the round-opening gate's own probe
+    // fails twice, then succeeds on the 3rd attempt, which is exactly waitForDispatchClear's
+    // SUCCESS/fast-path return (ceiling clear + park clear/green-light, line ~884 in round.ts) —
+    // the ONE iteration that does NOT run the function's own internal final-stop re-check (that
+    // check deliberately only fires on an iteration about to actually WAIT, never on this
+    // already-clear path — see its doc). #374 review (Codex sol-high verify-pass finding 2, P2):
+    // tying countOpenIssuesInMilestone's answer to the SAME `probeCalls > 2` condition the probe
+    // itself uses means the milestone completes AT THE EXACT SAME MOMENT recovery clears —
+    // precisely the race this finding closes, rather than merely "sometime before or after".
+    let simulatedMs = Date.parse("2026-01-01T00:00:00.000Z");
+    const now = (): Date => new Date(simulatedMs);
+    const sleep = async (ms: number): Promise<void> => {
+      simulatedMs += ms;
+    };
+    forge.countOpenIssuesInMilestone = async (): Promise<number> => (probeCalls > 2 ? 0 : 1);
+    const deps = baseDeps({
+      forge,
+      state,
+      now,
+      sleep,
+      tickIntervalSec: 1,
+      cfg: mkCfg({
+        round: { emptySpin: { consecutiveDegradedRoundsThreshold: 2 } },
+        envFailure: { probeBackoffBaseSec: 1, probeBackoffMaxSec: 5 },
+      }),
+      peripherals: degradingPeripherals,
+      stop: { onMilestoneComplete: "M4" },
+      probeLlmReachable: async () => {
+        probeCalls++;
+        return probeCalls > 2;
+      },
+    });
+    const stopSafety = boundedStopOnPhase(deps, 15);
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.equal(result.stoppedBy, "stop-condition");
+    assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
+    assert.equal(result.rounds, 2, "round 3 NEVER opened — the milestone hit was caught the instant recovery cleared");
+    // The probe genuinely succeeded (recovery WAS real) — this proves the run stopped because of
+    // the milestone catch, not because the probe itself somehow never got a green light.
+    assert.ok(probeCalls >= 3, "the gate actually re-probed until it got a green light");
+    const parkProbeEvents = state.eventsAfterId(0, ["park-probe"]).filter((e) => (e.payload as { source?: string }).source === "llm");
+    assert.ok(
+      parkProbeEvents.some((e) => (e.payload as { success?: boolean }).success === true),
+      "a successful park-probe event was still recorded — recovery cleared, but the run stopped anyway",
+    );
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── #212: round-pool dispatch scoping, round-close label cleanup, removeLabel containment ────

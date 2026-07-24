@@ -1791,9 +1791,28 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // path needs; no `Issue` object is required for it.
       const recoveryOnlyNumbers = [...triageJournal.decisions.keys()].filter((n) => !candidatesByNumber.has(n));
       const triageWorkNumbers = [...triageCandidates.map((issue) => issue.number), ...recoveryOnlyNumbers];
+      // #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a journal-resumption loss
+      // the finding-1 canary fix itself introduced): once true, the REMAINING candidates that
+      // would need a FRESH session are skipped — but a journal resumption (an earlier attempt
+      // THIS round already durably recorded a decision for) dispatches NO session at all, so it
+      // must still execute even after the park is observed; skipping it too would permanently
+      // lose its still-pending comment/concern/receipts, since no later pass ever re-dispatches a
+      // session for a number the journal already has a decision for (see `resumed` below —
+      // triageProgress only reads THIS round's decisions, and the phase marker persists at this
+      // function's return regardless). See the per-iteration check just below the loop line for
+      // where this is consulted, and the `sawEnvPark`-setting fresh-dispatch branch further down
+      // for where it gets set.
+      let envParkedThisPass = false;
       for (let triageIdx = 0; triageIdx < triageWorkNumbers.length; triageIdx++) {
         const number = triageWorkNumbers[triageIdx]!;
         const resumed = triageJournal.decisions.get(number);
+        // A resumption dispatches nothing — it is always safe (and REQUIRED, see the doc above)
+        // to keep processing it even once envParkedThisPass is true. Only a candidate that would
+        // need a brand-new session is skipped here.
+        if (envParkedThisPass && !resumed) {
+          alignSummaryTriaged.push({ issue: number, drafted: false });
+          continue;
+        }
         let validated: TriageValidation;
         let expectedHash: string;
         let attempt: number;
@@ -1803,11 +1822,13 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         // fresh session dispatch comes back env-classified — NEVER pre-checked against "a park
         // row merely exists" before dispatching. The first (and every) candidate always gets a
         // real attempt; only once one of them actually observes a classified quota/429 does the
-        // loop stop for the REST. Gating on pre-existing park state instead would let an ARMED
-        // recovery round (round.ts's green-ping canary, which only arms the round to open — it
-        // never clears the episode outright) skip every candidate before any of them had a
-        // chance to prove recovery, wedging the engine parked forever. A resumed (durably-
-        // decided, no fresh session) candidate can never set this — it dispatches nothing.
+        // loop start skipping FRESH candidates for the rest of this pass (journal resumptions are
+        // exempt — see envParkedThisPass's own doc above). Gating on pre-existing park state
+        // instead would let an ARMED recovery round (round.ts's green-ping canary, which only
+        // arms the round to open — it never clears the episode outright) skip every candidate
+        // before any of them had a chance to prove recovery, wedging the engine parked forever. A
+        // resumed (durably-decided, no fresh session) candidate can never set this — it
+        // dispatches nothing.
         let sawEnvPark = false;
 
         if (resumed) {
@@ -1965,11 +1986,17 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           // to do: no write, no success comment, the candidate re-matches next round.
           alignSummaryTriaged.push({ issue: number, drafted: false });
           if (sawEnvPark) {
+            envParkedThisPass = true;
+            // #374 review (Codex sol-high verify-pass finding 1, P1): never a `break` — the
+            // remaining FRESH candidates are skipped (via the per-iteration check at the top of
+            // this loop, from the NEXT iteration onward), but any remaining JOURNAL RESUMPTION
+            // still executes this same pass (see envParkedThisPass's own doc above for why that
+            // distinction is load-bearing).
+            const remainingFresh = triageWorkNumbers.slice(triageIdx + 1).filter((n) => !triageJournal.decisions.has(n)).length;
             (deps.log ?? console.error)(
-              `[sapwood:po] round ${roundId}: llm park active — skipping ${triageWorkNumbers.length - triageIdx - 1} ` +
-                `remaining triage candidate(s) this pass`,
+              `[sapwood:po] round ${roundId}: llm park active — skipping ${remainingFresh} remaining FRESH ` +
+                `triage candidate(s) this pass (journal resumptions, if any, still run)`,
             );
-            break;
           }
           continue;
         }

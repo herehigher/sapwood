@@ -1348,13 +1348,22 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           if (signalled) {
             return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
           }
-          // #374 review (Codex sol-high verify-pass finding 2, P2): waitForDispatchClear now
-          // returns EARLY (before ceiling/park actually clear) the instant a final stop condition
-          // fires inside its own wait loop — and even when it returns because ceiling/park
-          // genuinely cleared, the SAME wake could be the moment a milestone completed
-          // externally. Either way, a hit here must stop the run cleanly BEFORE standby or
-          // startRound ever run — never silently fall through into opening a pointless
-          // post-recovery round.
+          // #374 review (Codex sol-high verify-pass finding 2, P2): UNCONDITIONALLY refresh the
+          // final-stop check here, every time, regardless of which path waitForDispatchClear
+          // returned by. Its own internal re-check (see its doc) only fires on an iteration about
+          // to actually sit out a wait — deliberately NOT on the fast/already-clear success path
+          // (line ~884), so a never-parked run's common case stays cheap (no redundant network
+          // call). That means the EXACT iteration where ceiling/park recovery clears — the
+          // success path itself — never re-checks internally: a milestone that completed
+          // during/around that very recovery probe would otherwise go unnoticed until AFTER a
+          // pointless round already opened. Re-running checkFinalSpend/checkFinalMilestone HERE
+          // closes that gap for free in every OTHER case: both are no-ops (an early `if
+          // (finalStopHit) return` inside each) the instant finalStopHit is already set from
+          // inside the loop's own bottom-of-loop check, so this only ever does REAL work in the
+          // one case that matters — the recovery-clear iteration, where finalStopHit was never
+          // set internally at all.
+          checkFinalSpend();
+          await checkFinalMilestone();
           if (finalStopHit) {
             return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
           }
