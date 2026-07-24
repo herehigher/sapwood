@@ -15,6 +15,7 @@
 // mid-flight, so "stop after the in-flight tick completes" falls out of the loop shape rather
 // than needing its own cancellation machinery.
 import { type TickDeps, type TickResult, tick } from "./conductor.js";
+import { reconcileEscalations } from "./escalation-reconcile.js";
 
 /** How the loop decides to stop ticking. Default ("forever") is the normal daemon mode — only a
  *  signal stops it. "once": run exactly one tick then stop (scripting / cron / a manual poke).
@@ -252,6 +253,15 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
         result = await tick(tickDeps);
         ticks++;
         deps.onTick?.(result);
+        // #295 (Codex P1, PR #371): the escalation-resolution sweep runs on BOTH supported
+        // drivers — round-defaults.ts hooks it once per round at aligning; this driver has no
+        // round cadence, so per-tick is its natural granularity (same cost class as the other
+        // per-tick forge reads here: one read per OPEN escalation, and zero when none are open
+        // — the common case). Without this, `engine.driver: tick` never appends
+        // escalation-resolved and every no-clear escalation is a permanent dashboard item.
+        // Never throws (contained internally, see its own doc) — inside this try only so an
+        // impossible throw still lands in the structured tick-error path, not a crash.
+        await reconcileEscalations(deps.forge, deps.state, deps.cfg, deps.log);
       } catch (e) {
         tickErrors++;
         // Structured + durable — never a silent swallow. Guarded itself: if even the event
