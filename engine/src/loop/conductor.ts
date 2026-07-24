@@ -2363,7 +2363,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // absent observation (the paths that never wrap one) is a no-op, never a release, and the
       // gate outcome below is untouched either way.
       if (outcome.holdObservation) {
-        const lastHold = state.lastHoldEvent(w.name);
+        // #294 (Codex P2): scoped to (worker, pr) — see lastHoldEvent's own doc for the
+        // lane-repointing rationale.
+        const lastHold = state.lastHoldEvent(w.name, pr);
         if (outcome.holdObservation.held) {
           if (lastHold !== "pr-held") {
             state.appendEvent("pr-held", { worker: w.name, issue: w.issue, pr, label: outcome.holdObservation.label });

@@ -356,6 +356,23 @@ export class MergeDriver {
       return { kind: "queued", pr, reason: `gate-data-unavailable: ${String(e)}` };
     }
 
+    // #294 (Codex P2, PR #372): the hold observation is constructed HERE, immediately after the
+    // successful PR-data read, and attached to every subsequent return — not only the final
+    // withSignals wrap — so a long-lived early-return episode (a held PR that is also merge-
+    // conflicted, or one parked in the trigger/instruction paths) still reports its label and
+    // the conductor can emit pr-held/pr-released for it. The two mixed-read queues below
+    // (state-mismatch / head-mismatch) are deliberately left bare: same "never derive a signal
+    // from mixed reads" stance the gate itself takes, and both are one-tick transients — an
+    // absent observation is a no-op at the conductor, never a release.
+    // Exact case-insensitive identity (#248 G3), reported in on-PR casing (see the
+    // DriveOutcome.holdObservation doc above).
+    const heldLabel = data.labels.find((l) => cfg.escalation.holdLabels.some((h) => h.toLowerCase() === l.toLowerCase()));
+    const holdObservation: NonNullable<DriveOutcome["holdObservation"]> = {
+      held: heldLabel != null,
+      ...(heldLabel != null ? { label: heldLabel } : {}),
+    };
+    const observed = (o: DriveOutcome): DriveOutcome => ({ ...o, holdObservation });
+
     // An ALREADY-MERGED PR is terminal success, not human work (Codex PR #42 P2): in
     // produce-pr-and-stop mode the lane deliberately stays driving until a human merges, so
     // the next gate read seeing MERGED is the designed happy path — collapsing it to HUMAN
@@ -365,7 +382,7 @@ export class MergeDriver {
     // territory. Checked on EITHER read: one may predate the merge, and this must win over
     // the head-mismatch queue below (a merged PR never re-gates).
     if (status.state === "MERGED" || data.state === "MERGED") {
-      return { kind: "merged", pr, headOid: status.headOid };
+      return observed({ kind: "merged", pr, headOid: status.headOid });
     }
 
     // #246 review round 1 (C4, Codex sol-high PR #264 round 2): the two reads can disagree on
@@ -394,22 +411,22 @@ export class MergeDriver {
     // is spent on a PR that must be human-adjudicated.
     const instructionEscalation = await escalateInstructionPathChanges({ forge, pr, labels: data.labels, cfg });
     if (instructionEscalation.kind === "unavailable") {
-      return { kind: "queued", pr, reason: instructionEscalation.reason };
+      return observed({ kind: "queued", pr, reason: instructionEscalation.reason });
     }
     if (instructionEscalation.kind === "latched") {
       // The latch cannot distinguish sapwood's own #292 label write from a human-applied label,
       // and need not: both are human territory. Conductor escalation handling is idempotent.
-      return { kind: "needs-human", pr, reason: "gate:HUMAN:instruction-path-latch" };
+      return observed({ kind: "needs-human", pr, reason: "gate:HUMAN:instruction-path-latch" });
     }
     if (instructionEscalation.kind === "escalated") {
-      return {
+      return observed({
         kind: "needs-human",
         pr,
         reason:
           instructionEscalation.reason === "instruction-path-list-incomplete"
             ? `gate:HUMAN:${instructionEscalation.reason}`
             : `gate:HUMAN:instruction-path-change:${instructionEscalation.matchedPaths.join(",")}`,
-      };
+      });
     }
 
     // #270: sense conflicts before triggering or evaluating review. A born-conflicted PR has
@@ -429,12 +446,12 @@ export class MergeDriver {
         holdLabels: cfg.escalation.holdLabels,
         prFixCap: cfg.lanes.prFixCap,
       });
-      if (conflictGate === "WAIT") return { kind: "queued", pr, reason: "gate-pending:merge-conflict-held" };
-      if (conflictGate === "HUMAN") return { kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" };
+      if (conflictGate === "WAIT") return observed({ kind: "queued", pr, reason: "gate-pending:merge-conflict-held" });
+      if (conflictGate === "HUMAN") return observed({ kind: "needs-human", pr, reason: "gate:HUMAN:merge-conflict" });
       if (cfg.merge.mode === "produce-pr-and-stop") {
-        return { kind: "stopped", pr, reason: "gates-passed:FIXABLE:merge-conflict" };
+        return observed({ kind: "stopped", pr, reason: "gates-passed:FIXABLE:merge-conflict" });
       }
-      return { kind: "fixable", pr, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" };
+      return observed({ kind: "fixable", pr, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" });
     }
 
     // #55 P1-B: the head is now KNOWN (both reads agree) — this is the one place that can
@@ -470,9 +487,9 @@ export class MergeDriver {
         // crash the whole tick loop. Retried next tick. If the trigger comment DID post but the
         // pin write failed, the retry re-posts a duplicate trigger comment (harmless) rather
         // than ever counting comments against an unrecorded pin — fail-closed either way.
-        return { kind: "queued", pr, reason: `review-trigger-failed: ${String(e)}` };
+        return observed({ kind: "queued", pr, reason: `review-trigger-failed: ${String(e)}` });
       }
-      return { kind: "queued", pr, reason: "review-triggered" };
+      return observed({ kind: "queued", pr, reason: "review-triggered" });
     }
 
     // #147 P1 (Codex PR #151, rounds 1+2): re-entry review-freshness cutoff — TWO-PHASE.
@@ -567,15 +584,13 @@ export class MergeDriver {
         fallbackConfigured: (this.deps.fallbackReviewers?.length ?? 0) > 0,
         failoverAfterSec: cfg.reviewer.failoverAfterSec,
       });
-      // #294: which PR label (if any) matches a configured hold label — exact case-insensitive
-      // identity, the same G3 rule deriveGate's own holdLabels check uses; never substring.
-      // Reported in on-PR casing so the event payload names the label a human actually applied.
-      const heldLabel = data.labels.find((l) => cfg.escalation.holdLabels.some((h) => h.toLowerCase() === l.toLowerCase()));
       return {
         ...outcome,
         ...(resolved.transition ? { reviewerTransition: resolved.transition } : {}),
         ...(silenceSec != null ? { reviewSilenceEscalation: { head: data.headOid, silenceSec } } : {}),
-        holdObservation: { held: heldLabel != null, ...(heldLabel != null ? { label: heldLabel } : {}) },
+        // #294: the shared per-pass observation, computed once right after the PR-data read
+        // (see `holdObservation` above) — identical here and on every early-return site.
+        holdObservation,
       };
     };
 

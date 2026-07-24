@@ -1518,8 +1518,8 @@ test("tick DRIVE (#294): two lanes hold and release independently — one lane's
   gate.outcomes[55] = { kind: "queued", pr: 55, reason: "q", holdObservation: { held: true, label: "sapwood:hold" } };
   gate.outcomes[56] = { kind: "queued", pr: 56, reason: "q", holdObservation: { held: false } };
   await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
-  assert.equal(st.lastHoldEvent("lane-a"), "pr-held");
-  assert.equal(st.lastHoldEvent("lane-b"), null, "lane-b was never held — lane-a's event must not speak for it");
+  assert.equal(st.lastHoldEvent("lane-a", 55), "pr-held");
+  assert.equal(st.lastHoldEvent("lane-b", 56), null, "lane-b was never held — lane-a's event must not speak for it");
 
   // Now lane-b is held while lane-a stays held: lane-b announces, lane-a stays deduped.
   gate.outcomes[56] = { kind: "queued", pr: 56, reason: "q", holdObservation: { held: true, label: "sapwood:hold" } };
