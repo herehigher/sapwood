@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LoopEvent } from "../api/types.ts";
-import { HeroStage } from "./stage.tsx";
+import { dropletPoint, HeroStage } from "./stage.tsx";
 import {
   foldEvents,
   type HeroState,
@@ -12,7 +12,9 @@ import {
   planTransitions,
   sendBackReason,
   type Transition,
+  transitionOrigin,
   withLaneCount,
+  withLanePrs,
 } from "./state.ts";
 
 let seq = 0;
@@ -46,16 +48,51 @@ test("§6 `dispatched`: droplet leaves the backlog for a lane channel, lane ligh
   assert.deepEqual(state.pool, [88]);
 });
 
-test("§6 lane `running → driving`: droplet parks at the checkpoint pair with a PR tag", () => {
+test("§6 lane `running → driving`: droplet parks at the checkpoint pair", () => {
+  // The engine's real payload — `{ worker, issue, next }`, no `pr`: conductor.ts stores the
+  // PR on the worker row and the event carries only the transition. The tag comes from the
+  // live lane overlay below, never from an invented payload field.
   const { state, transitions } = run([
     ev("dispatched", { worker: "w1", issue: 86 }),
-    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING" }),
   ]);
 
   assert.deepEqual(kinds(transitions), ["dispatch", "to-checkpoint"]);
   assert.equal(droplet(state, 86)?.at, "checkpoint");
-  assert.equal(droplet(state, 86)?.pr, 97);
   assert.equal(state.lanes[0]?.phase, "driving");
+});
+
+test("the PR tag comes from the live lane overlay, since `reclaim-done` carries no PR number", () => {
+  // §6 wants the droplet to emerge "carrying a PR tag", but no *event* holds the number at
+  // that moment. `/api/loop/state`'s lane rows do — §6 names /state as the live overlay — so
+  // the tag is applied at render time, leaving the fold pure and replay-honest.
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 86 }), ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING" })]);
+  assert.equal(droplet(state, 86)?.pr, null);
+  assert.match(markup(state), /data-issue="86"[^>]*>.*?⊙ 86/s);
+
+  const tagged = withLanePrs(state, [{ lane: "w1", pr: 97 }]);
+  assert.equal(droplet(tagged, 86)?.pr, 97);
+  assert.match(markup(tagged), /⤳ 97/);
+
+  // The overlay never invents or overwrites: no lane PR leaves the droplet as it was, and a
+  // number the events already established wins over a stale lane row.
+  assert.equal(droplet(withLanePrs(state, [{ lane: "w1", pr: null }]), 86)?.pr, null);
+  assert.equal(droplet(withLanePrs(tagged, [{ lane: "w1", pr: 12 }]), 86)?.pr, 97);
+  // …and with nothing to apply it returns the same object, so React skips the re-render.
+  assert.equal(withLanePrs(state, []), state);
+});
+
+test("in replay the PR tag arrives with the first PR-bearing event", () => {
+  // No /state overlay exists in replay, so the tag has to come from the event stream. Every
+  // later drive event carries `pr` — the droplet picks it up then and keeps it.
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING" }),
+    ev("drive-queued", { worker: "w1", issue: 86, pr: 97, reason: "queued" }),
+  ]);
+
+  assert.equal(droplet(state, 86)?.pr, 97);
+  assert.equal(droplet(state, 86)?.at, "checkpoint");
 });
 
 test("§6: the checkpoint pair is one waiting state — never per-gate progress", () => {
@@ -180,6 +217,56 @@ test("§6 `handoff`: droplet folds back into the backlog with a progress badge",
   assert.match(markup(state), /saved for a successor/);
 });
 
+test("a rescued `reclaim-failed` is a recovery, not a failure — it drives on", () => {
+  // conductor.ts rescues a clean-but-failed lane that has a PR: the worker row goes to
+  // `driving` and the event carries `next: "DRIVING"`. Marking that failed would leave a ✕
+  // on a PR that is alive and heading for review.
+  const { state, transitions } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-failed", { worker: "w1", issue: 86, next: "DRIVING" }),
+  ]);
+
+  assert.deepEqual(kinds(transitions), ["dispatch", "to-checkpoint"]);
+  assert.equal(droplet(state, 86)?.failed, false);
+  assert.equal(droplet(state, 86)?.at, "checkpoint");
+  assert.equal(state.lanes[0]?.phase, "driving");
+  assert.doesNotMatch(markup(state), /✕/);
+});
+
+test("a rescued `reclaim-dead` is a recovery too — flagged by `rescued`, not `next`", () => {
+  // The reclaim-dead payload is `{ worker, issue, rescued }` — no `next` field at all, so the
+  // recovery test has to read `rescued`.
+  const { state, transitions } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-dead", { worker: "w1", issue: 86, rescued: true }),
+  ]);
+
+  assert.deepEqual(kinds(transitions), ["dispatch", "to-checkpoint"]);
+  assert.equal(droplet(state, 86)?.failed, false);
+  assert.equal(state.lanes[0]?.phase, "driving");
+
+  // …and the un-rescued branch of the same kind stays a failure.
+  const dead = run([ev("dispatched", { worker: "w1", issue: 86 }), ev("reclaim-dead", { worker: "w1", issue: 86, rescued: false })]);
+  assert.equal(droplet(dead.state, 86)?.failed, true);
+});
+
+test("a droplet that recovers loses its ✕ — the mark never outlives the failure", () => {
+  // The failure latch used to be permanent: nothing cleared it, so a lane that failed, got
+  // re-dispatched and merged still rendered ✕ beside a merged PR.
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-failed", { worker: "w1", issue: 86, next: "ESCALATE" }),
+    ev("dispatched", { worker: "w2", issue: 86 }),
+    ev("reclaim-done", { worker: "w2", issue: 86, next: "DRIVING" }),
+    ev("merged", { worker: "w2", issue: 86, pr: 97 }),
+  ]);
+
+  assert.equal(droplet(state, 86)?.failed, false);
+  assert.equal(droplet(state, 86)?.at, "trunk");
+  assert.equal(state.rings, 1);
+  assert.doesNotMatch(markup(state), /✕/);
+});
+
 test("§6 failure kinds stop the droplet with a static ✕ — no lane left lit", () => {
   for (const kind of ["reclaim-failed", "reclaim-dead", "rollback-escalated"]) {
     const { state, transitions } = run([
@@ -221,6 +308,55 @@ test("§6 `ceiling-escalated` / PAUSE / kill switch dim the stage", () => {
   for (const engine of ["paused", "winding-down", "stopping", "stopped"] as const) {
     assert.equal(isStageDimmed(calm, engine), true, engine);
   }
+});
+
+// ── Travel origin ─────────────────────────────────────────────────────────────
+
+test("every travelling transition declares where it travels FROM", () => {
+  // A droplet seen for the first time has no previously-rendered position, so the animation
+  // layer has nothing to travel from and would animate a point to itself — the very first
+  // `dispatched` would simply appear in the lane with no journey. Each transition therefore
+  // names its own semantic source zone, which is what the timeline starts from.
+  const origins = Object.fromEntries(
+    [
+      ["dispatch", { kind: "dispatch", id: 1, issue: 1, lane: "w1" }],
+      ["to-checkpoint", { kind: "to-checkpoint", id: 2, issue: 1, lane: "w1", pr: 11 }],
+      ["fix-return", { kind: "fix-return", id: 3, issue: 1, lane: "w1", pr: 11, reason: "review findings", round: 1 }],
+      ["escalate", { kind: "escalate", id: 4, issue: 1, pr: 11 }],
+      ["ring", { kind: "ring", id: 5, issue: 1, pr: 11, ring: 1 }],
+      ["handoff", { kind: "handoff", id: 6, issue: 1, lane: "w1" }],
+      ["fail", { kind: "fail", id: 7, issue: 1, lane: "w1" }],
+      ["dim", { kind: "dim", id: 8 }],
+    ].map(([name, t]) => [name, transitionOrigin(t as Transition)]),
+  );
+
+  assert.deepEqual(origins, {
+    dispatch: "backlog", // detaches from the backlog stack
+    "to-checkpoint": "lane", // emerges from the lane it was written in
+    "fix-return": "checkpoint", // back along the return arrow
+    escalate: "checkpoint", // onto the rust branch
+    ring: "checkpoint", // across the merge arm into the trunk
+    handoff: "lane", // folds back into the backlog
+    fail: null, // stops where it stands — no travel
+    dim: null, // not a droplet transition at all
+  });
+});
+
+test("a first-seen droplet travels from its origin zone, not from where it already sits", () => {
+  const { state, transitions } = run([ev("dispatched", { worker: "w1", issue: 86 })]);
+  const step = transitions[0];
+  assert.ok(step?.kind === "dispatch");
+
+  const d = droplet(state, 86);
+  const origin = transitionOrigin(step);
+  assert.ok(d);
+  assert.ok(origin);
+  const from = dropletPoint(state, d, origin);
+  const to = dropletPoint(state, d);
+
+  // The backlog sits left of the lanes, so a real dispatch always covers ground.
+  assert.notDeepEqual(from, to);
+  assert.ok(from.x < to.x, `${JSON.stringify(from)} → ${JSON.stringify(to)}`);
 });
 
 // ── AC 2: the reserved planning slot renders but is never event-driven ─────────

@@ -117,6 +117,60 @@ export function withLaneCount(state: HeroState, lanesMax: number | null): HeroSt
 }
 
 /**
+ * The zone a transition travels **from** — its semantic source.
+ *
+ * A droplet seen for the first time has no previously-rendered position, so the animation
+ * layer has nothing to travel from: it would animate a point to itself and the very first
+ * `dispatched` would simply appear in the lane, no journey. Each transition therefore names
+ * its own origin, which is what the timeline starts at when there is no rendered history.
+ * `null` means the transition moves nothing (failures are still; `dim` is not a droplet).
+ */
+export function transitionOrigin(t: Transition): DropletAt | null {
+  switch (t.kind) {
+    case "dispatch":
+      return "backlog";
+    case "to-checkpoint":
+    case "handoff":
+      return "lane";
+    case "fix-return":
+    case "escalate":
+    case "ring":
+      return "checkpoint";
+    case "fail":
+    case "dim":
+      return null;
+  }
+}
+
+/**
+ * Apply the live lane rows' PR numbers to the droplets riding those lanes.
+ *
+ * §6 wants the droplet to emerge from its lane "carrying a PR tag", but no *event* holds the
+ * number at that moment — `reclaim-done` is `{worker, issue, next}` and the engine keeps the
+ * PR on the worker row. `/api/loop/state`'s lane rows do carry it, and §6 already names
+ * `/state` as the live overlay for exactly this transition, so the tag is applied at render
+ * time. The fold stays pure and replay-honest: in replay there is no overlay and the tag
+ * arrives with the first later event that carries a `pr` (every drive event does).
+ *
+ * Never overwrites a number the events already established — an event is better evidence
+ * than a lane row that may already have moved on.
+ */
+export function withLanePrs(state: HeroState, lanes: readonly { lane: string; pr: number | null }[]): HeroState {
+  const prs = new Map(lanes.filter((l) => l.pr !== null).map((l) => [l.lane, l.pr as number]));
+  if (prs.size === 0) return state;
+
+  let changed = false;
+  const droplets = state.droplets.map((d) => {
+    const pr = d.lane === null ? undefined : prs.get(d.lane);
+    if (pr === undefined || d.pr !== null) return d;
+    changed = true;
+    return { ...d, pr };
+  });
+
+  return changed ? { ...state, droplets } : state;
+}
+
+/**
  * §6/§7: the arrow's label is one of three words. The engine's `drive-fixup.reason` is a
  * gate string (`gate:FIXABLE:merge-conflict`, `gate:FIXABLE:<verdict>:…:ciRed=true`), never
  * prose — so map it, and when it says nothing specific, say the mildest true thing rather
@@ -136,6 +190,18 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.length > 
 
 /** Failure kinds that stop a droplet where it stands (§6 last-but-one row). */
 const FAILURE_KINDS = new Set(["reclaim-failed", "reclaim-dead", "rollback-escalated"]);
+
+/**
+ * …but two of those kinds are also the engine's *recovery* paths.
+ *
+ * A clean-but-failed lane holding a PR is rescued to `driving` and emits `reclaim-failed`
+ * with `next: "DRIVING"`; a dead lane holding a PR emits `reclaim-dead` with
+ * `rescued: true` (that payload has no `next` field at all, so the two need different
+ * tests). Both mean the PR is alive and heading for review — rendering them as failures
+ * would leave a ✕ on work that is still moving.
+ */
+const isRescue = (kind: string, p: Record<string, unknown>): boolean =>
+  (kind === "reclaim-failed" && String(p.next ?? "").toUpperCase() === "DRIVING") || (kind === "reclaim-dead" && p.rescued === true);
 
 type Draft = {
   lanes: LaneView[];
@@ -175,6 +241,28 @@ function releaseLane(lane: LaneView | undefined): void {
   lane.reason = null;
 }
 
+/**
+ * The lane → checkpoint transition, shared by `reclaim-done`'s DRIVING branch and by the two
+ * rescue paths that reach the same place from a failure kind.
+ *
+ * The PR number is deliberately not required: `reclaim-done`'s payload is `{worker, issue,
+ * next}` — the engine stores the PR on the worker row, not in the event — so the tag comes
+ * from the live lane overlay (`withLanePrs`) or from the first later event that carries one.
+ */
+function toCheckpoint(draft: Draft, id: number, issue: number, worker: string | null, pr: number | null): Transition {
+  const lane = laneOf(draft, worker);
+  if (lane) lane.phase = "driving";
+  const d = moveDroplet(draft, issue, { at: "checkpoint", ...(pr !== null ? { pr } : {}) });
+  return { kind: "to-checkpoint", id, issue, lane: worker ?? "", pr: d.pr };
+}
+
+/**
+ * Patch a droplet.
+ *
+ * Any move clears `failed` unless the patch re-asserts it: the ✕ marks the state a droplet is
+ * *in*, not a scar it carries. A lane that failed, was re-dispatched and merged must not keep
+ * rendering ✕ beside a merged PR.
+ */
 function moveDroplet(draft: Draft, issue: number, patch: Partial<Droplet>): Droplet {
   const current = draft.droplets.get(issue) ?? {
     issue,
@@ -185,8 +273,14 @@ function moveDroplet(draft: Draft, issue: number, patch: Partial<Droplet>): Drop
     handedOff: false,
     sendBack: null,
   };
-  const next = { ...current, ...patch };
+  const next = { ...current, failed: false, ...patch };
   draft.droplets.set(issue, next);
+
+  // The lane's ✕ is the same mark on the other end of the wire: a channel still pinned to an
+  // issue that has since moved on would keep showing a failure for work that recovered.
+  if (!next.failed) {
+    for (const lane of draft.lanes) if (lane.phase === "failed" && lane.issue === issue) releaseLane(lane);
+  }
   return next;
 }
 
@@ -197,6 +291,13 @@ function apply(draft: Draft, e: LoopEvent): Transition | null {
   const worker = str(p.worker);
   const issue = num(p.issue);
   const pr = num(p.pr);
+
+  // Any event naming both an issue and a PR teaches that droplet its number, whether or not
+  // the kind moves anything. This is how the tag arrives in replay, where no live lane
+  // overlay exists and `reclaim-done` itself carries no PR: the next drive event supplies it.
+  // Deliberately not via moveDroplet — learning a number is not motion and must not clear ✕.
+  const known = issue === null ? undefined : draft.droplets.get(issue);
+  if (known && pr !== null && known.pr === null) draft.droplets.set(known.issue, { ...known, pr });
 
   switch (e.kind) {
     case "pool-selected": {
@@ -219,18 +320,15 @@ function apply(draft: Draft, e: LoopEvent): Transition | null {
 
     case "reclaim-done": {
       if (issue === null || worker === null) return null;
-      const lane = laneOf(draft, worker);
       // §6's canonical PR-open transition. `next` is uppercase in the engine's payload.
       if (String(p.next ?? "").toUpperCase() !== "DRIVING") {
         // No PR: the lane is simply finished. §6 has no row for it — the Needs-attention
         // strip (§3) narrates it — so the hero clears it silently instead of inventing motion.
-        releaseLane(lane);
+        releaseLane(laneOf(draft, worker));
         draft.droplets.delete(issue);
         return null;
       }
-      if (lane) lane.phase = "driving";
-      const d = moveDroplet(draft, issue, { at: "checkpoint", ...(pr !== null ? { pr } : {}) });
-      return { kind: "to-checkpoint", id, issue, lane: worker, pr: d.pr };
+      return toCheckpoint(draft, id, issue, worker, pr);
     }
 
     case "drive-fixup": {
@@ -290,6 +388,9 @@ function apply(draft: Draft, e: LoopEvent): Transition | null {
 
     default: {
       if (!FAILURE_KINDS.has(e.kind) || issue === null) return null;
+      // The engine's own recovery paths ride two of these kinds — they end at `driving`, so
+      // they are the PR-open transition, not a failure.
+      if (isRescue(e.kind, p)) return toCheckpoint(draft, id, issue, worker, pr);
       const lane = laneOf(draft, worker);
       if (lane) lane.phase = "failed";
       moveDroplet(draft, issue, { failed: true });

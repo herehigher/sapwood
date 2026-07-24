@@ -528,8 +528,9 @@ animates. The hero must never lag behind the state it claims to show.
 rings appear without stroke animation; ambient shimmer off. The scene remains
 fully legible — motion is commentary, never the only carrier of state.
 
-Amended 2026-07-24 (#144, hero implementation). Two facts the shipped hero
-establishes:
+Amended 2026-07-24 (#144, hero implementation). Facts the shipped hero
+establishes — each one a place where the engine's actual event payloads are
+narrower than the prose above assumed:
 
 - **The planning trio and SUMMARY / RETRO ship drawn but never lit.** The
   design above has them lit from the round phase cursor, but no *persisted*
@@ -549,9 +550,35 @@ establishes:
   → "checks failed", otherwise "review findings" — and an unrecognised reason
   falls back to "review findings" rather than guessing a cause. The mapper
   belongs with the rest of the §7 map once `copy.ts` lands.
+- **The PR-open transition carries no PR number.** The table's
+  `running → driving` row has the droplet "emerge from the lane carrying a PR
+  tag", but `reclaim-done`'s payload is `{worker, issue, next}` — the engine
+  stores the PR on the *worker row*, not in the event. So the tag has two
+  sources and neither is that event: **live** takes it from
+  `/api/loop/state`'s lane rows (this row's own note already names `/state`
+  as the live overlay), applied over the folded state at render time; **replay**
+  has no overlay and picks it up from the first later event that carries a
+  `pr` — every drive event does. The fold itself never invents one, and an
+  event-supplied number always beats a lane row that may have moved on.
+  Persisting the PR on the transition event would collapse this to one path.
+- **Two of the failure kinds are also the engine's recovery paths.** A
+  clean-but-failed lane holding a PR is rescued to `driving` and emits
+  `reclaim-failed` with `next: "DRIVING"`; a dead lane holding a PR emits
+  `reclaim-dead` with `rescued: true` (that payload has no `next` field at
+  all, so the two need different tests). Both are the PR-open transition, not
+  the failure row — rendering them as failures leaves a ✕ on work that is
+  alive and heading for review. More generally the ✕ marks the state a droplet
+  is **in**, never a scar it carries: any forward motion clears it, on the
+  droplet and on the lane channel alike.
 
-The reason word is also held by the **entity, not the channel**: a mid-fix
+The reason word is held by the **entity, not the channel**: a mid-fix
 `handoff` frees the lane, and `fix-leg-resumed` must re-light the same state.
+
+The **live cursor** is part of this contract too (§8: "live mode polls with
+the last seen id"). A cursor frozen at `after=0` against the ascending,
+page-capped feed re-serves the same first rows forever — once the log outgrows
+one page nothing new reaches the reducer and the ring count silently freezes
+while the loop keeps merging.
 
 **Replay mode** drives the identical scene from history: a transport
 (play/pause, speed ×1/×4/×16, scrub bar) replaces the polling source. The

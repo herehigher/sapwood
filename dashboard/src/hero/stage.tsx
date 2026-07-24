@@ -10,7 +10,7 @@
  */
 
 import type { Ref } from "react";
-import type { Droplet, HeroState } from "./state.ts";
+import type { Droplet, DropletAt, HeroState } from "./state.ts";
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 // One coordinate space, shared with Hero.tsx's timelines so travel always lands where
@@ -48,9 +48,15 @@ const laneY = (index: number) => LANES.top + index * LANES.gap;
 /** The channel a droplet belongs to; channel 0 when its lane has already been released. */
 const laneIndex = (state: HeroState, d: Droplet) => state.lanes.find((l) => l.worker === d.lane)?.channel ?? 0;
 
-/** Where a droplet sits, in stage coordinates. The single source for both draw and travel. */
-export function dropletPoint(state: HeroState, d: Droplet): { x: number; y: number } {
-  switch (d.at) {
+/**
+ * Where a droplet sits, in stage coordinates. The single source for both draw and travel.
+ *
+ * `at` defaults to where the droplet actually is; pass a zone to get the same droplet's
+ * coordinates somewhere else — that is how a first-seen droplet gets a travel origin
+ * (`transitionOrigin`) instead of animating from its own destination.
+ */
+export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at): { x: number; y: number } {
+  switch (at) {
     case "backlog": {
       const rank = state.droplets.filter((o) => o.at === "backlog").findIndex((o) => o.issue === d.issue);
       return { x: BACKLOG.x + BACKLOG.w / 2, y: BACKLOG.y + 30 + Math.max(0, rank) * BACKLOG.chip };

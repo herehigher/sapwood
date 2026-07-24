@@ -1,4 +1,4 @@
-import { useEvents, useLoopState } from "./api/queries.ts";
+import { useEventStream, useLoopState } from "./api/queries.ts";
 import { Hero } from "./hero/Hero.tsx";
 
 /** §3 E: the config drawer is an allowlisted key/value map; read defensively until it exists. */
@@ -14,15 +14,18 @@ const configNumber = (config: Record<string, unknown> | undefined, key: string, 
  */
 export function App() {
   const loop = useLoopState();
-  const events = useEvents(0);
+  // Live mode polls from the last seen id (§8) — a frozen after=0 would re-serve the same
+  // first page forever once the log outgrows one page, and the hero would stop updating.
+  const events = useEventStream();
 
   return (
     <main className="stack">
       <section className="panel" style={{ gridColumn: "1 / -1" }}>
         <Hero
-          events={events.data?.events ?? []}
+          events={events.events}
           lanesMax={loop.data?.lanes.max ?? null}
           engine={loop.data?.engine.state ?? "stopped"}
+          lanes={loop.data?.lanes.items ?? []}
           fixCap={configNumber(loop.data?.config, "lanes.prFixCap", 2)}
         />
       </section>
@@ -48,7 +51,7 @@ export function App() {
       <section className="panel">
         <h2>feed</h2>
         <ul aria-live="polite">
-          {events.data?.events.map((e) => (
+          {events.events.map((e) => (
             <li key={e.id} className="data">
               {e.ts} {e.kind}
             </li>

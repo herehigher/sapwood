@@ -19,7 +19,10 @@ import {
   isStageDimmed,
   type PlannedTransition,
   planTransitions,
+  type Transition,
+  transitionOrigin,
   withLaneCount,
+  withLanePrs,
 } from "./state.ts";
 
 /** §5 motion tokens, in the units anime.js wants. Kept in sync with tokens.css by name. */
@@ -36,13 +39,18 @@ export type HeroProps = {
   events: LoopEvent[];
   lanesMax: number | null;
   engine: EngineState;
+  /**
+   * Live lane rows from `/api/loop/state`. The only source of a driving lane's PR number —
+   * `reclaim-done` doesn't carry it (§6 overlay). Empty in replay, where later events do.
+   */
+  lanes?: readonly { lane: string; pr: number | null }[];
   /** `lanes.prFixCap` — the "round n of cap" denominator. */
   fixCap?: number;
   /** Replay transport speed; ≥ ×4 collapses animation per the §6 coalescing policy. */
   speed?: number;
 };
 
-export function Hero({ events, lanesMax, engine, fixCap = 2, speed = 1 }: HeroProps) {
+export function Hero({ events, lanesMax, engine, lanes = [], fixCap = 2, speed = 1 }: HeroProps) {
   const reducedMotion = useReducedMotion();
   const svgRef = useRef<SVGSVGElement>(null);
   const previous = useRef(new Map<number, Point>());
@@ -57,14 +65,16 @@ export function Hero({ events, lanesMax, engine, fixCap = 2, speed = 1 }: HeroPr
     });
   }, [events, lanesMax, reducedMotion, speed]);
 
+  // The PR tag the events cannot supply (§6 live overlay) — applied to the folded state
+  // rather than inside it, so replay drives the identical reducer with no overlay at all.
+  const state = withLanePrs(scene.state, lanes);
+
   useEffect(() => {
     const root = svgRef.current;
     if (root) previous.current = play(root, scene, previous.current);
   }, [scene]);
 
-  return (
-    <HeroStage ref={svgRef} state={scene.state} fixCap={fixCap} dimmed={isStageDimmed(scene.state, engine)} reducedMotion={reducedMotion} />
-  );
+  return <HeroStage ref={svgRef} state={state} fixCap={fixCap} dimmed={isStageDimmed(state, engine)} reducedMotion={reducedMotion} />;
 }
 
 /** §6: the JS half of the reduced-motion contract; app.css collapses the CSS half. */
@@ -110,7 +120,7 @@ function play(root: SVGSVGElement, { state, plan }: Scene, previous: Map<number,
       // Droplet detaches from the backlog stack and travels into a lane channel; the lane
       // lights in the same beat.
       case "dispatch": {
-        travel(tl, root, step.issue, previous, points, TRAVEL);
+        travel(tl, root, state, step, previous, points, TRAVEL);
         lightLane(tl, root, state, step.lane);
         break;
       }
@@ -118,14 +128,14 @@ function play(root: SVGSVGElement, { state, plan }: Scene, previous: Map<number,
       // The PR-open transition: the droplet emerges carrying a PR tag and parks at the
       // CI / REVIEW pair, which breathes (CSS) while the PR waits. No per-gate progress.
       case "to-checkpoint": {
-        travel(tl, root, step.issue, previous, points, TRAVEL);
+        travel(tl, root, state, step, previous, points, TRAVEL);
         break;
       }
 
       // The loop's proof moment: back along the return arrow into the lane it came from,
       // with the send-back reason lighting on the way.
       case "fix-return": {
-        travel(tl, root, step.issue, previous, points, TRAVEL);
+        travel(tl, root, state, step, previous, points, TRAVEL);
         const arrow = root.querySelector<SVGPathElement>(".hero-fixloop");
         if (arrow) tl.add(arrow, { opacity: [0.35, 1, 0.35], duration: TRAVEL }, 0);
         lightLane(tl, root, state, step.lane);
@@ -134,7 +144,7 @@ function play(root: SVGSVGElement, { state, plan }: Scene, previous: Map<number,
 
       // Onto the rust escalation branch. Still, not loud.
       case "escalate": {
-        travel(tl, root, step.issue, previous, points, TRAVEL);
+        travel(tl, root, state, step, previous, points, TRAVEL);
         const branch = root.querySelector<SVGPathElement>(".hero-branch");
         if (branch) tl.add(branch, { opacity: [0.4, 1], duration: BEAT }, TRAVEL - BEAT);
         break;
@@ -148,7 +158,7 @@ function play(root: SVGSVGElement, { state, plan }: Scene, previous: Map<number,
         tl.onComplete = () => {
           for (const g of gates) g.classList.remove("is-merged");
         };
-        travel(tl, root, step.issue, previous, points, TRAVEL);
+        travel(tl, root, state, step, previous, points, TRAVEL);
         const ring = root.querySelector<SVGCircleElement>('.hero-ring[data-current="true"]');
         if (ring) {
           const circumference = 2 * Math.PI * ring.r.baseVal.value;
@@ -162,7 +172,7 @@ function play(root: SVGSVGElement, { state, plan }: Scene, previous: Map<number,
 
       // Folds back into the backlog with its "saved for a successor" badge.
       case "handoff": {
-        travel(tl, root, step.issue, previous, points, TRAVEL);
+        travel(tl, root, state, step, previous, points, TRAVEL);
         const badge = droplet(root, step.issue)?.querySelector<SVGTextElement>(".hero-badge");
         if (badge) tl.add(badge, { opacity: [0, 1], duration: BEAT }, TRAVEL);
         break;
@@ -186,18 +196,32 @@ function play(root: SVGSVGElement, { state, plan }: Scene, previous: Map<number,
   return points;
 }
 
+/**
+ * Animate a droplet from where it was to where it now is.
+ *
+ * A droplet the stage has never rendered has no previous position — falling back to `to`
+ * would animate it to itself, so a first `dispatched` would pop into the lane with no
+ * journey at all. The transition's own semantic origin (`transitionOrigin`) is the fallback,
+ * which is where the §6 table says the travel begins.
+ */
 function travel(
   tl: ReturnType<typeof createTimeline>,
   root: SVGSVGElement,
-  issue: number,
+  state: HeroState,
+  step: Transition,
   previous: Map<number, Point>,
   points: Map<number, Point>,
   duration: number,
 ): void {
-  const el = droplet(root, issue);
-  const to = points.get(issue);
-  if (!el || !to) return;
-  const from = previous.get(issue) ?? to;
+  if (!("issue" in step)) return;
+  const el = droplet(root, step.issue);
+  const to = points.get(step.issue);
+  const d = state.droplets.find((o) => o.issue === step.issue);
+  if (!el || !to || !d) return;
+
+  const origin = transitionOrigin(step);
+  const from = previous.get(step.issue) ?? (origin ? dropletPoint(state, d, origin) : to);
+  utils.set(el, { translateX: from.x, translateY: from.y });
   tl.add(el, { translateX: [from.x, to.x], translateY: [from.y, to.y], duration }, 0);
 }
 

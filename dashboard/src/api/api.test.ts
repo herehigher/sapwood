@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { fetchEvents, fetchLoopState } from "./client.ts";
-import { eventsQuery, loopStateQuery, POLL_MS } from "./queries.ts";
+import { advanceCursor, EVENTS_PAGE, eventsQuery, loopStateQuery, POLL_MS } from "./queries.ts";
+import type { LoopEvent } from "./types.ts";
 
 type FetchCall = { url: string; init: RequestInit | undefined };
 
@@ -54,6 +55,42 @@ test("§2 Transport: query options poll every 3 s, no WebSocket", () => {
   assert.equal(eventsQuery(0).refetchInterval, POLL_MS);
   assert.deepEqual(loopStateQuery().queryKey, ["loop", "state"]);
   assert.deepEqual(eventsQuery(480).queryKey, ["events", 480]);
+});
+
+// ── The live cursor ───────────────────────────────────────────────────────────
+// §8: "live mode polls with the last seen id, replay mode pages from after=0". Polling a
+// frozen after=0 against a capped, ascending page means that once the log passes one page,
+// every poll returns the same first rows forever — nothing new ever reaches the reducer.
+
+const page = (ids: number[], lastId = ids.at(-1) ?? 0) => ({
+  events: ids.map((id): LoopEvent => ({ id, ts: "2026-07-09T08:12:00Z", kind: "dispatched", payload: {} })),
+  lastId,
+});
+
+test("the live cursor advances past each fetched page", () => {
+  assert.equal(advanceCursor(0, page([1, 2, 3])), 3);
+  assert.equal(advanceCursor(3, page([4, 5])), 5);
+});
+
+test("the cursor holds still when there is nothing new, and never walks backwards", () => {
+  // An empty page must not reset the cursor — that would re-serve the whole log next poll.
+  assert.equal(advanceCursor(512, page([], 0)), 512);
+  assert.equal(advanceCursor(512, undefined), 512);
+  // A stale in-flight response for an older cursor must not rewind a newer one.
+  assert.equal(advanceCursor(512, page([100, 101])), 512);
+});
+
+test("the cursor trusts the highest id it actually saw, not just lastId", () => {
+  // lastId is the server's own marker; the events are the evidence. Take the max of both so
+  // neither a lagging nor a leading marker can stall the stream.
+  assert.equal(advanceCursor(0, page([1, 2, 3], 0)), 3);
+  assert.equal(advanceCursor(0, page([1, 2, 3], 9)), 9);
+});
+
+test("a full page means more may be waiting — the next poll must not sit on the interval", () => {
+  // Catching up after downtime should drain at fetch speed, not one page per 3 s tick.
+  assert.equal(eventsQuery(0).refetchInterval, POLL_MS);
+  assert.ok(EVENTS_PAGE > 0);
 });
 
 test("queryFn forwards the AbortSignal so a superseded poll is cancelled", async () => {
