@@ -944,11 +944,12 @@ the overlay is the named boundary.
    at round open, every `advanceRoundPhase` transition, and the terminal
    `closed`; without it the hero's phase lighting cannot replay and the
    §8 spend phase-bucketing has no windows. **Shipped** (round.ts): the
-   event is appended *before* the `rounds` row is updated, so a crash
-   between the two loses the phase write, never the trail — a rerun then
-   re-appends the same `{round_id, phase}`. **Consumers must fold
-   idempotently**: duplicates are expected (rerun-not-resume, #77 dec. 4)
-   and are deliberately not deduplicated by the engine.
+   event means *"round R entered phase P"* and is emitted by whichever
+   process actually enters it — including a restart resuming a crashed
+   round at its persisted phase — so no crash window can drop a phase the
+   round really ran. **Consumers must fold idempotently**: a re-run phase
+   says so twice (rerun-not-resume, #77 dec. 4) and the engine deliberately
+   does not deduplicate.
 2. **`run-started` event** (#206) — appended once at CLI startup, payload
    `{ config: <allowlisted subset>, configHash }` — the same allowlist the
    config drawer serves (§3 E); a hash alone cannot power historical
