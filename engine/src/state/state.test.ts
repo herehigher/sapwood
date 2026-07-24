@@ -1185,6 +1185,15 @@ test("park: not parked initially; enterPark persists source/reason/triggerIssue/
   assert.equal(p?.probeAttempts, 0);
   assert.equal(p?.escalatedAt, null);
   assert.equal(p?.canaryWorker, null);
+  assert.equal(p?.resetHintAt, null, "omitted resetHintAtIso -> null, unchanged from every pre-#374 caller");
+  s.close();
+});
+
+test("park: enterPark's optional resetHintAtIso (#374) is persisted and read back", () => {
+  const s = mem();
+  s.enterPark("llm", "hit your session limit", 42, "2026-07-14T00:00:00Z", "2026-07-14T06:30:00Z");
+  const p = s.parkRow("llm");
+  assert.equal(p?.resetHintAt, "2026-07-14T06:30:00Z");
   s.close();
 });
 
@@ -1197,6 +1206,15 @@ test("park: re-entering the SAME source is a no-op (first detection wins, entere
   assert.equal(p?.reason, "first reason");
   assert.equal(p?.triggerIssue, 1);
   assert.equal(p?.enteredAt, "2026-07-14T00:00:00Z");
+  s.close();
+});
+
+test("park: a resetHintAtIso is set ONCE at entry — a later classified failure for the SAME open episode never overwrites it (first detection wins, same stance as reason/enteredAt)", () => {
+  const s = mem();
+  s.enterPark("llm", "first reason", 1, "2026-07-14T00:00:00Z", "2026-07-14T06:30:00Z");
+  s.enterPark("llm", "a later llm failure", 2, "2026-07-14T01:00:00Z", "2026-07-14T09:00:00Z");
+  const p = s.parkRow("llm");
+  assert.equal(p?.resetHintAt, "2026-07-14T06:30:00Z");
   s.close();
 });
 
@@ -2903,8 +2921,8 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 26);
-    assert.equal(s.userVersion(), 26);
+    assert.equal(SCHEMA_VERSION, 27);
+    assert.equal(s.userVersion(), 27);
     assert.equal(s.getEngineReviewAttemptPin("lane-v25"), null, "the lane is re-reviewable on its unchanged head");
     const row = s.getWorker("lane-v25");
     assert.equal(row?.engine_review_pin_head, null);
@@ -2913,6 +2931,39 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     assert.equal(row?.engine_review_pin_kind, null);
     assert.equal(row?.engine_review_first_attempt_at, null);
     s.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration v26->v27: a populated v26 DB (predating park_state.reset_hint_at) opens with data intact, the open episode's reset_hint_at NULL, user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 26; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 26");
+    raw
+      .prepare(
+        `INSERT INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run("llm", "pre-existing v26 episode", 42, "2026-07-24T00:00:00Z", "2026-07-24T00:00:00Z", 0);
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.equal(SCHEMA_VERSION, 27);
+    assert.equal(s.userVersion(), 27);
+    const row = s.parkRow("llm");
+    assert.equal(row?.reason, "pre-existing v26 episode");
+    assert.equal(row?.triggerIssue, 42);
+    assert.equal(row?.resetHintAt, null, "a pre-#374 episode has no hint — probeDueWithHint treats this as 'no hint'");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    s2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

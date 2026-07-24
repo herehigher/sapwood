@@ -2222,6 +2222,129 @@ test("#168: RoundDeps.probeLlmReachable omitted -> a pre-parked (llm) episode is
   state.close();
 });
 
+// ── #374: the empty-spin breaker + the round-opening gate (F16: 145 empty rounds, no bound) ──
+
+test("runRounds #374: N consecutive degraded, dispatch-empty rounds force a park; round 3 is WITHHELD (no unbounded round churn) until a human intervenes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge(); // empty board — never any dispatch, this test is about degrade-only churn
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    // Simulates F16's own root cause: an UNCLASSIFIED systemic role-session failure (a text
+    // classifyEnvFailure simply doesn't recognize) — the aligning phase "degrades" every round,
+    // appending the SAME durable event round-artifact.ts's degradedPhases already scans for.
+    const degradingPeripherals = {
+      ...allPeripherals(log),
+      aligning: {
+        async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+          log.push({ phase: "aligning" as PeripheralPhase, marker: ctx.marker });
+          state.appendEvent("po-degraded", { round_id: ctx.roundId, outcome: "failed", session: `s-${ctx.roundId}` });
+          return { marker: `aligning-r${ctx.roundId}` };
+        },
+      },
+    };
+    // Polls the durable park state itself (never a magic sleep-call COUNT, which is timing-
+    // fragile — the exact number of sleep calls per round can shift with unrelated engine
+    // changes): the very FIRST sleep call observed AFTER the breaker has parked the engine
+    // flips KILL_SWITCH — same "operator intervenes mid-wait" idiom the standby KILL_SWITCH
+    // test above uses, just triggered on a robust condition instead of a call-count.
+    const sleep = async (): Promise<void> => {
+      if (state.isParked()) writeFileSync(join(dir, "KILL_SWITCH"), "");
+    };
+    const deps = baseDeps({
+      forge,
+      state,
+      sleep,
+      cfg: mkCfg({ round: { emptySpin: { consecutiveDegradedRoundsThreshold: 2 } } }),
+      peripherals: degradingPeripherals,
+    });
+    const result = await runRounds(deps);
+    assert.equal(result.stoppedBy, "kill-switch");
+    assert.equal(result.rounds, 2, "rounds 1-2 degraded and closed; round 3 was withheld, never opened/closed");
+    // allPeripherals(log) logs EVERY phase, not just aligning — 2 full rounds x 5 phases each.
+    // Round 3 never opened its phases at all (no 11th entry, no round-3-tagged marker below).
+    assert.equal(log.length, 10, "exactly 2 full rounds ran their 5 phases each — round 3 never opened");
+    assert.equal(
+      log.filter((l) => l.phase === "aligning").length,
+      2,
+      "exactly 2 aligning attempts happened — round 3's aligning stub never ran",
+    );
+    const emptySpinEvents = state.eventsAfterId(0, ["empty-spin-park"]);
+    assert.equal(emptySpinEvents.length, 1, "the breaker fires EXACTLY once, at N=2 — never re-fires every round after");
+    assert.deepEqual(emptySpinEvents[0]!.payload, { consecutiveDegradedRounds: 2, threshold: 2, roundId: 2 });
+    assert.equal(state.isParked(), true);
+    assert.equal(state.parkRow("llm")?.source, "llm");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #374: the round-opening gate resumes via the EXISTING probe path — a green probeLlmReachable ping arms round 3 to open again (no unbounded round churn, no need for a human)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const degradingPeripherals = {
+      ...allPeripherals(log),
+      aligning: {
+        async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+          log.push({ phase: "aligning" as PeripheralPhase, marker: ctx.marker });
+          state.appendEvent("po-degraded", { round_id: ctx.roundId, outcome: "failed", session: `s-${ctx.roundId}` });
+          return { marker: `aligning-r${ctx.roundId}` };
+        },
+      },
+    };
+    let probeCalls = 0;
+    // A CONTROLLED, advancing fake clock — required here (unlike test 1 above, which exits via
+    // KILL_SWITCH before any wall-clock-based check matters): the gate's probeDueWithHint check
+    // is genuinely wall-clock-based, and a REAL Date.now() paired with an instantly-resolving
+    // fake `sleep` would busy-loop for real backoff seconds (30s+) waiting for elapsed time that
+    // never actually passes — worse, that busy microtask loop starves Node's OWN timer phase,
+    // hanging the test process outright (observed while developing this test). Advancing the
+    // fake clock BY the exact sleep duration requested makes each wait "elapse" instantly in
+    // real time while still satisfying the real backoff arithmetic after a small, bounded number
+    // of iterations.
+    let simulatedMs = Date.parse("2026-01-01T00:00:00.000Z");
+    const now = (): Date => new Date(simulatedMs);
+    const sleep = async (ms: number): Promise<void> => {
+      simulatedMs += ms;
+    };
+    const deps = baseDeps({
+      forge,
+      state,
+      now,
+      sleep,
+      tickIntervalSec: 1,
+      cfg: mkCfg({
+        round: { emptySpin: { consecutiveDegradedRoundsThreshold: 2 } },
+        envFailure: { probeBackoffBaseSec: 1, probeBackoffMaxSec: 5 },
+      }),
+      peripherals: degradingPeripherals,
+      // Fails the first 2 pings (still "quota exhausted"), then succeeds — the SAME probe path
+      // conductor.ts's worker-lane canary uses, reused here for the round-opening gate.
+      probeLlmReachable: async () => {
+        probeCalls++;
+        return probeCalls > 2;
+      },
+    });
+    const stopSafety = boundedStopOnPhase(deps, 15); // rounds 1-2 degrade (park), round 3 opens once the probe clears
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.ok(result.rounds >= 3, `round 3 opened once the probe succeeded (got ${result.rounds})`);
+    assert.ok(probeCalls >= 3, "the gate actually re-probed until it got a green light");
+    const parkProbeEvents = state.eventsAfterId(0, ["park-probe"]).filter((e) => (e.payload as { source?: string }).source === "llm");
+    assert.ok(
+      parkProbeEvents.some((e) => (e.payload as { success?: boolean }).success === true),
+      "a successful park-probe event was recorded before round 3 opened",
+    );
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #212: round-pool dispatch scoping, round-close label cleanup, removeLabel containment ────
 
 test("runRounds #212: dispatch is restricted to pool-labelled Ready issues — an approved Ready issue outside the pool is never dispatched", async () => {

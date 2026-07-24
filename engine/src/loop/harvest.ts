@@ -34,7 +34,13 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
-import { ROLE_DISALLOWED_TOOLS, type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "../roles/peripheral.js";
+import {
+  envFailureHook,
+  ROLE_DISALLOWED_TOOLS,
+  type RoleRunner,
+  type RoleSessionResult,
+  runSessionWithRetry,
+} from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
@@ -296,6 +302,8 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
             `closing the harvesting phase WITHOUT posting round-context comments (degraded, see ` +
             `the harvest-degraded event); the run is not blocked`,
           isValid: (result) => validateHarvestOutput(result.resultText ?? "", needsHumanIssues).ok,
+          // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
+          envFailure: envFailureHook(deps.cfg, deps.state),
         });
         // Every comment write originates from a SCHEMA-VALIDATED, SET-VALIDATED session decision
         // (module doc) — the session itself never touches `gh`. A degraded (still-invalid-after-

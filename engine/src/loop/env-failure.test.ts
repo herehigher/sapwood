@@ -4,10 +4,12 @@ import {
   classifyEnvFailure,
   DEFAULT_FORGE_FAILURE_PATTERNS,
   DEFAULT_LLM_FAILURE_PATTERNS,
+  emptySpinBreached,
   escalationChannel,
   parkDurationExceededSec,
   probeBackoffSec,
   probeDue,
+  probeDueWithHint,
 } from "./env-failure.js";
 
 const patterns = { llm: [...DEFAULT_LLM_FAILURE_PATTERNS], forge: [...DEFAULT_FORGE_FAILURE_PATTERNS] };
@@ -57,6 +59,18 @@ test("classifyEnvFailure: ordinary task failure that discusses networking/creden
 
 test("classifyEnvFailure: empty/missing output -> null", () => {
   assert.equal(classifyEnvFailure("", patterns), null);
+});
+
+// ── #374: the real Claude CLI session/plan-quota exhaustion text (dogfood F16/F17) ─────────
+
+test("classifyEnvFailure: Claude CLI session-limit exhaustion (verbatim captured text) -> llm", () => {
+  assert.equal(classifyEnvFailure("You've hit your session limit · resets 6:30pm (Asia/Tokyo)", patterns), "llm");
+  assert.equal(classifyEnvFailure("[success] You've hit your session limit · resets 6:30pm (Asia/Tokyo)", patterns), "llm");
+});
+
+test("classifyEnvFailure: 5-hour/weekly Claude plan-quota tiers -> llm", () => {
+  assert.equal(classifyEnvFailure("5-hour limit reached ∙ resets 3pm", patterns), "llm");
+  assert.equal(classifyEnvFailure("weekly limit reached ∙ resets Monday", patterns), "llm");
 });
 
 test("classifyEnvFailure: llm precedence over forge when both signatures somehow appear", () => {
@@ -129,4 +143,48 @@ test("escalationChannel: llm-sourced park -> forge channel (forge presumed fine)
 
 test("escalationChannel: llm-sourced park during a mixed storm (forge episode also open) -> local (never a doomed GitHub write)", () => {
   assert.equal(escalationChannel("llm", true), "local");
+});
+
+// ── #374: probeDueWithHint — a known reset instant floors the first useful probe ────────────
+
+test("probeDueWithHint: no hint -> byte-identical to probeDue", () => {
+  const last = "2026-07-24T00:00:00Z";
+  const lastMs = Date.parse(last);
+  assert.equal(probeDueWithHint(last, lastMs + 29_000, 30, null), false);
+  assert.equal(probeDueWithHint(last, lastMs + 30_000, 30, null), true);
+  assert.equal(probeDueWithHint(null, lastMs, 30, null), true);
+});
+
+test("probeDueWithHint: hint in the future withholds the probe even once ordinary backoff would fire", () => {
+  const last = "2026-07-24T00:00:00Z";
+  const lastMs = Date.parse(last);
+  const hint = "2026-07-24T06:30:00Z";
+  // Ordinary backoff (30s base) would be due almost immediately; the hint (6.5h out) wins.
+  assert.equal(probeDueWithHint(last, lastMs + 60_000, 30, hint), false);
+  assert.equal(probeDueWithHint(last, Date.parse(hint) - 1, 30, hint), false);
+});
+
+test("probeDueWithHint: due exactly at the hint and after, once ordinary probeDue also agrees", () => {
+  const last = "2026-07-24T00:00:00Z";
+  const hint = "2026-07-24T06:30:00Z";
+  const hintMs = Date.parse(hint);
+  // last_probe_at is far enough in the past that ordinary backoff is already satisfied by hintMs.
+  assert.equal(probeDueWithHint(last, hintMs, 30, hint), true);
+  assert.equal(probeDueWithHint(last, hintMs + 1000, 30, hint), true);
+});
+
+test("probeDueWithHint: a malformed hint degrades to plain probeDue, never throws", () => {
+  const last = "2026-07-24T00:00:00Z";
+  const lastMs = Date.parse(last);
+  assert.doesNotThrow(() => probeDueWithHint(last, lastMs + 30_000, 30, "not-a-date"));
+  assert.equal(probeDueWithHint(last, lastMs + 30_000, 30, "not-a-date"), true);
+});
+
+// ── #374: emptySpinBreached — pure threshold comparison ─────────────────────────────────────
+
+test("emptySpinBreached: below/at/above threshold", () => {
+  assert.equal(emptySpinBreached(0, 3), false);
+  assert.equal(emptySpinBreached(2, 3), false);
+  assert.equal(emptySpinBreached(3, 3), true);
+  assert.equal(emptySpinBreached(4, 3), true);
 });

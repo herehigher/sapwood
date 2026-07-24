@@ -823,6 +823,19 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         );
     `);
   },
+  // 26 -> 27 (#374): a park episode's OPTIONAL reset-time hint — the Claude CLI's own structured
+  // rate-limit telemetry (worker.ts's extractRateLimitResetAt / peripheral.ts's RoleSessionResult
+  // .rateLimitResetAtMs) can name the EXACT instant quota resets, strictly better scheduling
+  // information than the bounded exponential backoff alone (env-failure.ts's probeDueWithHint).
+  // Nullable, set ONCE at park entry (State.enterPark's optional 5th argument) and never
+  // overwritten thereafter — same "first detection wins" stance entered_at/reason already take
+  // (a storm of classified failures for the SAME episode must not keep moving either the
+  // escalation clock OR this hint). A pre-#374 row simply has NULL here, which
+  // probeDueWithHint treats identically to "no hint was ever observed" — the existing backoff
+  // schedule, unchanged.
+  (db) => {
+    db.exec(`ALTER TABLE park_state ADD COLUMN reset_hint_at TEXT;`);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -1191,6 +1204,9 @@ export interface ParkRow {
   probeAttempts: number;
   escalatedAt: string | null;
   canaryWorker: string | null;
+  /** #374: the FIRST-observed reset-time hint for this episode (ISO string), or null when none
+   *  was ever supplied to State.enterPark — see the schema v26->v27 migration's doc comment. */
+  resetHintAt: string | null;
 }
 
 // ── Ambient session context manifests (#236) ──────────────────────────────────────────────
@@ -2092,14 +2108,26 @@ export class State {
    *  pushing the duration-based escalation threshold out). A DIFFERENT source while parked
    *  opens its own row (mixed storm — PR #180 review P1-1a). `last_probe_at` is seeded to `now`
    *  so the first probe/canary waits a full base backoff (P1-1c). Returns true iff THIS call
-   *  actually inserted the row, so a caller can fire a park-entry event once per episode. */
-  enterPark(source: EnvFailureSource, reason: string, triggerIssue: number | null, now: string): boolean {
+   *  actually inserted the row, so a caller can fire a park-entry event once per episode.
+   *
+   *  `resetHintAtIso` (#374, optional — every pre-#374 call site omits it unchanged): a KNOWN
+   *  reset instant (worker.ts's extractRateLimitResetAt / peripheral.ts's RoleSessionResult
+   *  .rateLimitResetAtMs), stored ONCE at first entry, same "first detection wins" stance as
+   *  `reason`/`entered_at` — a later classified failure for the SAME open episode never
+   *  overwrites it (INSERT OR IGNORE no-ops the whole row on conflict, this column included). */
+  enterPark(
+    source: EnvFailureSource,
+    reason: string,
+    triggerIssue: number | null,
+    now: string,
+    resetHintAtIso: string | null = null,
+  ): boolean {
     const res = this.db
       .prepare(
-        `INSERT OR IGNORE INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts)
-         VALUES (?, ?, ?, ?, ?, 0)`,
+        `INSERT OR IGNORE INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts, reset_hint_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?)`,
       )
-      .run(source, reason, triggerIssue, now, now);
+      .run(source, reason, triggerIssue, now, now, resetHintAtIso);
     return res.changes > 0;
   }
 
@@ -2112,6 +2140,7 @@ export class State {
     probe_attempts: number;
     escalated_at: string | null;
     canary_worker: string | null;
+    reset_hint_at: string | null;
   }): ParkRow {
     return {
       source: row.source as EnvFailureSource,
@@ -2122,6 +2151,7 @@ export class State {
       probeAttempts: row.probe_attempts,
       escalatedAt: row.escalated_at,
       canaryWorker: row.canary_worker,
+      resetHintAt: row.reset_hint_at,
     };
   }
 

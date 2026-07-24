@@ -36,7 +36,7 @@ import type { IForge, Issue } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
-import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
+import { envFailureHook, PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
@@ -1337,6 +1337,8 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
           `[sapwood:pool] round ${deps.roundId}: po-pool selection session failed twice (${r.outcome}) — ` +
           `degrading to the deterministic top-${cap} selection: ${poolDegradeReason(r, candidateNumbers, cap)}`,
         isValid: (r) => validatePoolSelectionOutput(r.resultText ?? "", candidateNumbers, cap).ok,
+        // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
+        envFailure: envFailureHook(deps.cfg, deps.state),
       });
       const validated: PoolSelectionValidation =
         result.outcome === "done"
@@ -1622,6 +1624,8 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
               `[sapwood:po] round ${roundId}: po-align session failed twice (${result.outcome}) — ` +
               `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result, alignInView)}`,
             isValid: (result) => validateAlignOutput(result.resultText ?? "", alignInView).ok,
+            // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
+            envFailure: envFailureHook(deps.cfg, deps.state),
           });
           alignValidated =
             alignResult.outcome === "done"
@@ -1927,6 +1931,8 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
               `#${issue.number} — proceeding (pre-Ready, low stakes; the next round retries naturally): ` +
               `${triageDegradeReason(result, issue.number, triageInView)}`,
             isValid: (result) => validateTriageOutput(result.resultText ?? "", issue.number, triageInView).ok,
+            // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
+            envFailure: envFailureHook(deps.cfg, deps.state),
           });
           validated =
             triageResult.outcome === "done"

@@ -932,6 +932,43 @@ export function extractFailureText(jsonl: string): string {
   return out.join("\n");
 }
 
+/** #374 (dogfood F16/F17): the Claude CLI's own structured rate-limit telemetry line —
+ *  `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":<epoch
+ *  seconds>,"rateLimitType":"five_hour",...}}` — captured verbatim in a real session transcript
+ *  alongside (not instead of) the human-readable "You've hit your session limit · resets
+ *  6:30pm (Asia/Tokyo)" text extractFailureText already surfaces for classification. This is a
+ *  SEPARATE, purely structural extraction: a SCHEDULING input (the exact reset instant, as a
+ *  machine timestamp) for env-failure.ts's probeDueWithHint, never a classification input —
+ *  extractFailureText deliberately does NOT include `rate_limit_event` lines (they are neither
+ *  a `result` nor an `error` record), so this reads the SAME jsonl independently rather than
+ *  widening that function's classification surface.
+ *
+ *  Returns the LAST "rejected" record's `resetsAt` converted to epoch MILLISECONDS, or `null`
+ *  when no such record is present, every record found has a non-"rejected" status, or a line
+ *  fails to parse — tolerant by construction (never throws): an absent hint simply means the
+ *  ordinary bounded backoff schedule applies, exactly the pre-#374 behavior. */
+export function extractRateLimitResetAt(jsonl: string): number | null {
+  let resetAtMs: number | null = null;
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // mid-write/truncated stream fragment
+    }
+    if (obj.type !== "rate_limit_event") continue;
+    const info = obj.rate_limit_info as Record<string, unknown> | undefined;
+    if (info?.status !== "rejected") continue;
+    const resetsAt = info.resetsAt;
+    if (typeof resetsAt === "number" && Number.isFinite(resetsAt)) {
+      resetAtMs = resetsAt * 1000;
+    }
+  }
+  return resetAtMs;
+}
+
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
  *  matcher covers exactly the tools the guard inspects — Read/Grep/Glob/NotebookRead joined
@@ -2254,6 +2291,9 @@ export class WorkerSupervisor implements Supervisor {
     // computing it unconditionally would re-read the jsonl on every probe of every lane for no
     // reason.
     const failureText = failed ? this.terminalFailureText(name) : undefined;
+    // #374: same "only for a FAILED lane" gating as failureText above — this is only ever
+    // consumed at the FAILED reclaim path's env-classification site.
+    const rateLimitResetAtMs = failed ? this.terminalRateLimitResetAtMs(name) : undefined;
     // #247: only for a DONE lane — same "compute it lazily, only where a consumer could ever
     // use it" stance failureText already takes for FAILED lanes (conductor.ts's fix-leg harvest
     // is the first reader; an ordinary worker's DONE result text is otherwise unconsumed).
@@ -2277,6 +2317,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(failureText !== undefined ? { failureText } : {}),
       ...(resultText !== undefined ? { resultText } : {}),
       ...(actualModel != null ? { actualModel } : {}),
+      ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
     };
   }
 
@@ -2322,6 +2363,13 @@ export class WorkerSupervisor implements Supervisor {
   private terminalFailureText(name: string): string {
     const text = extractFailureText(this.readJsonl(this.path(name, "jsonl")));
     return text.length > FAILURE_TEXT_TAIL_CHARS ? text.slice(-FAILURE_TEXT_TAIL_CHARS) : text;
+  }
+
+  /** #374: same shape as terminalFailureText — a new READ of the jsonl this class already
+   *  writes, feeding conductor.ts's env-park entry with a reset-time SCHEDULING hint when the
+   *  CLI's own structured rate-limit telemetry names one. */
+  private terminalRateLimitResetAtMs(name: string): number | null {
+    return extractRateLimitResetAt(this.readJsonl(this.path(name, "jsonl")));
   }
 
   /** #247: a DONE lane's own final-message text — parseResultText over this lane's CURRENT LEG

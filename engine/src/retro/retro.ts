@@ -37,7 +37,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import { renderFactsTemplate } from "../loop/harvest.js";
 import type { PeripheralStub } from "../loop/round.js";
-import { type RoleRunner, runSessionWithRetry } from "../roles/peripheral.js";
+import { envFailureHook, type RoleRunner, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
 import type { RoundRow, State } from "../state/state.js";
 import { buildRetroDigest } from "./retro-digest.js";
@@ -329,6 +329,10 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
           `closing the retro phase WITHOUT a proposal pass (degraded, see the retro-degraded ` +
           `event); the run is not blocked`,
         isValid: (result) => parseRetroScratch(result.scratchText).kind !== "invalid",
+        // #374: quota/429 (or a forge signature from retro's own git push — this is the one role
+        // session that holds write/git tools) parks instead of degrading — see peripheral.ts's
+        // envFailureHook doc.
+        envFailure: envFailureHook(deps.cfg, deps.state),
       });
       // #111 PR-B: the engine-side write half. Only a validated PROPOSAL reaches the forge —
       // `none` (a quiet round) and a degraded session (runSessionWithRetry already recorded it)

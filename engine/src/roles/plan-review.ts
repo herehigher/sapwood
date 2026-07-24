@@ -47,6 +47,7 @@ import { parseStructuredBlock } from "../state/structured-output.js";
 import {
   CONFIRM_ALLOWED_TOOLS,
   CONFIRM_DISALLOWED_TOOLS,
+  envFailureHook,
   PLAN_DRAFTER_DISALLOWED_TOOLS,
   type RoleRunner,
   type RoleSessionResult,
@@ -492,7 +493,21 @@ async function reviewOneIssue(
           `[sapwood:plan-review] round ${roundId} issue #${issue.number} cycle ${cycle}: ` +
           `${reviewerDegradeReason(result, issue.number, currentBody)}`,
         isValid: (result) => validateReviewerOutput(result.resultText ?? "", issue.number, currentBody).ok,
+        // #374: quota/429 parks instead of escalating needs-human — see peripheral.ts's
+        // envFailureHook doc. A classified attempt returns with `envParked: true` — see the
+        // check right below, which stops this function's OWN escalation branch from ever
+        // mislabeling an issue needs-human over a provider outage.
+        envFailure: envFailureHook(deps.cfg, deps.state),
       });
+      if (reviewResult.envParked) {
+        // #374: the engine parked instead of escalating (peripheral.ts's runSessionWithRetry
+        // already recorded the durable env-park episode + role-env-failure event) — this issue
+        // simply gets no verdict THIS pass; it re-matches next round once dispatch resumes. NO
+        // needs-human, NO plan-review-escalated (that event is for a genuine review failure, not
+        // an environment outage).
+        trail.push(`cycle ${cycle}: plan-reviewer session ${reviewResult.name} -> environment park (provider outage)`);
+        return;
+      }
 
       const validated: ReviewerValidation =
         reviewResult.outcome === "done"
@@ -637,7 +652,15 @@ async function reviewOneIssue(
       degradeMessage: (result) =>
         `[sapwood:plan-review] round ${roundId} issue #${issue.number} cycle ${cycle}: ` + `${drafterDegradeReason(result, issue.number)}`,
       isValid: (result) => validateDrafterOutput(result.resultText ?? "", issue.number).ok,
+      // #374: quota/429 parks instead of escalating needs-human — see envParked's check below.
+      envFailure: envFailureHook(deps.cfg, deps.state),
     });
+    if (drafterResult.envParked) {
+      // #374: same stance as the reviewer branch above — the engine parked instead of
+      // escalating; this issue gets no drafted revision THIS pass, it re-matches next round.
+      trail.push(`cycle ${cycle}: plan-drafter session ${drafterResult.name} -> environment park (provider outage)`);
+      return;
+    }
 
     const draftValidated: DrafterValidation =
       drafterResult.outcome === "done"
@@ -770,7 +793,15 @@ async function confirmOneIssue(
     degradeMessage: (r) =>
       `[sapwood:plan-review] round ${roundId} issue #${issue.number} confirm: ${confirmDegradeReason(r, issue.number)}`,
     isValid: (r) => validateConfirmOutput(r.resultText ?? "", issue.number).ok,
+    // #374: quota/429 parks instead of escalating needs-human — see envParked's check below.
+    envFailure: envFailureHook(deps.cfg, deps.state),
   });
+  if (result.envParked) {
+    // #374: same stance as reviewOneIssue's reviewer/drafter branches — the engine parked
+    // instead of escalating; this issue gets no confirm verdict THIS pass, it re-matches next
+    // round (plan:approved is untouched either way).
+    return;
+  }
 
   const validated: ConfirmValidation =
     result.outcome === "done"

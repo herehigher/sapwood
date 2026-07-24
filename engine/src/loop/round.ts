@@ -24,9 +24,22 @@ import { labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
-import { type FixLegResumeDeps, type MergeGate, type Supervisor, type TickDeps, type TickResult, tick } from "./conductor.js";
+import {
+  type CeilingReason,
+  engineSessionGapSec,
+  escalatePark,
+  evaluateCeiling,
+  type FixLegResumeDeps,
+  type MergeGate,
+  probeForgeReachable,
+  type Supervisor,
+  type TickDeps,
+  type TickResult,
+  tick,
+} from "./conductor.js";
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
-import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
+import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
+import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
 
 export type { RoundPhase, RoundRow } from "../state/state.js";
 
@@ -642,6 +655,121 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // like standbyAttempts: a restart is a fresh shot for the PO (deliberate — the cheapest
   // "wake the PO" lever an operator has).
   let lastRoundIdle = false;
+  // #374 (F16): the empty-spin breaker's own counter — consecutive CLOSED rounds, in a row,
+  // that dispatched nothing AND had at least one peripheral role session degrade. In-memory
+  // only, same "restart is a fresh shot" stance as standbyAttempts/lastRoundIdle above — a
+  // restart is itself evidence of a human/operator touching the engine, so starting this back
+  // at 0 is the accepted, documented scope boundary (never a churn-inducing false reset:
+  // env-classified quota storms re-park within one round via item 1's role-session wiring
+  // regardless of this counter's value).
+  let consecutiveDegradedRounds = 0;
+
+  /** #374 (F16 root cause: "ceilingBreached=true did not stop round churn" / 145 empty rounds in
+   *  3.5h): withhold opening a NEW round while the engine is ceiling-breached OR env-parked —
+   *  the SAME two safety states that already stop DISPATCH inside tick() (conductor.ts's
+   *  ceilingBreached/parkActive gates), now ALSO gating round-opening. ONLY from round 2 onward
+   *  — the caller only invokes this when `roundsClosed > 0` — the very FIRST round of a run
+   *  always opens unconditionally regardless of any pre-existing park/ceiling state, exactly the
+   *  existing #168 contract round.test.ts already pins ("a pre-parked episode's ping probe runs
+   *  DURING the round's executing phase" — that round must actually open for its tick() to ever
+   *  run). This mirrors standby's own `roundsClosed > 0` gate just above/below, for the same
+   *  reason: round 1 gives the PO its decomposition shot / lets a pre-existing park's OWN
+   *  tick()-driven probe machinery run at all before this gate could ever have an opinion.
+   *
+   *  Probes on the identical cadence/primitives conductor.ts's own PARK section uses
+   *  (env-failure.ts's probeBackoffSec/probeDueWithHint, conductor.ts's probeForgeReachable/
+   *  escalatePark) — never a parallel mechanism, just a second call site for the same one.
+   *  Ceiling reasons are re-derived FRESH every wait iteration (evaluateCeiling), never trusted
+   *  from a stale stored marker — engineSessionStart's wall-clock bookkeeping is safe to touch
+   *  from here too (its own doc: "call once per tick" means roughly this cadence, not an
+   *  exclusive tick()-only invariant; multiple forward-only calls never corrupt it).
+   *
+   *  llm-ping semantics match conductor.ts's canary doctrine EXACTLY (settleCanary's own doc: a
+   *  green ping on the cheapest model is NOT itself proof the worker/role's real model/tier has
+   *  quota back) — a successful ping here does NOT clear the episode; it only ARMS this round to
+   *  open (the round's own peripheral role sessions become the real canary, via item 1's
+   *  runSessionWithRetry env-classification wiring: a non-classified attempt clears the episode
+   *  for real, a re-classified one simply continues it). Gated the SAME way conductor.ts gates
+   *  its own canary: only when no FORGE episode is ALSO open (`state.parkRow("forge") == null`)
+   *  — a mixed storm never opens a round that would just fail on forge writes anyway. `forge`
+   *  itself IS a genuine recovery signal (conductor.ts's own doc: "the cheap IForge read is a
+   *  GENUINE recovery signal") and clears outright on success, same as conductor.ts.
+   *
+   *  Returns (clear to open) the instant ceiling is clear AND (nothing is parked OR the llm
+   *  episode alone just got a green light), or immediately when KILL_SWITCH is active or a
+   *  signal arrives — same "let the round open & block normally at its first peripheral phase"
+   *  contract the standby loop above already documents for KILL_SWITCH. */
+  const waitForDispatchClear = async (): Promise<void> => {
+    for (;;) {
+      if (signalled || deps.state.isKillSwitchActive()) return;
+      const nowDate = now();
+      const sessionStart = deps.state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec));
+      const ceilingReasons: CeilingReason[] = evaluateCeiling({
+        dailySpendUsd: deps.state.dailySpendUsd(nowDate),
+        dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+        wallClockElapsedSec: (nowDate.getTime() - sessionStart.getTime()) / 1000,
+        maxWallClockSec: cfg.cost.maxWallClockSec,
+      });
+      if (ceilingReasons.length > 0) deps.state.recordCeilingBreach(ceilingReasons, nowDate);
+      else deps.state.clearCeilingBreach();
+
+      let llmGreenLight = false;
+      for (const episode of deps.state.parkedSources()) {
+        const backoffSec = probeBackoffSec(episode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec);
+        if (!probeDueWithHint(episode.lastProbeAt, nowDate.getTime(), backoffSec, episode.resetHintAt)) continue;
+        if (episode.source === "forge") {
+          const ok = await probeForgeReachable(forge);
+          deps.state.appendEvent("park-probe", {
+            source: "forge",
+            success: ok,
+            attempts: ok ? episode.probeAttempts : episode.probeAttempts + 1,
+          });
+          if (ok) {
+            deps.state.clearPark("forge");
+            deps.state.appendEvent("park-resumed", { source: "forge", enteredAt: episode.enteredAt, via: "round-open-probe" });
+          } else {
+            deps.state.bumpParkProbe("forge", iso());
+          }
+        } else if (deps.probeLlmReachable) {
+          // Disabled-consumer rule (doctrine): no wired probe -> untouched, same as
+          // conductor.ts's own llm probe section. Duration escalation below still fires
+          // regardless.
+          const raw = await deps.probeLlmReachable();
+          const ok = typeof raw === "boolean" ? raw : raw.ok;
+          const detail = typeof raw === "boolean" ? undefined : raw.detail;
+          deps.state.appendEvent("park-probe", {
+            source: "llm",
+            success: ok,
+            attempts: ok ? episode.probeAttempts : episode.probeAttempts + 1,
+            ...(!ok && detail != null ? { reason: detail } : {}),
+          });
+          if (ok) {
+            // Touch (pace), never bump (grow backoff) — a green ping is a successful probe, not
+            // a failure, same "touch on success" contract conductor.ts's own llm branch uses.
+            deps.state.touchParkProbe("llm", iso());
+            llmGreenLight = true;
+          } else {
+            deps.state.bumpParkProbe("llm", iso());
+          }
+        }
+      }
+      for (const episode of deps.state.parkedSources()) {
+        if (
+          episode.escalatedAt == null &&
+          parkDurationExceededSec(episode.enteredAt, nowDate.getTime(), cfg.envFailure.parkEscalateAfterSec)
+        ) {
+          await escalatePark(forge, deps.state, cfg, episode, deps.state.parkRow("forge") != null, iso, deps.log);
+        }
+      }
+
+      const parkClearToOpen = !deps.state.isParked() || (llmGreenLight && deps.state.parkRow("forge") == null);
+      if (ceilingReasons.length === 0 && parkClearToOpen) return;
+
+      if (signalled) return;
+      await interTickWait(deps.tickIntervalSec * 1000);
+      if (deps.state.isKillSwitchActive()) return;
+    }
+  };
 
   /** Contained tick() call (same containment stance as driver.ts's runDriver): a thrown tick
    *  is a structured tick-error event, never a crash, never a hot retry loop (callers still
@@ -1136,6 +1264,19 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           }
         }
 
+        // #374: withhold opening a NEW round while ceiling-breached or env-parked (see
+        // waitForDispatchClear's own doc) — runs regardless of whether standby engaged above
+        // (standby's own probe is about BACKLOG emptiness; this is an orthogonal SAFETY-STATE
+        // gate). `roundsClosed > 0` ONLY — never gates the very first round of a run (see the
+        // doc's own explanation: round 1 always opens unconditionally, matching the pre-existing
+        // #168 contract).
+        if (roundsClosed > 0) {
+          await waitForDispatchClear();
+          if (signalled) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
+          }
+        }
+
         round = deps.state.startRound(iso());
       }
 
@@ -1236,8 +1377,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // re-runs the (marker-idempotent) close and the upsert overwrites with the same window.
       // Contained: an assembly/validation/persistence BUG still degrades to a durable
       // tick-error and the round still closes — the artifact is best-effort, the close is not.
+      // #374: captured (not discarded) — the empty-spin breaker below reads this SAME artifact's
+      // degradedPhases rather than re-deriving anything, so a round-level "did every peripheral
+      // session degrade" signal costs nothing extra to compute.
+      let artifact: RoundArtifact | null = null;
       try {
-        persistRoundArtifact(deps.state, buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, closedAt), closedAt);
+        artifact = buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, closedAt);
+        persistRoundArtifact(deps.state, artifact, closedAt);
       } catch (e) {
         tickErrors++;
         try {
@@ -1257,6 +1403,37 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // that lets standby engage at the top of the next iteration (see lastRoundIdle's comment).
       // A resumed round that skipped executing is NOT idle-evidence (see ranExecuting above).
       lastRoundIdle = ranExecuting && workersThisRound === 0;
+      // #374 (F16): the empty-spin breaker — independent of error CLASSIFICATION (item 1's
+      // env-park wiring may simply not recognize an unfamiliar systemic failure's text). A round
+      // that dispatched nothing AND had at least one peripheral session degrade (this round's OWN
+      // artifact.degradedPhases, or a degraded retro proposal — the two places a role-session
+      // failure shows up in the artifact) is one strike; N consecutive strikes force the SAME
+      // "llm" park episode item 1 already uses, so waitForDispatchClear (above) bounds the churn
+      // even when the failure text never matched a known signature. `artifact == null` (its own
+      // build/persist THREW, see the try/catch above) counts as NOT degraded — a contained
+      // observability failure must never itself trip a safety breaker.
+      const roundDegraded =
+        ranExecuting &&
+        workersThisRound === 0 &&
+        artifact != null &&
+        (artifact.degradedPhases.length > 0 || artifact.retro.degraded != null);
+      consecutiveDegradedRounds = roundDegraded ? consecutiveDegradedRounds + 1 : 0;
+      if (emptySpinBreached(consecutiveDegradedRounds, cfg.round.emptySpin.consecutiveDegradedRoundsThreshold)) {
+        const reason =
+          `empty-spin breaker: ${consecutiveDegradedRounds} consecutive rounds with no dispatch and a degraded ` +
+          `peripheral session (round ${round.round_id} last) — independent of error classification (#374 F16)`;
+        deps.state.enterPark("llm", reason, null, closedAt);
+        try {
+          deps.state.appendEvent("empty-spin-park", {
+            consecutiveDegradedRounds,
+            threshold: cfg.round.emptySpin.consecutiveDegradedRoundsThreshold,
+            roundId: round.round_id,
+          });
+        } catch {
+          /* best-effort — the park row itself is still the durable record */
+        }
+        consecutiveDegradedRounds = 0; // episode entered (or already open) — the gate above takes over
+      }
       // #109 gate② P1 (idle throttle): an IDLE round — zero workers in flight — closing and the
       // next opening back-to-back would run the real peripheral role sessions (PO/architect/
       // plan-review/harvest/retro Claude sessions, the production default since #106)
