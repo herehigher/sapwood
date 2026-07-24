@@ -1583,7 +1583,17 @@ test("tick DRIVE (#246 review round 1, C1): the fixLegResume-unwired degrade's l
 // still drain, never start a brand-new fix leg instead.
 // ──────────────────────────────────────────────────────────────────────────────────────────
 
-test("tick DRIVE (#246 C2): paused (forceDispatchPause) blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+// #375 (PR #388 review round 2, P1): forceDispatchPause is round.ts's OWN "no new dispatch wave
+// this round" signal (round-budget/round-dispatch-cap/milestone/run-level stop conditions) — it
+// is NOT a human pause, and none of those are "new dispatch" from an already-driving lane's fix
+// leg's point of view. Folding it into the FIXUP admission gate (the OLD behavior this test used
+// to pin) reproduced the #375 wedge under a different trigger: once ANY round/run-level stop
+// condition fired, every FIXUP attempt blocked on "fix-leg-admission-blocked:paused" forever, the
+// round never closing (see round.test.ts's own "runRounds (#375 review round 2, P1)" for the
+// full end-to-end reproduction through runRounds()). This test now pins the OPPOSITE: a bare
+// forceDispatchPause must NOT block a fix leg at all. The test right after it pins that a GENUINE
+// human PAUSE sentinel still does — that half of the old behavior is unchanged, by design.
+test("tick DRIVE (#375 review round 2, P1): forceDispatchPause ALONE (no human PAUSE sentinel) does NOT block a FIXUP dispatch — the fix leg still dispatches", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -1600,12 +1610,41 @@ test("tick DRIVE (#246 C2): paused (forceDispatchPause) blocks a FIXUP dispatch 
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
   const row = st.getWorker("lane-a")!;
-  assert.equal(row.state, "driving");
-  assert.equal(row.fix_rounds ?? 0, 0);
-  assert.deepEqual(sup.resumeCalls, []);
-  assert.equal(r.driven[0]!.kind, "queued");
-  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:paused/);
+  assert.equal(row.state, "fixing", "#375: forceDispatchPause alone no longer blocks a fix leg");
+  assert.equal(row.fix_rounds, 1);
+  assert.equal(sup.resumeCalls.length, 1);
+  assert.equal(r.driven[0]!.kind, "fixup");
   st.close();
+});
+
+test("tick DRIVE (#375 review round 2, P1): a GENUINE human PAUSE sentinel (data/PAUSE, not forceDispatchPause) still blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-pause-fixup-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE — no forceDispatchPause involved
+    const r = await tick({
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg(),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    const row = st.getWorker("lane-a")!;
+    assert.equal(row.state, "driving");
+    assert.equal(row.fix_rounds ?? 0, 0);
+    assert.deepEqual(sup.resumeCalls, []);
+    assert.equal(r.driven[0]!.kind, "queued");
+    assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:paused/);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("tick DRIVE (#246 C2): an engine-wide ceiling breach (daily budget) blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
@@ -2371,6 +2410,51 @@ test("tick: KILL_SWITCH drain — a driving lane AT the fix-rounds cap is TERMIN
     const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
     assert.match(ev!.payload.reason, /drain-fix-rounds-capped:2\/2/);
     assert.equal(st.activeWorkers().length, 0); // #375 AC2: wind-down's activeWorkers()===0 loop can now exit
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: KILL_SWITCH drain — a driving lane's escalation honors the #69/#147 forge-before-terminal-upsert ordering (#375 review round 2, P2): a failed needs-human label write leaves the row `driving` (never a terminal upsert on a write failure), retried on the very next tick", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window
+
+    // Tick 2: the label write fails — unlike escalateNeedsHuman's OTHER callers (which commit
+    // the terminal upsert regardless, tracking the failure via gated_escalation_labeled: 0), the
+    // drain path must NOT terminalize on a write failure: this IS the row's one scheduled visit
+    // for the current breach, so it stays `driving` and is retried, not silently downgraded to
+    // permanently-manual.
+    forge.throwOnAddLabel = true;
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r2.escalated, [], "a failed label write must NOT count as drained");
+    assert.equal(st.getWorker("lane-a")?.state, "driving", "stays driving — never a terminal upsert on a write failure");
+    assert.notEqual(
+      st.getWorker("lane-a")?.gated_escalation_labeled,
+      1,
+      "no gated_escalation_labeled=1 latch on a failed write — this row is NOT terminalized at all yet",
+    );
+    const failEv = st.latestEvent("drain-driving-escalation-label-failed") as { payload: { reason: string; error: string } } | undefined;
+    assert.match(failEv!.payload.reason, /drain-fix-rounds-capped:2\/2/);
+
+    // Tick 3: forge recovers — the SAME still-elapsed breach window retries immediately (no
+    // fresh window needed, per recordCeilingBreach's first-detection-only INSERT OR IGNORE).
+    forge.throwOnAddLabel = false;
+    const r3 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r3.escalated, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "failed");
+    assert.equal(st.getWorker("lane-a")?.gated_escalation_labeled, 1);
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

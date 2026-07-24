@@ -384,7 +384,14 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   *other*, pre-existing limits: `lanes.prFixCap` (attempts, as above), `worker.budgetUsdSoft`
   (each leg's own per-worker graceful-handoff ceiling), and `cost.dailyBudgetUsd` (the hard
   daily ceiling — still a real admission blocker via the same pause/ceiling/park/run-spend-stop
-  check above). **The daily ceiling is the actual hard safety boundary**, exactly as
+  check above). **The exemption is uniform across every round/run-level stop reason, not just
+  the spend cap** (PR #388 review round 2): once ANY of `roundBudgetUsd`/`roundDispatchCap`/a
+  round milestone/a `stop.*` run-level condition fires, round.ts freezes further waves via the
+  SAME `forceDispatchPause` signal — which is a "no new dispatch this round" fact, never a human
+  pause, and a fix leg on an already-open PR is never "new dispatch" either way. A fix leg's
+  admission gate reads the genuine `data/PAUSE` sentinel only, not `forceDispatchPause` — new
+  DISPATCH itself stays fully frozen regardless (round.ts already zeroes its dispatch quota in
+  lockstep). **The daily ceiling is the actual hard safety boundary**, exactly as
   everywhere else in this doc — it is deliberately *not* exempted, since it is the boundary
   that exists to stop runaway spend, not to pace one round. A daily-budget-blocked (or
   fix-rounds-capped) driving lane is also now **terminal-for-drain** under the `KILL_SWITCH`

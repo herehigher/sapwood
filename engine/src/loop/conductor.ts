@@ -374,7 +374,19 @@ export function fixLegAdmissionBlockReason(input: {
  *  A `driving` lane with `fixRounds === 0` is never treated as terminal here: it may be MERGE-
  *  or WAIT-gated and need nothing from the fix loop at all, so forcing it to needs-human on a
  *  bare ceiling breach would escalate a healthy in-review PR for no reason — it simply resumes
- *  normal DRIVE progression the instant the breach/switch clears. */
+ *  normal DRIVE progression the instant the breach/switch clears.
+ *
+ *  #375 review round 2 (P2, accepted trade-off, PR #388 review): the fix-capped arm CAN still
+ *  false-positive on the kill-switch path specifically — a lane at `prFixCap` that has ALSO
+ *  reached a healthy post-fix WAIT (its rework already done, merely awaiting re-review) gets
+ *  force-escalated too, since this heuristic cannot see that (DRIVE never ran this tick to prove
+ *  it). This is deliberate, not an oversight: under an active KILL_SWITCH, DRIVE is frozen no
+ *  matter how healthy the lane is, so it cannot merge THIS tick regardless, and the engine MUST
+ *  still exit the bounded drain window (PLAN.md "drain before kill, always" — the #375 PM
+ *  adjudication names fix-capped lanes terminal-for-drain unconditionally). The recovery path is
+ *  #147's GATED RECLAIM: a human clears the `needs-human` label once they see the false positive
+ *  (or once review lands and the PR is simply mergeable), and the SAME lane/PR/branch reclaims
+ *  back into `driving` — no data loss, no fresh dispatch, just one extra manual step. */
 export function drivingLaneTerminalForDrain(fixRounds: number, prFixCap: number, dailyBudgetBreached: boolean): boolean {
   if (fixRounds >= prFixCap) return true;
   return fixRounds > 0 && dailyBudgetBreached;
@@ -1135,9 +1147,21 @@ async function drainThenEscalate(
     // window, exactly like DRIVE's own fix-rounds-cap branch would escalate it (#246) — just one
     // drain window early on the kill-switch path (DRIVE never gets to run while the switch
     // stands), or confirmed by THIS SAME tick's own DRIVE pass on the ceiling path (see
-    // `DrivingDrainMode`'s own doc for why the two callers cannot share one predicate). Reuses
-    // escalateNeedsHuman outright (same label-then-terminal-upsert-then-event contract, same
-    // gated-reentry comment for a repeat escalation) rather than a second inline copy of it.
+    // `DrivingDrainMode`'s own doc for why the two callers cannot share one predicate).
+    //
+    // #375 review round 2 (P2, Codex PR #388 review): deliberately NOT escalateNeedsHuman — that
+    // helper commits the terminal `upsertWorker(failed)` UNCONDITIONALLY, even when its own
+    // `forge.addLabel` throws (it only records the failure via `gated_escalation_labeled: 0`, a
+    // durable "manual drive as before #147" marker — the right contract for its many OTHER
+    // callers, an ordinary DRIVE-tick escalation that gets re-attempted from a clean `driving` row
+    // if anything ever needs to look at it again). A drain escalation is different: this IS the
+    // row's one scheduled visit for the current breach, so a transient forge outage here should
+    // not permanently downgrade it to manual-only. Mirror the FIXABLE cap-exhausted branch's own
+    // contract instead (`Hard rule (#69/#147 forge-before-terminal-upsert)`, above): label FIRST;
+    // on failure, leave the row `driving` and retry next tick — `state.ceilingBreach()`'s
+    // timestamp is untouched by a retry (recordCeilingBreach only ever records FIRST detection),
+    // so the NEXT tick's `drainEscalationDue` check is still past-window and retries immediately —
+    // one extra tick, never a fresh drain window.
     for (const w of state.drivingWorkers()) {
       const fixRounds = w.fix_rounds ?? 0;
       const terminal =
@@ -1152,7 +1176,14 @@ async function drainThenEscalate(
           : drivingDrain.mode === "heuristic"
             ? `drain-daily-budget-blocked:fix-rounds=${fixRounds}`
             : `drain-ceiling-admission-blocked:fix-rounds=${fixRounds}`;
-      await escalateNeedsHuman(forge, state, cfg, w, w.pr, reason, iso);
+      try {
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      } catch (e) {
+        state.appendEvent("drain-driving-escalation-label-failed", { worker: w.name, issue: w.issue, pr: w.pr, reason, error: String(e) });
+        continue; // stays `driving`, no latch — the next drain tick retries this whole branch
+      }
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
+      state.appendEvent("drive-needs-human", { worker: w.name, issue: w.issue, pr: w.pr, reason, labeled: 1 });
       escalated.push(w.name);
     }
   }
@@ -1972,6 +2003,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   present -> KILL_SWITCH already returned above, so this line is never reached — the
   //   stricter gate wins, unconditionally.
   const paused = state.isPauseActive() || (deps.forceDispatchPause ?? false);
+  // #375 review round 2 (P1): `paused` above also folds in round.ts's OWN `forceDispatchPause`
+  // (round-budget / round-dispatch-cap / milestone / run-level stop conditions — see round.ts's
+  // tryDispatchWave/recordBudgetStop) — none of those are "new dispatch" from a driving lane's
+  // fix leg's point of view: an already-open PR finishing its own rework is continuing existing
+  // work, never opening new work, the exact reasoning #375 item 1 already applied to
+  // cost.roundBudgetUsd specifically. Folding `forceDispatchPause` into the fix-leg admission
+  // gate (below) reproduced the SAME permanent wedge under a different trigger — a driving
+  // lane's FIXUP forever blocked on "fix-leg-admission-blocked:paused" once ANY round/run-level
+  // stop condition fired, never clearing until the round itself ended (Codex PR #388 review,
+  // P1). DISPATCH is ALREADY fully frozen independently the moment `forceDispatchPause` fires —
+  // round.ts sets `dispatchCapOverride: 0` in lockstep with it, and the DISPATCH gate below
+  // checks `effectiveDispatchCap > 0` regardless of `paused` — so threading `forceDispatchPause`
+  // into the fix-leg gate serves no purpose there except reintroducing the #375 wedge.
+  // `humanPauseOnly` is the ONE genuine human control that should still hold a fix leg back —
+  // the out-of-band `data/PAUSE` sentinel — matching this comment's own long-standing "PAUSE
+  // only freezes DISPATCH, not existing-lane progression" intent below, which the fix-leg
+  // admission gate had silently violated since #246 introduced it. RESUME's own admission gate
+  // (`resumeSpendPaused`, below) and the llm-probe suppression deliberately keep using the wider
+  // `paused`, unchanged — a `handoff` lane is NOT in `state.activeWorkers()` (running + driving +
+  // fixing only), so a resume forever blocked by `forceDispatchPause` does not itself keep
+  // `activeWorkers()` above zero — it is not the same wind-down-never-exits shape this issue
+  // fixes. Scope kept deliberately narrow to the fix-leg gate; revisit RESUME separately if it
+  // ever proves to share the shape.
+  const humanPauseOnly = state.isPauseActive();
   // Snapshot before RECLAIM: a lane that writes .handoff during this tick gets one settled
   // terminal beat and becomes resumable on the NEXT tick, never immediately in the same tick.
   const handoffsAtTickStart = state.handoffWorkers();
@@ -2587,14 +2642,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             // more — `overBudget: driveOverBudget` below is always `false` now (see that
             // constant's own doc), so this admission check's `ceilingBreached` (daily-budget +
             // wall-clock only, never round budget) is the sole budget-shaped gate a fix leg still
-            // has to clear. A wind-down must drain, never start a brand-new fix leg instead.
-            // Blocked -> stays driving, retried next tick (transient); the gate derivation itself
-            // already ran (this only gates the spawn). Ceiling/run-spend-stop are read FRESH here
-            // (E1), not from a pre-DRIVE-loop snapshot — DRIVE can run long across many lanes, and
-            // wall-clock keeps elapsing regardless of spend, so a snapshot taken before the loop
-            // started could be stale by the time a LATER lane reaches this check.
+            // has to clear. #375 review round 2 (P1): `paused: humanPauseOnly` below (NOT the
+            // wider `paused`) for the exact same reason — round.ts's own `forceDispatchPause`
+            // (round-budget/round-dispatch-cap/milestone/run-level stop conditions) is not a
+            // human pause and not "new dispatch" from a fix leg's point of view; see
+            // `humanPauseOnly`'s own doc, above the kill-switch/PAUSE section, for the full
+            // reasoning and why RESUME deliberately keeps the wider `paused`. A wind-down must
+            // drain, never start a brand-new fix leg instead — that's still fully enforced here,
+            // just via `ceilingBreached`/`parkActive`/`runSpendStop` and a GENUINE human pause,
+            // not round.ts's internal dispatch-quota bookkeeping. Blocked -> stays driving,
+            // retried next tick (transient); the gate derivation itself already ran (this only
+            // gates the spawn). Ceiling/run-spend-stop are read FRESH here (E1), not from a
+            // pre-DRIVE-loop snapshot — DRIVE can run long across many lanes, and wall-clock
+            // keeps elapsing regardless of spend, so a snapshot taken before the loop started
+            // could be stale by the time a LATER lane reaches this check.
             const admissionBlock = fixLegAdmissionBlockReason({
-              paused,
+              paused: humanPauseOnly,
               ceilingBreached: ceilingReasonsAsOf(now()).length > 0,
               parkActive: parkedBeforeProbes,
               overBudget: driveOverBudget,
