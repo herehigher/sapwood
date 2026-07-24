@@ -1,0 +1,76 @@
+/*
+ * sapwood design tokens — frontend-design.md §5.
+ *
+ * Token names are ROLE-stable across themes; only the values swap. `--heartwood` is
+ * always "the page ground" and `--sapwood` always "primary text", even though in the
+ * light theme those hexes trade places. That is what lets every component name a role
+ * once and never branch on theme.
+ *
+ * Both themes live in one `light-dark(light, dark)` declaration per token, so they
+ * cannot drift apart. `color-scheme: dark light` makes heartwood (dark) the default —
+ * it is a monitoring surface — with the sapwood (light) theme coming on via
+ * `prefers-color-scheme`. `[data-theme]` on <html> is the manual override.
+ */
+
+@font-face {
+  font-family: "Fraunces";
+  src: url("./fonts/fraunces-latin-var.woff2") format("woff2");
+  font-weight: 400 600;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+2000-206F, U+2122, U+2191, U+2193, U+2212, U+2215;
+}
+
+:root {
+  color-scheme: dark light;
+
+  /* ---- Colour ------------------------------------------------------------ */
+  --heartwood: light-dark(#F1F0E2, #251B10); /* page ground */
+  --panel: light-dark(#E9EAD6, #2E2317); /* cards, drawer */
+  --sapwood: light-dark(#251B10, #F1E7D2); /* primary text */
+  --bark: #8A7A64; /* borders and hairlines ONLY — below AA for text, both themes */
+  --bark-text: light-dark(#57604A, #A6957C); /* muted text */
+  --sap: light-dark(#8A5A14, #E8A33D); /* amber — "in motion" */
+  --moss: light-dark(#3E6B4F, #8FA36B); /* success — "done well" */
+  /* failure/escalation — "a person should look".
+     Dark value lightened from the spec's #C05A2E (3.46:1 on --panel) to clear AA as
+     text; §5's quality floor requires adjusting the failing side. */
+  --rust: light-dark(#A34620, #D9713F);
+
+  /* ---- Type -------------------------------------------------------------- */
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-data: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* 13 px base, 1.25 ratio, rounded to whole pixels, up to the 33 px display size */
+  --text-0: 13px;
+  --text-1: 16px;
+  --text-2: 20px;
+  --text-3: 26px;
+  --text-4: 33px;
+  --leading-body: 1.5;
+  --leading-display: 1.2;
+
+  /* ---- Space & shape ----------------------------------------------------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --radius-card: 6px;
+  --radius-pill: 999px;
+  --hairline: 1px solid color-mix(in srgb, var(--bark) 25%, transparent);
+
+  /* ---- Motion ------------------------------------------------------------ */
+  --beat: 240ms; /* state flips */
+  --travel: 900ms; /* token movement in the hero */
+  --ease: cubic-bezier(0.3, 0.7, 0.3, 1);
+  --ambient: 3s; /* ambient pulses are never faster than this */
+}
+
+:root[data-theme="heartwood"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="sapwood"] {
+  color-scheme: light;
+}
