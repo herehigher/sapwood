@@ -1,0 +1,13 @@
+// The §8 data server (server.ts) is Node-side: NodeNext resolution, no DOM, and it reads the
+// engine's own State/config sources. tsconfig.json next door is the vite/React half (bundler
+// resolution, DOM lib) — one package, two genuinely different compilation targets, so two
+// configs rather than one that is wrong for both.
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["*.ts", "../engine/src/**/*.ts"],
+  "exclude": ["../engine/src/**/*.test.ts"]
+}

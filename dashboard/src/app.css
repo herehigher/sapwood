@@ -1,0 +1,82 @@
+/*
+ * Base layer — frontend-design.md §5. Components own their own rules; this file only
+ * sets the ground, the three type roles, and the quality-floor defaults every module
+ * inherits (focus ring, reduced motion, 720 px stacking).
+ */
+@import "./tokens.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--heartwood);
+  color: var(--sapwood);
+  font-family: var(--font-body);
+  font-size: var(--text-0);
+  line-height: var(--leading-body);
+  font-weight: 400;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  line-height: var(--leading-display);
+  font-weight: 600;
+  margin: 0;
+}
+
+code,
+.data {
+  font-family: var(--font-data);
+}
+
+.muted {
+  color: var(--bark-text);
+}
+
+.panel {
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: var(--space-4);
+}
+
+/* §5 quality floor: visible keyboard focus, --sap outline. */
+:focus-visible {
+  outline: 2px solid var(--sap);
+  outline-offset: 2px;
+}
+
+/* §5 quality floor: modules stack at 720 px. */
+.stack {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  padding: var(--space-4);
+}
+
+/*
+ * §6: honour prefers-reduced-motion by collapsing the motion tokens rather than by
+ * disabling animations one at a time — every module reads --beat/--travel, so this is
+ * the single switch. Lives here, not in tokens.css: tokens.css stays a flat declaration
+ * of the palette so the §5 contrast/token check can parse it unambiguously.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --beat: 1ms;
+    --travel: 1ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

@@ -14,7 +14,7 @@
     "typecheck": "npm run -ws typecheck",
     "lint": "biome ci .",
     "test": "npm run -ws test",
-    "build": "npm run -ws --if-present build"
+    "build": "npm run -ws build"
   },
   "license": "MIT",
   "devDependencies": {

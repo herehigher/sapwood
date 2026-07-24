@@ -366,7 +366,17 @@ below are unchanged:
 | `--bark-text` | `#A6957C` | Muted text (AA-passing on both grounds) |
 | `--sap` | `#E8A33D` | Amber — the *activity* color: flowing tokens, running lanes, spend meter |
 | `--moss` | `#8FA36B` | Success: merged, CI green, healthy engine dot |
-| `--rust` | `#C05A2E` | Failure/escalation: failed lanes, `needs-human`, ceiling breach |
+| `--rust` | `#D9713F` | Failure/escalation: failed lanes, `needs-human`, ceiling breach |
+
+Amended 2026-07-24 (#143, token implementation): the dark `--rust` moved from the
+originally-specced `#C05A2E` to `#D9713F`. `#C05A2E` measures 3.82:1 on
+`--heartwood` and 3.46:1 on `--panel` — below AA as text, and `--rust` *is* text
+("failed", "needs human"). The quality floor's "adjust the failing side" rule
+applies; `#D9713F` is the same hue one step lighter and clears AA on both grounds
+(5.14:1 / 4.66:1). All 20 text-on-ground pairs now pass — `npm run contrast -w
+dashboard` prints the table, and `dashboard/src/tokens.test.ts` fails the build if
+any pair regresses. Both themes live in a single `light-dark(light, dark)`
+declaration per token, so a theme cannot silently drift from its twin.
 
 Rules: `--sap` means "in motion", `--moss` means "done well", `--rust` means
 "a person should look" — never decorative use of any of the three. Rings are
@@ -802,9 +812,10 @@ configuration.
 ## 9. Tech architecture
 
 ```
-dashboard/            # new npm workspace — implementer MUST add "dashboard" to root
-                      # package.json "workspaces" (currently ["engine"] only), or root
-                      # -ws build/test/typecheck silently skip the package and CI lies
+dashboard/            # npm workspace — listed in root package.json "workspaces"
+                      # alongside "engine" (#143). Omitting it makes root -ws
+                      # build/test/typecheck silently skip the package while CI reports green
+  index.html  vite.config.ts
   server.ts           # node:http + node:sqlite, ~150 LOC, no deps
   src/
     api/              # fetch + TanStack Query hooks (poll 3 s)  ── the data layer
@@ -813,8 +824,16 @@ dashboard/            # new npm workspace — implementer MUST add "dashboard" t
     components/       # Header, NeedsAttention, LaneBoard, Feed, CostStrip,
                       # ConfigDrawer, Controls (the §3 verbs + confirm flow)
     copy.ts           # §7 — the single copy map
+    fonts/            # the one bundled display face (Fraunces, latin subset woff2)
+    contrast.ts       # §5 quality-floor checker — test assertion + `npm run contrast`
     tokens.css  app.css
 ```
+
+CI (`.github/workflows/ci.yml`) invokes checks per workspace
+(`npm --workspace engine …`) rather than via `-ws`, so adding the workspace alone
+does **not** put the dashboard in CI — the workflow needs matching
+`--workspace dashboard` steps. That file is human-merge-only (security.md), so it
+lands as a separate human-authored change.
 
 - **Build:** Vite + React + TypeScript; `vite build` output embedded in the
   plugin package. Dev: `vite` proxying `/api` to the local server.
@@ -856,10 +875,10 @@ Three things about it are decisions, not implementation detail:
   The header meter therefore falls back whole to the daily tier, exactly as §3 A
   already specifies — no new machinery, and no mixed-tier fraction.
 
-`dashboard` is an npm workspace, so root `lint`/`typecheck`/`test`/`build` cover
-it. CI (`.github/workflows/ci.yml`) still names the engine workspace explicitly
-and does not yet run the dashboard's own typecheck/test — adding those two steps
-is human-merge-only work.
+The server is Node-side and the vite frontend is not, so the package carries two
+tsconfigs — `tsconfig.json` (bundler resolution, DOM) for `src/`, and
+`tsconfig.server.json` (NodeNext, no DOM) for `server.ts`; `npm run typecheck`
+runs both. The CI gap noted above applies to it unchanged.
 
 ## 10. Deferred (v0.3+)
 
