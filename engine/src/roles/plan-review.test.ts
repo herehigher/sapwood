@@ -1138,6 +1138,72 @@ test("createPlanReviewStub (#214 gate② review delta P2): verify_na write order
   );
 });
 
+// ── #296: the verify:n/a proposal is a genuine "a person must adjudicate" hold, but pre-#296 it
+//    wrote only labels + a comment and appended NO event — invisible to every event-fed surface
+//    (the dashboard needs-attention strip, frontend-design.md §3). One additive event, emitted
+//    only once the escalation PROVABLY landed (same ordering doctrine as fix-rounds-capped). ──
+
+test("createPlanReviewStub (#296): a verify_na proposal appends verify-na-proposed exactly once, naming the round and issue", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 212, title: "plain docs work", labels: [ROUND_POOL_LABEL] }];
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-212", sapwoodResult({ decision: "verify_na", issue: 212 }, "Pure docs work.")) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["verify-na-proposed"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, { round_id: round.round_id, issue: 212 });
+  state.close();
+});
+
+test("createPlanReviewStub (#296): a FAILED verifyNa label write appends nothing — no event claiming a hold that never landed; next round retries unchanged", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 213, title: "plain docs work", labels: [ROUND_POOL_LABEL] }];
+  const realAddLabel = forge.addLabel.bind(forge);
+  forge.addLabel = async (n: number, l: string): Promise<void> => {
+    if (l === cfg.labels.verifyNa) throw new Error("simulated forge failure");
+    await realAddLabel(n, l);
+  };
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-213", sapwoodResult({ decision: "verify_na", issue: 213 }, "Pure docs work.")) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await assert.rejects(() => stub.run({ roundId: round.round_id, phase: "plan_review", marker: null }), /simulated forge failure/);
+
+  assert.equal(state.eventsSince("2020-01-01T00:00:00.000Z", ["verify-na-proposed"]).length, 0);
+  state.close();
+});
+
+test("createPlanReviewStub (#296): a state-write failure on the verify-na-proposed append is contained — the forge escalation still stands, run() does not throw", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 214, title: "plain docs work", labels: [ROUND_POOL_LABEL] }];
+  state.appendEvent = () => {
+    throw new Error("simulated disk failure");
+  };
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-214", sapwoodResult({ decision: "verify_na", issue: 214 }, "Pure docs work.")) },
+  ]);
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await assert.doesNotReject(() => stub.run({ roundId: round.round_id, phase: "plan_review", marker: null }));
+  assert.ok(forge.issueLabels[214]!.includes(cfg.labels.needsHuman));
+  assert.ok(forge.issueLabels[214]!.includes(cfg.labels.verifyNa));
+  state.close();
+});
+
 test("createPlanReviewStub (#214 gate② review delta P2): verify_na write order, ALREADY-APPROVED variant (confirm-invalidate reachable path) — same needsHuman -> comment -> verifyNa order, with the dual-cleanup comment landing BEFORE verifyNa either way", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
