@@ -245,8 +245,24 @@ run** — a restart must not empty the strip while the human task remains
 still does). Clearing uses only events that actually resolve the item:
 issue-scoped items (including `ceiling-escalated`, which the engine emits
 **per hard-stopped worker**, and `env-failure-preserved`) clear when a
-later event moves that issue (`dispatched`, `merged`, `gated-reentry`);
-`park-escalated` clears on `park-resumed`; round-scoped escalations clear
+later event moves that issue (`dispatched`, `merged`, `gated-reentry`) —
+**or, since #295, when `escalation-resolved` reports the human resolved it
+outside the loop entirely.** That event is what makes the empty-strip
+contract survivable: the 2026-07-21 audit found most escalation classes had
+no clearing path at all (`gated-reentry-capped`, merged-path
+`rollback-escalated` and `drive-needs-human` with `labeled: 0` are one-way
+latches; `resume-capped`, `resume-undecidable`, `ceiling-escalated`,
+`env-failure-preserved` and the no-PR escalations cleared only on a
+re-dispatch that a hand-merge or a hand-closed issue never triggers), so a
+zombie row could sit on the strip forever and teach the operator to ignore
+it. A per-round read-only reconciler now observes external forge truth and
+appends the event once per resolution, keyed `(source, issue)` for the
+fold. Two honesty limits the strip inherits: `via: "label-removed"` is only
+emitted for escalations that **provably applied** the label (otherwise a
+failed label write would read as a human clearing it — a false empty strip,
+worse than a zombie row), and there is no `board-fixed` resolution because
+no escalation class is board-column-signalled. `park-escalated` clears on
+`park-resumed`; round-scoped escalations clear
 when their round closes; `stalled`/`disconnected` clear when polling
 recovers. `worktree-retained` clears on `worktree-released` — a new
 **additive** engine event (follow-up #210, alongside
@@ -618,6 +634,7 @@ checklist item**):
 | `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
 | `gated-reentry-capped` | Issue #{issue} was unblocked too many times without landing — flagged for a human |
 | `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |
+| `escalation-resolved` | Branches on `payload.via`: merged → "Issue #{issue} no longer needs you — PR #{pr} was merged"; closed → "Issue #{issue} no longer needs you — it was closed"; label-removed → "Issue #{issue} no longer needs you — the flag was cleared". Never an attention item — this is the event that *clears* one (§3) |
 | `retro-pr-opened` | The loop proposed an improvement to itself — PR #{pr} awaits review |
 | `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
 | `run-started` | Engine started a new run |
