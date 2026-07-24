@@ -637,6 +637,49 @@ test("MergeDriver.driveOne (#248): #170 silence escalation is suppressed while a
   });
 });
 
+// ── #294: hold-visibility — driveOne's STATELESS per-pass hold observation ────────────────
+// The signal only; the transition/dedupe into pr-held / pr-released events is conductor.ts's
+// (conductor.test.ts covers that half), exactly as #54's reviewerTransition is split.
+
+test("MergeDriver.driveOne (#294): a hold label gating the PR is reported as a stateless observation carrying the label, alongside the unchanged WAIT outcome", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["type:feature", "Sapwood:Hold"] };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new FakeReviewer(),
+    cfg: mkCfg({ escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood:hold"] } }),
+  });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  // Gate behavior is untouched (#294 AC): still the plain #248 WAIT, still no merge, no writes.
+  assert.equal(outcome.kind, "queued");
+  assert.deepEqual(forge.merged, []);
+  assert.deepEqual(forge.labelsAdded, []);
+  // On-PR casing, so the event payload names the label the human actually applied.
+  assert.deepEqual(outcome.holdObservation, { held: true, label: "Sapwood:Hold" });
+});
+
+test("MergeDriver.driveOne (#294): an unheld PR reports the NOT-held observation on every pass — the release transition is only detectable because the negative case is reported too", async () => {
+  const forge = new FakeForge();
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "merged"); // an unheld, green, approved PR still merges — unchanged
+  assert.deepEqual(outcome.holdObservation, { held: false });
+});
+
+test("MergeDriver.driveOne (#294): the observation is exact-match, like the gate it mirrors — a substring-only configured entry reports NOT held (never a phantom hold event)", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["sapwood:hold"] };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new FakeReviewer(),
+    // "sapwood" is a substring of the PR's real label, but not an exact match — the #248 G3 rule.
+    cfg: mkCfg({ escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood"] } }),
+  });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.deepEqual(outcome.holdObservation, { held: false });
+  assert.equal(outcome.kind, "merged"); // and the gate agrees: not held
+});
+
 test("MergeDriver.driveOne: gates pass (CI green + MERGE_OK) -> merges with the PINNED head oid", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer();

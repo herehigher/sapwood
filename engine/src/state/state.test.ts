@@ -391,6 +391,25 @@ test("worker.review_fallback_head/kind survives an upsert that spreads a previou
   s.close();
 });
 
+test("lastHoldEvent (#294): none -> null; returns the LATEST hold transition for the right worker only", () => {
+  const s = mem();
+  assert.equal(s.lastHoldEvent("lane-a"), null);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", pr: 55 }); // unrelated kinds never match
+  assert.equal(s.lastHoldEvent("lane-a"), null);
+
+  s.appendEvent("pr-held", { worker: "lane-a", issue: 2, pr: 55, label: "sapwood:hold" });
+  s.appendEvent("pr-held", { worker: "lane-b", issue: 3, pr: 56, label: "sapwood:hold" });
+  assert.equal(s.lastHoldEvent("lane-a"), "pr-held");
+
+  // A later release for the same lane supersedes the hold; lane-b's episode is untouched — this
+  // per-worker scoping is what lets two lanes be held/released independently.
+  s.appendEvent("pr-released", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(s.lastHoldEvent("lane-a"), "pr-released");
+  assert.equal(s.lastHoldEvent("lane-b"), "pr-held");
+  s.close();
+});
+
 test("lastReviewerFallbackEvent (#54 R2): none -> null; returns the LATEST switch/revert for the right worker only", () => {
   const s = mem();
   assert.equal(s.lastReviewerFallbackEvent("lane-a"), null);

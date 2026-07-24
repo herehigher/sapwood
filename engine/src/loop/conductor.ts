@@ -2350,6 +2350,28 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           });
         }
       }
+      // #294: hold-visibility. A hold is the one human-INITIATED carrier in the three-tier
+      // escalation model, and until now it lived only inside gate derivation — deriveGate reads
+      // the label live and appends nothing, so a held PR was indistinguishable from "waiting on
+      // review" in persisted data (frontend-design.md §11 follow-up #7). driveOne reports its
+      // live observation STATELESSLY every pass (it has no memory), so the transition is derived
+      // HERE against the durable event log, the same dedup-the-event-not-the-signal paradigm as
+      // the reviewer-failover announcement above: pr-held on the first pass that observes a
+      // hold, pr-released on the first pass that observes it gone, nothing on steady-state
+      // ticks. Crash-safe for free — the log IS the memory, so a kill -9 between the observation
+      // and the next tick re-observes the same state and re-emits nothing. Purely additive: an
+      // absent observation (the paths that never wrap one) is a no-op, never a release, and the
+      // gate outcome below is untouched either way.
+      if (outcome.holdObservation) {
+        const lastHold = state.lastHoldEvent(w.name);
+        if (outcome.holdObservation.held) {
+          if (lastHold !== "pr-held") {
+            state.appendEvent("pr-held", { worker: w.name, issue: w.issue, pr, label: outcome.holdObservation.label });
+          }
+        } else if (lastHold === "pr-held") {
+          state.appendEvent("pr-released", { worker: w.name, issue: w.issue, pr });
+        }
+      }
       switch (outcome.kind) {
         case "merged":
           state.upsertWorker({ ...w, state: "done", ended_at: iso() });

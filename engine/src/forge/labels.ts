@@ -86,6 +86,16 @@ export function labelsIncludeAny(labels: readonly string[], wants: readonly stri
   return wants.some((want) => labelsInclude(labels, want));
 }
 
+/** #294: `labelsIncludeAny`'s witness — the FIRST matching label instead of a bare boolean,
+ * returned in its ON-PR casing so an event payload can name the label a human actually applied.
+ * Matching is identical (same normalized EXACT identity, same G3 hardening), so
+ * `firstMatchingLabel(...) != null` is interchangeable with `labelsIncludeAny(...)` — which is
+ * what lets merge-driver.ts's hold check swap one for the other with no gate-behavior change. */
+export function firstMatchingLabel(labels: readonly string[], wants: readonly string[]): string | null {
+  const normalizedWants = wants.map(normalizeLabel);
+  return labels.find((label) => normalizedWants.includes(normalizeLabel(label))) ?? null;
+}
+
 /** Match only the priority namespace selected by the configured prefix. */
 export function matchPriorityLabel(name: string, prefix: string): number | null {
   const normalized = normalizeLabel(name);

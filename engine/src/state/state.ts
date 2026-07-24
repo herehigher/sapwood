@@ -1805,6 +1805,26 @@ export class State {
     this.db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run(new Date().toISOString(), kind, JSON.stringify(payload));
   }
 
+  /** #294: the kind of the most recent hold-visibility event for `worker`'s lane, or null if
+   *  the lane has never been held — tick()'s dedup source for the transition-only hold events,
+   *  the same event-log-as-memory pattern `lastReviewerFallbackEvent` uses below (#169: dedupe
+   *  the EVENT, not the signal). MergeDriver observes the hold label live on every gate pass and
+   *  has no memory of its own, so the durable log is what makes an episode edge detectable:
+   *  announce `pr-held` only when this is not already 'pr-held', `pr-released` only when it is.
+   *  Being on-disk is what makes it crash-consistent — a kill -9 between the observation and the
+   *  next tick re-reads the same answer and re-emits nothing. */
+  lastHoldEvent(worker: string): "pr-held" | "pr-released" | null {
+    const row = this.db
+      .prepare(
+        `SELECT kind FROM events
+         WHERE kind IN ('pr-held', 'pr-released')
+           AND json_extract(payload, '$.worker') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker) as { kind: string } | undefined;
+    return row?.kind === "pr-held" || row?.kind === "pr-released" ? row.kind : null;
+  }
+
   /** The most recent reviewer-failover announcement for `worker`'s lane (#54 R2) — tick()'s
    *  dedup source: driveOne reports the switch/revert signal STATELESSLY on every tick the
    *  condition holds (resolveReviewVerdict is pure and has no memory), so the durable event
