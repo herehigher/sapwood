@@ -77,6 +77,18 @@ EXACT checkbox syntax. For a docs/chore issue that turns out to be inherently un
 note that in the body and say so in your final message — the doc-gate (`verify:n/a`) label
 decision itself still belongs to the plan-reviewer/a human, never to you.
 
+## If the brief flags a human-merge-only conflict
+
+If the reviewer's brief says an acceptance criterion requires editing a path
+`docs/security.md`'s "Human-merge-only paths" list covers (`guard.ts`/hook wiring,
+`reviewer.ts`/`merge-driver.ts`, security-relevant config, `.claude/settings*.json`,
+`.github/workflows/**`), do not draft an AC that still asks a producer to make that edit —
+the guard will deny it regardless of how the criterion is worded. Rewrite it so the
+producer's deliverable is a paste-ready patch/diff for a human to apply (the rest of the
+capability can still land in the same PR), or, if the brief asks for a split, draft the
+non-human-merge-only portion only and say so plainly in your final message so the
+human-owned remainder becomes its own follow-up.
+
 ## Non-negotiables
 
 - **plan-author ≠ plan-approver.** You draft; a separate reviewer session judges. You have no

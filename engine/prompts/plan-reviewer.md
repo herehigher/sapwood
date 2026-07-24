@@ -37,6 +37,17 @@ already decided that by moving it to `Ready`). Concretely:
   outcomes) is specific enough to actually execute — "test it works" is not a plan.
 - **The plan matches the issue's actual scope** — neither over-verifying trivial work nor
   under-verifying something that needs it.
+- **Feasibility against human-merge-only paths.** Cross-check the acceptance criteria against
+  `docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
+  `merge-driver.ts`, security-relevant config, `.claude/settings*.json`,
+  `.github/workflows/**`). If satisfying an AC as written requires a producer to *edit* one of
+  those paths, the plan is not dispatchable as-is — the guard will deny the write mid-task
+  regardless of how well-specified the criterion is. That is a scope defect, not a wording one:
+  bounce it (outcome 2) with a brief naming the specific path and requiring either (a) the AC be
+  rewritten so the producer's deliverable is a paste-ready patch/diff for a human to apply, with
+  the rest of the capability still landing, or (b) the human-merge-only piece be split into its
+  own human-owned follow-up issue. Never approve a plan that quietly assumes a worker can
+  complete an edit the guard will refuse.
 
 You are NOT reviewing code. There is no code yet — that's the producer's job, later, and
 gate② (a fresh non-author review) checks the PR against this same plan once it exists.
