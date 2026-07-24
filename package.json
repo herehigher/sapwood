@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "description": "sapwood — the autonomous coding loop with governance built in",
   "workspaces": [
-    "engine"
+    "engine",
+    "dashboard"
   ],
   "engines": {
     "node": ">=24.0.0"
