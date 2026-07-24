@@ -101,7 +101,6 @@ export const CONFIG_ALLOWLIST: readonly string[] = [
   // Worker
   "worker.model",
   "worker.effort",
-  "worker.fallbackModel",
   "worker.timeoutSec",
   "worker.budgetUsdSoft",
   "worker.maxResumes",
@@ -136,7 +135,7 @@ export const CONFIG_ALLOWLIST: readonly string[] = [
   "labels.decomposed",
   "labels.roundPool",
   // Per-role model/effort (§3 E: the allowlist MUST include these — the captions read them)
-  ...ROLE_KEYS.flatMap((r) => [`roles.${r}.model`, `roles.${r}.effort`, `roles.${r}.fallbackModel`]),
+  ...ROLE_KEYS.flatMap((r) => [`roles.${r}.model`, `roles.${r}.effort`]),
 ];
 
 /** Project the resolved config down to CONFIG_ALLOWLIST. Missing/undefined leaves are omitted
