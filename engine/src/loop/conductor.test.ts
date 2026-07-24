@@ -23,6 +23,7 @@ import {
   codingFloor,
   drainEscalationDue,
   driveDecision,
+  drivingLaneTerminalForDrain,
   ENGINE_SESSION_GAP_SEC,
   engineSessionGapSec,
   evaluateCeiling,
@@ -1574,10 +1575,12 @@ test("tick DRIVE (#246 review round 1, C1): the fixLegResume-unwired degrade's l
 });
 
 // ── #246 review round 1 (C2, Codex sol-high PR #264): FIXUP dispatch must pass the SAME
-// new-leg admission gate RESUME/DISPATCH do (paused / ceiling / park / round-budget /
-// run-spend-stop) — a wind-down must drain, never start a brand-new fix leg. Round-budget's own
-// coverage is the pre-existing "fixable + round budget exceeded" test above (that one exercises
-// driveDecision's OWN overBudget-escalate path, not this admission gate — see its own comment).
+// new-leg admission gate RESUME/DISPATCH do (paused / ceiling / park / run-spend-stop). #375:
+// round budget is deliberately NOT one of them any more — a fix leg is exempt from
+// cost.roundBudgetUsd outright (see the "fixable + round budget exceeded" test below, which now
+// asserts the OPPOSITE of what it used to: the fix leg dispatches). The remaining admission
+// gates (paused/ceiling/park/run-spend-stop) are entirely unchanged by #375 — a wind-down must
+// still drain, never start a brand-new fix leg instead.
 // ──────────────────────────────────────────────────────────────────────────────────────────
 
 test("tick DRIVE (#246 C2): paused (forceDispatchPause) blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
@@ -1774,7 +1777,21 @@ test("tick DRIVE (#246): fixable + FIXUP but startFixLeg's resume() throws -> st
   st.close();
 });
 
-test("tick DRIVE (#246): fixable + round budget exceeded -> ESCALATE is treated as a TRANSIENT this-tick block (queued, no label, no terminal upsert) — retried next tick, never a permanent cap escalation", async () => {
+// #375 (P0, PM adjudication option (a)-minimal): a driving lane's fix leg is now EXEMPT from
+// cost.roundBudgetUsd — a fresh `false` is hardcoded in place of the old
+// budgetExceeded(roundSpendUsd, roundBudgetUsd) read (conductor.ts's `driveOverBudget`), because
+// an already-open PR has no other completion path (merge or fix — there is no "abandon the PR"
+// outcome) and round-budget-blocking it was the dogfood-observed permanent wedge (F7/F8: round
+// spend crosses the cap, FIXABLE stays queued forever, the round never closes). This replaces
+// the OLD "round budget exceeded -> TRANSIENT queued block" test that used to live here — that
+// behavior no longer exists at all (driveDecision's own overBudget-escalate branch can never
+// fire from this call site anymore). The three PRE-EXISTING limits still bound a fix leg
+// unchanged: cfg.lanes.prFixCap (attempts — see the "fix_rounds cap reached" test below, still
+// terminal), worker.budgetUsdSoft (each leg's own per-worker ceiling, untouched by this issue),
+// and cfg.cost.dailyBudgetUsd (still a real admission blocker — see the "#246 C2" ceiling test
+// above, which is UNCHANGED: daily-budget/wall-clock ceiling breaches still admission-block a
+// FIXUP dispatch via fixLegAdmissionBlockReason's `ceilingBreached`, only round budget is exempt).
+test("tick DRIVE (#375): fixable + round budget exceeded -> the fix leg is EXEMPT from cost.roundBudgetUsd and dispatches normally (round budget no longer gates a driving lane's fix leg at all)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -1787,16 +1804,15 @@ test("tick DRIVE (#246): fixable + round budget exceeded -> ESCALATE is treated 
     supervisor: sup,
     cfg: mkCfg(),
     mergeGate: gate,
-    roundSpendUsd: () => 50, // > default cost.roundBudgetUsd (30) -> over budget
+    roundSpendUsd: () => 50, // > default cost.roundBudgetUsd (30) — would have blocked pre-#375
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
   const row = st.getWorker("lane-a")!;
-  assert.equal(row.state, "driving", "stays driving — never terminal on a mere budget block");
-  assert.equal(row.fix_rounds ?? 0, 0);
-  assert.deepEqual(sup.resumeCalls, [], "no fix leg dispatched while over budget");
-  assert.deepEqual(forge.labelsAdded, []);
-  assert.equal(r.driven[0]!.kind, "queued");
-  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-over-budget/);
+  assert.equal(row.state, "fixing", "#375: round budget no longer blocks a fix leg — it dispatches");
+  assert.equal(row.fix_rounds, 1);
+  assert.equal(sup.resumeCalls.length, 1, "the fix leg WAS dispatched despite round spend > roundBudgetUsd");
+  assert.deepEqual(forge.labelsAdded, []); // no escalation — this is a normal rework dispatch
+  assert.equal(r.driven[0]!.kind, "fixup");
   st.close();
 });
 
@@ -2319,6 +2335,132 @@ test("tick: kill switch records a DONE+PR lane's terminal state under the switch
     st.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #375 AC2: KILL_SWITCH wind-down must never wait forever on a `driving` lane. Unlike
+// running/fixing lanes (a live process the drain can requestHandoff/hard-kill), a `driving`
+// lane has nothing to hand off — DRIVE is frozen entirely while the switch is active (#69), so
+// the ONLY way one of these ever leaves `driving` under a sustained switch is the SAME bounded
+// escalation drainThenEscalate already runs for running/fixing lanes, extended to cover it too
+// (drivingLaneTerminalForDrain decides which ones qualify — see that function's own doc). ──
+
+test("tick: KILL_SWITCH drain — a driving lane AT the fix-rounds cap is TERMINAL-for-drain (#375 AC2): escalated to needs-human past the drain window, activeWorkers() reaches zero so wind-down can exit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    const r1 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.equal(r1.ceilingBreached, true);
+    assert.deepEqual(r1.escalated, []); // just breached — still within the drain window
+    assert.equal(st.getWorker("lane-a")?.state, "driving"); // not yet touched
+
+    clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, switch still active
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r2.escalated, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "failed");
+    assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+    // Evidence: the drain reason (fix-capped, not the daily-budget variant) is on the record.
+    const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
+    assert.match(ev!.payload.reason, /drain-fix-rounds-capped:2\/2/);
+    assert.equal(st.activeWorkers().length, 0); // #375 AC2: wind-down's activeWorkers()===0 loop can now exit
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: KILL_SWITCH drain — a driving lane mid-fix-loop (fix_rounds>0, under cap) blocked ONLY by the daily-budget ceiling is TERMINAL-for-drain too (#375 AC2: round budget is exempt, but daily budget can still wedge a fix leg)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 }); // under the default cap (2) — has needed a fix leg before
+    st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // over a tiny daily cap, same UTC day as `clock`
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+
+    assert.deepEqual(r2.escalated, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "failed");
+    assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+    // Evidence: the daily-budget-blocked reason (not the fix-capped variant) is on the record.
+    const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
+    assert.match(ev!.payload.reason, /drain-daily-budget-blocked:fix-rounds=1/);
+    assert.equal(st.activeWorkers().length, 0);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: KILL_SWITCH drain — a driving lane that never needed a fix leg (fix_rounds=0, e.g. MERGE/WAIT-gated) is left alone even past the drain window (#375 AC2 scope: only budget-blocked/fix-capped lanes are terminal-for-drain)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55); // fix_rounds 0 — never been through the fix loop
+    st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // daily cap breached too
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+
+    assert.deepEqual(r2.escalated, []); // never touched — it isn't stuck for a budget reason at all
+    assert.equal(st.getWorker("lane-a")?.state, "driving");
+    assert.deepEqual(forge.labelsAdded, []);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #375: regression fixtures mirroring the two dogfood-observed wedges (events 37–77 and
+// 123–446 — round cap $30 then $60, a FIXABLE fix leg blocked, round never closing; then
+// KILL_SWITCH set with the same driving lane still stuck, wind-down spinning 14+ minutes until
+// force-killed). Both round-budget tiers now dispatch normally (item 1's exemption); the
+// KILL_SWITCH spin is closed by the three tests just above (item 2).
+test("tick DRIVE (#375 regression): a driving lane's fix leg dispatches normally at EITHER dogfood round-cap tier ($30 or $60 roundBudgetUsd), however far round spend has crossed it", async () => {
+  for (const [roundBudgetUsd, roundSpend] of [
+    [30, 45], // first dogfood wedge tier
+    [60, 123], // second dogfood wedge tier, after the cap was raised mid-run
+  ] as const) {
+    const st = new State(":memory:");
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    const r = await tick({
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg({ cost: { roundBudgetUsd } }),
+      mergeGate: gate,
+      roundSpendUsd: () => roundSpend,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    assert.equal(st.getWorker("lane-a")?.state, "fixing", `roundBudgetUsd=${roundBudgetUsd}, spend=${roundSpend}`);
+    assert.equal(r.driven[0]?.kind, "fixup");
+    st.close();
   }
 });
 
@@ -3380,6 +3522,30 @@ test("driveDecision: gate + fix rounds -> scheduling action (fail-safe ESCALATE)
   assert.equal(driveDecision("HUMAN", 0, 3, false), "ESCALATE");
   assert.equal(driveDecision("", 0, 3, false), "ESCALATE"); // empty/unknown gate -> fail-safe
   assert.equal(driveDecision("WHATEVER", 0, 3, false), "ESCALATE");
+});
+
+// ── #375 AC2: drivingLaneTerminalForDrain — the wind-down predicate that decides whether a
+// `driving` lane (no live process, so nothing for the kill-switch drain to hand off/kill) is
+// TERMINAL-for-drain: fix-capped (permanent regardless of any ceiling) or budget-blocked
+// (already needed at least one fix leg AND the daily-budget hard ceiling is presently
+// breached — round budget no longer applies to fix legs at all, #375 item 1). A lane that has
+// never needed a fix leg (fixRounds === 0) is never terminal here — it may be perfectly healthy
+// (MERGE/WAIT-gated) and simply resumes once the breach/switch clears. ──────────────────────
+
+test("drivingLaneTerminalForDrain (#375): fix-capped is terminal regardless of daily-budget status", () => {
+  assert.equal(drivingLaneTerminalForDrain(2, 2, false), true); // at cap, no daily-budget breach
+  assert.equal(drivingLaneTerminalForDrain(3, 2, false), true); // past cap (shouldn't happen, fail-safe anyway)
+  assert.equal(drivingLaneTerminalForDrain(2, 2, true), true); // at cap AND daily-budget breached
+});
+
+test("drivingLaneTerminalForDrain (#375): under cap + daily-budget breached is terminal ONLY once at least one fix round has actually been spent", () => {
+  assert.equal(drivingLaneTerminalForDrain(1, 2, true), true); // has needed a fix leg, budget now blocks a fresh one
+  assert.equal(drivingLaneTerminalForDrain(0, 2, true), false); // never needed a fix leg — likely MERGE/WAIT, not stuck
+});
+
+test("drivingLaneTerminalForDrain (#375): under cap + no daily-budget breach is never terminal — a healthy fix leg is still admissible once DRIVE runs again", () => {
+  assert.equal(drivingLaneTerminalForDrain(0, 2, false), false);
+  assert.equal(drivingLaneTerminalForDrain(1, 2, false), false);
 });
 
 // ── #147: gated-PR reentry — a human removing needs-human from an escalated PR's issue
