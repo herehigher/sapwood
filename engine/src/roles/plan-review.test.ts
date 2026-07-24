@@ -517,10 +517,14 @@ test("createPlanReviewStub #110: reviewer output with no structured block at all
   assert.ok(/structured output/.test(comment), "the escalation comment names the malformed-output reason");
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string };
+  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string; origin?: string };
   assert.equal(payload.round_id, 3);
   assert.equal(payload.issue, 33);
   assert.ok(/structured output/.test(payload.reason));
+  // #374 review (Codex sol-high verify-pass finding 3, P1): invalid-output-twice is still a
+  // genuine session failure for this purpose (the isValid-hook path shares runSessionWithRetry's
+  // one degradeEvent with the crash/timeout path) — origin tags it the same way.
+  assert.equal(payload.origin, "session-failure");
   state.close();
 });
 
@@ -649,10 +653,14 @@ test("createPlanReviewStub #104: escalate() (maxDraftCycles exhausted) appends a
   await stub.run({ roundId: 7, phase: "plan_review", marker: null });
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string };
+  const payload = events[0]!.payload as { round_id: number; issue: number; reason: string; origin?: string };
   assert.equal(payload.round_id, 7);
   assert.equal(payload.issue, 13);
   assert.ok(/exhausted/.test(payload.reason));
+  // #374 review (Codex sol-high verify-pass finding 3, P1): a maxDraftCycles exhaustion is a
+  // LOOP-level outcome, not a session failure — every reviewer/drafter session here ran cleanly.
+  // round-artifact.ts's assembler relies on this exact tag to keep it OUT of degradedPhases.
+  assert.equal(payload.origin, "cycle-exhausted");
   state.close();
 });
 
@@ -667,9 +675,13 @@ test("createPlanReviewStub #104: escalate() from a reviewer-session-failed-twice
   await stub.run({ roundId: 2, phase: "plan_review", marker: null });
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { round_id: number; issue: number };
+  const payload = events[0]!.payload as { round_id: number; issue: number; origin?: string };
   assert.equal(payload.round_id, 2);
   assert.equal(payload.issue, 31);
+  // #374 review (Codex sol-high verify-pass finding 3, P1): a genuine session failure (crashed
+  // twice) — round-artifact.ts's assembler relies on this exact tag to count it INTO
+  // degradedPhases (the empty-spin breaker's own signal).
+  assert.equal(payload.origin, "session-failure");
   state.close();
 });
 
@@ -710,6 +722,75 @@ test("createPlanReviewStub: processes every candidate issue, independently", asy
   assert.ok(forge.issueLabels[20]!.includes("plan:approved"));
   assert.ok(forge.issueLabels[21]!.includes("plan:approved"));
   assert.equal(marker, planReviewMarker(3));
+  state.close();
+});
+
+test("createPlanReviewStub #374 review (Codex sol-high finding 6): once an earlier issue classifies quota/429 and parks, remaining pool members are SKIPPED — no doomed per-issue sessions", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [
+    { number: 30, title: "a", labels: [ROUND_POOL_LABEL] },
+    { number: 31, title: "b", labels: [ROUND_POOL_LABEL] },
+    { number: 32, title: "c", labels: [ROUND_POOL_LABEL] },
+  ];
+  forge.issueBodies[30] = PLAN_BODY;
+  forge.issueBodies[31] = PLAN_BODY;
+  forge.issueBodies[32] = PLAN_BODY;
+  const cfg = mkCfg();
+  const quotaResult: RoleSessionResult = {
+    outcome: "failed",
+    costUsd: 0,
+    modelUsage: [],
+    exitCode: 1,
+    name: "r-30",
+    failureText: "hit your session limit",
+  };
+  const runner = new ScriptedRunner([{ result: quotaResult }]);
+  const state = new State(":memory:");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 5, phase: "plan_review", marker: null });
+  // Issue #30's session dispatched normally (it IS this pass's canary) and classified; #31/#32
+  // were skipped ONLY once THAT attempt itself came back env-parked — never pre-checked against
+  // "a park row exists" before dispatching (see reviewOneIssue's own doc for why that distinction
+  // matters).
+  assert.equal(runner.calls.length, 1, "only #30 dispatched — #31/#32 skipped once #30's OWN attempt classified");
+  assert.equal(state.isParked(), true);
+  assert.equal(state.parkRow("llm")?.source, "llm");
+  // Neither #31 nor #32 got any forge write at all (no escalation, no label, no comment).
+  assert.equal(forge.issueLabels[31], undefined);
+  assert.equal(forge.issueLabels[32], undefined);
+  state.close();
+});
+
+test("createPlanReviewStub #374 review (Codex sol-high verify-pass finding 1, P1): an ARMED recovery round (park ALREADY open before this pass) still runs the FIRST pool member for real — it IS the canary — never skips on pre-existing park state alone", async () => {
+  const forge = new FakeForge();
+  forge.poolEligibleIssues = [
+    { number: 40, title: "a", labels: [ROUND_POOL_LABEL] },
+    { number: 41, title: "b", labels: [ROUND_POOL_LABEL] },
+  ];
+  forge.issueBodies[40] = PLAN_BODY;
+  forge.issueBodies[41] = PLAN_BODY;
+  const cfg = mkCfg();
+  // #40's session succeeds cleanly (the provider IS actually back) -> approve.
+  const runner = new ScriptedRunner([
+    { result: doneResult("r-40", sapwoodResult({ decision: "approve", issue: 40 })) },
+    { result: doneResult("r-41", sapwoodResult({ decision: "approve", issue: 41 })) },
+  ]);
+  const state = new State(":memory:");
+  // Simulates round.ts's round-opening gate having ARMED this round via a green
+  // probeLlmReachable ping — the ping only arms the round to open, it never clears the episode
+  // outright (round.ts's own canary doctrine). If the loop guard skipped on "a park row exists"
+  // (the pre-fix behavior), #40 would never even get a chance to prove recovery.
+  state.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
+  const deps: PlanReviewDeps = { forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: 6, phase: "plan_review", marker: null });
+  // BOTH issues got a real session — #40's success cleared the park, so #41 proceeds normally
+  // too (never gated on the STALE pre-pass park state).
+  assert.equal(runner.calls.length, 2, "the pre-existing park never suppressed dispatch — both pool members ran");
+  assert.equal(state.isParked(), false, "#40's 'done' outcome cleared the episode");
+  assert.ok(forge.issueLabels[40]!.includes("plan:approved"));
+  assert.ok(forge.issueLabels[41]!.includes("plan:approved"));
   state.close();
 });
 
@@ -1268,9 +1349,12 @@ test("createPlanReviewStub (#214): a confirm session that fails TWICE escalates 
   assert.ok(comment.includes(planReviewMarker(round.round_id)));
   const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]);
   assert.equal(events.length, 1);
-  const payload = events[0]!.payload as { round_id: number; issue: number };
+  const payload = events[0]!.payload as { round_id: number; issue: number; origin?: string };
   assert.equal(payload.round_id, round.round_id);
   assert.equal(payload.issue, 300);
+  // #374 review (Codex sol-high verify-pass finding 3, P1): a genuine confirm session failure —
+  // must count toward the empty-spin breaker via round-artifact.ts's origin filter.
+  assert.equal(payload.origin, "session-failure");
   state.close();
 });
 

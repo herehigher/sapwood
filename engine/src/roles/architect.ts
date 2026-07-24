@@ -60,7 +60,7 @@ import { capDigest } from "../retro/retro-digest.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { extractMarkdownSections } from "../util/markdown.js";
-import { type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
+import { envFailureHook, type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 
 export interface ArchitectDeps {
@@ -779,6 +779,8 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
           `[sapwood:architect] round ${roundId}: ${architectDegradeReason(r, candidateNumbers, poolNumbers)} — ` +
           `proceeding WITHOUT a round design note (advisory phase, round not wedged)`,
         isValid: (r) => validateArchitectOutput(r.resultText ?? "", candidateNumbers, poolNumbers).ok,
+        // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
+        envFailure: envFailureHook(deps.cfg, deps.state),
       });
 
       // The final attempt's own validity decides whether anything is written — NOT just whether

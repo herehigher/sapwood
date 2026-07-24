@@ -836,6 +836,21 @@ const Standby = z
   })
   .strict();
 
+// #374 (dogfood F16): the empty-spin breaker — a structural backstop, independent of
+// env-failure.ts's classifyEnvFailure, for a systemic failure whose text the classifier simply
+// doesn't recognize (an unfamiliar provider error shape, a future outage class). round.ts counts
+// CONSECUTIVE closed rounds that dispatched nothing AND had at least one peripheral role session
+// degrade; reaching this threshold forces the same "llm" park episode a classified quota/429
+// failure would, bounding round churn either way. Small default (3): the F16 incident spun 145
+// empty rounds in ~3.5h with zero bound — even a small threshold is a massive improvement, and a
+// SMALL number keeps the backstop from masking a genuinely transient blip (a round or two of
+// real, unrelated flakiness) as a full park episode. User-tunable per the config rule.
+const EmptySpin = z
+  .object({
+    consecutiveDegradedRoundsThreshold: z.number().int().positive().default(3),
+  })
+  .strict();
+
 // #86: round-loop scoping. `milestone` reuses the exact GitHub-milestone mechanism
 // stop.onMilestoneComplete already validates against (forge.listMilestoneTitles/
 // countOpenIssuesInMilestone) rather than inventing a parallel label-based "theme" — one key
@@ -848,6 +863,8 @@ const Round = z
   .object({
     milestone: z.string().min(1).optional(),
     standby: Standby.default({}),
+    // #374: the empty-spin breaker's own threshold — see EmptySpin's doc above.
+    emptySpin: EmptySpin.default({}),
     // #126: round directive file — human steering (why/what) injected into the aligning +
     // architecting prompts at round open (directive.ts's resolveRoundDirective). Resolved like
     // other DATA paths in this repo — relative to the process cwd, the same convention
@@ -1521,6 +1538,7 @@ export function dashboardConfigSubset(cfg: SapwoodConfig) {
       milestone: cfg.round.milestone,
       poolFactor: cfg.round.poolFactor,
       standby: { enabled: cfg.round.standby.enabled, backoffCapSec: cfg.round.standby.backoffCapSec },
+      emptySpin: { consecutiveDegradedRoundsThreshold: cfg.round.emptySpin.consecutiveDegradedRoundsThreshold },
     },
     reviewer: { mode: cfg.reviewer.mode, deltaChainMax: cfg.reviewer.deltaChainMax },
     merge: { mode: cfg.merge.mode },

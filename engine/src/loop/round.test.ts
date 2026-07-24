@@ -30,6 +30,7 @@ import { State } from "../state/state.js";
 import type { LaneProbe, MergeGate, Supervisor } from "./conductor.js";
 import {
   buildFixLegResume,
+  isRoundFullyDegraded,
   noopPeripheralStub,
   type PeripheralPhase,
   type PeripheralStub,
@@ -40,7 +41,7 @@ import {
   removeRoundPoolLabel,
   runRounds,
 } from "./round.js";
-import { RoundArtifactSchema } from "./round-artifact.js";
+import { type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
 
 class FakeForge implements IForge {
   async listUnplacedIssues() {
@@ -1994,19 +1995,23 @@ test("runRounds standby: an outstanding pending-rollback row counts as work — 
   state.close();
 });
 
-test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-standby ends the run within one backoff step — never an eternal probe loop (Codex P2 on PR #150)", async () => {
+test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY before standby ever engages ends the run immediately — never an eternal probe loop (Codex P2 on PR #150)", async () => {
   const forge = new FakeForge();
-  forge.ready = []; // empty board — standby engages after the idle first round
-  // Loop-top checks before rounds 1 and 2: 1 open (no hit); the post-wake re-check INSIDE
-  // standby: 0 (hit). cfg.round.milestone is unset, so neither executing nor the probe consumes
-  // any of these counts — they all belong to checkFinalMilestone.
+  forge.ready = []; // empty board — standby would otherwise engage after the idle first round
+  // Loop-top check before round 1: 1 open (no hit). Loop-top check before round 2's gate: 1
+  // open (no hit). #374 review (Codex sol-high verify-pass finding 2, P2): waitForDispatchClear's
+  // OWN success/fast-path return (nothing ever parked here) never re-checks internally — the
+  // call site's UNCONDITIONAL post-return re-check is what catches the completed milestone here,
+  // BEFORE standby ever gets a chance to engage (a strict improvement over the pre-finding-2
+  // behavior, which only noticed this after standby's own first backoff wait).
   forge.milestoneOpenCounts = [1, 1, 0];
   let stop = (): void => {};
   const sleepCalls: number[] = [];
   const sleep = async (ms: number): Promise<void> => {
     sleepCalls.push(ms);
-    // Safety net: if the fix regresses (final stop never re-checked mid-standby), the loop would
-    // probe forever — bail via signal so the stoppedBy assertion below fails instead of hanging.
+    // Safety net: if the fix regresses (final stop never re-checked after the recovery-clear
+    // path), the loop would probe forever — bail via signal so the stoppedBy assertion below
+    // fails instead of hanging.
     if (sleepCalls.length >= 4) stop();
   };
   const deps = baseDeps({
@@ -2022,10 +2027,16 @@ test("runRounds standby: stop.onMilestoneComplete completing EXTERNALLY mid-stan
   const result = await runRounds(deps);
   assert.equal(result.stoppedBy, "stop-condition");
   assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
-  assert.equal(result.rounds, 1, "only the idle first round — the run ended from inside standby");
-  // Sleep 1 = the idle round's throttle wait; sleep 2 = exactly ONE backoff step before the
-  // completed milestone was noticed.
-  assert.deepEqual(sleepCalls, [5000, 5000]);
+  assert.equal(result.rounds, 1, "only the idle first round — round 2's gate found the hit before standby ever ran");
+  // Sleep 1 = the idle round's own per-tick throttle wait (unrelated to standby) — round 2's gate
+  // resolves the milestone hit the INSTANT waitForDispatchClear returns, with no further wait at
+  // all: standby never engages, so there is no second (backoff) sleep call this time.
+  assert.deepEqual(sleepCalls, [5000]);
+  assert.equal(
+    deps.state.eventsAfterId(0, ["standby-wait"]).length,
+    0,
+    "standby never engaged — the recovery-clear re-check resolved it first",
+  );
   deps.state.close();
 });
 
@@ -2220,6 +2231,393 @@ test("#168: RoundDeps.probeLlmReachable omitted -> a pre-parked (llm) episode is
   assert.equal(state.isParked(), true, "never probed -> never auto-resumed");
   assert.equal(state.parkRow("llm")?.probeAttempts, 0);
   state.close();
+});
+
+// ── #374 review (Codex sol-high finding 5): isRoundFullyDegraded — pure unit tests ───────────
+
+const mkArtifact = (over: Partial<RoundArtifact> = {}): RoundArtifact => ({
+  schemaVersion: 1,
+  roundId: 1,
+  startedAt: "2026-07-24T00:00:00Z",
+  endedAt: "2026-07-24T00:05:00Z",
+  dispatches: [],
+  merges: [],
+  prsOpened: 0,
+  prsMerged: 0,
+  issuesClosed: 0,
+  spendUsd: 0,
+  roundBudgetUsd: 30,
+  retries: { gatedReentries: 0, gatedReentryCapped: 0, rollbacksRecovered: 0, rollbacksEscalated: 0 },
+  reviewRounds: { reviewerFallbackSwitches: 0, reviewerFallbackReverts: 0 },
+  escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
+  egressSuspects: [],
+  handoffs: 0,
+  degradedPhases: [],
+  roundStops: [],
+  retro: { opened: null, degraded: null },
+  align: null,
+  concerns: [],
+  concernsReconciled: [],
+  ...over,
+});
+
+const degradedPhase = (phase: string): { phase: string; outcome: string; session: string } => ({
+  phase,
+  outcome: "failed",
+  session: "s",
+});
+
+test("isRoundFullyDegraded: a TOTAL quota storm (every default-enabled phase degrades) -> true", () => {
+  const cfg = mkCfg();
+  const totalStorm = mkArtifact({
+    degradedPhases: [
+      degradedPhase("po-align"),
+      degradedPhase("architect"),
+      degradedPhase("plan_review"),
+      degradedPhase("harvest"),
+      degradedPhase("retro"),
+    ],
+    escalations: { needsHuman: [1], ceiling: 0, driveNoPr: 0 }, // makes harvesting REQUIRED too
+  });
+  assert.equal(isRoundFullyDegraded(cfg, totalStorm, 1), true);
+
+  // A PARTIAL storm (harvesting/retro still fine) is NOT fully degraded.
+  const partial = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review")],
+    escalations: { needsHuman: [1], ceiling: 0, driveNoPr: 0 },
+  });
+  assert.equal(isRoundFullyDegraded(cfg, partial, 1), false);
+});
+
+test("isRoundFullyDegraded (the retro-only false positive this finding fixes): only retro degrades, everything else fine -> false", () => {
+  const cfg = mkCfg();
+  const artifact = mkArtifact({ retro: { opened: null, degraded: { branch: "b", title: "t", reason: "push failed" } } });
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), false);
+});
+
+test("isRoundFullyDegraded #374 review (Codex sol-high verify-pass finding 3, P2): artifact.retro.degraded (a POST-session branch-verify/openPR failure) never counts as retro-phase degradation, even when every OTHER required phase genuinely degraded", () => {
+  // retro.ts's openProposalPR (the only site that ever sets artifact.retro.degraded) runs ONLY
+  // after the retro SESSION already returned outcome:"done" with a validated proposal — this
+  // artifact shape is exactly what a real "session succeeded, git push/openPR then failed"
+  // round looks like: every OTHER required phase truly failed (a real quota storm elsewhere),
+  // but retro's own session was fine. Without this fix, line-122's old `artifact.retro.degraded
+  // != null` check would have added "retro" to degradedRoundPhases too, making every required
+  // phase appear degraded — a false "fully degraded" verdict manufactured from a signal that
+  // PROVES the provider was reachable.
+  const cfg = mkCfg();
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review")],
+    retro: { opened: null, degraded: { branch: "b", title: "t", reason: "openPR failed for verified-pushed branch" } },
+  });
+  assert.equal(
+    isRoundFullyDegraded(cfg, artifact, 1),
+    false,
+    "retro's own session succeeded — the round is NOT fully degraded even though three other phases genuinely are",
+  );
+});
+
+test("isRoundFullyDegraded: a disabled role is EXCLUDED from the required set — degrading everything else still counts as fully degraded", () => {
+  const cfg = mkCfg({ roles: { architect: { enabled: false } } });
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("plan_review"), degradedPhase("retro")],
+    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 }, // harvesting stays unrequired (nothing to brief)
+  });
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), true);
+});
+
+test("isRoundFullyDegraded: aligning is EXCLUDED from the required set when BOTH po.enabled and po.poolSelection are off (no session can ever run there)", () => {
+  const cfg = mkCfg({ roles: { po: { enabled: false, poolSelection: false } } });
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
+  });
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), true);
+});
+
+test("isRoundFullyDegraded: harvesting is required ONLY when this round's own artifact shows something to brief (escalations.needsHuman non-empty)", () => {
+  const cfg = mkCfg();
+  const noNeedsHuman = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
+    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
+  });
+  assert.equal(isRoundFullyDegraded(cfg, noNeedsHuman, 1), true, "harvesting not required — nothing to brief");
+
+  const withNeedsHumanButHarvestFine = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
+    escalations: { needsHuman: [7], ceiling: 0, driveNoPr: 0 },
+  });
+  assert.equal(
+    isRoundFullyDegraded(cfg, withNeedsHumanButHarvestFine, 1),
+    false,
+    "harvesting IS required now (something to brief) but didn't degrade",
+  );
+});
+
+test("isRoundFullyDegraded: retro is required ONLY on its own cadence turn (roundId % everyNRounds === 0)", () => {
+  const cfg = mkCfg({ roles: { retro: { everyNRounds: 5 } } });
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review")],
+  });
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 7), true, "round 7 isn't retro's turn (7 % 5 !== 0) — retro not required");
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 10), false, "round 10 IS retro's turn (10 % 5 === 0) — retro required, didn't degrade");
+});
+
+test("isRoundFullyDegraded: every role disabled (nothing was even configured to run a session) -> false, never a degenerate true", () => {
+  const cfg = mkCfg({
+    roles: {
+      po: { enabled: false, poolSelection: false },
+      architect: { enabled: false },
+      planReviewer: { enabled: false },
+      harvest: { enabled: false },
+      retro: { enabled: false },
+    },
+  });
+  const artifact = mkArtifact();
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), false);
+});
+
+// ── #374: the empty-spin breaker + the round-opening gate (F16: 145 empty rounds, no bound) ──
+
+/** #374 review (Codex sol-high finding 5): isRoundFullyDegraded requires EVERY peripheral phase
+ *  the round was actually configured to run a session for to degrade, not any single one — so a
+ *  test simulating F16's total-outage scenario must degrade ALL FIVE phases. Note the plan_review
+ *  fake's "plan-review-escalated" event ALSO populates artifact.escalations.needsHuman (finding
+ *  4: it's dual-role — needs-human AND degraded-phase), which is what makes harvesting REQUIRED
+ *  too (isRoundFullyDegraded only requires it when there's something to brief) — so harvesting
+ *  degrades here as well, matching a genuine total-storm scenario where nothing succeeds. Each
+ *  stub appends the SAME durable event round-artifact.ts's degradedPhases already scans for.
+ *  Shared by both #374 tests below. */
+function mkFullyDegradingPeripherals(log: Array<{ phase: PeripheralPhase; marker: string | null }>, state: State) {
+  const degrade = (phase: PeripheralPhase, kind: string, payload: (roundId: number) => Record<string, unknown>) => ({
+    async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+      log.push({ phase, marker: ctx.marker });
+      state.appendEvent(kind, payload(ctx.roundId));
+      return { marker: `${phase}-r${ctx.roundId}` };
+    },
+  });
+  return {
+    aligning: degrade("aligning", "po-degraded", (round_id) => ({ round_id, outcome: "failed", session: `po-${round_id}` })),
+    architecting: degrade("architecting", "architect-degraded", (round_id) => ({
+      round_id,
+      outcome: "failed",
+      session: `arch-${round_id}`,
+    })),
+    // #374 review (Codex sol-high verify-pass finding 3, P1): `origin: "session-failure"` is
+    // REQUIRED now — round-artifact.ts's assembler only counts a plan-review-escalated event
+    // toward degradedPhases when the emitter tagged it as a genuine session failure (never a
+    // legitimate cycle-exhausted escalation, and never a payload with no origin at all — see
+    // round-artifact.ts's own doc). Omitting it here would silently stop this fixture from ever
+    // registering as a degraded phase, breaking every test built on mkFullyDegradingPeripherals's
+    // "all five phases genuinely failed" premise.
+    plan_review: degrade("plan_review", "plan-review-escalated", (round_id) => ({
+      round_id,
+      issue: 1,
+      reason: "session failed twice",
+      origin: "session-failure",
+    })),
+    harvesting: degrade("harvesting", "harvest-degraded", (round_id) => ({ round_id, outcome: "failed", session: `harvest-${round_id}` })),
+    retro: degrade("retro", "retro-degraded", (round_id) => ({ round_id, outcome: "failed", session: `retro-${round_id}` })),
+  };
+}
+
+test("runRounds #374: N consecutive degraded, dispatch-empty rounds force a park; round 3 is WITHHELD (no unbounded round churn) until a human intervenes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge(); // empty board — never any dispatch, this test is about degrade-only churn
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    // Simulates F16's own root cause: an UNCLASSIFIED systemic role-session failure (a text
+    // classifyEnvFailure simply doesn't recognize) — EVERY peripheral phase "degrades" every
+    // round (isRoundFullyDegraded requires all of them, see mkFullyDegradingPeripherals's doc).
+    const degradingPeripherals = mkFullyDegradingPeripherals(log, state);
+    // Polls the durable park state itself (never a magic sleep-call COUNT, which is timing-
+    // fragile — the exact number of sleep calls per round can shift with unrelated engine
+    // changes): the very FIRST sleep call observed AFTER the breaker has parked the engine
+    // flips KILL_SWITCH — same "operator intervenes mid-wait" idiom the standby KILL_SWITCH
+    // test above uses, just triggered on a robust condition instead of a call-count.
+    const sleep = async (): Promise<void> => {
+      if (state.isParked()) writeFileSync(join(dir, "KILL_SWITCH"), "");
+    };
+    const deps = baseDeps({
+      forge,
+      state,
+      sleep,
+      cfg: mkCfg({ round: { emptySpin: { consecutiveDegradedRoundsThreshold: 2 } } }),
+      peripherals: degradingPeripherals,
+    });
+    const result = await runRounds(deps);
+    assert.equal(result.stoppedBy, "kill-switch");
+    assert.equal(result.rounds, 2, "rounds 1-2 degraded and closed; round 3 was withheld, never opened/closed");
+    // allPeripherals(log) logs EVERY phase, not just aligning — 2 full rounds x 5 phases each.
+    // Round 3 never opened its phases at all (no 11th entry, no round-3-tagged marker below).
+    assert.equal(log.length, 10, "exactly 2 full rounds ran their 5 phases each — round 3 never opened");
+    assert.equal(
+      log.filter((l) => l.phase === "aligning").length,
+      2,
+      "exactly 2 aligning attempts happened — round 3's aligning stub never ran",
+    );
+    const emptySpinEvents = state.eventsAfterId(0, ["empty-spin-park"]);
+    assert.equal(emptySpinEvents.length, 1, "the breaker fires EXACTLY once, at N=2 — never re-fires every round after");
+    assert.deepEqual(emptySpinEvents[0]!.payload, { consecutiveDegradedRounds: 2, threshold: 2, roundId: 2 });
+    assert.equal(state.isParked(), true);
+    assert.equal(state.parkRow("llm")?.source, "llm");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #374: the round-opening gate resumes via the EXISTING probe path — a green probeLlmReachable ping arms round 3 to open again (no unbounded round churn, no need for a human)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const degradingPeripherals = mkFullyDegradingPeripherals(log, state);
+    let probeCalls = 0;
+    // A CONTROLLED, advancing fake clock — required here (unlike test 1 above, which exits via
+    // KILL_SWITCH before any wall-clock-based check matters): the gate's probeDueWithHint check
+    // is genuinely wall-clock-based, and a REAL Date.now() paired with an instantly-resolving
+    // fake `sleep` would busy-loop for real backoff seconds (30s+) waiting for elapsed time that
+    // never actually passes — worse, that busy microtask loop starves Node's OWN timer phase,
+    // hanging the test process outright (observed while developing this test). Advancing the
+    // fake clock BY the exact sleep duration requested makes each wait "elapse" instantly in
+    // real time while still satisfying the real backoff arithmetic after a small, bounded number
+    // of iterations.
+    let simulatedMs = Date.parse("2026-01-01T00:00:00.000Z");
+    const now = (): Date => new Date(simulatedMs);
+    const sleep = async (ms: number): Promise<void> => {
+      simulatedMs += ms;
+    };
+    const deps = baseDeps({
+      forge,
+      state,
+      now,
+      sleep,
+      tickIntervalSec: 1,
+      cfg: mkCfg({
+        round: { emptySpin: { consecutiveDegradedRoundsThreshold: 2 } },
+        envFailure: { probeBackoffBaseSec: 1, probeBackoffMaxSec: 5 },
+      }),
+      peripherals: degradingPeripherals,
+      // Fails the first 2 pings (still "quota exhausted"), then succeeds — the SAME probe path
+      // conductor.ts's worker-lane canary uses, reused here for the round-opening gate.
+      probeLlmReachable: async () => {
+        probeCalls++;
+        return probeCalls > 2;
+      },
+    });
+    const stopSafety = boundedStopOnPhase(deps, 15); // rounds 1-2 degrade (park), round 3 opens once the probe clears
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.ok(result.rounds >= 3, `round 3 opened once the probe succeeded (got ${result.rounds})`);
+    assert.ok(probeCalls >= 3, "the gate actually re-probed until it got a green light");
+    const parkProbeEvents = state.eventsAfterId(0, ["park-probe"]).filter((e) => (e.payload as { source?: string }).source === "llm");
+    assert.ok(
+      parkProbeEvents.some((e) => (e.payload as { success?: boolean }).success === true),
+      "a successful park-probe event was recorded before round 3 opened",
+    );
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds #374 review (Codex sol-high verify-pass finding 2, P2): stop.onMilestoneComplete completing EXTERNALLY while llm-parked ends the run cleanly — waitForDispatchClear never waits forever for a recovery that may never come, and never opens a pointless post-recovery round", async () => {
+  const forge = new FakeForge();
+  forge.ready = []; // round 1 has no dispatch work — opens unconditionally, closes idle
+  // Loop-top check before round 2 (the `!round` branch's OWN checkFinalMilestone, run BEFORE
+  // waitForDispatchClear): 1 (no hit). Then waitForDispatchClear's own re-check, once per wait
+  // iteration: 1 (still no hit) on the first iteration, then 0 (hit) on the second — the
+  // milestone completes DURING the wait, not before it.
+  forge.milestoneOpenCounts = [1, 1, 0];
+  const state = new State(":memory:");
+  // Pre-seed an OPEN llm park with NO probeLlmReachable wired (disabled-consumer rule, #168) —
+  // the episode can never auto-clear via ping, simulating a provider that stays down. Without
+  // this fix, waitForDispatchClear's own loop has no notion of the run's final stop condition
+  // and would spin on ceiling/park state alone forever, even though the run is already,
+  // independently, done.
+  state.enterPark("llm", "quota exhausted", null, "2026-07-24T00:00:00.000Z");
+  const sleepCalls: number[] = [];
+  let stop = (): void => {};
+  const sleep = async (ms: number): Promise<void> => {
+    sleepCalls.push(ms);
+    // Safety net: if the fix regresses (final stop never re-checked inside the wait loop), this
+    // loop spins forever waiting for a park that never clears — bail via signal so the
+    // stoppedBy/rounds assertions below fail instead of hanging the suite.
+    if (sleepCalls.length >= 5) stop();
+  };
+  const deps = baseDeps({ forge, state, sleep, tickIntervalSec: 1, stop: { onMilestoneComplete: "M4" } });
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "stop-condition");
+  assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
+  assert.equal(result.rounds, 1, "only round 1 closed — round 2 never opened once the milestone was noticed mid-wait");
+  assert.equal(state.isParked(), true, "the run stopped WITHOUT the park ever clearing — never waited for recovery");
+  state.close();
+});
+
+test("runRounds #374 review (Codex sol-high verify-pass finding 2, P2): a milestone that completes EXACTLY on the recovery-CLEAR iteration (the green probeLlmReachable ping that arms round 3 back open) still stops the run — never opens the pointless post-recovery round", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge();
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const degradingPeripherals = mkFullyDegradingPeripherals(log, state);
+    let probeCalls = 0;
+    // Same fixture as "the round-opening gate resumes via the EXISTING probe path" above: rounds
+    // 1-2 fully degrade -> the empty-spin breaker parks (llm); the round-opening gate's own probe
+    // fails twice, then succeeds on the 3rd attempt, which is exactly waitForDispatchClear's
+    // SUCCESS/fast-path return (ceiling clear + park clear/green-light, line ~884 in round.ts) —
+    // the ONE iteration that does NOT run the function's own internal final-stop re-check (that
+    // check deliberately only fires on an iteration about to actually WAIT, never on this
+    // already-clear path — see its doc). #374 review (Codex sol-high verify-pass finding 2, P2):
+    // tying countOpenIssuesInMilestone's answer to the SAME `probeCalls > 2` condition the probe
+    // itself uses means the milestone completes AT THE EXACT SAME MOMENT recovery clears —
+    // precisely the race this finding closes, rather than merely "sometime before or after".
+    let simulatedMs = Date.parse("2026-01-01T00:00:00.000Z");
+    const now = (): Date => new Date(simulatedMs);
+    const sleep = async (ms: number): Promise<void> => {
+      simulatedMs += ms;
+    };
+    forge.countOpenIssuesInMilestone = async (): Promise<number> => (probeCalls > 2 ? 0 : 1);
+    const deps = baseDeps({
+      forge,
+      state,
+      now,
+      sleep,
+      tickIntervalSec: 1,
+      cfg: mkCfg({
+        round: { emptySpin: { consecutiveDegradedRoundsThreshold: 2 } },
+        envFailure: { probeBackoffBaseSec: 1, probeBackoffMaxSec: 5 },
+      }),
+      peripherals: degradingPeripherals,
+      stop: { onMilestoneComplete: "M4" },
+      probeLlmReachable: async () => {
+        probeCalls++;
+        return probeCalls > 2;
+      },
+    });
+    const stopSafety = boundedStopOnPhase(deps, 15);
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.equal(result.stoppedBy, "stop-condition");
+    assert.deepEqual(result.stopCondition, { name: "onMilestoneComplete", threshold: "M4", detail: "0 open issues left" });
+    assert.equal(result.rounds, 2, "round 3 NEVER opened — the milestone hit was caught the instant recovery cleared");
+    // The probe genuinely succeeded (recovery WAS real) — this proves the run stopped because of
+    // the milestone catch, not because the probe itself somehow never got a green light.
+    assert.ok(probeCalls >= 3, "the gate actually re-probed until it got a green light");
+    const parkProbeEvents = state.eventsAfterId(0, ["park-probe"]).filter((e) => (e.payload as { source?: string }).source === "llm");
+    assert.ok(
+      parkProbeEvents.some((e) => (e.payload as { success?: boolean }).success === true),
+      "a successful park-probe event was still recorded — recovery cleared, but the run stopped anyway",
+    );
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── #212: round-pool dispatch scoping, round-close label cleanup, removeLabel containment ────

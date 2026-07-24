@@ -30,6 +30,7 @@ import {
   parkDurationExceededSec,
   probeBackoffSec,
   probeDue,
+  probeDueWithHint,
 } from "./env-failure.js";
 import { attemptThreadWrite, computeFixResponseHarvest, type FixResponseWriteOutcome } from "./fix-response.js";
 
@@ -548,6 +549,13 @@ export interface LaneProbe {
    *  "in-memory lane only" scoping). tick()'s KEEP branch feeds a non-null value into
    *  State.recordWorkerActualModel alongside its existing State.setLiveTelemetry call. */
   actualModel?: string | null;
+  /** #374: a FAILED lane's own structured rate-limit telemetry (worker.ts's
+   *  extractRateLimitResetAt — the Claude CLI's `rate_limit_event.resetsAt`), epoch ms, when a
+   *  429 payload named the exact instant quota resets. undefined for a non-FAILED lane, when no
+   *  such record was ever emitted, or for probe fixtures that predate #374. Threaded into
+   *  state.enterPark's optional reset-hint column purely as SCHEDULING input (env-failure.ts's
+   *  probeDueWithHint) — never a classification input (classifyEnvFailure never sees it). */
+  rateLimitResetAtMs?: number;
 }
 
 /** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
@@ -1240,7 +1248,7 @@ function summarizeFailureText(text: string): string {
  *  wrapped so any throw (network/auth/5xx — exactly the conditions env-failure.ts's forge
  *  signatures describe) reads as "still unreachable" rather than propagating. Deterministic:
  *  the classification is "did the call succeed", never an LLM judgment. */
-async function probeForgeReachable(forge: IForge): Promise<boolean> {
+export async function probeForgeReachable(forge: IForge): Promise<boolean> {
   try {
     await forge.listOpenIssueNumbers();
     return true;
@@ -1308,7 +1316,7 @@ function releaseCanaryInconclusive(state: State, workerName: string): void {
  *  P1-2 surfacing (PR #180 review): env-failure requeues suspended by a forge outage never
  *  degrade to needs-human — they stay durable in pending_rollbacks and are surfaced HERE, in
  *  the escalation message, as the human-visible record of what will drain on resume. */
-async function escalatePark(
+export async function escalatePark(
   forge: IForge,
   state: State,
   cfg: SapwoodConfig,
@@ -1496,7 +1504,15 @@ async function reclaimTerminalLane(
     settleCanary(state, w.name, envSource != null, iso);
     if (envSource) {
       const reason = summarizeFailureText(p.failureText ?? "");
-      state.enterPark(envSource, reason, w.issue, iso());
+      // #374 review (Codex sol-high finding 7): thread the CLI's own structured reset-time hint
+      // ONLY when THIS episode is llm-sourced — see env-failure.ts's probeDueWithHint and the
+      // schema v26->v27 migration's doc comment. A forge-classified failure whose transcript
+      // ALSO happens to carry rate-limit telemetry (both signatures can appear in the same
+      // captured output — e.g. a worker that hit quota earlier in its run and a forge outage
+      // later) must NOT suppress the FREE forge probe until an unrelated llm timestamp elapses;
+      // the hint is llm-specific scheduling input, never a forge one.
+      const resetHintAtIso = envSource === "llm" && p.rateLimitResetAtMs != null ? new Date(p.rateLimitResetAtMs).toISOString() : null;
+      state.enterPark(envSource, reason, w.issue, iso(), resetHintAtIso);
       state.appendEvent("env-failure", { worker: w.name, issue: w.issue, source: envSource, reason, hasPr: p.hasPr });
     }
     if (envSource && !p.hasPr) {
@@ -2904,7 +2920,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // unaffected either way.
     if (llmEpisode && llmEpisode.canaryWorker == null && deps.probeLlmReachable && !ceilingBreached && !paused) {
       const backoffSec = probeBackoffSec(llmEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec);
-      if (probeDue(llmEpisode.lastProbeAt, nowDate.getTime(), backoffSec)) {
+      // #374: a known reset-time hint floors the first useful probe (env-failure.ts's
+      // probeDueWithHint) — reduces to plain probeDue when no hint was ever recorded for this
+      // episode (llmEpisode.resetHintAt == null), byte-identical to pre-#374 behavior.
+      if (probeDueWithHint(llmEpisode.lastProbeAt, nowDate.getTime(), backoffSec, llmEpisode.resetHintAt)) {
         const raw = await deps.probeLlmReachable();
         const pingOk = typeof raw === "boolean" ? raw : raw.ok;
         // Amendment 2: on failure, the probe's own first error line rides along in the event —

@@ -36,7 +36,7 @@ import type { IForge, Issue } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
-import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
+import { envFailureHook, PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
@@ -1337,6 +1337,8 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
           `[sapwood:pool] round ${deps.roundId}: po-pool selection session failed twice (${r.outcome}) — ` +
           `degrading to the deterministic top-${cap} selection: ${poolDegradeReason(r, candidateNumbers, cap)}`,
         isValid: (r) => validatePoolSelectionOutput(r.resultText ?? "", candidateNumbers, cap).ok,
+        // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
+        envFailure: envFailureHook(deps.cfg, deps.state),
       });
       const validated: PoolSelectionValidation =
         result.outcome === "done"
@@ -1622,6 +1624,8 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
               `[sapwood:po] round ${roundId}: po-align session failed twice (${result.outcome}) — ` +
               `proceeding (pre-Ready, low stakes; the next round retries naturally): ${alignDegradeReason(result, alignInView)}`,
             isValid: (result) => validateAlignOutput(result.resultText ?? "", alignInView).ok,
+            // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
+            envFailure: envFailureHook(deps.cfg, deps.state),
           });
           alignValidated =
             alignResult.outcome === "done"
@@ -1787,12 +1791,45 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // path needs; no `Issue` object is required for it.
       const recoveryOnlyNumbers = [...triageJournal.decisions.keys()].filter((n) => !candidatesByNumber.has(n));
       const triageWorkNumbers = [...triageCandidates.map((issue) => issue.number), ...recoveryOnlyNumbers];
-      for (const number of triageWorkNumbers) {
+      // #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a journal-resumption loss
+      // the finding-1 canary fix itself introduced): once true, the REMAINING candidates that
+      // would need a FRESH session are skipped — but a journal resumption (an earlier attempt
+      // THIS round already durably recorded a decision for) dispatches NO session at all, so it
+      // must still execute even after the park is observed; skipping it too would permanently
+      // lose its still-pending comment/concern/receipts, since no later pass ever re-dispatches a
+      // session for a number the journal already has a decision for (see `resumed` below —
+      // triageProgress only reads THIS round's decisions, and the phase marker persists at this
+      // function's return regardless). See the per-iteration check just below the loop line for
+      // where this is consulted, and the `sawEnvPark`-setting fresh-dispatch branch further down
+      // for where it gets set.
+      let envParkedThisPass = false;
+      for (let triageIdx = 0; triageIdx < triageWorkNumbers.length; triageIdx++) {
+        const number = triageWorkNumbers[triageIdx]!;
         const resumed = triageJournal.decisions.get(number);
+        // A resumption dispatches nothing — it is always safe (and REQUIRED, see the doc above)
+        // to keep processing it even once envParkedThisPass is true. Only a candidate that would
+        // need a brand-new session is skipped here.
+        if (envParkedThisPass && !resumed) {
+          alignSummaryTriaged.push({ issue: number, drafted: false });
+          continue;
+        }
         let validated: TriageValidation;
         let expectedHash: string;
         let attempt: number;
         let bodyAlreadyCommitted: boolean;
+        // #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a recovery canary
+        // starvation the original finding-6 fix introduced): set ONLY when THIS iteration's OWN
+        // fresh session dispatch comes back env-classified — NEVER pre-checked against "a park
+        // row merely exists" before dispatching. The first (and every) candidate always gets a
+        // real attempt; only once one of them actually observes a classified quota/429 does the
+        // loop start skipping FRESH candidates for the rest of this pass (journal resumptions are
+        // exempt — see envParkedThisPass's own doc above). Gating on pre-existing park state
+        // instead would let an ARMED recovery round (round.ts's green-ping canary, which only
+        // arms the round to open — it never clears the episode outright) skip every candidate
+        // before any of them had a chance to prove recovery, wedging the engine parked forever. A
+        // resumed (durably-decided, no fresh session) candidate can never set this — it
+        // dispatches nothing.
+        let sawEnvPark = false;
 
         if (resumed) {
           // #232 gate② F2: a terminal event only resolves THIS decision when its attempt
@@ -1927,7 +1964,10 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
               `#${issue.number} — proceeding (pre-Ready, low stakes; the next round retries naturally): ` +
               `${triageDegradeReason(result, issue.number, triageInView)}`,
             isValid: (result) => validateTriageOutput(result.resultText ?? "", issue.number, triageInView).ok,
+            // #374: quota/429 parks instead of degrading — see peripheral.ts's envFailureHook doc.
+            envFailure: envFailureHook(deps.cfg, deps.state),
           });
+          sawEnvPark = triageResult.envParked === true;
           validated =
             triageResult.outcome === "done"
               ? validateTriageOutput(triageResult.resultText ?? "", issue.number, triageInView)
@@ -1945,6 +1985,19 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           // isValid-driven retry+degrade above (triage-degraded fired there) — nothing further
           // to do: no write, no success comment, the candidate re-matches next round.
           alignSummaryTriaged.push({ issue: number, drafted: false });
+          if (sawEnvPark) {
+            envParkedThisPass = true;
+            // #374 review (Codex sol-high verify-pass finding 1, P1): never a `break` — the
+            // remaining FRESH candidates are skipped (via the per-iteration check at the top of
+            // this loop, from the NEXT iteration onward), but any remaining JOURNAL RESUMPTION
+            // still executes this same pass (see envParkedThisPass's own doc above for why that
+            // distinction is load-bearing).
+            const remainingFresh = triageWorkNumbers.slice(triageIdx + 1).filter((n) => !triageJournal.decisions.has(n)).length;
+            (deps.log ?? console.error)(
+              `[sapwood:po] round ${roundId}: llm park active — skipping ${remainingFresh} remaining FRESH ` +
+                `triage candidate(s) this pass (journal resumptions, if any, still run)`,
+            );
+          }
           continue;
         }
         // #232: write-ahead acceptance — the validated decision is durably recorded BEFORE any

@@ -44,6 +44,19 @@ export const DEFAULT_LLM_FAILURE_PATTERNS: readonly string[] = [
   // ("expected mock to return 429, got 500") must not match; the full phrase is specific to an
   // actual HTTP client error, never something ordinary task code/prose would contain verbatim.
   "429 too many requests",
+  // #374 (2026-07-24 dogfood F16/F17): the Claude CLI's own session/plan-quota exhaustion
+  // message, verified verbatim against a real captured session transcript (a `type:"result"`
+  // record with `is_error:true`, `api_error_status:429`): "You've hit your session limit ·
+  // resets 6:30pm (Asia/Tokyo)". "hit your session limit" is the distinctive, CLI-authored
+  // phrase (never something ordinary worker prose would produce verbatim, same signature-shaped
+  // bar as "usage limit reached" above) — extractFailureText (worker.ts) already carries this
+  // text through for a FAILED lane's `result` field regardless of the record's (misleadingly
+  // "success") subtype, since `is_error` alone gates inclusion. "5-hour limit"/"weekly limit" are
+  // the CLI's other two plan-quota tiers (same UI family, not yet observed verbatim in this
+  // codebase's own captures, added defensively so all three tiers classify identically).
+  "hit your session limit",
+  "5-hour limit reached",
+  "weekly limit reached",
 ];
 
 export const DEFAULT_FORGE_FAILURE_PATTERNS: readonly string[] = [
@@ -108,6 +121,39 @@ export function probeDue(lastProbeAtIso: string | null, nowMs: number, backoffSe
  *  due. */
 export function parkDurationExceededSec(enteredAtIso: string, nowMs: number, thresholdSec: number): boolean {
   return (nowMs - Date.parse(enteredAtIso)) / 1000 > thresholdSec;
+}
+
+/** #374: same "is a probe due" question as probeDue, but additionally honoring a KNOWN reset
+ *  instant — a 429 payload that names exactly when quota comes back (worker.ts's
+ *  extractRateLimitResetAt, the Claude CLI's structured `rate_limit_event.resetsAt`) is strictly
+ *  better scheduling information than the bounded exponential backoff, which knows nothing about
+ *  the real outage length and would otherwise burn several doomed-to-fail probes before backing
+ *  off far enough to matter. `resetHintAtIso == null` (no hint was ever observed) reduces this
+ *  to plain `probeDue` exactly — byte-identical to every pre-#374 call site. A malformed hint
+ *  (unparseable ISO string) is treated the same as "no hint" (fail toward the existing, already-
+ *  correct backoff schedule, never toward "never probe again"). Once `nowMs` reaches the hint,
+ *  this defers to the ordinary backoff schedule from then on (a hint is a floor on the first
+ *  useful probe time, not a promise the very next probe succeeds — the CLI's own reset estimate
+ *  can be off by the same clock-skew/timezone slop any third-party timestamp carries). */
+export function probeDueWithHint(lastProbeAtIso: string | null, nowMs: number, backoffSec: number, resetHintAtIso: string | null): boolean {
+  if (resetHintAtIso != null) {
+    const hintMs = Date.parse(resetHintAtIso);
+    if (!Number.isNaN(hintMs) && nowMs < hintMs) return false;
+  }
+  return probeDue(lastProbeAtIso, nowMs, backoffSec);
+}
+
+/** #374 (F16): the empty-spin breaker — independent of error CLASSIFICATION (classifyEnvFailure
+ *  above may simply not recognize an unfamiliar systemic failure's text), this bounds round
+ *  churn on a purely STRUCTURAL signal: how many CONSECUTIVE rounds in a row did no dispatched
+ *  work survive AND every peripheral role session that ran this round degraded. `threshold` is
+ *  the configured `cfg.round.emptySpin.consecutiveDegradedRoundsThreshold` (user-tunable, small
+ *  default) — round.ts's own loop maintains `consecutiveDegradedRounds`, this is just the pure
+ *  ">=" comparison, kept here (not inlined) for the same "arithmetic lives beside the other
+ *  park-decision arithmetic, independently testable" reasoning every other function in this file
+ *  follows. */
+export function emptySpinBreached(consecutiveDegradedRounds: number, threshold: number): boolean {
+  return consecutiveDegradedRounds >= threshold;
 }
 
 export type EscalationChannel = "forge" | "local";

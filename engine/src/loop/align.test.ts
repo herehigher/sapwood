@@ -1141,6 +1141,139 @@ test("createAligningStub: triage processes every candidate independently", async
   state.close();
 });
 
+test("createAligningStub #374 review (Codex sol-high finding 6): once an earlier triage candidate classifies quota/429 and parks, remaining candidates are SKIPPED — no doomed per-issue sessions", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [
+    { number: 60, title: "a", labels: [], body: "" },
+    { number: 61, title: "b", labels: [], body: "" },
+    { number: 62, title: "c", labels: [], body: "" },
+  ];
+  const cfg = mkCfg();
+  const quotaResult: RoleSessionResult = {
+    outcome: "failed",
+    costUsd: 0,
+    modelUsage: [],
+    exitCode: 1,
+    name: "po-triage-60",
+    failureText: "hit your session limit",
+  };
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])), // po-align itself succeeds cleanly
+    quotaResult, // po-triage's FIRST candidate (#60) classifies quota/429 -> parks
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 9, phase: "aligning", marker: null });
+  // po-align (1 call) + ONLY #60's triage attempt (1 call) — #61/#62 skipped once parked.
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-triage"],
+  );
+  assert.equal(state.isParked(), true);
+  assert.equal(state.parkRow("llm")?.source, "llm");
+  assert.equal(
+    forge.issueCommentsPosted.some(([n]) => n === 61 || n === 62),
+    false,
+    "#61/#62 got no forge write at all",
+  );
+  state.close();
+});
+
+test("createAligningStub #374 review (Codex sol-high verify-pass finding 1, P1): an ARMED recovery round (park ALREADY open before this pass) still runs the FIRST triage candidate for real — it IS the canary — never skips on pre-existing park state alone", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [
+    { number: 90, title: "a", labels: [], body: "" },
+    { number: 91, title: "b", labels: [], body: "" },
+  ];
+  const cfg = mkCfg();
+  // #90's session succeeds cleanly (the provider IS actually back) -> triaged normally.
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-90", triageResultText(90, "## Verification\n- a")),
+    doneResult("po-triage-91", triageResultText(91, "## Verification\n- b")),
+  ]);
+  const state = new State(":memory:");
+  // Simulates round.ts's round-opening gate having ARMED this round via a green
+  // probeLlmReachable ping — the ping only arms the round to open, it never clears the episode
+  // outright (round.ts's own canary doctrine). If the loop guard skipped on "a park row exists"
+  // (the pre-fix behavior), #90 would never even get a chance to prove recovery.
+  state.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 10, phase: "aligning", marker: null });
+  // BOTH candidates got a real session — #90's success cleared the park, so #91 proceeds
+  // normally too (never gated on the STALE pre-pass park state).
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-triage", "po-triage"],
+    "the pre-existing park never suppressed dispatch — both candidates ran",
+  );
+  assert.equal(state.isParked(), false, "#90's 'done' outcome cleared the episode");
+  assert.ok(forge.issueCommentsPosted.some(([n]) => n === 90));
+  assert.ok(forge.issueCommentsPosted.some(([n]) => n === 91));
+  state.close();
+});
+
+test("createAligningStub #374 review (Codex sol-high verify-pass finding 1, P1): an env failure on a FRESH candidate skips later FRESH candidates but a JOURNAL RESUMPTION later in the list still executes (its decision already landed — no session needed, so the park must never suppress it)", async () => {
+  const forge = new FakeForge();
+  // #60 is the ONLY fresh candidate (forge.getIssuesNeedingPlanTriage()'s live result) — it gets
+  // dispatched first and classifies quota/429.
+  forge.planTriageCandidates = [{ number: 60, title: "a", labels: [], body: "" }];
+  // #61 is NOT a fresh candidate at all (already has a plan section, hence excluded from the
+  // live selector) — but a PRIOR attempt this round already validated and durably accepted its
+  // triage decision, with no terminal receipt yet (crash between decision-persist and
+  // effect-commit). triageWorkNumbers orders it AFTER every fresh candidate (recoveryOnlyNumbers
+  // is appended last) — exactly the "resumption later in the list" shape this fix covers.
+  const draftedBody61 = "no plan yet\n## Verification\n- run npm test";
+  const expectedHash61 = contentVersionForTest("no plan yet");
+  forge.issueBodies[61] = "no plan yet"; // the live body the crashed attempt actually read
+  const state = new State(":memory:");
+  state.appendEvent("triage-decision-accepted", {
+    round_id: 40,
+    issue: 61,
+    phase: "aligning",
+    role: "po",
+    session: "po-triage:61",
+    attempt: 1,
+    body: draftedBody61,
+    expected_hash: expectedHash61,
+  });
+  const cfg = mkCfg();
+  const quotaResult: RoleSessionResult = {
+    outcome: "failed",
+    costUsd: 0,
+    modelUsage: [],
+    exitCode: 1,
+    name: "po-triage-60",
+    failureText: "hit your session limit",
+  };
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])), // po-align itself succeeds cleanly
+    quotaResult, // po-triage's ONLY fresh candidate (#60) classifies quota/429 -> parks
+  ]);
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 40, phase: "aligning", marker: null });
+  // po-align (1 call) + ONLY #60's fresh triage attempt (1 call) — #61 dispatches NO session at
+  // all (it is a resumption), yet its pending body write/comment/receipts still execute below.
+  assert.deepEqual(
+    runner.calls.map((c) => c.roleId),
+    ["po-align", "po-triage"],
+    "no session is ever dispatched for #61 — it resumes from its durably-recorded decision",
+  );
+  assert.equal(state.isParked(), true, "#60's classified failure still parks the episode");
+  // The load-bearing assertion: #61's resumption was NOT skipped by the park — its decision's
+  // effects (guarded body write, success comment) still landed this pass, even though it comes
+  // AFTER the parked fresh candidate in triageWorkNumbers.
+  assert.deepEqual(forge.updateIssueBodyCalls, [[61, draftedBody61]], "#61's resumed body write still landed");
+  assert.ok(
+    forge.issueCommentsPosted.some(([n]) => n === 61),
+    "#61's success comment still posted",
+  );
+  state.close();
+});
+
 // ── marker-idempotence across a re-run (rerun-not-resume, #77 decision 4) ───────────────────
 
 test("createAligningStub: re-running the SAME round after a marker was already set drafts nothing twice", async () => {
