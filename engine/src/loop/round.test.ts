@@ -2633,6 +2633,70 @@ test("runRounds (#253): cfg.proxy.enabled: true, shadow: false (the go-live flip
   deps.state.close();
 });
 
+// ── #375 (PR #388 review round 2, P1): a ROUND-BUDGET-caused wind-down must not starve a
+// driving lane's own fix leg. The #253 test above deliberately dodges this exact shape (see its
+// own "roundDispatchCap deliberately > 1" comment) — this test uses the fixture that DOES trip
+// it: cost.roundBudgetUsd crossed after wave 1, which sets round.ts's forceDispatchPause for the
+// rest of the round. Pre-fix, that folded into tick()'s `paused`, and fixLegAdmissionBlockReason
+// treated it exactly like a human PAUSE — blocking every FIXUP attempt with
+// "fix-leg-admission-blocked:paused" forever, so activeWorkers() never reached zero and the
+// round never closed (the real end-to-end shape of #375's own F7/F8 dogfood wedge, one level
+// higher than conductor.test.ts's bare-tick() tests can see). ──────────────────────────────────
+
+test("runRounds (#375 review round 2, P1): round budget crossed after wave 1 does NOT block a driving lane's fix leg — the FIXABLE gate still dispatches (bounded by prFixCap only) and the round reaches a terminal state, never wedging on 'fix-leg-admission-blocked:paused'", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new CapturingResumeSupervisor();
+  // Same probe entry answers every reclaim of "lane-1-1" — the initial coding worker AND every
+  // later fix leg (startFixLeg reuses the SAME worker row/name, #245) — so each fix round settles
+  // back to `driving` on the very next tick, letting the ScriptedMergeGate's "fixable" outcome
+  // (clamped, fires every call) redrive it until lanes.prFixCap is genuinely exhausted. $6 (not
+  // $999, unlike the plain cost.roundBudgetUsd test elsewhere in this file): the SAME probe entry
+  // is charged again on EVERY fix-round reclaim too, and this fixture needs to cross ONLY the $5
+  // roundBudgetUsd, never the default $100 dailyBudgetUsd — that ceiling is a SEPARATE, legitimate
+  // admission blocker (#375 item 1's own `ceilingBreached`) this test is not exercising.
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1, costUsd: 6 };
+  const gate = new ScriptedMergeGate([{ kind: "fixable", pr: 1, reason: "ci-red" }]);
+  const renderFixPrompt = (issueNumber: number, pr: number): string => `fix #${issueNumber} for PR #${pr}`;
+  const state = new State(":memory:");
+  const events = spyOnEvents(state);
+  const deps = baseDeps({
+    forge,
+    state,
+    supervisor: sup,
+    sleep,
+    mergeGate: gate,
+    // roundDispatchCap deliberately HIGH so it never fires first — isolating roundBudgetUsd as
+    // the ONLY round-level stop this fixture trips (mirrors the pre-existing cost.roundBudgetUsd
+    // test's own isolation style elsewhere in this file). $6 (wave 1's lane cost) > $5.
+    cfg: mkCfg({ lanes: { max: 1, roundDispatchCap: 10 }, cost: { roundBudgetUsd: 5 }, proxy: { enabled: true, shadow: false } }),
+    renderFixPrompt,
+  });
+  const stopSafety = boundedStopOnPhase(deps, 20);
+  await runRounds(deps);
+  stopSafety();
+
+  // Round budget really was crossed (proves this reproduces #375's own F7/F8 scenario, not an
+  // unrelated no-op fixture).
+  assert.ok(
+    events.some(([kind, payload]) => kind === "round-stop" && (payload as { name: string }).name === "roundBudgetUsd"),
+    "expected the round-budget stop condition to have actually fired",
+  );
+  // The fix: a FIXUP dispatch happened despite forceDispatchPause being set for the rest of the
+  // round — pre-fix this was 0 (permanently blocked on "paused").
+  assert.ok(sup.resumeCalls.length >= 1, "the fix leg must dispatch despite round spend crossing roundBudgetUsd");
+  assert.ok(
+    !events.some(([kind, payload]) => kind === "fix-leg-dispatch-blocked" && (payload as { blockReason: string }).blockReason === "paused"),
+    "a round-budget-caused pause must never appear as the fix leg's own admission-block reason",
+  );
+  // Bounded by lanes.prFixCap (default 2), not round budget: the fix loop reaches a REAL
+  // terminal state (needs-human, once genuinely exhausted) rather than spinning forever.
+  assert.equal(state.getWorker("lane-1-1")?.state, "failed");
+  assert.equal(state.activeWorkers().length, 0, "the driving lane reached a terminal state — wind-down can actually exit");
+  state.close();
+});
+
 test("runRounds (#253 review round 2, H1): cfg.proxy.enabled: true, shadow: true (the DEFAULT once enabled) -> fixLegResume is NEVER attached — a FIXABLE gate degrades EXACTLY like the fully-disabled case, never dispatching a fix leg", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();

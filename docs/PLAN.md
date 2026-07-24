@@ -305,7 +305,15 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   else is blocked: no dispatch, no drive/merge, no rollback retry, and no kill+requeue
   of crashed (no-sentinel) lanes. Accepted trade-off: a switch flipped mid-tick takes
   effect at the next tick's gate, not within the same tick. The per-worker *soft*
-  budget stays a graceful handoff, never a mid-work kill (#33).
+  budget stays a graceful handoff, never a mid-work kill (#33). **#375:** a `driving`
+  lane has no live process for the drain to hand off/kill, so it used to sit untouched
+  for as long as the switch stayed active — once its only next action was itself
+  budget-blocked or fix-rounds-capped (see the fix-loop paragraph below), that meant
+  forever, spinning the engine's wind-down loop past its drain window with nothing to
+  show for it. Such a lane is now escalated to `needs-human` past that SAME bounded
+  `drainWindowSec` too, so the engine always exits within it; a `driving` lane that
+  isn't stuck for a budget reason (MERGE/WAIT-gated) is left alone and resumes normally
+  once the switch clears.
 - **Drain contract is sentinel-only; the supervisor never runs git in a worker
   worktree (#69, superseding #60/#62/#63's supervisor-side commit+push)** — a
   drain SIGTERM ends with the supervisor writing the `.handoff` sentinel
@@ -364,12 +372,38 @@ says stop. TS port of 0day's `pr_gate.sh` ACTION protocol + `loop_merge_driver.s
   via `startFixLeg`, itself gated by the same pause/ceiling/park/run-spend-stop admission
   checks RESUME/DISPATCH already pass — a blocked admission is a transient `queued` retry
   next tick, not an escalation) while `fix_rounds < cap`, or `ESCALATE` when the cap is
-  exhausted, the round count is malformed, or this tick is over the round budget. Of those
-  three, only cap-exhaustion and the malformed-count fail-safe are terminal — they escalate
-  to `needs-human`, the same escalation #147's GATED RECLAIM below can then reclaim once a
-  human clears the label; an over-budget tick is, like a blocked admission, just a transient
-  `queued` retry, costing zero fix-round budget. The fix leg pulls its own PR's review
-  findings via the PR-facing forge MCP
+  exhausted or the round count is malformed. Of those two, both are terminal — they
+  escalate to `needs-human`, the same escalation #147's GATED RECLAIM below can then
+  reclaim once a human clears the label.
+  **Round budget paces new work; it never blocks finishing an open PR (#375, fixing two
+  dogfood-observed permanent wedges, F7/F8).** A driving lane's fix leg is exempt from
+  `cost.roundBudgetUsd` outright — an already-open PR has no other completion path (merge
+  or fix; there is no "abandon the PR" outcome), so gating it on round spend could wedge a
+  round forever once spend crossed the cap while a PR still needed rework. `cost.roundBudgetUsd`
+  now gates **NEW dispatch only** (unchanged there). A fix leg remains bounded by the three
+  *other*, pre-existing limits: `lanes.prFixCap` (attempts, as above), `worker.budgetUsdSoft`
+  (each leg's own per-worker graceful-handoff ceiling), and `cost.dailyBudgetUsd` (the hard
+  daily ceiling — still a real admission blocker via the same pause/ceiling/park/run-spend-stop
+  check above). **The exemption is uniform across every round/run-level stop reason, not just
+  the spend cap** (PR #388 review round 2): once ANY of `roundBudgetUsd`/`roundDispatchCap`/a
+  round milestone/a `stop.*` run-level condition fires, round.ts freezes further waves via the
+  SAME `forceDispatchPause` signal — which is a "no new dispatch this round" fact, never a human
+  pause, and a fix leg on an already-open PR is never "new dispatch" either way. A fix leg's
+  admission gate reads the genuine `data/PAUSE` sentinel only, not `forceDispatchPause` — new
+  DISPATCH itself stays fully frozen regardless (round.ts already zeroes its dispatch quota in
+  lockstep). **The daily ceiling is the actual hard safety boundary**, exactly as
+  everywhere else in this doc — it is deliberately *not* exempted, since it is the boundary
+  that exists to stop runaway spend, not to pace one round. A daily-budget-blocked (or
+  fix-rounds-capped) driving lane is also now **terminal-for-drain** under the `KILL_SWITCH`
+  bounded drain (`drainThenEscalate`, above): a `driving` lane has no live process to hand
+  off, so before #375 it could sit forever once DRIVE froze, spinning the wind-down loop
+  past its drain window with nothing to show for it (the second dogfood-observed wedge — a
+  14-minute spin, force-killed). It now escalates to `needs-human` past the SAME bounded
+  `drainWindowSec`, exactly like a hard-killed running/fixing lane, so the engine always
+  exits within the drain window. A driving lane that has never needed a fix leg
+  (MERGE-/WAIT-gated) is left alone — it isn't stuck for a budget reason, and resumes the
+  instant the breach/switch clears. The fix leg pulls its own PR's review findings via the
+  PR-facing forge MCP
   proxy tools (#244, attached to `resume()` too) rather than having them relayed through its
   prompt — no prompt-injection transport, no forge credentials handed to the leg — and, per
   #247, can act on individual review threads directly: the engine executes structured
@@ -1093,8 +1127,12 @@ one winds down, and the process exits. The two levels count different things: ro
 level counts PRs opened; final level counts issues merged — matching `stop.*`'s existing
 semantics exactly. **#211:** round-budget accounting is the durable spend-ledger window
 anchored when the round opens (`start_spend_id`), so opening/closing peripherals and
-worker legs all count exactly once across crash/resume. The budget gates dispatch only;
-harvest and retro still close an over-budget round.
+worker legs all count exactly once across crash/resume. The budget gates *new* dispatch
+only; harvest and retro still close an over-budget round. **#375** makes this literal for
+lanes already in flight too: a driving lane's fix leg is exempt from `cost.roundBudgetUsd`
+outright (see the fix-loop paragraph above) — round budget paces new work, it never blocks
+finishing a PR already open, so an over-budget round always still reaches a terminal state
+(closed or fully escalated) rather than wedging on a PR it can neither merge nor fix.
 
 **The round pool — explicit per-round task selection (locked 2026-07-16, issue #212).**
 "This round's tasks" is an explicit, bounded selection, not an open-ended per-tick
