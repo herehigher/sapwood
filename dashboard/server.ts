@@ -202,21 +202,28 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
   const active = state.activeWorkers();
   const breach = state.ceilingBreach();
   const round = state.openRound();
+  const lastTickAt = state.lastTickAt();
+  const engineState = deriveEngineState({
+    now,
+    killSwitch: state.isKillSwitchActive(),
+    activeLanes: active.length,
+    ceilingBreach: breach,
+    pause: state.isPauseActive(),
+    lastTickAt,
+    staleGapSec: engineSessionGapSec(cfg?.engine.tickIntervalSec ?? 0),
+    roundOpen: round !== undefined,
+    standbyWaiting: standbyWaiting(state),
+  });
   return {
     engine: {
-      state: deriveEngineState({
-        now,
-        killSwitch: state.isKillSwitchActive(),
-        activeLanes: active.length,
-        ceilingBreach: breach,
-        pause: state.isPauseActive(),
-        lastTickAt: state.lastTickAt(),
-        staleGapSec: engineSessionGapSec(cfg?.engine.tickIntervalSec ?? 0),
-        roundOpen: round !== undefined,
-        standbyWaiting: standbyWaiting(state),
-      }),
-      reasons: breach?.reasons ?? [],
-      lastTickAt: state.lastTickAt(),
+      state: engineState,
+      // §8: reasons carry ceiling_breach.reasons ONLY while winding-down. A `ceiling_breach`
+      // row can outlive the winding-down state — KILL_SWITCH (stopping/stopped) and a stale
+      // engine both outrank it in deriveEngineState while the row is still open — so gating on
+      // the DERIVED state, not on the row's mere existence, keeps a manually stopped or dead
+      // dashboard from surfacing an irrelevant budget/kill reason (Codex review P2).
+      reasons: engineState === "winding-down" ? (breach?.reasons ?? []) : [],
+      lastTickAt,
     },
     lanes: {
       max: cfg?.lanes.max ?? null, // null, never a fabricated 3, when the config is unreadable

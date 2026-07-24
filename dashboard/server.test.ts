@@ -198,6 +198,40 @@ test("/api/loop/state reports lanes.max and budgets as null when the config is u
   }
 });
 
+test("/api/loop/state carries ceiling reasons only while winding-down (§8)", async () => {
+  // A breach with no kill switch → winding-down → reasons surface.
+  const fx = await fixture((s) => {
+    s.recordCeilingBreach(["daily-budget"], new Date("2026-07-24T11:00:00.000Z"));
+    s.engineSessionStart(new Date(), 900); // a fresh heartbeat so it isn't stalled
+  });
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.equal(body.engine.state, "winding-down");
+    assert.deepEqual(body.engine.reasons, ["daily-budget"]);
+  } finally {
+    fx.close();
+  }
+});
+
+test("/api/loop/state clears ceiling reasons once the kill switch stops the engine (§8)", async () => {
+  // KILL_SWITCH outranks the breach → stopped/stopping — reasons must NOT leak a stale
+  // budget/kill reason onto a manually stopped dashboard (the P2 from Codex review).
+  const fx = await fixture(
+    (s) => {
+      s.recordCeilingBreach(["daily-budget"], new Date("2026-07-24T11:00:00.000Z"));
+      s.engineSessionStart(new Date(), 900);
+    },
+    { killSwitch: true },
+  );
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.equal(body.engine.state, "stopped"); // no active lanes in this fixture
+    assert.deepEqual(body.engine.reasons, [], "a stopped engine exposes no ceiling reasons");
+  } finally {
+    fx.close();
+  }
+});
+
 test("/api/loop/state round is null when no round is open", async () => {
   const fx = await fixture((s) => {
     s.startRound("2026-07-24T10:00:00.000Z");
@@ -318,12 +352,16 @@ interface Fixture {
 }
 
 /** A temp-dir DB seeded through a WRITABLE handle, then served through a read-only one. */
-async function fixture(seed?: (s: State) => void, opts: { config?: boolean } = {}): Promise<Fixture> {
+async function fixture(seed?: (s: State) => void, opts: { config?: boolean; killSwitch?: boolean } = {}): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-"));
   const dbPath = join(dir, "sapwood.sqlite");
   const writable = new State(dbPath);
   seed?.(writable);
   writable.close();
+
+  // The kill switch is a file sentinel in the DB's own data dir (State.killSwitchPath) — touch
+  // it the same way an operator or `/sapwood-stop` would, so isKillSwitchActive() reads true.
+  if (opts.killSwitch) writeFileSync(join(dir, "KILL_SWITCH"), "", "utf8");
 
   let configPath: string | undefined;
   if (opts.config !== false) {
