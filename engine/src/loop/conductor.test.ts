@@ -1462,6 +1462,128 @@ test("tick DRIVE: stopped (produce-pr-and-stop) -> stays driving, never treated 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #294: hold-visibility events — the TRANSITION half. driveOne reports the live hold
+// observation statelessly on every pass (merge-driver.test.ts covers that half); these tests
+// are about what conductor.ts DOES with it: dedupe the EVENT, not the signal (#169), against
+// the durable event log. Gate behavior is not exercised here at all — the FakeMergeGate's
+// outcome is scripted, so these prove observability is genuinely additive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#294): an absent -> held -> held -> absent -> held-again label sequence emits exactly pr-held, nothing, pr-released, pr-held", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  // Every pass returns the SAME gate outcome — only the observation changes, so any emitted
+  // event can only have come from the hold transition, never from the gate verdict.
+  const observe = (holdObservation: DriveOutcome["holdObservation"]) => {
+    gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW", holdObservation };
+  };
+  const runTick = () => tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const heldEvents = () => st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
+
+  observe({ held: false }); // 1. no hold yet — nothing to announce
+  await runTick();
+  assert.deepEqual(heldEvents(), [], "an unheld lane never announces a release it never held");
+
+  observe({ held: true, label: "sapwood:hold" }); // 2. a human applies the hold
+  await runTick();
+  await runTick(); // 3. steady-state held tick — re-observes the same hold, announces nothing
+
+  observe({ held: false }); // 4. the human removes it
+  await runTick();
+
+  observe({ held: true, label: "sapwood:hold" }); // 5. held again — a NEW episode announces again
+  await runTick();
+
+  assert.deepEqual(
+    heldEvents().map((e) => e.kind),
+    ["pr-held", "pr-released", "pr-held"],
+  );
+  // Both events carry the lane + PR the dashboard's ON HOLD card keys off; pr-held names the
+  // label a human applied (pr-released has no label to name — the hold is gone).
+  assert.deepEqual(heldEvents()[0]!.payload, { worker: "lane-a", issue: 2, pr: 55, label: "sapwood:hold" });
+  assert.deepEqual(heldEvents()[1]!.payload, { worker: "lane-a", issue: 2, pr: 55 });
+  // The gate outcome itself is untouched by any of this — still the ordinary queued lane.
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+  st.close();
+});
+
+test("tick DRIVE (#294): two lanes hold and release independently — one lane's episode never dedupes another's", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  seedDriving(st, "lane-b", 3, 56);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "q", holdObservation: { held: true, label: "sapwood:hold" } };
+  gate.outcomes[56] = { kind: "queued", pr: 56, reason: "q", holdObservation: { held: false } };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.lastHoldEvent("lane-a", 55), "pr-held");
+  assert.equal(st.lastHoldEvent("lane-b", 56), null, "lane-b was never held — lane-a's event must not speak for it");
+
+  // Now lane-b is held while lane-a stays held: lane-b announces, lane-a stays deduped.
+  gate.outcomes[56] = { kind: "queued", pr: 56, reason: "q", holdObservation: { held: true, label: "sapwood:hold" } };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const kinds = st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
+  assert.deepEqual(
+    kinds.map((e) => (e.payload as { worker: string }).worker),
+    ["lane-a", "lane-b"],
+  );
+  st.close();
+});
+
+test("tick DRIVE (#294): an outcome carrying NO hold observation emits nothing — the signal is purely additive", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  // Every pre-#294 outcome shape, and the engine-agent path (which never wraps the signal),
+  // reaches this branch with holdObservation undefined — it must be a no-op, not a release.
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]), []);
+  st.close();
+});
+
+test("tick DRIVE (#294) crash-rerun: a kill -9 between the hold observation and the next tick never double-emits pr-held (the durable event log IS the dedupe memory)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-hold-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const held: DriveOutcome = {
+      kind: "queued",
+      pr: 55,
+      reason: "gate-pending:WAIT_REVIEW",
+      holdObservation: { held: true, label: "sapwood:hold" },
+    };
+    const before = new State(path);
+    seedDriving(before, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = held;
+    await tick({ forge: new FakeForge(), state: before, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate });
+    assert.equal(before.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held"]).length, 1);
+    before.close(); // kill -9 — no in-memory dedupe flag survives this
+
+    // Reopen and re-tick against the STILL-held PR. The rerun re-observes the identical hold;
+    // recognising the episode as already announced can only come from on-disk state.
+    const after = new State(path);
+    const gate2 = new FakeMergeGate();
+    gate2.outcomes[55] = held;
+    await tick({ forge: new FakeForge(), state: after, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate2 });
+    assert.deepEqual(
+      after.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]).map((e) => e.kind),
+      ["pr-held"],
+      "exactly one pr-held survives the restart — no duplicate for the same episode",
+    );
+    after.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // #246: FIXABLE gate wiring — the DRIVE loop's own "fixable" branch (driveDecision's
 // FIXUP/ESCALATE refinement, fed by THIS lane's fix_rounds/cfg.lanes.prFixCap/round budget).
 // Seeds a `driving` row directly (seedDriving, defined below) and scripts the FakeMergeGate's

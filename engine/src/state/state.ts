@@ -1853,6 +1853,33 @@ export class State {
     this.db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run(new Date().toISOString(), kind, JSON.stringify(payload));
   }
 
+  /** #294: the kind of the most recent hold-visibility event for `worker`'s lane, or null if
+   *  the lane has never been held — tick()'s dedup source for the transition-only hold events,
+   *  the same event-log-as-memory pattern `lastReviewerFallbackEvent` uses below (#169: dedupe
+   *  the EVENT, not the signal). MergeDriver observes the hold label live on every gate pass and
+   *  has no memory of its own, so the durable log is what makes an episode edge detectable:
+   *  announce `pr-held` only when this is not already 'pr-held', `pr-released` only when it is.
+   *  Being on-disk is what makes it crash-consistent — a kill -9 between the observation and the
+   *  next tick re-reads the same answer and re-emits nothing. */
+  lastHoldEvent(worker: string, pr: number): "pr-held" | "pr-released" | null {
+    // #294 (Codex P2, PR #372): scoped to (worker, pr), not worker alone — a lane name
+    // reassigned to a new issue/PR must not inherit the prior PR's hold episode (a stale
+    // 'pr-held' would suppress the new PR's first held announcement, and an unheld new PR
+    // would emit a spurious 'pr-released' carrying the new PR number). Bounded blind spot,
+    // accepted: a PR still held when its lane is repointed never gets a closing 'pr-released'
+    // — the episode simply ends with the last durable 'pr-held' on record.
+    const row = this.db
+      .prepare(
+        `SELECT kind FROM events
+         WHERE kind IN ('pr-held', 'pr-released')
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { kind: string } | undefined;
+    return row?.kind === "pr-held" || row?.kind === "pr-released" ? row.kind : null;
+  }
+
   /** The most recent reviewer-failover announcement for `worker`'s lane (#54 R2) — tick()'s
    *  dedup source: driveOne reports the switch/revert signal STATELESSLY on every tick the
    *  condition holds (resolveReviewVerdict is pure and has no memory), so the durable event

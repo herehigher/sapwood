@@ -600,6 +600,8 @@ checklist item**):
 | `rollback-escalated` | Couldn't return issue #{issue} automatically — flagged for a human |
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
+| `pr-held` | A person put PR #{pr} on hold — nothing moves until they lift it |
+| `pr-released` | Hold released — PR #{pr} resumes |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
 | `worktree-released` | Lane {worker}'s retained folder was cleaned up |
 | `env-failure` | Lane {worker} hit an environment problem — not the work itself (subsequent events narrate the disposition; this sentence claims none of it — `hasPr` alone cannot pick the outcome) |

@@ -240,6 +240,7 @@ test("#248 review round 1 (G3): reviewSilenceDuration's holdLabelPresent input i
     pr: 7,
     reason: "gate-pending:WAIT_REVIEW",
     reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 }, // fires — the misconfigured substring never suppressed it
+    holdObservation: { held: false }, // #294: same exact-match rule — the substring entry observes NOT held
   });
 });
 
@@ -445,7 +446,7 @@ test("#292 MergeDriver: an existing needs-human label returns HUMAN before file 
   // For a needs-human-labeled PR that does not touch instruction paths, the terminal outcome is
   // unchanged from pre-#292 (needs-human); the latch deliberately avoids the wasted trigger.
   const outcome = await new MergeDriver({ forge, reviewer, cfg: mkCfg() }).driveOne(7, 46, null, noopRecord);
-  assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "gate:HUMAN:instruction-path-latch" });
+  assert.deepEqual(outcome, { kind: "needs-human", pr: 7, reason: "gate:HUMAN:instruction-path-latch", holdObservation: { held: false } });
   assert.equal(forge.calls.includes("changed-files"), false);
   assert.deepEqual(reviewer.triggered, []);
   assert.deepEqual(forge.comments, []);
@@ -460,7 +461,7 @@ test("#292 MergeDriver regression pin: a non-matching PR keeps the pre-#292 merg
     ALREADY_TRIGGERED,
     noopRecord,
   );
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
   assert.deepEqual(forge.calls, ["status", "review-data", "changed-files", "merge"]);
   assert.deepEqual(forge.prLabelsAdded, []);
   assert.deepEqual(forge.comments, []);
@@ -574,6 +575,7 @@ test("#170 MergeDriver: an aged silent current-head review signals once; a fresh
     pr: 7,
     reason: "gate-pending:WAIT_REVIEW",
     reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 },
+    holdObservation: { held: false }, // #294
   });
 
   forge.reviewData = { ...forge.reviewData, labels: ["Needs-Human"] };
@@ -634,7 +636,66 @@ test("MergeDriver.driveOne (#248): #170 silence escalation is suppressed while a
     pr: 7,
     reason: "gate-pending:WAIT_REVIEW",
     reviewSilenceEscalation: { head: "HEAD", silenceSec: 120 },
+    holdObservation: { held: false }, // #294: the release is observable on this very pass
   });
+});
+
+// ── #294: hold-visibility — driveOne's STATELESS per-pass hold observation ────────────────
+// The signal only; the transition/dedupe into pr-held / pr-released events is conductor.ts's
+// (conductor.test.ts covers that half), exactly as #54's reviewerTransition is split.
+
+test("MergeDriver.driveOne (#294): a hold label gating the PR is reported as a stateless observation carrying the label, alongside the unchanged WAIT outcome", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["type:feature", "Sapwood:Hold"] };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new FakeReviewer(),
+    cfg: mkCfg({ escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood:hold"] } }),
+  });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  // Gate behavior is untouched (#294 AC): still the plain #248 WAIT, still no merge, no writes.
+  assert.equal(outcome.kind, "queued");
+  assert.deepEqual(forge.merged, []);
+  assert.deepEqual(forge.labelsAdded, []);
+  // On-PR casing, so the event payload names the label the human actually applied.
+  assert.deepEqual(outcome.holdObservation, { held: true, label: "Sapwood:Hold" });
+});
+
+test("MergeDriver.driveOne (#294): an unheld PR reports the NOT-held observation on every pass — the release transition is only detectable because the negative case is reported too", async () => {
+  const forge = new FakeForge();
+  const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "merged"); // an unheld, green, approved PR still merges — unchanged
+  assert.deepEqual(outcome.holdObservation, { held: false });
+});
+
+test("MergeDriver.driveOne (#294, Codex P2): a held PR that is ALSO merge-conflicted still reports the observation — the conflict branch's early return must not blind the whole hold episode", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, mergeable: "CONFLICTING" };
+  forge.reviewData = { ...forge.reviewData, labels: ["Sapwood:Hold"] };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new FakeReviewer(),
+    cfg: mkCfg({ escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood:hold"] } }),
+  });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "queued");
+  assert.match((outcome as { reason: string }).reason, /merge-conflict-held/);
+  assert.deepEqual(outcome.holdObservation, { held: true, label: "Sapwood:Hold" });
+});
+
+test("MergeDriver.driveOne (#294): the observation is exact-match, like the gate it mirrors — a substring-only configured entry reports NOT held (never a phantom hold event)", async () => {
+  const forge = new FakeForge();
+  forge.reviewData = { ...forge.reviewData, labels: ["sapwood:hold"] };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new FakeReviewer(),
+    // "sapwood" is a substring of the PR's real label, but not an exact match — the #248 G3 rule.
+    cfg: mkCfg({ escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood"] } }),
+  });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.deepEqual(outcome.holdObservation, { held: false });
+  assert.equal(outcome.kind, "merged"); // and the gate agrees: not held
 });
 
 test("MergeDriver.driveOne: gates pass (CI green + MERGE_OK) -> merges with the PINNED head oid", async () => {
@@ -642,7 +703,7 @@ test("MergeDriver.driveOne: gates pass (CI green + MERGE_OK) -> merges with the 
   const reviewer = new FakeReviewer();
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
   assert.deepEqual(forge.merged, [[7, "HEAD"]]);
 });
 
@@ -699,8 +760,22 @@ test("MergeDriver.driveOne: PR already MERGED (by a human) -> merged outcome, no
   forge.reviewData = { ...forge.reviewData, state: "MERGED" };
   const driver = new MergeDriver({ forge, reviewer: new FakeReviewer(), cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
   assert.deepEqual(forge.merged, []); // recognized as merged; no second merge attempt
+});
+
+test("MergeDriver.driveOne (#294, Codex P2 round 2): a manually-merged PR still carrying its hold label reports NOT held — terminal outcome, the episode closes with pr-released instead of dangling", async () => {
+  const forge = new FakeForge();
+  forge.status = { ...forge.status, state: "MERGED" };
+  forge.reviewData = { ...forge.reviewData, state: "MERGED", labels: ["Sapwood:Hold"] };
+  const driver = new MergeDriver({
+    forge,
+    reviewer: new FakeReviewer(),
+    cfg: mkCfg({ escalation: { humanLabels: HUMAN_LABELS, holdLabels: ["sapwood:hold"] } }),
+  });
+  const outcome = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);
+  assert.equal(outcome.kind, "merged");
+  assert.deepEqual(outcome.holdObservation, { held: false });
 });
 
 test("MergeDriver.driveOne: merge raced — only ONE read saw MERGED yet -> still merged, wins over head-mismatch queue", async () => {
@@ -731,7 +806,13 @@ test("MergeDriver.driveOne (#270): born-CONFLICTING zero-check PR -> conflict FI
   reviewer.verdict = { action: "WAIT_REVIEW", headOid: null };
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, { head: null, at: null }, noopRecord);
-  assert.deepEqual(outcome, { kind: "fixable", pr: 7, reason: "gate:FIXABLE:merge-conflict", prescription: "conflict" });
+  assert.deepEqual(outcome, {
+    kind: "fixable",
+    pr: 7,
+    reason: "gate:FIXABLE:merge-conflict",
+    prescription: "conflict",
+    holdObservation: { held: false },
+  });
   assert.deepEqual(forge.comments, [], "moot review is never triggered on a conflicting head");
   assert.deepEqual(forge.merged, []);
 });
@@ -932,7 +1013,7 @@ test("MergeDriver.driveOne reentered: a FRESH review (submitted after the pin) c
   forge.reviewData = { ...forge.reviewData, reviews: [codexReview("2026-07-02T00:05:00Z")] };
   const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, REENTRY_PIN, noopRecord, undefined, true);
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
 });
 
 test("MergeDriver.driveOne reentered: a review with NO submittedAt can never prove freshness -> filtered (fail-closed), queued", async () => {
@@ -949,7 +1030,7 @@ test("MergeDriver.driveOne NOT reentered (param omitted): the same pre-pin revie
   forge.reviewData = { ...forge.reviewData, reviews: [codexReview("2026-07-01T00:00:00Z")] };
   const driver = new MergeDriver({ forge, reviewer: new CodexReviewer([]), cfg: mkCfg() });
   const outcome = await driver.driveOne(7, 46, REENTRY_PIN, noopRecord);
-  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD" });
+  assert.deepEqual(outcome, { kind: "merged", pr: 7, headOid: "HEAD", holdObservation: { held: false } });
 });
 
 test("MergeDriver.driveOne reentered (round-2 P1): a STANDING pre-reentry human CHANGES_REQUESTED skips the time filter — a fresh post-pin clean Codex review cannot speak for it, so the lane re-escalates, never merges", async () => {
@@ -1004,7 +1085,7 @@ test("MergeDriver.driveOne: no trigger recorded yet (pin.head === null) -> posts
   const recorded: Array<[string, string]> = [];
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg(), now: () => new Date("2026-07-07T08:00:00Z") });
   const outcome = await driver.driveOne(7, 46, { head: null, at: null }, (h, a) => recorded.push([h, a]));
-  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered", holdObservation: { held: false } });
   assert.deepEqual(reviewer.triggeredWith, [[7, 46]]); // issue #46 threaded through
   assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: null }]);
   assert.deepEqual(recorded, [["HEAD", "2026-07-07T08:00:00.000Z"]]);
@@ -1017,7 +1098,7 @@ test("MergeDriver.driveOne #273: unanswered prior head re-triggers with a full P
   const recorded: Array<[string, string]> = [];
   const driver = new MergeDriver({ forge, reviewer, cfg: mkCfg(), now: () => new Date("2026-07-07T09:00:00Z") });
   const outcome = await driver.driveOne(7, 46, { head: "OLD_HEAD", at: "2026-07-07T07:00:00Z" }, (h, a) => recorded.push([h, a]));
-  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered", holdObservation: { held: false } });
   assert.deepEqual(recorded, [["HEAD", "2026-07-07T09:00:00.000Z"]]);
   assert.deepEqual(reviewer.triggerContexts, [{ head: "HEAD", baseHead: null }]);
 });
@@ -1361,7 +1442,7 @@ test("MergeDriver.driveOne: head change mid-drive re-triggers exactly once per n
 
   // Tick 1: never triggered -> triggers for "HEAD", queues.
   const t1 = await driver.driveOne(7, 46, pin, record);
-  assert.deepEqual(t1, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(t1, { kind: "queued", pr: 7, reason: "review-triggered", holdObservation: { held: false } });
   assert.deepEqual(pin, { head: "HEAD", at: "2026-07-07T10:00:00.000Z" });
 
   // Tick 2: pin matches -> no re-trigger, gates through to merge.
@@ -1373,7 +1454,7 @@ test("MergeDriver.driveOne: head change mid-drive re-triggers exactly once per n
   forge.status = { ...forge.status, headOid: "HEAD2" };
   forge.reviewData = { ...forge.reviewData, headOid: "HEAD2" };
   const t3 = await driver.driveOne(7, 46, pin, record);
-  assert.deepEqual(t3, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(t3, { kind: "queued", pr: 7, reason: "review-triggered", holdObservation: { held: false } });
   assert.deepEqual(pin, { head: "HEAD2", at: "2026-07-07T10:00:00.000Z" });
   assert.equal(reviewer.triggered.length, 2); // one more trigger, not a flood
 });
@@ -1555,7 +1636,7 @@ test("MergeDriver.driveOne R2: a head change clears the (now stale) lock in the 
     noopRecord,
     { lock: { head: "OLD_HEAD", kind: "human" }, recordFallback: (l) => recorded.push(l) },
   );
-  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered" });
+  assert.deepEqual(outcome, { kind: "queued", pr: 7, reason: "review-triggered", holdObservation: { held: false } });
   assert.deepEqual(recorded, [{ head: null, kind: null }]); // stale episode ended with the old head
 });
 
