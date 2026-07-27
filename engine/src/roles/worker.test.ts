@@ -1442,6 +1442,47 @@ test("resume: spawn error removes the unconfirmed intent and leaves handoff retr
   }
 });
 
+test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a separate call site from dispatch()'s, missed in the first pass — is bounded too. A never-arriving notification is killed and reported, never hangs forever", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const worktreeRoot = join(dir, "worktrees");
+    mkdirSync(worktreeRoot, { recursive: true });
+    // A prior dispatch's handoff sentinel — resume() reads this from DISK, not from any
+    // in-memory state of whichever supervisor instance created it (the same cross-restart
+    // contract a real engine resume relies on), so a SEPARATE supervisor instance (below,
+    // configured with the zero timeout under test) can resume it directly.
+    writeFileSync(
+      join(dir, "lane-resume-timeout.handoff.json"),
+      JSON.stringify({ name: "lane-resume-timeout", issue: 5, session_id: "retry-session-395" }),
+    );
+    writeFileSync(join(dir, "lane-resume-timeout.jsonl"), "");
+    const bin = mkStub(dir, FAST_STUB);
+    const liveCfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      liveness: { spawnConfirmTimeoutMs: 1 },
+    });
+    const s = new WorkerSupervisor({
+      cfg: liveCfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      sleep: async () => {
+        /* resolves immediately — deterministically wins the race, same technique as dispatch()'s
+           own #395 regression test above */
+      },
+    });
+    await assert.rejects(() => s.resume({ number: 5, title: "t", labels: [] }, "lane-resume-timeout"), /spawn confirmation timed out/i);
+    assert.equal(existsSync(join(dir, "lane-resume-timeout.running.json")), false, "no bogus running marker left behind");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the resumed run's terminal cost is probed normally", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {
@@ -1713,6 +1754,49 @@ test("dispatch (#395): cfg.liveness.spawnConfirmTimeoutMs is threaded through �
     const { name } = await s.dispatch({ number: 8, title: "t", labels: [] });
     for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
     assert.ok(existsSync(join(dir, `${name}.done.json`)), "done sentinel written — the configured timeout never fired");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is bounded, killed, AND its (already-provisioned) worktree is removed — a fresh lane never gets tracked, so nothing else would ever sweep it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const worktreeRoot = join(dir, "worktrees");
+    mkdirSync(worktreeRoot, { recursive: true });
+    const bin = mkStub(dir, FAST_STUB);
+    const liveCfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      liveness: { spawnConfirmTimeoutMs: 1 },
+    });
+    const s = new WorkerSupervisor({
+      cfg: liveCfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      // Deterministic: an injected `sleep` resolving on the next microtask reliably wins the
+      // race against a real (if fast) OS process-spawn confirmation — same technique
+      // util/spawn-confirm.test.ts uses in isolation, exercised here end-to-end through
+      // dispatch() itself.
+      sleep: async () => {
+        /* resolves immediately */
+      },
+    });
+    // Simulate the live-incident shape: the (about-to-be-killed) child already started
+    // provisioning its own worktree before the notification was lost. A real `claude` CLI
+    // does this itself (this test's stub binary doesn't understand --worktree at all), so the
+    // directory is created here directly to exercise the cleanup path in isolation.
+    const laneWorktree = join(worktreeRoot, "lane-timeout-wt");
+    mkdirSync(laneWorktree, { recursive: true });
+    writeFileSync(join(laneWorktree, "marker.txt"), "partially provisioned");
+    await assert.rejects(() => s.dispatch({ number: 9, title: "t", labels: [] }, "lane-timeout-wt"), /spawn confirmation timed out/i);
+    assert.ok(!existsSync(laneWorktree), "the orphaned worktree was removed — nothing else ever tracks this never-registered lane");
+    assert.ok(!existsSync(join(dir, "lane-timeout-wt.running.json")));
     s.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

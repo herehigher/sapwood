@@ -16,6 +16,7 @@
 // than needing its own cancellation machinery.
 import { type TickDeps, type TickResult, tick } from "./conductor.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
+import { EngineStalledError, raceTickWithWatchdog } from "./watchdog.js";
 
 /** How the loop decides to stop ticking. Default ("forever") is the normal daemon mode — only a
  *  signal stops it. "once": run exactly one tick then stop (scripting / cron / a manual poke).
@@ -163,24 +164,6 @@ function isIdle(deps: DriverDeps, result: TickResult): boolean {
   return activeLanes === 0 && !dispatchedAny && !handoffNeedsNextTick;
 }
 
-/** #395: a cancelable "fires once after `ms`" timer for the liveness watchdog. Deliberately NOT
- *  wired to DriverDeps.sleep — that seam fakes the INTER-TICK wait (a no-op resolve in most
- *  tests, since it only paces two already-settled ticks apart) and reusing it here would race a
- *  near-instant fake sleep against tick() itself, spuriously "stalling" on every fast fake tick
- *  in the existing test suite. This is always a REAL `setTimeout` — cancelled well within
- *  microseconds on any tick that actually settles (the healthy-path cost is one create+clear per
- *  tick, not a churning interval). A test that wants to exercise the stalled branch drives it
- *  with a real-but-tiny `ms` (a small tickIntervalSec × watchdogTickMultiplier) against a tick()
- *  that genuinely never resolves — deterministic, since the "other side" of that race never
- *  settles at all, never a real-clock DATE read (no `Date.now()`/`new Date()` anywhere here). */
-function armWatchdog(ms: number): { promise: Promise<"stalled">; cancel: () => void } {
-  let t: ReturnType<typeof setTimeout>;
-  const promise = new Promise<"stalled">((resolve) => {
-    t = setTimeout(() => resolve("stalled"), ms);
-  });
-  return { promise, cancel: () => clearTimeout(t) };
-}
-
 /**
  * Run the tick loop until a stop condition fires. Always attempts at least one tick. Never
  * rejects on a signal — a signal is a normal, expected stop, not an error.
@@ -276,41 +259,19 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
       const tickDeps: TickDeps = stopConditionHit
         ? { ...deps, ...spendStopThunk, forceDispatchPause: true }
         : { ...deps, ...spendStopThunk };
-      // #395: the liveness watchdog — a generous multiple of tickIntervalSec (never a fixed
-      // absolute duration, so a legitimately slow cadence is never itself a false alarm) past
-      // which this single tick() attempt is treated as wedged. Armed fresh every iteration (never
-      // a churning background timer on the healthy path: exactly one real setTimeout per tick,
-      // cancelled the instant tick() itself settles either way — see armWatchdog's own doc for
-      // why this is a real timer, never DriverDeps.sleep).
-      const watchdog = armWatchdog(deps.tickIntervalSec * 1000 * deps.cfg.liveness.watchdogTickMultiplier);
       try {
-        const raced = await Promise.race<{ kind: "tick"; result: TickResult } | { kind: "stalled" }>([
-          tick(tickDeps).then((r) => ({ kind: "tick", result: r })),
-          watchdog.promise.then(() => ({ kind: "stalled" })),
-        ]);
-        watchdog.cancel();
-        if (raced.kind === "stalled") {
-          // PM ruling (issue #395): the smallest thing that works — a durable event + a nonzero
-          // exit, never an in-process self-heal/abort machine. The stuck tick() attempt's own
-          // awaits are never cancelled in place; their resources are reclaimed by the process
-          // exit itself, which is also the only way to actually stop a hung `gh`/spawn callback
-          // that outlived its own (already-added, #395) bound. Best-effort durable event: if even
-          // the write fails, the nonzero exit is still the operative signal a supervisor sees.
-          try {
-            deps.state.appendEvent("engine-stalled", {
-              tickIntervalSec: deps.tickIntervalSec,
-              watchdogTickMultiplier: deps.cfg.liveness.watchdogTickMultiplier,
-            });
-          } catch {
-            /* state write failed too — the nonzero exit is still the operative signal */
-          }
-          (deps.watchdogExit ?? ((code: number) => process.exit(code)))(1);
-          // Unreachable in production (process.exit never returns) — reached only when a test
-          // injects a non-exiting watchdogExit, so the loop stops cleanly instead of spinning on
-          // an attempt that will never resolve.
-          return { ticks, tickErrors, stoppedBy: "watchdog" };
-        }
-        result = raced.result;
+        // #395: the liveness watchdog (shared with round.ts's runRounds — see watchdog.ts) — a
+        // generous multiple of tickIntervalSec (never a fixed absolute duration, so a
+        // legitimately slow cadence is never itself a false alarm) past which this single
+        // tick() attempt is treated as wedged. Armed fresh every iteration; never a churning
+        // background timer on the healthy path (one real setTimeout per tick, cancelled the
+        // instant tick() settles either way).
+        result = await raceTickWithWatchdog(() => tick(tickDeps), {
+          watchdogMs: deps.tickIntervalSec * 1000 * deps.cfg.liveness.watchdogTickMultiplier,
+          state: deps.state,
+          exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),
+          eventPayload: { tickIntervalSec: deps.tickIntervalSec, watchdogTickMultiplier: deps.cfg.liveness.watchdogTickMultiplier },
+        });
         ticks++;
         deps.onTick?.(result);
         // #295 (Codex P1, PR #371): the escalation-resolution sweep runs on BOTH supported
@@ -323,7 +284,13 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
         // impossible throw still lands in the structured tick-error path, not a crash.
         await reconcileEscalations(deps.forge, deps.state, deps.cfg, deps.log);
       } catch (e) {
-        watchdog.cancel();
+        if (e instanceof EngineStalledError) {
+          // PM ruling (issue #395): the smallest thing that works — a durable event + a nonzero
+          // exit (already fired inside raceTickWithWatchdog), never an in-process self-heal/abort
+          // machine. Reached only when a test's injected exit hook doesn't actually terminate the
+          // process — production never gets here (process.exit never returns).
+          return { ticks, tickErrors, stoppedBy: "watchdog" };
+        }
         tickErrors++;
         // Structured + durable — never a silent swallow. Guarded itself: if even the event
         // write fails (e.g. the disk is gone) there is nothing left to record to, and the

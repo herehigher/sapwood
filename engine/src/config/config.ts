@@ -760,8 +760,18 @@ const Liveness = z
     // Hard per-call ceiling on a single `gh` CLI invocation (gh.ts's `gh`/`ghText`/`ghWithTimeout`
     // — the ONE place the engine shells out to `gh`, forge.ts's GithubForge.gh routes every forge
     // call through it). Same rationale/shape as proxy.timeoutMs's own doc ("a hung upstream `gh`
-    // call must never wedge a session waiting ... forever").
-    forgeCallTimeoutMs: z.number().int().positive().default(30_000),
+    // call must never wedge a session waiting ... forever"). Every failure (including this one)
+    // already fails toward retry — GithubForge is called either from inside tick() (an unguarded
+    // throw there is CONTAINED by driver.ts's/round.ts's own tick-error handling, retried next
+    // tick/round) or from a caller with its own local try/catch (probeForgeReachable,
+    // checkFinalMilestone, escalatePark's forge-comment fallback, ...) — never a path that can
+    // reach classifyEnvFailure/park (that's driven exclusively by WORKER-LEG output text, never
+    // by GithubForge's own exceptions) or a fatal exit. 60s (not 30s, proxy.timeoutMs's own
+    // value): several forge.ts reads are `gh api --paginate` over potentially large pages
+    // (getCommitsSince, getPRReviewData's reactions/comments, getIssueComments) — a legitimately
+    // slow-but-would-succeed call on that shape needs more headroom than a single small read,
+    // while staying well under the tick-loop watchdog's own (much larger) window either way.
+    forgeCallTimeoutMs: z.number().int().positive().default(60_000),
     // Hard ceiling on the wait for a freshly spawned child (a role session, peripheral.ts's
     // RoleRunner.run, or a worker leg, worker.ts's WorkerSupervisor.dispatch) to report Node's
     // own `spawn`/`error` event. Node gives that confirmation no timeout of its own — a callback

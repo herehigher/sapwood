@@ -3160,3 +3160,74 @@ test("runRounds (#253): cfg.proxy.enabled: false (the default) -> no fixLegResum
   );
   state.close();
 });
+
+// ── #395: the liveness watchdog — a never-resolving forge/spawn await inside the executing ────
+// ── phase's tick() must not wedge the ROUNDS driver (the production default) past a generous ──
+// ── multiple of tickIntervalSec ─────────────────────────────────────────────────────────────
+
+test("runRounds (#395): a never-resolving forge await (the live incident's shape — an in-flight call during the executing phase) is bounded by the watchdog — durable engine-stalled event + the injected exit hook, never spins forever", async () => {
+  const forge = new FakeForge();
+  // The exact live-incident shape: an in-flight forge/spawn await that never resolves (a host
+  // sleep losing the completion notification). getReadyIssues is called from tick()'s DISPATCH
+  // phase, reached the instant the round enters `executing` (wave 1 fires immediately, no
+  // inter-tick wait) — this wedges tick() itself, not just one branch of it.
+  forge.getReadyIssues = () => new Promise<Issue[]>(() => {});
+  const state = new State(":memory:");
+  // A tiny tickIntervalSec × watchdogTickMultiplier=1 keeps this test's REAL watchdog timer in
+  // the low tens of milliseconds — deterministic (not flaky) because the OTHER side of the race,
+  // the hung getReadyIssues() call, never resolves at all; there is nothing for the real timer to
+  // race against except itself.
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
+  const exitCalls: number[] = [];
+  const deps = baseDeps({
+    forge,
+    state,
+    cfg,
+    tickIntervalSec: 0.02, // 20ms -> watchdogMs = 20ms
+    watchdogExit: (code) => exitCalls.push(code),
+  });
+  const result = await runRounds(deps);
+  assert.equal(result.stoppedBy, "watchdog");
+  assert.deepEqual(exitCalls, [1], "the injected exit hook fired exactly once, with a nonzero code");
+  const stalled = state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 1, "a durable engine-stalled event was appended before the exit hook fired");
+  assert.deepEqual(stalled[0]!.payload, { tickIntervalSec: 0.02, watchdogTickMultiplier: 1 });
+  state.close();
+});
+
+test("runRounds (#395): a healthy fast round never trips the watchdog, even with a short tickIntervalSec — no false alarm on the common (successful) path", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
+  const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 0.02, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1, "the fast fake round completed normally, well inside the 20ms watchdog window");
+  assert.notEqual(result.stoppedBy, "watchdog");
+  const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 0, "no engine-stalled event on the healthy path");
+  deps.state.close();
+});
+
+test("runRounds (#395): a contained tick() THROW (not a hang) during executing is still a plain tick-error — the watchdog never fires, and the round loop keeps going (existing containment behavior unmodified)", async () => {
+  const forge = new FakeForge();
+  forge.getReadyIssues = async () => {
+    throw new Error("HTTP 502");
+  };
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
+  const deps = baseDeps({ forge, cfg, tickIntervalSec: 0.02 });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.notEqual(result.stoppedBy, "watchdog");
+  const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 0, "a thrown (settled) tick is a tick-error, never a stall");
+  const errored = deps.state.eventsAfterId(0, ["tick-error"]);
+  assert.ok(
+    errored.some((e) => String((e.payload as { error: string }).error).includes("HTTP 502")),
+    "the throw was still recorded as an ordinary tick-error, exactly as before #395",
+  );
+  deps.state.close();
+});

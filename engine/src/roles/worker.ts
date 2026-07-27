@@ -1587,6 +1587,19 @@ export class WorkerSupervisor implements Supervisor {
       // #244 (Codex sol-high PR #260 review round 2, P2): the per-lane GH_CONFIG_DIR scratch
       // directory is lane-scoped litter otherwise — clean it up on this path too, not just onExit.
       this.removeGhConfigDir(lane.ghConfigDir, laneName);
+      // #395: on a genuinely-lost spawn notification (spawnConfirm.timedOut), the child may have
+      // already started provisioning its OWN worktree (the `claude` CLI's `--worktree laneName`
+      // startup step, which runs entirely inside the spawned process — this engine never creates
+      // it). This is a FRESH lane's first-ever worktree, never prior WIP (unlike resume(), which
+      // reuses an existing one and must never delete it here) — safe to discard. No running.json/
+      // State row was ever written for this lane, so nothing else would ever sweep it. A no-op
+      // when nothing was created yet (the ordinary bad-binary spawn-error case, which never gets
+      // this far).
+      try {
+        rmSync(join(this.worktreeRoot, laneName), { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
       throw new Error(`worker spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     // Post-spawn error (rare) must not crash the host — route to a failed exit.
@@ -1892,23 +1905,37 @@ export class WorkerSupervisor implements Supervisor {
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
 
-    let spawnErr: unknown;
-    await new Promise<void>((resolve) => {
-      child.once("spawn", () => {
-        try {
-          this.writeJsonAtomic(runningPath, { ...runningMarker, spawn_confirmed: true, wrapper_pid: child.pid });
-          resolve();
-        } catch (e) {
-          spawnErr = e;
-          lane.reclaiming = true;
-          void this.killTree(child).finally(resolve);
-        }
-      });
-      child.once("error", (e) => {
-        spawnErr = e;
-        resolve();
-      });
-    });
+    // #395: bounded — same rationale as dispatch()'s own spawn-confirmation await (Node gives
+    // this confirmation no timeout of its own, and the live incident was exactly this class of
+    // await never resolving). The on-success write (spawn_confirmed/wrapper_pid) is preserved
+    // exactly as before: a write failure there is still routed through onError (killTree first,
+    // then reported), never silently dropped.
+    const spawnConfirm = await awaitSpawnConfirmation(
+      (onSpawn, onError) => {
+        child.once("spawn", () => {
+          try {
+            this.writeJsonAtomic(runningPath, { ...runningMarker, spawn_confirmed: true, wrapper_pid: child.pid });
+            onSpawn();
+          } catch (e) {
+            lane.reclaiming = true;
+            void this.killTree(child).finally(() => onError(e));
+          }
+        });
+        child.once("error", onError);
+      },
+      this.deps.cfg.liveness.spawnConfirmTimeoutMs,
+      this.deps.sleep,
+    );
+    let spawnErr: unknown = spawnConfirm.err;
+    if (spawnConfirm.timedOut) {
+      spawnErr = new Error(
+        `spawn confirmation timed out after ${this.deps.cfg.liveness.spawnConfirmTimeoutMs}ms ` +
+          "(host sleep or a lost spawn notification) — killing the possibly-still-alive child",
+      );
+      // Best-effort: the child may actually be alive despite the lost notification.
+      lane.reclaiming = true;
+      await this.killTree(child);
+    }
     if (spawnErr) {
       this.lanes.delete(name);
       try {

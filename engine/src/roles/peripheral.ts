@@ -710,6 +710,21 @@ export class RoleRunner {
           /* noop */
         }
         this.removeIfExists(jsonlPath);
+        // #395: on a genuinely-lost spawn notification (spawnConfirm.timedOut), the child may
+        // have already started provisioning its OWN worktree (the `claude` CLI's own
+        // `--worktree name` startup step) — the ordinary end-of-run cleanup a few lines below
+        // (`materializedCwd === undefined` branch) never runs on this early-throw path, so
+        // nothing else would ever remove it. Same "a role session never has WIP worth
+        // preserving" rationale as that cleanup — safe to discard unconditionally. Skipped in
+        // review-session mode for the SAME reason the end-of-run cleanup skips it: this runner
+        // never created that directory and doesn't own its lifecycle.
+        if (materializedCwd === undefined) {
+          try {
+            rmSync(join(this.worktreeRoot, name), { recursive: true, force: true });
+          } catch {
+            /* best-effort */
+          }
+        }
         throw new Error(`role session spawn failed (${this.bin}): ${String(spawnErr)}`);
       }
       session.onError(() => {
