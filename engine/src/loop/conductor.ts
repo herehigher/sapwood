@@ -1154,11 +1154,16 @@ async function drainThenEscalate(
       // observeResolution only checks merge/closure for escalations whose payload preserved a
       // pr, so discarding a number we already hold here left the advertised external-merge
       // clearing path permanently broken for this source.
+      // Round 8 (Codex P2): `p.prNumber` comes from probe(), which searches OPEN PRs only — a
+      // manually CLOSED PR leaves it null while the durable row still knows the number, and the
+      // reconciler would then never observe that closure. Same `?? w.pr` fallback the reclaim
+      // paths above use.
+      const ceilingPr = p.prNumber ?? w.pr ?? null;
       state.appendEvent("ceiling-escalated", {
         worker: w.name,
         issue: w.issue,
         reasons,
-        ...(p.prNumber != null ? { pr: p.prNumber } : {}),
+        ...(ceilingPr != null ? { pr: ceilingPr } : {}),
       });
       // #155: leaving `running` via the ceiling drain — clear the LIVE telemetry trio.
       state.clearLiveTelemetry(w.name);
