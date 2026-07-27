@@ -17,6 +17,7 @@
 //   LOOP_TRUSTED_REVIEWERS-> reviewer.trustedReviewers
 //   LOOP_FRICTION_MIN     -> lanes.frictionMin
 //   LOOP_OPTIM_RECUR      -> optimize.recur
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -761,6 +762,20 @@ const Logging = z
   })
   .strict();
 
+// #210 (docs/frontend-design.md §11 follow-up 5): the dashboard's own knobs. Schema only for
+// now — the v0.2 dashboard reads them; nothing in the engine does yet.
+const Dashboard = z
+  .object({
+    // Gates the Operations verbs (start/pause/resume/stop) and the `POST /api/control` route
+    // that serves them. Default `true`: the dashboard the round-2 amendment designed drives the
+    // loop, not just watches it. `false` = a pure-SPECTATOR dashboard — buttons absent and the
+    // route refuses, so a read-only deployment (a shared screen, a demo) cannot be clicked into
+    // touching the loop. A gate, not a permission model: it says what this deployment offers,
+    // never who may use it.
+    controls: z.boolean().default(true),
+  })
+  .strict();
+
 // #76: goal-based stop conditions — the loop driver's FINAL break conditions ("when is this run
 // complete"). All optional; absent = today's behavior exactly (the driver only stops on a signal,
 // --once, or --until-idle idleness). CLI --stop-after-issues/--stop-after-prs/--stop-on-milestone
@@ -821,6 +836,21 @@ const Standby = z
   })
   .strict();
 
+// #374 (dogfood F16): the empty-spin breaker — a structural backstop, independent of
+// env-failure.ts's classifyEnvFailure, for a systemic failure whose text the classifier simply
+// doesn't recognize (an unfamiliar provider error shape, a future outage class). round.ts counts
+// CONSECUTIVE closed rounds that dispatched nothing AND had at least one peripheral role session
+// degrade; reaching this threshold forces the same "llm" park episode a classified quota/429
+// failure would, bounding round churn either way. Small default (3): the F16 incident spun 145
+// empty rounds in ~3.5h with zero bound — even a small threshold is a massive improvement, and a
+// SMALL number keeps the backstop from masking a genuinely transient blip (a round or two of
+// real, unrelated flakiness) as a full park episode. User-tunable per the config rule.
+const EmptySpin = z
+  .object({
+    consecutiveDegradedRoundsThreshold: z.number().int().positive().default(3),
+  })
+  .strict();
+
 // #86: round-loop scoping. `milestone` reuses the exact GitHub-milestone mechanism
 // stop.onMilestoneComplete already validates against (forge.listMilestoneTitles/
 // countOpenIssuesInMilestone) rather than inventing a parallel label-based "theme" — one key
@@ -833,6 +863,8 @@ const Round = z
   .object({
     milestone: z.string().min(1).optional(),
     standby: Standby.default({}),
+    // #374: the empty-spin breaker's own threshold — see EmptySpin's doc above.
+    emptySpin: EmptySpin.default({}),
     // #126: round directive file — human steering (why/what) injected into the aligning +
     // architecting prompts at round open (directive.ts's resolveRoundDirective). Resolved like
     // other DATA paths in this repo — relative to the process cwd, the same convention
@@ -1036,6 +1068,7 @@ const ConfigSchemaRaw = z
     board: Board,
     engine: Engine.default({}),
     logging: Logging.default({}),
+    dashboard: Dashboard.default({}),
     lanes: Lanes.default({}),
     worker: Worker.default({}),
     guard: Guard.default({}),
@@ -1444,4 +1477,107 @@ export function loadConfig(path?: string): SapwoodConfig {
     cfg.reviewer.agent.promptFile = resolve(dirname(file), cfg.reviewer.agent.promptFile);
   }
   return cfg;
+}
+
+// ── #206: the config surface the engine publishes (frontend-design.md §3 E / §11) ─────────────
+
+/** The ONLY config keys that ever leave the engine: the read-only config drawer's **allowlisted
+ *  subset** (frontend-design.md §3 E), snapshotted into the `run-started` event at startup (§11)
+ *  and — later — served by the dashboard server from that same list. Built by explicit picks,
+ *  never by spreading the resolved object: `/api/events` serves stored payloads verbatim, so the
+ *  no-secrets guarantee has to hold at WRITE time. A config key added later (a token, a resolved
+ *  local path like `worker.promptFile`) is therefore absent until someone deliberately lists it
+ *  here. Grouped the way the drawer renders it — Board · Lanes · Worker · Safety · Review &
+ *  merge · Labels — plus the per-role model/effort the §3 C/§6 captions read. */
+export function dashboardConfigSubset(cfg: SapwoodConfig) {
+  const session = (r: { model: string; effort: string; enabled?: boolean }) => ({
+    model: r.model,
+    effort: r.effort,
+    ...(r.enabled === undefined ? {} : { enabled: r.enabled }),
+  });
+  return {
+    engine: { driver: cfg.engine.driver, tickIntervalSec: cfg.engine.tickIntervalSec },
+    board: {
+      owner: cfg.board.owner,
+      repo: cfg.board.repo,
+      projectNumber: cfg.board.projectNumber,
+      statusField: cfg.board.statusField,
+      status: { ...cfg.board.status },
+    },
+    lanes: {
+      max: cfg.lanes.max,
+      roundDispatchCap: cfg.lanes.roundDispatchCap,
+      reserveCap: cfg.lanes.reserveCap,
+      prFixCap: cfg.lanes.prFixCap,
+      gatedReentryCap: cfg.lanes.gatedReentryCap,
+    },
+    worker: {
+      model: cfg.worker.model,
+      effort: cfg.worker.effort,
+      fallbackModel: cfg.worker.fallbackModel,
+      timeoutSec: cfg.worker.timeoutSec,
+      budgetUsdSoft: cfg.worker.budgetUsdSoft,
+      maxResumes: cfg.worker.maxResumes,
+    },
+    // Safety group: the guard mode plus every ceiling/stop condition this run is bounded by.
+    // Optional stop.* keys stay absent (JSON drops undefined) — "unset" reads as unset.
+    guard: { mode: cfg.guard.mode },
+    cost: {
+      roundBudgetUsd: cfg.cost.roundBudgetUsd,
+      dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+      maxWallClockSec: cfg.cost.maxWallClockSec,
+      drainWindowSec: cfg.cost.drainWindowSec,
+    },
+    stop: {
+      afterIssuesMerged: cfg.stop.afterIssuesMerged,
+      afterPRsOpened: cfg.stop.afterPRsOpened,
+      onMilestoneComplete: cfg.stop.onMilestoneComplete,
+      afterSpendUsd: cfg.stop.afterSpendUsd,
+    },
+    round: {
+      milestone: cfg.round.milestone,
+      poolFactor: cfg.round.poolFactor,
+      standby: { enabled: cfg.round.standby.enabled, backoffCapSec: cfg.round.standby.backoffCapSec },
+      emptySpin: { consecutiveDegradedRoundsThreshold: cfg.round.emptySpin.consecutiveDegradedRoundsThreshold },
+    },
+    reviewer: { mode: cfg.reviewer.mode, deltaChainMax: cfg.reviewer.deltaChainMax },
+    merge: { mode: cfg.merge.mode },
+    roles: {
+      planReviewer: session(cfg.roles.planReviewer),
+      planDrafter: session(cfg.roles.planDrafter),
+      architect: session(cfg.roles.architect),
+      po: session(cfg.roles.po),
+      harvest: session(cfg.roles.harvest),
+      retro: session(cfg.roles.retro),
+    },
+    // The drawer's whole "Labels" group. Spread deliberately, unlike every group above: this
+    // block is closed by construction (`workflowLabelDefaults(prefix)` + `prefix`, see the
+    // SapwoodConfig type) and every value in it is a workflow label NAME — there is no key that
+    // could be added here without being one.
+    labels: { ...cfg.labels },
+  };
+}
+
+/** Recursive key sort — the only thing standing between two byte-identical configs written in
+ *  different key order and two different hashes. Arrays keep their order (it is meaningful). */
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value === null || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(source)
+      .sort()
+      .map((k) => [k, sortKeys(source[k])]),
+  );
+}
+
+/** #206: stable hash of the FULL resolved config — the `run-started` payload's change-detection
+ *  half (frontend-design.md §11). Deliberately hashes everything, not just the allowlisted
+ *  subset above: a changed key the drawer never shows still makes this a differently-configured
+ *  run. The hash leaks nothing (it is one-way), which is exactly why the readable half next to
+ *  it has to be an allowlist. */
+export function configHash(cfg: SapwoodConfig): string {
+  return createHash("sha256")
+    .update(JSON.stringify(sortKeys(cfg)))
+    .digest("hex");
 }

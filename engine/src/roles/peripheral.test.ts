@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import { DEFAULT_LLM_FAILURE_PATTERNS, type EnvFailureSource } from "../loop/env-failure.js";
+import type { ParkRow } from "../state/state.js";
 import type { ContextManifest } from "./context-manifest.js";
 import {
   CONFIRM_ALLOWED_TOOLS,
@@ -1144,6 +1146,145 @@ test("runSessionWithRetry: isValid OMITTED — behavior is byte-identical to tod
   assert.equal(failRunner.calls.length, 2);
   assert.equal(failState.events.length, 1);
   assert.equal(failState.events[0]![0], "test-degraded");
+});
+
+// ── #374: runSessionWithRetry's OPTIONAL envFailure hook — a fake park-episode store, no real
+//    State/RoleRunner needed (the helper only touches Pick<State,"enterPark"|"clearPark"|
+//    "parkRow">, same "fake the collaborator" split every other test in this section uses). ──
+
+class FakePark {
+  rows = new Map<EnvFailureSource, ParkRow>();
+  enterCalls: Array<{ source: EnvFailureSource; reason: string; triggerIssue: number | null; resetHintAtIso: string | null }> = [];
+  clearCalls: EnvFailureSource[] = [];
+  enterPark(
+    source: EnvFailureSource,
+    reason: string,
+    triggerIssue: number | null,
+    now: string,
+    resetHintAtIso: string | null = null,
+  ): boolean {
+    this.enterCalls.push({ source, reason, triggerIssue, resetHintAtIso });
+    if (this.rows.has(source)) return false;
+    this.rows.set(source, {
+      source,
+      reason,
+      triggerIssue,
+      enteredAt: now,
+      lastProbeAt: now,
+      probeAttempts: 0,
+      escalatedAt: null,
+      canaryWorker: null,
+      resetHintAt: resetHintAtIso,
+    });
+    return true;
+  }
+  clearPark(source: EnvFailureSource): void {
+    this.clearCalls.push(source);
+    this.rows.delete(source);
+  }
+  parkRow(source: EnvFailureSource): ParkRow | null {
+    return this.rows.get(source) ?? null;
+  }
+}
+
+const envPatterns = { llm: [...DEFAULT_LLM_FAILURE_PATTERNS], forge: [] };
+
+test("runSessionWithRetry + envFailure: a classified attempt-1 failure parks immediately — no retry, no ordinary degrade event", async () => {
+  const runner = new FakeRunner([
+    mkResult({ outcome: "failed", failureText: "You've hit your session limit · resets 6:30pm (Asia/Tokyo)" }),
+  ]);
+  const state = new FakeState();
+  const park = new FakePark();
+  const result = await runSessionWithRetry({ ...mkOpts(runner, state, undefined), envFailure: { patterns: envPatterns, park } });
+  assert.equal(runner.calls.length, 1, "no second attempt — a quota-exhausted retry is guaranteed to fail identically");
+  assert.equal(park.enterCalls.length, 1);
+  assert.equal(park.enterCalls[0]!.source, "llm");
+  assert.equal(park.enterCalls[0]!.triggerIssue, null, "round-level, no single triggering issue");
+  assert.equal(state.events.length, 1);
+  assert.equal(state.events[0]![0], "role-env-failure");
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.envParked, true, "callers with their own forge-visible escalation must be able to detect this and skip it");
+});
+
+test("runSessionWithRetry + envFailure: an ordinary (non-classified) failure still retries/degrades exactly as before", async () => {
+  const runner = new FakeRunner([
+    mkResult({ outcome: "failed", failureText: "TypeError: cannot read property x" }),
+    mkResult({ outcome: "failed" }),
+  ]);
+  const state = new FakeState();
+  const park = new FakePark();
+  await runSessionWithRetry({ ...mkOpts(runner, state, undefined), envFailure: { patterns: envPatterns, park } });
+  assert.equal(runner.calls.length, 2, "ordinary failures still get the normal retry-once");
+  assert.equal(park.enterCalls.length, 0);
+  assert.equal(state.events.length, 1);
+  assert.equal(state.events[0]![0], "test-degraded", "no env classification -> the caller's own degradeEvent still fires");
+});
+
+test("runSessionWithRetry + envFailure: a non-classified attempt CLEARS an already-open llm episode (provider proved reachable) and emits park-resumed", async () => {
+  const runner = new FakeRunner([mkResult({ outcome: "done" })]);
+  const state = new FakeState();
+  const park = new FakePark();
+  park.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
+  const result = await runSessionWithRetry({ ...mkOpts(runner, state, undefined), envFailure: { patterns: envPatterns, park } });
+  assert.equal(result.outcome, "done");
+  assert.deepEqual(park.clearCalls, ["llm"]);
+  assert.equal(park.parkRow("llm"), null);
+  assert.equal(state.events.length, 1);
+  assert.equal(state.events[0]![0], "park-resumed");
+  assert.deepEqual(state.events[0]![1], { source: "llm", enteredAt: "2026-07-24T00:00:00Z", via: "role-session" });
+});
+
+test("runSessionWithRetry + envFailure (PM review P3): a TIMEOUT outcome does NOT clear an open llm episode — a killed-for-hanging session proves nothing about provider reachability", async () => {
+  const runner = new FakeRunner([mkResult({ outcome: "timeout" })]);
+  const state = new FakeState();
+  const park = new FakePark();
+  park.enterPark("llm", "prior quota storm", null, "2026-07-24T00:00:00Z");
+  const result = await runSessionWithRetry({ ...mkOpts(runner, state, undefined), envFailure: { patterns: envPatterns, park } });
+  assert.equal(result.outcome, "timeout");
+  assert.equal(park.clearCalls.length, 0, "a timeout never clears — only a real done/failed terminal outcome does");
+  assert.deepEqual(park.parkRow("llm")?.reason, "prior quota storm", "the episode is untouched, not cleared or re-entered");
+  assert.equal(
+    state.events.some(([kind]) => kind === "park-resumed"),
+    false,
+  );
+  // The ordinary retry-then-degrade path still proceeds normally (envFailure only intercepts
+  // classified attempts; an unclassified timeout falls through to it unchanged).
+  assert.equal(runner.calls.length, 2);
+  assert.equal(
+    state.events.some(([kind]) => kind === "test-degraded"),
+    true,
+  );
+});
+
+test("runSessionWithRetry + envFailure: no open episode + a non-classified result -> no-op (no clearPark call, no event)", async () => {
+  const runner = new FakeRunner([mkResult({ outcome: "done" })]);
+  const state = new FakeState();
+  const park = new FakePark();
+  await runSessionWithRetry({ ...mkOpts(runner, state, undefined), envFailure: { patterns: envPatterns, park } });
+  assert.equal(park.clearCalls.length, 0);
+  assert.equal(state.events.length, 0);
+});
+
+test("runSessionWithRetry + envFailure: a reset-time hint (rateLimitResetAtMs) is threaded into enterPark as an ISO string", async () => {
+  const resetAtMs = Date.parse("2026-07-24T18:30:00+09:00");
+  const runner = new FakeRunner([mkResult({ outcome: "failed", failureText: "hit your session limit", rateLimitResetAtMs: resetAtMs })]);
+  const state = new FakeState();
+  const park = new FakePark();
+  await runSessionWithRetry({ ...mkOpts(runner, state, undefined), envFailure: { patterns: envPatterns, park } });
+  assert.equal(park.enterCalls[0]!.resetHintAtIso, new Date(resetAtMs).toISOString());
+});
+
+test("runSessionWithRetry: envFailure OMITTED -> zero behavior change (classification never runs, even on session-limit-shaped text)", async () => {
+  const runner = new FakeRunner([mkResult({ outcome: "failed", failureText: "hit your session limit" }), mkResult({ outcome: "failed" })]);
+  const state = new FakeState();
+  await runSessionWithRetry(mkOpts(runner, state, undefined));
+  assert.equal(
+    runner.calls.length,
+    2,
+    "no envFailure wired -> the ordinary retry-once-then-degrade path, unaffected by failureText content",
+  );
+  assert.equal(state.events.length, 1);
+  assert.equal(state.events[0]![0], "test-degraded");
 });
 
 // ── #236: runSessionWithRetry's OPTIONAL context-manifest recording — round/phase key prefix

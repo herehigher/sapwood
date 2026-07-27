@@ -24,9 +24,22 @@ import { labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
-import { type FixLegResumeDeps, type MergeGate, type Supervisor, type TickDeps, type TickResult, tick } from "./conductor.js";
+import {
+  type CeilingReason,
+  engineSessionGapSec,
+  escalatePark,
+  evaluateCeiling,
+  type FixLegResumeDeps,
+  type MergeGate,
+  probeForgeReachable,
+  type Supervisor,
+  type TickDeps,
+  type TickResult,
+  tick,
+} from "./conductor.js";
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
-import { buildRoundArtifact, persistRoundArtifact } from "./round-artifact.js";
+import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
+import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
 
 export type { RoundPhase, RoundRow } from "../state/state.js";
 
@@ -35,6 +48,104 @@ export type { RoundPhase, RoundRow } from "../state/state.js";
 export type PeripheralPhase = Exclude<RoundPhase, "executing" | "closed">;
 
 const SEQUENCE: readonly RoundPhase[] = ["aligning", "architecting", "plan_review", "executing", "harvesting", "retro", "closed"];
+
+/** #374 review (Codex sol-high finding 5, P2): maps round-artifact.ts's fine-grained
+ *  degradedPhases phase NAMES (po-align/po-triage/po-pool/architect/plan_review/harvest/retro —
+ *  finding 4's fidelity fix) down to the round-phase they belong to, for the empty-spin
+ *  breaker's "every phase that ran a session degraded" computation (see isRoundFullyDegraded's
+ *  own doc — issue #374's AC requires FULLY degraded, not any single phase). po-align/po-triage/
+ *  po-pool all fold into "aligning" — the ONE round-phase slot that bundles all three
+ *  sub-sessions (round-defaults.ts's own aligning wrapper). */
+const DEGRADED_PHASE_TO_ROUND_PHASE: Readonly<Record<string, PeripheralPhase>> = {
+  "po-align": "aligning",
+  "po-triage": "aligning",
+  "po-pool": "aligning",
+  architect: "architecting",
+  plan_review: "plan_review",
+  harvest: "harvesting",
+  retro: "retro",
+};
+
+/** #206 (frontend-design.md §11): the round state machine's replay trail — "round R entered
+ *  phase P". `rounds.phase` is an in-place UPDATE, so without this event history has no record
+ *  that a round was ever *in* a phase, and the dashboard's phase strip (plus §8's spend
+ *  phase-bucketing) reconstructs entirely from it. Emitted by whichever process ENTERS the
+ *  phase (see the call site), so no crash window can drop a phase the round actually ran.
+ *  Appended caller-side, like every other event in this loop: state methods never self-append
+ *  (state.ts). */
+function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, phase: RoundPhase): void {
+  state.appendEvent("round-phase", { round_id: roundId, phase });
+}
+
+/** #374 review (Codex sol-high finding 5, P2 — align to the AC): issue #374's own acceptance
+ *  criterion says "N consecutive FULLY-degraded rounds (every phase session failed)" — the
+ *  first cut of the empty-spin breaker fired on ANY single degraded phase (e.g. a retro-only
+ *  degrade, unrelated to the other four phases being perfectly fine), a false positive this
+ *  function closes. Pure and exported for direct unit testing.
+ *
+ *  A round counts as fully degraded only when EVERY peripheral phase this round was actually
+ *  capable of running a session for shows up in `degradedRoundPhases` (finding 4's fidelity fix
+ *  feeds that set correctly — see DEGRADED_PHASE_TO_ROUND_PHASE). "Capable of running a
+ *  session" is resolved as precisely as round.ts can cheaply know, without a new forge read or
+ *  a PeripheralStub contract change (marginal-complexity principle — see the accepted
+ *  limitation noted below):
+ *   - aligning: only required when SOME real session could run there at all — po-align
+ *     (`roles.po.enabled`) or the opt-in pool-selection session (`roles.po.poolSelection`).
+ *     With BOTH off, aligning never spawns any LLM session (round-defaults.ts's own doc: pool
+ *     selection is a deterministic engine computation by default) — requiring it would be a
+ *     permanent false negative for that deployment shape.
+ *   - architecting / plan_review: required whenever the role is enabled at all.
+ *   - harvesting: required only when there was actually something to brief — harvest.ts's own
+ *     stub skips its session entirely when `artifact.escalations.needsHuman` is empty (its own
+ *     doc: "no needs-human issues to brief -> no session"), a fact THIS round's own artifact
+ *     already carries precisely.
+ *   - retro: required only on retro's own cadence turn (`roundId % everyNRounds === 0`,
+ *     retro.ts's own gate) — a thinned-out round genuinely never dispatches a session.
+ *
+ *  ACCEPTED LIMITATION (documented, not silently swallowed): architecting/plan_review can ALSO
+ *  skip their session entirely when there's simply nothing to review this round (architect.ts's
+ *  own `candidates.length===0 && poolIssues.length===0` check; plan-review.ts's own
+ *  `poolMembers.length===0` check) — round.ts has no cheap, forge-free way to know that ahead of
+ *  this round's own artifact. Unlike the three cases resolved precisely above, this is NOT
+ *  modeled: a round where architecting/plan_review had nothing to do is (only in that specific
+ *  case) undercounted as "not fully degraded" even during a genuine total outage. This
+ *  under-triggers, never over-triggers, the breaker — the safer direction for a new safety
+ *  mechanism — and item 1's env-classification path plus the ceiling-breach gate remain the
+ *  primary defenses regardless; a sustained outage spans many rounds, and it only takes N
+ *  CONSECUTIVE rounds where every configured phase actually ran to trip.
+ *
+ *  #374 review (Codex sol-high verify-pass finding 3, P2 — narrows an over-broad false-park
+ *  source): `artifact.retro.degraded` (retro.ts's `retro-pr-degraded` event) is DELIBERATELY
+ *  never treated as retro-phase degradation here — retro.ts's openProposalPR (the only place
+ *  that event fires) runs ONLY after the retro SESSION already returned `outcome === "done"`
+ *  with a validated proposal (see retro.ts's own call site: `if (result.outcome === "done") {
+ *  ... if (scratch.kind === "proposal") await openProposalPR(...) }`). Its failure modes
+ *  (branch-verification miss, openPR throwing) are exclusively POST-session forge/git
+ *  infrastructure problems — proof the LLM/provider is fine, the exact opposite of what this
+ *  breaker exists to detect. A genuine retro SESSION failure is already captured correctly, via
+ *  the `retro-degraded` event (a completely separate emission site, gated on the session's own
+ *  outcome/isValid) folding into `artifact.degradedPhases` through the loop just above — that
+ *  path is untouched. Counting `retro.degraded` here too would double up on a signal that can
+ *  only ever mean "the session succeeded, something else broke", turning an unrelated forge/git
+ *  hiccup into a false contributor toward parking the whole engine. The breaker must UNDER-fire
+ *  on an ambiguous signal, never over-fire on a well-understood one. */
+export function isRoundFullyDegraded(cfg: SapwoodConfig, artifact: RoundArtifact, roundId: number): boolean {
+  const degradedRoundPhases = new Set<PeripheralPhase>();
+  for (const d of artifact.degradedPhases) {
+    const rp = DEGRADED_PHASE_TO_ROUND_PHASE[d.phase];
+    if (rp) degradedRoundPhases.add(rp);
+  }
+
+  const requiredPhases: PeripheralPhase[] = [];
+  if (cfg.roles.po.enabled || cfg.roles.po.poolSelection) requiredPhases.push("aligning");
+  if (cfg.roles.architect.enabled) requiredPhases.push("architecting");
+  if (cfg.roles.planReviewer.enabled) requiredPhases.push("plan_review");
+  if (cfg.roles.harvest.enabled && artifact.escalations.needsHuman.length > 0) requiredPhases.push("harvesting");
+  if (cfg.roles.retro.enabled && roundId % cfg.roles.retro.everyNRounds === 0) requiredPhases.push("retro");
+
+  if (requiredPhases.length === 0) return false; // nothing was even configured to run a session
+  return requiredPhases.every((p) => degradedRoundPhases.has(p));
+}
 
 /** One externalized-artifact-producing peripheral role session — STUBBED in #86 (the real
  *  role runner/prompts are a follow-up issue). Rerun-not-resume (#77 decision 4): run() is
@@ -631,6 +742,161 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // like standbyAttempts: a restart is a fresh shot for the PO (deliberate — the cheapest
   // "wake the PO" lever an operator has).
   let lastRoundIdle = false;
+  // #374 (F16): the empty-spin breaker's own counter — consecutive CLOSED rounds, in a row,
+  // that dispatched nothing AND had at least one peripheral role session degrade. In-memory
+  // only, same "restart is a fresh shot" stance as standbyAttempts/lastRoundIdle above — a
+  // restart is itself evidence of a human/operator touching the engine, so starting this back
+  // at 0 is the accepted, documented scope boundary (never a churn-inducing false reset:
+  // env-classified quota storms re-park within one round via item 1's role-session wiring
+  // regardless of this counter's value).
+  let consecutiveDegradedRounds = 0;
+
+  /** #374 (F16 root cause: "ceilingBreached=true did not stop round churn" / 145 empty rounds in
+   *  3.5h): withhold opening a NEW round while the engine is ceiling-breached OR env-parked —
+   *  the SAME two safety states that already stop DISPATCH inside tick() (conductor.ts's
+   *  ceilingBreached/parkActive gates), now ALSO gating round-opening. ONLY from round 2 onward
+   *  — the caller only invokes this when `roundsClosed > 0` — the very FIRST round of a run
+   *  always opens unconditionally regardless of any pre-existing park/ceiling state, exactly the
+   *  existing #168 contract round.test.ts already pins ("a pre-parked episode's ping probe runs
+   *  DURING the round's executing phase" — that round must actually open for its tick() to ever
+   *  run). This mirrors standby's own `roundsClosed > 0` gate just above/below, for the same
+   *  reason: round 1 gives the PO its decomposition shot / lets a pre-existing park's OWN
+   *  tick()-driven probe machinery run at all before this gate could ever have an opinion.
+   *
+   *  Probes on the identical cadence/primitives conductor.ts's own PARK section uses
+   *  (env-failure.ts's probeBackoffSec/probeDueWithHint, conductor.ts's probeForgeReachable/
+   *  escalatePark) — never a parallel mechanism, just a second call site for the same one.
+   *  Ceiling reasons are re-derived FRESH every wait iteration (evaluateCeiling), never trusted
+   *  from a stale stored marker — engineSessionStart's wall-clock bookkeeping is safe to touch
+   *  from here too (its own doc: "call once per tick" means roughly this cadence, not an
+   *  exclusive tick()-only invariant; multiple forward-only calls never corrupt it).
+   *
+   *  llm-ping semantics match conductor.ts's canary doctrine EXACTLY (settleCanary's own doc: a
+   *  green ping on the cheapest model is NOT itself proof the worker/role's real model/tier has
+   *  quota back) — a successful ping here does NOT clear the episode; it only ARMS this round to
+   *  open (the round's own peripheral role sessions become the real canary, via item 1's
+   *  runSessionWithRetry env-classification wiring: a non-classified attempt clears the episode
+   *  for real, a re-classified one simply continues it). Gated the SAME way conductor.ts gates
+   *  its own canary: only when no FORGE episode is ALSO open (`state.parkRow("forge") == null`)
+   *  — a mixed storm never opens a round that would just fail on forge writes anyway. `forge`
+   *  itself IS a genuine recovery signal (conductor.ts's own doc: "the cheap IForge read is a
+   *  GENUINE recovery signal") and clears outright on success, same as conductor.ts.
+   *
+   *  Returns (clear to open) the instant ceiling is clear AND (nothing is parked OR the llm
+   *  episode alone just got a green light), or immediately when KILL_SWITCH is active or a
+   *  signal arrives — same "let the round open & block normally at its first peripheral phase"
+   *  contract the standby loop above already documents for KILL_SWITCH.
+   *
+   *  #374 review (Codex sol-high finding 2, P1): the llm ping is skipped entirely while
+   *  ceiling-breached (same `!ceilingBreached` gate conductor.ts's own llm-probe section uses) —
+   *  it is a REAL, PAID API call, and a simultaneous quota park + daily-budget/wall-clock breach
+   *  must never keep spending past the hard ceiling just to test recovery. The free forge probe
+   *  is unaffected either way (conductor.ts's own stance: an IForge read is a genuine, zero-cost
+   *  recovery signal regardless of ceiling state); duration-based escalation is unaffected too.
+   *
+   *  #374 review (Codex sol-high verify-pass finding 2, P2): this loop's OWN exit condition is
+   *  ceiling/park state alone — it has no notion of the run's FINAL stop conditions
+   *  (stop.onMilestoneComplete etc, checkFinalMilestone/checkFinalSpend just below). Without a
+   *  re-check, a milestone that completes EXTERNALLY while the engine sits parked would never be
+   *  noticed: this loop keeps waiting for ceiling/park to clear (which, for a permanently-broken
+   *  provider, may be never) instead of recognizing the run is already, independently, done. The
+   *  re-check sits right before the wait at the BOTTOM of the loop (not the top) — deliberately:
+   *  the common case (nothing parked, no ceiling breach) already returns immediately above without
+   *  ever waiting, and the outer caller ALSO runs both checks just before invoking this function
+   *  (see its own call site) — re-checking again on that already-clear fast path would be a
+   *  redundant network call every round boundary for zero benefit. Placed here, the extra check
+   *  only ever fires on an iteration that is actually ABOUT to sit out a wait for recovery — the
+   *  exact situation the bug this closes is about. Same re-check every standby wake already
+   *  performs (below). Referencing checkFinalSpend/checkFinalMilestone here before their own
+   *  `const` declarations further down this closure is safe: this function is only ever CALLED
+   *  later (line ~1305, well after both are assigned), so by the time this body actually
+   *  executes, both names are long past their TDZ. */
+  const waitForDispatchClear = async (): Promise<void> => {
+    for (;;) {
+      if (signalled || deps.state.isKillSwitchActive()) return;
+      const nowDate = now();
+      const sessionStart = deps.state.engineSessionStart(nowDate, engineSessionGapSec(deps.tickIntervalSec));
+      const ceilingReasons: CeilingReason[] = evaluateCeiling({
+        dailySpendUsd: deps.state.dailySpendUsd(nowDate),
+        dailyBudgetUsd: cfg.cost.dailyBudgetUsd,
+        wallClockElapsedSec: (nowDate.getTime() - sessionStart.getTime()) / 1000,
+        maxWallClockSec: cfg.cost.maxWallClockSec,
+      });
+      if (ceilingReasons.length > 0) deps.state.recordCeilingBreach(ceilingReasons, nowDate);
+      else deps.state.clearCeilingBreach();
+
+      let llmGreenLight = false;
+      for (const episode of deps.state.parkedSources()) {
+        const backoffSec = probeBackoffSec(episode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec);
+        if (!probeDueWithHint(episode.lastProbeAt, nowDate.getTime(), backoffSec, episode.resetHintAt)) continue;
+        if (episode.source === "forge") {
+          const ok = await probeForgeReachable(forge);
+          deps.state.appendEvent("park-probe", {
+            source: "forge",
+            success: ok,
+            attempts: ok ? episode.probeAttempts : episode.probeAttempts + 1,
+          });
+          if (ok) {
+            deps.state.clearPark("forge");
+            deps.state.appendEvent("park-resumed", { source: "forge", enteredAt: episode.enteredAt, via: "round-open-probe" });
+          } else {
+            deps.state.bumpParkProbe("forge", iso());
+          }
+        } else if (deps.probeLlmReachable && ceilingReasons.length === 0) {
+          // Disabled-consumer rule (doctrine): no wired probe -> untouched, same as
+          // conductor.ts's own llm probe section. #374 review (Codex sol-high finding 2, P1):
+          // ALSO skip while ceiling-breached, same as conductor.ts's own llm-probe section
+          // (`!ceilingBreached`) — the ping is a REAL, PAID API call (~$0.016 measured); a
+          // simultaneous quota park + daily-budget/wall-clock breach must never keep burning
+          // probe spend past the hard ceiling. The FREE forge probe above is unaffected (no
+          // ceiling gate on it, matching conductor.ts: an IForge read is a genuine, free
+          // recovery signal regardless of ceiling state). Duration escalation below still fires
+          // regardless of ceiling either way.
+          const raw = await deps.probeLlmReachable();
+          const ok = typeof raw === "boolean" ? raw : raw.ok;
+          const detail = typeof raw === "boolean" ? undefined : raw.detail;
+          deps.state.appendEvent("park-probe", {
+            source: "llm",
+            success: ok,
+            attempts: ok ? episode.probeAttempts : episode.probeAttempts + 1,
+            ...(!ok && detail != null ? { reason: detail } : {}),
+          });
+          if (ok) {
+            // Touch (pace), never bump (grow backoff) — a green ping is a successful probe, not
+            // a failure, same "touch on success" contract conductor.ts's own llm branch uses.
+            deps.state.touchParkProbe("llm", iso());
+            llmGreenLight = true;
+          } else {
+            deps.state.bumpParkProbe("llm", iso());
+          }
+        }
+      }
+      for (const episode of deps.state.parkedSources()) {
+        if (
+          episode.escalatedAt == null &&
+          parkDurationExceededSec(episode.enteredAt, nowDate.getTime(), cfg.envFailure.parkEscalateAfterSec)
+        ) {
+          await escalatePark(forge, deps.state, cfg, episode, deps.state.parkRow("forge") != null, iso, deps.log);
+        }
+      }
+
+      const parkClearToOpen = !deps.state.isParked() || (llmGreenLight && deps.state.parkRow("forge") == null);
+      if (ceilingReasons.length === 0 && parkClearToOpen) return;
+
+      // #374 review (Codex sol-high verify-pass finding 2, P2): about to actually sit out a wait
+      // for ceiling/park to clear — re-check the run's FINAL stop condition first. A hit here
+      // means the run is independently done regardless of whether recovery ever comes; return
+      // immediately (no sleep) so the caller's own post-call finalStopHit check (see its site)
+      // stops the run cleanly instead of looping forever on a park that may never clear.
+      checkFinalSpend();
+      await checkFinalMilestone();
+      if (finalStopHit) return;
+
+      if (signalled) return;
+      await interTickWait(deps.tickIntervalSec * 1000);
+      if (deps.state.isKillSwitchActive()) return;
+    }
+  };
 
   /** Contained tick() call (same containment stance as driver.ts's runDriver): a thrown tick
    *  is a structured tick-error event, never a crash, never a hot retry loop (callers still
@@ -1062,6 +1328,47 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
         }
 
+        // #374 review (Codex sol-high finding 1, P1): withhold opening a NEW round while
+        // ceiling-breached or env-parked (see waitForDispatchClear's own doc) — run BEFORE
+        // standby engages below, never after. Ordering matters: standby's own wait loop probes
+        // ONLY backlog emptiness (probeHasWork), with no knowledge of park/ceiling state at
+        // all — an idle backlog PLUS an open park would previously let standby's loop spin
+        // forever waiting for backlog work to appear, never once probing recovery
+        // (probeForgeReachable/probeLlmReachable), never reaching duration-based escalation,
+        // never honoring a reset-time hint — recovery could then ONLY happen by some Ready work
+        // appearing, entirely unrelated to whether the provider/forge ever came back. Running
+        // this gate FIRST closes that gap structurally: by the time standby's own loop could
+        // possibly run below, ceiling is clear and nothing is parked, so standby's
+        // backlog-only probe is asking about a genuinely SAFE-to-dispatch state — the only
+        // question left is real backlog emptiness, exactly what it exists to answer. `roundsClosed
+        // > 0` ONLY — never gates the very first round of a run (see the doc's own explanation:
+        // round 1 always opens unconditionally, matching the pre-existing #168 contract).
+        if (roundsClosed > 0) {
+          await waitForDispatchClear();
+          if (signalled) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "signal" };
+          }
+          // #374 review (Codex sol-high verify-pass finding 2, P2): UNCONDITIONALLY refresh the
+          // final-stop check here, every time, regardless of which path waitForDispatchClear
+          // returned by. Its own internal re-check (see its doc) only fires on an iteration about
+          // to actually sit out a wait — deliberately NOT on the fast/already-clear success path
+          // (line ~884), so a never-parked run's common case stays cheap (no redundant network
+          // call). That means the EXACT iteration where ceiling/park recovery clears — the
+          // success path itself — never re-checks internally: a milestone that completed
+          // during/around that very recovery probe would otherwise go unnoticed until AFTER a
+          // pointless round already opened. Re-running checkFinalSpend/checkFinalMilestone HERE
+          // closes that gap for free in every OTHER case: both are no-ops (an early `if
+          // (finalStopHit) return` inside each) the instant finalStopHit is already set from
+          // inside the loop's own bottom-of-loop check, so this only ever does REAL work in the
+          // one case that matters — the recovery-clear iteration, where finalStopHit was never
+          // set internally at all.
+          checkFinalSpend();
+          await checkFinalMilestone();
+          if (finalStopHit) {
+            return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "stop-condition", stopCondition: finalStopHit };
+          }
+        }
+
         // #125 standby: withhold opening a NEW round while the probe is provably empty, backing
         // off tickIntervalSec * 2^n (capped at round.standby.backoffCapSec) between probes — any
         // hit resets the exponent and opens the round immediately, no extra wait. Guarded by the
@@ -1140,6 +1447,14 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
 
       while (SEQUENCE[idx] !== "closed") {
         const phase = SEQUENCE[idx]!;
+        // On ENTRY, not on transition (#206, gate② P1): the event means "this round entered
+        // phase X", so it is emitted by whichever process actually enters it. That closes every
+        // crash window at once — a crash after startRound (or after any advanceRoundPhase)
+        // leaves the round resumable AT that phase, and the restart re-enters it and says so.
+        // The cost is a duplicate whenever a phase is genuinely re-run (rerun-not-resume, #77
+        // dec. 4), which the replay fold absorbs as a no-op; the alternative direction — a phase
+        // the round entered but the trail never recorded — is unreconstructable.
+        appendRoundPhase(deps.state, round.round_id, phase);
         if (phase === "executing") {
           workersThisRound = await runExecuting(round, phase !== startedPhase);
           ranExecuting = true;
@@ -1217,8 +1532,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // re-runs the (marker-idempotent) close and the upsert overwrites with the same window.
       // Contained: an assembly/validation/persistence BUG still degrades to a durable
       // tick-error and the round still closes — the artifact is best-effort, the close is not.
+      // #374: captured (not discarded) — the empty-spin breaker below reads this SAME artifact's
+      // degradedPhases rather than re-deriving anything, so a round-level "did every peripheral
+      // session degrade" signal costs nothing extra to compute.
+      let artifact: RoundArtifact | null = null;
       try {
-        persistRoundArtifact(deps.state, buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, closedAt), closedAt);
+        artifact = buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, closedAt);
+        persistRoundArtifact(deps.state, artifact, closedAt);
       } catch (e) {
         tickErrors++;
         try {
@@ -1227,12 +1547,45 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           /* state write failed too — tickErrors still counts it */
         }
       }
+      // The terminal `closed` — the one phase the loop above never "enters" (the while guard
+      // excludes it). BEFORE closeRound, unlike the entry emissions: once the row is `done`, no
+      // resume ever revisits this round, so a crash between the two must lose the close (which
+      // the resume path redoes) rather than the event (which nothing would).
+      appendRoundPhase(deps.state, round.round_id, "closed");
       deps.state.closeRound(round.round_id, closedAt);
       roundsClosed++;
       // #125 idle-round precondition: record whether THIS round dispatched nothing — the gate
       // that lets standby engage at the top of the next iteration (see lastRoundIdle's comment).
       // A resumed round that skipped executing is NOT idle-evidence (see ranExecuting above).
       lastRoundIdle = ranExecuting && workersThisRound === 0;
+      // #374 (F16): the empty-spin breaker — independent of error CLASSIFICATION (item 1's
+      // env-park wiring may simply not recognize an unfamiliar systemic failure's text). A round
+      // that dispatched nothing AND was FULLY degraded (isRoundFullyDegraded's own doc — issue
+      // #374's AC: "every phase session failed", not any single one, closing the retro-only
+      // false positive) is one strike; N consecutive strikes force the SAME "llm" park episode
+      // item 1 already uses, so waitForDispatchClear (above) bounds the churn even when the
+      // failure text never matched a known signature. `artifact == null` (its own build/persist
+      // THREW, see the try/catch above) counts as NOT degraded — a contained observability
+      // failure must never itself trip a safety breaker.
+      const roundDegraded =
+        ranExecuting && workersThisRound === 0 && artifact != null && isRoundFullyDegraded(cfg, artifact, round.round_id);
+      consecutiveDegradedRounds = roundDegraded ? consecutiveDegradedRounds + 1 : 0;
+      if (emptySpinBreached(consecutiveDegradedRounds, cfg.round.emptySpin.consecutiveDegradedRoundsThreshold)) {
+        const reason =
+          `empty-spin breaker: ${consecutiveDegradedRounds} consecutive rounds with no dispatch and a degraded ` +
+          `peripheral session (round ${round.round_id} last) — independent of error classification (#374 F16)`;
+        deps.state.enterPark("llm", reason, null, closedAt);
+        try {
+          deps.state.appendEvent("empty-spin-park", {
+            consecutiveDegradedRounds,
+            threshold: cfg.round.emptySpin.consecutiveDegradedRoundsThreshold,
+            roundId: round.round_id,
+          });
+        } catch {
+          /* best-effort — the park row itself is still the durable record */
+        }
+        consecutiveDegradedRounds = 0; // episode entered (or already open) — the gate above takes over
+      }
       // #109 gate② P1 (idle throttle): an IDLE round — zero workers in flight — closing and the
       // next opening back-to-back would run the real peripheral role sessions (PO/architect/
       // plan-review/harvest/retro Claude sessions, the production default since #106)

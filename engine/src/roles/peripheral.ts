@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
+import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
 import {
@@ -32,6 +33,8 @@ import {
   claudeArgs,
   discoverClaudeBin,
   EMPTY_MCP_CONFIG_JSON,
+  extractFailureText,
+  extractRateLimitResetAt,
   guardSettings,
   hasSessionInitLine,
   parseCostUsdOrNull,
@@ -282,6 +285,34 @@ export interface RoleSessionResult {
    *  through RoleRunner.run()) keep compiling without updating every literal — same convention
    *  resultText/scratchText already use. */
   contextManifest?: ContextManifest;
+  /** #374: this attempt's own captured error output (worker.ts's extractFailureText — stderr
+   *  lines + errored result/error records, never assistant message content — same structured
+   *  extraction conductor.ts's env-failure classification already uses for a worker leg), when
+   *  `outcome !== "done"`. Feeds runSessionWithRetry's OPTIONAL `envFailure` classification hook
+   *  — undefined for a "done" outcome or for test fakes that construct a RoleSessionResult
+   *  literal directly (same "existing test fakes keep compiling" convention every other optional
+   *  field here follows). */
+  failureText?: string;
+  /** #374: same "only for a non-done outcome" gating as failureText — worker.ts's
+   *  extractRateLimitResetAt applied to this attempt's own jsonl, epoch ms, when the Claude
+   *  CLI's structured rate-limit telemetry named an exact reset instant. Purely a SCHEDULING
+   *  hint (env-failure.ts's probeDueWithHint) — never itself a classification input. */
+  rateLimitResetAtMs?: number;
+  /** #374: set ONLY by runSessionWithRetry, ONLY on the result it returns when
+   *  RetriedSession.envFailure classified this attempt as an environment failure. A caller whose
+   *  own post-call logic takes a FORGE-VISIBLE action on a non-"done" outcome (plan-review.ts's
+   *  reviewer/drafter/confirm sessions escalate needs-human on an invalid/failed result) MUST
+   *  check this FIRST and skip that action when true — an environment outage must never be
+   *  mistaken for a genuine review/task failure and escalated to a human. A caller whose own
+   *  failure handling is already a silent, non-forge-visible degrade (align.ts/architect.ts/
+   *  harvest.ts/retro.ts — "proceed without a note, retry next round") needs no such check: the
+   *  park event runSessionWithRetry already fired IS the durable record, and doing nothing
+   *  further is already the correct behavior either way. Never set on a "done" result (env
+   *  classification only ever runs against `failureText`, which is only ever populated for a
+   *  non-"done" outcome — see failureText's own doc). Absent/undefined on every result predating
+   *  #374 or produced without `envFailure` wired, same "omitted = false" convention every other
+   *  optional boolean-ish field in this codebase uses. */
+  envParked?: boolean;
 }
 
 export interface RoleRunnerDeps {
@@ -729,6 +760,12 @@ export class RoleRunner {
       // already do, so this costs nothing extra to compute even for roles that don't consume it.
       const resultText = parseResultText(jsonl);
       const outcome: "done" | "failed" | "timeout" = timedOut ? "timeout" : exitCode === 0 ? "done" : "failed";
+      // #374: same "only for a non-done outcome" gating as worker.ts's failureText/
+      // rateLimitResetAtMs (LaneProbe) — this is the env-failure classification input
+      // (runSessionWithRetry's optional envFailure hook) plus a scheduling hint, computed from
+      // the SAME jsonl this method already reads, never a new capture mechanism.
+      const failureText = outcome !== "done" ? extractFailureText(jsonl) : undefined;
+      const rateLimitResetAtMs = outcome !== "done" ? extractRateLimitResetAt(jsonl) : null;
       const sentinelTag = outcome === "timeout" ? "failed" : outcome;
       this.writeJsonAtomic(this.path(name, `${sentinelTag}.json`), {
         name,
@@ -812,6 +849,8 @@ export class RoleRunner {
         resultText,
         ...(scratchText !== undefined ? { scratchText } : {}),
         ...(contextManifest !== undefined ? { contextManifest } : {}),
+        ...(failureText !== undefined ? { failureText } : {}),
+        ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
       };
     } finally {
       // #234 F5: revoke + tear down the proxy in EVERY outcome this try block can exit
@@ -1077,6 +1116,69 @@ export interface RetriedSession {
      *  needing a second fake-state shape. */
     record: (key: ContextManifestKey, json: string, recordedAt: string) => void;
   };
+  /** #374 (dogfood F16/F17): OPTIONAL environment-failure classification — the role-session
+   *  side of the SAME park/probe/canary paradigm conductor.ts's worker-leg reclaim path already
+   *  uses (env-failure.ts's classifyEnvFailure). Wired uniformly through this ONE shared helper
+   *  covers every role-session call site at once (po-align/po-triage/architect/plan-reviewer/
+   *  plan-drafter/harvest/retro all call runSessionWithRetry). Kept as a SEPARATE field, never
+   *  widening `state` above's Pick type, for the same "existing callers/test fakes keep
+   *  compiling unchanged" reason contextManifest already documents — omitted here means zero
+   *  behavior change from pre-#374.
+   *
+   *  When supplied, EVERY attempt's result is classified against `patterns` BEFORE the ordinary
+   *  retry/degrade machinery runs:
+   *   - A CLASSIFIED attempt enters (or extends) the SAME "llm"/"forge" park episode
+   *     conductor.ts's worker-leg path uses (`park.enterPark`) and returns IMMEDIATELY — no
+   *     second attempt (a quota-exhausted retry is guaranteed to fail identically; retrying just
+   *     doubles the exact churn #374's dogfood run observed), no `degradeEvent` (the durable
+   *     `role-env-failure` event this fires IS the record — a `*-degraded` event would
+   *     misclassify an environment outage as a role/task failure).
+   *   - A non-classified "done" attempt (the CLI ran to completion and produced a coherent
+   *     structured reply), while an "llm" episode is open, CLEARS it (mirrors conductor.ts's
+   *     settleCanary's non-env-classified branch: a real completed session proves the provider
+   *     is back) — the "resume when the provider answers again" half of #374. Neither a
+   *     non-classified "failed" NOR a "timeout" clears (Codex sol-high review finding 3/P3,
+   *     tightened from an earlier "any non-timeout" version): for a systemic failure
+   *     classifyEnvFailure doesn't recognize (the empty-spin breaker's own reason for existing),
+   *     an unclassified "failed" is the SAME text that caused the park — clearing on it would
+   *     let the breaker self-cancel in an unbounded ~N-round duty cycle. A "timeout" means this
+   *     runner's own heartbeat monitor killed a HUNG process, proving nothing about provider
+   *     reachability either way (the same "an inconclusive outcome proves nothing" stance
+   *     conductor.ts's releaseCanaryInconclusive already takes for a drained worker-lane
+   *     canary). See handleEnvFailure's own doc (below) for the full trade-off. Only "llm" is
+   *     checked for clearing — a "forge" episode (opened by a worker leg, or by retro's own git/
+   *     gh access classifying as forge) is left for conductor.ts's own forge probe to clear,
+   *     unaffected either way. */
+  envFailure?: {
+    patterns: EnvFailurePatterns;
+    /** Separate from `state` above (see this field's own doc) — the park-episode methods this
+     *  optional feature needs. A real caller passes the SAME State instance for both. */
+    park: Pick<State, "enterPark" | "clearPark" | "parkRow">;
+  };
+}
+
+/** #374: the standard RetriedSession.envFailure wiring every real role-session call site uses —
+ *  cfg.envFailure's configured pattern sets (the SAME config key conductor.ts's worker-leg
+ *  classification reads) plus the SAME State instance for the park-episode methods. A small,
+ *  shared builder rather than each of the ~7 call sites (align.ts's po-align/po-pool/po-triage,
+ *  architect.ts, plan-review.ts's reviewer/drafter/confirm, harvest.ts, retro.ts) repeating the
+ *  same object literal — anchors every site to identical classification behavior by construction
+ *  rather than by convention. */
+export function envFailureHook(
+  cfg: SapwoodConfig,
+  state: Pick<State, "enterPark" | "clearPark" | "parkRow">,
+): NonNullable<RetriedSession["envFailure"]> {
+  return { patterns: { llm: cfg.envFailure.llmPatterns, forge: cfg.envFailure.forgePatterns }, park: state };
+}
+
+/** #374: a short, human-readable excerpt of a classified attempt's captured output — the same
+ *  role/purpose as conductor.ts's summarizeFailureText for a worker leg (kept as an independent
+ *  copy rather than an export/import round-trip between the two modules — a tiny, self-contained
+ *  string helper, not worth a cross-module dependency either way). */
+const ROLE_PARK_REASON_MAX_CHARS = 200;
+function summarizeRoleFailureText(text: string): string {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  return trimmed.length > ROLE_PARK_REASON_MAX_CHARS ? `${trimmed.slice(0, ROLE_PARK_REASON_MAX_CHARS)}…` : trimmed;
 }
 
 /** Run one role session; on a non-"done" outcome (or, when `isValid` is supplied, a "done"
@@ -1085,7 +1187,10 @@ export interface RetriedSession {
  *  fail-toward-more-work stance as every other appendEvent call site in this codebase) and log
  *  it to stderr. Always returns the LAST attempt's result (the caller decides what "still not
  *  done" means for its own phase: proceed without a note, skip a summary/proposal, etc. — this
- *  helper only owns the retry-and-degrade mechanics, never the phase's own business logic). */
+ *  helper only owns the retry-and-degrade mechanics, never the phase's own business logic).
+ *
+ *  #374: when `opts.envFailure` is wired, an environment-classified attempt short-circuits this
+ *  entirely — see RetriedSession.envFailure's own doc for the full contract. */
 export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSessionResult> {
   const iso = (): string => opts.now().toISOString();
   const attempt = async (n: number): Promise<RoleSessionResult> => {
@@ -1123,9 +1228,65 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
       return false;
     }
   };
+  // #374: classify ONE attempt's result against opts.envFailure (when wired). Returns the
+  // classified source (park entered/extended, caller must stop — no retry, no degrade) or null.
+  // No-op (always null) when opts.envFailure is omitted — byte-identical to pre-#374 behavior.
+  //
+  // #374 review (Codex sol-high finding 3, P1 — closes a self-cancel loop): ONLY a "done"
+  // outcome clears an open "llm" episode (tightened from an earlier "any non-timeout" version).
+  // For a systemic failure classifyEnvFailure doesn't recognize (the empty-spin breaker's own
+  // reason for existing), the VERY NEXT attempt after the round-opening gate lets a round
+  // through produces the exact SAME unclassified "failed" text that caused the park in the first
+  // place — clearing on THAT would resume dispatch immediately, degrade again next round,
+  // re-trip the breaker at ~N-round intervals forever: the identical unbounded churn #374 exists
+  // to eliminate, just at a slower duty cycle. Only a completed "done" is unambiguous evidence
+  // the provider answered; a bare "failed" (unclassified) is exactly as consistent with "still
+  // broken" as with "recovered but this task itself failed for an unrelated reason". TRADE-OFF
+  // (documented, not silently accepted): if the provider genuinely recovers but every SESSION
+  // keeps failing for a real, unrelated bug, the park persists until either some session
+  // eventually succeeds OR duration-based escalation notifies a human (env-failure.ts's
+  // parkEscalateAfterSec) — bounded and honest, never a silent wedge. A TIMEOUT outcome is
+  // likewise excluded (this runner's own heartbeat monitor killed a HUNG process, proving
+  // nothing about provider reachability either way — the same "an inconclusive outcome proves
+  // nothing" stance conductor.ts's releaseCanaryInconclusive already takes for a drained
+  // worker-lane canary). Neither a timeout nor an unclassified failure parks OR clears here —
+  // the episode's disposition is simply left as-is for the next attempt to decide.
+  const handleEnvFailure = (result: RoleSessionResult): EnvFailureSource | null => {
+    if (!opts.envFailure) return null;
+    const source = classifyEnvFailure(result.failureText ?? "", opts.envFailure.patterns);
+    if (source) {
+      const reason = summarizeRoleFailureText(result.failureText ?? "");
+      // #374 review (Codex sol-high finding 7): thread the reset-time hint ONLY when THIS
+      // episode is llm-sourced — a role session's own transcript classifying as "forge" (retro
+      // is the one role with git/write access) must never suppress the FREE forge probe behind
+      // an unrelated llm timestamp, same reasoning as conductor.ts's worker-leg site.
+      const resetHintAtIso =
+        source === "llm" && result.rateLimitResetAtMs != null ? new Date(result.rateLimitResetAtMs).toISOString() : null;
+      opts.envFailure.park.enterPark(source, reason, null, iso(), resetHintAtIso);
+      try {
+        opts.state.appendEvent("role-env-failure", { role: opts.session.roleId, session: result.name, source, reason });
+      } catch {
+        /* state write failed — the park row itself is still the durable record */
+      }
+      return source;
+    }
+    if (result.outcome !== "done") return null;
+    const llm = opts.envFailure.park.parkRow("llm");
+    if (llm) {
+      opts.envFailure.park.clearPark("llm");
+      try {
+        opts.state.appendEvent("park-resumed", { source: "llm", enteredAt: llm.enteredAt, via: "role-session" });
+      } catch {
+        /* best-effort — the park row is already cleared, the SQL write is the durable fact */
+      }
+    }
+    return null;
+  };
   let result = await attempt(1);
+  if (handleEnvFailure(result)) return { ...result, envParked: true };
   if (!isDone(result)) {
     result = await attempt(2);
+    if (handleEnvFailure(result)) return { ...result, envParked: true };
     if (!isDone(result)) {
       try {
         opts.state.appendEvent(opts.degradeEvent, opts.degradePayload(result));

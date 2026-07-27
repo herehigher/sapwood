@@ -23,6 +23,7 @@ import {
   codingFloor,
   drainEscalationDue,
   driveDecision,
+  drivingLaneTerminalForDrain,
   ENGINE_SESSION_GAP_SEC,
   engineSessionGapSec,
   evaluateCeiling,
@@ -39,6 +40,7 @@ import {
   nextRoundId,
   orderForDispatch,
   type ReclaimResult,
+  releaseVanishedWorktrees,
   resumeDecision,
   type Supervisor,
   startFixLeg,
@@ -1460,6 +1462,128 @@ test("tick DRIVE: stopped (produce-pr-and-stop) -> stays driving, never treated 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #294: hold-visibility events — the TRANSITION half. driveOne reports the live hold
+// observation statelessly on every pass (merge-driver.test.ts covers that half); these tests
+// are about what conductor.ts DOES with it: dedupe the EVENT, not the signal (#169), against
+// the durable event log. Gate behavior is not exercised here at all — the FakeMergeGate's
+// outcome is scripted, so these prove observability is genuinely additive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("tick DRIVE (#294): an absent -> held -> held -> absent -> held-again label sequence emits exactly pr-held, nothing, pr-released, pr-held", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  // Every pass returns the SAME gate outcome — only the observation changes, so any emitted
+  // event can only have come from the hold transition, never from the gate verdict.
+  const observe = (holdObservation: DriveOutcome["holdObservation"]) => {
+    gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW", holdObservation };
+  };
+  const runTick = () => tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const heldEvents = () => st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
+
+  observe({ held: false }); // 1. no hold yet — nothing to announce
+  await runTick();
+  assert.deepEqual(heldEvents(), [], "an unheld lane never announces a release it never held");
+
+  observe({ held: true, label: "sapwood:hold" }); // 2. a human applies the hold
+  await runTick();
+  await runTick(); // 3. steady-state held tick — re-observes the same hold, announces nothing
+
+  observe({ held: false }); // 4. the human removes it
+  await runTick();
+
+  observe({ held: true, label: "sapwood:hold" }); // 5. held again — a NEW episode announces again
+  await runTick();
+
+  assert.deepEqual(
+    heldEvents().map((e) => e.kind),
+    ["pr-held", "pr-released", "pr-held"],
+  );
+  // Both events carry the lane + PR the dashboard's ON HOLD card keys off; pr-held names the
+  // label a human applied (pr-released has no label to name — the hold is gone).
+  assert.deepEqual(heldEvents()[0]!.payload, { worker: "lane-a", issue: 2, pr: 55, label: "sapwood:hold" });
+  assert.deepEqual(heldEvents()[1]!.payload, { worker: "lane-a", issue: 2, pr: 55 });
+  // The gate outcome itself is untouched by any of this — still the ordinary queued lane.
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+  st.close();
+});
+
+test("tick DRIVE (#294): two lanes hold and release independently — one lane's episode never dedupes another's", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  seedDriving(st, "lane-b", 3, 56);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "q", holdObservation: { held: true, label: "sapwood:hold" } };
+  gate.outcomes[56] = { kind: "queued", pr: 56, reason: "q", holdObservation: { held: false } };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(st.lastHoldEvent("lane-a", 55), "pr-held");
+  assert.equal(st.lastHoldEvent("lane-b", 56), null, "lane-b was never held — lane-a's event must not speak for it");
+
+  // Now lane-b is held while lane-a stays held: lane-b announces, lane-a stays deduped.
+  gate.outcomes[56] = { kind: "queued", pr: 56, reason: "q", holdObservation: { held: true, label: "sapwood:hold" } };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const kinds = st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]);
+  assert.deepEqual(
+    kinds.map((e) => (e.payload as { worker: string }).worker),
+    ["lane-a", "lane-b"],
+  );
+  st.close();
+});
+
+test("tick DRIVE (#294): an outcome carrying NO hold observation emits nothing — the signal is purely additive", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  // Every pre-#294 outcome shape, and the engine-agent path (which never wraps the signal),
+  // reaches this branch with holdObservation undefined — it must be a no-op, not a release.
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate-pending:WAIT_REVIEW" };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]), []);
+  st.close();
+});
+
+test("tick DRIVE (#294) crash-rerun: a kill -9 between the hold observation and the next tick never double-emits pr-held (the durable event log IS the dedupe memory)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-hold-"));
+  try {
+    const path = join(dir, "sapwood.sqlite");
+    const held: DriveOutcome = {
+      kind: "queued",
+      pr: 55,
+      reason: "gate-pending:WAIT_REVIEW",
+      holdObservation: { held: true, label: "sapwood:hold" },
+    };
+    const before = new State(path);
+    seedDriving(before, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = held;
+    await tick({ forge: new FakeForge(), state: before, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate });
+    assert.equal(before.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held"]).length, 1);
+    before.close(); // kill -9 — no in-memory dedupe flag survives this
+
+    // Reopen and re-tick against the STILL-held PR. The rerun re-observes the identical hold;
+    // recognising the episode as already announced can only come from on-disk state.
+    const after = new State(path);
+    const gate2 = new FakeMergeGate();
+    gate2.outcomes[55] = held;
+    await tick({ forge: new FakeForge(), state: after, supervisor: new FakeSupervisor(), cfg: mkCfg(), mergeGate: gate2 });
+    assert.deepEqual(
+      after.eventsSince("1970-01-01T00:00:00.000Z", ["pr-held", "pr-released"]).map((e) => e.kind),
+      ["pr-held"],
+      "exactly one pr-held survives the restart — no duplicate for the same episode",
+    );
+    after.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // #246: FIXABLE gate wiring — the DRIVE loop's own "fixable" branch (driveDecision's
 // FIXUP/ESCALATE refinement, fed by THIS lane's fix_rounds/cfg.lanes.prFixCap/round budget).
 // Seeds a `driving` row directly (seedDriving, defined below) and scripts the FakeMergeGate's
@@ -1573,13 +1697,25 @@ test("tick DRIVE (#246 review round 1, C1): the fixLegResume-unwired degrade's l
 });
 
 // ── #246 review round 1 (C2, Codex sol-high PR #264): FIXUP dispatch must pass the SAME
-// new-leg admission gate RESUME/DISPATCH do (paused / ceiling / park / round-budget /
-// run-spend-stop) — a wind-down must drain, never start a brand-new fix leg. Round-budget's own
-// coverage is the pre-existing "fixable + round budget exceeded" test above (that one exercises
-// driveDecision's OWN overBudget-escalate path, not this admission gate — see its own comment).
+// new-leg admission gate RESUME/DISPATCH do (paused / ceiling / park / run-spend-stop). #375:
+// round budget is deliberately NOT one of them any more — a fix leg is exempt from
+// cost.roundBudgetUsd outright (see the "fixable + round budget exceeded" test below, which now
+// asserts the OPPOSITE of what it used to: the fix leg dispatches). The remaining admission
+// gates (paused/ceiling/park/run-spend-stop) are entirely unchanged by #375 — a wind-down must
+// still drain, never start a brand-new fix leg instead.
 // ──────────────────────────────────────────────────────────────────────────────────────────
 
-test("tick DRIVE (#246 C2): paused (forceDispatchPause) blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+// #375 (PR #388 review round 2, P1): forceDispatchPause is round.ts's OWN "no new dispatch wave
+// this round" signal (round-budget/round-dispatch-cap/milestone/run-level stop conditions) — it
+// is NOT a human pause, and none of those are "new dispatch" from an already-driving lane's fix
+// leg's point of view. Folding it into the FIXUP admission gate (the OLD behavior this test used
+// to pin) reproduced the #375 wedge under a different trigger: once ANY round/run-level stop
+// condition fired, every FIXUP attempt blocked on "fix-leg-admission-blocked:paused" forever, the
+// round never closing (see round.test.ts's own "runRounds (#375 review round 2, P1)" for the
+// full end-to-end reproduction through runRounds()). This test now pins the OPPOSITE: a bare
+// forceDispatchPause must NOT block a fix leg at all. The test right after it pins that a GENUINE
+// human PAUSE sentinel still does — that half of the old behavior is unchanged, by design.
+test("tick DRIVE (#375 review round 2, P1): forceDispatchPause ALONE (no human PAUSE sentinel) does NOT block a FIXUP dispatch — the fix leg still dispatches", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -1596,12 +1732,41 @@ test("tick DRIVE (#246 C2): paused (forceDispatchPause) blocks a FIXUP dispatch 
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
   const row = st.getWorker("lane-a")!;
-  assert.equal(row.state, "driving");
-  assert.equal(row.fix_rounds ?? 0, 0);
-  assert.deepEqual(sup.resumeCalls, []);
-  assert.equal(r.driven[0]!.kind, "queued");
-  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:paused/);
+  assert.equal(row.state, "fixing", "#375: forceDispatchPause alone no longer blocks a fix leg");
+  assert.equal(row.fix_rounds, 1);
+  assert.equal(sup.resumeCalls.length, 1);
+  assert.equal(r.driven[0]!.kind, "fixup");
   st.close();
+});
+
+test("tick DRIVE (#375 review round 2, P1): a GENUINE human PAUSE sentinel (data/PAUSE, not forceDispatchPause) still blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-pause-fixup-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE — no forceDispatchPause involved
+    const r = await tick({
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg(),
+      mergeGate: gate,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    const row = st.getWorker("lane-a")!;
+    assert.equal(row.state, "driving");
+    assert.equal(row.fix_rounds ?? 0, 0);
+    assert.deepEqual(sup.resumeCalls, []);
+    assert.equal(r.driven[0]!.kind, "queued");
+    assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:paused/);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("tick DRIVE (#246 C2): an engine-wide ceiling breach (daily budget) blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
@@ -1773,7 +1938,21 @@ test("tick DRIVE (#246): fixable + FIXUP but startFixLeg's resume() throws -> st
   st.close();
 });
 
-test("tick DRIVE (#246): fixable + round budget exceeded -> ESCALATE is treated as a TRANSIENT this-tick block (queued, no label, no terminal upsert) — retried next tick, never a permanent cap escalation", async () => {
+// #375 (P0, PM adjudication option (a)-minimal): a driving lane's fix leg is now EXEMPT from
+// cost.roundBudgetUsd — a fresh `false` is hardcoded in place of the old
+// budgetExceeded(roundSpendUsd, roundBudgetUsd) read (conductor.ts's `driveOverBudget`), because
+// an already-open PR has no other completion path (merge or fix — there is no "abandon the PR"
+// outcome) and round-budget-blocking it was the dogfood-observed permanent wedge (F7/F8: round
+// spend crosses the cap, FIXABLE stays queued forever, the round never closes). This replaces
+// the OLD "round budget exceeded -> TRANSIENT queued block" test that used to live here — that
+// behavior no longer exists at all (driveDecision's own overBudget-escalate branch can never
+// fire from this call site anymore). The three PRE-EXISTING limits still bound a fix leg
+// unchanged: cfg.lanes.prFixCap (attempts — see the "fix_rounds cap reached" test below, still
+// terminal), worker.budgetUsdSoft (each leg's own per-worker ceiling, untouched by this issue),
+// and cfg.cost.dailyBudgetUsd (still a real admission blocker — see the "#246 C2" ceiling test
+// above, which is UNCHANGED: daily-budget/wall-clock ceiling breaches still admission-block a
+// FIXUP dispatch via fixLegAdmissionBlockReason's `ceilingBreached`, only round budget is exempt).
+test("tick DRIVE (#375): fixable + round budget exceeded -> the fix leg is EXEMPT from cost.roundBudgetUsd and dispatches normally (round budget no longer gates a driving lane's fix leg at all)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -1786,16 +1965,15 @@ test("tick DRIVE (#246): fixable + round budget exceeded -> ESCALATE is treated 
     supervisor: sup,
     cfg: mkCfg(),
     mergeGate: gate,
-    roundSpendUsd: () => 50, // > default cost.roundBudgetUsd (30) -> over budget
+    roundSpendUsd: () => 50, // > default cost.roundBudgetUsd (30) — would have blocked pre-#375
     fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
   });
   const row = st.getWorker("lane-a")!;
-  assert.equal(row.state, "driving", "stays driving — never terminal on a mere budget block");
-  assert.equal(row.fix_rounds ?? 0, 0);
-  assert.deepEqual(sup.resumeCalls, [], "no fix leg dispatched while over budget");
-  assert.deepEqual(forge.labelsAdded, []);
-  assert.equal(r.driven[0]!.kind, "queued");
-  assert.match((r.driven[0] as { reason: string }).reason, /fix-leg-over-budget/);
+  assert.equal(row.state, "fixing", "#375: round budget no longer blocks a fix leg — it dispatches");
+  assert.equal(row.fix_rounds, 1);
+  assert.equal(sup.resumeCalls.length, 1, "the fix leg WAS dispatched despite round spend > roundBudgetUsd");
+  assert.deepEqual(forge.labelsAdded, []); // no escalation — this is a normal rework dispatch
+  assert.equal(r.driven[0]!.kind, "fixup");
   st.close();
 });
 
@@ -2319,6 +2497,293 @@ test("tick: kill switch records a DONE+PR lane's terminal state under the switch
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #375 AC2: KILL_SWITCH wind-down must never wait forever on a `driving` lane. Unlike
+// running/fixing lanes (a live process the drain can requestHandoff/hard-kill), a `driving`
+// lane has nothing to hand off — DRIVE is frozen entirely while the switch is active (#69), so
+// the ONLY way one of these ever leaves `driving` under a sustained switch is the SAME bounded
+// escalation drainThenEscalate already runs for running/fixing lanes, extended to cover it too
+// (drivingLaneTerminalForDrain decides which ones qualify — see that function's own doc). ──
+
+test("tick: KILL_SWITCH drain — a driving lane AT the fix-rounds cap is TERMINAL-for-drain (#375 AC2): escalated to needs-human past the drain window, activeWorkers() reaches zero so wind-down can exit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    const r1 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.equal(r1.ceilingBreached, true);
+    assert.deepEqual(r1.escalated, []); // just breached — still within the drain window
+    assert.equal(st.getWorker("lane-a")?.state, "driving"); // not yet touched
+
+    clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, switch still active
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r2.escalated, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "failed");
+    assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+    // Evidence: the drain reason (fix-capped, not the daily-budget variant) is on the record.
+    const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
+    assert.match(ev!.payload.reason, /drain-fix-rounds-capped:2\/2/);
+    // #375 review round 3 (P2): the pre-terminal evidence comment landed too, naming the drain
+    // reason (kill-switch), the fix-rounds spent/cap, and the #147 gated-reentry recovery path —
+    // a human landing on this needs-human issue is never left with zero explanation.
+    assert.equal(forge.issueComments.length, 1);
+    assert.equal(forge.issueComments[0]![0], 2);
+    assert.match(forge.issueComments[0]![1], /kill-switch drain/);
+    assert.match(forge.issueComments[0]![1], /drain-fix-rounds-capped:2\/2/);
+    assert.match(forge.issueComments[0]![1], /2 fix round\(s\) spent of 2/);
+    assert.match(forge.issueComments[0]![1], /#147 gated reentry/);
+    assert.equal(st.activeWorkers().length, 0); // #375 AC2: wind-down's activeWorkers()===0 loop can now exit
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: KILL_SWITCH drain — a failed EVIDENCE COMMENT (label already succeeded) leaves the row `driving` too (#375 review round 3, P2): never a terminal upsert with no explanation, retried on the very next tick", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window
+
+    // Tick 2: the label write succeeds, but the evidence comment fails — the row must stay
+    // `driving` (never a needs-human issue with zero explanation of why the engine gave up).
+    forge.throwOnAddIssueComment = true;
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r2.escalated, [], "a failed evidence-comment write must NOT count as drained");
+    assert.equal(st.getWorker("lane-a")?.state, "driving", "stays driving — never a terminal upsert without the evidence comment");
+    assert.notEqual(st.getWorker("lane-a")?.gated_escalation_labeled, 1, "no terminal latch yet");
+    assert.deepEqual(forge.issueComments, [], "the failed comment attempt left no partial trace");
+    const failEv = st.latestEvent("drain-driving-escalation-comment-failed") as { payload: { reason: string; error: string } } | undefined;
+    assert.match(failEv!.payload.reason, /drain-fix-rounds-capped:2\/2/);
+
+    // Tick 3: forge recovers — retried immediately (same still-elapsed breach window, no fresh
+    // window needed). The re-attempted label call is a harmless idempotent duplicate.
+    forge.throwOnAddIssueComment = false;
+    const r3 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r3.escalated, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "failed");
+    assert.equal(st.getWorker("lane-a")?.gated_escalation_labeled, 1);
+    assert.equal(forge.issueComments.length, 1);
+    assert.match(forge.issueComments[0]![1], /drain-fix-rounds-capped:2\/2/);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: KILL_SWITCH drain — a driving lane's escalation honors the #69/#147 forge-before-terminal-upsert ordering (#375 review round 2, P2): a failed needs-human label write leaves the row `driving` (never a terminal upsert on a write failure), retried on the very next tick", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 }); // at the default lanes.prFixCap (2)
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window
+
+    // Tick 2: the label write fails — unlike escalateNeedsHuman's OTHER callers (which commit
+    // the terminal upsert regardless, tracking the failure via gated_escalation_labeled: 0), the
+    // drain path must NOT terminalize on a write failure: this IS the row's one scheduled visit
+    // for the current breach, so it stays `driving` and is retried, not silently downgraded to
+    // permanently-manual.
+    forge.throwOnAddLabel = true;
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r2.escalated, [], "a failed label write must NOT count as drained");
+    assert.equal(st.getWorker("lane-a")?.state, "driving", "stays driving — never a terminal upsert on a write failure");
+    assert.notEqual(
+      st.getWorker("lane-a")?.gated_escalation_labeled,
+      1,
+      "no gated_escalation_labeled=1 latch on a failed write — this row is NOT terminalized at all yet",
+    );
+    const failEv = st.latestEvent("drain-driving-escalation-label-failed") as { payload: { reason: string; error: string } } | undefined;
+    assert.match(failEv!.payload.reason, /drain-fix-rounds-capped:2\/2/);
+
+    // Tick 3: forge recovers — the SAME still-elapsed breach window retries immediately (no
+    // fresh window needed, per recordCeilingBreach's first-detection-only INSERT OR IGNORE).
+    forge.throwOnAddLabel = false;
+    const r3 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+    assert.deepEqual(r3.escalated, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "failed");
+    assert.equal(st.getWorker("lane-a")?.gated_escalation_labeled, 1);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: KILL_SWITCH drain — a driving lane mid-fix-loop (fix_rounds>0, under cap) blocked ONLY by the daily-budget ceiling is TERMINAL-for-drain too (#375 AC2: round budget is exempt, but daily budget can still wedge a fix leg)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 }); // under the default cap (2) — has needed a fix leg before
+    st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // over a tiny daily cap, same UTC day as `clock`
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+
+    assert.deepEqual(r2.escalated, ["lane-a"]);
+    assert.equal(st.getWorker("lane-a")?.state, "failed");
+    assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+    // Evidence: the daily-budget-blocked reason (not the fix-capped variant) is on the record.
+    const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
+    assert.match(ev!.payload.reason, /drain-daily-budget-blocked:fix-rounds=1/);
+    assert.equal(st.activeWorkers().length, 0);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick: KILL_SWITCH drain — a driving lane that never needed a fix leg (fix_rounds=0, e.g. MERGE/WAIT-gated) is left alone even past the drain window (#375 AC2 scope: only budget-blocked/fix-capped lanes are terminal-for-drain)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-killswitch-drain-driving-"));
+  try {
+    const st = new State(join(dir, "sapwood.sqlite"));
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55); // fix_rounds 0 — never been through the fix loop
+    st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // daily cap breached too
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 } });
+    let clock = new Date("2026-07-20T00:00:00Z");
+    const now = () => clock;
+
+    await tick({ forge, state: st, supervisor: sup, cfg, now }); // detect breach
+    clock = new Date(clock.getTime() + 61_000); // past the drain window
+    const r2 = await tick({ forge, state: st, supervisor: sup, cfg, now });
+
+    assert.deepEqual(r2.escalated, []); // never touched — it isn't stuck for a budget reason at all
+    assert.equal(st.getWorker("lane-a")?.state, "driving");
+    assert.deepEqual(forge.labelsAdded, []);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #375: regression fixtures mirroring the two dogfood-observed wedges (events 37–77 and
+// 123–446 — round cap $30 then $60, a FIXABLE fix leg blocked, round never closing; then
+// KILL_SWITCH set with the same driving lane still stuck, wind-down spinning 14+ minutes until
+// force-killed). Both round-budget tiers now dispatch normally (item 1's exemption); the
+// KILL_SWITCH spin is closed by the three tests just above (item 2).
+test("tick DRIVE (#375 regression): a driving lane's fix leg dispatches normally at EITHER dogfood round-cap tier ($30 or $60 roundBudgetUsd), however far round spend has crossed it", async () => {
+  for (const [roundBudgetUsd, roundSpend] of [
+    [30, 45], // first dogfood wedge tier
+    [60, 123], // second dogfood wedge tier, after the cap was raised mid-run
+  ] as const) {
+    const st = new State(":memory:");
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    seedDriving(st, "lane-a", 2, 55);
+    const gate = new FakeMergeGate();
+    gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+    const r = await tick({
+      forge,
+      state: st,
+      supervisor: sup,
+      cfg: mkCfg({ cost: { roundBudgetUsd } }),
+      mergeGate: gate,
+      roundSpendUsd: () => roundSpend,
+      fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+    });
+    assert.equal(st.getWorker("lane-a")?.state, "fixing", `roundBudgetUsd=${roundBudgetUsd}, spend=${roundSpend}`);
+    assert.equal(r.driven[0]?.kind, "fixup");
+    st.close();
+  }
+});
+
+// ── #375 review round 1 (P1): the CEILING (daily-budget/wall-clock) drain path must use THIS
+// TICK's own OBSERVED DRIVE outcome, never the kill-switch path's heuristic — DRIVE already ran
+// this same tick (it precedes the CEILING section), so what actually happened to a driving lane
+// is known, not merely inferred from its historical fix_rounds. ──────────────────────────────
+
+test("tick: CEILING drain (daily-budget breach) — a driving lane admission-blocked THIS TICK (ceiling blocks its FIXUP spawn) is escalated past the drain window, using OBSERVED evidence (#375 review round 1, P1)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55); // fix_rounds 0 — the admission block is the ONLY reason it's stuck
+  st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // over a tiny daily cap, same UTC day as `clock`
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
+  const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 } });
+  let clock = new Date("2026-07-20T00:00:00Z");
+  const now = () => clock;
+  const tickOpts = {
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg,
+    mergeGate: gate,
+    now,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+
+  const r1 = await tick(tickOpts);
+  assert.equal(r1.ceilingBreached, true);
+  assert.equal(r1.driven[0]?.kind, "queued");
+  assert.match((r1.driven[0] as { reason: string }).reason, /fix-leg-admission-blocked:ceiling/);
+  assert.deepEqual(r1.escalated, []); // just breached — still within the drain window
+  assert.equal(st.getWorker("lane-a")?.state, "driving");
+
+  clock = new Date(clock.getTime() + 61_000); // past drainWindowSec, breach still standing
+  const r2 = await tick(tickOpts);
+  assert.deepEqual(r2.escalated, ["lane-a"]);
+  assert.equal(st.getWorker("lane-a")?.state, "failed");
+  assert.deepEqual(forge.labelsAdded, [[2, "needs-human"]]);
+  const ev = st.latestEvent("drive-needs-human") as { payload: { reason: string } } | undefined;
+  assert.match(ev!.payload.reason, /drain-ceiling-admission-blocked:fix-rounds=0/);
+  st.close();
+});
+
+test("tick: CEILING drain (daily-budget breach) — a driving lane in WAIT this tick (fix_rounds>0 from a PAST fix leg, but no NEW fixable finding — its rework is done, just awaiting re-review) is NEVER escalated, even past the drain window: it can still merge for free the instant review lands (#375 review round 1, P1 — the exact false positive the old heuristic would have produced on this path)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 }); // needed a fix leg before, but...
+  st.recordSpend("lane-earlier", 99, 500, "2026-07-20T00:00:01.000Z"); // daily cap breached
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "queued", pr: 55, reason: "gate:WAIT_REVIEW" }; // ...its fix leg is DONE, just awaiting re-review
+  const cfg = mkCfg({ cost: { drainWindowSec: 60, dailyBudgetUsd: 10 } });
+  let clock = new Date("2026-07-20T00:00:00Z");
+  const now = () => clock;
+  const tickOpts = { forge, state: st, supervisor: sup, cfg, mergeGate: gate, now };
+
+  await tick(tickOpts); // detect breach
+  clock = new Date(clock.getTime() + 61_000); // past the drain window, breach still standing
+  const r2 = await tick(tickOpts);
+
+  assert.deepEqual(r2.escalated, []); // the OLD heuristic (fix_rounds>0 && dailyBudgetBreached) would wrongly escalate this
+  assert.equal(st.getWorker("lane-a")?.state, "driving"); // untouched — free to merge once review lands
+  assert.deepEqual(forge.labelsAdded, []);
+  st.close();
 });
 
 // ── #75: PAUSE — the gentle tier. Unlike the kill switch, a paused tick does NOT drain or
@@ -3379,6 +3844,30 @@ test("driveDecision: gate + fix rounds -> scheduling action (fail-safe ESCALATE)
   assert.equal(driveDecision("HUMAN", 0, 3, false), "ESCALATE");
   assert.equal(driveDecision("", 0, 3, false), "ESCALATE"); // empty/unknown gate -> fail-safe
   assert.equal(driveDecision("WHATEVER", 0, 3, false), "ESCALATE");
+});
+
+// ── #375 AC2: drivingLaneTerminalForDrain — the wind-down predicate that decides whether a
+// `driving` lane (no live process, so nothing for the kill-switch drain to hand off/kill) is
+// TERMINAL-for-drain: fix-capped (permanent regardless of any ceiling) or budget-blocked
+// (already needed at least one fix leg AND the daily-budget hard ceiling is presently
+// breached — round budget no longer applies to fix legs at all, #375 item 1). A lane that has
+// never needed a fix leg (fixRounds === 0) is never terminal here — it may be perfectly healthy
+// (MERGE/WAIT-gated) and simply resumes once the breach/switch clears. ──────────────────────
+
+test("drivingLaneTerminalForDrain (#375): fix-capped is terminal regardless of daily-budget status", () => {
+  assert.equal(drivingLaneTerminalForDrain(2, 2, false), true); // at cap, no daily-budget breach
+  assert.equal(drivingLaneTerminalForDrain(3, 2, false), true); // past cap (shouldn't happen, fail-safe anyway)
+  assert.equal(drivingLaneTerminalForDrain(2, 2, true), true); // at cap AND daily-budget breached
+});
+
+test("drivingLaneTerminalForDrain (#375): under cap + daily-budget breached is terminal ONLY once at least one fix round has actually been spent", () => {
+  assert.equal(drivingLaneTerminalForDrain(1, 2, true), true); // has needed a fix leg, budget now blocks a fresh one
+  assert.equal(drivingLaneTerminalForDrain(0, 2, true), false); // never needed a fix leg — likely MERGE/WAIT, not stuck
+});
+
+test("drivingLaneTerminalForDrain (#375): under cap + no daily-budget breach is never terminal — a healthy fix leg is still admissible once DRIVE runs again", () => {
+  assert.equal(drivingLaneTerminalForDrain(0, 2, false), false);
+  assert.equal(drivingLaneTerminalForDrain(1, 2, false), false);
 });
 
 // ── #147: gated-PR reentry — a human removing needs-human from an escalated PR's issue
@@ -6060,4 +6549,117 @@ test("tick (B4): unconfirmed-intent escalation with a FAILING label write does N
   assert.equal(retried.state, "failed");
   assert.equal(retried.gated_escalation_labeled, 1);
   st.close();
+});
+
+// ── #210 (frontend-design §11 follow-up 4): worktree-released — the Needs-attention strip's
+//   only resolution signal for a retained worktree. The engine already owns the retained path,
+//   so the filesystem it manages IS the signal: on tick/startup, a retained folder that is gone
+//   (the human salvaged/discarded it) appends the event ONCE. ──
+
+const RELEASE_SINCE = "1970-01-01T00:00:00Z";
+const releasedPaths = (st: State) =>
+  st.eventsSince(RELEASE_SINCE, ["worktree-released"]).map((e) => (e.payload as { worktreePath: string }).worktreePath);
+
+test("#210: worktree-released fires once per cleaned-up retained path — never while the folder exists, never twice, and never across a restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-released-"));
+  const dbPath = join(dir, "state.db");
+  const gone = join(dir, "lane-gone");
+  const here = join(dir, "lane-here");
+  mkdirSync(gone);
+  mkdirSync(here);
+  try {
+    const st = new State(dbPath);
+    st.appendEvent("worktree-retained", { worker: "lane-gone", issue: 11, worktreePath: gone });
+    st.appendEvent("worktree-retained", { worker: "lane-here", issue: 12, worktreePath: here });
+
+    releaseVanishedWorktrees(st);
+    assert.deepEqual(releasedPaths(st), [], "both folders still on disk — nothing is resolved yet");
+
+    rmSync(gone, { recursive: true, force: true }); // the human cleaned it up
+    releaseVanishedWorktrees(st);
+    const first = st.eventsSince(RELEASE_SINCE, ["worktree-released"]);
+    assert.equal(first.length, 1);
+    assert.deepEqual(first[0]!.payload, { worker: "lane-gone", issue: 11, worktreePath: gone }, "mirrors worktree-retained's payload");
+
+    releaseVanishedWorktrees(st); // same tick's worth of work again
+    assert.deepEqual(releasedPaths(st), [gone], "no repeat emission while the row stays resolved");
+    st.close();
+
+    // Restart: the durable event log itself is the memory — a fresh State must not re-emit.
+    const restarted = new State(dbPath);
+    releaseVanishedWorktrees(restarted);
+    assert.deepEqual(releasedPaths(restarted), [gone], "dedupe survives a restart (no in-memory flag involved)");
+
+    rmSync(here, { recursive: true, force: true });
+    releaseVanishedWorktrees(restarted);
+    assert.deepEqual(releasedPaths(restarted), [gone, here], "each path resolves on its own, when its own folder goes");
+    restarted.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#210: a lane slot re-retained at the SAME path after release resolves again — the latest event per path decides, not 'ever released'", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-released-reuse-"));
+  const lane = join(dir, "lane-1");
+  try {
+    const st = new State(":memory:");
+    st.appendEvent("worktree-retained", { worker: "lane-1", issue: 20, worktreePath: lane });
+    releaseVanishedWorktrees(st); // never created on disk -> resolved immediately
+    assert.deepEqual(releasedPaths(st), [lane]);
+
+    // The lane slot is reused (lane names AND their paths are recycled) and retained again.
+    mkdirSync(lane, { recursive: true });
+    st.appendEvent("worktree-retained", { worker: "lane-1", issue: 21, worktreePath: lane });
+    releaseVanishedWorktrees(st);
+    assert.deepEqual(releasedPaths(st), [lane], "still on disk — the fresh retention is unresolved");
+
+    rmSync(lane, { recursive: true, force: true });
+    releaseVanishedWorktrees(st);
+    const events = st.eventsSince(RELEASE_SINCE, ["worktree-released"]);
+    assert.equal(events.length, 2, "the second retention gets its own release");
+    assert.equal((events[1]!.payload as { issue: number }).issue, 21, "carrying the LATEST retention's worker/issue");
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#210: a retention with a null worktreePath is unmatchable and is never released (the engine must not emit one)", async () => {
+  const st = new State(":memory:");
+  st.appendEvent("worktree-retained", { worker: "lane-null", issue: 30, worktreePath: null });
+  releaseVanishedWorktrees(st);
+  assert.deepEqual(releasedPaths(st), [], "a null path can never be matched — it must never be emitted in the first place");
+
+  // ...and the retention the conductor actually emits always carries one.
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-dirty", 31);
+  sup.probes["lane-dirty"] = { ...DEFAULT_PROBE, hbAge: 99999, wrapperAlive: 0 };
+  sup.reclaimResults["lane-dirty"] = { worktreePath: "/abs/worktrees/lane-dirty", worktreeRetained: true };
+  await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const retained = st.eventsSince(RELEASE_SINCE, ["worktree-retained"]);
+  assert.equal(retained.length, 2);
+  assert.equal((retained[1]!.payload as { worktreePath: string | null }).worktreePath, "/abs/worktrees/lane-dirty");
+  st.close();
+});
+
+test("#210: tick() itself runs the release scan — the strip clears without a dedicated sweep call", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-released-tick-"));
+  const lane = join(dir, "lane-tick");
+  try {
+    const st = new State(":memory:");
+    const forge = new FakeForge();
+    const sup = new FakeSupervisor();
+    mkdirSync(lane);
+    st.appendEvent("worktree-retained", { worker: "lane-tick", issue: 40, worktreePath: lane });
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.deepEqual(releasedPaths(st), [], "folder still there");
+    rmSync(lane, { recursive: true, force: true });
+    await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+    assert.deepEqual(releasedPaths(st), [lane]);
+    st.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

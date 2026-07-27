@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { type EngineOverrides, runCli, runDryRun, runEngine, tickOnlyFlagError } from "../cli.js";
-import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import { ConfigSchema, configHash, dashboardConfigSubset, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus, StartupReconcileData } from "../forge/forge.js";
 import { State } from "../state/state.js";
 import type { PeripheralPhase } from "./round.js";
@@ -491,6 +491,54 @@ test("sapwood run (default driver): KILL_SWITCH blocks every peripheral AND disp
     // "never spawned" means the dir is empty, not absent.
     const roleDir = join(dir, "roles");
     assert.ok(!existsSync(roleDir) || readdirSync(roleDir).length === 0, "no role session ever ran");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #206: run boundaries + config provenance in the event stream (frontend-design.md §11) ────
+
+test("sapwood run (#206): startup appends exactly ONE run-started event, before the first round opens, carrying the allowlisted config subset + a hash of the full config", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-rounds-runstarted-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const state = new State(join(dir, "sapwood.sqlite"));
+    // Same KILL_SWITCH shortcut as the test above: the round still OPENS (proving the ordering
+    // claim) but freezes at its first phase, so this stays a fast, session-free run.
+    writeFileSync(join(dir, "KILL_SWITCH"), "");
+    const forge = new FakeForge();
+    const cfg = mkCfg({ proxy: { enabled: true } });
+
+    await runEngine(["node", "sapwood", "run"], {
+      cfg,
+      forge,
+      state,
+      logger: silentLogger,
+      roleRunnerDeps: {
+        stateDir: join(dir, "roles"),
+        worktreeRoot: join(dir, "worktrees"),
+        claudeBin: bin,
+        heartbeatMs: 50,
+        guardHookPath: mkHook(dir),
+        preSpawnCaptureTimeoutMs: 150,
+        preSpawnCapturePollMs: 10,
+      },
+      sleep: async () => {},
+      registerSignals: () => () => {},
+    });
+
+    const stream = state.eventsSince("1970-01-01T00:00:00.000Z", ["run-started", "round-phase", "board-normalized"]);
+    assert.equal(stream.filter((e) => e.kind === "run-started").length, 1, "exactly one per process start");
+    assert.equal(stream[0]?.kind, "run-started", "the run boundary is the FIRST thing this run wrote");
+    assert.deepEqual(stream[1], { kind: "round-phase", payload: { round_id: 1, phase: "aligning" } }, "…and it precedes round 1");
+
+    const payload = stream[0]!.payload as { config: Record<string, unknown>; configHash: string };
+    assert.deepEqual(payload.config, JSON.parse(JSON.stringify(dashboardConfigSubset(cfg))));
+    assert.equal(payload.configHash, configHash(cfg));
+    // The dashboard serves /api/events payloads verbatim, so the allowlist has to hold HERE:
+    // `proxy` is set in this run's config and must still be absent from what was written.
+    assert.equal(payload.config.proxy, undefined);
+    assert.equal(payload.config.logging, undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -30,6 +30,7 @@ import {
   parkDurationExceededSec,
   probeBackoffSec,
   probeDue,
+  probeDueWithHint,
 } from "./env-failure.js";
 import { attemptThreadWrite, computeFixResponseHarvest, type FixResponseWriteOutcome } from "./fix-response.js";
 
@@ -341,6 +342,57 @@ export function fixLegAdmissionBlockReason(input: {
   return null;
 }
 
+/** #375 AC2: is a `driving` lane TERMINAL-for-drain — i.e. can it NEVER make forward progress
+ *  while DRIVE stays frozen (an active kill switch skips the whole DRIVE loop entirely, #69)?
+ *  A `driving` lane has no live process — nothing for supervisor.requestHandoff/reclaim to act
+ *  on — so unlike `running`/`fixing` lanes it can only ever be "drained" by forcing it to a
+ *  terminal state outright. Waiting on one instead would wedge the bounded drain forever
+ *  (PLAN.md "drain before kill, never a permanent wedge"), exactly the dogfood-observed spin
+ *  (#375: KILL_SWITCH set while a FIXABLE driving lane sat blocked -> wind-down's
+ *  `activeWorkers() === 0` loop never terminated).
+ *
+ *  #375 review round 1 (P1): this heuristic is for the KILL-SWITCH caller ONLY
+ *  (`DrivingDrainMode`'s `"heuristic"` arm) — it is the only evidence available when DRIVE never
+ *  ran at all this tick. It must NOT be reused for the ceiling/daily-budget/wall-clock drain
+ *  path, where DRIVE already ran THIS SAME tick before the ceiling section: there, a `driving`
+ *  lane with `fixRounds > 0` sitting in WAIT (its fix leg already done, awaiting re-review) can
+ *  still merge for free the instant review lands, and this heuristic cannot see that — it would
+ *  force-escalate a perfectly healthy lane merely for having needed a fix leg in the past. The
+ *  ceiling path instead consults `driveFixBlockedLanes`, the OBSERVED set THIS tick's DRIVE loop
+ *  itself populated (`DrivingDrainMode`'s `"observed"` arm) — ground truth, not an inference.
+ *
+ *  Two structural, LOCALLY-derivable facts, either sufficient — deliberately NOT a live
+ *  gate.driveOne() re-evaluation: a drain path must stay cheap and safe, never a second source
+ *  of "new work" (the same #69 doctrine the kill-switch gate itself documents):
+ *   - fix-capped: `fixRounds` already spent `prFixCap` — permanent regardless of any ceiling,
+ *     the exact same cap DRIVE's own FIXABLE branch would escalate on (#246) one tick later.
+ *   - budget-blocked: `fixRounds > 0` (this lane has already needed at least one fix leg — the
+ *     only other legitimate `driving` reasons, MERGE/WAIT, never touch fix_rounds at all) AND
+ *     `dailyBudgetBreached` (round budget no longer applies to fix legs at all, #375 item 1, so
+ *     the daily-budget hard ceiling is the only remaining admission blocker that can wedge a
+ *     fresh fix leg — and it will not clear before this drain window elapses).
+ *
+ *  A `driving` lane with `fixRounds === 0` is never treated as terminal here: it may be MERGE-
+ *  or WAIT-gated and need nothing from the fix loop at all, so forcing it to needs-human on a
+ *  bare ceiling breach would escalate a healthy in-review PR for no reason — it simply resumes
+ *  normal DRIVE progression the instant the breach/switch clears.
+ *
+ *  #375 review round 2 (P2, accepted trade-off, PR #388 review): the fix-capped arm CAN still
+ *  false-positive on the kill-switch path specifically — a lane at `prFixCap` that has ALSO
+ *  reached a healthy post-fix WAIT (its rework already done, merely awaiting re-review) gets
+ *  force-escalated too, since this heuristic cannot see that (DRIVE never ran this tick to prove
+ *  it). This is deliberate, not an oversight: under an active KILL_SWITCH, DRIVE is frozen no
+ *  matter how healthy the lane is, so it cannot merge THIS tick regardless, and the engine MUST
+ *  still exit the bounded drain window (PLAN.md "drain before kill, always" — the #375 PM
+ *  adjudication names fix-capped lanes terminal-for-drain unconditionally). The recovery path is
+ *  #147's GATED RECLAIM: a human clears the `needs-human` label once they see the false positive
+ *  (or once review lands and the PR is simply mergeable), and the SAME lane/PR/branch reclaims
+ *  back into `driving` — no data loss, no fresh dispatch, just one extra manual step. */
+export function drivingLaneTerminalForDrain(fixRounds: number, prFixCap: number, dailyBudgetBreached: boolean): boolean {
+  if (fixRounds >= prFixCap) return true;
+  return fixRounds > 0 && dailyBudgetBreached;
+}
+
 /** #245: the fix-loop's dependency seam — deliberately narrower than the full TickDeps a caller
  *  (this module's own tick(), or #246's future FIXUP-dispatch branch inside it) already holds,
  *  so a caller can pass a `Pick`-shaped subset without constructing a whole fake tick(). */
@@ -497,6 +549,13 @@ export interface LaneProbe {
    *  "in-memory lane only" scoping). tick()'s KEEP branch feeds a non-null value into
    *  State.recordWorkerActualModel alongside its existing State.setLiveTelemetry call. */
   actualModel?: string | null;
+  /** #374: a FAILED lane's own structured rate-limit telemetry (worker.ts's
+   *  extractRateLimitResetAt — the Claude CLI's `rate_limit_event.resetsAt`), epoch ms, when a
+   *  429 payload named the exact instant quota resets. undefined for a non-FAILED lane, when no
+   *  such record was ever emitted, or for probe fixtures that predate #374. Threaded into
+   *  state.enterPark's optional reset-hint column purely as SCHEDULING input (env-failure.ts's
+   *  probeDueWithHint) — never a classification input (classifyEnvFailure never sees it). */
+  rateLimitResetAtMs?: number;
 }
 
 /** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
@@ -941,6 +1000,24 @@ async function reportRetainedWorktree(
     .catch(() => {});
 }
 
+/** #210 (docs/frontend-design.md §11 follow-up 4): the resolution signal for a retained
+ *  worktree. Nothing else marks a retained folder as dealt with — the dashboard's
+ *  Needs-attention strip would carry the row forever — and the engine already owns the path, so
+ *  the filesystem it manages IS the signal: once the folder is gone (the human salvaged or
+ *  discarded it), append `worktree-released` once, mirroring `worktree-retained`'s payload. No
+ *  acknowledge UI is invented, and no forge call is made — this is a pure state+disk scan.
+ *
+ *  Runs on every tick (the first tick of a run covers startup). Dedupe is the event log itself
+ *  (see State.unreleasedRetainedWorktrees): a released path drops out of the scan until the same
+ *  path is retained again, so repeat ticks AND restarts emit nothing further. `exists` is
+ *  injectable for tests only. Never throws — an unreadable path just stays retained. */
+export function releaseVanishedWorktrees(state: State, exists: (path: string) => boolean = existsSync): void {
+  for (const { worker, issue, worktreePath } of state.unreleasedRetainedWorktrees()) {
+    if (exists(worktreePath)) continue;
+    state.appendEvent("worktree-released", { worker, issue, worktreePath });
+  }
+}
+
 /** Label-first/latch-second handling for a resume spawn whose outcome is unknowable after a
  *  crash. Shared by proactive marker inspection and resume()'s typed-error backstop. */
 async function escalateUndecidableResume(
@@ -979,13 +1056,47 @@ async function escalateUndecidableResume(
   return { kind: "capped", worker: worker.name, issue: worker.issue, attempts };
 }
 
+/** #375 review round 1 (P1): which of the two `drainThenEscalate` callers is asking, and what
+ *  evidence each one actually HAS about a `driving` lane's fix-leg status — these are NOT
+ *  interchangeable, because the two callers see fundamentally different worlds:
+ *
+ *   - `"heuristic"` (the #69 kill-switch gate): tick() returns before DRIVE ever runs under an
+ *     active switch (the whole point of the gate — see its own comment), so there is no live
+ *     information about what a `driving` lane's CURRENT gate is. `dailyBudgetBreached` (a pure,
+ *     forge-free read — safe inside a kill-switch-frozen tick) plus the lane's own durable
+ *     `fix_rounds` is the only evidence available, fed to `drivingLaneTerminalForDrain`'s
+ *     heuristic (see that function's own doc for exactly what it infers and why).
+ *   - `"observed"` (the CEILING/daily-budget/wall-clock path): DRIVE already ran THIS SAME tick,
+ *     before the ceiling section (conductor.ts's DRIVE loop precedes CEILING) — a ceiling breach
+ *     blocks new dispatch/resume/fix-leg-admission, but NOT drive/merge progression, so a
+ *     `driving` lane with `fix_rounds > 0` sitting in WAIT (its fix leg already done, awaiting
+ *     re-review) can still merge for free the instant review lands; DRIVE's own FIXABLE branch
+ *     only re-fires on a NEW finding, never while merely waiting. The `drivingLaneTerminalForDrain`
+ *     heuristic cannot distinguish that from a genuinely-still-blocked lane and would force-
+ *     escalate it — a regression versus pre-#375 behavior, where a ceiling breach let `driving`
+ *     lanes complete naturally via DRIVE. `blockedLanes` is the fix: the EXACT set of lane names
+ *     whose own fixable branch, THIS tick, actually observed a ceiling-caused admission block or
+ *     a genuine fix-rounds-cap exhaustion (populated inline in the DRIVE loop, see
+ *     `driveFixBlockedLanes`) — ground truth, not an inference, so only lanes DRIVE itself just
+ *     proved stuck are ever escalated here. */
+export type DrivingDrainMode =
+  | { mode: "heuristic"; dailyBudgetBreached: boolean }
+  | { mode: "observed"; blockedLanes: ReadonlySet<string> };
+
 /** The bounded drain (PLAN.md Security model: drain before kill, always). Shared by the #69
  *  global kill-switch gate and the #14 cost-ceiling breach path in tick(): record the breach
  *  (first detection only — see State.recordCeilingBreach's INSERT OR IGNORE), ask every
  *  running worker to hand off gracefully (idempotent per tick), and only once
  *  cfg.cost.drainWindowSec has elapsed since first detection escalate to the hard
  *  process-tree kill + needs-human. No PR-aware rescue on escalation — this is a safety
- *  boundary, not a liveness classification, so fail-safe to human triage. */
+ *  boundary, not a liveness classification, so fail-safe to human triage.
+ *
+ *  #375 AC2: `driving` lanes join the SAME bounded escalation, past the SAME window — but never
+ *  the drain-REQUEST step above (no live process, nothing for requestHandoff/reclaim to act on).
+ *  A `driving` lane only ever reaches the escalation step, and only when `drivingDrain` (see its
+ *  own doc — the two callers' evidence differs fundamentally) says it can never make forward
+ *  progress on its own: otherwise a healthy MERGE-/WAIT-gated PR would get force-escalated
+ *  merely for outliving one ceiling breach. */
 async function drainThenEscalate(
   forge: IForge,
   state: State,
@@ -994,6 +1105,7 @@ async function drainThenEscalate(
   reasons: CeilingReason[],
   nowDate: Date,
   iso: () => string,
+  drivingDrain: DrivingDrainMode,
 ): Promise<{ drainRequested: string[]; escalated: string[] }> {
   state.recordCeilingBreach(reasons, nowDate);
   const drainRequested: string[] = [];
@@ -1038,6 +1150,86 @@ async function drainThenEscalate(
       state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
       escalated.push(w.name);
     }
+    // #375 AC2: a `driving` lane whose only next DRIVE action is a fresh fix leg that can never
+    // be admitted right now (fix-capped, or budget-blocked) is drained here too, past this SAME
+    // window, exactly like DRIVE's own fix-rounds-cap branch would escalate it (#246) — just one
+    // drain window early on the kill-switch path (DRIVE never gets to run while the switch
+    // stands), or confirmed by THIS SAME tick's own DRIVE pass on the ceiling path (see
+    // `DrivingDrainMode`'s own doc for why the two callers cannot share one predicate).
+    //
+    // #375 review round 2 (P2, Codex PR #388 review): deliberately NOT escalateNeedsHuman — that
+    // helper commits the terminal `upsertWorker(failed)` UNCONDITIONALLY, even when its own
+    // `forge.addLabel` throws (it only records the failure via `gated_escalation_labeled: 0`, a
+    // durable "manual drive as before #147" marker — the right contract for its many OTHER
+    // callers, an ordinary DRIVE-tick escalation that gets re-attempted from a clean `driving` row
+    // if anything ever needs to look at it again). A drain escalation is different: this IS the
+    // row's one scheduled visit for the current breach, so a transient forge outage here should
+    // not permanently downgrade it to manual-only. Mirror the FIXABLE cap-exhausted branch's own
+    // contract instead (`Hard rule (#69/#147 forge-before-terminal-upsert)`, above): label FIRST;
+    // on failure, leave the row `driving` and retry next tick — `state.ceilingBreach()`'s
+    // timestamp is untouched by a retry (recordCeilingBreach only ever records FIRST detection),
+    // so the NEXT tick's `drainEscalationDue` check is still past-window and retries immediately —
+    // one extra tick, never a fresh drain window.
+    for (const w of state.drivingWorkers()) {
+      const fixRounds = w.fix_rounds ?? 0;
+      const terminal =
+        drivingDrain.mode === "heuristic"
+          ? drivingLaneTerminalForDrain(fixRounds, cfg.lanes.prFixCap, drivingDrain.dailyBudgetBreached)
+          : drivingDrain.blockedLanes.has(w.name);
+      if (!terminal) continue;
+      if (w.pr == null) continue; // a PR-less driving row is DRIVE's own fail-safe, not drain's
+      const reason =
+        fixRounds >= cfg.lanes.prFixCap
+          ? `drain-fix-rounds-capped:${fixRounds}/${cfg.lanes.prFixCap}`
+          : drivingDrain.mode === "heuristic"
+            ? `drain-daily-budget-blocked:fix-rounds=${fixRounds}`
+            : `drain-ceiling-admission-blocked:fix-rounds=${fixRounds}`;
+      try {
+        await forge.addLabel(w.issue, cfg.labels.needsHuman);
+      } catch (e) {
+        state.appendEvent("drain-driving-escalation-label-failed", { worker: w.name, issue: w.issue, pr: w.pr, reason, error: String(e) });
+        continue; // stays `driving`, no latch — the next drain tick retries this whole branch
+      }
+      // #375 review round 3 (P2, Codex PR #388 verify pass): the evidence comment — WHY the
+      // engine gave up (the drain reason: kill-switch vs ceiling; fix-rounds spent vs cap; the
+      // specific budget/admission blocker) and HOW to undo it (#147 gated reentry, including the
+      // repeat-reentry trail escalateNeedsHuman's own callers preserve) — gets the SAME
+      // forge-before-terminal-upsert treatment as the label: label -> comment -> terminal upsert,
+      // mirroring the FIXABLE cap-exhausted branch exactly. A comment-write failure must not
+      // silently swallow this row into a needs-human issue with zero explanation (the preserved-
+      // evidence stance every other escalation in this file honors) — leave it `driving` (no
+      // upsert, no latch) and retry the WHOLE branch next tick; a re-attempt re-posts the label
+      // harmlessly (GitHub's addLabel is idempotent), same accepted stance as the cap-exhausted
+      // branch's own no-new-dedup-machinery ruling.
+      const gatedAttempts = w.gated_reentry_attempts ?? 0;
+      const reentryNote =
+        gatedAttempts > 0
+          ? `This is gated-reentry attempt ${gatedAttempts}/${cfg.lanes.gatedReentryCap} for this PR. ` +
+            (gatedAttempts >= cfg.lanes.gatedReentryCap
+              ? capHitEscalationNote(cfg)
+              : `Remove \`${cfg.labels.needsHuman}\` again once resolved to retry (#147 gated reentry).`)
+          : `Remove \`${cfg.labels.needsHuman}\` once resolved to reclaim the same PR (#147 gated reentry).`;
+      try {
+        await forge.addIssueComment(
+          w.issue,
+          `sapwood: ${reasons.join("+")} drain (#375) — PR #${w.pr} could not progress this tick ` +
+            `(${reason}), ${fixRounds} fix round(s) spent of ${cfg.lanes.prFixCap}. Escalating to ` +
+            `\`${cfg.labels.needsHuman}\` rather than wedge the bounded drain. ${reentryNote}`,
+        );
+      } catch (e) {
+        state.appendEvent("drain-driving-escalation-comment-failed", {
+          worker: w.name,
+          issue: w.issue,
+          pr: w.pr,
+          reason,
+          error: String(e),
+        });
+        continue; // stays `driving`, no latch — the next drain tick retries this whole branch
+      }
+      state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
+      state.appendEvent("drive-needs-human", { worker: w.name, issue: w.issue, pr: w.pr, reason, labeled: 1 });
+      escalated.push(w.name);
+    }
   }
   return { drainRequested, escalated };
 }
@@ -1056,7 +1248,7 @@ function summarizeFailureText(text: string): string {
  *  wrapped so any throw (network/auth/5xx — exactly the conditions env-failure.ts's forge
  *  signatures describe) reads as "still unreachable" rather than propagating. Deterministic:
  *  the classification is "did the call succeed", never an LLM judgment. */
-async function probeForgeReachable(forge: IForge): Promise<boolean> {
+export async function probeForgeReachable(forge: IForge): Promise<boolean> {
   try {
     await forge.listOpenIssueNumbers();
     return true;
@@ -1124,7 +1316,7 @@ function releaseCanaryInconclusive(state: State, workerName: string): void {
  *  P1-2 surfacing (PR #180 review): env-failure requeues suspended by a forge outage never
  *  degrade to needs-human — they stay durable in pending_rollbacks and are surfaced HERE, in
  *  the escalation message, as the human-visible record of what will drain on resume. */
-async function escalatePark(
+export async function escalatePark(
   forge: IForge,
   state: State,
   cfg: SapwoodConfig,
@@ -1312,7 +1504,15 @@ async function reclaimTerminalLane(
     settleCanary(state, w.name, envSource != null, iso);
     if (envSource) {
       const reason = summarizeFailureText(p.failureText ?? "");
-      state.enterPark(envSource, reason, w.issue, iso());
+      // #374 review (Codex sol-high finding 7): thread the CLI's own structured reset-time hint
+      // ONLY when THIS episode is llm-sourced — see env-failure.ts's probeDueWithHint and the
+      // schema v26->v27 migration's doc comment. A forge-classified failure whose transcript
+      // ALSO happens to carry rate-limit telemetry (both signatures can appear in the same
+      // captured output — e.g. a worker that hit quota earlier in its run and a forge outage
+      // later) must NOT suppress the FREE forge probe until an unrelated llm timestamp elapses;
+      // the hint is llm-specific scheduling input, never a forge one.
+      const resetHintAtIso = envSource === "llm" && p.rateLimitResetAtMs != null ? new Date(p.rateLimitResetAtMs).toISOString() : null;
+      state.enterPark(envSource, reason, w.issue, iso(), resetHintAtIso);
       state.appendEvent("env-failure", { worker: w.name, issue: w.issue, source: envSource, reason, hasPr: p.hasPr });
     }
     if (envSource && !p.hasPr) {
@@ -1726,6 +1926,11 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const iso = () => now().toISOString();
   const threshold = cfg.worker.heartbeatStaleSecs;
 
+  // #210: retained-worktree release scan — before the kill-switch gate on purpose. It is an
+  // OBSERVATION of state the engine already owns (no forge call, no spawn, no board write), and
+  // a human clearing a folder mid-drain must still clear the Needs-attention row.
+  releaseVanishedWorktrees(state);
+
   // #245 round-2 fix A3: reconcile any driving-row fix-leg spawn intent BEFORE the kill-switch
   // gate — see reconcileDrivingFixIntents' own doc for the crash window this repairs.
   await reconcileDrivingFixIntents(forge, state, supervisor, cfg, iso);
@@ -1802,7 +2007,25 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // drainThenEscalate re-reads runningWorkers()+fixingWorkers() AFTER the terminal reclaim
     // above transitioned those lanes out of `running`/`fixing`, so a just-recorded
     // handoff/done/driving lane is never re-touched.
-    const { drainRequested, escalated } = await drainThenEscalate(forge, state, supervisor, cfg, ["kill-switch"], now(), iso);
+    // #375 AC2: the kill-switch gate short-circuits before evaluateCeiling ever runs (#69's own
+    // documented trade-off — no ceiling evaluation under an active switch), so daily-budget
+    // status for the `driving`-lane drain check below has to be read fresh, here, rather than
+    // reused from a ceiling-section variable that doesn't exist on this path yet. Pure (a DB
+    // read + a config compare, no forge call) — safe under a kill-switch-frozen tick.
+    const killSwitchDailyBudgetBreached = budgetExceeded(state.dailySpendUsd(now()), cfg.cost.dailyBudgetUsd);
+    const { drainRequested, escalated } = await drainThenEscalate(
+      forge,
+      state,
+      supervisor,
+      cfg,
+      ["kill-switch"],
+      now(),
+      iso,
+      // #375 review round 1 (P1): DRIVE never runs under an active kill switch (this branch
+      // returns before it) — the heuristic is the ONLY evidence this caller can ever have. See
+      // `DrivingDrainMode`'s own doc for why the ceiling-path caller below must NOT share it.
+      { mode: "heuristic", dailyBudgetBreached: killSwitchDailyBudgetBreached },
+    );
     return {
       reclaimed,
       dispatched: [],
@@ -1835,6 +2058,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   present -> KILL_SWITCH already returned above, so this line is never reached — the
   //   stricter gate wins, unconditionally.
   const paused = state.isPauseActive() || (deps.forceDispatchPause ?? false);
+  // #375 review round 2 (P1): `paused` above also folds in round.ts's OWN `forceDispatchPause`
+  // (round-budget / round-dispatch-cap / milestone / run-level stop conditions — see round.ts's
+  // tryDispatchWave/recordBudgetStop) — none of those are "new dispatch" from a driving lane's
+  // fix leg's point of view: an already-open PR finishing its own rework is continuing existing
+  // work, never opening new work, the exact reasoning #375 item 1 already applied to
+  // cost.roundBudgetUsd specifically. Folding `forceDispatchPause` into the fix-leg admission
+  // gate (below) reproduced the SAME permanent wedge under a different trigger — a driving
+  // lane's FIXUP forever blocked on "fix-leg-admission-blocked:paused" once ANY round/run-level
+  // stop condition fired, never clearing until the round itself ended (Codex PR #388 review,
+  // P1). DISPATCH is ALREADY fully frozen independently the moment `forceDispatchPause` fires —
+  // round.ts sets `dispatchCapOverride: 0` in lockstep with it, and the DISPATCH gate below
+  // checks `effectiveDispatchCap > 0` regardless of `paused` — so threading `forceDispatchPause`
+  // into the fix-leg gate serves no purpose there except reintroducing the #375 wedge.
+  // `humanPauseOnly` is the ONE genuine human control that should still hold a fix leg back —
+  // the out-of-band `data/PAUSE` sentinel — matching this comment's own long-standing "PAUSE
+  // only freezes DISPATCH, not existing-lane progression" intent below, which the fix-leg
+  // admission gate had silently violated since #246 introduced it. RESUME's own admission gate
+  // (`resumeSpendPaused`, below) and the llm-probe suppression deliberately keep using the wider
+  // `paused`, unchanged — a `handoff` lane is NOT in `state.activeWorkers()` (running + driving +
+  // fixing only), so a resume forever blocked by `forceDispatchPause` does not itself keep
+  // `activeWorkers()` above zero — it is not the same wind-down-never-exits shape this issue
+  // fixes. Scope kept deliberately narrow to the fix-leg gate; revisit RESUME separately if it
+  // ever proves to share the shape.
+  const humanPauseOnly = state.isPauseActive();
   // Snapshot before RECLAIM: a lane that writes .handoff during this tick gets one settled
   // terminal beat and becomes resumable on the NEXT tick, never immediately in the same tick.
   const handoffsAtTickStart = state.handoffWorkers();
@@ -2190,14 +2437,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   down, in deps.mergeGate.driveOne (merge-driver.ts), invoked ONLY from here. Omitted
   //   mergeGate -> driving lanes stay driving with no gate/merge activity (pre-#13 behavior).
   const driven: DrivenOutcome[] = [];
-  // #246: the SAME round-budget read the DISPATCH phase re-derives later this tick (line below
-  // marked "Shared fresh-spend gates for RESUME + DISPATCH") — a fix leg is itself a fresh
-  // Claude worker leg (startFixLeg -> supervisor.resume), so a FIXUP dispatch must observe the
-  // identical post-reclaim round-spend gate a brand-new coding-worker dispatch does (zero new
-  // accounting machinery, per #246's own AC). Pure/cheap (just deps.roundSpendUsd() vs the cap,
-  // same as the later read) — evaluating it again here, right where DRIVE needs it, is safe;
-  // nothing in between mutates the round ledger.
-  const driveOverBudget = budgetExceeded(deps.roundSpendUsd?.() ?? 0, cfg.cost.roundBudgetUsd);
+  // #375 review round 1 (P1): lanes whose OWN fixable branch, THIS tick, actually hit a
+  // ceiling-caused admission block or a genuine fix-rounds-cap exhaustion — the OBSERVED truth
+  // DRIVE just produced, as opposed to the `drivingLaneTerminalForDrain` heuristic the
+  // kill-switch path is stuck guessing with (DRIVE never runs there at all). Consulted only by
+  // the CEILING section's own `drainThenEscalate` call, below, once this tick's DRIVE loop has
+  // finished populating it — see that call site's own comment for why the two callers must NOT
+  // share one predicate.
+  const driveFixBlockedLanes = new Set<string>();
+  // #375 (PM adjudication, option (a)-minimal): fix legs for an ALREADY-OPEN PR are EXEMPT
+  // from cost.roundBudgetUsd — round budget paces NEW dispatch only (see the DISPATCH phase's
+  // own `overBudget` below, a completely separate read against the SAME config key; that one
+  // is untouched by this issue). A driving lane with an open PR has no other completion path
+  // (merge or fix — there is no "abandon the PR" outcome), so round-budget-blocking its fix leg
+  // was the dogfood-observed wedge (#375: F7/F8, round cap crossed -> FIXABLE forever queued,
+  // round never closes). The fix-leg path below remains bounded by the three PRE-EXISTING
+  // limits instead, unchanged: cfg.lanes.prFixCap (attempts — `cap` below), worker.budgetUsdSoft
+  // (each fix leg's own per-worker graceful-handoff ceiling, enforced unchanged by
+  // worker.ts/supervisor), and cfg.cost.dailyBudgetUsd (still enforced a few lines down, via
+  // fixLegAdmissionBlockReason's `ceilingBreached` — evaluateCeiling folds in daily-budget +
+  // wall-clock, NEVER round budget, so that admission check is untouched by this exemption).
+  // Kept as a named constant (rather than inlining `false` at each call site) purely so the
+  // two consumers below read as "the fix-leg path's own round-budget signal", documented once,
+  // not two unexplained `false` literals.
+  const driveOverBudget = false;
   // #246 review round 2 (E1, Codex sol-high PR #264 delta): a FIXUP dispatch must observe the
   // SAME admission gates RESUME/DISPATCH do (pause / ceiling / park / run-spend-stop), not just
   // the round budget above — but DRIVE makes a remote gate.driveOne call per driving lane and can
@@ -2353,6 +2616,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           });
         }
       }
+      // #294: hold-visibility. A hold is the one human-INITIATED carrier in the three-tier
+      // escalation model, and until now it lived only inside gate derivation — deriveGate reads
+      // the label live and appends nothing, so a held PR was indistinguishable from "waiting on
+      // review" in persisted data (frontend-design.md §11 follow-up #7). driveOne reports its
+      // live observation STATELESSLY every pass (it has no memory), so the transition is derived
+      // HERE against the durable event log, the same dedup-the-event-not-the-signal paradigm as
+      // the reviewer-failover announcement above: pr-held on the first pass that observes a
+      // hold, pr-released on the first pass that observes it gone, nothing on steady-state
+      // ticks. Crash-safe for free — the log IS the memory, so a kill -9 between the observation
+      // and the next tick re-observes the same state and re-emits nothing. Purely additive: an
+      // absent observation (the paths that never wrap one) is a no-op, never a release, and the
+      // gate outcome below is untouched either way.
+      if (outcome.holdObservation) {
+        // #294 (Codex P2): scoped to (worker, pr) — see lastHoldEvent's own doc for the
+        // lane-repointing rationale.
+        const lastHold = state.lastHoldEvent(w.name, pr);
+        if (outcome.holdObservation.held) {
+          if (lastHold !== "pr-held") {
+            state.appendEvent("pr-held", { worker: w.name, issue: w.issue, pr, label: outcome.holdObservation.label });
+          }
+        } else if (lastHold === "pr-held") {
+          state.appendEvent("pr-released", { worker: w.name, issue: w.issue, pr });
+        }
+      }
       switch (outcome.kind) {
         case "merged":
           state.upsertWorker({ ...w, state: "done", ended_at: iso() });
@@ -2406,7 +2693,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // MergeDriver.driveOne itself — this branch only ever sees the mode that actually acts).
           // driveDecision owns the fix_rounds/cap/budget refinement this pure PR-level outcome
           // never carries — fed from THIS lane's own WorkerRow.fix_rounds, cfg.lanes.prFixCap,
-          // and the round-budget read captured once above the DRIVE loop (driveOverBudget).
+          // and `driveOverBudget` (#375: hardcoded `false` — a fix leg is exempt from round
+          // budget; see that constant's own doc for what still bounds it).
           const fixRounds = w.fix_rounds ?? 0;
           const cap = cfg.lanes.prFixCap;
           const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget);
@@ -2429,15 +2717,26 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             // #246 review round 1 (C2) + round 2 (E1): a FIXUP dispatch spawns a FRESH paid
             // Claude worker leg (startFixLeg -> supervisor.resume) — it must pass the SAME
             // new-leg admission gate RESUME/DISPATCH do (pause / ceiling breach / environment
-            // park / run-spend-stop), not just the round budget driveDecision already folded in
-            // above. A wind-down must drain, never start a brand-new fix leg instead. Blocked ->
-            // stays driving, retried next tick (transient); the gate derivation itself already
-            // ran (this only gates the spawn). Ceiling/run-spend-stop are read FRESH here (E1),
-            // not from a pre-DRIVE-loop snapshot — DRIVE can run long across many lanes, and
-            // wall-clock keeps elapsing regardless of spend, so a snapshot taken before the loop
-            // started could be stale by the time a LATER lane reaches this check.
+            // park / run-spend-stop). #375: round budget is deliberately NOT one of them any
+            // more — `overBudget: driveOverBudget` below is always `false` now (see that
+            // constant's own doc), so this admission check's `ceilingBreached` (daily-budget +
+            // wall-clock only, never round budget) is the sole budget-shaped gate a fix leg still
+            // has to clear. #375 review round 2 (P1): `paused: humanPauseOnly` below (NOT the
+            // wider `paused`) for the exact same reason — round.ts's own `forceDispatchPause`
+            // (round-budget/round-dispatch-cap/milestone/run-level stop conditions) is not a
+            // human pause and not "new dispatch" from a fix leg's point of view; see
+            // `humanPauseOnly`'s own doc, above the kill-switch/PAUSE section, for the full
+            // reasoning and why RESUME deliberately keeps the wider `paused`. A wind-down must
+            // drain, never start a brand-new fix leg instead — that's still fully enforced here,
+            // just via `ceilingBreached`/`parkActive`/`runSpendStop` and a GENUINE human pause,
+            // not round.ts's internal dispatch-quota bookkeeping. Blocked -> stays driving,
+            // retried next tick (transient); the gate derivation itself already ran (this only
+            // gates the spawn). Ceiling/run-spend-stop are read FRESH here (E1), not from a
+            // pre-DRIVE-loop snapshot — DRIVE can run long across many lanes, and wall-clock
+            // keeps elapsing regardless of spend, so a snapshot taken before the loop started
+            // could be stale by the time a LATER lane reaches this check.
             const admissionBlock = fixLegAdmissionBlockReason({
-              paused,
+              paused: humanPauseOnly,
               ceilingBreached: ceilingReasonsAsOf(now()).length > 0,
               parkActive: parkedBeforeProbes,
               overBudget: driveOverBudget,
@@ -2447,6 +2746,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               const reason = `fix-leg-admission-blocked:${admissionBlock}`;
               state.appendEvent("fix-leg-dispatch-blocked", { worker: w.name, issue: w.issue, pr, blockReason: admissionBlock });
               driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason });
+              // #375 review round 1 (P1): ONLY a ceiling-caused block belongs in the observed
+              // set the CEILING section's drain consults below — `paused`/`park`/`run-spend-stop`
+              // are separate, typically human-controlled or self-healing conditions, unrelated to
+              // the daily-budget/wall-clock breach that triggers that drain at all (first-match-
+              // wins in fixLegAdmissionBlockReason means a paused+breached tick reports "paused"
+              // here, correctly excluding it — that lane isn't stuck for a BUDGET reason).
+              if (admissionBlock === "ceiling") driveFixBlockedLanes.add(w.name);
               break;
             }
             try {
@@ -2469,14 +2775,24 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             }
             break;
           }
-          // action === "ESCALATE": either a transient this-tick budget block (retry next tick,
-          // no state change), or the fix_rounds cap is genuinely exhausted (permanent escalation
-          // — #147's GATED RECLAIM is the post-adjudication reentry channel back in).
-          if (driveOverBudget) {
-            state.appendEvent("drive-queued", { worker: w.name, issue: w.issue, pr, reason: `fix-leg-over-budget:${outcome.reason}` });
-            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: `fix-leg-over-budget:${outcome.reason}` });
-            break;
-          }
+          // action === "ESCALATE": with `driveOverBudget` now permanently `false` (#375 — a fix
+          // leg is exempt from round budget, so driveDecision's own overBudget-escalate branch
+          // can never fire here anymore), the ONLY way this branch is reached is fixRounds
+          // already >= cap (or a non-integer/negative fix_rounds, driveDecision's own fail-safe)
+          // — genuinely exhausted, permanent escalation. #147's GATED RECLAIM is the post-
+          // adjudication reentry channel back in. (The pre-#375 transient "retry next tick,
+          // no state change" branch this comment used to describe is gone: round-budget alone
+          // can no longer wedge a fix leg, and the daily-budget/pause/park/run-spend-stop
+          // reasons are handled entirely by the admission-block check above, which leaves the
+          // lane `driving`+queued without ever reaching `action === "ESCALATE"` at all.)
+          // #375 review round 1 (P1): this IS the observed, this-tick truth that the lane is
+          // fix-rounds-capped — add it to the CEILING section's drain set unconditionally
+          // (regardless of which sub-branch below it falls into: labeled+commented+terminal, or
+          // stuck `driving`+queued on a transient forge-write failure). A write-failure retry
+          // would normally converge on its own next tick, but if THIS SAME tick also happens to
+          // be past the ceiling drain window, there is no reason to make it wait an extra tick
+          // for what DRIVE already proved true right here.
+          driveFixBlockedLanes.add(w.name);
           // Cap exhausted. Hard rule (#69/#147 forge-before-terminal-upsert): the needs-human
           // label AND the escalation comment (naming rounds spent + the standing signal) land
           // BEFORE the terminal upsert. A label-write failure leaves the row untouched (still
@@ -2544,7 +2860,23 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   let drainRequested: string[] = [];
   let escalated: string[] = [];
   if (ceilingBreached) {
-    ({ drainRequested, escalated } = await drainThenEscalate(forge, state, supervisor, cfg, ceilingReasons, nowDate, iso));
+    ({ drainRequested, escalated } = await drainThenEscalate(
+      forge,
+      state,
+      supervisor,
+      cfg,
+      ceilingReasons,
+      nowDate,
+      iso,
+      // #375 review round 1 (P1): DRIVE already ran THIS tick (it precedes this CEILING
+      // section) — the heuristic `drivingLaneTerminalForDrain` uses on the kill-switch path
+      // would false-positive here (a fix-capped-from-history lane sitting in WAIT_REVIEW can
+      // still merge for free the moment review lands; DRIVE's ESCALATE only fires on a NEW
+      // finding). Pass the OBSERVED set instead — lane names whose own fixable branch, THIS
+      // tick, actually hit a ceiling-caused admission block or a genuine cap exhaustion (see
+      // `driveFixBlockedLanes`'s own doc, and `DrivingDrainMode`'s).
+      { mode: "observed", blockedLanes: driveFixBlockedLanes },
+    ));
   } else {
     // Resolved (daily cap rolled to a fresh day / wall-clock cfg raised / kill switch
     // lifted before this tick) -> clear so a future re-breach starts a fresh drain window.
@@ -2615,7 +2947,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     // unaffected either way.
     if (llmEpisode && llmEpisode.canaryWorker == null && deps.probeLlmReachable && !ceilingBreached && !paused) {
       const backoffSec = probeBackoffSec(llmEpisode.probeAttempts, cfg.envFailure.probeBackoffBaseSec, cfg.envFailure.probeBackoffMaxSec);
-      if (probeDue(llmEpisode.lastProbeAt, nowDate.getTime(), backoffSec)) {
+      // #374: a known reset-time hint floors the first useful probe (env-failure.ts's
+      // probeDueWithHint) — reduces to plain probeDue when no hint was ever recorded for this
+      // episode (llmEpisode.resetHintAt == null), byte-identical to pre-#374 behavior.
+      if (probeDueWithHint(llmEpisode.lastProbeAt, nowDate.getTime(), backoffSec, llmEpisode.resetHintAt)) {
         const raw = await deps.probeLlmReachable();
         const pingOk = typeof raw === "boolean" ? raw : raw.ok;
         // Amendment 2: on failure, the probe's own first error line rides along in the event —

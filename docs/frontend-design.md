@@ -227,7 +227,10 @@ defined **semantically, not by sentence wording**: a kind whose event
 only some payloads qualify (the entry owns its own condition — no side
 list to drift, and gate②'s existing extend-the-map checklist item curates
 the flag with the sentence). Flagged today: `drive-needs-human`,
-`rollback-escalated`, `plan-review-escalated`, `gated-reentry-capped`,
+`rollback-escalated`, `plan-review-escalated`, `verify-na-proposed` (#296 —
+the gate⓪ "not separately verifiable" proposal: labels and comment land
+automatically, but only a person accepts or rejects it; issue-scoped, so the
+existing issue-scoped clears below resolve the row), `gated-reentry-capped`,
 `gated-reentry-capped-label-failed`, `worktree-retained`,
 `park-escalated`, `env-failure-preserved` (that path deliberately leaves
 the lane failed — the preserved PR needs a manual drive),
@@ -586,7 +589,7 @@ precisely because they convey what actually happens: **CI**, **retro**,
 performed at that node. The kinds — counted by the
 map, never by this prose: an earlier hard-coded "33" here had already
 drifted past #180's park/environment family, proving §2's own rule
-(`run-started`/`round-phase` remain pending their engine issue; **every
+(`run-started`/`round-phase` shipped with #206; **every
 engine PR that adds an event kind must extend this map; make it a gate②
 checklist item**):
 
@@ -614,6 +617,8 @@ checklist item**):
 | `rollback-escalated` | Couldn't return issue #{issue} automatically — flagged for a human |
 | `reviewer-fallback-switch` | The usual reviewer isn't answering — switched to the backup |
 | `reviewer-fallback-revert` | The usual reviewer is back — switched back |
+| `pr-held` | A person put PR #{pr} on hold — nothing moves until they lift it |
+| `pr-released` | Hold released — PR #{pr} resumes |
 | `worktree-retained` | Kept lane {worker}'s working folder for inspection |
 | `worktree-released` | Lane {worker}'s retained folder was cleaned up |
 | `env-failure` | Lane {worker} hit an environment problem — not the work itself (subsequent events narrate the disposition; this sentence claims none of it — `hasPr` alone cannot pick the outcome) |
@@ -632,6 +637,7 @@ checklist item**):
 | `triage-degraded` | A planning session had trouble — some issues keep their old plans |
 | `no-plan-after-draft` | Issue #{issue} still has no usable plan after a drafting attempt |
 | `plan-review-escalated` | Issue #{issue}'s plan needs a human — automated review couldn't approve it |
+| `verify-na-proposed` | Issue #{issue} proposed as not separately verifiable — a person decides |
 | `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
 | `gated-reentry-capped` | Issue #{issue} was unblocked too many times without landing — flagged for a human |
 | `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |
@@ -866,6 +872,77 @@ lands as a separate human-authored change.
   and opens the browser. Read-only DB handle; safe to run beside a live engine
   (WAL mode).
 
+### Server — what has landed (#142, completed by #360)
+
+`dashboard/server.ts` serves the whole §8 surface: the four READ routes (`GET
+/api/loop/state`, `GET /api/events?after=&limit=`, `GET
+/api/spend?after=&limit=`, `GET /api/rounds`), the single gated `POST
+/api/control`, and the `dashboard/dist` statics.
+`createDashboardServer({ dbPath, configPath, port, staticDir })` opens `State`
+in `readOnly` mode, binds `127.0.0.1` (default port 4517), and dispatches
+through a pathname→method route table. There is no CLI entry point yet — until
+`sapwood dashboard` lands, the server is started from code.
+
+Wire details the frontend can rely on:
+
+- Both paged feeds answer `{ <name>: [...], "lastId": n }` — `events` for
+  `/api/events`, `spend` for `/api/spend` — with the same `after`/`limit`
+  contract, a shared 1000-row page cap, and a `lastId` that an empty tail
+  leaves at the caller's own cursor rather than rewinding to 0.
+- `/api/rounds` is unpaged: one row per round is a chapter index, not a feed.
+  Every `rounds` row appears, artifact-less ones included, with
+  `schemaVersion`/`artifact` both `null` when there is no artifact (render
+  tally-less, never skip the round). `eventCount` is the round's slice of the
+  ledger — its own `startEventId` exclusive to the *next* round's inclusive, so
+  the counts partition the ledger; events before the first round belong to none.
+- Anything outside `/api/` is a static: a real file under `dashboard/dist`, else
+  the `index.html` shell (the app is client-routed). `/api/*` never falls back —
+  an unknown API path is an honest JSON 404. "Under `dist`" is checked against
+  **real** paths on both sides (the root is realpath'd once at startup): a
+  textual `../` is refused before the filesystem is touched, and a symlink
+  anywhere under `dist` that resolves outside it is refused too, rather than
+  followed or laundered into the shell fallback.
+
+Five things about it are decisions, not implementation detail:
+
+- **The write route is registered, not hidden.** `dashboard.controls` (#210)
+  decides whether `/api/control` exists at all; `false` — *and an unreadable
+  config*, fail-closed — means a 404, so the spectator posture is structural.
+  The route defends itself server-side: `X-Sapwood-Control` (which forces a
+  preflight this server never grants), an `application/json` content-type (so a
+  no-preflight form POST cannot reach a verb), and an `Origin` that, when
+  present, must be this server's. Its verb allowlist is exactly `start`,
+  `pause`, `resume`, `stop` — `estop` joins it in the same change that lands the
+  #293 `EMERGENCY_STOP` sentinel, never before, because a verb that reports
+  success while signalling nothing is worse than a 400. The only effect is
+  creating/removing the engine's own `PAUSE`/`KILL_SWITCH` files, and the reply
+  is the engine state read back *after* the signal (`stop` answers `stopping`
+  while lanes drain), so the UI renders the real transition.
+
+- **The config surface is an allowlist**, `CONFIG_ALLOWLIST` in the same file —
+  the §3 E groups' named leaves plus the per-role `model`/`effort` keys. A
+  config key added later is not served unless someone adds it there, so the
+  no-secrets guarantee survives config growth.
+- **The engine-state derivation lives server-side only** and reads the engine's
+  own `State`/config rather than re-querying SQLite, so `sapwood status` and the
+  dashboard cannot drift apart — the control route's reply goes through that
+  same derivation. Its six dashboard-only reads (`lastTickAt`, `countEvents`,
+  `eventsPage`, `spendByModelForDay`, `spendPage`, `listRounds`) are read-only
+  additions to `engine/src/state/state.ts` — notably `lastTickAt`, which reads
+  the heartbeat without the write `engineSessionStart` performs.
+- **The SQLite handle stays read-only even now that a write route exists.** The
+  control verbs write files, never rows; a write attempted through the handle
+  still throws, and the test suite asserts it after a successful control call.
+- **`spend.runUsd` is `null`** until follow-up #206's `run-started` event
+  persists the #154 run anchor (today it exists only in engine-process memory).
+  The header meter therefore falls back whole to the daily tier, exactly as §3 A
+  already specifies — no new machinery, and no mixed-tier fraction.
+
+The server is Node-side and the vite frontend is not, so the package carries two
+tsconfigs — `tsconfig.json` (bundler resolution, DOM) for `src/`, and
+`tsconfig.server.json` (NodeNext, no DOM) for `server.ts`; `npm run typecheck`
+runs both. The CI gap noted above applies to it unchanged.
+
 ## 10. Deferred (v0.3+)
 
 - **Config editing** — needs a config write path + auth story; contradicts
@@ -891,8 +968,9 @@ lands as a separate human-authored change.
   deferred to v0.3 (§11). A round is fully replayable the moment it closes.
 - **Honest "On hold" rendering** — blocked on the hold-visibility events
   (#294, §11 follow-up #7); until then held PRs render as waiting.
-- **Config replay** — becomes possible once `run-started` carries a
-  resolved-config snapshot (§11); v0.2 keeps the config drawer live-only.
+- **Config replay** — unblocked by #206 (`run-started` now carries the
+  allowlisted snapshot, §11), but still deferred: v0.2 keeps the config
+  drawer live-only.
   (The earlier "replayable cost panels" deferral is superseded: `spend_ledger`
   is itself the historical source — no event-payload folding needed, §11.)
 
@@ -911,9 +989,9 @@ mutable snapshot or outside the engine's own DB is live-only.
 |---|---|---|
 | `events` | append-only, id-ordered | **Yes** — the replay stream itself |
 | `spend_ledger` | append-only, id-ordered | **Yes** — settled cost at any cursor is `SUM(usd)` up to it |
-| `rounds.phase` | in-place UPDATE (`advanceRoundPhase` appends no event) | **Not today** — needs the `round-phase` event below |
+| `rounds.phase` | in-place UPDATE, mirrored by an append-only `round-phase` event (#206) | **Yes** — fold the events, never read the mutable row |
 | live telemetry (`est_cost_usd`, `contextTokens`, token split) | overwritten per probe, cleared when the lane leaves `running` (#155) | **Never** — the history never existed. Est never replays; settled only (§3 E's settled/est grammar is the same line) |
-| resolved config | read at startup, unversioned | Live-only until `run-started` snapshots it |
+| resolved config | read at startup, snapshotted (allowlisted subset + hash) into `run-started` (#206) | **Yes**, for the allowlisted keys — anything outside that list stays live-only |
 | backlog / board | external GitHub state | Live-only |
 
 ### Round identity & the replay unit
@@ -979,7 +1057,13 @@ the overlay is the named boundary.
    { round_id, phase })` covering the **full trail**: the initial `aligning`
    at round open, every `advanceRoundPhase` transition, and the terminal
    `closed`; without it the hero's phase lighting cannot replay and the
-   §8 spend phase-bucketing has no windows.
+   §8 spend phase-bucketing has no windows. **Shipped** (round.ts): the
+   event means *"round R entered phase P"* and is emitted by whichever
+   process actually enters it — including a restart resuming a crashed
+   round at its persisted phase — so no crash window can drop a phase the
+   round really ran. **Consumers must fold idempotently**: a re-run phase
+   says so twice (rerun-not-resume, #77 dec. 4) and the engine deliberately
+   does not deduplicate.
 2. **`run-started` event** (#206) — appended once at CLI startup, payload
    `{ config: <allowlisted subset>, configHash }` — the same allowlist the
    config drawer serves (§3 E); a hash alone cannot power historical
@@ -990,15 +1074,22 @@ the overlay is the named boundary.
    dashboard server cannot compute `spend.runUsd` (§8) until this event's
    adjacent ledger position persists the anchor. Until it lands, the header
    meter runs whole on the daily tier (§3 A's existing fallback path — no
-   new machinery).
+   new machinery). **Shipped** (cli.ts, both drivers): appended once per
+   process start, before anything else that run writes. The allowlist is
+   `dashboardConfigSubset()` in `engine/src/config/config.ts` — the single
+   list this event and `/api/status`'s own `config` key (§8) both read, so
+   the drawer never has to re-derive it (and a config key added later is
+   absent from both until someone lists it). `configHash` is a SHA-256 over the
+   **full** resolved config with keys sorted, so key order in the YAML
+   never shows up as a config change.
 3. **Titles in event payloads** (#207, design-director amendment) —
    `dispatched` carries the issue title, PR-producing/merging events carry
    the PR title, read from data the engine already holds at those moments
    (board query / forge response) — never an extra GitHub call. Powers the
    §3 C hover tooltips offline and in replay; entities without a
    title-bearing event degrade to no tooltip.
-4. **`worktree-released` event** (#210, round-2 amendment) — payload
-   `{ worker, issue, worktreePath }`, mirroring `worktree-retained`'s.
+4. **`worktree-released` event** (#210, round-2 amendment) — **LANDED** —
+   payload `{ worker, issue, worktreePath }`, mirroring `worktree-retained`'s.
    Emission: on tick/startup the engine checks each retained path it has
    recorded; when the folder no longer exists (the human cleaned it up), it
    appends the event once. Matching for the §3 Needs-attention clear is
@@ -1007,9 +1098,14 @@ the overlay is the named boundary.
    matched and its row therefore never auto-clears — the engine must not
    emit retention without a path going forward. Purpose: the strip's only
    missing resolution signal, replay-consistent like every event.
-5. **`dashboard.controls` config key** (#210, round-2 amendment) — boolean,
-   default `true`, added to the strict config schema; gates the §3
-   Operations verbs and the §8 `POST /api/control` route.
+   Dedupe is the event log itself (the newest of the two kinds for a given
+   path decides), so repeat ticks and restarts emit nothing further — and a
+   lane slot recycled at the same path can be retained, and resolve, again.
+5. **`dashboard.controls` config key** (#210, round-2 amendment) —
+   **LANDED** — boolean, default `true`, in the strict config schema
+   (`docs/configuration.md`); gates the §3 Operations verbs and the §8
+   `POST /api/control` route. `false` = pure-spectator dashboard. Schema
+   only: the dashboard reads it, the engine does not.
 6. **`EMERGENCY_STOP` sentinel** (#293, third amendment) — immediate hard
    stop, no drain window: detection hard-kills every running/fixing lane's
    process group in the same tick via the existing kill path, with the

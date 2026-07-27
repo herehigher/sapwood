@@ -823,6 +823,19 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
         );
     `);
   },
+  // 26 -> 27 (#374): a park episode's OPTIONAL reset-time hint — the Claude CLI's own structured
+  // rate-limit telemetry (worker.ts's extractRateLimitResetAt / peripheral.ts's RoleSessionResult
+  // .rateLimitResetAtMs) can name the EXACT instant quota resets, strictly better scheduling
+  // information than the bounded exponential backoff alone (env-failure.ts's probeDueWithHint).
+  // Nullable, set ONCE at park entry (State.enterPark's optional 5th argument) and never
+  // overwritten thereafter — same "first detection wins" stance entered_at/reason already take
+  // (a storm of classified failures for the SAME episode must not keep moving either the
+  // escalation clock OR this hint). A pre-#374 row simply has NULL here, which
+  // probeDueWithHint treats identically to "no hint was ever observed" — the existing backoff
+  // schedule, unchanged.
+  (db) => {
+    db.exec(`ALTER TABLE park_state ADD COLUMN reset_hint_at TEXT;`);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -1066,6 +1079,38 @@ export interface RoundRow {
   start_spend_id?: number;
 }
 
+/** One `spend_ledger` row as the dashboard reads it (State.spendPage, #360) — the stored
+ *  columns verbatim, token counts camelCased to match the rest of the §8 wire. */
+export interface SpendLedgerRow {
+  id: number;
+  ts: string;
+  worker: string;
+  issue: number;
+  usd: number;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
+/** One `rounds` row with its artifact left-joined (State.listRounds, #360). `schemaVersion` and
+ *  `artifact` are BOTH null for a round that never got one — the reader's cue to render the
+ *  round without an outcome tally rather than to skip it. */
+export interface RoundListRow {
+  roundId: number;
+  status: RoundStatus;
+  startedAt: string;
+  endedAt: string | null;
+  /** #123 cursors, from the ROUNDS row — the replay chapter window. Not artifact fields. */
+  startEventId: number;
+  startSpendId: number;
+  eventCount: number;
+  schemaVersion: number | null;
+  /** The validated artifact JSON, parsed and verbatim (docs/round-artifact.md is its contract). */
+  artifact: unknown;
+}
+
 /** #231: one engine-controlled input channel's read record for one peripheral session attempt —
  *  see the schema v13->v14 migration comment for the full table-shape rationale. `attempt` is
  *  populated by the CALLER from State.nextInputManifestAttempt (itself derived from durable
@@ -1191,6 +1236,9 @@ export interface ParkRow {
   probeAttempts: number;
   escalatedAt: string | null;
   canaryWorker: string | null;
+  /** #374: the FIRST-observed reset-time hint for this episode (ISO string), or null when none
+   *  was ever supplied to State.enterPark — see the schema v26->v27 migration's doc comment. */
+  resetHintAt: string | null;
 }
 
 // ── Ambient session context manifests (#236) ──────────────────────────────────────────────
@@ -1805,6 +1853,33 @@ export class State {
     this.db.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run(new Date().toISOString(), kind, JSON.stringify(payload));
   }
 
+  /** #294: the kind of the most recent hold-visibility event for `worker`'s lane, or null if
+   *  the lane has never been held — tick()'s dedup source for the transition-only hold events,
+   *  the same event-log-as-memory pattern `lastReviewerFallbackEvent` uses below (#169: dedupe
+   *  the EVENT, not the signal). MergeDriver observes the hold label live on every gate pass and
+   *  has no memory of its own, so the durable log is what makes an episode edge detectable:
+   *  announce `pr-held` only when this is not already 'pr-held', `pr-released` only when it is.
+   *  Being on-disk is what makes it crash-consistent — a kill -9 between the observation and the
+   *  next tick re-reads the same answer and re-emits nothing. */
+  lastHoldEvent(worker: string, pr: number): "pr-held" | "pr-released" | null {
+    // #294 (Codex P2, PR #372): scoped to (worker, pr), not worker alone — a lane name
+    // reassigned to a new issue/PR must not inherit the prior PR's hold episode (a stale
+    // 'pr-held' would suppress the new PR's first held announcement, and an unheld new PR
+    // would emit a spurious 'pr-released' carrying the new PR number). Bounded blind spot,
+    // accepted: a PR still held when its lane is repointed never gets a closing 'pr-released'
+    // — the episode simply ends with the last durable 'pr-held' on record.
+    const row = this.db
+      .prepare(
+        `SELECT kind FROM events
+         WHERE kind IN ('pr-held', 'pr-released')
+           AND json_extract(payload, '$.worker') = ?
+           AND json_extract(payload, '$.pr') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(worker, pr) as { kind: string } | undefined;
+    return row?.kind === "pr-held" || row?.kind === "pr-released" ? row.kind : null;
+  }
+
   /** The most recent reviewer-failover announcement for `worker`'s lane (#54 R2) — tick()'s
    *  dedup source: driveOne reports the switch/revert signal STATELESSLY on every tick the
    *  condition holds (resolveReviewVerdict is pure and has no memory), so the durable event
@@ -2092,14 +2167,26 @@ export class State {
    *  pushing the duration-based escalation threshold out). A DIFFERENT source while parked
    *  opens its own row (mixed storm — PR #180 review P1-1a). `last_probe_at` is seeded to `now`
    *  so the first probe/canary waits a full base backoff (P1-1c). Returns true iff THIS call
-   *  actually inserted the row, so a caller can fire a park-entry event once per episode. */
-  enterPark(source: EnvFailureSource, reason: string, triggerIssue: number | null, now: string): boolean {
+   *  actually inserted the row, so a caller can fire a park-entry event once per episode.
+   *
+   *  `resetHintAtIso` (#374, optional — every pre-#374 call site omits it unchanged): a KNOWN
+   *  reset instant (worker.ts's extractRateLimitResetAt / peripheral.ts's RoleSessionResult
+   *  .rateLimitResetAtMs), stored ONCE at first entry, same "first detection wins" stance as
+   *  `reason`/`entered_at` — a later classified failure for the SAME open episode never
+   *  overwrites it (INSERT OR IGNORE no-ops the whole row on conflict, this column included). */
+  enterPark(
+    source: EnvFailureSource,
+    reason: string,
+    triggerIssue: number | null,
+    now: string,
+    resetHintAtIso: string | null = null,
+  ): boolean {
     const res = this.db
       .prepare(
-        `INSERT OR IGNORE INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts)
-         VALUES (?, ?, ?, ?, ?, 0)`,
+        `INSERT OR IGNORE INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts, reset_hint_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?)`,
       )
-      .run(source, reason, triggerIssue, now, now);
+      .run(source, reason, triggerIssue, now, now, resetHintAtIso);
     return res.changes > 0;
   }
 
@@ -2112,6 +2199,7 @@ export class State {
     probe_attempts: number;
     escalated_at: string | null;
     canary_worker: string | null;
+    reset_hint_at: string | null;
   }): ParkRow {
     return {
       source: row.source as EnvFailureSource,
@@ -2122,6 +2210,7 @@ export class State {
       probeAttempts: row.probe_attempts,
       escalatedAt: row.escalated_at,
       canaryWorker: row.canary_worker,
+      resetHintAt: row.reset_hint_at,
     };
   }
 
@@ -2461,6 +2550,35 @@ export class State {
     return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
   }
 
+  /** #210: every retained worktree path whose LATEST retention has not been released yet — the
+   *  input to conductor.ts's releaseVanishedWorktrees scan (docs/frontend-design.md §11
+   *  follow-up 4). Identity is the `worktreePath`, not the lane name (lane names are reused
+   *  slots), and the decision is "what is the newest event for this path" rather than "was this
+   *  path ever released": a slot recycled at the same path is retained again, and that fresh
+   *  retention must be able to resolve on its own. Null paths are excluded — they are
+   *  unmatchable by construction, which is exactly why the engine never emits one (see
+   *  conductor.ts's reportRetainedWorktree). The event log itself is the dedupe memory, so the
+   *  scan is restart-safe with no in-memory flag. */
+  unreleasedRetainedWorktrees(): { worker: string; issue: number; worktreePath: string }[] {
+    // Bare columns alongside a single MAX() come from the max row (documented SQLite behavior),
+    // so each group carries its LATEST event's kind and payload fields.
+    const rows = this.db
+      .prepare(
+        `SELECT json_extract(payload, '$.worker') AS worker,
+                json_extract(payload, '$.issue') AS issue,
+                json_extract(payload, '$.worktreePath') AS worktreePath,
+                kind, MAX(id)
+         FROM events
+         WHERE kind IN ('worktree-retained', 'worktree-released')
+           AND json_extract(payload, '$.worktreePath') IS NOT NULL
+         GROUP BY json_extract(payload, '$.worktreePath')`,
+      )
+      .all() as unknown as { worker: string; issue: number; worktreePath: string; kind: string }[];
+    return rows
+      .filter((r) => r.kind === "worktree-retained")
+      .map((r) => ({ worker: r.worker, issue: r.issue, worktreePath: r.worktreePath }));
+  }
+
   latestEvent(kind: string): { kind: string; payload: unknown } | undefined {
     const row = this.db.prepare("SELECT kind, payload FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1").get(kind) as
       | { kind: string; payload: string }
@@ -2505,6 +2623,109 @@ export class State {
     return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM spend_ledger").get() as { m: number }).m;
   }
 
+  // ── #142: dashboard reads (docs/frontend-design.md §8) ─────────────────────────────────
+  //
+  // Four PURE READS the dashboard's read-only handle needs and nothing else in the engine has
+  // an equivalent of. They live here rather than in dashboard/server.ts so there is exactly one
+  // module that knows this schema's SQL — §8's requirement that `sapwood status` and the
+  // dashboard "can never disagree" is only structural if neither re-derives the other's queries.
+
+  /** The engine session's liveness heartbeat, READ-ONLY — the staleness input to §8's engine-state
+   *  derivation. Deliberately NOT engineSessionStart(), which WRITES (it refreshes the heartbeat
+   *  and may reset the session): a spectator reading the clock must never move it. `null` means
+   *  no session row exists at all — the engine has never ticked against this DB. */
+  lastTickAt(): string | null {
+    const row = this.db.prepare("SELECT last_tick_at FROM engine_session WHERE id = 1").get() as { last_tick_at: string } | undefined;
+    return row?.last_tick_at ?? null;
+  }
+
+  /** How many events of one kind the ledger holds — §8's ring count is COUNT(kind='merged').
+   *  A COUNT rather than eventsAfterId(0, [kind]).length so a growing history never costs a
+   *  JSON.parse per row for a number the caller only wants to display. */
+  countEvents(kind: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = ?").get(kind) as { n: number }).n;
+  }
+
+  /** One ascending page of the RAW event ledger — §8's `/api/events` transport. Unlike
+   *  eventsAfterId (kind-filtered, id/ts dropped) the dashboard needs every kind plus the id
+   *  (the poll cursor) and ts (the replay clock), so this deliberately takes no kinds filter.
+   *  A row whose payload is not parseable JSON is served as `null` rather than throwing — one
+   *  corrupt legacy row must not make the whole feed unreadable. */
+  eventsPage(afterId: number, limit: number): { id: number; ts: string; kind: string; payload: unknown }[] {
+    const rows = this.db.prepare("SELECT id, ts, kind, payload FROM events WHERE id > ? ORDER BY id LIMIT ?").all(afterId, limit) as {
+      id: number;
+      ts: string;
+      kind: string;
+      payload: string;
+    }[];
+    return rows.map((r) => {
+      let payload: unknown = null;
+      try {
+        payload = JSON.parse(r.payload);
+      } catch {
+        /* corrupt row — served as null, never a 500 for the whole page */
+      }
+      return { id: r.id, ts: r.ts, kind: r.kind, payload };
+    });
+  }
+
+  /** `now`'s UTC calendar day of spend, grouped by model — §8's `spend.byModel`. Same day
+   *  window as dailySpendUsd (ts-prefix match), so the group sums and the headline total can
+   *  never disagree. KNOWN CEILING (recordSpend's own shape, not this query's): a settlement
+   *  writes one row per model but puts the leg's whole `usd` on the FIRST row, so a multi-model
+   *  leg attributes its cost to one of its models while the token counts stay per-model. */
+  spendByModelForDay(now: Date): { model: string; usd: number; inputTokens: number; outputTokens: number }[] {
+    const dayPrefix = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    const rows = this.db
+      .prepare(
+        `SELECT model, COALESCE(SUM(usd), 0) AS usd,
+                COALESCE(SUM(input_tokens), 0) AS inputTokens, COALESCE(SUM(output_tokens), 0) AS outputTokens
+         FROM spend_ledger WHERE ts LIKE ? GROUP BY model ORDER BY usd DESC, model`,
+      )
+      .all(`${dayPrefix}%`) as unknown as { model: string; usd: number; inputTokens: number; outputTokens: number }[];
+    // Re-shaped into ordinary objects: node:sqlite hands back null-prototype rows, which
+    // deep-equal comparisons (and any structuredClone-style consumer) treat as a different type.
+    return rows.map((r) => ({ model: r.model, usd: r.usd, inputTokens: r.inputTokens, outputTokens: r.outputTokens }));
+  }
+
+  /** One ascending page of the RAW spend ledger — §8's `/api/spend` transport (#360), the same
+   *  id-cursor paging contract eventsPage gives events, so replay can walk both feeds with one
+   *  cursor discipline. Rows are the ledger's own columns, nothing derived: a spend panel that
+   *  wants a total sums these, it never asks the server for a number it cannot re-derive. */
+  spendPage(afterId: number, limit: number): SpendLedgerRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, ts, worker, issue, usd, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+         FROM spend_ledger WHERE id > ? ORDER BY id LIMIT ?`,
+      )
+      .all(afterId, limit) as unknown as {
+      id: number;
+      ts: string;
+      worker: string;
+      issue: number;
+      usd: number;
+      model: string;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+    }[];
+    // Re-shaped into ordinary objects for the same null-prototype reason spendByModelForDay
+    // documents, and camelCased to match every other token count on the §8 wire.
+    return rows.map((r) => ({
+      id: r.id,
+      ts: r.ts,
+      worker: r.worker,
+      issue: r.issue,
+      usd: r.usd,
+      model: r.model,
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      cacheReadTokens: r.cache_read_tokens,
+      cacheCreationTokens: r.cache_creation_tokens,
+    }));
+  }
+
   // ── #123: round summary artifact (round_artifacts, migration 9->10) ─────────────────────
 
   /** Upsert the FINAL round artifact row — one per round (round_id is the PK), so a crash-rerun
@@ -2530,6 +2751,66 @@ export class State {
       | { schema_version: number; json: string }
       | undefined;
     return row ? { schemaVersion: row.schema_version, json: row.json } : undefined;
+  }
+
+  /** Every round, ascending, with its artifact LEFT-JOINed — §8's `/api/rounds` (#360).
+   *
+   *  The `rounds` table is the SPINE, not `round_artifacts`: a round that closed without an
+   *  artifact (pre-#123 history, or a crash between closeRound and saveRoundArtifact) is still
+   *  a round that happened, and dropping it would silently shorten the replay timeline. Such a
+   *  row comes back with `schemaVersion: null` / `artifact: null` and renders tally-less.
+   *
+   *  `eventCount` is the round's own slice of the ledger — its #123 start cursor exclusive, the
+   *  NEXT round's start cursor inclusive (the newest event id for the last round). That keeps
+   *  the counts a partition of the ledger rather than the unbounded `id > cursor` window
+   *  round-artifact.ts uses at close time, when there is no next round yet. Events before the
+   *  first round belong to no round and are counted by none. */
+  listRounds(): RoundListRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.round_id, r.status, r.started_at, r.ended_at, r.start_event_id, r.start_spend_id,
+                a.schema_version, a.json,
+                (SELECT COUNT(*) FROM events e
+                  WHERE e.id > r.start_event_id
+                    AND e.id <= COALESCE(
+                      (SELECT MIN(n.start_event_id) FROM rounds n WHERE n.round_id > r.round_id),
+                      (SELECT COALESCE(MAX(id), 0) FROM events))) AS event_count
+         FROM rounds r LEFT JOIN round_artifacts a ON a.round_id = r.round_id
+         ORDER BY r.round_id`,
+      )
+      .all() as unknown as {
+      round_id: number;
+      status: RoundStatus;
+      started_at: string;
+      ended_at: string | null;
+      start_event_id: number;
+      start_spend_id: number;
+      schema_version: number | null;
+      json: string | null;
+      event_count: number;
+    }[];
+    return rows.map((r) => {
+      let artifact: unknown = null;
+      if (r.json !== null) {
+        try {
+          artifact = JSON.parse(r.json);
+        } catch {
+          /* engine-written and schema-validated before storage — a corrupt row degrades to the
+             artifact-less rendering, never a 500 for the whole timeline */
+        }
+      }
+      return {
+        roundId: r.round_id,
+        status: r.status,
+        startedAt: r.started_at,
+        endedAt: r.ended_at,
+        startEventId: r.start_event_id,
+        startSpendId: r.start_spend_id,
+        eventCount: r.event_count,
+        schemaVersion: artifact === null ? null : r.schema_version,
+        artifact,
+      };
+    });
   }
 
   /** Where the derived markdown VIEW of a round's artifact lives on disk — null for an

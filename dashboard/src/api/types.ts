@@ -38,7 +38,9 @@ export type LoopState = {
   spend: {
     todayUsd: number;
     dailyBudgetUsd: number | null;
-    runUsd: number;
+    /** #154's run anchor lives only in engine-process memory until follow-up #206 persists
+     *  it, so the server serves null and the header falls back whole to the daily tier (§3 A). */
+    runUsd: number | null;
     runBudgetUsd: number | null;
     byModel: { model: string; usd: number; inputTokens: number; outputTokens: number }[];
   };
@@ -46,8 +48,9 @@ export type LoopState = {
   rings: number;
   /** Path only; the server never serves log content. */
   logPath: string | null;
-  /** Allowlisted subset of the resolved config (§3 E) — never the whole object. */
-  config: Record<string, unknown>;
+  /** Allowlisted subset of the resolved config (§3 E) — never the whole object.
+   *  null when the config is unreadable, the same honest-unknown as `lanes.max`. */
+  config: Record<string, unknown> | null;
 };
 
 export type LoopEvent = {

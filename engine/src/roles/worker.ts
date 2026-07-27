@@ -932,6 +932,80 @@ export function extractFailureText(jsonl: string): string {
   return out.join("\n");
 }
 
+/** #374 review (PM P2): a sanity horizon on the reset-time hint — see extractRateLimitResetAt's
+ *  own doc for why this exists. `resetsAt` is UNTRUSTED third-party input feeding a scheduling
+ *  decision (env-failure.ts's probeDueWithHint) that can otherwise wait forever: if the CLI ever
+ *  emitted milliseconds instead of seconds (a units mismatch lands ~1000x too far out — e.g.
+ *  epoch ms 1784885400000 treated as seconds and re-multiplied by 1000 lands in the year 58652),
+ *  or the value were simply corrupted, or local clock skew were severe, the naive hint could sit
+ *  centuries in the future — and probeDueWithHint would then withhold EVERY future probe
+ *  permanently (escalatePark still fires once at the duration threshold, but nothing ever probes
+ *  again afterward: the engine sits parked forever with no path back except a human clearing it
+ *  by hand). The real quota tiers observed are 5-hour and weekly; 48h comfortably covers both
+ *  with margin. A candidate hint further than this from `nowMs` is rejected here, at the single
+ *  extraction site every downstream consumer (conductor.ts's worker-leg park entry, peripheral.ts's
+ *  role-session park entry, round.ts's round-opening gate) reads from — so the fallback ("treat
+ *  as absent, use ordinary bounded-exponential backoff instead") is uniform and automatic, with
+ *  no per-consumer clamping needed. */
+export const MAX_RATE_LIMIT_RESET_HORIZON_MS = 48 * 60 * 60 * 1000;
+
+/** #374 review (Codex sol-high finding 8): the ECMAScript spec's OWN hard limit on valid `Date`
+ *  values — exactly ±100,000,000 days (≈273,790 years) from the epoch (MDN's documented bound,
+ *  never a tunable). `new Date(ms)` for any `ms` outside this range silently constructs an
+ *  Invalid Date, and calling `.toISOString()` on one THROWS a RangeError — a corrupted or
+ *  adversarial `resetsAt` (e.g. `-1e20`) survives the future-horizon check above (it can sit
+ *  arbitrarily far in the PAST, which that check never bounds) and would otherwise reach exactly
+ *  that call in conductor.ts's/peripheral.ts's `new Date(rateLimitResetAtMs).toISOString()` —
+ *  crashing the reclaim/park path itself. Bounding by this constant closes that crash
+ *  unconditionally, in both directions, at the single extraction site. */
+const JS_DATE_VALID_RANGE_MS = 8_640_000_000_000_000;
+
+/** #374 (dogfood F16/F17): the Claude CLI's own structured rate-limit telemetry line —
+ *  `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":<epoch
+ *  seconds>,"rateLimitType":"five_hour",...}}` — captured verbatim in a real session transcript
+ *  alongside (not instead of) the human-readable "You've hit your session limit · resets
+ *  6:30pm (Asia/Tokyo)" text extractFailureText already surfaces for classification. This is a
+ *  SEPARATE, purely structural extraction: a SCHEDULING input (the exact reset instant, as a
+ *  machine timestamp) for env-failure.ts's probeDueWithHint, never a classification input —
+ *  extractFailureText deliberately does NOT include `rate_limit_event` lines (they are neither
+ *  a `result` nor an `error` record), so this reads the SAME jsonl independently rather than
+ *  widening that function's classification surface.
+ *
+ *  Returns the LAST "rejected" record's `resetsAt` converted to epoch MILLISECONDS, or `null`
+ *  when no such record is present, every record found has a non-"rejected" status, a line fails
+ *  to parse, the resulting value falls outside JS_DATE_VALID_RANGE_MS in EITHER direction (finding
+ *  8 — never lets a corrupted/adversarial value reach a downstream `.toISOString()` and throw),
+ *  OR the value is further than MAX_RATE_LIMIT_RESET_HORIZON_MS in the FUTURE beyond `nowMs` (see
+ *  that constant's own doc) — tolerant by construction (never throws): an absent hint simply
+ *  means the ordinary bounded backoff schedule applies, exactly the pre-#374 behavior. A value
+ *  merely far in the PAST (but still Date-valid) is honored unchanged — that just means "probe
+ *  immediately", never a reason to reject. `nowMs` defaults to the real current time; overridable
+ *  for tests. */
+export function extractRateLimitResetAt(jsonl: string, nowMs: number = Date.now()): number | null {
+  let resetAtMs: number | null = null;
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // mid-write/truncated stream fragment
+    }
+    if (obj.type !== "rate_limit_event") continue;
+    const info = obj.rate_limit_info as Record<string, unknown> | undefined;
+    if (info?.status !== "rejected") continue;
+    const resetsAt = info.resetsAt;
+    if (typeof resetsAt === "number" && Number.isFinite(resetsAt)) {
+      resetAtMs = resetsAt * 1000;
+    }
+  }
+  if (resetAtMs == null) return null;
+  if (!Number.isFinite(resetAtMs) || Math.abs(resetAtMs) > JS_DATE_VALID_RANGE_MS) return null;
+  if (resetAtMs - nowMs > MAX_RATE_LIMIT_RESET_HORIZON_MS) return null;
+  return resetAtMs;
+}
+
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
  *  matcher covers exactly the tools the guard inspects — Read/Grep/Glob/NotebookRead joined
@@ -2254,6 +2328,9 @@ export class WorkerSupervisor implements Supervisor {
     // computing it unconditionally would re-read the jsonl on every probe of every lane for no
     // reason.
     const failureText = failed ? this.terminalFailureText(name) : undefined;
+    // #374: same "only for a FAILED lane" gating as failureText above — this is only ever
+    // consumed at the FAILED reclaim path's env-classification site.
+    const rateLimitResetAtMs = failed ? this.terminalRateLimitResetAtMs(name) : undefined;
     // #247: only for a DONE lane — same "compute it lazily, only where a consumer could ever
     // use it" stance failureText already takes for FAILED lanes (conductor.ts's fix-leg harvest
     // is the first reader; an ordinary worker's DONE result text is otherwise unconsumed).
@@ -2277,6 +2354,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(failureText !== undefined ? { failureText } : {}),
       ...(resultText !== undefined ? { resultText } : {}),
       ...(actualModel != null ? { actualModel } : {}),
+      ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
     };
   }
 
@@ -2322,6 +2400,13 @@ export class WorkerSupervisor implements Supervisor {
   private terminalFailureText(name: string): string {
     const text = extractFailureText(this.readJsonl(this.path(name, "jsonl")));
     return text.length > FAILURE_TEXT_TAIL_CHARS ? text.slice(-FAILURE_TEXT_TAIL_CHARS) : text;
+  }
+
+  /** #374: same shape as terminalFailureText — a new READ of the jsonl this class already
+   *  writes, feeding conductor.ts's env-park entry with a reset-time SCHEDULING hint when the
+   *  CLI's own structured rate-limit telemetry names one. */
+  private terminalRateLimitResetAtMs(name: string): number | null {
+    return extractRateLimitResetAt(this.readJsonl(this.path(name, "jsonl")));
   }
 
   /** #247: a DONE lane's own final-message text — parseResultText over this lane's CURRENT LEG

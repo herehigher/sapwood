@@ -7,9 +7,9 @@
   "engines": { "node": ">=24.0.0" },
   "scripts": {
     "dev": "vite",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json",
     "build": "vite build",
-    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "test": "node --import tsx --test \"*.test.ts\" \"src/**/*.test.ts\"",
     "contrast": "node --import tsx src/contrast.ts"
   },
   "dependencies": {

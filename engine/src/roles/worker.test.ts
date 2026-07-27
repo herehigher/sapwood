@@ -33,6 +33,7 @@ import {
   discoverClaudeBin,
   EMPTY_MCP_CONFIG_JSON,
   extractFailureText,
+  extractRateLimitResetAt,
   guardSettings,
   loadFixPromptTemplate,
   loadWorkerPromptTemplate,
@@ -2285,6 +2286,116 @@ test("extractFailureText: assistant/user/system records and SUCCESSFUL results a
 test("extractFailureText: an unparseable {-prefixed line (mid-write stream fragment, possibly of an assistant message) is SKIPPED, never included", () => {
   const truncatedAssistant = `{"type":"assistant","message":{"content":[{"type":"text","text":"discussing rate_limit_error and how`;
   assert.equal(extractFailureText(truncatedAssistant), "");
+});
+
+// ── #374: extractRateLimitResetAt — the Claude CLI's structured rate_limit_event telemetry ────
+
+test("extractRateLimitResetAt: a real captured rate_limit_event line yields resetsAt in epoch MILLISECONDS", () => {
+  const jsonl = [
+    `{"type":"system","subtype":"init","model":"opus"}`,
+    `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1784885400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false},"session_id":"s1"}`,
+    `{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your session limit · resets 6:30pm (Asia/Tokyo)","total_cost_usd":0}`,
+  ].join("\n");
+  assert.equal(extractRateLimitResetAt(jsonl), 1784885400 * 1000);
+});
+
+test("extractRateLimitResetAt: no rate_limit_event line -> null (an absent hint, never a fabricated one)", () => {
+  const jsonl = [`{"type":"system","subtype":"init"}`, `gh: Bad credentials (HTTP 401)`].join("\n");
+  assert.equal(extractRateLimitResetAt(jsonl), null);
+});
+
+test("extractRateLimitResetAt: a non-'rejected' status (e.g. an 'allowed' telemetry line) is ignored", () => {
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1784885400,"rateLimitType":"five_hour"}}`;
+  assert.equal(extractRateLimitResetAt(jsonl), null);
+});
+
+test("extractRateLimitResetAt: the LAST rejected record wins when more than one appears", () => {
+  const jsonl = [
+    `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1000}}`,
+    `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":2000}}`,
+  ].join("\n");
+  assert.equal(extractRateLimitResetAt(jsonl), 2000 * 1000);
+});
+
+test("extractRateLimitResetAt: malformed/truncated JSON lines and a missing rate_limit_info are tolerated, never throw", () => {
+  const jsonl = [`{"type":"rate_limit_event"`, `{"type":"rate_limit_event","rate_limit_info":null}`, "not json at all"].join("\n");
+  assert.doesNotThrow(() => extractRateLimitResetAt(jsonl));
+  assert.equal(extractRateLimitResetAt(jsonl), null);
+});
+
+test("extractRateLimitResetAt: empty input -> null", () => {
+  assert.equal(extractRateLimitResetAt(""), null);
+});
+
+// ── #374 review (PM P2): the sanity horizon — an untrusted third-party timestamp must never be
+//    able to withhold every future probe permanently. ──────────────────────────────────────────
+
+test("extractRateLimitResetAt: a hint within the 48h horizon is honored", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const resetsAtSec = Math.floor(nowMs / 1000) + 6 * 3600; // 6h out — a real five_hour-ish tier
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${resetsAtSec}}}`;
+  assert.equal(extractRateLimitResetAt(jsonl, nowMs), resetsAtSec * 1000);
+});
+
+test("extractRateLimitResetAt: resetsAt accidentally in epoch-MILLISECONDS scale (a units mismatch) lands ~1000x too far out -> treated as ABSENT (null), never a centuries-long stall", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  // A real epoch-ms value (already ~1784885400000) misread as seconds and re-multiplied by 1000
+  // by this function lands far beyond the 48h horizon — exactly the failure mode the horizon
+  // check exists to catch, regardless of which specific unit confusion produced it.
+  const msMistakenForSeconds = 1784885400000;
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${msMistakenForSeconds}}}`;
+  assert.equal(extractRateLimitResetAt(jsonl, nowMs), null);
+});
+
+test("extractRateLimitResetAt: a hint exactly AT the 48h horizon is honored; one second past it is rejected", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const atHorizonSec = Math.floor(nowMs / 1000) + 48 * 3600;
+  const pastHorizonSec = atHorizonSec + 1;
+  const atJsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${atHorizonSec}}}`;
+  const pastJsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${pastHorizonSec}}}`;
+  assert.equal(extractRateLimitResetAt(atJsonl, nowMs), atHorizonSec * 1000);
+  assert.equal(extractRateLimitResetAt(pastJsonl, nowMs), null);
+});
+
+test("extractRateLimitResetAt: a hint in the PAST (already-elapsed reset) is honored unchanged — only an over-future hint is rejected", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const pastSec = Math.floor(nowMs / 1000) - 3600; // 1h ago
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${pastSec}}}`;
+  assert.equal(extractRateLimitResetAt(jsonl, nowMs), pastSec * 1000);
+});
+
+// ── #374 review (Codex sol-high finding 8): the horizon clamp only bounds the FUTURE side — a
+//    corrupted resetsAt (e.g. -1e20) sits arbitrarily far in the PAST and must never survive to
+//    reach a downstream `new Date(...).toISOString()` call, which THROWS on an Invalid Date. ────
+
+test("extractRateLimitResetAt: a wildly corrupted resetsAt (-1e20) is outside JS's valid Date range -> rejected (null), never a value that would crash a downstream toISOString()", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":-1e20}}`;
+  const result = extractRateLimitResetAt(jsonl, nowMs);
+  assert.equal(result, null);
+});
+
+test("extractRateLimitResetAt: a Date-valid but ancient value (millennia in the past) is still honored — only OUT-OF-RANGE values are rejected, not merely large-magnitude-but-legal ones", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  // ~8000 years before the epoch in seconds, comfortably within Date's ~273,790-year range once
+  // converted to ms — legal, just very old; probeDueWithHint reads this as "probe immediately".
+  const ancientSec = -8000 * 365 * 24 * 3600;
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${ancientSec}}}`;
+  const result = extractRateLimitResetAt(jsonl, nowMs);
+  assert.equal(result, ancientSec * 1000);
+  assert.doesNotThrow(() => new Date(result!).toISOString());
+});
+
+test("extractRateLimitResetAt: a resetsAt exactly at the Date-valid boundary is honored; one unit past it is rejected", () => {
+  const nowMs = Date.parse("2026-07-24T00:00:00Z");
+  const validBoundarySec = 8_640_000_000_000_000 / 1000; // exactly at the ECMAScript Date limit
+  const pastBoundarySec = validBoundarySec + 1;
+  const validJsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${validBoundarySec}}}`;
+  const invalidJsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${pastBoundarySec}}}`;
+  // The boundary value itself is far beyond the 48h future horizon, so it's rejected on THAT
+  // basis too — this test only asserts neither call throws and the out-of-range one is null.
+  assert.doesNotThrow(() => extractRateLimitResetAt(validJsonl, nowMs));
+  assert.equal(extractRateLimitResetAt(invalidJsonl, nowMs), null);
 });
 
 test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTANT text + a non-env failure -> task failure, no env classification, no park", async () => {

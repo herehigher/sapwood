@@ -391,6 +391,35 @@ test("worker.review_fallback_head/kind survives an upsert that spreads a previou
   s.close();
 });
 
+test("lastHoldEvent (#294): none -> null; returns the LATEST hold transition for the right worker only", () => {
+  const s = mem();
+  assert.equal(s.lastHoldEvent("lane-a", 55), null);
+
+  s.appendEvent("drive-queued", { worker: "lane-a", pr: 55 }); // unrelated kinds never match
+  assert.equal(s.lastHoldEvent("lane-a", 55), null);
+
+  s.appendEvent("pr-held", { worker: "lane-a", issue: 2, pr: 55, label: "sapwood:hold" });
+  s.appendEvent("pr-held", { worker: "lane-b", issue: 3, pr: 56, label: "sapwood:hold" });
+  assert.equal(s.lastHoldEvent("lane-a", 55), "pr-held");
+
+  // A later release for the same lane supersedes the hold; lane-b's episode is untouched — this
+  // per-worker scoping is what lets two lanes be held/released independently.
+  s.appendEvent("pr-released", { worker: "lane-a", issue: 2, pr: 55 });
+  assert.equal(s.lastHoldEvent("lane-a", 55), "pr-released");
+  assert.equal(s.lastHoldEvent("lane-b", 56), "pr-held");
+  s.close();
+});
+
+test("lastHoldEvent (#294, Codex P2): scoped to (worker, pr) — a lane repointed to a NEW PR never inherits the prior PR's hold episode", () => {
+  const s = mem();
+  s.appendEvent("pr-held", { worker: "lane-a", issue: 2, pr: 55, label: "sapwood:hold" });
+  // Same lane name, different PR (the F15 repointing shape): the old PR's episode must not
+  // suppress the new PR's first pr-held, nor manufacture a spurious pr-released for it.
+  assert.equal(s.lastHoldEvent("lane-a", 72), null);
+  assert.equal(s.lastHoldEvent("lane-a", 55), "pr-held"); // the old episode is still on record
+  s.close();
+});
+
 test("lastReviewerFallbackEvent (#54 R2): none -> null; returns the LATEST switch/revert for the right worker only", () => {
   const s = mem();
   assert.equal(s.lastReviewerFallbackEvent("lane-a"), null);
@@ -1185,6 +1214,15 @@ test("park: not parked initially; enterPark persists source/reason/triggerIssue/
   assert.equal(p?.probeAttempts, 0);
   assert.equal(p?.escalatedAt, null);
   assert.equal(p?.canaryWorker, null);
+  assert.equal(p?.resetHintAt, null, "omitted resetHintAtIso -> null, unchanged from every pre-#374 caller");
+  s.close();
+});
+
+test("park: enterPark's optional resetHintAtIso (#374) is persisted and read back", () => {
+  const s = mem();
+  s.enterPark("llm", "hit your session limit", 42, "2026-07-14T00:00:00Z", "2026-07-14T06:30:00Z");
+  const p = s.parkRow("llm");
+  assert.equal(p?.resetHintAt, "2026-07-14T06:30:00Z");
   s.close();
 });
 
@@ -1197,6 +1235,15 @@ test("park: re-entering the SAME source is a no-op (first detection wins, entere
   assert.equal(p?.reason, "first reason");
   assert.equal(p?.triggerIssue, 1);
   assert.equal(p?.enteredAt, "2026-07-14T00:00:00Z");
+  s.close();
+});
+
+test("park: a resetHintAtIso is set ONCE at entry — a later classified failure for the SAME open episode never overwrites it (first detection wins, same stance as reason/enteredAt)", () => {
+  const s = mem();
+  s.enterPark("llm", "first reason", 1, "2026-07-14T00:00:00Z", "2026-07-14T06:30:00Z");
+  s.enterPark("llm", "a later llm failure", 2, "2026-07-14T01:00:00Z", "2026-07-14T09:00:00Z");
+  const p = s.parkRow("llm");
+  assert.equal(p?.resetHintAt, "2026-07-14T06:30:00Z");
   s.close();
 });
 
@@ -2903,8 +2950,8 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
     raw.close();
 
     const s = new State(dbPath);
-    assert.equal(SCHEMA_VERSION, 26);
-    assert.equal(s.userVersion(), 26);
+    assert.equal(SCHEMA_VERSION, 27);
+    assert.equal(s.userVersion(), 27);
     assert.equal(s.getEngineReviewAttemptPin("lane-v25"), null, "the lane is re-reviewable on its unchanged head");
     const row = s.getWorker("lane-v25");
     assert.equal(row?.engine_review_pin_head, null);
@@ -2916,4 +2963,206 @@ test("migration v25->v26 clears a decisive engine-review pin whose WAL has no ve
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("migration v26->v27: a populated v26 DB (predating park_state.reset_hint_at) opens with data intact, the open episode's reset_hint_at NULL, user_version SCHEMA_VERSION, idempotent reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "sapwood.sqlite");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    for (let v = 0; v < 26; v++) MIGRATIONS[v]!(raw);
+    raw.exec("PRAGMA user_version = 26");
+    raw
+      .prepare(
+        `INSERT INTO park_state (source, reason, trigger_issue, entered_at, last_probe_at, probe_attempts)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run("llm", "pre-existing v26 episode", 42, "2026-07-24T00:00:00Z", "2026-07-24T00:00:00Z", 0);
+    raw.close();
+
+    const s = new State(dbPath);
+    assert.equal(SCHEMA_VERSION, 27);
+    assert.equal(s.userVersion(), 27);
+    const row = s.parkRow("llm");
+    assert.equal(row?.reason, "pre-existing v26 episode");
+    assert.equal(row?.triggerIssue, 42);
+    assert.equal(row?.resetHintAt, null, "a pre-#374 episode has no hint — probeDueWithHint treats this as 'no hint'");
+    s.close();
+
+    const s2 = new State(dbPath);
+    assert.equal(s2.userVersion(), SCHEMA_VERSION);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #142: dashboard reads (docs/frontend-design.md §8) ──────────────────────────────────────
+
+test("lastTickAt reads the heartbeat WITHOUT moving it (a spectator must not reset the session)", () => {
+  const s = mem();
+  assert.equal(s.lastTickAt(), null, "no session row yet — the engine has never ticked here");
+
+  s.engineSessionStart(new Date("2026-07-24T10:00:00.000Z"), 900);
+  assert.equal(s.lastTickAt(), "2026-07-24T10:00:00.000Z");
+  // Reading twice must not touch last_tick_at — engineSessionStart is the ONLY writer.
+  assert.equal(s.lastTickAt(), "2026-07-24T10:00:00.000Z");
+  s.close();
+});
+
+test("countEvents counts one kind only (§8's ring count)", () => {
+  const s = mem();
+  assert.equal(s.countEvents("merged"), 0);
+  s.appendEvent("merged", { pr: 1 });
+  s.appendEvent("dispatched", { issue: 2 });
+  s.appendEvent("merged", { pr: 3 });
+  assert.equal(s.countEvents("merged"), 2);
+  assert.equal(s.countEvents("dispatched"), 1);
+  s.close();
+});
+
+test("eventsPage pages ascending by id across every kind, with id/ts/payload", () => {
+  const s = mem();
+  for (let i = 1; i <= 5; i++) s.appendEvent(`kind-${i}`, { n: i });
+
+  const first = s.eventsPage(0, 2);
+  assert.deepEqual(
+    first.map((e) => e.id),
+    [1, 2],
+  );
+  assert.deepEqual(first[0], { id: 1, ts: first[0]!.ts, kind: "kind-1", payload: { n: 1 } });
+  assert.ok(first[0]!.ts.length > 0);
+
+  assert.deepEqual(
+    s.eventsPage(2, 2).map((e) => e.kind),
+    ["kind-3", "kind-4"],
+  );
+  assert.deepEqual(s.eventsPage(5, 10), [], "past the tail is empty, not an error");
+  s.close();
+});
+
+test("eventsPage serves a corrupt payload as null rather than failing the whole page", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-state-"));
+  try {
+    const dbPath = join(dir, "s.sqlite");
+    const s = new State(dbPath);
+    s.appendEvent("merged", { pr: 1 });
+    s.close();
+
+    const raw = new DatabaseSync(dbPath);
+    raw.prepare("INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)").run("2026-07-24T00:00:00Z", "legacy", "not json");
+    raw.close();
+
+    const s2 = new State(dbPath);
+    const page = s2.eventsPage(0, 10);
+    assert.equal(page.length, 2);
+    assert.deepEqual(page[0]!.payload, { pr: 1 });
+    assert.equal(page[1]!.payload, null);
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("spendByModelForDay groups the day's ledger by model, biggest spender first", () => {
+  const s = mem();
+  const models = (model: string, i: number, o: number): ModelUsageEntry[] => [
+    { model, inputTokens: i, outputTokens: o, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ];
+  s.recordSpend("w1", 1, 1.25, "2026-07-24T11:30:00.000Z", models("opus", 100, 20));
+  s.recordSpend("w2", 2, 0.75, "2026-07-24T12:00:00.000Z", models("sonnet", 50, 10));
+  s.recordSpend("w3", 3, 2.0, "2026-07-24T13:00:00.000Z", models("opus", 200, 40));
+  s.recordSpend("w4", 4, 99.0, "2026-07-23T23:59:59.000Z", models("opus", 1, 1)); // yesterday
+
+  assert.deepEqual(s.spendByModelForDay(new Date("2026-07-24T18:00:00.000Z")), [
+    { model: "opus", usd: 3.25, inputTokens: 300, outputTokens: 60 },
+    { model: "sonnet", usd: 0.75, inputTokens: 50, outputTokens: 10 },
+  ]);
+  // Same day window as dailySpendUsd — the group sums and the headline can never disagree.
+  assert.equal(
+    s.spendByModelForDay(new Date("2026-07-24T18:00:00.000Z")).reduce((a, r) => a + r.usd, 0),
+    s.dailySpendUsd(new Date("2026-07-24T18:00:00.000Z")),
+  );
+  assert.deepEqual(s.spendByModelForDay(new Date("2026-07-25T00:00:00.000Z")), [], "a quiet day groups to nothing");
+  s.close();
+});
+
+// ── #360: the dashboard's remaining read transports (spend paging, the rounds spine) ───────
+
+test("spendPage pages the ledger ascending by id, rows verbatim", () => {
+  const s = mem();
+  const models = (model: string): ModelUsageEntry[] => [
+    { model, inputTokens: 100, outputTokens: 20, cacheReadTokens: 900, cacheCreationTokens: 40 },
+  ];
+  s.recordSpend("w1", 86, 1.25, "2026-07-24T11:30:00.000Z", models("opus"));
+  s.recordSpend("w2", 88, 0.75, "2026-07-24T11:31:00.000Z", models("sonnet"));
+  s.recordSpend("w3", 90, 0.5, "2026-07-24T11:32:00.000Z");
+
+  const first = s.spendPage(0, 2);
+  assert.deepEqual(
+    first.map((r) => r.id),
+    [1, 2],
+  );
+  assert.deepEqual(first[0], {
+    id: 1,
+    ts: "2026-07-24T11:30:00.000Z",
+    worker: "w1",
+    issue: 86,
+    usd: 1.25,
+    model: "opus",
+    inputTokens: 100,
+    outputTokens: 20,
+    cacheReadTokens: 900,
+    cacheCreationTokens: 40,
+  });
+  assert.equal(s.spendPage(2, 10)[0]?.model, "unknown", "a model-less leg keeps recordSpend's own 'unknown' row");
+  assert.deepEqual(s.spendPage(3, 10), [], "past the tail is empty, not an error");
+  s.close();
+});
+
+test("listRounds is the rounds spine: every row, artifact left-joined, cursors and event counts", () => {
+  const s = mem();
+  // Round 1: two events inside its window, closed WITH an artifact.
+  s.appendEvent("before", {}); // id 1 — belongs to no round
+  const r1 = s.startRound("2026-07-24T10:00:00.000Z");
+  s.appendEvent("dispatched", { issue: 86 });
+  s.appendEvent("merged", { pr: 94 });
+  s.closeRound(r1.round_id, "2026-07-24T11:00:00.000Z");
+  s.saveRoundArtifact(r1.round_id, 1, JSON.stringify({ roundId: 1, merged: [94] }), "2026-07-24T11:00:01.000Z");
+  // Round 2: one event, closed WITHOUT an artifact (the crash-between-close-and-save case).
+  const r2 = s.startRound("2026-07-24T12:00:00.000Z");
+  s.appendEvent("dispatched", { issue: 88 });
+  s.closeRound(r2.round_id, "2026-07-24T13:00:00.000Z");
+  // Round 3: still open, no events yet.
+  s.startRound("2026-07-24T14:00:00.000Z");
+
+  const rounds = s.listRounds();
+  assert.deepEqual(
+    rounds.map((r) => r.roundId),
+    [1, 2, 3],
+    "ascending, and an artifact-less round is NOT dropped",
+  );
+
+  assert.deepEqual(rounds[0], {
+    roundId: 1,
+    status: "done",
+    startedAt: "2026-07-24T10:00:00.000Z",
+    endedAt: "2026-07-24T11:00:00.000Z",
+    startEventId: 1,
+    startSpendId: 0,
+    eventCount: 2,
+    schemaVersion: 1,
+    artifact: { roundId: 1, merged: [94] },
+  });
+
+  assert.equal(rounds[1]!.schemaVersion, null, "no artifact — tally-less, honestly");
+  assert.equal(rounds[1]!.artifact, null);
+  assert.equal(rounds[1]!.eventCount, 1);
+  assert.equal(rounds[1]!.startEventId, 3);
+
+  assert.equal(rounds[2]!.status, "in_progress");
+  assert.equal(rounds[2]!.endedAt, null);
+  assert.equal(rounds[2]!.eventCount, 0, "an open round with no events of its own counts none");
+  s.close();
 });

@@ -26,9 +26,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #321: intentional edits — sentinel examples are plain text, never markdown-fenced.
   "po.md": "d33d20062d903584608e0799e3d825cb7a0b1fea23c070a5c0271a82a7b8896e",
   "architect.md": "08ae9bd5a164533d3d6c96b6a3c98e48c0fa666d41cc85b73d2457358d17f3b2",
-  "plan-reviewer.md": "138223d62a4137861b65ea07fec52cc938605c66b0234e5b3e5d51e6b2bbe41d",
-  "plan-reviewer-confirm.md": "5502bd8c5c9196e51f0d45086ba256aa8ce8fd0eaf1249c57120fafe3e49aacf",
-  "plan-drafter.md": "2daa2a1f1e4d57acde6a8efafdb806cdb525631cd241d8fa1bfb08dae5914d4c",
+  "plan-reviewer.md": "a9ed1a2277fdbd0bdbf0eec415e997c1a342eea26fa8a8196efd795a51ccefd8",
+  "plan-reviewer-confirm.md": "250c0752f7e2b91418cc76a772123107a36d7de16fa9728c33399061993497fa",
+  "plan-drafter.md": "dce0f4aca4c0d323ad8f7176a6612527075d9e6ec83b19396e9d3dc2f68903eb",
   "harvest.md": "59fb5fb1a8a3bebb2429c878c309caffe3105a3f9a32262268b7a14525026d4b",
   "retro.md": "d667893510d96a67e5e8041861daa2d6767e708acfeca2f98c498e09e6a21917",
   "po-pool.md": "a5f51726e886ecaca53dfc9773e7403b602e3cb555cfb972bee2f15e54204d09",
