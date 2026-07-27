@@ -329,9 +329,7 @@ export async function reconcileEscalations(
         // escalation stays open rather than being cleared on an unattributable placement.
         const nameWithOwner = `${cfg.board.owner}/${cfg.board.repo}`;
         placements = new Map(
-          data.placements
-            .filter((p) => p.number != null && p.repo === nameWithOwner)
-            .map((p) => [p.number as number, p.status]),
+          data.placements.filter((p) => p.number != null && p.repo === nameWithOwner).map((p) => [p.number as number, p.status]),
         );
       } catch (e) {
         warn(`[sapwood:escalation] board placement read failed — merge-produced escalations left open this pass: ${String(e)}`);
