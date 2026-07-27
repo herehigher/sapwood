@@ -649,3 +649,17 @@ test("reconcileEscalations (#295 r2): fix-leg-undecidable resolves via external 
   state.close();
   state2.close();
 });
+
+// ── #295 review round 3 (Codex P2): only MERGED is terminal — closed entities can reopen ─────
+
+test("openEscalations (#295 r3): a closed-then-reopened entity's genuine re-escalation is NOT suppressed — only merged is terminal", () => {
+  const events = [
+    { kind: "resume-capped", payload: { issue: 6 } }, // pr-less source: stored/new pr are both undefined
+    { kind: "escalation-resolved", payload: { issue: 6, source: "resume-capped", via: "closed" } },
+    // The issue was reopened and the lane re-escalated — a genuinely new attention item.
+    { kind: "resume-capped", payload: { issue: 6 } },
+  ];
+  const open = openEscalations(events);
+  assert.equal(open.size, 1, "the re-escalation after a closure genuinely reopens");
+  assert.equal(open.get("resume-capped:6")?.issue, 6);
+});

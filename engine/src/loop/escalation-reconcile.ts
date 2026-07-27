@@ -155,13 +155,24 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
   // #295 review round 2 (Codex P1 — exactly-once for RETRYING sources): a source that re-emits
   // its escalation event every tick while a companion write keeps failing (e.g.
   // gated-reentry-capped-label-failed) would otherwise REOPEN the escalation after a terminal
-  // resolution — merged/closed resolves it, the next tick's retry event re-enters `open`, the
-  // next sweep appends a SECOND escalation-resolved, ad infinitum. A merged/closed PR (or
-  // closed issue) is a TERMINAL fact: a later same-key event about the SAME pr can only ever be
-  // a retry stream, never a genuine re-escalation, so it is suppressed here. `label-removed` is
-  // deliberately NOT terminal — a human removing the label and the lane later re-escalating is
-  // the one genuine reopen this fold must keep honoring. A later event carrying a DIFFERENT pr
-  // (lane repointed — the F15 shape) is a genuinely new episode and clears the suppression.
+  // resolution — the next tick's retry event re-enters `open`, the next sweep appends a SECOND
+  // escalation-resolved, ad infinitum. A MERGED pr is the one genuinely IRREVERSIBLE fact: a
+  // later same-key event about the SAME pr can only ever be a retry stream, never a genuine
+  // re-escalation, so it is suppressed here.
+  //
+  // #295 review round 3 (Codex P2): `closed` is deliberately NOT terminal — an issue (or
+  // unmerged PR) can be closed, REOPENED, and genuinely re-escalate under the same key (and for
+  // pr-less sources the stored/new pr are both undefined, so the key can never disambiguate);
+  // suppressing that would silently eat a real escalation forever. The cost of leaving `closed`
+  // non-terminal is bounded and honest: a retry stream against a still-closed entity re-opens
+  // the fold entry and the next sweep re-observes the same closure and appends another
+  // resolution — escalations and resolutions stay paired (the dashboard fold nets to zero, no
+  // zombie), and the stream ends when the failing companion write finally lands. Wrong-side
+  // trade-offs compared: a duplicated resolution pair is noise; a suppressed genuine
+  // re-escalation is an invisible, permanently-lost attention item. `label-removed` is likewise
+  // non-terminal (a human clearing the label and the lane re-escalating is the designed reopen).
+  // A later event carrying a DIFFERENT pr (lane repointed — the F15 shape) is a genuinely new
+  // episode and clears the suppression.
   const terminal = new Map<string, number | undefined>();
   for (const e of events) {
     const payload = (e.payload ?? null) as Record<string, unknown> | null;
@@ -171,7 +182,7 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
       const source = typeof payload?.source === "string" ? payload.source : undefined;
       if (source !== undefined) {
         open.delete(`${source}:${issue}`);
-        if (payload?.via === "merged" || payload?.via === "closed") {
+        if (payload?.via === "merged") {
           terminal.set(`${source}:${issue}`, payloadNumber(payload, "pr"));
         }
       }
