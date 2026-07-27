@@ -1274,9 +1274,9 @@ test("runSessionWithRetry + envFailure: a reset-time hint (rateLimitResetAtMs) i
   assert.equal(park.enterCalls[0]!.resetHintAtIso, new Date(resetAtMs).toISOString());
 });
 
-test("runSessionWithRetry + envFailure (#394 F22, AC2): rateLimitRejected=true parks as llm even when failureText is completely unrecognized", async () => {
+test("runSessionWithRetry + envFailure (#394 F22, AC2): envSignalStructured=true parks as llm even when failureText is completely unrecognized", async () => {
   const runner = new FakeRunner([
-    mkResult({ outcome: "failed", failureText: "a brand new CLI wording never seen before", rateLimitRejected: true }),
+    mkResult({ outcome: "failed", failureText: "a brand new CLI wording never seen before", envSignalStructured: true }),
   ]);
   const state = new FakeState();
   const park = new FakePark();

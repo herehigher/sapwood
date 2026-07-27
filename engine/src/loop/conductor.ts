@@ -556,11 +556,15 @@ export interface LaneProbe {
    *  state.enterPark's optional reset-hint column purely as SCHEDULING input (env-failure.ts's
    *  probeDueWithHint) — never a classification input (classifyEnvFailure never sees it). */
   rateLimitResetAtMs?: number;
-  /** #394 (F22): same "only for a FAILED lane" gating as failureText/rateLimitResetAtMs above —
-   *  worker.ts's hasRejectedRateLimitEvent, the PRIMARY, text-free classification signal for
-   *  classifyEnvFailure below (checked BEFORE failureText's pattern match). Unlike
-   *  rateLimitResetAtMs (scheduling only), this one directly drives classification. */
-  rateLimitRejected?: boolean;
+  /** #394 (F22) / gate② round 3: same "only for a FAILED lane" gating as
+   *  failureText/rateLimitResetAtMs above — worker.ts's
+   *  `hasRejectedRateLimitEvent(jsonl) || hasQuotaErrorStatus(jsonl)`, the PRIMARY, text-free
+   *  classification signal(s) for classifyEnvFailure below (checked BEFORE failureText's pattern
+   *  match). Unlike rateLimitResetAtMs (scheduling only), this one directly drives
+   *  classification. Two structured signals OR'd together, not one — see worker.ts's
+   *  terminalEnvSignalStructured / env-failure.ts's own module doc for why a single rejected
+   *  `rate_limit_event` line is not sufficient on its own. */
+  envSignalStructured?: boolean;
 }
 
 /** #69: what reclaim() did with the lane's worktree. Dirty-worktree retention policy:
@@ -1521,7 +1525,7 @@ async function reclaimTerminalLane(
     const envSource = classifyEnvFailure(
       p.failureText ?? "",
       { llm: cfg.envFailure.llmPatterns, forge: cfg.envFailure.forgePatterns },
-      p.rateLimitRejected ?? false,
+      p.envSignalStructured ?? false,
     );
     // P1-1b: if THIS lane was the llm episode's canary, settle it first — env-classified means
     // the same episode continues (attempts bumped, entered_at untouched); anything else means

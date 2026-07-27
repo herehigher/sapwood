@@ -35,6 +35,7 @@ import {
   extractFailureText,
   extractRateLimitResetAt,
   guardSettings,
+  hasQuotaErrorStatus,
   hasRejectedRateLimitEvent,
   loadFixPromptTemplate,
   loadWorkerPromptTemplate,
@@ -2437,6 +2438,97 @@ test("hasRejectedRateLimitEvent: malformed/truncated JSON lines and a missing ra
 
 test("hasRejectedRateLimitEvent: empty input -> false", () => {
   assert.equal(hasRejectedRateLimitEvent(""), false);
+});
+
+// ── #394 gate② round 3 (Codex sol-high BLOCK finding, P2): hasQuotaErrorStatus — the SECOND
+//    structured, text-free classification signal (an errored `result` record carrying the
+//    transport-level `api_error_status:429`), needed because NOT every real quota failure emits
+//    a `rate_limit_event` line (a real captured transcript proves this — see the fixture below,
+//    the exact shape extractRateLimitResetAt's own #374 test already uses). ────────────────────
+
+test("hasQuotaErrorStatus: a real captured errored-result record (is_error:true, api_error_status:429) -> true", () => {
+  const jsonl = `{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your session limit · resets 6:30pm (Asia/Tokyo)","total_cost_usd":0}`;
+  assert.equal(hasQuotaErrorStatus(jsonl), true);
+});
+
+test("hasQuotaErrorStatus: no result line at all -> false", () => {
+  const jsonl = `{"type":"assistant","message":{}}\n{"type":"system","subtype":"init"}`;
+  assert.equal(hasQuotaErrorStatus(jsonl), false);
+});
+
+test("hasQuotaErrorStatus: a SUCCESSFUL result (is_error absent/false) with api_error_status:429 present anyway is ignored -> false — is_error alone gates inclusion", () => {
+  const jsonl = `{"type":"result","subtype":"success","is_error":false,"api_error_status":429,"result":"ok"}`;
+  assert.equal(hasQuotaErrorStatus(jsonl), false);
+});
+
+test("hasQuotaErrorStatus: an errored result with a DIFFERENT api_error_status (e.g. 500) is NOT a quota signal -> false", () => {
+  const jsonl = `{"type":"result","is_error":true,"api_error_status":500,"result":"internal server error"}`;
+  assert.equal(hasQuotaErrorStatus(jsonl), false);
+});
+
+test("hasQuotaErrorStatus: api_error_status as a STRING ('429', not the number 429) does not match — the CLI emits it unquoted, a stringified value is a different shape", () => {
+  const jsonl = `{"type":"result","is_error":true,"api_error_status":"429","result":"..."}`;
+  assert.equal(hasQuotaErrorStatus(jsonl), false);
+});
+
+test("hasQuotaErrorStatus: malformed/truncated JSON lines are tolerated, never throw", () => {
+  const jsonl = [`{"type":"result"`, `{"type":"result","is_error":true`, "not json at all"].join("\n");
+  assert.doesNotThrow(() => hasQuotaErrorStatus(jsonl));
+  assert.equal(hasQuotaErrorStatus(jsonl), false);
+});
+
+test("hasQuotaErrorStatus: empty input -> false", () => {
+  assert.equal(hasQuotaErrorStatus(""), false);
+});
+
+// ── #394 gate② round 3: the EXACT gap this second signal closes (Codex's own concrete trace) —
+//    an errored 429 result whose human-readable text uses an UNLISTED tier word ("monthly", not
+//    session/weekly/5-hour) and carries NO rate_limit_event line anywhere. Before this signal
+//    existed, classifyEnvFailure would have missed this entirely (no structured match, no text
+//    pattern match) and treated it as an ordinary task failure — UNBOUNDED on the worker-lane
+//    path (see env-failure.ts's own module doc for why the empty-spin breaker does not cover
+//    that path). ─────────────────────────────────────────────────────────────────────────────
+
+test("#394 gate② round 3 (Codex's concrete trace): is_error:true + api_error_status:429 + an UNLISTED tier word ('monthly') + NO rate_limit_event line -> classifies as llm via the SECOND structured signal alone", () => {
+  const jsonl = `{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your monthly limit · resets Aug 1","total_cost_usd":0}`;
+
+  // The extraction-level proof: the rejected-event signal is genuinely absent (no rate_limit_event
+  // line at all in this jsonl) — only the second signal fires.
+  assert.equal(hasRejectedRateLimitEvent(jsonl), false, "no rate_limit_event line exists in this jsonl");
+  assert.equal(hasQuotaErrorStatus(jsonl), true, "the errored 429 result record is present");
+
+  // The text-pattern fallback would ALSO miss this (proving the second structured signal is
+  // doing real work here, not just duplicating what the text list already catches): "monthly"
+  // is not in DEFAULT_LLM_FAILURE_PATTERNS' enumerated tier alternation.
+  const failureText = extractFailureText(jsonl);
+  const patterns = { llm: [...DEFAULT_LLM_FAILURE_PATTERNS], forge: [...DEFAULT_FORGE_FAILURE_PATTERNS] };
+  assert.equal(
+    classifyEnvFailure(failureText, patterns),
+    null,
+    "sanity check: the TEXT alone, without any structured signal, does not classify",
+  );
+
+  // The full pipeline, as a real caller assembles it (worker.ts's terminalEnvSignalStructured /
+  // the peripheral-session equivalent): OR the two structured signals, pass the result as the
+  // 3rd argument.
+  const structuredSignal = hasRejectedRateLimitEvent(jsonl) || hasQuotaErrorStatus(jsonl);
+  assert.equal(classifyEnvFailure(failureText, patterns, structuredSignal), "llm");
+});
+
+test("#394 gate② round 3: the negative counterpart — an errored result with NO 429 status and text matching NO listed tier word stays unclassified (an ordinary task failure, not llm)", () => {
+  const jsonl = `{"type":"result","is_error":true,"api_error_status":500,"result":"internal server error, please retry"}`;
+
+  assert.equal(hasRejectedRateLimitEvent(jsonl), false);
+  assert.equal(hasQuotaErrorStatus(jsonl), false, "500, not 429 — not a quota signal");
+
+  const failureText = extractFailureText(jsonl);
+  const patterns = { llm: [...DEFAULT_LLM_FAILURE_PATTERNS], forge: [...DEFAULT_FORGE_FAILURE_PATTERNS] };
+  const structuredSignal = hasRejectedRateLimitEvent(jsonl) || hasQuotaErrorStatus(jsonl);
+  assert.equal(
+    classifyEnvFailure(failureText, patterns, structuredSignal),
+    null,
+    "neither structured signal fired and the text matches no configured pattern -> an ordinary, unclassified task failure",
+  );
 });
 
 test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTANT text + a non-env failure -> task failure, no env classification, no park", async () => {

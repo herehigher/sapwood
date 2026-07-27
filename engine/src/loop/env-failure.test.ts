@@ -94,16 +94,16 @@ test("classifyEnvFailure: an UNRELATED 'hit your <X> limit' line (e.g. a storage
   assert.equal(classifyEnvFailure("You've hit your storage limit", patterns, true), "llm");
 });
 
-// ── #394 (F22): the structured rate_limit_event signal — text-free, authoritative, checked
-//    BEFORE any pattern match. AC2: a rejected rate_limit_event classifies as llm even when the
-//    human-readable text is unrecognized. ───────────────────────────────────────────────────────
+// ── #394 (F22): the structured signal(s) — text-free, authoritative, checked BEFORE any pattern
+//    match. AC2: a structured signal classifies as llm even when the human-readable text is
+//    unrecognized. ────────────────────────────────────────────────────────────────────────────
 
-test("classifyEnvFailure: AC2 — rateLimitRejected=true classifies as llm even when the text is completely unrecognized", () => {
+test("classifyEnvFailure: AC2 — structuredSignal=true classifies as llm even when the text is completely unrecognized", () => {
   assert.equal(classifyEnvFailure("some brand new CLI wording nobody has ever seen before", patterns, true), "llm");
   assert.equal(classifyEnvFailure("", patterns, true), "llm", "even empty output — the structured signal alone is authoritative");
 });
 
-test("classifyEnvFailure: rateLimitRejected omitted/false -> unchanged text-pattern-only behavior (backward compatible)", () => {
+test("classifyEnvFailure: structuredSignal omitted/false -> unchanged text-pattern-only behavior (backward compatible)", () => {
   assert.equal(classifyEnvFailure("ordinary task failure, nothing env-related", patterns), null);
   assert.equal(classifyEnvFailure("ordinary task failure, nothing env-related", patterns, false), null);
 });
