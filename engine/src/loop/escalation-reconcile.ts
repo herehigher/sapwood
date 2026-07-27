@@ -139,6 +139,16 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
  *  resolution): a lane that is re-dispatched and escalates AGAIN is a genuine new episode. */
 const CLEAR_KINDS = ["dispatched", "merged", "gated-reentry"] as const;
 
+/** #295 review round 5 (Codex P2): sources a clear event must NOT clear, because they are emitted
+ *  BY the very operation that clears. The merged branch calls `handleRollbackFailure` — which
+ *  appends `rollback-escalated` — BEFORE it appends its own `merged` event (conductor.ts's
+ *  `case "merged"`), so the escalation carries the LOWER event id and an issue-wide clear would
+ *  erase a human task the merge just created and did not repair: the board transition still
+ *  failed. "A later event moved this issue" is evidence of resolution only for escalations the
+ *  move actually supersedes. Exempt sources still resolve through their own path — for
+ *  `rollback-escalated` (`never`-proof) that is issue closure. */
+const CLEAR_EXEMPT_SOURCES = new Set<string>(["rollback-escalated"]);
+
 const RESOLVED_KIND = "escalation-resolved";
 
 /** How an escalation was observed to have been resolved. See the module doc for why
@@ -209,8 +219,8 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
     if ((CLEAR_KINDS as readonly string[]).includes(e.kind)) {
       // "a later event moves that issue" — issue-scoped, so every source on that issue clears,
       // not just one key. Same rule the strip applies.
-      for (const key of [...open.keys()]) {
-        if (open.get(key)?.issue === issue) open.delete(key);
+      for (const [key, esc] of [...open.entries()]) {
+        if (esc.issue === issue && !CLEAR_EXEMPT_SOURCES.has(esc.source)) open.delete(key);
       }
       continue;
     }

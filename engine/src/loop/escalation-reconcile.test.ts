@@ -726,3 +726,24 @@ test("reconcileEscalations: a ceiling-escalated event that preserved its PR reso
   assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "ceiling-escalated", via: "merged" }]);
   state.close();
 });
+
+test("openEscalations: a merge does NOT clear the rollback-escalated it just produced (round 5 P2)", () => {
+  // conductor's merged branch calls handleRollbackFailure (which appends rollback-escalated)
+  // BEFORE appending `merged`, so the escalation has the lower id. Merging the PR did not repair
+  // the failed board transition — that human task is still open.
+  const open = openEscalations([
+    { kind: "rollback-escalated", payload: { worker: "w1", issue: 7 } },
+    { kind: "merged", payload: { worker: "w1", issue: 7, pr: 12 } },
+  ]);
+  assert.equal(open.size, 1);
+  assert.equal(open.get("rollback-escalated:7")?.source, "rollback-escalated");
+});
+
+test("openEscalations: the exemption is source-scoped — a clear still clears every OTHER source on that issue", () => {
+  const open = openEscalations([
+    { kind: "rollback-escalated", payload: { worker: "w1", issue: 7 } },
+    { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7, reasons: ["x"] } },
+    { kind: "merged", payload: { worker: "w1", issue: 7, pr: 12 } },
+  ]);
+  assert.deepEqual([...open.keys()], ["rollback-escalated:7"]);
+});
