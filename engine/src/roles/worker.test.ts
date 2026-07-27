@@ -2466,9 +2466,9 @@ test("hasQuotaErrorStatus: an errored result with a DIFFERENT api_error_status (
   assert.equal(hasQuotaErrorStatus(jsonl), false);
 });
 
-test("hasQuotaErrorStatus: api_error_status as a STRING ('429', not the number 429) does not match — the CLI emits it unquoted, a stringified value is a different shape", () => {
+test("hasQuotaErrorStatus: api_error_status as a STRING ('429', not the number 429) DOES match — accepted defensively (no capture has shown this shape; the string has no other possible meaning in this field)", () => {
   const jsonl = `{"type":"result","is_error":true,"api_error_status":"429","result":"..."}`;
-  assert.equal(hasQuotaErrorStatus(jsonl), false);
+  assert.equal(hasQuotaErrorStatus(jsonl), true);
 });
 
 test("hasQuotaErrorStatus: malformed/truncated JSON lines are tolerated, never throw", () => {

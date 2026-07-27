@@ -1047,11 +1047,20 @@ export function hasRejectedRateLimitEvent(jsonl: string): boolean {
  *  a tier word this file's enumerated pattern list doesn't happen to list (e.g. "monthly", a tier
  *  neither #374 nor #394 has captured verbatim) — would classify as an ORDINARY task failure, not
  *  `llm`, with NO fallback catching it: env-failure.ts's own doc explains exactly which paths
- *  this is (and isn't) bounded on. `api_error_status` is read as a NUMBER (`429`, unquoted in the
- *  wire format — see the fixture above), matching what the CLI actually emits; `is_error` gates
- *  inclusion the same way extractFailureText already treats this record type, regardless of the
- *  record's own (misleadingly non-error-sounding) `subtype`. Same tolerant parsing as its sibling
- *  above: a malformed/truncated line is skipped, never thrown. */
+ *  this is (and isn't) bounded on. `api_error_status` is accepted as EITHER the number `429` or
+ *  the string `"429"`. No capture in this repo has actually shown the string form — the one real
+ *  captured errored-429 result (this file's #374 fixture) carries it unquoted, numeric. The
+ *  string is accepted DEFENSIVELY, not because a stringified record has been observed: it costs
+ *  nothing (there is nothing else `api_error_status` holding the string `"429"` could mean in
+ *  this field) and it forecloses the exact class of bug #394 is about. #394 exists because the
+ *  engine held a confident, unverified assumption about the CLI's wire shape that reality did not
+ *  match; hard-coding this REPLACEMENT signal to one JSON type for the same field, on nothing but
+ *  assumption, would plant that identical failure mode one layer over. Do not tighten this back
+ *  to `=== 429`, and do not read this comment as asserting a stringified capture exists — none
+ *  does. `is_error` still gates inclusion — that check is deliberate and separate, matching the
+ *  same field extractFailureText already relies on, regardless of the record's own (misleadingly
+ *  non-error-sounding) `subtype`. Same tolerant parsing as its sibling above: a
+ *  malformed/truncated line is skipped, never thrown. */
 export function hasQuotaErrorStatus(jsonl: string): boolean {
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
@@ -1063,7 +1072,7 @@ export function hasQuotaErrorStatus(jsonl: string): boolean {
       continue; // mid-write/truncated stream fragment
     }
     if (obj.type !== "result") continue;
-    if (obj.is_error === true && obj.api_error_status === 429) return true;
+    if (obj.is_error === true && (obj.api_error_status === 429 || obj.api_error_status === "429")) return true;
   }
   return false;
 }
