@@ -25,6 +25,10 @@ class FakeForge implements IForge {
   reads: string[] = [];
   /** Issue numbers whose reads should throw (degradation test). */
   failReadsFor = new Set<number>();
+  /** Board column per issue, for the `board-fixed` arm. */
+  placements: Record<number, string | null> = {};
+  /** Make the board-wide placement read throw (degradation test). */
+  failBoardRead = false;
 
   async getIssueMeta(issue: number): Promise<IssueMeta> {
     this.reads.push(`getIssueMeta:${issue}`);
@@ -93,7 +97,12 @@ class FakeForge implements IForge {
     return { issues: [], skipped: 0 };
   }
   async readStartupReconcileData() {
-    return { placements: [], openPrs: [] };
+    this.reads.push("readStartupReconcileData");
+    if (this.failBoardRead) throw new Error("board read exploded");
+    return {
+      placements: Object.entries(this.placements).map(([number, status]) => ({ number: Number(number), repo: "r", status })),
+      openPrs: [],
+    };
   }
   async detectOwnerKind(): Promise<"user"> {
     return "user";
@@ -327,10 +336,84 @@ test("reconcileEscalations: a PR closed without merging resolves via 'closed'", 
   state.close();
 });
 
-test("reconcileEscalations: merged-path rollback-escalated resolves once its issue closes (#295 — the permanent-latch class)", async () => {
+test("reconcileEscalations: a merged-path rollback-escalated is NOT resolved by its own merge's issue closure (round 7)", async () => {
+  // A worker PR carries `Closes #N`, so the merge closes the issue — and this escalation says that
+  // same merge's Done-board write never landed. The board is still wrong; closure is not evidence.
   const forge = new FakeForge();
   const state = new State(":memory:");
   state.appendEvent("rollback-escalated", { issue: 7, target: "done", reason: "merged-board-done", attempts: 3, error: "boom" });
+  forge.issueStates[7] = "CLOSED";
+  forge.placements[7] = "In Progress";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  assert.deepEqual(forge.reads, ["readStartupReconcileData"]); // the issue read is skipped entirely
+  state.close();
+});
+
+test("reconcileEscalations: it resolves via 'board-fixed' once the board actually reaches Done (round 7)", async () => {
+  // Observes the FACT (the board is repaired), not a human ritual on a closed issue — so it heals
+  // legacy ledger events too, which a label-based path could not.
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("rollback-escalated", { issue: 7, target: "done", reason: "merged-board-done", attempts: 3, error: "boom" });
+  forge.issueStates[7] = "CLOSED";
+  forge.placements[7] = "Done";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "rollback-escalated", via: "board-fixed" }]);
+  state.close();
+});
+
+test("reconcileEscalations: the board read is ONE call per sweep however many merge-produced escalations are open", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  for (const issue of [7, 8, 9]) {
+    state.appendEvent("rollback-escalated", { issue, target: "done", reason: "merged-board-done", attempts: 3, error: "boom" });
+    forge.placements[issue] = "Done";
+  }
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.equal(resolvedEvents(logged).length, 3);
+  assert.deepEqual(forge.reads, ["readStartupReconcileData"]);
+  state.close();
+});
+
+test("reconcileEscalations: no merge-produced escalation open ⇒ the board is never read at all", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("rollback-escalated", { issue: 7, target: "ready", reason: "dead-lane-requeue", attempts: 3, error: "boom" });
+  forge.issueStates[7] = "CLOSED";
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(forge.reads, ["getIssueMeta:7"]);
+  state.close();
+});
+
+test("reconcileEscalations: a board read failure leaves merge-produced escalations open, never falsely resolved", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("rollback-escalated", { issue: 7, target: "done", reason: "merged-board-done", attempts: 3, error: "boom" });
+  forge.failBoardRead = true;
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  state.close();
+});
+
+test("reconcileEscalations: a NON-merge-produced rollback-escalated still resolves on issue closure (round 7 scoping)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("rollback-escalated", { issue: 7, target: "ready", reason: "dead-lane-requeue", attempts: 3, error: "boom" });
   forge.issueStates[7] = "CLOSED";
   const logged = tapEvents(state);
 

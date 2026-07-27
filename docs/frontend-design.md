@@ -248,7 +248,12 @@ run** — a restart must not empty the strip while the human task remains
 still does). Clearing uses only events that actually resolve the item:
 issue-scoped items (including `ceiling-escalated`, which the engine emits
 **per hard-stopped worker**, and `env-failure-preserved`) clear when a
-later event moves that issue (`dispatched`, `merged`, `gated-reentry`) —
+later event moves that issue (`dispatched`, `merged`, `gated-reentry`) — with
+one exemption: a clear event never clears an escalation **that same
+operation produced**, because an operation's own effects are not evidence
+it was resolved (a merge whose Done-board write failed emits
+`rollback-escalated` *before* its own `merged` event; the board is still
+wrong) —
 **or, since #295, when `escalation-resolved` reports the human resolved it
 outside the loop entirely.** That event is what makes the empty-strip
 contract survivable: the 2026-07-21 audit found most escalation classes had
@@ -264,8 +269,12 @@ appends the event once per resolution, keyed `(source, issue)` for the
 fold. Two honesty limits the strip inherits: `via: "label-removed"` is only
 emitted for escalations that **provably applied** the label (otherwise a
 failed label write would read as a human clearing it — a false empty strip,
-worse than a zombie row), and there is no `board-fixed` resolution because
-no escalation class is board-column-signalled. `park-escalated` clears on
+worse than a zombie row), and `via: "board-fixed"` exists for exactly one
+class — the merge-produced `rollback-escalated`, whose meaning *is* "the
+Done-board write never landed", so the board column is the only honest
+witness (its issue was closed by the same merge's `Closes #N`, which is why
+closure cannot clear it). It costs one board-wide placement read per sweep,
+taken only when such an escalation is open. `park-escalated` clears on
 `park-resumed`; round-scoped escalations clear
 when their round closes; `stalled`/`disconnected` clear when polling
 recovers. `worktree-retained` clears on `worktree-released` — a new
@@ -641,7 +650,7 @@ checklist item**):
 | `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
 | `gated-reentry-capped` | Issue #{issue} was unblocked too many times without landing — flagged for a human |
 | `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |
-| `escalation-resolved` | Branches on `payload.via`: merged → "Issue #{issue} no longer needs you — PR #{pr} was merged"; closed → "Issue #{issue} no longer needs you — it was closed"; label-removed → "Issue #{issue} no longer needs you — the flag was cleared". Never an attention item — this is the event that *clears* one (§3) |
+| `escalation-resolved` | Branches on `payload.via`: merged → "Issue #{issue} no longer needs you — PR #{pr} was merged"; closed → "Issue #{issue} no longer needs you — it was closed"; label-removed → "Issue #{issue} no longer needs you — the flag was cleared"; board-fixed → "Issue #{issue} no longer needs you — the board was set to Done". Never an attention item — this is the event that *clears* one (§3) |
 | `retro-pr-opened` | The loop proposed an improvement to itself — PR #{pr} awaits review |
 | `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
 | `run-started` | Engine started a new run |

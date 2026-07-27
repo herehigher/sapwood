@@ -70,13 +70,17 @@
 //     These clear via issue-closed / PR-merged-or-closed only, which is still strictly more
 //     clearing than the zero paths they have today.
 //
-// ponytail: no `via: "board-fixed"` observation, though issue #295's sketch names one. Tracing
-// the classes above, NONE of them is signalled by a board column — escalation in this engine is
-// label-and-event based, and board drift has its own separate `board-normalized` path. Adding it
-// would mean a whole-board read every round to service a resolution nothing can currently
-// produce, i.e. an unreachable enum arm. Upgrade path if a board-signalled escalation class ever
-// lands: one `readStartupReconcileData()` placement read per sweep (board-wide, NOT per-issue)
-// feeding a fourth arm in `observeResolution` below.
+// `via: "board-fixed"` (issue #295's sketch named it; review round 7 made it reachable). The
+// original ruling was that NO class is board-column-signalled, so the arm would be dead code.
+// That premise died when round 7 correctly ruled out issue closure for the merged-board-done
+// rollback escalation: a worker PR carries `Closes #N`, so the merge that PRODUCED the escalation
+// also closes the issue, and closure cannot be evidence anyone repaired the board. What that
+// class means is exactly "the Done-board write never landed", so what resolves it is exactly
+// "the board says Done" — a fact, directly observable, rather than a human ritual on a closed
+// issue nobody browses. Implemented as the doc always specified: ONE `readStartupReconcileData()`
+// placement read per sweep (board-wide, never per-issue), taken LAZILY — only if such an
+// escalation is actually open, which is rare by construction. This also heals every legacy
+// ledger event, which a label-based path could not: it observes the fact, not the act.
 //
 // Cost (the issue left "per tick or per round" to the implementer): per ROUND, wired next to
 // `scanForAdjudication` in round-defaults.ts's aligning wrapper — the same unconditional
@@ -159,7 +163,7 @@ const RESOLVED_KIND = "escalation-resolved";
 
 /** How an escalation was observed to have been resolved. See the module doc for why
  *  `board-fixed` (named in issue #295's sketch) is deliberately absent. */
-export type ResolutionVia = "merged" | "closed" | "label-removed";
+export type ResolutionVia = "merged" | "closed" | "label-removed" | "board-fixed";
 
 export interface OpenEscalation {
   /** The escalation event kind this came from — the `source` the dashboard folds on. */
@@ -259,11 +263,21 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
 /** The read-only observation for ONE open escalation: has the outside world resolved it? Order
  *  is most-informative-first — a merged PR is a richer fact than the issue closure it usually
  *  causes, so it wins when both are true. */
-async function observeResolution(forge: IForge, cfg: SapwoodConfig, esc: OpenEscalation): Promise<ResolutionVia | null> {
+async function observeResolution(
+  forge: IForge,
+  cfg: SapwoodConfig,
+  esc: OpenEscalation,
+  boardStatus: (issue: number) => Promise<string | null>,
+): Promise<ResolutionVia | null> {
   if (esc.pr !== undefined) {
     const pr = await forge.getPRStatus(esc.pr);
     if (pr.state === "MERGED") return "merged";
     if (pr.state === "CLOSED") return "closed";
+  }
+  // #295 review round 7: for an escalation the MERGE ITSELF produced, the board is the only honest
+  // witness. Checked BEFORE the issue read, and it is the only arm this class has — see below.
+  if (esc.producedBy === "merged") {
+    return (await boardStatus(esc.issue)) === cfg.board.status.done ? "board-fixed" : null;
   }
   const meta = await forge.getIssueMeta(esc.issue);
   if (meta.state === "CLOSED") return "closed";
@@ -298,10 +312,28 @@ export async function reconcileEscalations(
     warn(`[sapwood:escalation] failed to read the escalation ledger — swept nothing this pass: ${String(e)}`);
     return;
   }
+  // ONE board-wide placement read per sweep, taken LAZILY — only if a merge-produced escalation is
+  // actually open (rare by construction), and memoized so N of them still cost one call. A read
+  // failure yields `null` for every issue, i.e. "not observed resolved this pass", which is the
+  // same fail-open-to-still-open degradation every other arm uses. Deliberately NOT per-issue: the
+  // module doc's cost bound ("at most 2 read-only calls each per round") stays intact.
+  let placements: Map<number, string | null> | null | undefined;
+  const boardStatus = async (issue: number): Promise<string | null> => {
+    if (placements === undefined) {
+      try {
+        const data = await forge.readStartupReconcileData();
+        placements = new Map(data.placements.filter((p) => p.number != null).map((p) => [p.number as number, p.status]));
+      } catch (e) {
+        warn(`[sapwood:escalation] board placement read failed — merge-produced escalations left open this pass: ${String(e)}`);
+        placements = null;
+      }
+    }
+    return placements?.get(issue) ?? null;
+  };
   for (const esc of open.values()) {
     let via: ResolutionVia | null;
     try {
-      via = await observeResolution(forge, cfg, esc);
+      via = await observeResolution(forge, cfg, esc, boardStatus);
     } catch (e) {
       warn(`[sapwood:escalation] failed to check ${esc.source} on #${esc.issue} — left open this pass: ${String(e)}`);
       continue;
