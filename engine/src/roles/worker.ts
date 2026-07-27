@@ -2429,7 +2429,10 @@ export class WorkerSupervisor implements Supervisor {
    *  Extraction is STRUCTURED (PR #180 review P1-3 — see extractFailureText: stderr lines +
    *  errored result/error records only, never assistant message content), then tail-capped: an
    *  environment failure is almost always the LAST thing the process emits before dying, and
-   *  there's no reason to carry more through LaneProbe than the classifier can use. */
+   *  there's no reason to carry more through LaneProbe than the classifier can use. Reads the
+   *  FULL cumulative jsonl (not a per-leg slice) — see terminalRateLimitRejected's own doc below
+   *  for the shared, deliberate staleness this has in common with that reader on a multi-leg
+   *  lane, and why it's a documented parity, not narrowed. */
   private terminalFailureText(name: string): string {
     const text = extractFailureText(this.readJsonl(this.path(name, "jsonl")));
     return text.length > FAILURE_TEXT_TAIL_CHARS ? text.slice(-FAILURE_TEXT_TAIL_CHARS) : text;
@@ -2443,7 +2446,22 @@ export class WorkerSupervisor implements Supervisor {
   }
 
   /** #394 (F22): same shape as terminalRateLimitResetAtMs — a new READ of the SAME jsonl,
-   *  feeding conductor.ts's env-park classification with the primary, text-free signal. */
+   *  feeding conductor.ts's env-park classification with the primary, text-free signal.
+   *
+   *  #394 gate② review — DOCUMENTED, DELIBERATE staleness (ruled against narrowing): this reads
+   *  the FULL cumulative jsonl (`this.path(name, "jsonl")`), same as terminalFailureText just
+   *  above — NOT `currentLegJsonl`'s per-leg slice. On a multi-leg (resumed) lane, a rejected
+   *  rate_limit_event from an EARLIER, already-recovered leg can still be seen here and
+   *  reclassify a LATER, unrelated failure as `llm`. The reviewer proposed slicing to the
+   *  current leg only; rejected because terminalFailureText (this class's OTHER classification
+   *  reader, right above) already scans the same full file — narrowing only the structured
+   *  signal would make the text path and the telemetry path disagree about what "this failure"
+   *  scopes to, which is a worse thing for the next reader to reason about than the bounded
+   *  staleness itself. Both readers share this scope on purpose: PARITY, not an oversight. The
+   *  failure mode this staleness can cause — a stale-but-real rejection wrongly parks the engine
+   *  as `llm` for an unrelated later failure — self-heals through the EXISTING probe/canary path
+   *  (env-failure.ts's probeDue-family functions / escalationChannel): the next probe or canary
+   *  lane simply succeeds, since the provider was never actually still rejecting. */
   private terminalRateLimitRejected(name: string): boolean {
     return hasRejectedRateLimitEvent(this.readJsonl(this.path(name, "jsonl")));
   }

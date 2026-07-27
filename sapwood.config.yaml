@@ -394,7 +394,16 @@ reviewer:
 # envFailure:
 #   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
 #                 "credit balance is too low", insufficient_quota, overloaded_error,
-#                 "429 too many requests"]
+#                 "429 too many requests", 'hit your \S+ limit']
+#                 # ^ #394: the Claude CLI's own plan-quota-exhaustion message family
+#                 # ("You've hit your session/weekly/5-hour limit · resets ..."), matched on the
+#                 # shared "hit your <tier> limit" stem rather than a per-tier guess. Single-
+#                 # quoted deliberately — YAML single-quoted scalars are NOT escape-processed, so
+#                 # \S survives verbatim into the regex; a double-quoted "hit your \S+ limit"
+#                 # would need \\S instead. If you uncomment this block to add your OWN pattern,
+#                 # copy the FULL list above first — uncommenting replaces every default at once,
+#                 # not just the ones you're adding to (the exact #374/#394 incident: an earlier
+#                 # partial copy here silently dropped quota-tier coverage for months).
 #   forgePatterns: ["could not resolve host", "connection refused", "network is unreachable",
 #                   "temporary failure in name resolution", "bad gateway", "gateway timeout",
 #                   "service unavailable", "bad credentials", "401 unauthorized",

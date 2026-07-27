@@ -83,12 +83,12 @@ function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, ph
  *  degrade, unrelated to the other four phases being perfectly fine), a false positive this
  *  function closes. Pure and exported for direct unit testing.
  *
- *  A round counts as fully degraded only when EVERY peripheral phase this round was actually
- *  capable of running a session for shows up in `degradedRoundPhases` (finding 4's fidelity fix
- *  feeds that set correctly — see DEGRADED_PHASE_TO_ROUND_PHASE). "Capable of running a
- *  session" is resolved as precisely as round.ts can cheaply know, without a new forge read or
- *  a PeripheralStub contract change (marginal-complexity principle — see the accepted
- *  limitation noted below):
+ *  A round counts as fully degraded only when EVERY peripheral phase this round both (a) was
+ *  cfg-configured to be capable of running a session ("required", below) AND (b) actually ran
+ *  one (`ranPhases`, round.ts's own PeripheralStub.ranSession bookkeeping — see that interface's
+ *  doc) shows up in `degradedRoundPhases` (finding 4's fidelity fix feeds that set correctly —
+ *  see DEGRADED_PHASE_TO_ROUND_PHASE). "Cfg-configured to be capable" is the coarse, config-only
+ *  half of the check:
  *   - aligning: only required when SOME real session could run there at all — po-align
  *     (`roles.po.enabled`) or the opt-in pool-selection session (`roles.po.poolSelection`).
  *     With BOTH off, aligning never spawns any LLM session (round-defaults.ts's own doc: pool
@@ -102,17 +102,39 @@ function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, ph
  *   - retro: required only on retro's own cadence turn (`roundId % everyNRounds === 0`,
  *     retro.ts's own gate) — a thinned-out round genuinely never dispatches a session.
  *
- *  ACCEPTED LIMITATION (documented, not silently swallowed): architecting/plan_review can ALSO
- *  skip their session entirely when there's simply nothing to review this round (architect.ts's
- *  own `candidates.length===0 && poolIssues.length===0` check; plan-review.ts's own
- *  `poolMembers.length===0` check) — round.ts has no cheap, forge-free way to know that ahead of
- *  this round's own artifact. Unlike the three cases resolved precisely above, this is NOT
- *  modeled: a round where architecting/plan_review had nothing to do is (only in that specific
- *  case) undercounted as "not fully degraded" even during a genuine total outage. This
- *  under-triggers, never over-triggers, the breaker — the safer direction for a new safety
- *  mechanism — and item 1's env-classification path plus the ceiling-breach gate remain the
- *  primary defenses regardless; a sustained outage spans many rounds, and it only takes N
- *  CONSECUTIVE rounds where every configured phase actually ran to trip.
+ *  #394 (F23 — closes the pre-#394 "ACCEPTED LIMITATION" this doc used to carry): architecting/
+ *  plan_review can ALSO skip their session entirely when there's simply nothing to review this
+ *  round (architect.ts's own `candidates.length===0 && poolIssues.length===0` check;
+ *  plan-review.ts's own `poolMembers.length===0` check) — a case the coarse cfg-only check above
+ *  cannot see (it only knows the ROLE is enabled, not whether THIS round had anything to do).
+ *  Before #394 this meant an empty-pool round during a quota storm could NEVER register as fully
+ *  degraded: architecting/plan_review stayed in the "required" set (role enabled) but never
+ *  joined `degradedRoundPhases` either (no session ran, so nothing degraded), permanently
+ *  unsatisfying `every()` — exactly the scenario this breaker exists to catch, structurally
+ *  disarmed. The `ranPhases` intersection below closes this: a phase excluded from `ranPhases`
+ *  (because its own PeripheralStub reported no `ranSession`) is excluded from the requirement
+ *  too, "skipped phases are evidence of nothing." `ranPhases` is round.ts's OWN observation of
+ *  what actually happened this round — no new forge read, no speculative machinery, just the
+ *  stub's own return value already threaded back.
+ *
+ *  #394 ACCEPTED GAP (documented, not silently swallowed — a crash-RESUME variant of the same
+ *  fidelity question, in the OVER-trigger direction this time): `ranPhases` is a fresh, in-
+ *  process-only `Set` built by round.ts's own phase loop THIS run — a round resumed directly
+ *  into `executing` after an engine restart (round.phase was already past aligning/architecting/
+ *  plan_review when the process died) never re-enters those earlier phases in THIS process, so
+ *  they can never be added to `ranPhases` here, REGARDLESS of whether they genuinely ran and
+ *  SUCCEEDED before the crash. If every post-resume phase (harvesting/retro) then degrades, this
+ *  function sees only that smaller, all-degraded `ranPhases` subset and can report "fully
+ *  degraded" for a round whose earlier phases were actually fine — an over-trigger, the opposite
+ *  direction from every other gap this doc discusses. This is BOUNDED, not a live safety risk:
+ *  round.ts's own `consecutiveDegradedRounds` counter resets to 0 on every fresh engine start (an
+ *  in-memory variable, never persisted), so a resumed round can contribute AT MOST one single
+ *  false strike toward the streak before normal, non-resumed rounds resume driving it — it cannot
+ *  itself park a healthy engine. The full-fidelity fix (persist `ranPhases` per round, across a
+ *  restart) was considered and REJECTED: that is new durable state and new crash-rerun semantics
+ *  for a breaker whose entire job is being a bounded, low-machinery BACKSTOP — the marginal-
+ *  complexity principle (a recovery mechanism must not itself become a problem generator) rules
+ *  against it for a gap that is already capped at one strike per restart.
  *
  *  #374 review (Codex sol-high verify-pass finding 3, P2 — narrows an over-broad false-park
  *  source): `artifact.retro.degraded` (retro.ts's `retro-pr-degraded` event) is DELIBERATELY

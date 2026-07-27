@@ -513,6 +513,35 @@ test("createAligningStub #231: a missing goal file is an EXPLICIT align-creation
   }
 });
 
+test("createAligningStub (#394 F23 gate② fix): an unreadable goal file (persists every round) + an EMPTY board (zero triage candidates) -> NEITHER session dispatches -> ranSession false, never a permanent-block over-report", async () => {
+  // The reachable compound state gate② review traced: cfg.goal.file unreadable means the
+  // align-creation session never spawns (see the #231 test above); an empty board means the
+  // per-issue triage loop has nothing to iterate either. With NEITHER session actually running,
+  // this call must report ranSession: false — before this fix it unconditionally reported
+  // `true` at the bottom return, which (combined with a quota storm elsewhere the text/telemetry
+  // classifier misses) would make round.ts's empty-spin breaker's required-set check permanently
+  // unsatisfiable (aligning never lands in degradedPhases either, since no session ever runs to
+  // degrade).
+  const forge = new FakeForge(); // default: zero planTriageCandidates -> empty board
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-align-empty-board-"));
+  try {
+    const missingGoalPath = join(dir, "does-not-exist.md");
+    const cfg = mkCfg({ goal: { file: missingGoalPath } });
+    const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
+    const state = new State(":memory:");
+    const deps: AlignDeps = { forge, state, cfg, runner };
+    const stub = createAligningStub(deps);
+    const { marker, ranSession } = await stub.run({ roundId: 11, phase: "aligning", marker: null });
+
+    assert.equal(marker, alignMarker(11));
+    assert.equal(runner.calls.length, 0, "neither the align-creation nor any triage session ever dispatched");
+    assert.equal(ranSession, false, "#394 (F23 gate② fix): both dispatch points skipped -> ranSession false");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("createAligningStub #231: a backlog read failure SUPPRESSES issue creation (zero createIssue calls) but does not block the po-align session itself or triage", async () => {
   const forge = new FakeForge();
   forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [], body: NO_PLAN_BODY }];
