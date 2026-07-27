@@ -26,16 +26,19 @@ board:
 #                        # bare M4 loop driver (no peripherals; --once/--until-idle
 #                        # apply), kept as an explicit escape hatch.
 
-# liveness: #395 — bounded external awaits + the "tick" driver's own stall watchdog. A host
-#           # sleeping mid-round with a forge/spawn call in flight must never wedge the engine
-#           # with zero events; every duration below exists to bound exactly that.
-#   forgeCallTimeoutMs: 60000     # hard per-call ceiling on a single `gh` CLI invocation (raised
-#                                 # from an initial 30s: some reads are gh api --paginate over
-#                                 # potentially large pages and need headroom)
+# liveness: #395 — bounded external awaits + a PROGRESS-based stall watchdog (armed for BOTH
+#           # engine.driver values, tick and rounds). A host sleeping mid-round with a forge/
+#           # spawn call in flight must never wedge the engine with zero events; every duration
+#           # below exists to bound exactly that.
+#   forgeCallTimeoutMs: 60000     # hard per-call ceiling on a single `gh`/`git` CLI invocation
+#                                 # (raised from an initial 30s: some reads are gh api --paginate
+#                                 # over potentially large pages and need headroom)
 #   spawnConfirmTimeoutMs: 30000  # hard ceiling on waiting for a spawned child's spawn/error
 #                                 # confirmation (a role session or a worker leg)
-#   watchdogTickMultiplier: 10    # the "tick" driver (engine.driver: tick) treats no tick
-#                                 # completing within tickIntervalSec * this many as wedged —
+#   watchdogTickMultiplier: 10    # the watchdog treats no DURABLE EVENT being appended within
+#                                 # tickIntervalSec * this many as wedged — never tick duration
+#                                 # (a long-but-healthy inline review session self-kills the
+#                                 # engine under a duration-based trigger; see watchdog.ts) —
 #                                 # durable engine-stalled event + nonzero exit
 
 # logging:

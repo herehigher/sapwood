@@ -749,47 +749,64 @@ const Engine = z
   })
   .strict();
 
-// #395 (F24 dogfood incident): engine liveness — bounded external awaits (every `gh` CLI call,
-// role-session/worker-leg spawn confirmation) plus the "tick" driver's own liveness watchdog.
-// User-tunable per the config rule (never hardcoded) — the live incident was a host sleeping
-// ~49h mid-round with a role-session spawn/network call in flight: the process woke alive but
-// emitted zero events for 30+ minutes because nothing bounded that await. Every duration here
-// exists to close exactly that class of wedge.
+// #395 (F24 dogfood incident, gate② round 2): engine liveness — bounded external awaits (every
+// `gh`/`git` call, role-session/worker-leg spawn confirmation) plus a PROGRESS-BASED liveness
+// watchdog (watchdog.ts's startProgressWatchdog). User-tunable per the config rule (never
+// hardcoded) — the live incident was a host sleeping ~49h mid-round with a role-session spawn/
+// network call in flight: the process woke alive but emitted zero events for 30+ minutes because
+// nothing bounded that await and nothing noticed. Every duration here exists to close exactly
+// that class of wedge.
 const Liveness = z
   .object({
-    // Hard per-call ceiling on a single `gh` CLI invocation (gh.ts's `gh`/`ghText`/`ghWithTimeout`
-    // — the ONE place the engine shells out to `gh`, forge.ts's GithubForge.gh routes every forge
-    // call through it). Same rationale/shape as proxy.timeoutMs's own doc ("a hung upstream `gh`
-    // call must never wedge a session waiting ... forever"). Every failure (including this one)
-    // already fails toward retry — GithubForge is called either from inside tick() (an unguarded
-    // throw there is CONTAINED by driver.ts's/round.ts's own tick-error handling, retried next
-    // tick/round) or from a caller with its own local try/catch (probeForgeReachable,
-    // checkFinalMilestone, escalatePark's forge-comment fallback, ...) — never a path that can
-    // reach classifyEnvFailure/park (that's driven exclusively by WORKER-LEG output text, never
-    // by GithubForge's own exceptions) or a fatal exit. 60s (not 30s, proxy.timeoutMs's own
-    // value): several forge.ts reads are `gh api --paginate` over potentially large pages
-    // (getCommitsSince, getPRReviewData's reactions/comments, getIssueComments) — a legitimately
-    // slow-but-would-succeed call on that shape needs more headroom than a single small read,
-    // while staying well under the tick-loop watchdog's own (much larger) window either way.
+    // Hard per-call ceiling on a single `gh`/`git` CLI invocation (gh.ts's
+    // `gh`/`ghText`/`ghWithTimeout` — the ONE place the engine shells out to `gh`, forge.ts's
+    // GithubForge.gh routes every forge call through it; review/materializer.ts's private-clone
+    // fetch/clone/checkout reuse this same knob rather than a second one just for git). Same
+    // rationale/shape as proxy.timeoutMs's own doc ("a hung upstream `gh` call must never wedge
+    // a session waiting ... forever"). Most callers fail toward retry — GithubForge is called
+    // either from inside tick() (an unguarded throw there is CONTAINED by driver.ts's/round.ts's
+    // own tick-error handling, retried next tick/round) or from a caller with its own local
+    // try/catch (probeForgeReachable, checkFinalMilestone, escalatePark's forge-comment
+    // fallback, ...) — classifyEnvFailure/park itself is driven exclusively by WORKER-LEG
+    // output TEXT, never by GithubForge's own exceptions, so a `gh` timeout cannot directly
+    // trigger a park episode. It CAN still reach a fatal exit indirectly, by design: peripheral
+    // stubs (e.g. align.ts's own crash-rerun-safe forge calls) call the forge directly and are
+    // deliberately NOT contained the way tick()'s own forge calls are, so a burst of timeouts
+    // there can propagate to cli.ts's top-level `process.exit(1)` — the same pre-existing
+    // fail-fast stance any other burst of forge failures on that path already has, not a new gap
+    // this default introduces. 60s (not 30s, proxy.timeoutMs's own value): several forge.ts
+    // reads are `gh api --paginate` over potentially large pages (getCommitsSince,
+    // getPRReviewData's reactions/comments, getIssueComments) — a legitimately slow-but-would-
+    // succeed call on that shape needs more headroom than a single small read. Empirically ample
+    // for this repo's own heaviest paginated read (~0.5s).
     forgeCallTimeoutMs: z.number().int().positive().default(60_000),
     // Hard ceiling on the wait for a freshly spawned child (a role session, peripheral.ts's
-    // RoleRunner.run, or a worker leg, worker.ts's WorkerSupervisor.dispatch) to report Node's
-    // own `spawn`/`error` event. Node gives that confirmation no timeout of its own — a callback
-    // lost across a host sleep (the #395 live incident) hangs the await forever without one. On
-    // timeout the (possibly still-alive) child is best-effort killed and the attempt fails toward
-    // retry, the same way a genuine spawn error already does.
+    // RoleRunner.run, or a worker leg, worker.ts's WorkerSupervisor.dispatch/resume) to report
+    // Node's own `spawn`/`error` event. Node gives that confirmation no timeout of its own — a
+    // callback lost across a host sleep (the #395 live incident) hangs the await forever without
+    // one. On timeout the (possibly still-alive) child is best-effort killed and the attempt
+    // fails toward retry, the same way a genuine spawn error already does.
     spawnConfirmTimeoutMs: z.number().int().positive().default(30_000),
-    // The "tick" driver's (driver.ts's runDriver) own liveness watchdog: a generous MULTIPLE of
-    // engine.tickIntervalSec — never a fixed absolute duration, so a legitimately slow cadence is
-    // never itself a false alarm — past which no tick has completed is treated as a wedged loop
-    // (a stuck external await that slipped past the two bounds above, or any other stall; sleep
-    // is just the common case). Fires a durable `engine-stalled` event (state.appendEvent, the
-    // same durable-event mechanism every other engine event already uses) and exits the process
-    // nonzero so a supervisor can restart it — deliberately NOT an in-process self-heal/abort
-    // (PM ruling: the smallest thing that works; a stuck await's resources are reclaimed by the
-    // process exit itself, never by cancelling it in place). Conservative default (10x): with the
-    // shipped tickIntervalSec default (60s) that's a 10-minute window, comfortably above any
-    // healthy tick's real duration.
+    // The liveness watchdog (watchdog.ts's startProgressWatchdog, armed once per engine run by
+    // BOTH the "tick" driver — driver.ts's runDriver — and the "rounds" driver — round.ts's
+    // runRounds, the production default): a generous MULTIPLE of engine.tickIntervalSec — never
+    // a fixed absolute duration, so a legitimately slow cadence is never itself a false alarm —
+    // past which NO DURABLE EVENT has been appended (state.maxEventId unchanged), regardless of
+    // which phase is running or how long it legitimately takes. Deliberately NOT keyed on tick()
+    // completion or duration: `reviewer.mode: engine-agent` awaits a full LLM review session
+    // INLINE inside tick(), bounded only by worker.timeoutSec (default 3600s, up to two
+    // attempts) — a healthy 10-20 minute review would trip any duration-based window tight
+    // enough to be useful, self-killing the engine mid-review. Progress-based sidesteps that
+    // trade entirely (see watchdog.ts's own doc for the full reasoning) — but only works because
+    // several otherwise-quiet stretches (an inline review/role session, an ordinary worker leg,
+    // round.ts's standby backoff and park-recovery waits) now emit a periodic heartbeat event
+    // specifically so they don't starve this counter; see each site's own comment. Fires a
+    // durable `engine-stalled` event (state.appendEvent) and exits the process nonzero so a
+    // supervisor can restart it — deliberately NOT an in-process self-heal/abort (PM ruling: the
+    // smallest thing that works; a stuck await's resources are reclaimed by the process exit
+    // itself, never by cancelling it in place). Conservative default (10x): with the shipped
+    // tickIntervalSec default (60s) that's a 10-minute window with no progress at all —
+    // comfortably longer than any healthy heartbeat cadence (hbMs defaults to 30s).
     watchdogTickMultiplier: z.number().positive().default(10),
   })
   .strict();

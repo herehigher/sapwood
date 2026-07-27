@@ -1651,6 +1651,40 @@ test("run: #395 a spawn confirmation that never arrives is bounded by cfg.livene
   }
 });
 
+test("run (#395 gate② P2-1b): a spawn confirmation timeout appends a durable role-session-spawn-timeout event BEFORE throwing — this throw is caught NOWHERE before cli.ts's top-level process.exit(1) (runSessionWithRetry only retries a returned result, never a run() throw), so AC1's 'clean nonzero exit WITH a durable event' depends on this", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const events: Array<[string, unknown]> = [];
+    const fakeState = {
+      appendEvent: (kind: string, payload: unknown): void => {
+        events.push([kind, payload]);
+      },
+    };
+    const runner = mkRunner(dir, bin, {
+      cfg: { ...cfg, liveness: { ...cfg.liveness, spawnConfirmTimeoutMs: 1 } },
+      state: fakeState,
+      // Deterministic: an injected `sleep` resolving on the next microtask reliably wins the
+      // race against a real (if fast) OS process-spawn confirmation — same technique this
+      // file's worker-heartbeat-adjacent #395 tests already use.
+      sleep: async () => {
+        /* resolves immediately */
+      },
+    });
+    await assert.rejects(
+      () => runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" }),
+      /spawn confirmation timed out/i,
+    );
+    assert.equal(events.length, 1, "exactly one durable event was appended before the throw");
+    const [kind, payload] = events[0]!;
+    assert.equal(kind, "role-session-spawn-timeout");
+    assert.equal((payload as { roleId: string }).roleId, "architect");
+    assert.equal((payload as { timeoutMs: number }).timeoutMs, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: #218 regression, extended to a proxy-attached session — the spawn env stays forge/git credential-free, and the proxy's bearer token travels ONLY via --mcp-config, never the env", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   const poisoned = {

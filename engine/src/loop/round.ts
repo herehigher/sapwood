@@ -40,7 +40,7 @@ import {
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
-import { EngineStalledError, raceTickWithWatchdog } from "./watchdog.js";
+import { startProgressWatchdog } from "./watchdog.js";
 
 export type { RoundPhase, RoundRow } from "../state/state.js";
 
@@ -298,9 +298,11 @@ export interface RoundsResult {
   /** "kill-switch": a peripheral phase was blocked by an active KILL_SWITCH — the round loop
    *  stops immediately, without running that (or any later) peripheral for the round in
    *  flight. "signal"/"stop-condition": graceful — the round already open always finishes
-   *  harvest+retro and closes before the loop stops; only a NEW round is withheld. "watchdog"
-   *  (#395): the liveness watchdog fired — see watchdog.ts's EngineStalledError. */
-  stoppedBy: "signal" | "stop-condition" | "kill-switch" | "watchdog";
+   *  harvest+retro and closes before the loop stops; only a NEW round is withheld. #395's
+   *  liveness watchdog (watchdog.ts) is NOT a `stoppedBy` value here — it runs as an
+   *  independent background timer, never cooperatively unwinding this loop; a real stall means
+   *  `runRounds` itself never returns (the nonzero exit is the operative signal). */
+  stoppedBy: "signal" | "stop-condition" | "kill-switch";
   stopCondition?: StopConditionHit;
 }
 
@@ -690,14 +692,23 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   const cfg = deps.cfg;
   const forge: IForge = cfg.round.milestone ? new RoundScopedForge(deps.forge, cfg.round.milestone) : deps.forge;
   const peripherals = deps.peripherals ?? {};
-  // #395: resolved once — same contract as driver.ts's own watchdogExit default.
-  const watchdogExit = deps.watchdogExit ?? ((code: number) => process.exit(code));
 
   let signalled = false;
   let wakeFromSleep: (() => void) | null = null;
   const unregister = (deps.registerSignals ?? defaultRegisterSignals)(() => {
     signalled = true;
     wakeFromSleep?.();
+  });
+  // #395: the liveness watchdog — an INDEPENDENT background timer for this call's whole
+  // lifetime (every round-phase: aligning/architecting/plan_review/executing/harvesting/retro,
+  // not just tick()'s own dispatch/reclaim/drive), stopped in this function's `finally`
+  // alongside `unregister()`. Same contract as driver.ts's runDriver — see watchdog.ts's own
+  // doc for why this is progress-based, never raced against any single tick() call.
+  const watchdog = startProgressWatchdog({
+    windowMs: deps.tickIntervalSec * 1000 * cfg.liveness.watchdogTickMultiplier,
+    state: deps.state,
+    exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),
+    eventPayload: { tickIntervalSec: deps.tickIntervalSec, watchdogTickMultiplier: cfg.liveness.watchdogTickMultiplier },
   });
   // Same signal-abortable inter-tick wait as driver.ts's interTickWait — see its comment there
   // for the shutdown-latency rationale this shape closes.
@@ -902,26 +913,25 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       if (signalled) return;
       await interTickWait(deps.tickIntervalSec * 1000);
       if (deps.state.isKillSwitchActive()) return;
+      // #395 (gate② P1 round 2): a per-iteration progress heartbeat — this loop's own probe
+      // cadence (envFailure.probeBackoffMaxSec / parkEscalateAfterSec, both up to 1800-3600s
+      // default) can leave many consecutive iterations with no probe due and therefore no
+      // park-probe event, well past the liveness watchdog's own window, even though this loop
+      // itself is cycling normally (bounded by tickIntervalSec each time, never stuck).
+      try {
+        deps.state.appendEvent("park-wait-heartbeat", { parked: deps.state.isParked() });
+      } catch {
+        /* telemetry only */
+      }
     }
   };
 
   /** Contained tick() call (same containment stance as driver.ts's runDriver): a thrown tick
    *  is a structured tick-error event, never a crash, never a hot retry loop (callers still
-   *  sleep the normal cadence around this). Also updates the FINAL stop-condition counters.
-   *  #395: tick() is raced against the SAME shared liveness watchdog driver.ts's runDriver
-   *  uses (watchdog.ts) — a stall throws EngineStalledError (after its own durable event +
-   *  exit hook have already run), which this function's catch re-throws UNCAUGHT rather than
-   *  recording as an ordinary tick-error — it propagates through both call sites below (no
-   *  try/catch of their own) to runRounds's own outer catch, which converts it into a clean
-   *  `stoppedBy: "watchdog"` return. */
+   *  sleep the normal cadence around this). Also updates the FINAL stop-condition counters. */
   const runTick = async (tickDeps: TickDeps): Promise<TickResult | null> => {
     try {
-      const result = await raceTickWithWatchdog(() => tick(tickDeps), {
-        watchdogMs: deps.tickIntervalSec * 1000 * cfg.liveness.watchdogTickMultiplier,
-        state: deps.state,
-        exit: watchdogExit,
-        eventPayload: { tickIntervalSec: deps.tickIntervalSec, watchdogTickMultiplier: cfg.liveness.watchdogTickMultiplier },
-      });
+      const result = await tick(tickDeps);
       ticks++;
       deps.onTick?.(result);
       issuesMerged += issuesMergedThisTick(result);
@@ -947,10 +957,6 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       }
       return result;
     } catch (e) {
-      // #395: a watchdog stall is NOT a contained tick-error — its own durable event + exit hook
-      // already ran inside raceTickWithWatchdog; re-throw uncaught so it propagates past both
-      // call sites (neither wraps runTick() in its own try/catch) to runRounds's outer catch.
-      if (e instanceof EngineStalledError) throw e;
       tickErrors++;
       try {
         deps.state.appendEvent("tick-error", { error: String(e) });
@@ -1426,6 +1432,18 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
               const sliceSec = Math.min(remainingSec, deps.tickIntervalSec);
               await interTickWait(sliceSec * 1000);
               remainingSec -= sliceSec;
+              // #395 (gate② P1 round 2): a per-slice progress heartbeat, SEPARATE from
+              // standby-wait above (which keeps its existing one-per-backoff-step schedule,
+              // unchanged) — a single backoff step can legitimately run up to
+              // cfg.round.standby.backoffCapSec (default 1800s), well past the liveness
+              // watchdog's own window, with standby-wait itself firing only once at the start.
+              // Bounded by the SAME tickIntervalSec-sized slicing this loop already does for
+              // the KILL_SWITCH check above — no new cadence introduced.
+              try {
+                deps.state.appendEvent("standby-heartbeat", { attempt: standbyAttempts, remainingSec });
+              } catch {
+                /* telemetry only — the wait itself proceeds */
+              }
             }
             if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
             if (signalled) break;
@@ -1621,17 +1639,8 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       }
       // Loop back to the top: re-check signal / final-stop before opening the NEXT round.
     }
-  } catch (e) {
-    // #395: the ONLY exception runTick's own catch ever re-throws is a watchdog stall (see its
-    // doc) — its durable engine-stalled event + exit hook already ran; convert to a clean
-    // result here (reached only when a test's injected exit hook didn't actually terminate the
-    // process — production never gets here). Any other exception is a genuine bug, not a
-    // recognized stop path, and propagates unchanged.
-    if (e instanceof EngineStalledError) {
-      return { rounds: roundsClosed, ticks, tickErrors, stoppedBy: "watchdog" };
-    }
-    throw e;
   } finally {
     unregister();
+    watchdog.stop();
   }
 }

@@ -2606,6 +2606,16 @@ export class State {
     return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
   }
 
+  /** #395 (F24 round 2): the events table's own MAX(id) — the liveness watchdog's progress
+   *  signal (watchdog.ts's startProgressWatchdog). Same cheap MAX(id) pattern as
+   *  maxSpendLedgerId below; `state.appendEvent` is the engine's one durable progress channel
+   *  (round-phase entries, dispatched, reclaim outcomes, tick-error, heartbeats, ...) — an
+   *  unchanged reading across a full watchdog window means nothing was appended, independent of
+   *  which phase is running or how long it legitimately takes. */
+  maxEventId(): number {
+    return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number }).m;
+  }
+
   /** #123: id-cursor variant of spentUsdSince (same rationale as eventsAfterId). */
   spentUsdAfterId(afterId: number): number {
     const row = this.db.prepare("SELECT COALESCE(SUM(usd), 0) AS total FROM spend_ledger WHERE id > ?").get(afterId) as { total: number };

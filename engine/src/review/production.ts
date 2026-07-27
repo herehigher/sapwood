@@ -149,8 +149,10 @@ export function makeProductionEngineAgent(
         }
         return result;
       }
-      const clone = await createPrivateClone({ sourceRepoDir, cloneDir, worktreeRoot });
-      const result = await materialize({ clone, oid: head, treeDir });
+      // #395 (gate② P3): thread the same forge-call timeout `gh` calls use — one user-tunable
+      // knob for both external-process bounds, rather than a second one just for materializer.ts.
+      const clone = await createPrivateClone({ sourceRepoDir, cloneDir, worktreeRoot, timeoutMs: cfg.liveness.forgeCallTimeoutMs });
+      const result = await materialize({ clone, oid: head, treeDir, timeoutMs: cfg.liveness.forgeCallTimeoutMs });
       if (result.kind === "materialized" && activeWorker) {
         const wal = state.getEngineReviewWal(activeWorker);
         if (wal?.head === head) {

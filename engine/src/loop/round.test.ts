@@ -3161,33 +3161,41 @@ test("runRounds (#253): cfg.proxy.enabled: false (the default) -> no fixLegResum
   state.close();
 });
 
-// ── #395: the liveness watchdog — a never-resolving forge/spawn await inside the executing ────
-// ── phase's tick() must not wedge the ROUNDS driver (the production default) past a generous ──
-// ── multiple of tickIntervalSec ─────────────────────────────────────────────────────────────
+// ── #395 round 2 (gate② P1): the liveness watchdog is PROGRESS-based, not tick-duration-based ──
+// ── — an independent background timer for the WHOLE run, covering every round phase, never ─────
+// ── raced against any single tick() call. See watchdog.ts's own doc for why. ───────────────────
 
-test("runRounds (#395): a never-resolving forge await (the live incident's shape — an in-flight call during the executing phase) is bounded by the watchdog — durable engine-stalled event + the injected exit hook, never spins forever", async () => {
+test("runRounds (#395): a never-resolving forge await during the executing phase is bounded by the INDEPENDENT progress watchdog — durable engine-stalled event + the injected exit hook fire even though runRounds itself never returns", async () => {
   const forge = new FakeForge();
   // The exact live-incident shape: an in-flight forge/spawn await that never resolves (a host
   // sleep losing the completion notification). getReadyIssues is called from tick()'s DISPATCH
   // phase, reached the instant the round enters `executing` (wave 1 fires immediately, no
-  // inter-tick wait) — this wedges tick() itself, not just one branch of it.
+  // inter-tick wait) — this wedges tick() itself, and by construction runRounds's own returned
+  // promise, which is why this test does NOT await it (see driver.test.ts's equivalent test for
+  // the full rationale — a genuine stall means it legitimately never resolves).
   forge.getReadyIssues = () => new Promise<Issue[]>(() => {});
   const state = new State(":memory:");
   // A tiny tickIntervalSec × watchdogTickMultiplier=1 keeps this test's REAL watchdog timer in
-  // the low tens of milliseconds — deterministic (not flaky) because the OTHER side of the race,
-  // the hung getReadyIssues() call, never resolves at all; there is nothing for the real timer to
-  // race against except itself.
+  // the low tens of milliseconds — deterministic (not flaky) because the OTHER side, progress on
+  // `state`, never happens at all.
   const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
   const exitCalls: number[] = [];
+  let resolveExited: () => void;
+  const exited = new Promise<void>((resolve) => {
+    resolveExited = resolve;
+  });
   const deps = baseDeps({
     forge,
     state,
     cfg,
-    tickIntervalSec: 0.02, // 20ms -> watchdogMs = 20ms
-    watchdogExit: (code) => exitCalls.push(code),
+    tickIntervalSec: 0.02, // 20ms -> watchdog windowMs = 20ms
+    watchdogExit: (code) => {
+      exitCalls.push(code);
+      resolveExited();
+    },
   });
-  const result = await runRounds(deps);
-  assert.equal(result.stoppedBy, "watchdog");
+  void runRounds(deps); // deliberately not awaited
+  await exited;
   assert.deepEqual(exitCalls, [1], "the injected exit hook fired exactly once, with a nonzero code");
   const stalled = state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 1, "a durable engine-stalled event was appended before the exit hook fired");
@@ -3195,33 +3203,34 @@ test("runRounds (#395): a never-resolving forge await (the live incident's shape
   state.close();
 });
 
-test("runRounds (#395): a healthy fast round never trips the watchdog, even with a short tickIntervalSec — no false alarm on the common (successful) path", async () => {
+test("runRounds (#395): a healthy fast round never trips the watchdog — a LARGE window (P2-4: window size is irrelevant to this assertion, so make it CI-safe) never even gets the chance to elapse before runRounds's own clean return stops it", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
   const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
-  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
-  const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 0.02, peripherals: allPeripherals(log) });
+  // tickIntervalSec=60 x multiplier=10 (the shipped defaults) -> a 600s real window, never
+  // remotely close to elapsing before this fast fake round completes and runRounds's own
+  // `finally` stops the watchdog — see driver.test.ts's equivalent test for the same rationale.
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
+  const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 60, peripherals: allPeripherals(log) });
   const stopSafety = boundedStopOnPhase(deps, 5);
   const result = await runRounds(deps);
   stopSafety();
-  assert.equal(result.rounds, 1, "the fast fake round completed normally, well inside the 20ms watchdog window");
-  assert.notEqual(result.stoppedBy, "watchdog");
+  assert.equal(result.rounds, 1, "the fast fake round completed normally");
   const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 0, "no engine-stalled event on the healthy path");
   deps.state.close();
 });
 
-test("runRounds (#395): a contained tick() THROW (not a hang) during executing is still a plain tick-error — the watchdog never fires, and the round loop keeps going (existing containment behavior unmodified)", async () => {
+test("runRounds (#395): a contained tick() THROW during executing settles quickly (a plain tick-error, progress counter advances) — the watchdog is stopped cleanly, same large-window CI-safety as the healthy-path test above", async () => {
   const forge = new FakeForge();
   forge.getReadyIssues = async () => {
     throw new Error("HTTP 502");
   };
-  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
-  const deps = baseDeps({ forge, cfg, tickIntervalSec: 0.02 });
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
+  const deps = baseDeps({ forge, cfg, tickIntervalSec: 60 });
   const stopSafety = boundedStopOnPhase(deps, 5);
-  const result = await runRounds(deps);
+  await runRounds(deps);
   stopSafety();
-  assert.notEqual(result.stoppedBy, "watchdog");
   const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 0, "a thrown (settled) tick is a tick-error, never a stall");
   const errored = deps.state.eventsAfterId(0, ["tick-error"]);

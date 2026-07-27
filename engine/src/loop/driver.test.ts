@@ -774,33 +774,43 @@ test("runDriver (#295): a no-clear escalation resolved externally (PR merged) ge
   deps.state.close();
 });
 
-// ── #395: the liveness watchdog — a never-resolving forge/spawn await inside tick() must not ──
-// ── wedge the loop past a generous multiple of tickIntervalSec ────────────────────────────────
+// ── #395 round 2 (gate② P1): the liveness watchdog is PROGRESS-based, not tick-duration-based ──
+// ── — an independent background timer, never raced against any single tick() call. See ────────
+// ── watchdog.ts's own doc for why (a duration-based trigger self-kills the engine mid- ─────────
+// ── review under reviewer.mode: engine-agent). ──────────────────────────────────────────────────
 
-test("runDriver (#395): a never-resolving forge await (the live incident's shape) is bounded by the watchdog — durable engine-stalled event + the injected exit hook, never spins forever", async () => {
+test("runDriver (#395): a never-resolving forge await is bounded by the INDEPENDENT progress watchdog — durable engine-stalled event + the injected exit hook fire even though runDriver itself never returns", async () => {
   const forge = new FakeForge();
   // The exact live-incident shape: an in-flight forge/spawn await that never resolves (a host
   // sleep losing the completion notification). getReadyIssues is unconditionally called every
-  // tick's DISPATCH phase, so this wedges tick() itself, not just one branch of it.
+  // tick's DISPATCH phase, so this wedges tick() itself — and, by construction, runDriver's own
+  // returned promise, which is why this test does NOT await it (a genuine stall means it
+  // legitimately never resolves — the nonzero exit is the only recourse, not a cooperative
+  // unwind; see DriverDeps.watchdogExit's own doc).
   forge.getReadyIssues = () => new Promise<Issue[]>(() => {});
   const state = new State(":memory:");
   // A tiny tickIntervalSec × watchdogTickMultiplier=1 keeps this test's REAL watchdog timer in
-  // the low tens of milliseconds — deterministic (not flaky) because the OTHER side of the race,
-  // the hung getReadyIssues() call, never resolves at all; there is nothing for the real timer to
-  // race against except itself.
+  // the low tens of milliseconds — deterministic (not flaky) because the OTHER side, progress on
+  // `state`, never happens at all; there is nothing for the real timer to race against.
   const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
   const exitCalls: number[] = [];
+  let resolveExited: () => void;
+  const exited = new Promise<void>((resolve) => {
+    resolveExited = resolve;
+  });
   const deps = baseDeps({
     forge,
     state,
     cfg,
-    tickIntervalSec: 0.02, // 20ms -> watchdogMs = 20ms
-    stopMode: "once",
-    watchdogExit: (code) => exitCalls.push(code),
+    tickIntervalSec: 0.02, // 20ms -> watchdog windowMs = 20ms
+    stopMode: "forever",
+    watchdogExit: (code) => {
+      exitCalls.push(code);
+      resolveExited();
+    },
   });
-  const result = await runDriver(deps);
-  assert.equal(result.stoppedBy, "watchdog");
-  assert.equal(result.ticks, 0, "the wedged attempt never counted as a completed tick");
+  void runDriver(deps); // deliberately not awaited
+  await exited;
   assert.deepEqual(exitCalls, [1], "the injected exit hook fired exactly once, with a nonzero code");
   const stalled = state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 1, "a durable engine-stalled event was appended before the exit hook fired");
@@ -808,26 +818,30 @@ test("runDriver (#395): a never-resolving forge await (the live incident's shape
   state.close();
 });
 
-test("runDriver (#395): a healthy fast tick never trips the watchdog, even with a short tickIntervalSec — no false alarm on the common (successful) path", async () => {
+test("runDriver (#395): a healthy fast tick never trips the watchdog — a LARGE window (P2-4: window size is irrelevant to this assertion, so make it CI-safe) never even gets the chance to elapse before runDriver's own clean return stops it", async () => {
   const { sleep } = mkSleepSpy();
   const forge = new FakeForge();
-  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
-  const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 0.02, stopMode: "once" });
+  // tickIntervalSec=60 x multiplier=10 (the shipped defaults) -> a 600s real window. runDriver
+  // finishes (fake tick, no real sleep) and stops the watchdog in its own `finally` in
+  // milliseconds — this window is never remotely close to elapsing, so its size cannot make this
+  // test flaky under CI load the way a tight, race-dependent window could (P2-4).
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
+  const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 60, stopMode: "once" });
   const result = await runDriver(deps);
   assert.equal(result.stoppedBy, "once");
-  assert.equal(result.ticks, 1, "the fast fake tick completed normally, well inside the 20ms watchdog window");
+  assert.equal(result.ticks, 1);
   const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 0, "no engine-stalled event on the healthy path");
   deps.state.close();
 });
 
-test("runDriver (#395): a contained tick() THROW (not a hang) is still a plain tick-error — the watchdog never fires on an error that settles quickly", async () => {
+test("runDriver (#395): a contained tick() THROW settles quickly (a plain tick-error, progress counter advances) — the watchdog is stopped cleanly on return, same large-window CI-safety as the healthy-path test above", async () => {
   const forge = new FakeForge();
   forge.getReadyIssues = async () => {
     throw new Error("HTTP 502");
   };
-  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
-  const deps = baseDeps({ forge, cfg, tickIntervalSec: 0.02, stopMode: "once" });
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
+  const deps = baseDeps({ forge, cfg, tickIntervalSec: 60, stopMode: "once" });
   const result = await runDriver(deps);
   assert.deepEqual(result, { ticks: 0, tickErrors: 1, stoppedBy: "once" });
   const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);

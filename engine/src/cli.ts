@@ -928,7 +928,7 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // exact observable guarantee) unless cfg.proxy is in its production-attach state (enabled:
   // true, shadow: false).
   const fixLegResume = buildTickFixLegResume(cfg, forge, state, renderFixPrompt, log);
-  const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log }) : null;
+  const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state }) : null;
   const engineAgent = engineReviewRunner
     ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
         ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
@@ -1037,7 +1037,7 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   const state = overrides.state ?? new State();
   appendRunStarted(state, cfg);
   const forge = overrides.forge ?? new GithubForge(cfg);
-  const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log }) : null;
+  const engineReviewRunner = cfg.reviewer.mode === "engine-agent" ? new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state }) : null;
   const engineAgent = engineReviewRunner
     ? makeProductionEngineAgent(cfg, forge, state, engineReviewRunner, {
         ...(overrides.roleRunnerDeps?.worktreeRoot !== undefined ? { worktreeRoot: overrides.roleRunnerDeps.worktreeRoot } : {}),
@@ -1075,7 +1075,7 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
     cfg.proxy.enabled && !cfg.proxy.shadow
       ? { mint: createProxyMint({ cfg, forge, state, roundId: 0, phase: "peripheral", log }) }
       : undefined;
-  const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, ...(defaultProxy !== undefined ? { defaultProxy } : {}) });
+  const runner = new RoleRunner({ cfg, ...overrides.roleRunnerDeps, log, state, ...(defaultProxy !== undefined ? { defaultProxy } : {}) });
   const peripherals = createDefaultPeripherals({ forge, state, cfg, runner, log });
   const stop = resolveStopConfig(argv, cfg);
   // #76: same fail-fast stance as the tick driver — a typo'd milestone goal must abort startup

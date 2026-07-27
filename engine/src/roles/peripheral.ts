@@ -335,6 +335,14 @@ export interface RoleRunnerDeps {
    *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
    *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
   sleep?: (ms: number) => Promise<void>;
+  /** #395 (gate② P1 round 2): narrow State surface for the run() heartbeat interval's own
+   *  progress signal (a `role-session-heartbeat` event, appended on the SAME `hb` interval this
+   *  runner already keeps alive for the whole session — see run()'s own comment for why this
+   *  interval, specifically, is what the liveness watchdog needs). Same optional/omitted =
+   *  zero-behavior-change contract as every other narrow-state dep in this codebase (e.g.
+   *  worker.ts's WorkerDeps.state) — cli.ts's real production construction always supplies it;
+   *  a bare test fake simply never gets the heartbeat event. */
+  state?: Pick<State, "appendEvent">;
   /** #236 (Codex F1, corrected in R1): bounded poll of the session's OWN stream-json jsonl file
    *  for its `{"type":"system","subtype":"init"}` line, before capturing the filesystem-derived
    *  half of the context manifest. The init line is the CLI's own signal that it finished
@@ -699,6 +707,22 @@ export class RoleRunner {
           `spawn confirmation timed out after ${this.deps.cfg.liveness.spawnConfirmTimeoutMs}ms ` +
             "(host sleep or a lost spawn notification) — killing the possibly-still-alive child",
         );
+        // #395 (gate② P2-1b): this throw is caught NOWHERE between here and cli.ts's top-level
+        // `process.exit(1)` — runSessionWithRetry only ever retries a returned (non-done)
+        // RESULT, never a run() throw — so without a durable event here, the exact incident
+        // this issue is about (a wedged spawn confirmation) would exit the whole process with
+        // no record of what happened, contradicting AC1's "clean nonzero exit WITH a durable
+        // event". Best-effort — the thrown Error's own message is still the fallback signal if
+        // even this write fails.
+        try {
+          this.deps.state?.appendEvent("role-session-spawn-timeout", {
+            name,
+            roleId: opts.roleId,
+            timeoutMs: this.deps.cfg.liveness.spawnConfirmTimeoutMs,
+          });
+        } catch {
+          /* best-effort */
+        }
         // Best-effort: the child may actually be alive despite the lost notification. killTree
         // itself never throws (peripheral.ts's own SpawnedSession.killGroup swallows kill errors).
         await this.killTree(session);
@@ -769,6 +793,22 @@ export class RoleRunner {
       // exitPromise (with whatever code the kill produces), so run() always returns normally.
       const hb = setInterval(() => {
         const elapsedSec = (this.now().getTime() - startedMs) / 1000;
+        // #395 (gate② P1 round 2): this interval is the ONE thing that keeps running for the
+        // whole duration of `await exitPromise` below, independent of the round loop's own tick
+        // cadence — including a `reviewer.mode: engine-agent` review session awaited INLINE
+        // inside tick() (conductor.ts -> merge-driver.ts -> review/drive.ts ->
+        // review/engine-agent.ts -> this very run() call), the case that motivated the liveness
+        // watchdog's progress-based redesign (watchdog.ts). VERIFIED this interval previously
+        // appended nothing on an ordinary tick (it only ever acted on the timeout branch below)
+        // — a long-but-healthy session (well inside worker.timeoutSec) would otherwise starve
+        // state.maxEventId() for its whole duration and false-trip the watchdog. Optional
+        // (RoleRunnerDeps.state) for the same "omitted = zero behavior change" contract every
+        // other optional dep here uses.
+        try {
+          this.deps.state?.appendEvent("role-session-heartbeat", { name, roleId: opts.roleId, elapsedSec: Math.round(elapsedSec) });
+        } catch {
+          /* best-effort — never blocks the timeout check below */
+        }
         if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
           timedOut = true;
           clearInterval(hb);

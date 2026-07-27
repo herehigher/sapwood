@@ -1483,6 +1483,53 @@ test("resume (#395 PM follow-up): resume()'s OWN spawn confirmation await — a 
   }
 });
 
+test("resume (#395 gate② P2-2): a merely-DELAYED (not lost) real spawn event racing the timeout must NOT resurrect running.json after the failure path already removed it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const worktreeRoot = join(dir, "worktrees");
+    mkdirSync(worktreeRoot, { recursive: true });
+    writeFileSync(join(dir, "lane-race.handoff.json"), JSON.stringify({ name: "lane-race", issue: 6, session_id: "retry-session-race" }));
+    writeFileSync(join(dir, "lane-race.jsonl"), "");
+    // A REAL, working binary — its 'spawn' event WILL eventually fire genuinely (just later than
+    // the injected sleep below, which deterministically wins the timeout race first — same
+    // "microtask beats a real OS process-spawn notification" evidence as this file's other
+    // #395 regression tests).
+    const bin = mkStub(dir, FAST_STUB);
+    const liveCfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      liveness: { spawnConfirmTimeoutMs: 1 },
+    });
+    const s = new WorkerSupervisor({
+      cfg: liveCfg,
+      stateDir: dir,
+      worktreeRoot,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      sleep: async () => {
+        /* resolves immediately — wins the timeout race before the real 'spawn' event arrives */
+      },
+    });
+    await assert.rejects(() => s.resume({ number: 6, title: "t", labels: [] }, "lane-race"), /spawn confirmation timed out/i);
+    assert.equal(existsSync(join(dir, "lane-race.running.json")), false, "removed by the failure path");
+    // Give the real (merely delayed, not lost) 'spawn' event time to actually fire its late
+    // handler. Before the #395 gate② P2-2 fix, that handler unconditionally re-wrote
+    // running.json with spawn_confirmed:true + a real-but-by-then-dead pid — exactly the marker
+    // the adoption/RESUME_UNDECIDABLE machinery trusts.
+    await sleep(300);
+    assert.equal(
+      existsSync(join(dir, "lane-race.running.json")),
+      false,
+      "the late spawn handler must not resurrect running.json once the race already settled on timed-out",
+    );
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resume: --resume reuses the ORIGINAL session id, clears .handoff, and the resumed run's terminal cost is probed normally", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

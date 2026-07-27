@@ -17,9 +17,18 @@ export interface SpawnConfirmOutcome {
  *  (tests), replaces the real timer so a test can deterministically win the race without
  *  depending on real OS process-spawn timing — the same injectable-timer seam driver.ts's own
  *  liveness watchdog uses (an optional `(ms) => Promise<void>`, default a real, cancelable
- *  `setTimeout`). Never reads the real clock directly (no `Date.now()`/`new Date()`). */
+ *  `setTimeout`). Never reads the real clock directly (no `Date.now()`/`new Date()`).
+ *
+ *  `register`'s third argument, `isSettled`, lets a caller whose own `onSpawn` performs a side
+ *  effect (worker.ts's resume() writes a `spawn_confirmed:true` sentinel) guard that effect
+ *  against a MERELY-DELAYED (not lost) real event racing the timeout (#395 gate② P2-2): the raw
+ *  listener `register` attaches stays live even after this function's own returned promise has
+ *  already settled on "timed out" — a late-arriving real `spawn` would otherwise still run the
+ *  caller's side effect after the failure path already killed the child and cleaned up,
+ *  resurrecting a stale marker. Callers with no side effect (dispatch(), the peripheral site)
+ *  can ignore this third argument entirely — see their own call sites. */
 export async function awaitSpawnConfirmation(
-  register: (onSpawn: () => void, onError: (e: unknown) => void) => void,
+  register: (onSpawn: () => void, onError: (e: unknown) => void, isSettled: () => boolean) => void,
   timeoutMs: number,
   sleep?: (ms: number) => Promise<void>,
 ): Promise<SpawnConfirmOutcome> {
@@ -57,6 +66,7 @@ export async function awaitSpawnConfirmation(
         err = e;
         finish();
       },
+      () => settled,
     );
   });
   return { timedOut, err };

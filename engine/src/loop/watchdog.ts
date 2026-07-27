@@ -1,85 +1,83 @@
-// watchdog.ts (#395): the liveness watchdog shared by BOTH loop drivers (driver.ts's "tick"
-// driver and round.ts's "rounds" driver, cfg.engine.driver's two values) — one implementation,
-// not two forks. A generous multiple of the caller's own tick cadence past which a single
-// tick() attempt hasn't completed is treated as wedged (a stuck external await — a dead `gh`
-// socket, a lost role-session spawn notification — the live incident's shape: the host slept
-// ~49h mid-round with such an await in flight, and nothing noticed ticks had stopped).
+// watchdog.ts (#395 round 2 — gate② P1): a PROGRESS-based liveness watchdog, not a
+// tick-completion race.
 //
-// On a stall: append a durable `engine-stalled` event (the same `state.appendEvent` mechanism
-// every other engine event uses — `appendEvent` is synchronous, so this is guaranteed to land
-// before the exit call below), invoke the caller's exit hook (`process.exit(1)` in production,
-// which never returns), and THEN throw `EngineStalledError` so a caller whose exit hook does
-// NOT actually terminate the process (tests, via an injected fake) still unwinds the call stack
-// cleanly instead of continuing as though the attempt succeeded. Deliberately not an in-process
-// self-heal/abort (PM ruling, issue #395): a stuck await's own resources are reclaimed by the
-// process exit itself, never by cancelling it in place.
+// The original design armed a timer against each tick() call and treated "this one tick took
+// too long" as a stall. That is structurally unsound: `reviewer.mode: engine-agent` (the
+// dogfooded production reviewer) awaits a full LLM review session INLINE inside tick()
+// (conductor.ts -> merge-driver.ts -> review/drive.ts -> review/engine-agent.ts ->
+// peripheral.ts's RoleRunner.run() -> `await exitPromise`), bounded only by worker.timeoutSec
+// (default 3600s) with up to two attempts serial per gated lane. A perfectly healthy 10-20
+// minute review well inside its cost budget would trip a tickIntervalSec x
+// watchdogTickMultiplier (600s default) window and self-kill the engine MID-REVIEW — a
+// deterministic self-kill loop on exactly the PRs that most need reviewing, strictly worse than
+// the wedge this issue set out to fix. Enlarging the window doesn't fix this: the true ceiling
+// is lanes x attempts x worker.timeoutSec, so any window safe against a busy tick is far too
+// coarse to detect a real stall, and any window tight enough to be useful self-kills.
+//
+// So the watchdog no longer measures tick DURATION at all. Instead: the engine is stalled when
+// no DURABLE EVENT has been appended for a full window, regardless of which phase is running or
+// how long that phase legitimately takes — the live incident's own signature (an operator
+// diagnosed it as "zero events for 30+ minutes", not "a tick that ran long"). Armed ONCE per
+// engine run (at the top of driver.ts's runDriver / round.ts's runRounds, stopped in their own
+// `finally`) as an INDEPENDENT recurring real timer — never raced against any specific await —
+// so it covers every phase (aligning/architecting/plan_review/executing/harvesting/retro), not
+// just tick()'s own dispatch/reclaim/drive. peripheral.ts's own unbounded `await exitPromise`
+// (RoleRunner.run) needs no SEPARATE bound as a result — this watchdog already covers it.
+//
+// This only works if something appends an event at least once per window during every
+// legitimately long, otherwise-quiet stretch. Verified (see each site's own comment for the
+// evidence) that four such stretches previously emitted NOTHING and needed a heartbeat added
+// for this round: peripheral.ts's RoleRunner.run() heartbeat interval (the review-session path
+// above, and every other role session), worker.ts's WorkerSupervisor heartbeatTick (the same
+// class of gap for an ordinary, non-review worker leg), and round.ts's standby backoff wait AND
+// park-recovery wait (both can legitimately run quiet for far longer than any reasonable
+// window — up to round.standby.backoffCapSec / envFailure.probeBackoffMaxSec / parkEscalateAfterSec).
 import type { State } from "../state/state.js";
 
-/** Thrown by raceTickWithWatchdog on a stall, after the durable event + exit hook have already
- *  run — a signal to unwind, not an ordinary tick failure. Callers that distinguish "genuine
- *  tick() throw" (contained, a tick-error) from "watchdog stall" (already recorded/handled,
- *  propagate) check `instanceof EngineStalledError`. */
-export class EngineStalledError extends Error {
-  constructor(public readonly context: Record<string, unknown>) {
-    super("engine liveness watchdog fired — no tick completed within the configured window");
-    this.name = "EngineStalledError";
-  }
-}
-
-/** A cancelable "fires once after `ms`" real timer. Always a real `setTimeout` — never wired to
- *  a driver's own injected inter-tick `sleep` (that seam fakes PACING BETWEEN already-settled
- *  ticks, near-instant in most tests; racing it against a tick attempt itself would spuriously
- *  "stall" on every fast fake tick). Cancelled well within microseconds on any tick that
- *  actually settles — the healthy-path cost is one create+clear per tick, never a churning
- *  interval. Never reads the real clock (no `Date.now()`/`new Date()`) — a test that wants the
- *  stalled branch drives it with a real-but-tiny `ms` against an attempt that genuinely never
- *  resolves, which is deterministic since the other side of the race never settles at all. */
-function armWatchdog(ms: number): { promise: Promise<"stalled">; cancel: () => void } {
-  let t: ReturnType<typeof setTimeout>;
-  const promise = new Promise<"stalled">((resolve) => {
-    t = setTimeout(() => resolve("stalled"), ms);
-  });
-  return { promise, cancel: () => clearTimeout(t) };
-}
-
-export interface RaceTickWithWatchdogOpts {
-  /** tickIntervalSec * 1000 * cfg.liveness.watchdogTickMultiplier — computed by the caller (both
-   *  drivers already have their own cadence + cfg in scope). */
-  watchdogMs: number;
-  state: Pick<State, "appendEvent">;
-  /** `process.exit` in production; tests inject a fake that records the call and returns instead
-   *  of terminating (this function then throws EngineStalledError so the caller still unwinds). */
+export interface ProgressWatchdogOpts {
+  /** engine.tickIntervalSec * 1000 * liveness.watchdogTickMultiplier — the caller's own cadence
+   *  and multiplier, computed once. */
+  windowMs: number;
+  state: Pick<State, "appendEvent" | "maxEventId">;
+  /** `process.exit` in production; tests inject a fake so a deliberately-quiet State doesn't
+   *  kill the test runner. */
   exit: (code: number) => void;
-  /** The `engine-stalled` event's payload — both drivers pass the same shape
-   *  (`{ tickIntervalSec, watchdogTickMultiplier }`). */
   eventPayload: Record<string, unknown>;
 }
 
-/** Race `attempt()` against the watchdog. Resolves with `attempt()`'s own result on a normal
- *  completion (whether success or throw — a genuine `attempt()` rejection propagates UNCHANGED,
- *  never swallowed or reclassified). On a stall, throws `EngineStalledError` (see its own doc)
- *  after the durable event + exit hook have run. */
-export async function raceTickWithWatchdog<T>(attempt: () => Promise<T>, opts: RaceTickWithWatchdogOpts): Promise<T> {
-  const watchdog = armWatchdog(opts.watchdogMs);
-  try {
-    const raced = await Promise.race<{ kind: "tick"; result: T } | { kind: "stalled" }>([
-      attempt().then((result): { kind: "tick"; result: T } => ({ kind: "tick", result })),
-      watchdog.promise.then((): { kind: "stalled" } => ({ kind: "stalled" })),
-    ]);
-    if (raced.kind === "stalled") {
+export interface ProgressWatchdogHandle {
+  /** Stop the recurring timer. Called from the loop's own `finally` — the SAME shutdown path
+   *  `unregister()` already uses — so a clean stop (signal, --once, a stop condition) never
+   *  leaves a stray timer running past the process's own natural lifetime. */
+  stop: () => void;
+}
+
+/** Start the progress watchdog: re-checks `state.maxEventId()` every `windowMs` against its own
+ *  previous reading. Unchanged across one full window -> stalled: append the durable
+ *  `engine-stalled` event (best-effort — a failed write still lets the nonzero exit be the
+ *  operative signal), then call `exit(1)`. Deliberately does NOT reschedule after firing — the
+ *  watchdog fires once and stops itself, whether or not the exit hook actually terminated the
+ *  process (production: it always does; tests inject a non-terminating fake). Never reads the
+ *  real clock (no `Date.now()`/`new Date()` anywhere here) — purely timer-driven, so a test
+ *  drives the stalled branch with a real-but-tiny `windowMs` against a State nothing else ever
+ *  touches, which is deterministic since the "progress" side never happens at all. */
+export function startProgressWatchdog(opts: ProgressWatchdogOpts): ProgressWatchdogHandle {
+  let lastSeenId = opts.state.maxEventId();
+  let timer: ReturnType<typeof setTimeout>;
+  const check = (): void => {
+    const currentId = opts.state.maxEventId();
+    if (currentId === lastSeenId) {
       try {
         opts.state.appendEvent("engine-stalled", opts.eventPayload);
       } catch {
-        /* best-effort — the nonzero exit is still the operative signal a supervisor sees */
+        /* best-effort — the nonzero exit is still the operative signal */
       }
       opts.exit(1);
-      // Unreachable in production (process.exit never returns) — reached only when a test
-      // injects a non-exiting exit hook, so the caller still unwinds instead of spinning on an
-      // attempt that will never resolve.
-      throw new EngineStalledError(opts.eventPayload);
+      return;
     }
-    return raced.result;
-  } finally {
-    watchdog.cancel();
-  }
+    lastSeenId = currentId;
+    timer = setTimeout(check, opts.windowMs);
+  };
+  timer = setTimeout(check, opts.windowMs);
+  return { stop: () => clearTimeout(timer) };
 }

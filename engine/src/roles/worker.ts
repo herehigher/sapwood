@@ -1562,8 +1562,12 @@ export class WorkerSupervisor implements Supervisor {
         `spawn confirmation timed out after ${this.deps.cfg.liveness.spawnConfirmTimeoutMs}ms ` +
           "(host sleep or a lost spawn notification) — killing the possibly-still-alive child",
       );
-      // Best-effort: the child may actually be alive despite the lost notification.
-      this.killGroup(child, "SIGKILL");
+      // #395 (gate② P3): AWAIT the kill (SIGTERM, a short grace window, then SIGKILL — the same
+      // killTree() ordering resume()'s own timeout branch and peripheral.ts's RoleRunner both
+      // already use) before the cleanup below rmSync's this lane's worktree — a fire-and-forget
+      // SIGKILL followed immediately by rmSync could race a still-alive process's own in-flight
+      // writes to that same directory.
+      await this.killTree(child);
     }
     if (spawnErr) {
       this.lanes.delete(laneName);
@@ -1911,8 +1915,16 @@ export class WorkerSupervisor implements Supervisor {
     // exactly as before: a write failure there is still routed through onError (killTree first,
     // then reported), never silently dropped.
     const spawnConfirm = await awaitSpawnConfirmation(
-      (onSpawn, onError) => {
+      (onSpawn, onError, isSettled) => {
         child.once("spawn", () => {
+          // #395 (gate② P2-2): a merely-DELAYED (not lost) real 'spawn' racing the timeout must
+          // not perform its side effect once the outer race has already settled on "timed out"
+          // — the failure path below may already have killed this child, removed `runningPath`,
+          // and thrown; writing a fresh spawn_confirmed:true/wrapper_pid marker here would
+          // resurrect exactly the marker the adoption/RESUME_UNDECIDABLE machinery trusts, now
+          // pointing at a dead pid. dispatch() and the peripheral site have no such side effect
+          // in their own `onSpawn` — this guard is resume()-specific.
+          if (isSettled()) return;
           try {
             this.writeJsonAtomic(runningPath, { ...runningMarker, spawn_confirmed: true, wrapper_pid: child.pid });
             onSpawn();
@@ -2066,6 +2078,18 @@ export class WorkerSupervisor implements Supervisor {
       if (lane.hb) clearInterval(lane.hb);
       void this.killTree(lane.child);
       return;
+    }
+    // #395 (gate② P1 round 2): this interval is the one thing that keeps running for the whole
+    // duration of a worker leg, independent of the round loop's own tick cadence — the same
+    // class of gap peripheral.ts's RoleRunner heartbeat closes for role sessions (see its own
+    // comment for the verified-empty-before evidence). A long-but-healthy coding leg (well
+    // inside worker.timeoutSec) would otherwise starve state.maxEventId() for its whole
+    // duration and false-trip the liveness watchdog (watchdog.ts). Optional (WorkerDeps.state,
+    // already used for proxy-mint-failed) — omitted means zero behavior change.
+    try {
+      this.deps.state?.appendEvent("worker-heartbeat", { worker: name, issue: lane.issue, elapsedSec: Math.round(elapsedSec) });
+    } catch {
+      /* best-effort */
     }
     this.touchHeartbeat(name);
     this.checkSoftBudget(name, lane);
