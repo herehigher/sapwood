@@ -3323,6 +3323,27 @@ test("#172 cap latch: a second handoff past maxResumes escalates exactly once an
   st.close();
 });
 
+test("#295 review round 4 (Codex P1): resume-capped preserves a fixing-origin lane's known PR", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ worker: { maxResumes: 1 } });
+  seedRunning(st, "lane-pr", 174);
+  st.upsertWorker({ ...st.getWorker("lane-pr")!, pr: 4242 });
+
+  sup.probes["lane-pr"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 1 };
+  await tick({ forge, state: st, supervisor: sup, cfg }); // leg 0 -> handoff
+  await tick({ forge, state: st, supervisor: sup, cfg }); // resume attempt 1
+  sup.probes["lane-pr"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 0.5 };
+  await tick({ forge, state: st, supervisor: sup, cfg }); // resumed leg -> handoff
+  await tick({ forge, state: st, supervisor: sup, cfg }); // cap
+
+  const [event] = st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]);
+  // Without the PR, escalation-reconcile can never observe an external merge of it.
+  assert.equal((event?.payload as { pr?: number } | undefined)?.pr, 4242);
+  st.close();
+});
+
 test("#172 pause + full hold-set: a handoff does not resume until PAUSE and configured human holds are both cleared", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-resume-pause-"));
   try {

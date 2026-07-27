@@ -757,3 +757,19 @@ test("runDriver stop.afterSpendUsd: a quiet gap that resets the wall-clock SESSI
   assert.deepEqual(result.stopCondition, { name: "afterSpendUsd", threshold: 10, detail: "spent $11.00" });
   deps.state.close();
 });
+
+// ── #295 (Codex P1, PR #371): the escalation-resolution sweep runs on the TICK driver too ────
+
+test("runDriver (#295): a no-clear escalation resolved externally (PR merged) gets its escalation-resolved appended by the tick driver — parity with the rounds driver's per-round sweep", async () => {
+  const forge = new FakeForge();
+  // The escalated PR was merged by a human between engine runs — exactly the external
+  // resolution the sweep exists to observe.
+  forge.getPRStatus = async (n: number) => ({ number: n, headOid: "x", state: "MERGED", mergeable: "MERGEABLE", ciGreen: true });
+  const deps = baseDeps({ forge, stopMode: "once" });
+  deps.state.appendEvent("drive-needs-human", { worker: "lane-9", issue: 9, pr: 90, reason: "fix-rounds-capped:2/2", labeled: 1 });
+  await runDriver(deps);
+  const resolved = deps.state.eventsAfterId(0, ["escalation-resolved"]);
+  assert.equal(resolved.length, 1, "the tick driver swept and resolved the open escalation");
+  assert.deepEqual(resolved[0]!.payload, { issue: 9, pr: 90, source: "drive-needs-human", via: "merged" });
+  deps.state.close();
+});

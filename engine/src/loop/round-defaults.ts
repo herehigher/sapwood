@@ -25,6 +25,7 @@ import { createPlanReviewStub } from "../roles/plan-review.js";
 import type { State } from "../state/state.js";
 import { alignMarker, createAligningStub, runPoolSelection } from "./align.js";
 import { reconcileDurableConcerns, scanForAdjudication } from "./dissent.js";
+import { reconcileEscalations } from "./escalation-reconcile.js";
 import { createHarvestStub } from "./harvest.js";
 import { type PeripheralPhase, type PeripheralStub, RoundScopedForge } from "./round.js";
 import { type AlignSection, mergeAlignSummary, type RoundArtifact, RoundArtifactSchema } from "./round-artifact.js";
@@ -207,6 +208,11 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
       // scanForAdjudication call right below, not just a future one.
       await reconcileDurableConcerns(forge, deps.state, deps.cfg, deps.log);
       await scanForAdjudication(forge, deps.state, deps.log);
+      // #295: the escalation-resolution reconciler shares this hook for the SAME reason the
+      // dissent scan does — "is a human still blocked?" must not depend on which optional roles
+      // are enabled. Read-only and transition-only (see escalation-reconcile.ts's module doc);
+      // it can neither change what the rest of this phase does nor be skipped by it.
+      await reconcileEscalations(forge, deps.state, deps.cfg, deps.log);
       const result = deps.cfg.roles.po.enabled ? await alignStub.run(ctx) : { marker: alignMarker(ctx.roundId) };
       await runPoolSelection({
         forge,

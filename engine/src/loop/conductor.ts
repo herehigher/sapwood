@@ -905,7 +905,9 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
 }
 
 const ENV_FAILURE_REQUEUE_REASON = "env-failure-requeue";
-const MERGED_BOARD_DONE_REASON = "merged-board-done";
+/** Exported for escalation-reconcile's clear-exemption discriminator (#295 review round 6): only
+ *  the merge that PRODUCED a rollback escalation may not clear it. */
+export const MERGED_BOARD_DONE_REASON = "merged-board-done";
 
 function suspendRollbackDuringForgePark(reason: string): boolean {
   return reason === ENV_FAILURE_REQUEUE_REASON || reason === MERGED_BOARD_DONE_REASON;
@@ -1052,6 +1054,10 @@ async function escalateUndecidableResume(
     worker: worker.name,
     issue: worker.issue,
     sessionId: worker.session_id,
+    // #295 review round 4 (Codex P1): a fixing-origin handoff still owns its PR — preserve it so
+    // escalation-reconcile can observe an external merge/close of that PR (its observeResolution
+    // checks the PR only when the payload carried one).
+    ...(worker.pr != null ? { pr: worker.pr } : {}),
   });
   return { kind: "capped", worker: worker.name, issue: worker.issue, attempts };
 }
@@ -1144,7 +1150,21 @@ async function drainThenEscalate(
         await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman).catch(() => {});
       }
       if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
-      state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons });
+      // #295 review round 4 (Codex P1): carry the PR when one is known. escalation-reconcile's
+      // observeResolution only checks merge/closure for escalations whose payload preserved a
+      // pr, so discarding a number we already hold here left the advertised external-merge
+      // clearing path permanently broken for this source.
+      // Round 8 (Codex P2): `p.prNumber` comes from probe(), which searches OPEN PRs only — a
+      // manually CLOSED PR leaves it null while the durable row still knows the number, and the
+      // reconciler would then never observe that closure. Same `?? w.pr` fallback the reclaim
+      // paths above use.
+      const ceilingPr = p.prNumber ?? w.pr ?? null;
+      state.appendEvent("ceiling-escalated", {
+        worker: w.name,
+        issue: w.issue,
+        reasons,
+        ...(ceilingPr != null ? { pr: ceilingPr } : {}),
+      });
       // #155: leaving `running` via the ceiling drain — clear the LIVE telemetry trio.
       state.clearLiveTelemetry(w.name);
       state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
@@ -1730,7 +1750,10 @@ async function reconcileDrivingFixIntents(
         continue;
       }
       state.upsertWorker({ ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1 });
-      state.appendEvent("fix-leg-undecidable", { worker: w.name, issue: w.issue });
+      // #295 (Codex P2, PR #371): `pr` rides along so the escalation-resolution sweep can
+      // observe an external merge/close of this lane's PR — without it the sweep could only
+      // ever see issue closure or label removal for this source.
+      state.appendEvent("fix-leg-undecidable", { worker: w.name, issue: w.issue, ...(w.pr != null ? { pr: w.pr } : {}) });
     }
     // "none": nothing to reconcile.
   }
@@ -3056,7 +3079,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         )
         .catch(() => {});
       state.upsertWorker({ ...w, ended_at: iso(), resume_capped: 1 });
-      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts });
+      // #295 review round 4 (Codex P1): same as resume-undecidable — preserve the known PR.
+      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts, ...(w.pr != null ? { pr: w.pr } : {}) });
       resumed.push({ kind: "capped", worker: w.name, issue: w.issue, attempts });
       continue;
     }
