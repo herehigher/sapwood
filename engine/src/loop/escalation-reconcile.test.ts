@@ -884,3 +884,40 @@ test("openEscalations: a merge still clears every OTHER source on that issue", (
   ]);
   assert.deepEqual([...open.keys()], ["rollback-escalated:7"]);
 });
+
+test("openEscalations: the gate⓪ attention sources are tracked and label-proven (round 10 P1)", () => {
+  const open = openEscalations([
+    { kind: "plan-review-escalated", payload: { round_id: "r1", issue: 7, reason: "x", origin: "cycle-exhausted" } },
+    { kind: "verify-na-proposed", payload: { round_id: "r1", issue: 8 } },
+  ]);
+  assert.equal(open.size, 2);
+  assert.equal(open.get("plan-review-escalated:7")?.labelProven, true);
+  assert.equal(open.get("verify-na-proposed:8")?.labelProven, true);
+});
+
+test("reconcileEscalations: a verify-na-proposed resolves when the human clears the flag (round 10 P1)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("verify-na-proposed", { round_id: "r1", issue: 7 });
+  forge.issueLabels[7] = [];
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "verify-na-proposed", via: "label-removed" }]);
+  state.close();
+});
+
+test("reconcileEscalations: a plan-review-escalated resolves when its issue is closed externally (round 10 P1)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("plan-review-escalated", { round_id: "r1", issue: 7, reason: "cycles", origin: "cycle-exhausted" });
+  forge.issueStates[7] = "CLOSED";
+  forge.issueLabels[7] = [NEEDS_HUMAN];
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "plan-review-escalated", via: "closed" }]);
+  state.close();
+});

@@ -131,6 +131,22 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
   // AFTER its own addLabel returned (a throw emits `fix-rounds-cap-label-failed` and `break`s
   // without this event), and its payload carries the driving lane's `pr`.
   "fix-rounds-capped": "always",
+  // #295 review round 10 (Codex P1): the two gate⓪ attention sources frontend-design.md §3 flags
+  // by name. Both are `always`: `plan-review-escalated` appends only after an UNGUARDED
+  // `escalateForge(reason)` (a label throw propagates and no event lands), and
+  // `verify-na-proposed` is emitted strictly after BOTH label writes under the same
+  // fix-rounds-capped doctrine its own comment cites ("an escalation event may only claim what
+  // provably landed"). Neither carries a PR, so they resolve by issue closure or label removal.
+  "plan-review-escalated": "always",
+  "verify-na-proposed": "always",
+  // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
+  // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic
+  // continuation, and `reclaim-done` on its no-PR branch. They are attention items only for
+  // SOME payloads, and this table is kind-keyed, not payload-keyed. Externally closing such an
+  // issue therefore emits no `escalation-resolved` and its strip row persists. Deferred rather
+  // than bolted on: expressing "attention iff payload P" needs a predicate layer this table does
+  // not have, and the condition itself lives in the dashboard's fold — the two should be derived
+  // from one shared definition, not encoded twice. Stated here rather than silently omitted.
 };
 
 /** Events that CLEAR an issue-scoped attention item without resolving it externally — the
