@@ -341,7 +341,9 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
         const scratch = parseRetroScratch(result.scratchText);
         if (scratch.kind === "proposal") await openProposalPR(deps, roundId, scratch);
       }
-      return { marker: retroMarker(roundId) };
+      // #394 (F23): a session genuinely ran above — the off-cadence and no-round-row early
+      // returns are the only skip paths (see PeripheralStub.ranSession's own doc).
+      return { marker: retroMarker(roundId), ranSession: true };
     },
   };
 }

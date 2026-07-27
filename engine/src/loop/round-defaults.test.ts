@@ -576,8 +576,26 @@ test("createDefaultPeripherals (#127): all five roles.<role>.enabled=false omits
   // #212 AC7: aligning is never omitted — with the PO off it still runs the engine-computed
   // fallback selection (no session at all).
   assert.ok(peripherals.aligning, "aligning stays wired even with every role disabled");
-  await peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null });
+  const { ranSession } = await peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null });
   assert.equal(runner.calls.length, 0, "no session was dispatched — the fallback is pure engine computation");
+  assert.equal(ranSession, false, "#394 (F23 gate② fix): PO off + deterministic pool fallback -> no session anywhere -> ranSession false");
+  state.close();
+});
+
+test("createDefaultPeripherals (#394 F23 gate② fix): roles.po.enabled=false but roles.po.poolSelection=true with candidates -> the aligning phase's ranSession is driven by pool-selection ALONE (alignStub itself never runs a session)", async () => {
+  const state = new State(":memory:");
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "a", labels: [] }];
+  const cfg = mkCfg({ roles: { po: { enabled: false, poolSelection: true } } });
+  const runner = new ScriptedRunner(forge, cfg);
+  const peripherals = createDefaultPeripherals({ forge, state, cfg, runner });
+  const { ranSession } = await peripherals.aligning!.run({ roundId: 1, phase: "aligning", marker: null });
+  assert.equal(
+    runner.calls.some((c) => c.roleId === "po-pool"),
+    true,
+    "the po-pool session dispatched",
+  );
+  assert.equal(ranSession, true, "pool-selection's own dispatch, folded in by round-defaults.ts's wrapper, is enough on its own");
   state.close();
 });
 

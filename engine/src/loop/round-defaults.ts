@@ -214,6 +214,14 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
       // it can neither change what the rest of this phase does nor be skipped by it.
       await reconcileEscalations(forge, deps.state, deps.cfg, deps.log);
       const result = deps.cfg.roles.po.enabled ? await alignStub.run(ctx) : { marker: alignMarker(ctx.roundId) };
+      // #394 (F23 gate② fix): the aligning round-phase's THIRD possible session dispatch —
+      // #212/#233's round-pool selection — is a separate call from alignStub.run above, so its
+      // own session-or-not status is invisible to `result.ranSession` unless folded in here.
+      // onSessionRan fires synchronously iff runPoolSelection actually dispatches the po-pool
+      // session (see PoolSelectionRunDeps.onSessionRan's own doc) — ORed with whatever
+      // alignStub.run already reported (createAligningStub's own alignSessionRan/
+      // triageSessionRan), never overriding it.
+      let poolSessionRan = false;
       await runPoolSelection({
         forge,
         cfg: deps.cfg,
@@ -222,8 +230,11 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         roundId: ctx.roundId,
         ...(deps.now !== undefined ? { now: deps.now } : {}),
         ...(deps.log !== undefined ? { log: deps.log } : {}),
+        onSessionRan: () => {
+          poolSessionRan = true;
+        },
       });
-      return result;
+      return { ...result, ranSession: (result.ranSession ?? false) || poolSessionRan };
     },
   };
   if (deps.cfg.roles.architect.enabled) {

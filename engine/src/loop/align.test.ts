@@ -378,9 +378,10 @@ test("createAligningStub: dispatches the align session with the PO tool pair (PO
   const state = new State(":memory:");
   const deps: AlignDeps = { forge, state, cfg: mkCfg(), runner };
   const stub = createAligningStub(deps);
-  const { marker } = await stub.run({ roundId: 5, phase: "aligning", marker: null });
+  const { marker, ranSession } = await stub.run({ roundId: 5, phase: "aligning", marker: null });
   assert.equal(marker, alignMarker(5));
   assert.equal(runner.calls.length, 1);
+  assert.equal(ranSession, true, "#394 (F23): a real align session dispatched -> ranSession true");
   assert.equal(runner.calls[0]!.roleId, "po-align");
   assert.equal(runner.calls[0]!.allowedTools, PO_ALLOWED_TOOLS);
   // Security: the create-flag deny list (file exfil via --body-file, gate⓪ bypass via
@@ -506,6 +507,35 @@ test("createAligningStub #231: a missing goal file is an EXPLICIT align-creation
     assert.ok(triageIssueBodyRow && triageIssueBodyRow.session === "po-triage:9" && triageIssueBodyRow.ok);
     const triageBacklogRow = manifest.find((r) => r.channel === "backlog-digest" && r.session === "po-triage:9");
     assert.ok(triageBacklogRow?.ok, "the backlog read itself succeeded in this test — only the goal file failed");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createAligningStub (#394 F23 gate② fix): an unreadable goal file (persists every round) + an EMPTY board (zero triage candidates) -> NEITHER session dispatches -> ranSession false, never a permanent-block over-report", async () => {
+  // The reachable compound state gate② review traced: cfg.goal.file unreadable means the
+  // align-creation session never spawns (see the #231 test above); an empty board means the
+  // per-issue triage loop has nothing to iterate either. With NEITHER session actually running,
+  // this call must report ranSession: false — before this fix it unconditionally reported
+  // `true` at the bottom return, which (combined with a quota storm elsewhere the text/telemetry
+  // classifier misses) would make round.ts's empty-spin breaker's required-set check permanently
+  // unsatisfiable (aligning never lands in degradedPhases either, since no session ever runs to
+  // degrade).
+  const forge = new FakeForge(); // default: zero planTriageCandidates -> empty board
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-align-empty-board-"));
+  try {
+    const missingGoalPath = join(dir, "does-not-exist.md");
+    const cfg = mkCfg({ goal: { file: missingGoalPath } });
+    const runner = new ScriptedRunner([doneResult("must-not-run", alignResultText([]))]);
+    const state = new State(":memory:");
+    const deps: AlignDeps = { forge, state, cfg, runner };
+    const stub = createAligningStub(deps);
+    const { marker, ranSession } = await stub.run({ roundId: 11, phase: "aligning", marker: null });
+
+    assert.equal(marker, alignMarker(11));
+    assert.equal(runner.calls.length, 0, "neither the align-creation nor any triage session ever dispatched");
+    assert.equal(ranSession, false, "#394 (F23 gate② fix): both dispatch points skipped -> ranSession false");
     state.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1001,6 +1031,7 @@ test("createAligningStub #216: divergent proposal journal records honesty and ad
 
   assert.equal(result.marker, alignMarker(roundId));
   assert.equal(runner.calls.length, 0);
+  assert.equal(result.ranSession, undefined, "#394 (F23): a corrupt proposal journal skips outright -> ranSession stays unset");
   assert.equal(forge.createdIssues.length, 0);
   assert.equal(forge.issueCommentsPosted.length, 0);
   assert.equal(Object.values(forge.issueLabels).flat().length, 0);

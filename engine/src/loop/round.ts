@@ -84,12 +84,12 @@ function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, ph
  *  degrade, unrelated to the other four phases being perfectly fine), a false positive this
  *  function closes. Pure and exported for direct unit testing.
  *
- *  A round counts as fully degraded only when EVERY peripheral phase this round was actually
- *  capable of running a session for shows up in `degradedRoundPhases` (finding 4's fidelity fix
- *  feeds that set correctly — see DEGRADED_PHASE_TO_ROUND_PHASE). "Capable of running a
- *  session" is resolved as precisely as round.ts can cheaply know, without a new forge read or
- *  a PeripheralStub contract change (marginal-complexity principle — see the accepted
- *  limitation noted below):
+ *  A round counts as fully degraded only when EVERY peripheral phase this round both (a) was
+ *  cfg-configured to be capable of running a session ("required", below) AND (b) actually ran
+ *  one (`ranPhases`, round.ts's own PeripheralStub.ranSession bookkeeping — see that interface's
+ *  doc) shows up in `degradedRoundPhases` (finding 4's fidelity fix feeds that set correctly —
+ *  see DEGRADED_PHASE_TO_ROUND_PHASE). "Cfg-configured to be capable" is the coarse, config-only
+ *  half of the check:
  *   - aligning: only required when SOME real session could run there at all — po-align
  *     (`roles.po.enabled`) or the opt-in pool-selection session (`roles.po.poolSelection`).
  *     With BOTH off, aligning never spawns any LLM session (round-defaults.ts's own doc: pool
@@ -103,17 +103,50 @@ function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, ph
  *   - retro: required only on retro's own cadence turn (`roundId % everyNRounds === 0`,
  *     retro.ts's own gate) — a thinned-out round genuinely never dispatches a session.
  *
- *  ACCEPTED LIMITATION (documented, not silently swallowed): architecting/plan_review can ALSO
- *  skip their session entirely when there's simply nothing to review this round (architect.ts's
- *  own `candidates.length===0 && poolIssues.length===0` check; plan-review.ts's own
- *  `poolMembers.length===0` check) — round.ts has no cheap, forge-free way to know that ahead of
- *  this round's own artifact. Unlike the three cases resolved precisely above, this is NOT
- *  modeled: a round where architecting/plan_review had nothing to do is (only in that specific
- *  case) undercounted as "not fully degraded" even during a genuine total outage. This
- *  under-triggers, never over-triggers, the breaker — the safer direction for a new safety
- *  mechanism — and item 1's env-classification path plus the ceiling-breach gate remain the
- *  primary defenses regardless; a sustained outage spans many rounds, and it only takes N
- *  CONSECUTIVE rounds where every configured phase actually ran to trip.
+ *  #394 (F23 — closes the pre-#394 "ACCEPTED LIMITATION" this doc used to carry): architecting/
+ *  plan_review can ALSO skip their session entirely when there's simply nothing to review this
+ *  round (architect.ts's own `candidates.length===0 && poolIssues.length===0` check;
+ *  plan-review.ts's own `poolMembers.length===0` check) — a case the coarse cfg-only check above
+ *  cannot see (it only knows the ROLE is enabled, not whether THIS round had anything to do).
+ *  Before #394 this meant an empty-pool round during a quota storm could NEVER register as fully
+ *  degraded: architecting/plan_review stayed in the "required" set (role enabled) but never
+ *  joined `degradedRoundPhases` either (no session ran, so nothing degraded), permanently
+ *  unsatisfying `every()` — exactly the scenario this breaker exists to catch, structurally
+ *  disarmed. The `ranPhases` intersection below closes this: a phase excluded from `ranPhases`
+ *  (because its own PeripheralStub reported no `ranSession`) is excluded from the requirement
+ *  too, "skipped phases are evidence of nothing." `ranPhases` is round.ts's OWN observation of
+ *  what actually happened this round — no new forge read, no speculative machinery, just the
+ *  stub's own return value already threaded back.
+ *
+ *  #394 gate② round 2 (Codex sol-high BLOCK finding, P2 — a crash-RESUME variant of the same
+ *  fidelity question, in the OVER-trigger direction): `ranPhases` is a fresh, in-process-only
+ *  `Set` built by round.ts's own phase loop THIS run — a round PICKED UP already in-progress
+ *  (`deps.state.openRound()` returned non-null: some EARLIER process advanced it and then the
+ *  engine restarted, for any reason, not necessarily a crash) never re-enters whatever phases
+ *  that earlier process already ran, so they can never be added to `ranPhases` here, REGARDLESS
+ *  of whether they genuinely ran and SUCCEEDED before the restart.
+ *
+ *  This PR's own first cut of this doc claimed that gap was "bounded to one strike, since
+ *  `consecutiveDegradedRounds` resets to 0 on every fresh engine start" — that reasoning is
+ *  WRONG and has been retracted: the reset only makes the FIRST strike harmless when the
+ *  configured threshold is ABOVE 1. `round.emptySpin.consecutiveDegradedRoundsThreshold` is
+ *  `z.number().int().positive()` (config.ts) — `1` is a valid, supported value — and at
+ *  threshold 1 a single false strike IS the whole breaker: earlier phases succeed, the engine
+ *  restarts with the round cursor sitting at `executing`, the (now genuinely empty) board
+ *  dispatches zero workers, harvest has nothing to brief, and retro alone degrades on something
+ *  wholly unrelated to the LLM/provider — `ranPhases` (this process only ever saw retro) reads
+ *  as fully degraded on the FIRST post-restart round, parking a perfectly healthy engine
+ *  immediately. The fix is not "bound the count harder" (still rejected: persisting `ranPhases`
+ *  itself, or the resume-boundary count, across a restart is new durable state and new
+ *  crash-rerun semantics the marginal-complexity principle rules against for a bounded-scope
+ *  backstop). It is simpler than that: a round with a resume boundary in its history has
+ *  STRUCTURALLY INCOMPLETE evidence for this process's `ranPhases`, independent of how many
+ *  strikes have accumulated — so don't judge it at all, the same "under-fire on an ambiguous
+ *  signal" doctrine this doc already states for the retro.degraded case just below. `wasResumed`
+ *  (this function's 5th argument) is a SINGLE boolean round.ts's own loop already knows for
+ *  free — `deps.state.openRound()` returning non-null IS "this round pre-existed before this
+ *  process looked at it," no new state, no new read. `true` short-circuits straight to `false`
+ *  before any of the required/ran/degraded computation below runs at all.
  *
  *  #374 review (Codex sol-high verify-pass finding 3, P2 — narrows an over-broad false-park
  *  source): `artifact.retro.degraded` (retro.ts's `retro-pr-degraded` event) is DELIBERATELY
@@ -130,7 +163,20 @@ function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, ph
  *  only ever mean "the session succeeded, something else broke", turning an unrelated forge/git
  *  hiccup into a false contributor toward parking the whole engine. The breaker must UNDER-fire
  *  on an ambiguous signal, never over-fire on a well-understood one. */
-export function isRoundFullyDegraded(cfg: SapwoodConfig, artifact: RoundArtifact, roundId: number): boolean {
+export function isRoundFullyDegraded(
+  cfg: SapwoodConfig,
+  artifact: RoundArtifact,
+  roundId: number,
+  ranPhases: ReadonlySet<PeripheralPhase>,
+  wasResumed: boolean,
+): boolean {
+  // #394 gate② round 2 (Codex sol-high BLOCK finding, P2): a round PICKED UP already in-progress
+  // (round.ts's own `deps.state.openRound()` returning non-null) has structurally incomplete
+  // `ranPhases` evidence in THIS process — see this function's own doc, the paragraph above,
+  // for the reachable at-threshold-1 over-trigger this closes. Short-circuits before any of the
+  // required/ran/degraded computation below — a resumed round is simply never judged.
+  if (wasResumed) return false;
+
   const degradedRoundPhases = new Set<PeripheralPhase>();
   for (const d of artifact.degradedPhases) {
     const rp = DEGRADED_PHASE_TO_ROUND_PHASE[d.phase];
@@ -144,8 +190,19 @@ export function isRoundFullyDegraded(cfg: SapwoodConfig, artifact: RoundArtifact
   if (cfg.roles.harvest.enabled && artifact.escalations.needsHuman.length > 0) requiredPhases.push("harvesting");
   if (cfg.roles.retro.enabled && roundId % cfg.roles.retro.everyNRounds === 0) requiredPhases.push("retro");
 
-  if (requiredPhases.length === 0) return false; // nothing was even configured to run a session
-  return requiredPhases.every((p) => degradedRoundPhases.has(p));
+  // #394 (F23): a phase configured (and, per the checks above, expected) to run this round is
+  // only genuinely "required" for the breaker if it ACTUALLY ran a session — round.ts's own
+  // PeripheralStub.ranSession bookkeeping, threaded in as `ranPhases`. Without this intersection,
+  // a phase that structurally short-circuited with NO session at all (architect/plan_review
+  // hitting an EMPTY round pool — the exact dogfood scenario this issue fixes: aligning/retro
+  // degraded every round, but architect/plan_review/harvest silently skipped, so they never
+  // joined degradedRoundPhases either, and requiredPhases.every() stayed false forever) would be
+  // wrongly counted as an unfulfilled requirement. "Skipped phases are evidence of nothing" — the
+  // breaker must judge only the phases that actually attempted work.
+  const ranRequiredPhases = requiredPhases.filter((p) => ranPhases.has(p));
+
+  if (ranRequiredPhases.length === 0) return false; // nothing that could have run actually ran
+  return ranRequiredPhases.every((p) => degradedRoundPhases.has(p));
 }
 
 /** One externalized-artifact-producing peripheral role session — STUBBED in #86 (the real
@@ -155,13 +212,24 @@ export function isRoundFullyDegraded(cfg: SapwoodConfig, artifact: RoundArtifact
  *  non-null when a prior attempt crashed after externalizing something (a comment, a document,
  *  ...) but before the round advanced past this phase. A correct stub must treat a non-null
  *  marker as "already done — do not duplicate that side effect" (it may simply return the same
- *  marker unchanged). */
+ *  marker unchanged).
+ *
+ *  #394 (F23): `ranSession` — did this call actually dispatch at least one real role session,
+ *  as opposed to short-circuiting (already-externalized marker, no candidates/pool members, no
+ *  needs-human to brief, off-cadence, etc.)? OPTIONAL and defaults to `false` when omitted — the
+ *  conservative, "under-trigger on an ambiguous signal" direction this codebase already takes
+ *  elsewhere (env-failure.ts's own doc): an unset/false ranSession is read as "no evidence this
+ *  phase ran," never as "assume it did." round.ts's own runPeripheral collects this per round
+ *  into the `ranPhases` set isRoundFullyDegraded uses to decide which configured phases were
+ *  genuinely required THIS round — see that function's own doc for why a bare "was it configured
+ *  to run" check silently mis-served the exact scenario the empty-spin breaker exists for. */
 export interface PeripheralStub {
-  run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }): Promise<{ marker: string }>;
+  run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }): Promise<{ marker: string; ranSession?: boolean }>;
 }
 
 /** The only implementation shipped in #86 — every peripheral phase is a true no-op. Real role
- *  sessions are a follow-up issue (#86's own "out of scope" note). */
+ *  sessions are a follow-up issue (#86's own "out of scope" note). ranSession stays unset/false —
+ *  a no-op never runs a real session. */
 export const noopPeripheralStub: PeripheralStub = {
   async run({ marker }) {
     return { marker: marker ?? "noop" };
@@ -1118,11 +1186,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(deps.probeLlmReachable !== undefined ? { probeLlmReachable: deps.probeLlmReachable } : {}),
   });
 
-  /** Run one peripheral phase's stub, persist its marker, fire the observability hook. Returns
+  /** Run one peripheral phase's stub, persist its marker, fire the observability hook. `ok`
    *  false (never invoking the stub) when KILL_SWITCH is active — the caller must stop the
-   *  whole loop without advancing past this phase. */
-  const runPeripheral = async (round: RoundRow, phase: PeripheralPhase): Promise<boolean> => {
-    if (deps.state.isKillSwitchActive()) return false;
+   *  whole loop without advancing past this phase; `ranSession` is threaded straight from the
+   *  stub's own PeripheralStub.run() return (#394 F23) — see that interface's own doc. */
+  const runPeripheral = async (round: RoundRow, phase: PeripheralPhase): Promise<{ ok: boolean; ranSession: boolean }> => {
+    if (deps.state.isKillSwitchActive()) return { ok: false, ranSession: false };
     const stub = peripherals[phase] ?? noopPeripheralStub;
     // Rerun-not-resume marker: only the phase we are CURRENTLY sitting in (round.phase ===
     // phase — true both for a fresh phase just advanced into this run, and for a phase we
@@ -1130,10 +1199,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // phase in the sequence is being entered fresh this run, so its marker is null regardless
     // of what artifact_ref happens to hold (it belongs to whatever phase set it last).
     const marker = round.phase === phase ? round.artifact_ref : null;
-    const { marker: newMarker } = await stub.run({ roundId: round.round_id, phase, marker });
+    const { marker: newMarker, ranSession } = await stub.run({ roundId: round.round_id, phase, marker });
     deps.state.setRoundMarker(round.round_id, newMarker, iso());
     deps.onRoundPhase?.(round.round_id, phase);
-    return true;
+    return { ok: true, ranSession: ranSession ?? false };
   };
 
   /** #95 follow-up: persist a round-stop hit to the durable event log (in addition to firing
@@ -1349,6 +1418,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       }
 
       let round = deps.state.openRound();
+      // #394 gate② round 2: `openRound()` returning non-null means this round already existed
+      // as in_progress BEFORE this call looked — it was opened by an EARLIER process (or an
+      // earlier call to this function) and is being picked up rather than started fresh HERE.
+      // Every fresh round this SAME call opens goes through `startRound()` below instead, right
+      // after this in_progress-round check fails once its own round properly closes — so this
+      // boolean is exactly, and only, "this round's `ranPeripheralPhases` set (below) may be
+      // missing evidence for phases an earlier process already ran." See
+      // isRoundFullyDegraded's own doc for why this matters.
+      const roundWasResumed = round != null;
       if (!round) {
         checkFinalSpend(); // #154: cheapest check first (local read), then the network one
         await checkFinalMilestone();
@@ -1484,6 +1562,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // about idleness — and it must not arm standby, or a restart lands straight back in
       // standby without the fresh PO shot the restart-as-wakeup path documents.
       let ranExecuting = false;
+      // #394 (F23): every peripheral phase THIS round that actually ran a session (not a
+      // structural skip) — accumulated as runPeripheral reports back, fed to
+      // isRoundFullyDegraded at round close. Fresh per round, same lifetime as workersThisRound/
+      // ranExecuting above.
+      const ranPeripheralPhases = new Set<PeripheralPhase>();
 
       while (SEQUENCE[idx] !== "closed") {
         const phase = SEQUENCE[idx]!;
@@ -1502,11 +1585,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           // Narrowed to PeripheralPhase: every RoundPhase except "executing" (handled above)
           // and "closed" (excluded by the while guard — this branch is unreachable at
           // runtime, kept only so TypeScript can see the exhaustive narrowing).
-          const ok = await runPeripheral(round, phase);
-          if (!ok) {
+          const result = await runPeripheral(round, phase);
+          if (!result.ok) {
             killSwitchStop = true;
             break;
           }
+          if (result.ranSession) ranPeripheralPhases.add(phase);
         }
         idx++;
         const nextPhase = SEQUENCE[idx]!;
@@ -1608,7 +1692,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // THREW, see the try/catch above) counts as NOT degraded — a contained observability
       // failure must never itself trip a safety breaker.
       const roundDegraded =
-        ranExecuting && workersThisRound === 0 && artifact != null && isRoundFullyDegraded(cfg, artifact, round.round_id);
+        ranExecuting &&
+        workersThisRound === 0 &&
+        artifact != null &&
+        isRoundFullyDegraded(cfg, artifact, round.round_id, ranPeripheralPhases, roundWasResumed);
       consecutiveDegradedRounds = roundDegraded ? consecutiveDegradedRounds + 1 : 0;
       if (emptySpinBreached(consecutiveDegradedRounds, cfg.round.emptySpin.consecutiveDegradedRoundsThreshold)) {
         const reason =

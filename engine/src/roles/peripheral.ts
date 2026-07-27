@@ -37,6 +37,8 @@ import {
   extractFailureText,
   extractRateLimitResetAt,
   guardSettings,
+  hasQuotaErrorStatus,
+  hasRejectedRateLimitEvent,
   hasSessionInitLine,
   parseCostUsdOrNull,
   parseModelUsage,
@@ -299,6 +301,16 @@ export interface RoleSessionResult {
    *  CLI's structured rate-limit telemetry named an exact reset instant. Purely a SCHEDULING
    *  hint (env-failure.ts's probeDueWithHint) — never itself a classification input. */
   rateLimitResetAtMs?: number;
+  /** #394 (F22) / gate② round 3: same "only for a non-done outcome" gating as
+   *  failureText/rateLimitResetAtMs — `hasRejectedRateLimitEvent(jsonl) ||
+   *  hasQuotaErrorStatus(jsonl)` applied to this attempt's own jsonl: did the CLI's structured
+   *  telemetry record an actual rejection OR an errored result with `api_error_status:429`?
+   *  Unlike rateLimitResetAtMs (a scheduling hint only, never fed to the classifier), THIS field
+   *  IS a classification input — the primary one, checked before failureText's pattern match
+   *  (env-failure.ts's classifyEnvFailure). Two structured signals OR'd, not one — see
+   *  env-failure.ts's own module doc for why a single rejected `rate_limit_event` line alone
+   *  leaves a real gap. */
+  envSignalStructured?: boolean;
   /** #374: set ONLY by runSessionWithRetry, ONLY on the result it returns when
    *  RetriedSession.envFailure classified this attempt as an environment failure. A caller whose
    *  own post-call logic takes a FORGE-VISIBLE action on a non-"done" outcome (plan-review.ts's
@@ -841,6 +853,11 @@ export class RoleRunner {
       // the SAME jsonl this method already reads, never a new capture mechanism.
       const failureText = outcome !== "done" ? extractFailureText(jsonl) : undefined;
       const rateLimitResetAtMs = outcome !== "done" ? extractRateLimitResetAt(jsonl) : null;
+      // #394 (F22) / gate② round 3: same "only for a non-done outcome" gating, same jsonl, the
+      // primary text-free classification signal(s) for runSessionWithRetry's envFailure hook
+      // below — true if EITHER structured signal fired (see env-failure.ts's own module doc for
+      // why a single rejected rate_limit_event line alone leaves a real gap).
+      const envSignalStructured = outcome !== "done" ? hasRejectedRateLimitEvent(jsonl) || hasQuotaErrorStatus(jsonl) : false;
       const sentinelTag = outcome === "timeout" ? "failed" : outcome;
       this.writeJsonAtomic(this.path(name, `${sentinelTag}.json`), {
         name,
@@ -926,6 +943,7 @@ export class RoleRunner {
         ...(contextManifest !== undefined ? { contextManifest } : {}),
         ...(failureText !== undefined ? { failureText } : {}),
         ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
+        ...(envSignalStructured ? { envSignalStructured } : {}),
       };
     } finally {
       // #234 F5: revoke + tear down the proxy in EVERY outcome this try block can exit
@@ -1328,7 +1346,7 @@ export async function runSessionWithRetry(opts: RetriedSession): Promise<RoleSes
   // the episode's disposition is simply left as-is for the next attempt to decide.
   const handleEnvFailure = (result: RoleSessionResult): EnvFailureSource | null => {
     if (!opts.envFailure) return null;
-    const source = classifyEnvFailure(result.failureText ?? "", opts.envFailure.patterns);
+    const source = classifyEnvFailure(result.failureText ?? "", opts.envFailure.patterns, result.envSignalStructured ?? false);
     if (source) {
       const reason = summarizeRoleFailureText(result.failureText ?? "");
       // #374 review (Codex sol-high finding 7): thread the reset-time hint ONLY when THIS

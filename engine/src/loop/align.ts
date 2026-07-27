@@ -1167,6 +1167,14 @@ export interface PoolSelectionRunDeps extends PoolSelectionDeps {
   runner: Pick<RoleRunner, "run">;
   roundId: number;
   now?: () => Date;
+  /** #394 (F23 gate② fix): fired synchronously, exactly once, iff this call actually dispatches
+   *  the po-pool session (never on the replay/deterministic/zero-candidates no-session paths) —
+   *  round-defaults.ts's aligning wrapper uses this to fold pool-selection's own dispatch status
+   *  into the aligning phase's overall PeripheralStub.ranSession, alongside align-session/triage
+   *  (see createAligningStub's own ranSession doc). Optional and additive: every existing caller/
+   *  test that omits it is unaffected — this changes no other observable behavior of this
+   *  function, only whether that one extra bit gets reported. */
+  onSessionRan?: () => void;
 }
 
 /** Orchestrates one round's pool selection end to end (round-defaults.ts's ONE call site,
@@ -1302,6 +1310,10 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
         "pool.digest": poolDigest.text,
         "pool.cap": String(cap),
       });
+      // #394 (F23): this IS the one real session dispatch on this function's session path (the
+      // replay/deterministic/zero-candidates branches above all return before reaching here) —
+      // see PoolSelectionRunDeps.onSessionRan's own doc.
+      deps.onSessionRan?.();
       const result = await runSessionWithRetry({
         runner: deps.runner,
         state: deps.state,
@@ -1482,6 +1494,10 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // event + a log line) instead of wedging the round; the next round retries naturally. ──
       let persistedProposals = priorProgress.proposals;
       let alignValidated: AlignValidation;
+      // #394 (F23 gate② fix): true iff the align-CREATION session below actually dispatched
+      // (never on the persisted-proposal replay path, nor the goal-file-unreadable abort path)
+      // — see the function's own ranSession return for why this matters.
+      let alignSessionRan = false;
       // #237: the align session's actual injected view of existing issues — the rendered
       // backlog-digest subset (same set the read-failure suppression above already gates
       // creation on). A concern naming any other issue is out-of-view, invalid output.
@@ -1589,6 +1605,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
             "round.directive": directive,
             "backlog.digest": backlogDigest.text,
           });
+          alignSessionRan = true;
           const alignResult = await runSessionWithRetry({
             runner: deps.runner,
             state: deps.state,
@@ -1803,6 +1820,10 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       // where this is consulted, and the `sawEnvPark`-setting fresh-dispatch branch further down
       // for where it gets set.
       let envParkedThisPass = false;
+      // #394 (F23 gate② fix): true iff ANY triage iteration below actually dispatches a fresh
+      // session (the `resumed` branch replays a durably-recorded decision with no session at
+      // all) — folded into this function's own ranSession return alongside alignSessionRan.
+      let triageSessionRan = false;
       for (let triageIdx = 0; triageIdx < triageWorkNumbers.length; triageIdx++) {
         const number = triageWorkNumbers[triageIdx]!;
         const resumed = triageJournal.decisions.get(number);
@@ -1927,6 +1948,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           // capability belongs to align mode alone). Widening this set would accept output the
           // prompt itself never offers, a contract mismatch between prompt and validator.
           const triageInView = new Set<number>([issue.number]);
+          triageSessionRan = true;
           const triageResult = await runSessionWithRetry({
             runner: deps.runner,
             state: deps.state,
@@ -2181,7 +2203,20 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         ...(deps.log !== undefined ? { log: deps.log } : {}),
       });
 
-      return { marker: mark };
+      // #394 (F23 gate② fix): ranSession is the OR of the two session dispatch points THIS
+      // function itself owns (alignSessionRan/triageSessionRan, tracked above at their exact
+      // `runSessionWithRetry` call sites — never inferred from "did we reach here", which gate②
+      // review traced to a REACHABLE permanent-block: cfg.goal.file unreadable (persists every
+      // round, no align session) + an empty board (zero Ready issues, zero triage sessions) +
+      // a quota storm the text/telemetry classifier misses would have every round report
+      // ranSession:true while never landing in degradedPhases, making the empty-spin breaker's
+      // required-set check permanently unsatisfiable — the exact failure mode this breaker
+      // exists to catch). round-pool selection is this round-phase's THIRD possible session
+      // (#212/#233's runPoolSelection, dispatched separately by round-defaults.ts's aligning
+      // wrapper, never from inside this function) — that caller ORs in its own
+      // PoolSelectionRunDeps.onSessionRan signal alongside this function's return before handing
+      // the final ranSession to round.ts; see that wrapper's own comment.
+      return { marker: mark, ranSession: alignSessionRan || triageSessionRan };
     },
   };
 }

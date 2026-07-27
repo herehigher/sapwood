@@ -51,12 +51,58 @@ export const DEFAULT_LLM_FAILURE_PATTERNS: readonly string[] = [
   // phrase (never something ordinary worker prose would produce verbatim, same signature-shaped
   // bar as "usage limit reached" above) — extractFailureText (worker.ts) already carries this
   // text through for a FAILED lane's `result` field regardless of the record's (misleadingly
-  // "success") subtype, since `is_error` alone gates inclusion. "5-hour limit"/"weekly limit" are
-  // the CLI's other two plan-quota tiers (same UI family, not yet observed verbatim in this
-  // codebase's own captures, added defensively so all three tiers classify identically).
-  "hit your session limit",
-  "5-hour limit reached",
-  "weekly limit reached",
+  // "success") subtype, since `is_error` alone gates inclusion.
+  //
+  // #394 (F22 dogfood retro, 2026-07-27): #374's own "5-hour limit"/"weekly limit" guesses above
+  // were modeled on a DIFFERENT UI string ("5-hour limit reached" / "weekly limit reached") that
+  // never matched the real CLI output and missed a live weekly-quota storm for ~72 rounds (~$80).
+  // The real captured text, verbatim: "You've hit your weekly limit · resets Jul 27 at 9am
+  // (Asia/Tokyo)" — same "hit your <tier> limit" STEM as the verified session-limit message
+  // above, just a different tier word.
+  //
+  // #394 gate② round 3 (Codex sol-high BLOCK finding, P2 — retracts this PR's own first cut,
+  // which used a bare `hit your \S+ limit` wildcard): a wildcard stem is NOT provider-specific —
+  // `extractFailureText` admits raw stderr verbatim, and a failed session's own tooling can
+  // legitimately emit an UNRELATED "hit your X limit" line (concretely: "You've hit your storage
+  // limit" from a local disk-quota/MCP-server/other-component error with no rejected
+  // rate_limit_event anywhere in the transcript) — the engine would classify it `llm` and park
+  // against a perfectly healthy provider. This is NOT symmetric with the miss the wildcard
+  // replaced: a too-narrow pattern list produces a false NEGATIVE (misses a real quota message —
+  // costs money); a too-wide pattern produces a false POSITIVE (halts the engine on an unrelated
+  // failure) — worse. Deliberately narrowed back to an ENUMERATED tier alternation instead:
+  // `session` (verified verbatim, #374) and `weekly` (verified verbatim, #394's own AC1) are
+  // directly observed; `5-hour` is not yet independently captured but is the CLI's OWN named
+  // third plan-quota tier (the two verified messages already establish the family), so it is
+  // listed alongside them rather than guessed from scratch.
+  //
+  // THIS TEXT LIST IS THE THIRD, LAST-RESORT LINE OF DEFENSE — not the only one, and not
+  // universal cover either (round 3 review corrected an earlier overclaim in this exact comment
+  // that it was). classifyEnvFailure checks TWO structured, text-free signals FIRST (see that
+  // function's own doc): a rejected `rate_limit_event` and an errored result with
+  // `api_error_status:429` — both provider-authoritative, neither guessable-wrong the way a text
+  // pattern is. This list only ever matters when BOTH of those are absent. The residual false-
+  // negative surface with all three layers combined is genuinely narrow — a quota failure that
+  // produces neither a rejected `rate_limit_event`, nor an `api_error_status:429` result, nor a
+  // listed tier word — not the earlier "telemetry catches everything" claim, which was false.
+  // Deliberately narrow anyway, not an oversight to "fix" back to a wildcard: keeping this list
+  // enumerated costs, at worst, an unclassified quota failure that already cleared BOTH
+  // structural checks and still uses unlisted wording — narrow and rare; a wildcard here costs a
+  // healthy engine parked on any unrelated "hit your X limit" line — broad and common. Widening
+  // this back to a wildcard is the wrong trade — do not.
+  //
+  // WHAT ACTUALLY BOUNDS A MISSED CLASSIFICATION (round 3 correction — the earlier claim that
+  // "the empty-spin breaker bounds it" was WRONG on the path that matters most): round.ts's
+  // isRoundFullyDegraded (F23) only ever fires on the PERIPHERAL-session path (align/architect/
+  // plan_review/harvest/retro), because its own gate requires `workersThisRound === 0` — a
+  // dispatched WORKER lane hitting an unclassified quota/network failure makes that count > 0
+  // for the round, defeating the breaker entirely for that path. Concretely: on the peripheral
+  // path, a missed classification degrades visibly and (with enough consecutive fully-degraded
+  // rounds) still trips the empty-spin park — bounded. On the WORKER-lane path (conductor.ts's
+  // reclaim FAILED branch), a missed classification is NOT bounded by anything in this file: the
+  // lane simply escalates as an ordinary task failure (gated-reentry, then `needs-human` once
+  // exhausted) — a human sees it, but nothing here stops the loop from repeating this same miss
+  // on the next dispatched issue that hits the same unclassified failure text.
+  "hit your (?:session|weekly|5-hour) limit",
 ];
 
 export const DEFAULT_FORGE_FAILURE_PATTERNS: readonly string[] = [
@@ -90,8 +136,28 @@ function matchesAny(text: string, patterns: readonly string[]): boolean {
  * sets. Pure, deterministic, no LLM. `llm` is checked before `forge` (fixed precedence — a
  * failure text matching both patterns, unlikely in practice, classifies as `llm`). No match on
  * either set -> null, an ordinary task failure (unchanged existing disposition).
+ *
+ * #394 (F22) / gate② round 3 (Codex sol-high BLOCK finding, P2): `structuredSignal` is the
+ * PRIMARY signal, checked BEFORE any text pattern — TWO text-free, provider-authoritative
+ * conditions, OR'd together by the caller before this call: (1) the Claude CLI's own structured
+ * `rate_limit_event` telemetry (`rate_limit_info.status:"rejected"`, worker.ts's
+ * hasRejectedRateLimitEvent) and (2) an errored `result` record carrying the transport-level
+ * `api_error_status:429` (worker.ts's hasQuotaErrorStatus). BOTH are needed: a real captured
+ * transcript (#374's own fixture) shows the CLI does not always emit a `rate_limit_event` line
+ * for a genuine quota failure — signal (1) alone missed that case, which is exactly why gate②
+ * round 3 added (2). Unlike the pattern lists below (necessarily a finite, sometimes-stale guess
+ * at the CLI's human-readable wording — exactly what missed the real "weekly limit" text this
+ * issue fixes), neither structured condition can be produced by anything other than the provider
+ * itself refusing the request. Defaults to `false` so every pre-#394 call site (omitting the
+ * argument) keeps byte-identical behavior — text-pattern classification only, unchanged.
+ *
+ * What this does NOT catch (the honest residual gap, not "nothing" — see
+ * DEFAULT_LLM_FAILURE_PATTERNS's own comment below for the full accounting): a quota/rate-limit
+ * failure that produces neither a rejected `rate_limit_event`, nor an errored result with
+ * `api_error_status:429`, nor text matching one of the enumerated tier words below.
  */
-export function classifyEnvFailure(output: string, patterns: EnvFailurePatterns): EnvFailureSource | null {
+export function classifyEnvFailure(output: string, patterns: EnvFailurePatterns, structuredSignal = false): EnvFailureSource | null {
+  if (structuredSignal) return "llm";
   if (!output) return null;
   if (matchesAny(output, patterns.llm)) return "llm";
   if (matchesAny(output, patterns.forge)) return "forge";

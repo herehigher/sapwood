@@ -68,9 +68,44 @@ test("classifyEnvFailure: Claude CLI session-limit exhaustion (verbatim captured
   assert.equal(classifyEnvFailure("[success] You've hit your session limit · resets 6:30pm (Asia/Tokyo)", patterns), "llm");
 });
 
-test("classifyEnvFailure: 5-hour/weekly Claude plan-quota tiers -> llm", () => {
-  assert.equal(classifyEnvFailure("5-hour limit reached ∙ resets 3pm", patterns), "llm");
-  assert.equal(classifyEnvFailure("weekly limit reached ∙ resets Monday", patterns), "llm");
+test("classifyEnvFailure: 5-hour/weekly Claude plan-quota tiers use the SAME 'hit your <tier> limit' stem as session-limit, not the old guessed 'X limit reached' shape", () => {
+  assert.equal(classifyEnvFailure("You've hit your 5-hour limit · resets 3pm", patterns), "llm");
+  assert.equal(classifyEnvFailure("You've hit your weekly limit · resets Monday", patterns), "llm");
+});
+
+// ── #394 (F22, dogfood retro 2026-07-27): the REAL captured weekly-limit text — #374's guessed
+//    "weekly limit reached" pattern never matched this and missed a live quota storm for ~72
+//    rounds (~$80). AC1: this exact verbatim string classifies as llm. ─────────────────────────
+
+test("classifyEnvFailure: AC1 — verbatim captured weekly-limit text classifies as llm", () => {
+  assert.equal(classifyEnvFailure("You've hit your weekly limit · resets Jul 27 at 9am (Asia/Tokyo)", patterns), "llm");
+});
+
+// ── #394 gate② round 3 (Codex sol-high BLOCK finding, P2): the tier list is a DELIBERATE
+//    enumeration (session/weekly/5-hour), not a `\S+` wildcard — an unrelated "hit your <X>
+//    limit" line from some OTHER component (storage, disk quota, an MCP server, ...) must NOT
+//    false-park the engine absent the structured rate_limit_event signal. ──────────────────────
+
+test("classifyEnvFailure: an UNRELATED 'hit your <X> limit' line (e.g. a storage-quota error from some other component) does NOT classify as llm absent the structured signal — the tier list is enumerated, not a wildcard", () => {
+  assert.equal(classifyEnvFailure("You've hit your storage limit", patterns), null);
+  assert.equal(classifyEnvFailure("Error: you've hit your disk limit — free up space and retry", patterns), null);
+  // The SAME unrelated text, but WITH a genuine rejected rate_limit_event elsewhere in the
+  // transcript, still correctly classifies as llm — via the structured signal, never the text.
+  assert.equal(classifyEnvFailure("You've hit your storage limit", patterns, true), "llm");
+});
+
+// ── #394 (F22): the structured signal(s) — text-free, authoritative, checked BEFORE any pattern
+//    match. AC2: a structured signal classifies as llm even when the human-readable text is
+//    unrecognized. ────────────────────────────────────────────────────────────────────────────
+
+test("classifyEnvFailure: AC2 — structuredSignal=true classifies as llm even when the text is completely unrecognized", () => {
+  assert.equal(classifyEnvFailure("some brand new CLI wording nobody has ever seen before", patterns, true), "llm");
+  assert.equal(classifyEnvFailure("", patterns, true), "llm", "even empty output — the structured signal alone is authoritative");
+});
+
+test("classifyEnvFailure: structuredSignal omitted/false -> unchanged text-pattern-only behavior (backward compatible)", () => {
+  assert.equal(classifyEnvFailure("ordinary task failure, nothing env-related", patterns), null);
+  assert.equal(classifyEnvFailure("ordinary task failure, nothing env-related", patterns, false), null);
 });
 
 test("classifyEnvFailure: llm precedence over forge when both signatures somehow appear", () => {
