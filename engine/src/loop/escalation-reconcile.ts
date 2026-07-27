@@ -119,7 +119,25 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
   // gated-reentry-capped-label-failed does). Its payload carries `pr` (the driving lane's own),
   // so an external merge/close of that PR resolves it like every other pr-bearing source.
   "fix-leg-undecidable": "always",
+  // #295 review round 4 (Codex P1): the fix-round cap — in practice the MOST common escalation
+  // of all — was missing from this table entirely, so `openEscalations` skipped it and no
+  // external merge/close/label-removal could ever resolve it. `always`, for exactly the reason
+  // `fix-leg-undecidable` is: conductor.ts's cap branch appends `fix-rounds-capped` strictly
+  // AFTER its own addLabel returned (a throw emits `fix-rounds-cap-label-failed` and `break`s
+  // without this event), and its payload carries the driving lane's `pr`.
+  "fix-rounds-capped": "always",
 };
+
+/** Events that CLEAR an issue-scoped attention item without resolving it externally — the
+ *  dashboard's own fold (docs/frontend-design.md, "Attention items fold over the whole event
+ *  history") clears on any later event that MOVES the issue. #295 review round 4 (Codex P2):
+ *  this module folded only escalation + resolution kinds, so on an upgraded or long-running DB
+ *  every historical escalation whose issue was later re-dispatched stayed "open" here forever —
+ *  a per-round forge read each, growing monotonically, plus a misleading late resolution event
+ *  for an item the strip already considers cleared. Folding the same clear kinds keeps the two
+ *  folds over one ledger from disagreeing. Deliberately NOT terminal (unlike a merged
+ *  resolution): a lane that is re-dispatched and escalates AGAIN is a genuine new episode. */
+const CLEAR_KINDS = ["dispatched", "merged", "gated-reentry"] as const;
 
 const RESOLVED_KIND = "escalation-resolved";
 
@@ -188,6 +206,14 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
       }
       continue;
     }
+    if ((CLEAR_KINDS as readonly string[]).includes(e.kind)) {
+      // "a later event moves that issue" — issue-scoped, so every source on that issue clears,
+      // not just one key. Same rule the strip applies.
+      for (const key of [...open.keys()]) {
+        if (open.get(key)?.issue === issue) open.delete(key);
+      }
+      continue;
+    }
     const proof = ESCALATION_SOURCES[e.kind];
     if (proof === undefined) continue;
     const pr = payloadNumber(payload, "pr");
@@ -243,7 +269,7 @@ export async function reconcileEscalations(
   const warn = log ?? console.error;
   let open: Map<string, OpenEscalation>;
   try {
-    open = openEscalations(state.eventsAfterId(0, [...Object.keys(ESCALATION_SOURCES), RESOLVED_KIND]));
+    open = openEscalations(state.eventsAfterId(0, [...Object.keys(ESCALATION_SOURCES), ...CLEAR_KINDS, RESOLVED_KIND]));
   } catch (e) {
     // Fail closed: an unreadable ledger must never risk a duplicate append (we cannot tell what
     // was already resolved). A later round reads it again.

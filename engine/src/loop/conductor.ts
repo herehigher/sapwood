@@ -1052,6 +1052,10 @@ async function escalateUndecidableResume(
     worker: worker.name,
     issue: worker.issue,
     sessionId: worker.session_id,
+    // #295 review round 4 (Codex P1): a fixing-origin handoff still owns its PR — preserve it so
+    // escalation-reconcile can observe an external merge/close of that PR (its observeResolution
+    // checks the PR only when the payload carried one).
+    ...(worker.pr != null ? { pr: worker.pr } : {}),
   });
   return { kind: "capped", worker: worker.name, issue: worker.issue, attempts };
 }
@@ -1144,7 +1148,16 @@ async function drainThenEscalate(
         await forge.addPRLabel(p.prNumber, cfg.labels.needsHuman).catch(() => {});
       }
       if (r.worktreeRetained) await reportRetainedWorktree(forge, state, w.name, w.issue, r.worktreePath, cfg.labels.needsHuman);
-      state.appendEvent("ceiling-escalated", { worker: w.name, issue: w.issue, reasons });
+      // #295 review round 4 (Codex P1): carry the PR when one is known. escalation-reconcile's
+      // observeResolution only checks merge/closure for escalations whose payload preserved a
+      // pr, so discarding a number we already hold here left the advertised external-merge
+      // clearing path permanently broken for this source.
+      state.appendEvent("ceiling-escalated", {
+        worker: w.name,
+        issue: w.issue,
+        reasons,
+        ...(p.prNumber != null ? { pr: p.prNumber } : {}),
+      });
       // #155: leaving `running` via the ceiling drain — clear the LIVE telemetry trio.
       state.clearLiveTelemetry(w.name);
       state.upsertWorker({ ...w, state: "failed", ended_at: iso() });
@@ -3059,7 +3072,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         )
         .catch(() => {});
       state.upsertWorker({ ...w, ended_at: iso(), resume_capped: 1 });
-      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts });
+      // #295 review round 4 (Codex P1): same as resume-undecidable — preserve the known PR.
+      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts, ...(w.pr != null ? { pr: w.pr } : {}) });
       resumed.push({ kind: "capped", worker: w.name, issue: w.issue, attempts });
       continue;
     }

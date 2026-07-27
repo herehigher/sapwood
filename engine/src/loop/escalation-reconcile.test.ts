@@ -663,3 +663,66 @@ test("openEscalations (#295 r3): a closed-then-reopened entity's genuine re-esca
   assert.equal(open.size, 1, "the re-escalation after a closure genuinely reopens");
   assert.equal(open.get("resume-capped:6")?.issue, 6);
 });
+
+// ── #295 review round 4 (Codex) ──────────────────────────────────────────────────────────────
+
+test("openEscalations: fix-rounds-capped is a tracked source — the most common escalation was missing from the table (round 4 P1)", () => {
+  const open = openEscalations([{ kind: "fix-rounds-capped", payload: { worker: "w1", issue: 7, pr: 12, fixRounds: 2, cap: 2 } }]);
+  assert.equal(open.size, 1);
+  assert.deepEqual(open.get("fix-rounds-capped:7"), { source: "fix-rounds-capped", issue: 7, pr: 12, labelProven: true });
+});
+
+test("reconcileEscalations: a fix-rounds-capped lane whose PR was hand-merged resolves via 'merged' (round 4 P1)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("fix-rounds-capped", { worker: "w1", issue: 7, pr: 12, fixRounds: 2, cap: 2 });
+  forge.prStates[12] = "MERGED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "fix-rounds-capped", via: "merged" }]);
+  state.close();
+});
+
+for (const clearKind of ["dispatched", "merged", "gated-reentry"]) {
+  test(`openEscalations: a later '${clearKind}' on the same issue clears the item — the strip's own fold rule (round 4 P2)`, () => {
+    const open = openEscalations([
+      { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7, reasons: ["x"] } },
+      { kind: "env-failure-preserved", payload: { worker: "w1", issue: 7 } },
+      { kind: clearKind, payload: { worker: "w1", issue: 7 } },
+    ]);
+    assert.equal(open.size, 0, "every source on that issue clears, not just one key");
+  });
+}
+
+test("openEscalations: a clear event does NOT suppress a genuine LATER re-escalation (clears are not terminal)", () => {
+  const open = openEscalations([
+    { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7, reasons: ["x"] } },
+    { kind: "dispatched", payload: { worker: "w1", issue: 7 } },
+    { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7, reasons: ["y"] } },
+  ]);
+  assert.equal(open.size, 1);
+  assert.equal(open.get("ceiling-escalated:7")?.issue, 7);
+});
+
+test("openEscalations: a clear event on a DIFFERENT issue leaves this one open", () => {
+  const open = openEscalations([
+    { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7, reasons: ["x"] } },
+    { kind: "dispatched", payload: { worker: "w2", issue: 8 } },
+  ]);
+  assert.equal(open.size, 1);
+});
+
+test("reconcileEscalations: a ceiling-escalated event that preserved its PR resolves on an external merge (round 4 P1)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("ceiling-escalated", { worker: "w1", issue: 7, reasons: ["wall-clock"], pr: 12 });
+  forge.prStates[12] = "MERGED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [{ issue: 7, pr: 12, source: "ceiling-escalated", via: "merged" }]);
+  state.close();
+});
