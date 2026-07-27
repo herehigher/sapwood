@@ -704,6 +704,10 @@ async function fixture(seed?: (s: State) => void, opts: FixtureOpts = {}): Promi
     dbPath,
     configPath,
     port: 0,
+    // Pinned to the same day every seeded spend/telemetry date in this file uses — todayUsd/
+    // byModel are day-scoped reads against the REAL clock otherwise, which made the suite a
+    // date-rollover time bomb (green on 2026-07-24, red from the 25th — caught live on main).
+    now: () => new Date("2026-07-24T12:00:00.000Z"),
     ...(opts.staticDir === undefined ? {} : { staticDir: opts.staticDir }),
   });
   return {
