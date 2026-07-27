@@ -21,6 +21,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
+import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 import {
   assembleContextManifest,
   type ContextManifest,
@@ -330,6 +331,10 @@ export interface RoleRunnerDeps {
   guardHookPath?: string;
   heartbeatMs?: number;
   now?: () => Date;
+  /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
+   *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
+   *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
+  sleep?: (ms: number) => Promise<void>;
   /** #236 (Codex F1, corrected in R1): bounded poll of the session's OWN stream-json jsonl file
    *  for its `{"type":"system","subtype":"init"}` line, before capturing the filesystem-derived
    *  half of the context manifest. The init line is the CLI's own signal that it finished
@@ -675,14 +680,29 @@ export class RoleRunner {
         session.onExit((code) => resolve(code));
       });
 
-      let spawnErr: unknown;
-      await new Promise<void>((resolve) => {
-        session.onSpawn(() => resolve());
-        session.onError((e) => {
-          spawnErr = e;
-          resolve();
-        });
-      });
+      // #395: bounded — Node gives spawn confirmation no timeout of its own, and the live
+      // incident was exactly this await never resolving (a host sleep lost the child's `spawn`
+      // notification, wedging the engine 30+ minutes with zero events). A timeout is folded into
+      // `spawnErr` and handled by the SAME cleanup/throw below a genuine spawn `error` already
+      // uses — no new failure path, just a bound on this one.
+      const spawnConfirm = await awaitSpawnConfirmation(
+        (onSpawn, onError) => {
+          session.onSpawn(onSpawn);
+          session.onError(onError);
+        },
+        this.deps.cfg.liveness.spawnConfirmTimeoutMs,
+        this.deps.sleep,
+      );
+      let spawnErr: unknown = spawnConfirm.err;
+      if (spawnConfirm.timedOut) {
+        spawnErr = new Error(
+          `spawn confirmation timed out after ${this.deps.cfg.liveness.spawnConfirmTimeoutMs}ms ` +
+            "(host sleep or a lost spawn notification) — killing the possibly-still-alive child",
+        );
+        // Best-effort: the child may actually be alive despite the lost notification. killTree
+        // itself never throws (peripheral.ts's own SpawnedSession.killGroup swallows kill errors).
+        await this.killTree(session);
+      }
       if (spawnErr) {
         try {
           closeSync(jsonlFd);

@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
 import { extractMarkdownSections } from "../util/markdown.js";
-import { gh } from "./gh.js";
+import { ghWithTimeout } from "./gh.js";
 import { labelsInclude } from "./labels.js";
 
 const OPEN_ISSUES_LIMIT = 1000;
@@ -552,9 +552,11 @@ export interface PRChecksPage {
 export class GithubForge implements IForge {
   constructor(private readonly cfg: SapwoodConfig) {}
 
-  /** Run `gh` via the shared (execFile, no-shell) helper. Returns stdout. */
+  /** Run `gh` via the shared (execFile, no-shell) helper. Returns stdout. #395: every call is
+   *  bounded by cfg.liveness.forgeCallTimeoutMs — a dead socket/hung upstream must never wedge
+   *  the tick loop forever. */
   private async gh(args: string[]): Promise<string> {
-    return gh(args);
+    return ghWithTimeout(args, this.cfg.liveness.forgeCallTimeoutMs);
   }
 
   async detectOwnerKind(owner: string): Promise<OwnerKind> {

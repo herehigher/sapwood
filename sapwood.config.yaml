@@ -26,6 +26,16 @@ board:
 #                        # bare M4 loop driver (no peripherals; --once/--until-idle
 #                        # apply), kept as an explicit escape hatch.
 
+# liveness: #395 — bounded external awaits + the "tick" driver's own stall watchdog. A host
+#           # sleeping mid-round with a forge/spawn call in flight must never wedge the engine
+#           # with zero events; every duration below exists to bound exactly that.
+#   forgeCallTimeoutMs: 30000     # hard per-call ceiling on a single `gh` CLI invocation
+#   spawnConfirmTimeoutMs: 30000  # hard ceiling on waiting for a spawned child's spawn/error
+#                                 # confirmation (a role session or a worker leg)
+#   watchdogTickMultiplier: 10    # the "tick" driver (engine.driver: tick) treats no tick
+#                                 # completing within tickIntervalSec * this many as wedged —
+#                                 # durable engine-stalled event + nonzero exit
+
 # logging:
 #   path: data/logs/sapwood.log # disposable run narrative; relative paths resolve against
 #                                # this config file's directory

@@ -42,6 +42,7 @@ import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "..
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import { sanitizeUpstreamError } from "../proxy/tools.js";
 import type { CategorizedTokenUsage, ModelUsageEntry, State } from "../state/state.js";
+import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 
 /** A durable resume intent exists, but the engine restarted before spawn confirmation made
  *  the outcome knowable. Retrying could create a second Claude process in the same worktree. */
@@ -1136,6 +1137,10 @@ export interface WorkerDeps {
   guardHookPath?: string;
   heartbeatMs?: number; // default 30_000
   now?: () => Date;
+  /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
+   *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
+   *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
+  sleep?: (ms: number) => Promise<void>;
   /** #244 (Codex sol-high PR #260 review, P2): the narrow State surface WorkerSupervisor needs
    *  ONLY to record a durable `proxy-mint-failed` event when a `dispatch()` caller's `proxy.mint`
    *  throws — kept as a `Pick` (not the whole State class), same convention as every other
@@ -1539,14 +1544,27 @@ export class WorkerSupervisor implements Supervisor {
     // spawn() reports a bad CLAUDE_BIN / missing `claude` via an async `error` event, not a
     // throw — AWAIT the spawn outcome before reporting success. On failure clean up + reject
     // so the conductor's claim-rollback runs and no bogus running marker is left (Codex R1 P2).
-    let spawnErr: unknown;
-    await new Promise<void>((resolve) => {
-      child.once("spawn", () => resolve());
-      child.once("error", (e) => {
-        spawnErr = e;
-        resolve();
-      });
-    });
+    // #395: bounded — Node gives this confirmation no timeout of its own, and the live incident
+    // was exactly this class of await never resolving (a host sleep lost a spawn/exit
+    // notification). A timeout folds into `spawnErr` and reuses the SAME cleanup/throw below a
+    // genuine spawn `error` already takes — no new failure path.
+    const spawnConfirm = await awaitSpawnConfirmation(
+      (onSpawn, onError) => {
+        child.once("spawn", onSpawn);
+        child.once("error", onError);
+      },
+      this.deps.cfg.liveness.spawnConfirmTimeoutMs,
+      this.deps.sleep,
+    );
+    let spawnErr: unknown = spawnConfirm.err;
+    if (spawnConfirm.timedOut) {
+      spawnErr = new Error(
+        `spawn confirmation timed out after ${this.deps.cfg.liveness.spawnConfirmTimeoutMs}ms ` +
+          "(host sleep or a lost spawn notification) — killing the possibly-still-alive child",
+      );
+      // Best-effort: the child may actually be alive despite the lost notification.
+      this.killGroup(child, "SIGKILL");
+    }
     if (spawnErr) {
       this.lanes.delete(laneName);
       try {

@@ -749,6 +749,41 @@ const Engine = z
   })
   .strict();
 
+// #395 (F24 dogfood incident): engine liveness — bounded external awaits (every `gh` CLI call,
+// role-session/worker-leg spawn confirmation) plus the "tick" driver's own liveness watchdog.
+// User-tunable per the config rule (never hardcoded) — the live incident was a host sleeping
+// ~49h mid-round with a role-session spawn/network call in flight: the process woke alive but
+// emitted zero events for 30+ minutes because nothing bounded that await. Every duration here
+// exists to close exactly that class of wedge.
+const Liveness = z
+  .object({
+    // Hard per-call ceiling on a single `gh` CLI invocation (gh.ts's `gh`/`ghText`/`ghWithTimeout`
+    // — the ONE place the engine shells out to `gh`, forge.ts's GithubForge.gh routes every forge
+    // call through it). Same rationale/shape as proxy.timeoutMs's own doc ("a hung upstream `gh`
+    // call must never wedge a session waiting ... forever").
+    forgeCallTimeoutMs: z.number().int().positive().default(30_000),
+    // Hard ceiling on the wait for a freshly spawned child (a role session, peripheral.ts's
+    // RoleRunner.run, or a worker leg, worker.ts's WorkerSupervisor.dispatch) to report Node's
+    // own `spawn`/`error` event. Node gives that confirmation no timeout of its own — a callback
+    // lost across a host sleep (the #395 live incident) hangs the await forever without one. On
+    // timeout the (possibly still-alive) child is best-effort killed and the attempt fails toward
+    // retry, the same way a genuine spawn error already does.
+    spawnConfirmTimeoutMs: z.number().int().positive().default(30_000),
+    // The "tick" driver's (driver.ts's runDriver) own liveness watchdog: a generous MULTIPLE of
+    // engine.tickIntervalSec — never a fixed absolute duration, so a legitimately slow cadence is
+    // never itself a false alarm — past which no tick has completed is treated as a wedged loop
+    // (a stuck external await that slipped past the two bounds above, or any other stall; sleep
+    // is just the common case). Fires a durable `engine-stalled` event (state.appendEvent, the
+    // same durable-event mechanism every other engine event already uses) and exits the process
+    // nonzero so a supervisor can restart it — deliberately NOT an in-process self-heal/abort
+    // (PM ruling: the smallest thing that works; a stuck await's resources are reclaimed by the
+    // process exit itself, never by cancelling it in place). Conservative default (10x): with the
+    // shipped tickIntervalSec default (60s) that's a 10-minute window, comfortably above any
+    // healthy tick's real duration.
+    watchdogTickMultiplier: z.number().positive().default(10),
+  })
+  .strict();
+
 const Logging = z
   .object({
     path: z.string().min(1).default("data/logs/sapwood.log"),
@@ -1067,6 +1102,7 @@ const ConfigSchemaRaw = z
   .object({
     board: Board,
     engine: Engine.default({}),
+    liveness: Liveness.default({}),
     logging: Logging.default({}),
     dashboard: Dashboard.default({}),
     lanes: Lanes.default({}),

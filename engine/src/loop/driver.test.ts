@@ -773,3 +773,64 @@ test("runDriver (#295): a no-clear escalation resolved externally (PR merged) ge
   assert.deepEqual(resolved[0]!.payload, { issue: 9, pr: 90, source: "drive-needs-human", via: "merged" });
   deps.state.close();
 });
+
+// ── #395: the liveness watchdog — a never-resolving forge/spawn await inside tick() must not ──
+// ── wedge the loop past a generous multiple of tickIntervalSec ────────────────────────────────
+
+test("runDriver (#395): a never-resolving forge await (the live incident's shape) is bounded by the watchdog — durable engine-stalled event + the injected exit hook, never spins forever", async () => {
+  const forge = new FakeForge();
+  // The exact live-incident shape: an in-flight forge/spawn await that never resolves (a host
+  // sleep losing the completion notification). getReadyIssues is unconditionally called every
+  // tick's DISPATCH phase, so this wedges tick() itself, not just one branch of it.
+  forge.getReadyIssues = () => new Promise<Issue[]>(() => {});
+  const state = new State(":memory:");
+  // A tiny tickIntervalSec × watchdogTickMultiplier=1 keeps this test's REAL watchdog timer in
+  // the low tens of milliseconds — deterministic (not flaky) because the OTHER side of the race,
+  // the hung getReadyIssues() call, never resolves at all; there is nothing for the real timer to
+  // race against except itself.
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
+  const exitCalls: number[] = [];
+  const deps = baseDeps({
+    forge,
+    state,
+    cfg,
+    tickIntervalSec: 0.02, // 20ms -> watchdogMs = 20ms
+    stopMode: "once",
+    watchdogExit: (code) => exitCalls.push(code),
+  });
+  const result = await runDriver(deps);
+  assert.equal(result.stoppedBy, "watchdog");
+  assert.equal(result.ticks, 0, "the wedged attempt never counted as a completed tick");
+  assert.deepEqual(exitCalls, [1], "the injected exit hook fired exactly once, with a nonzero code");
+  const stalled = state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 1, "a durable engine-stalled event was appended before the exit hook fired");
+  assert.deepEqual(stalled[0]!.payload, { tickIntervalSec: 0.02, watchdogTickMultiplier: 1 });
+  state.close();
+});
+
+test("runDriver (#395): a healthy fast tick never trips the watchdog, even with a short tickIntervalSec — no false alarm on the common (successful) path", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
+  const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 0.02, stopMode: "once" });
+  const result = await runDriver(deps);
+  assert.equal(result.stoppedBy, "once");
+  assert.equal(result.ticks, 1, "the fast fake tick completed normally, well inside the 20ms watchdog window");
+  const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 0, "no engine-stalled event on the healthy path");
+  deps.state.close();
+});
+
+test("runDriver (#395): a contained tick() THROW (not a hang) is still a plain tick-error — the watchdog never fires on an error that settles quickly", async () => {
+  const forge = new FakeForge();
+  forge.getReadyIssues = async () => {
+    throw new Error("HTTP 502");
+  };
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
+  const deps = baseDeps({ forge, cfg, tickIntervalSec: 0.02, stopMode: "once" });
+  const result = await runDriver(deps);
+  assert.deepEqual(result, { ticks: 0, tickErrors: 1, stoppedBy: "once" });
+  const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 0, "a thrown (settled) tick is a tick-error, never a stall");
+  deps.state.close();
+});

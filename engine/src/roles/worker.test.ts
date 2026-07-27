@@ -1693,6 +1693,32 @@ test("dispatch rejects (and cleans up) when claude can't spawn — bad CLAUDE_BI
   }
 });
 
+test("dispatch (#395): cfg.liveness.spawnConfirmTimeoutMs is threaded through — a generous bound never fires on a normally-spawning worker (regression: the new plumbing doesn't disturb the healthy path)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const liveCfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      liveness: { spawnConfirmTimeoutMs: 5_000 },
+    });
+    const s = new WorkerSupervisor({
+      cfg: liveCfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+    });
+    const { name } = await s.dispatch({ number: 8, title: "t", labels: [] });
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)), "done sentinel written — the configured timeout never fired");
+    s.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("enforces worker timeout: a run past timeoutSec is killed and marked failed (Codex R2 P1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   try {

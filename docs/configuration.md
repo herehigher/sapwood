@@ -57,6 +57,19 @@ Identifies the repo and ProjectV2 board the loop drives.
 | `tickIntervalSec` | `60` | How often the engine calls `tick()`. Also feeds the wall-clock cost ceiling's session-gap scaling, so a real (non-default) cadence keeps that ceiling accurate. |
 | `driver` | `rounds` | Which engine `sapwood run` drives (#106). `rounds` — the round orchestrator: peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the same tick engine, one round at a time (see [`PLAN.md`'s round-orchestrator section](../docs/PLAN.md#v02-north-star-the-round-orchestrator)). `tick` — the bare M4 loop driver, no peripherals; `--once`/`--until-idle` only apply in this mode (under `rounds` they are a startup **error** — exit 1 before any dispatch — never silently ignored). Every safety behavior (KILL_SWITCH, cost ceilings, drain-before-kill, graceful stop still running harvest) holds under both. |
 
+## `liveness`
+
+#395: a host sleeping mid-round with a forge/spawn call in flight has to wake into a working
+engine, not a silently wedged one — a dogfood run once sat ~30 minutes after wake with zero
+events because an in-flight `gh` call / role-session spawn confirmation had no bound at all.
+Every key here closes exactly that class of hang.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `forgeCallTimeoutMs` | `30000` | Hard per-call ceiling on a single `gh` CLI invocation (`gh.ts` — the one place the engine shells out to `gh`; every `GithubForge` call routes through it). A dead socket/hung upstream fails toward retry instead of wedging the tick loop forever. |
+| `spawnConfirmTimeoutMs` | `30000` | Hard ceiling on waiting for a freshly spawned child (a role session, or a worker leg) to report Node's own `spawn`/`error` event. Node gives that confirmation no timeout of its own — a callback lost across a host sleep hangs the await forever without this bound. On timeout the (possibly still-alive) child is best-effort killed and the attempt fails toward retry, the same way a genuine spawn error already does. |
+| `watchdogTickMultiplier` | `10` | The **`tick` driver's** (`engine.driver: tick`) own liveness watchdog: a generous multiple of `engine.tickIntervalSec` — never a fixed absolute duration, so a legitimately slow cadence is never itself a false alarm — past which no tick has completed is treated as a wedged loop. Fires a durable `engine-stalled` event and exits the process nonzero so a supervisor can restart it; deliberately not an in-process self-heal/abort (the stuck await's own resources are reclaimed by the process exit itself). **Known gap:** the default `rounds` driver (`round.ts`) does not yet have an equivalent tick-completion watchdog — this key currently only backstops the `tick` driver. The bounded `gh`/spawn-confirmation timeouts above apply to both drivers regardless, since they're the same shared code paths either way. |
+
 ## `logging`
 
 Run-scoped, disposable narrative output for humans and LLMs. It complements rather than
@@ -193,6 +206,8 @@ case, no knob at all) — this table exists because two of these are easy to mis
 | tick | `engine.tickIntervalSec` | The dispatch/reclaim/drive cadence itself — not a duration cap on anything, just how often the loop runs. |
 | worker lane | `worker.timeoutSec` (hard) / `worker.budgetUsdSoft` (soft) | Hard wall-clock kill vs. a soft budget that triggers a graceful handoff, never a mid-work kill. |
 | peripheral session | `worker.timeoutSec` | Peripheral role sessions (aligning/architecting/plan_review/harvesting/retro) reuse the same wall-clock cap as a worker lane. |
+| single `gh` call | `liveness.forgeCallTimeoutMs` (#395) | Every `gh` CLI invocation, independent of everything above — bounds a dead socket / hung upstream, not the session that made the call. |
+| spawn confirmation | `liveness.spawnConfirmTimeoutMs` (#395) | Bounds waiting for a role session's or worker leg's own process-spawn event — distinct from `worker.timeoutSec`, which bounds the session once it's confirmed running. |
 | round | *(deliberately no duration cap)* | Bounded by *work*, not time: `lanes.roundDispatchCap` (dispatch quota) and `cost.roundBudgetUsd` (soft spend throttle) end a round's dispatch; there is no "a round may run at most N minutes" knob, by design — a round's real-world length follows its work. |
 | run | `stop.afterSpendUsd` / `afterIssuesMerged` / `afterPRsOpened` / `onMilestoneComplete` | Goal-based, not time-based — a run ends when one of these conditions fires (or on a signal), never on an elapsed-time budget. |
 | wall-clock window | `cost.maxWallClockSec` | A *continuous-activity* window that resets on any quiet gap — see above. Detects runaway churn, not a long run. |
