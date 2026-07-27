@@ -905,7 +905,9 @@ export function orderForDispatch(ready: Issue[], cfg: SapwoodConfig): Issue[] {
 }
 
 const ENV_FAILURE_REQUEUE_REASON = "env-failure-requeue";
-const MERGED_BOARD_DONE_REASON = "merged-board-done";
+/** Exported for escalation-reconcile's clear-exemption discriminator (#295 review round 6): only
+ *  the merge that PRODUCED a rollback escalation may not clear it. */
+export const MERGED_BOARD_DONE_REASON = "merged-board-done";
 
 function suspendRollbackDuringForgePark(reason: string): boolean {
   return reason === ENV_FAILURE_REQUEUE_REASON || reason === MERGED_BOARD_DONE_REASON;

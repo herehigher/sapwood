@@ -728,20 +728,41 @@ test("reconcileEscalations: a ceiling-escalated event that preserved its PR reso
 });
 
 test("openEscalations: a merge does NOT clear the rollback-escalated it just produced (round 5 P2)", () => {
-  // conductor's merged branch calls handleRollbackFailure (which appends rollback-escalated)
-  // BEFORE appending `merged`, so the escalation has the lower id. Merging the PR did not repair
-  // the failed board transition — that human task is still open.
+  // conductor's merged branch calls handleRollbackFailure (which appends rollback-escalated with
+  // reason `merged-board-done`) BEFORE appending `merged`, so the escalation has the lower id.
+  // Merging the PR did not repair the failed board transition — that human task is still open.
   const open = openEscalations([
-    { kind: "rollback-escalated", payload: { worker: "w1", issue: 7 } },
+    { kind: "rollback-escalated", payload: { issue: 7, target: "done", reason: "merged-board-done" } },
     { kind: "merged", payload: { worker: "w1", issue: 7, pr: 12 } },
   ]);
   assert.equal(open.size, 1);
-  assert.equal(open.get("rollback-escalated:7")?.source, "rollback-escalated");
+  assert.equal(open.get("rollback-escalated:7")?.producedBy, "merged");
 });
 
-test("openEscalations: the exemption is source-scoped — a clear still clears every OTHER source on that issue", () => {
+test("openEscalations: the exemption is scoped to the PRODUCING pair — another clear kind still clears it (round 6 P2)", () => {
+  // Same source, same issue: a `dispatched` does NOT produce a merged-board-done rollback, so it
+  // supersedes it normally. Only the merge that produced it is exempt.
   const open = openEscalations([
-    { kind: "rollback-escalated", payload: { worker: "w1", issue: 7 } },
+    { kind: "rollback-escalated", payload: { issue: 7, target: "done", reason: "merged-board-done" } },
+    { kind: "dispatched", payload: { worker: "w1", issue: 7 } },
+  ]);
+  assert.equal(open.size, 0);
+});
+
+test("openEscalations: a rollback-escalated from ANOTHER recovery path is cleared by a later dispatch (round 6 P2)", () => {
+  // A failed Ready transition IS genuinely superseded by the issue moving. Exempting the whole
+  // source would strand these forever — rollback-escalated is `never`-proof, so label removal can
+  // never clear it either.
+  const open = openEscalations([
+    { kind: "rollback-escalated", payload: { issue: 7, target: "ready", reason: "dead-lane-requeue" } },
+    { kind: "dispatched", payload: { worker: "w1", issue: 7 } },
+  ]);
+  assert.equal(open.size, 0);
+});
+
+test("openEscalations: a merge still clears every OTHER source on that issue", () => {
+  const open = openEscalations([
+    { kind: "rollback-escalated", payload: { issue: 7, target: "done", reason: "merged-board-done" } },
     { kind: "ceiling-escalated", payload: { worker: "w1", issue: 7, reasons: ["x"] } },
     { kind: "merged", payload: { worker: "w1", issue: 7, pr: 12 } },
   ]);

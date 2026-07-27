@@ -89,6 +89,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { State } from "../state/state.js";
+import { MERGED_BOARD_DONE_REASON } from "./conductor.js";
 
 /** How each escalation kind proves it actually applied the needs-human label — see the module
  *  doc's "label absence" note for why this table exists and what a wrong entry would cost.
@@ -139,15 +140,20 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
  *  resolution): a lane that is re-dispatched and escalates AGAIN is a genuine new episode. */
 const CLEAR_KINDS = ["dispatched", "merged", "gated-reentry"] as const;
 
-/** #295 review round 5 (Codex P2): sources a clear event must NOT clear, because they are emitted
- *  BY the very operation that clears. The merged branch calls `handleRollbackFailure` — which
- *  appends `rollback-escalated` — BEFORE it appends its own `merged` event (conductor.ts's
- *  `case "merged"`), so the escalation carries the LOWER event id and an issue-wide clear would
- *  erase a human task the merge just created and did not repair: the board transition still
- *  failed. "A later event moved this issue" is evidence of resolution only for escalations the
- *  move actually supersedes. Exempt sources still resolve through their own path — for
- *  `rollback-escalated` (`never`-proof) that is issue closure. */
-const CLEAR_EXEMPT_SOURCES = new Set<string>(["rollback-escalated"]);
+/** #295 review round 5 (Codex P2), narrowed in round 6: a clear event must not erase an escalation
+ *  THAT SAME OPERATION produced. conductor's `case "merged"` calls `handleRollbackFailure` — which
+ *  appends `rollback-escalated` — BEFORE it appends its own `merged` event, so the escalation
+ *  carries the LOWER event id and an issue-wide clear would erase a human task the merge just
+ *  created and did NOT repair: the board transition still failed.
+ *
+ *  Round 6 (Codex P2): the exemption is keyed on the PRODUCING pair, not on the source. A
+ *  `rollback-escalated` from any other recovery path (a dispatch or requeue Ready transition) IS
+ *  genuinely superseded by a later `dispatched`/`gated-reentry`, and since this source is
+ *  `never`-proof it can never clear by label removal — a source-wide exemption would strand those
+ *  forever, re-creating for one source exactly the unbounded-scan defect round 4 fixed. */
+const CLEAR_PRODUCES: Record<string, (kind: string, payload: Record<string, unknown> | null) => boolean> = {
+  merged: (kind, payload) => kind === "rollback-escalated" && payload?.reason === MERGED_BOARD_DONE_REASON,
+};
 
 const RESOLVED_KIND = "escalation-resolved";
 
@@ -165,6 +171,10 @@ export interface OpenEscalation {
   pr?: number;
   /** Whether label absence may be read as "a human removed it" — module doc. */
   labelProven: boolean;
+  /** #295 round 6: the clear kind whose own operation PRODUCED this escalation, if any. That one
+   *  clear kind cannot be evidence this escalation was resolved (see CLEAR_PRODUCES); every other
+   *  clear kind still clears it. Absent for the overwhelming majority of escalations. */
+  producedBy?: string;
 }
 
 function payloadNumber(payload: Record<string, unknown> | null, key: string): number | undefined {
@@ -220,7 +230,7 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
       // "a later event moves that issue" — issue-scoped, so every source on that issue clears,
       // not just one key. Same rule the strip applies.
       for (const [key, esc] of [...open.entries()]) {
-        if (esc.issue === issue && !CLEAR_EXEMPT_SOURCES.has(esc.source)) open.delete(key);
+        if (esc.issue === issue && esc.producedBy !== e.kind) open.delete(key);
       }
       continue;
     }
@@ -234,11 +244,13 @@ export function openEscalations(events: readonly { kind: string; payload: unknow
     }
     // The LATEST escalation's own facts win: a re-escalation may carry a different PR, and the
     // stale one would send the observation below at a PR this escalation is not about.
+    const producedBy = Object.keys(CLEAR_PRODUCES).find((clearKind) => CLEAR_PRODUCES[clearKind]?.(e.kind, payload));
     open.set(key, {
       source: e.kind,
       issue,
       ...(pr !== undefined ? { pr } : {}),
       labelProven: proof === "always" || (proof === "payload" && payload?.labeled === 1),
+      ...(producedBy !== undefined ? { producedBy } : {}),
     });
   }
   return open;
