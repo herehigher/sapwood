@@ -117,24 +117,35 @@ function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, ph
  *  what actually happened this round — no new forge read, no speculative machinery, just the
  *  stub's own return value already threaded back.
  *
- *  #394 ACCEPTED GAP (documented, not silently swallowed — a crash-RESUME variant of the same
- *  fidelity question, in the OVER-trigger direction this time): `ranPhases` is a fresh, in-
- *  process-only `Set` built by round.ts's own phase loop THIS run — a round resumed directly
- *  into `executing` after an engine restart (round.phase was already past aligning/architecting/
- *  plan_review when the process died) never re-enters those earlier phases in THIS process, so
- *  they can never be added to `ranPhases` here, REGARDLESS of whether they genuinely ran and
- *  SUCCEEDED before the crash. If every post-resume phase (harvesting/retro) then degrades, this
- *  function sees only that smaller, all-degraded `ranPhases` subset and can report "fully
- *  degraded" for a round whose earlier phases were actually fine — an over-trigger, the opposite
- *  direction from every other gap this doc discusses. This is BOUNDED, not a live safety risk:
- *  round.ts's own `consecutiveDegradedRounds` counter resets to 0 on every fresh engine start (an
- *  in-memory variable, never persisted), so a resumed round can contribute AT MOST one single
- *  false strike toward the streak before normal, non-resumed rounds resume driving it — it cannot
- *  itself park a healthy engine. The full-fidelity fix (persist `ranPhases` per round, across a
- *  restart) was considered and REJECTED: that is new durable state and new crash-rerun semantics
- *  for a breaker whose entire job is being a bounded, low-machinery BACKSTOP — the marginal-
- *  complexity principle (a recovery mechanism must not itself become a problem generator) rules
- *  against it for a gap that is already capped at one strike per restart.
+ *  #394 gate② round 2 (Codex sol-high BLOCK finding, P2 — a crash-RESUME variant of the same
+ *  fidelity question, in the OVER-trigger direction): `ranPhases` is a fresh, in-process-only
+ *  `Set` built by round.ts's own phase loop THIS run — a round PICKED UP already in-progress
+ *  (`deps.state.openRound()` returned non-null: some EARLIER process advanced it and then the
+ *  engine restarted, for any reason, not necessarily a crash) never re-enters whatever phases
+ *  that earlier process already ran, so they can never be added to `ranPhases` here, REGARDLESS
+ *  of whether they genuinely ran and SUCCEEDED before the restart.
+ *
+ *  This PR's own first cut of this doc claimed that gap was "bounded to one strike, since
+ *  `consecutiveDegradedRounds` resets to 0 on every fresh engine start" — that reasoning is
+ *  WRONG and has been retracted: the reset only makes the FIRST strike harmless when the
+ *  configured threshold is ABOVE 1. `round.emptySpin.consecutiveDegradedRoundsThreshold` is
+ *  `z.number().int().positive()` (config.ts) — `1` is a valid, supported value — and at
+ *  threshold 1 a single false strike IS the whole breaker: earlier phases succeed, the engine
+ *  restarts with the round cursor sitting at `executing`, the (now genuinely empty) board
+ *  dispatches zero workers, harvest has nothing to brief, and retro alone degrades on something
+ *  wholly unrelated to the LLM/provider — `ranPhases` (this process only ever saw retro) reads
+ *  as fully degraded on the FIRST post-restart round, parking a perfectly healthy engine
+ *  immediately. The fix is not "bound the count harder" (still rejected: persisting `ranPhases`
+ *  itself, or the resume-boundary count, across a restart is new durable state and new
+ *  crash-rerun semantics the marginal-complexity principle rules against for a bounded-scope
+ *  backstop). It is simpler than that: a round with a resume boundary in its history has
+ *  STRUCTURALLY INCOMPLETE evidence for this process's `ranPhases`, independent of how many
+ *  strikes have accumulated — so don't judge it at all, the same "under-fire on an ambiguous
+ *  signal" doctrine this doc already states for the retro.degraded case just below. `wasResumed`
+ *  (this function's 5th argument) is a SINGLE boolean round.ts's own loop already knows for
+ *  free — `deps.state.openRound()` returning non-null IS "this round pre-existed before this
+ *  process looked at it," no new state, no new read. `true` short-circuits straight to `false`
+ *  before any of the required/ran/degraded computation below runs at all.
  *
  *  #374 review (Codex sol-high verify-pass finding 3, P2 — narrows an over-broad false-park
  *  source): `artifact.retro.degraded` (retro.ts's `retro-pr-degraded` event) is DELIBERATELY
@@ -156,7 +167,15 @@ export function isRoundFullyDegraded(
   artifact: RoundArtifact,
   roundId: number,
   ranPhases: ReadonlySet<PeripheralPhase>,
+  wasResumed: boolean,
 ): boolean {
+  // #394 gate② round 2 (Codex sol-high BLOCK finding, P2): a round PICKED UP already in-progress
+  // (round.ts's own `deps.state.openRound()` returning non-null) has structurally incomplete
+  // `ranPhases` evidence in THIS process — see this function's own doc, the paragraph above,
+  // for the reachable at-threshold-1 over-trigger this closes. Short-circuits before any of the
+  // required/ran/degraded computation below — a resumed round is simply never judged.
+  if (wasResumed) return false;
+
   const degradedRoundPhases = new Set<PeripheralPhase>();
   for (const d of artifact.degradedPhases) {
     const rp = DEGRADED_PHASE_TO_ROUND_PHASE[d.phase];
@@ -1371,6 +1390,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       }
 
       let round = deps.state.openRound();
+      // #394 gate② round 2: `openRound()` returning non-null means this round already existed
+      // as in_progress BEFORE this call looked — it was opened by an EARLIER process (or an
+      // earlier call to this function) and is being picked up rather than started fresh HERE.
+      // Every fresh round this SAME call opens goes through `startRound()` below instead, right
+      // after this in_progress-round check fails once its own round properly closes — so this
+      // boolean is exactly, and only, "this round's `ranPeripheralPhases` set (below) may be
+      // missing evidence for phases an earlier process already ran." See
+      // isRoundFullyDegraded's own doc for why this matters.
+      const roundWasResumed = round != null;
       if (!round) {
         checkFinalSpend(); // #154: cheapest check first (local read), then the network one
         await checkFinalMilestone();
@@ -1627,7 +1655,7 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
         ranExecuting &&
         workersThisRound === 0 &&
         artifact != null &&
-        isRoundFullyDegraded(cfg, artifact, round.round_id, ranPeripheralPhases);
+        isRoundFullyDegraded(cfg, artifact, round.round_id, ranPeripheralPhases, roundWasResumed);
       consecutiveDegradedRounds = roundDegraded ? consecutiveDegradedRounds + 1 : 0;
       if (emptySpinBreached(consecutiveDegradedRounds, cfg.round.emptySpin.consecutiveDegradedRoundsThreshold)) {
         const reason =

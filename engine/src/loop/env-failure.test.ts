@@ -81,6 +81,19 @@ test("classifyEnvFailure: AC1 — verbatim captured weekly-limit text classifies
   assert.equal(classifyEnvFailure("You've hit your weekly limit · resets Jul 27 at 9am (Asia/Tokyo)", patterns), "llm");
 });
 
+// ── #394 gate② round 3 (Codex sol-high BLOCK finding, P2): the tier list is a DELIBERATE
+//    enumeration (session/weekly/5-hour), not a `\S+` wildcard — an unrelated "hit your <X>
+//    limit" line from some OTHER component (storage, disk quota, an MCP server, ...) must NOT
+//    false-park the engine absent the structured rate_limit_event signal. ──────────────────────
+
+test("classifyEnvFailure: an UNRELATED 'hit your <X> limit' line (e.g. a storage-quota error from some other component) does NOT classify as llm absent the structured signal — the tier list is enumerated, not a wildcard", () => {
+  assert.equal(classifyEnvFailure("You've hit your storage limit", patterns), null);
+  assert.equal(classifyEnvFailure("Error: you've hit your disk limit — free up space and retry", patterns), null);
+  // The SAME unrelated text, but WITH a genuine rejected rate_limit_event elsewhere in the
+  // transcript, still correctly classifies as llm — via the structured signal, never the text.
+  assert.equal(classifyEnvFailure("You've hit your storage limit", patterns, true), "llm");
+});
+
 // ── #394 (F22): the structured rate_limit_event signal — text-free, authoritative, checked
 //    BEFORE any pattern match. AC2: a rejected rate_limit_event classifies as llm even when the
 //    human-readable text is unrecognized. ───────────────────────────────────────────────────────

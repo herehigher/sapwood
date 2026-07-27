@@ -58,11 +58,31 @@ export const DEFAULT_LLM_FAILURE_PATTERNS: readonly string[] = [
   // never matched the real CLI output and missed a live weekly-quota storm for ~72 rounds (~$80).
   // The real captured text, verbatim: "You've hit your weekly limit · resets Jul 27 at 9am
   // (Asia/Tokyo)" — same "hit your <tier> limit" STEM as the verified session-limit message
-  // above, just a different tier word. Rather than guess each remaining tier's exact wording
-  // again, match the shared stem directly (regex, matchesAny's `new RegExp(p, "i")`) — this
-  // single pattern covers "session"/"weekly"/"5-hour" (all three now verified or directly
-  // implied by the verified pair) and any future tier the CLI introduces, without another guess.
-  "hit your \\S+ limit",
+  // above, just a different tier word.
+  //
+  // #394 gate② round 3 (Codex sol-high BLOCK finding, P2 — retracts this PR's own first cut,
+  // which used a bare `hit your \S+ limit` wildcard): a wildcard stem is NOT provider-specific —
+  // `extractFailureText` admits raw stderr verbatim, and a failed session's own tooling can
+  // legitimately emit an UNRELATED "hit your X limit" line (concretely: "You've hit your storage
+  // limit" from a local disk-quota/MCP-server/other-component error with no rejected
+  // rate_limit_event anywhere in the transcript) — the engine would classify it `llm` and park
+  // against a perfectly healthy provider. This is NOT symmetric with the miss the wildcard
+  // replaced: a too-narrow pattern list produces a false NEGATIVE (misses a real quota message —
+  // costs money, but is itself bounded by the empty-spin breaker, F23 above); a too-wide pattern
+  // produces a false POSITIVE (halts the engine on an unrelated failure) — worse, and unbounded
+  // by anything in this file. Deliberately narrowed back to an ENUMERATED tier alternation
+  // instead: `session` (verified verbatim, #374) and `weekly` (verified verbatim, #394's own AC1)
+  // are directly observed; `5-hour` is not yet independently captured but is the CLI's OWN named
+  // third plan-quota tier (the two verified messages already establish the family), so it is
+  // listed alongside them rather than guessed from scratch. This enumeration is DELIBERATELY
+  // narrow, not an oversight to "fix" back to a wildcard: this PR ALSO made the structured
+  // `rate_limit_event` telemetry (see classifyEnvFailure's `rateLimitRejected` parameter) the
+  // PRIMARY, text-free classifier, checked BEFORE any pattern here — an unknown future quota tier
+  // (or any wording change) is still caught by telemetry regardless of what this text list says,
+  // so the text list no longer has to be future-proof against tiers nobody has seen yet. Widening
+  // this back to a wildcard trades a bounded, self-correcting cost problem for an unbounded false
+  // park — do not.
+  "hit your (?:session|weekly|5-hour) limit",
 ];
 
 export const DEFAULT_FORGE_FAILURE_PATTERNS: readonly string[] = [

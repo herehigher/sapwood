@@ -394,15 +394,22 @@ reviewer:
 # envFailure:
 #   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
 #                 "credit balance is too low", insufficient_quota, overloaded_error,
-#                 "429 too many requests", 'hit your \S+ limit']
+#                 "429 too many requests", "hit your (?:session|weekly|5-hour) limit"]
 #                 # ^ #394: the Claude CLI's own plan-quota-exhaustion message family
-#                 # ("You've hit your session/weekly/5-hour limit · resets ..."), matched on the
-#                 # shared "hit your <tier> limit" stem rather than a per-tier guess. Single-
-#                 # quoted deliberately — YAML single-quoted scalars are NOT escape-processed, so
-#                 # \S survives verbatim into the regex; a double-quoted "hit your \S+ limit"
-#                 # would need \\S instead. If you uncomment this block to add your OWN pattern,
-#                 # copy the FULL list above first — uncommenting replaces every default at once,
-#                 # not just the ones you're adding to (the exact #374/#394 incident: an earlier
+#                 # ("You've hit your session/weekly/5-hour limit · resets ..."). Deliberately an
+#                 # ENUMERATED tier alternation, not a "hit your \S+ limit" wildcard (gate②
+#                 # round 3 retraction) — a wildcard also matches an UNRELATED "hit your <X>
+#                 # limit" line from some other component (a storage/disk-quota error, say) and
+#                 # would park the engine against a healthy provider; a too-narrow list only ever
+#                 # costs money (bounded by the empty-spin breaker below), a too-wide one halts
+#                 # the engine (unbounded). Safe to enumerate narrowly because the structured
+#                 # `rate_limit_event` telemetry (see env-failure.ts's classifyEnvFailure) is the
+#                 # PRIMARY, text-free classifier — an unknown future tier is still caught by
+#                 # telemetry regardless of wording, so this list no longer has to be future-
+#                 # proof. Ordinary double-quoting here (no backslash-escaping needed — this
+#                 # pattern has none). If you uncomment this block to add your OWN pattern, copy
+#                 # the FULL list above first — uncommenting replaces every default at once, not
+#                 # just the ones you're adding to (the exact #374/#394 incident: an earlier
 #                 # partial copy here silently dropped quota-tier coverage for months).
 #   forgePatterns: ["could not resolve host", "connection refused", "network is unreachable",
 #                   "temporary failure in name resolution", "bad gateway", "gateway timeout",
