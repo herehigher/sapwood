@@ -322,7 +322,17 @@ export async function reconcileEscalations(
     if (placements === undefined) {
       try {
         const data = await forge.readStartupReconcileData();
-        placements = new Map(data.placements.filter((p) => p.number != null).map((p) => [p.number as number, p.status]));
+        // #295 review round 8 (Codex P1): a ProjectV2 board may span repositories, so an issue
+        // NUMBER is not a key — a foreign repo's #7 would supply or overwrite the local #7's
+        // status and falsely resolve it. Filter on nameWithOwner exactly as the other board path
+        // does (forge.ts's listUnplacedIssues). A null repo fails closed: excluded, so the
+        // escalation stays open rather than being cleared on an unattributable placement.
+        const nameWithOwner = `${cfg.board.owner}/${cfg.board.repo}`;
+        placements = new Map(
+          data.placements
+            .filter((p) => p.number != null && p.repo === nameWithOwner)
+            .map((p) => [p.number as number, p.status]),
+        );
       } catch (e) {
         warn(`[sapwood:escalation] board placement read failed — merge-produced escalations left open this pass: ${String(e)}`);
         placements = null;

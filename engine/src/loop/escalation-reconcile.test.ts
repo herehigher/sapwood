@@ -29,6 +29,8 @@ class FakeForge implements IForge {
   placements: Record<number, string | null> = {};
   /** Make the board-wide placement read throw (degradation test). */
   failBoardRead = false;
+  /** Placements from OTHER repos on the same multi-repo Project board (round 8 P1). */
+  foreignPlacements: Array<{ number: number | null; repo: string | null; status: string | null }> = [];
 
   async getIssueMeta(issue: number): Promise<IssueMeta> {
     this.reads.push(`getIssueMeta:${issue}`);
@@ -100,7 +102,10 @@ class FakeForge implements IForge {
     this.reads.push("readStartupReconcileData");
     if (this.failBoardRead) throw new Error("board read exploded");
     return {
-      placements: Object.entries(this.placements).map(([number, status]) => ({ number: Number(number), repo: "r", status })),
+      placements: [
+        ...Object.entries(this.placements).map(([number, status]) => ({ number: Number(number), repo: "owner/r", status })),
+        ...this.foreignPlacements,
+      ],
       openPrs: [],
     };
   }
@@ -402,6 +407,34 @@ test("reconcileEscalations: a board read failure leaves merge-produced escalatio
   const state = new State(":memory:");
   state.appendEvent("rollback-escalated", { issue: 7, target: "done", reason: "merged-board-done", attempts: 3, error: "boom" });
   forge.failBoardRead = true;
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  state.close();
+});
+
+test("reconcileEscalations: a foreign repo's same-numbered board item can never supply a board-fixed resolution (round 8 P1)", async () => {
+  // A ProjectV2 board may span repositories; issue numbers are not globally unique.
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("rollback-escalated", { issue: 7, target: "done", reason: "merged-board-done", attempts: 3, error: "boom" });
+  forge.placements[7] = "In Progress"; // ours: still wrong
+  forge.foreignPlacements = [{ number: 7, repo: "someone-else/other", status: "Done" }];
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  state.close();
+});
+
+test("reconcileEscalations: a placement with no repo attribution never resolves — fails closed (round 8)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("rollback-escalated", { issue: 7, target: "done", reason: "merged-board-done", attempts: 3, error: "boom" });
+  forge.foreignPlacements = [{ number: 7, repo: null, status: "Done" }];
   const logged = tapEvents(state);
 
   await reconcileEscalations(forge, state, mkCfg());
