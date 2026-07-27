@@ -132,13 +132,22 @@ const ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
   // without this event), and its payload carries the driving lane's `pr`.
   "fix-rounds-capped": "always",
   // #295 review round 10 (Codex P1): the two gate⓪ attention sources frontend-design.md §3 flags
-  // by name. Both are `always`: `plan-review-escalated` appends only after an UNGUARDED
-  // `escalateForge(reason)` (a label throw propagates and no event lands), and
-  // `verify-na-proposed` is emitted strictly after BOTH label writes under the same
+  // by name. Neither carries a PR.
+  //
+  // `verify-na-proposed` is `always`: emitted strictly AFTER both label writes, under the same
   // fix-rounds-capped doctrine its own comment cites ("an escalation event may only claim what
-  // provably landed"). Neither carries a PR, so they resolve by issue closure or label removal.
-  "plan-review-escalated": "always",
+  // provably landed"), so the event cannot exist unless the label landed.
   "verify-na-proposed": "always",
+  // `plan-review-escalated` is `never`, NOT `always` (round 11, Codex P1 — a FALSE-CLEAR risk,
+  // the class this module's doctrine calls strictly worse than a zombie row). It has TWO emission
+  // sites with opposite orderings: plan-review.ts's own `escalate` appends after an unguarded
+  // `escalateForge`, but `runSessionWithRetry` (peripheral.ts) appends the degrade event FIRST
+  // and its callers (plan-review.ts:554/708/864) call `escalateForge` afterwards — so a failed
+  // addLabel there leaves the event standing with no label at all, and `always` would make the
+  // very next sweep read that absence as a human removal. Classified by the WEAKEST site, as the
+  // doctrine requires. Cost: it clears by issue closure only, which is still strictly more
+  // clearing than the zero paths it had.
+  "plan-review-escalated": "never",
   // KNOWN, BOUNDED GAP (#295 review round 10, deferred to #404): frontend-design.md §3 also
   // flags two PREDICATE kinds — `reclaim-failed` when `payload.next` is not an automatic
   // continuation, and `reclaim-done` on its no-PR branch. They are attention items only for

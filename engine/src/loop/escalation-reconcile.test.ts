@@ -891,7 +891,9 @@ test("openEscalations: the gate⓪ attention sources are tracked and label-prove
     { kind: "verify-na-proposed", payload: { round_id: "r1", issue: 8 } },
   ]);
   assert.equal(open.size, 2);
-  assert.equal(open.get("plan-review-escalated:7")?.labelProven, true);
+  // round 11 (Codex P1): NOT label-proven — runSessionWithRetry appends before its caller labels,
+  // so a failed label write would otherwise read as a human removal on the very next sweep.
+  assert.equal(open.get("plan-review-escalated:7")?.labelProven, false);
   assert.equal(open.get("verify-na-proposed:8")?.labelProven, true);
 });
 
@@ -919,5 +921,20 @@ test("reconcileEscalations: a plan-review-escalated resolves when its issue is c
   await reconcileEscalations(forge, state, mkCfg());
 
   assert.deepEqual(resolvedEvents(logged), [{ issue: 7, source: "plan-review-escalated", via: "closed" }]);
+  state.close();
+});
+
+test("reconcileEscalations: a plan-review-escalated whose label never landed is NOT falsely cleared (round 11 P1)", async () => {
+  // The event can exist with no label at all (runSessionWithRetry appends before its caller
+  // labels). Reading that absence as a human act would empty the strip although nobody acted.
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("plan-review-escalated", { round_id: "r1", issue: 7, reason: "cycles", origin: "cycle-exhausted" });
+  forge.issueLabels[7] = [];
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
   state.close();
 });
