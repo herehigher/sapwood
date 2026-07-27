@@ -1,10 +1,16 @@
-// watchdog.test.ts (#395 round 2 — gate② P1): startProgressWatchdog is the core new logic behind
+// watchdog.test.ts (#395 gate② round 2/3): startProgressWatchdog is the core new logic behind
 // the redesigned liveness watchdog — an INDEPENDENT background timer that fires when
 // state.maxEventId() has gone unchanged for a full window, never raced against or keyed on the
 // duration of any single tick() call. Uses a lightweight fake State (no real SQLite) so every
 // assertion here is about the watchdog's own timing/firing logic, not database overhead — real
 // setTimeout with generous margins (P2-4: CI-safe, since these tests assert both "fired" and
 // "did not fire yet" at checkpoints comfortably clear of the window boundary either way).
+//
+// Round 3 (gate② P2): the round-2 shape sampled once per FULL window, which could take almost
+// TWO windows to actually fire (if the last real event landed right after a check armed, that
+// SAME check still saw the changed id and re-armed for another full window). The "fires within
+// roughly one window, not two" test below is the regression test for that specific bug — it
+// MEASURES silence duration end to end, not just "eventually fires."
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -75,5 +81,30 @@ test("startProgressWatchdog: fires exactly once and does not reschedule after fi
   const handle = startProgressWatchdog({ windowMs: 15, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
   await sleep(120); // several windows' worth of continued quiet, if it were (wrongly) rescheduling
   assert.equal(exitCalls.length, 1, "fired exactly once, never re-armed after firing");
+  handle.stop();
+});
+
+test("startProgressWatchdog (#395 gate② round 3, P2): fires within roughly ONE window of actual silence, not two — the worst case (the last real event lands right after arming) is bounded, not ~2x", async () => {
+  const state = fakeState();
+  const exitCalls: number[] = [];
+  const windowMs = 120;
+  const handle = startProgressWatchdog({ windowMs, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
+  // Progress lands almost immediately after arming — the exact worst case the round-2 (once-
+  // per-window) design mishandled: a single-sample design would see this change on its FIRST
+  // check (~t=windowMs), re-arm for a FULL second window, and not fire until close to 2x
+  // windowMs despite there being no further progress at all after this point.
+  await sleep(5);
+  state.bump();
+  // At well under one window of REAL silence since the bump, it must not have fired yet.
+  await sleep(windowMs * 0.5);
+  assert.deepEqual(exitCalls, [], "fired too early — before even one window of silence elapsed");
+  // Comfortably past one window of silence, but still clearly under 2x windowMs (240ms here) —
+  // if this were the round-2 bug, exitCalls would still be empty at this point.
+  await sleep(windowMs * 1.1);
+  assert.deepEqual(
+    exitCalls,
+    [1],
+    "did not fire within roughly one window of actual silence — regression to the round-2 'up to ~2 windows' bug",
+  );
   handle.stop();
 });

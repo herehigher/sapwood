@@ -21,6 +21,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
+import { createHeartbeatGate } from "../util/heartbeat.js";
 import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 import {
   assembleContextManifest,
@@ -347,14 +348,14 @@ export interface RoleRunnerDeps {
    *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
    *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
   sleep?: (ms: number) => Promise<void>;
-  /** #395 (gate② P1 round 2): narrow State surface for the run() heartbeat interval's own
-   *  progress signal (a `role-session-heartbeat` event, appended on the SAME `hb` interval this
-   *  runner already keeps alive for the whole session — see run()'s own comment for why this
-   *  interval, specifically, is what the liveness watchdog needs). Same optional/omitted =
-   *  zero-behavior-change contract as every other narrow-state dep in this codebase (e.g.
-   *  worker.ts's WorkerDeps.state) — cli.ts's real production construction always supplies it;
-   *  a bare test fake simply never gets the heartbeat event. */
-  state?: Pick<State, "appendEvent">;
+  /** #395 (gate② round 2/3): narrow State surface for the run() heartbeat interval's own
+   *  progress signal (util/heartbeat.ts's createHeartbeatGate — a `role-session-heartbeat` event,
+   *  appended on the SAME `hb` interval this runner already keeps alive for the whole session).
+   *  `maxEventId` is needed for the gate's own "don't speak over other progress" check, on top of
+   *  `appendEvent`. Same optional/omitted = zero-behavior-change contract as every other narrow-
+   *  state dep in this codebase (e.g. worker.ts's WorkerDeps.state) — cli.ts's real production
+   *  construction always supplies it; a bare test fake simply never gets the heartbeat event. */
+  state?: Pick<State, "appendEvent" | "maxEventId">;
   /** #236 (Codex F1, corrected in R1): bounded poll of the session's OWN stream-json jsonl file
    *  for its `{"type":"system","subtype":"init"}` line, before capturing the filesystem-derived
    *  half of the context manifest. The init line is the CLI's own signal that it finished
@@ -799,28 +800,39 @@ export class RoleRunner {
       const worktreeAppeared = existsSync(worktreePath);
       const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared, captureBasis);
 
+      // #395 (gate② round 3, P1): this heartbeat must PROVE liveness, not just that its own
+      // timer fired — an unconditional append (round 2's shape) keeps advancing
+      // state.maxEventId() even after a post-spawn wedge where the session process itself has
+      // already died with its exit notification lost (this issue's own premise), masking the
+      // liveness watchdog until worker.timeoutSec (up to 60x the watchdog's own window) instead
+      // of letting it fire at the window. `isAlive` probes the ACTUAL child (`process.kill(pid,
+      // 0)`, the pid populated synchronously by spawn() independent of whether the async
+      // 'spawn'/'exit' event ever arrived) — deliberately NOT a progress-content check (no JSONL
+      // growth / child-output gate): a legitimately quiet-but-working session (no output for
+      // minutes) must keep heart-beating as long as the child is alive, or a healthy slow
+      // session would be killed. createHeartbeatGate (util/heartbeat.ts) also folds in the P2-2
+      // spam fix: skip the append when something ELSE already advanced maxEventId this cadence
+      // (an otherwise-busy engine emits ~zero of these). Optional (RoleRunnerDeps.state) for the
+      // same "omitted = zero behavior change" contract every other optional dep here uses.
+      const heartbeatGate = this.deps.state
+        ? createHeartbeatGate(this.deps.state, () => {
+            const pid = session.pid;
+            if (pid == null) return false;
+            try {
+              process.kill(pid, 0);
+              return true;
+            } catch {
+              return false;
+            }
+          })
+        : undefined;
       // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
       // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
       // mid-run): past worker.timeoutSec, kill the tree; the exit handler above still resolves
       // exitPromise (with whatever code the kill produces), so run() always returns normally.
       const hb = setInterval(() => {
         const elapsedSec = (this.now().getTime() - startedMs) / 1000;
-        // #395 (gate② P1 round 2): this interval is the ONE thing that keeps running for the
-        // whole duration of `await exitPromise` below, independent of the round loop's own tick
-        // cadence — including a `reviewer.mode: engine-agent` review session awaited INLINE
-        // inside tick() (conductor.ts -> merge-driver.ts -> review/drive.ts ->
-        // review/engine-agent.ts -> this very run() call), the case that motivated the liveness
-        // watchdog's progress-based redesign (watchdog.ts). VERIFIED this interval previously
-        // appended nothing on an ordinary tick (it only ever acted on the timeout branch below)
-        // — a long-but-healthy session (well inside worker.timeoutSec) would otherwise starve
-        // state.maxEventId() for its whole duration and false-trip the watchdog. Optional
-        // (RoleRunnerDeps.state) for the same "omitted = zero behavior change" contract every
-        // other optional dep here uses.
-        try {
-          this.deps.state?.appendEvent("role-session-heartbeat", { name, roleId: opts.roleId, elapsedSec: Math.round(elapsedSec) });
-        } catch {
-          /* best-effort — never blocks the timeout check below */
-        }
+        heartbeatGate?.tick("role-session-heartbeat", { name, roleId: opts.roleId, elapsedSec: Math.round(elapsedSec) });
         if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
           timedOut = true;
           clearInterval(hb);

@@ -1673,6 +1673,7 @@ test("run (#395 gate② P2-1b): a spawn confirmation timeout appends a durable r
       appendEvent: (kind: string, payload: unknown): void => {
         events.push([kind, payload]);
       },
+      maxEventId: () => events.length,
     };
     const runner = mkRunner(dir, bin, {
       cfg: { ...cfg, liveness: { ...cfg.liveness, spawnConfirmTimeoutMs: 1 } },

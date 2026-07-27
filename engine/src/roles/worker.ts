@@ -42,6 +42,7 @@ import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "..
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import { sanitizeUpstreamError } from "../proxy/tools.js";
 import type { CategorizedTokenUsage, ModelUsageEntry, State } from "../state/state.js";
+import { createHeartbeatGate, type HeartbeatGate } from "../util/heartbeat.js";
 import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 
 /** A durable resume intent exists, but the engine restarted before spawn confirmation made
@@ -1213,13 +1214,15 @@ export interface WorkerDeps {
    *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
   sleep?: (ms: number) => Promise<void>;
   /** #244 (Codex sol-high PR #260 review, P2): the narrow State surface WorkerSupervisor needs
-   *  ONLY to record a durable `proxy-mint-failed` event when a `dispatch()` caller's `proxy.mint`
-   *  throws — kept as a `Pick` (not the whole State class), same convention as every other
-   *  narrow-state-dependency field in this codebase (e.g. peripheral.ts's RetriedSession.state).
-   *  Optional and additive: omitted -> mint-failure observability degrades to the existing
-   *  stderr log line only (today's #244 behavior, unchanged) — never a hard requirement for
-   *  ordinary dispatch, which never even supplies a `proxy` opt. */
-  state?: Pick<State, "appendEvent">;
+   *  to record a durable `proxy-mint-failed` event when a `dispatch()` caller's `proxy.mint`
+   *  throws, and (#395 gate② round 2/3) `heartbeatTick`'s own progress heartbeat (util/
+   *  heartbeat.ts's createHeartbeatGate — `maxEventId` is the gate's "don't speak over other
+   *  progress" check) — kept as a `Pick` (not the whole State class), same convention as every
+   *  other narrow-state-dependency field in this codebase (e.g. peripheral.ts's
+   *  RetriedSession.state). Optional and additive: omitted -> both degrade to zero behavior
+   *  change (mint-failure observability falls back to the existing stderr log line; the
+   *  heartbeat simply never fires) — never a hard requirement for ordinary dispatch. */
+  state?: Pick<State, "appendEvent" | "maxEventId">;
 }
 
 /** #244: an optional, per-session revocable forge MCP proxy handle for a WORKER LEG (the fix-loop
@@ -1369,6 +1372,12 @@ export class WorkerSupervisor implements Supervisor {
   // A missing/malformed configured file throws HERE, at startup, before any dispatch.
   private readonly pricing: PricingTable;
   private readonly lanes = new Map<string, Lane>();
+  // #395 (gate② round 3): one liveness-gated heartbeat per live lane, keyed by lane name —
+  // persisted across setInterval ticks (util/heartbeat.ts's createHeartbeatGate needs its own
+  // "id seen at the last check" cursor to remember). Created lazily in heartbeatTick, removed in
+  // onExit (the one place a lane truly terminates) — a spawn-failure lane never gets an entry at
+  // all, since `lane.hb`/heartbeatTick are only ever set up after a confirmed spawn.
+  private readonly heartbeatGates = new Map<string, HeartbeatGate>();
   // Detached lanes (persisted running.json, no in-memory handle — engine restarted while the
   // worker kept running) already asked to hand off. Keeps requestHandoff idempotent-per-tick
   // for lanes we can only reach by persisted pid (Codex PR #41 P1). Also consulted by
@@ -2150,17 +2159,32 @@ export class WorkerSupervisor implements Supervisor {
       void this.killTree(lane.child);
       return;
     }
-    // #395 (gate② P1 round 2): this interval is the one thing that keeps running for the whole
-    // duration of a worker leg, independent of the round loop's own tick cadence — the same
-    // class of gap peripheral.ts's RoleRunner heartbeat closes for role sessions (see its own
-    // comment for the verified-empty-before evidence). A long-but-healthy coding leg (well
-    // inside worker.timeoutSec) would otherwise starve state.maxEventId() for its whole
-    // duration and false-trip the liveness watchdog (watchdog.ts). Optional (WorkerDeps.state,
-    // already used for proxy-mint-failed) — omitted means zero behavior change.
-    try {
-      this.deps.state?.appendEvent("worker-heartbeat", { worker: name, issue: lane.issue, elapsedSec: Math.round(elapsedSec) });
-    } catch {
-      /* best-effort */
+    // #395 (gate② round 3, P1): this heartbeat must PROVE liveness, not just that its own timer
+    // fired — same rationale as peripheral.ts's RoleRunner heartbeat (see its own comment for
+    // the full reasoning): an unconditional append kept masking the liveness watchdog until
+    // worker.timeoutSec for a post-spawn wedge where the child itself had already died with its
+    // exit notification lost. `isAlive` probes `lane.child.pid` directly (`process.kill(pid,
+    // 0)`) — deliberately not a progress-content check, so a legitimately quiet-but-working leg
+    // keeps heart-beating. createHeartbeatGate also folds in the P2-2 spam fix (skip when
+    // something else already advanced state.maxEventId() this cadence). Optional
+    // (WorkerDeps.state, already used for proxy-mint-failed) — omitted means zero behavior
+    // change, same as before.
+    if (this.deps.state) {
+      let gate = this.heartbeatGates.get(name);
+      if (!gate) {
+        gate = createHeartbeatGate(this.deps.state, () => {
+          const pid = lane.child.pid;
+          if (pid == null) return false;
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        this.heartbeatGates.set(name, gate);
+      }
+      gate.tick("worker-heartbeat", { worker: name, issue: lane.issue, elapsedSec: Math.round(elapsedSec) });
     }
     this.touchHeartbeat(name);
     this.checkSoftBudget(name, lane);
@@ -2289,6 +2313,11 @@ export class WorkerSupervisor implements Supervisor {
       );
     }
     this.lanes.delete(name);
+    // #395 (gate② round 3): drop this lane's heartbeat gate along with the lane itself — onExit
+    // is the one place a lane truly terminates (this method's own doc), so this is the one
+    // place its cursor ever needs clearing; never left to grow unboundedly over a long-running
+    // engine process's lifetime.
+    this.heartbeatGates.delete(name);
   }
 
   /** The ~10 lines every terminal-transition path (onExit here, and #63's detached-lane

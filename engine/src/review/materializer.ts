@@ -182,10 +182,10 @@ const ALLOWED_REMOTE_SUBKEYS = new Set(["url", "fetch"]);
  *  from the private clone and fails closed on anything outside the allowlist above. Called after
  *  every fresh clone and both before and after every reuse fetch: reuse is never treated as
  *  evidence that config stayed clean between materialization attempts. */
-export async function assertLocalConfigClean(cloneDir: string): Promise<void> {
+export async function assertLocalConfigClean(cloneDir: string, timeoutMs: number = DEFAULT_GIT_TIMEOUT_MS): Promise<void> {
   let stdout: string;
   try {
-    ({ stdout } = await pexecFile("git", ["-C", cloneDir, "config", "--local", "--list"], { env: gitIsolationEnv() }));
+    ({ stdout } = await pexecFile("git", ["-C", cloneDir, "config", "--local", "--list"], { env: gitIsolationEnv(), timeout: timeoutMs }));
   } catch (err) {
     // An unreadable local config is itself a failure, not a silent pass -- a private clone this
     // module can't even introspect can't be asserted clean.
@@ -342,16 +342,23 @@ export async function createPrivateClone(opts: PrivateCloneOptions): Promise<Pri
   assertOutsideWorktreeMounts(cloneDir, opts.worktreeRoot);
   if (existsSync(cloneDir)) {
     try {
-      await assertLocalConfigClean(cloneDir);
-      const probe = await pexecFile("git", ["-C", cloneDir, "rev-parse", "--is-bare-repository"], { env: gitIsolationEnv() });
+      const timeoutMs = opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
+      await assertLocalConfigClean(cloneDir, timeoutMs);
+      const probe = await pexecFile("git", ["-C", cloneDir, "rev-parse", "--is-bare-repository"], {
+        env: gitIsolationEnv(),
+        timeout: timeoutMs,
+      });
       if (probe.stdout.trim() !== "true") throw new MaterializerError(`existing private clone at "${cloneDir}" is not bare`);
-      const origin = await pexecFile("git", ["-C", cloneDir, "remote", "get-url", "origin"], { env: gitIsolationEnv() });
+      const origin = await pexecFile("git", ["-C", cloneDir, "remote", "get-url", "origin"], {
+        env: gitIsolationEnv(),
+        timeout: timeoutMs,
+      });
       if (origin.stdout.trim() !== sourceRepoDir) {
         throw new MaterializerError(`existing private clone origin does not match "${sourceRepoDir}"`);
       }
       const { args, env } = buildFetchInvocation(cloneDir);
-      await pexecFile("git", args, { env, timeout: opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS });
-      await assertLocalConfigClean(cloneDir);
+      await pexecFile("git", args, { env, timeout: timeoutMs });
+      await assertLocalConfigClean(cloneDir, timeoutMs);
       return { dir: cloneDir };
     } catch {
       // Optimization only: every doubt discards the clone and resumes at the proven fresh path.
@@ -367,7 +374,7 @@ export async function createPrivateClone(opts: PrivateCloneOptions): Promise<Pri
     throw new MaterializerError(`private clone of "${opts.sourceRepoDir}" into "${cloneDir}" failed: ${(err as Error).message}`);
   }
 
-  await assertLocalConfigClean(cloneDir);
+  await assertLocalConfigClean(cloneDir, opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS);
   return { dir: cloneDir };
 }
 
@@ -463,7 +470,10 @@ export async function materialize(opts: MaterializeOptions): Promise<Materialize
   // to check out here), but it uses the exact same `gitIsolationEnv`.
   let resolvedOid: string;
   try {
-    const { stdout } = await pexecFile("git", ["-C", clone.dir, "rev-parse", "--verify", `${oid}^{commit}`], { env: gitIsolationEnv() });
+    const { stdout } = await pexecFile("git", ["-C", clone.dir, "rev-parse", "--verify", `${oid}^{commit}`], {
+      env: gitIsolationEnv(),
+      timeout: opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
+    });
     resolvedOid = stdout.trim();
   } catch (err) {
     return { kind: "failure", reason: `post-checkout oid verification of ${oid} failed: ${(err as Error).message}` };

@@ -3442,10 +3442,14 @@ test("runRounds (#395): a never-resolving forge await during the executing phase
   // the full rationale — a genuine stall means it legitimately never resolves).
   forge.getReadyIssues = () => new Promise<Issue[]>(() => {});
   const state = new State(":memory:");
-  // A tiny tickIntervalSec × watchdogTickMultiplier=1 keeps this test's REAL watchdog timer in
-  // the low tens of milliseconds — deterministic (not flaky) because the OTHER side, progress on
-  // `state`, never happens at all.
-  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 1 } });
+  // Default liveness config (its watchdogTickMultiplier=10 already clears #395 gate② round 3's
+  // cross-field floor against cfg.engine.tickIntervalSec's own default — see
+  // config.test.ts's dedicated coverage) — deps.tickIntervalSec below is a SEPARATE field from
+  // cfg.engine.tickIntervalSec (only cli.ts's real wiring ties them together), so shrinking it
+  // here keeps this test's REAL watchdog timer in the low hundreds of milliseconds without
+  // touching cfg at all. Deterministic (not flaky): the OTHER side, progress on `state`, never
+  // happens at all.
+  const cfg = mkCfg();
   const exitCalls: number[] = [];
   let resolveExited: () => void;
   const exited = new Promise<void>((resolve) => {
@@ -3455,7 +3459,7 @@ test("runRounds (#395): a never-resolving forge await during the executing phase
     forge,
     state,
     cfg,
-    tickIntervalSec: 0.02, // 20ms -> watchdog windowMs = 20ms
+    tickIntervalSec: 0.02, // 20ms -> watchdog windowMs = 0.02s * 1000 * 10 (default multiplier) = 200ms
     watchdogExit: (code) => {
       exitCalls.push(code);
       resolveExited();
@@ -3466,7 +3470,7 @@ test("runRounds (#395): a never-resolving forge await during the executing phase
   assert.deepEqual(exitCalls, [1], "the injected exit hook fired exactly once, with a nonzero code");
   const stalled = state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 1, "a durable engine-stalled event was appended before the exit hook fired");
-  assert.deepEqual(stalled[0]!.payload, { tickIntervalSec: 0.02, watchdogTickMultiplier: 1 });
+  assert.deepEqual(stalled[0]!.payload, { tickIntervalSec: 0.02, watchdogTickMultiplier: 10 });
   state.close();
 });
 

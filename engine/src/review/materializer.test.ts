@@ -194,6 +194,97 @@ test("assertLocalConfigClean: fails closed on a filter.* entry (section outside 
   }
 });
 
+// ── #395 gate② round 3 P2: every git invocation this module makes is now timeout-bounded — ────
+// ── verify the bound actually propagates, not just that the option is passed. ─────────────────
+
+test("createPrivateClone (#395 P2): a timeoutMs too tight for a real `git clone` to finish is killed and surfaces as a MaterializerError, not a hang", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    // 1ms is comfortably tighter than a real `git clone` subprocess's own startup overhead
+    // (fork+exec + git loading the repo) — deterministic, the same "artificially tiny timeout"
+    // technique used elsewhere in this codebase for gh.ts/spawn-confirm timeout tests.
+    await assert.rejects(() => createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot, timeoutMs: 1 }), MaterializerError);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("assertLocalConfigClean (#395 P2): its own `git config --local --list` read is timeout-bounded — a tight timeoutMs is killed and rejects rather than hanging", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    // A generous timeout for the SETUP clone (not under test), then a 1ms timeout on the read
+    // under test — isolates which call the timeout is actually bounding.
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    await assert.rejects(() => assertLocalConfigClean(cloneDir, 1), /unable to read local config/);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("createPrivateClone (#395 P2): a matching, already-cloned reuse candidate is still timeout-bounded on the rev-parse/remote-url probes and the reuse fetch — a tight timeoutMs falls back to the fresh-clone path (never a hang)", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const cloneDir = join(cloneRoot, "clone.git");
+    // First call: generous timeout, creates the clone (the reuse candidate for the next call).
+    await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    // Second call: 1ms — every probe/fetch on the reuse path is bounded, so this either falls
+    // back to a fresh clone (also bounded, also fails at 1ms) or throws; either way it must
+    // reject rather than hang.
+    await assert.rejects(() => createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot, timeoutMs: 1 }), MaterializerError);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+test("materialize (#395 P2): the post-checkout OID verification (`git rev-parse --verify`) is timeout-bounded — a tight timeoutMs surfaces as a { kind: 'failure' } result, never a throw or a hang", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
+  const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
+  const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
+  const shared = initSharedRepo();
+  try {
+    writeFileSync(join(shared, "f.txt"), "hello\n");
+    git(shared, ["add", "f.txt"]);
+    git(shared, ["commit", "-qm", "init"]);
+    const head = headOid(shared);
+    const cloneDir = join(cloneRoot, "clone.git");
+    // Generous timeout for the SETUP clone (not under test).
+    const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
+    // 1ms is tight enough that EITHER the checkout step or the post-checkout OID verification
+    // (both now bounded) fails first — materialize()'s own contract (#284 AC) is that every
+    // failure path returns { kind: "failure" }, never a rejected promise.
+    const result = await materialize({ clone, oid: head, treeDir: join(treeRoot, "tree"), timeoutMs: 1 });
+    assert.equal(result.kind, "failure");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(cloneRoot, { recursive: true, force: true });
+    rmSync(treeRoot, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+  }
+});
+
 test("assertLocalConfigClean: fails closed on core.hooksPath even though 'core' itself is an allowed section", async () => {
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
   const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));

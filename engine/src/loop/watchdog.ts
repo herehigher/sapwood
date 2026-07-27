@@ -52,32 +52,56 @@ export interface ProgressWatchdogHandle {
   stop: () => void;
 }
 
-/** Start the progress watchdog: re-checks `state.maxEventId()` every `windowMs` against its own
- *  previous reading. Unchanged across one full window -> stalled: append the durable
- *  `engine-stalled` event (best-effort — a failed write still lets the nonzero exit be the
- *  operative signal), then call `exit(1)`. Deliberately does NOT reschedule after firing — the
- *  watchdog fires once and stops itself, whether or not the exit hook actually terminated the
- *  process (production: it always does; tests inject a non-terminating fake). Never reads the
- *  real clock (no `Date.now()`/`new Date()` anywhere here) — purely timer-driven, so a test
- *  drives the stalled branch with a real-but-tiny `windowMs` against a State nothing else ever
- *  touches, which is deterministic since the "progress" side never happens at all. */
+// #395 (gate② round 3, P2): sampling once per FULL window (the round-2 shape) can take almost
+// TWO windows to fire — if the last real event lands right after a check arms, that SAME check
+// (moments later) still sees the changed id and re-arms for another full window, so up to
+// (windowMs - epsilon) + windowMs of genuine silence can elapse before the NEXT check ever
+// notices. That contradicts both the stated contract ("fires at the window") and AC1. Fix:
+// sample SEVERAL times per window and require several CONSECUTIVE unchanged readings before
+// declaring a stall — SAMPLES_PER_WINDOW=4, so sampleMs = windowMs/4 and firing requires 4
+// consecutive unchanged samples. Worst case: the last real event lands just after a sample —
+// the NEXT sample (up to 1 sampleMs later) is the first to see "unchanged," and firing needs
+// SAMPLES_PER_WINDOW MORE consecutive unchanged samples after that — total detection latency is
+// therefore between (SAMPLES_PER_WINDOW-1)*sampleMs and (SAMPLES_PER_WINDOW+1)*sampleMs, i.e.
+// roughly windowMs to windowMs*1.25 — between one window and a small fraction over, never
+// approaching two.
+const SAMPLES_PER_WINDOW = 4;
+
+/** Start the progress watchdog: re-checks `state.maxEventId()` every `windowMs/SAMPLES_PER_WINDOW`
+ *  against its own previous reading, firing once `SAMPLES_PER_WINDOW` CONSECUTIVE samples have
+ *  seen no change (see the module-level comment above for the exact arithmetic this bounds).
+ *  Firing: append the durable `engine-stalled` event (best-effort — a failed write still lets
+ *  the nonzero exit be the operative signal), then call `exit(1)`. Deliberately does NOT
+ *  reschedule after firing — the watchdog fires once and stops itself, whether or not the exit
+ *  hook actually terminated the process (production: it always does; tests inject a
+ *  non-terminating fake). Never reads the real clock (no `Date.now()`/`new Date()` anywhere
+ *  here) — purely timer-driven, so a test drives the stalled branch with a real-but-tiny
+ *  `windowMs` against a State nothing else ever touches, which is deterministic since the
+ *  "progress" side never happens at all. */
 export function startProgressWatchdog(opts: ProgressWatchdogOpts): ProgressWatchdogHandle {
+  const sampleMs = opts.windowMs / SAMPLES_PER_WINDOW;
   let lastSeenId = opts.state.maxEventId();
+  let unchangedSamples = 0;
   let timer: ReturnType<typeof setTimeout>;
   const check = (): void => {
     const currentId = opts.state.maxEventId();
     if (currentId === lastSeenId) {
-      try {
-        opts.state.appendEvent("engine-stalled", opts.eventPayload);
-      } catch {
-        /* best-effort — the nonzero exit is still the operative signal */
+      unchangedSamples++;
+      if (unchangedSamples >= SAMPLES_PER_WINDOW) {
+        try {
+          opts.state.appendEvent("engine-stalled", opts.eventPayload);
+        } catch {
+          /* best-effort — the nonzero exit is still the operative signal */
+        }
+        opts.exit(1);
+        return;
       }
-      opts.exit(1);
-      return;
+    } else {
+      lastSeenId = currentId;
+      unchangedSamples = 0;
     }
-    lastSeenId = currentId;
-    timer = setTimeout(check, opts.windowMs);
+    timer = setTimeout(check, sampleMs);
   };
-  timer = setTimeout(check, opts.windowMs);
+  timer = setTimeout(check, sampleMs);
   return { stop: () => clearTimeout(timer) };
 }

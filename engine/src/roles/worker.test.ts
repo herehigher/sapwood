@@ -1071,6 +1071,7 @@ test("#304 fail-safe: an egress event write failure is logged but cannot change 
         appendEvent: () => {
           throw new Error("events unavailable");
         },
+        maxEventId: () => 0,
       },
     });
     const { name } = await s.dispatch({ number: 304, title: "egress", labels: [] });
@@ -1848,6 +1849,57 @@ test("dispatch (#395 PM follow-up): a spawn confirmation that never arrives is b
     assert.ok(!existsSync(join(dir, "lane-timeout-wt.running.json")));
     s.dispose();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch (#395 gate② round 3, P1): a LIVE worker leg heart-beats against a real State, and heartbeats STOP the instant the child is no longer alive — end-to-end through heartbeatTick's real wiring, not just the isolated createHeartbeatGate unit tests", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  try {
+    const { bin, ready } = longRunningStub(dir, "trap '' TERM\n"); // ignores TERM -> only SIGKILL ends it
+    const s = new WorkerSupervisor({
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      hasOpenPr: async () => false,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 15, // fast cadence so this test observes several ticks quickly
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name } = await s.dispatch({ number: 11, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM trap before we start observing heartbeats");
+    const pid = (s as unknown as { lanes: Map<string, { child: { pid?: number } }> }).lanes.get(name)!.child.pid!;
+    // While genuinely alive: at least one heartbeat lands (the lane does nothing else
+    // state-worthy while just sleeping, so this is a direct test of the liveness guard passing).
+    await waitFor(() => state.eventsAfterId(0, ["worker-heartbeat"]).length > 0, "no worker-heartbeat while the child was genuinely alive");
+    const beforeKillCount = state.eventsAfterId(0, ["worker-heartbeat"]).length;
+    // Kill the child OUTSIDE the lane's own tracked lifecycle (no onExit, no lane cleanup) — the
+    // same shape as this issue's live incident: the process is gone, but the engine's own
+    // bookkeeping doesn't know yet (a lost exit notification). heartbeatTick keeps firing on its
+    // setInterval regardless; only the liveness guard can tell the difference.
+    process.kill(pid, "SIGKILL");
+    await waitFor(() => {
+      try {
+        process.kill(pid, 0);
+        return false; // still alive by the OS's own account — keep waiting
+      } catch {
+        return true; // confirmed dead
+      }
+    }, "the killed child never actually died");
+    const countAtDeath = state.eventsAfterId(0, ["worker-heartbeat"]).length;
+    await sleep(80); // several more heartbeatMs cadences' worth of real time
+    const countAfterWaiting = state.eventsAfterId(0, ["worker-heartbeat"]).length;
+    assert.ok(beforeKillCount > 0, "sanity: heartbeats fired while genuinely alive");
+    assert.equal(
+      countAfterWaiting,
+      countAtDeath,
+      "no FURTHER worker-heartbeat events were appended once the child was confirmed dead, even though the setInterval kept firing",
+    );
+    s.dispose();
+  } finally {
+    state.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
