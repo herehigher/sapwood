@@ -1274,6 +1274,19 @@ test("runSessionWithRetry + envFailure: a reset-time hint (rateLimitResetAtMs) i
   assert.equal(park.enterCalls[0]!.resetHintAtIso, new Date(resetAtMs).toISOString());
 });
 
+test("runSessionWithRetry + envFailure (#394 F22, AC2): envSignalStructured=true parks as llm even when failureText is completely unrecognized", async () => {
+  const runner = new FakeRunner([
+    mkResult({ outcome: "failed", failureText: "a brand new CLI wording never seen before", envSignalStructured: true }),
+  ]);
+  const state = new FakeState();
+  const park = new FakePark();
+  const result = await runSessionWithRetry({ ...mkOpts(runner, state, undefined), envFailure: { patterns: envPatterns, park } });
+  assert.equal(runner.calls.length, 1, "the structured signal alone parks immediately — no retry needed to confirm");
+  assert.equal(park.enterCalls.length, 1);
+  assert.equal(park.enterCalls[0]!.source, "llm");
+  assert.equal(result.envParked, true);
+});
+
 test("runSessionWithRetry: envFailure OMITTED -> zero behavior change (classification never runs, even on session-limit-shaped text)", async () => {
   const runner = new FakeRunner([mkResult({ outcome: "failed", failureText: "hit your session limit" }), mkResult({ outcome: "failed" })]);
   const state = new FakeState();

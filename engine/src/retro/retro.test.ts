@@ -533,6 +533,7 @@ test("createRetroStub: everyNRounds > 1 skips a round whose id isn't a multiple 
   const r1 = await stub.run({ roundId: round1.round_id, phase: "retro", marker: null });
   assert.equal(r1.marker, retroMarker(round1.round_id));
   assert.equal(runner.calls.length, 0, "round 1 is not a multiple of 3 — skipped");
+  assert.equal(r1.ranSession, undefined, "#394 (F23): off-cadence skip -> ranSession stays unset");
 
   const r2 = await stub.run({ roundId: round2.round_id, phase: "retro", marker: null });
   assert.equal(r2.marker, retroMarker(round2.round_id));
@@ -548,9 +549,10 @@ test("createRetroStub: everyNRounds > 1 runs on a round whose id IS a multiple o
   const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
   const deps: RetroDeps = { state, cfg, runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
-  const { marker } = await stub.run({ roundId: round3.round_id, phase: "retro", marker: null });
+  const { marker, ranSession } = await stub.run({ roundId: round3.round_id, phase: "retro", marker: null });
   assert.equal(marker, retroMarker(round3.round_id));
   assert.equal(runner.calls.length, 1, "round 3 is a multiple of 3 — retro runs");
+  assert.equal(ranSession, true, "#394 (F23): a real retro session dispatched -> ranSession true");
   state.close();
 });
 

@@ -394,7 +394,26 @@ reviewer:
 # envFailure:
 #   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
 #                 "credit balance is too low", insufficient_quota, overloaded_error,
-#                 "429 too many requests"]
+#                 "429 too many requests", "hit your (?:session|weekly|5-hour) limit"]
+#                 # ^ #394: the Claude CLI's own plan-quota-exhaustion message family
+#                 # ("You've hit your session/weekly/5-hour limit · resets ..."). Deliberately an
+#                 # ENUMERATED tier alternation, not a "hit your \S+ limit" wildcard (gate②
+#                 # round 3 retraction) — a wildcard also matches an UNRELATED "hit your <X>
+#                 # limit" line from some other component (a storage/disk-quota error, say) and
+#                 # would park the engine against a healthy provider; a too-narrow list only ever
+#                 # costs money, a too-wide one halts the engine — not symmetric, so this list
+#                 # stays narrow. This is the THIRD, last-resort line of defense: classifyEnvFailure
+#                 # checks two structured, text-free signals FIRST — a rejected `rate_limit_event`
+#                 # and an errored result with `api_error_status:429` (gate② round 3, both
+#                 # provider-authoritative, neither config-driven) — this list only matters when
+#                 # BOTH are absent. That is a genuinely narrow residual gap, not "nothing gets
+#                 # through" — see env-failure.ts's own module doc for the honest accounting of
+#                 # what does and doesn't bound a miss. Ordinary double-quoting here (no backslash-
+#                 # escaping needed — this pattern has none). If you uncomment this block to add
+#                 # your OWN pattern, copy the FULL list above first — uncommenting replaces every
+#                 # default at once, not just the ones you're adding to (the exact #374/#394
+#                 # incident: an earlier partial copy here silently dropped quota-tier coverage for
+#                 # months).
 #   forgePatterns: ["could not resolve host", "connection refused", "network is unreachable",
 #                   "temporary failure in name resolution", "bad gateway", "gateway timeout",
 #                   "service unavailable", "bad credentials", "401 unauthorized",

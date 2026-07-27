@@ -286,9 +286,10 @@ test("createPlanReviewStub: no candidates -> returns the round's marker, no sess
   const state = new State(":memory:");
   const deps: PlanReviewDeps = { forge, state, cfg: mkCfg(), runner };
   const stub = createPlanReviewStub(deps);
-  const { marker } = await stub.run({ roundId: 5, phase: "plan_review", marker: null });
+  const { marker, ranSession } = await stub.run({ roundId: 5, phase: "plan_review", marker: null });
   assert.equal(marker, planReviewMarker(5));
   assert.equal(runner.calls.length, 0);
+  assert.equal(ranSession, false, "#394 (F23): an empty pool -> no session dispatched -> ranSession false");
   state.close();
 });
 
@@ -301,9 +302,10 @@ test("createPlanReviewStub: outcome 1 (approve, no body revision) — engine app
   const state = new State(":memory:");
   const deps: PlanReviewDeps = { forge, state, cfg, runner };
   const stub = createPlanReviewStub(deps);
-  await stub.run({ roundId: 1, phase: "plan_review", marker: null });
+  const { ranSession } = await stub.run({ roundId: 1, phase: "plan_review", marker: null });
   assert.equal(runner.calls.length, 1);
   assert.equal(runner.calls[0]!.roleId, "plan-reviewer");
+  assert.equal(ranSession, true, "#394 (F23): a real reviewer session dispatched -> ranSession true");
   assert.ok(forge.issueLabels[10]!.includes("plan:approved"));
   assert.equal(forge.updateIssueBodyCalls.length, 0, "no body revision in the decision -> no write");
   // Spend recorded against the reviewer session's own name.

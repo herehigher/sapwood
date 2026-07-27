@@ -2267,6 +2267,16 @@ const degradedPhase = (phase: string): { phase: string; outcome: string; session
   session: "s",
 });
 
+// #394 (F23): isRoundFullyDegraded now takes a `ranPhases` set — the phases that ACTUALLY ran a
+// session this round (round.ts's own PeripheralStub.ranSession bookkeeping), intersected against
+// the cfg-derived "required" set before the final every() check. Every test below that predates
+// #394 is testing the cfg-derived requirement logic itself (disabled role / retro cadence /
+// harvest needsHuman-gating) — unaffected by the ran-based intersection as long as `ranPhases`
+// includes every phase the test's OWN premise assumes ran (all five, by default: these tests are
+// about "was it REQUIRED", not "did it RUN"). The dedicated ran-based exclusion tests further
+// below are what actually exercise a phase being EXCLUDED for having skipped.
+const ALL_PERIPHERAL_PHASES = new Set<PeripheralPhase>(["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+
 test("isRoundFullyDegraded: a TOTAL quota storm (every default-enabled phase degrades) -> true", () => {
   const cfg = mkCfg();
   const totalStorm = mkArtifact({
@@ -2279,20 +2289,20 @@ test("isRoundFullyDegraded: a TOTAL quota storm (every default-enabled phase deg
     ],
     escalations: { needsHuman: [1], ceiling: 0, driveNoPr: 0 }, // makes harvesting REQUIRED too
   });
-  assert.equal(isRoundFullyDegraded(cfg, totalStorm, 1), true);
+  assert.equal(isRoundFullyDegraded(cfg, totalStorm, 1, ALL_PERIPHERAL_PHASES, false), true);
 
   // A PARTIAL storm (harvesting/retro still fine) is NOT fully degraded.
   const partial = mkArtifact({
     degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review")],
     escalations: { needsHuman: [1], ceiling: 0, driveNoPr: 0 },
   });
-  assert.equal(isRoundFullyDegraded(cfg, partial, 1), false);
+  assert.equal(isRoundFullyDegraded(cfg, partial, 1, ALL_PERIPHERAL_PHASES, false), false);
 });
 
 test("isRoundFullyDegraded (the retro-only false positive this finding fixes): only retro degrades, everything else fine -> false", () => {
   const cfg = mkCfg();
   const artifact = mkArtifact({ retro: { opened: null, degraded: { branch: "b", title: "t", reason: "push failed" } } });
-  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), false);
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1, ALL_PERIPHERAL_PHASES, false), false);
 });
 
 test("isRoundFullyDegraded #374 review (Codex sol-high verify-pass finding 3, P2): artifact.retro.degraded (a POST-session branch-verify/openPR failure) never counts as retro-phase degradation, even when every OTHER required phase genuinely degraded", () => {
@@ -2310,7 +2320,7 @@ test("isRoundFullyDegraded #374 review (Codex sol-high verify-pass finding 3, P2
     retro: { opened: null, degraded: { branch: "b", title: "t", reason: "openPR failed for verified-pushed branch" } },
   });
   assert.equal(
-    isRoundFullyDegraded(cfg, artifact, 1),
+    isRoundFullyDegraded(cfg, artifact, 1, ALL_PERIPHERAL_PHASES, false),
     false,
     "retro's own session succeeded — the round is NOT fully degraded even though three other phases genuinely are",
   );
@@ -2322,7 +2332,7 @@ test("isRoundFullyDegraded: a disabled role is EXCLUDED from the required set �
     degradedPhases: [degradedPhase("po-align"), degradedPhase("plan_review"), degradedPhase("retro")],
     escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 }, // harvesting stays unrequired (nothing to brief)
   });
-  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), true);
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1, ALL_PERIPHERAL_PHASES, false), true);
 });
 
 test("isRoundFullyDegraded: aligning is EXCLUDED from the required set when BOTH po.enabled and po.poolSelection are off (no session can ever run there)", () => {
@@ -2330,7 +2340,7 @@ test("isRoundFullyDegraded: aligning is EXCLUDED from the required set when BOTH
   const artifact = mkArtifact({
     degradedPhases: [degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
   });
-  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), true);
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1, ALL_PERIPHERAL_PHASES, false), true);
 });
 
 test("isRoundFullyDegraded: harvesting is required ONLY when this round's own artifact shows something to brief (escalations.needsHuman non-empty)", () => {
@@ -2339,14 +2349,18 @@ test("isRoundFullyDegraded: harvesting is required ONLY when this round's own ar
     degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
     escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
   });
-  assert.equal(isRoundFullyDegraded(cfg, noNeedsHuman, 1), true, "harvesting not required — nothing to brief");
+  assert.equal(
+    isRoundFullyDegraded(cfg, noNeedsHuman, 1, ALL_PERIPHERAL_PHASES, false),
+    true,
+    "harvesting not required — nothing to brief",
+  );
 
   const withNeedsHumanButHarvestFine = mkArtifact({
     degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review"), degradedPhase("retro")],
     escalations: { needsHuman: [7], ceiling: 0, driveNoPr: 0 },
   });
   assert.equal(
-    isRoundFullyDegraded(cfg, withNeedsHumanButHarvestFine, 1),
+    isRoundFullyDegraded(cfg, withNeedsHumanButHarvestFine, 1, ALL_PERIPHERAL_PHASES, false),
     false,
     "harvesting IS required now (something to brief) but didn't degrade",
   );
@@ -2357,8 +2371,16 @@ test("isRoundFullyDegraded: retro is required ONLY on its own cadence turn (roun
   const artifact = mkArtifact({
     degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("plan_review")],
   });
-  assert.equal(isRoundFullyDegraded(cfg, artifact, 7), true, "round 7 isn't retro's turn (7 % 5 !== 0) — retro not required");
-  assert.equal(isRoundFullyDegraded(cfg, artifact, 10), false, "round 10 IS retro's turn (10 % 5 === 0) — retro required, didn't degrade");
+  assert.equal(
+    isRoundFullyDegraded(cfg, artifact, 7, ALL_PERIPHERAL_PHASES, false),
+    true,
+    "round 7 isn't retro's turn (7 % 5 !== 0) — retro not required",
+  );
+  assert.equal(
+    isRoundFullyDegraded(cfg, artifact, 10, ALL_PERIPHERAL_PHASES, false),
+    false,
+    "round 10 IS retro's turn (10 % 5 === 0) — retro required, didn't degrade",
+  );
 });
 
 test("isRoundFullyDegraded: every role disabled (nothing was even configured to run a session) -> false, never a degenerate true", () => {
@@ -2372,7 +2394,94 @@ test("isRoundFullyDegraded: every role disabled (nothing was even configured to 
     },
   });
   const artifact = mkArtifact();
-  assert.equal(isRoundFullyDegraded(cfg, artifact, 1), false);
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1, ALL_PERIPHERAL_PHASES, false), false);
+});
+
+// ── #394 (F23): a phase configured to run but that SKIPPED this round (no session dispatched —
+//    e.g. architect/plan_review hitting an EMPTY round pool) is evidence of nothing, and must be
+//    EXCLUDED from the required set, never silently treated as an unfulfilled requirement. ──────
+
+test("isRoundFullyDegraded (F23 bug this fixes): an EMPTY-POOL round where architect/plan_review/harvest structurally SKIPPED (never ran a session) but aligning/retro genuinely degraded -> fully degraded, true", () => {
+  const cfg = mkCfg();
+  // The exact dogfood scenario (#394's own Why section): a weekly-limit storm with an empty
+  // pool. Only aligning and retro attempted sessions (both degraded); architect/plan_review
+  // skipped outright (no candidates/pool members — no session, no degrade event either); harvest
+  // skipped too (nothing to brief, escalations.needsHuman is empty).
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("retro")],
+    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
+  });
+  const ranPhases = new Set<PeripheralPhase>(["aligning", "retro"]); // architecting/plan_review/harvesting never ran
+  assert.equal(
+    isRoundFullyDegraded(cfg, artifact, 1, ranPhases, false),
+    true,
+    "every phase that ACTUALLY ran (aligning, retro) degraded — the skipped phases are not held against it",
+  );
+});
+
+test("isRoundFullyDegraded: the OLD (pre-#394) bug reproduced — with the full cfg-required set treated as ran regardless of evidence, the same empty-pool storm would NEVER be fully degraded", () => {
+  const cfg = mkCfg();
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("retro")],
+    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
+  });
+  // Architecting/plan_review are cfg-required (enabled) but never actually ran this round — if a
+  // caller (bug) claimed they ran anyway, only aligning/retro would ever land in degradedPhases,
+  // so requiredPhases.every() would be permanently false — exactly the bug #394 fixes.
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1, ALL_PERIPHERAL_PHASES, false), false);
+});
+
+test("isRoundFullyDegraded: architect DID run and degrade this round (real evidence, not skipped) -> counts toward fully-degraded normally", () => {
+  const cfg = mkCfg();
+  const artifact = mkArtifact({
+    degradedPhases: [degradedPhase("po-align"), degradedPhase("architect"), degradedPhase("retro")],
+    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
+  });
+  const ranPhases = new Set<PeripheralPhase>(["aligning", "architecting", "retro"]);
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1, ranPhases, false), true);
+});
+
+test("isRoundFullyDegraded: no phase ran ANYTHING this round -> false, never a degenerate true from an empty intersection", () => {
+  const cfg = mkCfg();
+  const artifact = mkArtifact();
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1, new Set(), false), false);
+});
+
+// ── #394 gate② round 2 (Codex sol-high BLOCK finding, P2): wasResumed short-circuits to false,
+//    unconditionally, before any required/ran/degraded computation runs — a round picked up
+//    already in-progress has structurally incomplete evidence, so it is simply never judged. ──
+
+test("isRoundFullyDegraded (#394 gate② round 2 fix): wasResumed=true -> ALWAYS false, even for a total quota storm that would otherwise be fully degraded", () => {
+  const cfg = mkCfg();
+  const totalStorm = mkArtifact({
+    degradedPhases: [
+      degradedPhase("po-align"),
+      degradedPhase("architect"),
+      degradedPhase("plan_review"),
+      degradedPhase("harvest"),
+      degradedPhase("retro"),
+    ],
+    escalations: { needsHuman: [1], ceiling: 0, driveNoPr: 0 },
+  });
+  // Sanity: this exact artifact/ranPhases pair IS fully degraded when wasResumed is false —
+  // proves the true branch below isn't vacuously passing on some OTHER disqualifying reason.
+  assert.equal(isRoundFullyDegraded(cfg, totalStorm, 1, ALL_PERIPHERAL_PHASES, false), true);
+  assert.equal(
+    isRoundFullyDegraded(cfg, totalStorm, 1, ALL_PERIPHERAL_PHASES, true),
+    false,
+    "wasResumed=true short-circuits to false regardless of how thoroughly everything else degraded",
+  );
+});
+
+test("isRoundFullyDegraded (#394 gate② round 2 fix): wasResumed=true reproduces the Codex-traced at-threshold-1 scenario — earlier phases succeeded, only retro (post-resume) is visible and degraded, still NOT fully degraded", () => {
+  const cfg = mkCfg();
+  // aligning/architecting/plan_review are NOT in degradedPhases (they succeeded, pre-restart, in
+  // a process this one never observed) — only retro shows up, because only retro ran IN THIS
+  // PROCESS. Without the wasResumed guard, ranPhases={retro} intersected against requiredPhases
+  // would make this read as fully degraded (the exact false-park Codex traced).
+  const artifact = mkArtifact({ degradedPhases: [degradedPhase("retro")] });
+  const ranPhases = new Set<PeripheralPhase>(["retro"]); // only what THIS process actually ran
+  assert.equal(isRoundFullyDegraded(cfg, artifact, 1, ranPhases, true), false);
 });
 
 // ── #374: the empty-spin breaker + the round-opening gate (F16: 145 empty rounds, no bound) ──
@@ -2391,7 +2500,9 @@ function mkFullyDegradingPeripherals(log: Array<{ phase: PeripheralPhase; marker
     async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
       log.push({ phase, marker: ctx.marker });
       state.appendEvent(kind, payload(ctx.roundId));
-      return { marker: `${phase}-r${ctx.roundId}` };
+      // #394 (F23): every phase here genuinely "ran" (it dispatched the fake session whose
+      // degrade event is appended above) — isRoundFullyDegraded now requires this evidence.
+      return { marker: `${phase}-r${ctx.roundId}`, ranSession: true };
     },
   });
   return {
@@ -2460,6 +2571,162 @@ test("runRounds #374: N consecutive degraded, dispatch-empty rounds force a park
     assert.deepEqual(emptySpinEvents[0]!.payload, { consecutiveDegradedRounds: 2, threshold: 2, roundId: 2 });
     assert.equal(state.isParked(), true);
     assert.equal(state.parkRow("llm")?.source, "llm");
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** #394 (F23, AC3): simulates the ACTUAL dogfood scenario — a weekly-limit storm with an EMPTY
+ *  round pool. aligning/retro attempt sessions every round and degrade (the provider itself is
+ *  down); architect/plan_review/harvest structurally SKIP (no candidates/pool members/needs-
+ *  human — round.ts's own runPeripheral never sees a `ranSession: true` from them, exactly like
+ *  the real stubs' early-return skip paths). Under the PRE-#394 cfg-only "required" computation
+ *  this round would NEVER register as fully degraded (architect/plan_review are cfg-enabled but
+ *  never appear in degradedPhases either, since they never ran) — the empty-spin breaker would
+ *  spin forever. This fixture reproduces exactly that shape. */
+function mkEmptyPoolWeeklyLimitStormPeripherals(
+  log: Array<{ phase: PeripheralPhase; marker: string | null }>,
+  state: State,
+): Partial<Record<PeripheralPhase, PeripheralStub>> {
+  const degrades = (phase: PeripheralPhase, kind: string, payload: (roundId: number) => Record<string, unknown>) => ({
+    async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+      log.push({ phase, marker: ctx.marker });
+      state.appendEvent(kind, payload(ctx.roundId));
+      return { marker: `${phase}-r${ctx.roundId}`, ranSession: true };
+    },
+  });
+  const skips = (phase: PeripheralPhase) => ({
+    async run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }) {
+      log.push({ phase, marker: ctx.marker });
+      // No session dispatched, no degrade event — the real architect.ts/plan-review.ts/
+      // harvest.ts early-return shape for "nothing to do this round" (empty pool / nothing to
+      // brief). ranSession omitted -> false, per PeripheralStub's own documented default.
+      return { marker: `${phase}-r${ctx.roundId}` };
+    },
+  });
+  return {
+    aligning: degrades("aligning", "po-degraded", (round_id) => ({ round_id, outcome: "failed", session: `po-${round_id}` })),
+    architecting: skips("architecting"),
+    plan_review: skips("plan_review"),
+    harvesting: skips("harvesting"),
+    retro: degrades("retro", "retro-degraded", (round_id) => ({ round_id, outcome: "failed", session: `retro-${round_id}` })),
+  };
+}
+
+test("runRounds #394 (F23, AC3): a weekly-limit storm with an EMPTY pool — architect/plan_review/harvest structurally skip every round, but aligning/retro genuinely degrade — the breaker still fires within N rounds", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    const forge = new FakeForge(); // empty board — nothing dispatches, nothing for architect/plan_review/harvest to see
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const emptyPoolPeripherals = mkEmptyPoolWeeklyLimitStormPeripherals(log, state);
+    const sleep = async (): Promise<void> => {
+      if (state.isParked()) writeFileSync(join(dir, "KILL_SWITCH"), "");
+    };
+    const deps = baseDeps({
+      forge,
+      state,
+      sleep,
+      cfg: mkCfg({ round: { emptySpin: { consecutiveDegradedRoundsThreshold: 2 } } }),
+      peripherals: emptyPoolPeripherals,
+    });
+    // gate② round 3 (Codex sol-high BLOCK finding, P2): a HARD bound, independent of the
+    // KILL_SWITCH-on-park sleep above. If the F23 ranPhases intersection this test exercises
+    // regresses, the breaker never parks, `state.isParked()` never goes true, the sleep above
+    // never writes KILL_SWITCH, and `runRounds` — an empty board with no other stop condition
+    // configured — spins forever (verified by hand: reverting the fix and re-running this exact
+    // test previously required killing the process manually; see the PR's own revert-experiment
+    // notes). `boundedStopOnPhase` (used throughout this file as exactly this kind of test-safety
+    // net) trips a graceful `signalled` stop after a generous 30 phase-visits — 6 full rounds'
+    // worth, three times the 2 rounds a HEALTHY run needs to park — so a real regression fails
+    // this test's own assertions in well under a second instead of hanging the suite/CI.
+    const stopSafety = boundedStopOnPhase(deps, 30);
+    const result = await runRounds(deps);
+    stopSafety();
+    assert.equal(
+      result.stoppedBy,
+      "kill-switch",
+      "expected the empty-spin breaker to park (KILL_SWITCH). Got 'signal' instead, meaning the " +
+        "30-phase-visit SAFETY BOUND tripped first — the breaker never fired at all. This is the " +
+        "F23 regression itself: re-check isRoundFullyDegraded's ranPhases intersection.",
+    );
+    assert.equal(result.rounds, 2, "rounds 1-2 both count as fully degraded — round 3 withheld, never opened");
+    const emptySpinEvents = state.eventsAfterId(0, ["empty-spin-park"]);
+    assert.equal(
+      emptySpinEvents.length,
+      1,
+      "the breaker fires — under the pre-#394 cfg-only required-set computation this would NEVER fire " +
+        "(architect/plan_review are cfg-enabled but skip every round, so they'd never join degradedPhases either)",
+    );
+    assert.deepEqual(emptySpinEvents[0]!.payload, { consecutiveDegradedRounds: 2, threshold: 2, roundId: 2 });
+    assert.equal(state.isParked(), true);
+    assert.equal(state.parkRow("llm")?.source, "llm");
+    // architecting/plan_review/harvesting genuinely ran their (skip) stub each round — the phase
+    // sequence still visits them — but never contributed a degrade event or ranSession:true.
+    assert.equal(log.filter((l) => l.phase === "architecting").length, 2);
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRounds (#394 gate② round 2, Codex sol-high BLOCK finding, P2): at threshold 1, a round RESUMED exactly at 'executing' (earlier phases succeeded in a process this one never observed; nothing was in flight to drain) — only harvesting/retro run here, retro alone degrades — does NOT park a healthy engine", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-round-"));
+  try {
+    // Seed a round that already advanced PAST aligining/architecting/plan_review and INTO
+    // "executing" before this runRounds() call ever looks at it — the exact "picked up already
+    // in-progress" shape `deps.state.openRound()` reports as `wasResumed`. Resuming exactly AT
+    // "executing" (not past it) is the precise shape that makes `ranExecuting` true in THIS
+    // process too (a drain-only pass — freshBatch=false, zero active workers to drain since none
+    // were ever dispatched before the simulated restart — `workersThisRound` stays 0), which is
+    // what lets roundDegraded's OTHER guards (`ranExecuting && workersThisRound === 0`) pass at
+    // all; resuming further along (e.g. directly at "harvesting"/"retro") would skip `executing`
+    // in this process entirely and `ranExecuting` would stay false, masking the bug behind an
+    // unrelated guard instead of actually exercising the fix. This process's phase loop starts at
+    // idx=SEQUENCE.indexOf("executing"), so aligining/architecting/plan_review are NEVER visited
+    // here — only harvesting and retro are, matching the Codex-traced scenario exactly: earlier
+    // phases are invisible to THIS process's ranPhases, whether they succeeded or not.
+    const state = new State(join(dir, "sapwood.sqlite"));
+    const round = state.startRound("2026-07-27T00:00:00.000Z");
+    state.advanceRoundPhase(round.round_id, "executing", "2026-07-27T00:01:00.000Z");
+
+    const forge = new FakeForge(); // empty board — zero dispatch either way, zero needs-human -> harvest skips
+    const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+    const degradingPeripherals = mkFullyDegradingPeripherals(log, state); // only .harvesting/.retro are invoked this run
+    const deps = baseDeps({
+      forge,
+      state,
+      // threshold 1: the EXACT configuration the gate② review traced as the one that exposes
+      // this bug — with the old (retracted) "bounded to one strike" reasoning, threshold 1 IS
+      // the whole breaker, so a single resumed-round false strike parks immediately.
+      cfg: mkCfg({ round: { emptySpin: { consecutiveDegradedRoundsThreshold: 1 } } }),
+      peripherals: degradingPeripherals,
+    });
+    // Stop the run right after round 1's two visited peripheral phases (harvesting, retro) —
+    // round 1 still runs to completion (close + the roundDegraded/park computation) in THIS
+    // iteration before `signalled` is checked at the top of the next one, so this observes
+    // exactly "did round 1's close-time computation park the engine", without ever letting
+    // round 2 open. ("executing" itself never calls onRoundPhase — see runPeripheral's own call
+    // site — so it doesn't count toward this cap.)
+    const stopSafety = boundedStopOnPhase(deps, 2);
+    const result = await runRounds(deps);
+    stopSafety();
+
+    assert.equal(result.stoppedBy, "signal", "the bounded stop fired after round 1's own two visited peripheral phases, as designed");
+    assert.deepEqual(
+      log.map((l) => l.phase),
+      ["harvesting", "retro"],
+      "only harvesting/retro ran in this process — aligining/architecting/plan_review were never re-entered",
+    );
+    assert.equal(
+      state.eventsAfterId(0, ["empty-spin-park"]).length,
+      0,
+      "#394 gate② round 2 fix: a resumed round is never judged fully-degraded, so it contributes " +
+        "no strike at all — WITHOUT this fix, threshold 1 would park here on retro's lone degrade, " +
+        "even though aligining/architecting/plan_review genuinely succeeded before this process ever started",
+    );
+    assert.equal(state.isParked(), false, "the engine is healthy — nothing should be parked");
     state.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

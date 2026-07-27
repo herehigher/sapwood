@@ -285,9 +285,10 @@ test("createHarvestStub (#123): no needs-human issues this round -> no session r
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: HarvestDeps = { forge: new MinimalForge(), state, cfg: mkCfg(), runner };
   const stub = createHarvestStub(deps);
-  const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
+  const { marker, ranSession } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
   assert.equal(marker, harvestMarker(round.round_id));
   assert.equal(runner.calls.length, 0);
+  assert.equal(ranSession, false, "#394 (F23): nothing to brief -> no session dispatched -> ranSession false");
   // The pre-#123 harvest-summary event is gone (superseded by the round_artifacts row that
   // round.ts persists at close) — harvest appends nothing when there's nobody to brief.
   const summaries = state.eventsSince("2020-01-01T00:00:00.000Z", ["harvest-summary"]);
@@ -305,10 +306,11 @@ test("createHarvestStub: a needs-human issue this round -> dispatches ONE harves
   const forge = new MinimalForge();
   const deps: HarvestDeps = { forge, state, cfg: mkCfg(), runner, now: () => new Date("2026-07-10T01:00:00.000Z") };
   const stub = createHarvestStub(deps);
-  const { marker } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
+  const { marker, ranSession } = await stub.run({ roundId: round.round_id, phase: "harvesting", marker: null });
 
   assert.equal(marker, harvestMarker(round.round_id));
   assert.equal(runner.calls.length, 1);
+  assert.equal(ranSession, true, "#394 (F23): a real harvest session dispatched -> ranSession true");
   const call = runner.calls[0]!;
   assert.equal(call.roleId, "harvest");
   assert.equal(call.model, "sonnet"); // roles.harvest default

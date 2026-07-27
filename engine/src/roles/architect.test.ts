@@ -240,9 +240,10 @@ test("createArchitectStub: no candidates -> returns the round's marker, no sessi
   const state = new State(":memory:");
   const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner };
   const stub = createArchitectStub(deps);
-  const { marker } = await stub.run({ roundId: 5, phase: "architecting", marker: null });
+  const { marker, ranSession } = await stub.run({ roundId: 5, phase: "architecting", marker: null });
   assert.equal(marker, architectMarker(5));
   assert.equal(runner.calls.length, 0);
+  assert.equal(ranSession, undefined, "#394 (F23): no session dispatched -> ranSession stays unset (round.ts reads this as false)");
   state.close();
 });
 
@@ -257,10 +258,11 @@ test("createArchitectStub: runs exactly ONE session for the whole round regardle
   const state = new State(":memory:");
   const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
-  const { marker } = await stub.run({ roundId: 9, phase: "architecting", marker: null });
+  const { marker, ranSession } = await stub.run({ roundId: 9, phase: "architecting", marker: null });
   assert.equal(runner.calls.length, 1);
   assert.equal(runner.calls[0]!.roleId, "architect");
   assert.equal(marker, architectMarker(9));
+  assert.equal(ranSession, true, "#394 (F23): a real session dispatched -> ranSession true");
   // Spend recorded against the architect session's own name.
   assert.equal(state.spentUsdForWorker("architect-1"), 0.02);
   state.close();

@@ -1006,6 +1006,77 @@ export function extractRateLimitResetAt(jsonl: string, nowMs: number = Date.now(
   return resetAtMs;
 }
 
+/** #394 (F22): did this jsonl carry AT LEAST ONE rejected `rate_limit_event` — the Claude CLI's
+ *  own structured, text-free confirmation the provider actually refused a request? Deliberately
+ *  a separate scan from extractRateLimitResetAt above (not "resetAtMs != null"): a rejection is
+ *  real evidence of an env failure regardless of whether its `resetsAt` field also happens to be
+ *  present/parseable/in-range — extractRateLimitResetAt's sanity-horizon rejection is a SCHEDULING
+ *  concern (never schedule a probe centuries out), not a reason to discard classification
+ *  evidence too. Same tolerant parsing as extractRateLimitResetAt: a malformed/truncated line is
+ *  skipped, never thrown. This is ONE of TWO structured, text-free classification signals — see
+ *  hasQuotaErrorStatus below for the other — both feeding env-failure.ts's classifyEnvFailure as
+ *  PRIMARY signals (see that function's own doc for why two, and what neither one covers) ahead
+ *  of any text pattern. This is the read half; conductor.ts's LaneProbe.envSignalStructured /
+ *  peripheral.ts's RoleSessionResult.envSignalStructured are the write/thread halves — both
+ *  computed as `hasRejectedRateLimitEvent(jsonl) || hasQuotaErrorStatus(jsonl)`. */
+export function hasRejectedRateLimitEvent(jsonl: string): boolean {
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // mid-write/truncated stream fragment
+    }
+    if (obj.type !== "rate_limit_event") continue;
+    const info = obj.rate_limit_info as Record<string, unknown> | undefined;
+    if (info?.status === "rejected") return true;
+  }
+  return false;
+}
+
+/** #394 gate② round 3 (Codex sol-high BLOCK finding, P2): the SECOND structured, text-free
+ *  signal — did this jsonl carry a `type:"result"` record the CLI itself marked as an actual
+ *  429 at the transport level (`is_error:true`, `api_error_status:429`)? This closes a real gap
+ *  `hasRejectedRateLimitEvent` alone leaves open: NOT every quota/rate-limit failure emits a
+ *  `rate_limit_event` line — a captured real transcript (worker.test.ts's own #374 fixture) shows
+ *  the CLI can produce an errored `result` record with `api_error_status:429` and NO
+ *  `rate_limit_event` anywhere in the same jsonl. Without this second signal, a session whose
+ *  ONLY evidence is that errored-429 result record — and whose human-readable `result` text uses
+ *  a tier word this file's enumerated pattern list doesn't happen to list (e.g. "monthly", a tier
+ *  neither #374 nor #394 has captured verbatim) — would classify as an ORDINARY task failure, not
+ *  `llm`, with NO fallback catching it: env-failure.ts's own doc explains exactly which paths
+ *  this is (and isn't) bounded on. `api_error_status` is accepted as EITHER the number `429` or
+ *  the string `"429"`. No capture in this repo has actually shown the string form — the one real
+ *  captured errored-429 result (this file's #374 fixture) carries it unquoted, numeric. The
+ *  string is accepted DEFENSIVELY, not because a stringified record has been observed: it costs
+ *  nothing (there is nothing else `api_error_status` holding the string `"429"` could mean in
+ *  this field) and it forecloses the exact class of bug #394 is about. #394 exists because the
+ *  engine held a confident, unverified assumption about the CLI's wire shape that reality did not
+ *  match; hard-coding this REPLACEMENT signal to one JSON type for the same field, on nothing but
+ *  assumption, would plant that identical failure mode one layer over. Do not tighten this back
+ *  to `=== 429`, and do not read this comment as asserting a stringified capture exists — none
+ *  does. `is_error` still gates inclusion — that check is deliberate and separate, matching the
+ *  same field extractFailureText already relies on, regardless of the record's own (misleadingly
+ *  non-error-sounding) `subtype`. Same tolerant parsing as its sibling above: a
+ *  malformed/truncated line is skipped, never thrown. */
+export function hasQuotaErrorStatus(jsonl: string): boolean {
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // mid-write/truncated stream fragment
+    }
+    if (obj.type !== "result") continue;
+    if (obj.is_error === true && (obj.api_error_status === 429 || obj.api_error_status === "429")) return true;
+  }
+  return false;
+}
+
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
  *  matcher covers exactly the tools the guard inspects — Read/Grep/Glob/NotebookRead joined
@@ -2331,6 +2402,12 @@ export class WorkerSupervisor implements Supervisor {
     // #374: same "only for a FAILED lane" gating as failureText above — this is only ever
     // consumed at the FAILED reclaim path's env-classification site.
     const rateLimitResetAtMs = failed ? this.terminalRateLimitResetAtMs(name) : undefined;
+    // #394 (F22/gate② round 3): same "only for a FAILED lane" gating — the PRIMARY, text-free
+    // classification signal (env-failure.ts's classifyEnvFailure), computed from the SAME jsonl
+    // read as rateLimitResetAtMs above (no new I/O). true if EITHER structured signal fired — a
+    // rejected rate_limit_event OR an errored result with api_error_status:429 (see
+    // terminalEnvSignalStructured's own doc for why both are needed).
+    const envSignalStructured = failed ? this.terminalEnvSignalStructured(name) : false;
     // #247: only for a DONE lane — same "compute it lazily, only where a consumer could ever
     // use it" stance failureText already takes for FAILED lanes (conductor.ts's fix-leg harvest
     // is the first reader; an ordinary worker's DONE result text is otherwise unconsumed).
@@ -2355,6 +2432,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(resultText !== undefined ? { resultText } : {}),
       ...(actualModel != null ? { actualModel } : {}),
       ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
+      ...(envSignalStructured ? { envSignalStructured } : {}),
     };
   }
 
@@ -2396,7 +2474,10 @@ export class WorkerSupervisor implements Supervisor {
    *  Extraction is STRUCTURED (PR #180 review P1-3 — see extractFailureText: stderr lines +
    *  errored result/error records only, never assistant message content), then tail-capped: an
    *  environment failure is almost always the LAST thing the process emits before dying, and
-   *  there's no reason to carry more through LaneProbe than the classifier can use. */
+   *  there's no reason to carry more through LaneProbe than the classifier can use. Reads the
+   *  FULL cumulative jsonl (not a per-leg slice) — see terminalEnvSignalStructured's own doc
+   *  below for the shared, deliberate staleness this has in common with that reader on a
+   *  multi-leg lane, and why it's a documented parity, not narrowed. */
   private terminalFailureText(name: string): string {
     const text = extractFailureText(this.readJsonl(this.path(name, "jsonl")));
     return text.length > FAILURE_TEXT_TAIL_CHARS ? text.slice(-FAILURE_TEXT_TAIL_CHARS) : text;
@@ -2407,6 +2488,34 @@ export class WorkerSupervisor implements Supervisor {
    *  CLI's own structured rate-limit telemetry names one. */
   private terminalRateLimitResetAtMs(name: string): number | null {
     return extractRateLimitResetAt(this.readJsonl(this.path(name, "jsonl")));
+  }
+
+  /** #394 (F22) / gate② round 3 (Codex sol-high BLOCK finding, P2): same shape as
+   *  terminalRateLimitResetAtMs — a new READ of the SAME jsonl, feeding conductor.ts's env-park
+   *  classification with the primary, text-free signal(s). TWO structured signals are OR'd
+   *  together here — a rejected `rate_limit_event` (hasRejectedRateLimitEvent) and an errored
+   *  `result` record carrying `api_error_status:429` (hasQuotaErrorStatus) — because #374's own
+   *  captured transcript shows the CLI does not always emit both together for the same quota
+   *  failure; relying on only one leaves a real gap (see env-failure.ts's own module doc for the
+   *  full accounting of what these two signals do and do not cover).
+   *
+   *  #394 gate② review — DOCUMENTED, DELIBERATE staleness (ruled against narrowing): this reads
+   *  the FULL cumulative jsonl (`this.path(name, "jsonl")`), same as terminalFailureText just
+   *  above — NOT `currentLegJsonl`'s per-leg slice. On a multi-leg (resumed) lane, either
+   *  structured signal from an EARLIER, already-recovered leg can still be seen here and
+   *  reclassify a LATER, unrelated failure as `llm`. The reviewer proposed slicing to the
+   *  current leg only; rejected because terminalFailureText (this class's OTHER classification
+   *  reader, right above) already scans the same full file — narrowing only the structured
+   *  signal would make the text path and the telemetry path disagree about what "this failure"
+   *  scopes to, which is a worse thing for the next reader to reason about than the bounded
+   *  staleness itself. Both readers share this scope on purpose: PARITY, not an oversight. The
+   *  failure mode this staleness can cause — a stale-but-real signal wrongly parks the engine as
+   *  `llm` for an unrelated later failure — self-heals through the EXISTING probe/canary path
+   *  (env-failure.ts's probeDue-family functions / escalationChannel): the next probe or canary
+   *  lane simply succeeds, since the provider was never actually still rejecting. */
+  private terminalEnvSignalStructured(name: string): boolean {
+    const jsonl = this.readJsonl(this.path(name, "jsonl"));
+    return hasRejectedRateLimitEvent(jsonl) || hasQuotaErrorStatus(jsonl);
   }
 
   /** #247: a DONE lane's own final-message text — parseResultText over this lane's CURRENT LEG

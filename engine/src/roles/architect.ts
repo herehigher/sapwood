@@ -890,7 +890,10 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         );
       }
 
-      return { marker: marker_ };
+      // #394 (F23): a session genuinely ran above (the early "no candidates and no pool
+      // members" return at the top of this function is the ONLY skip path) — see
+      // PeripheralStub.ranSession's own doc for why this matters (round.ts's empty-spin breaker).
+      return { marker: marker_, ranSession: true };
     },
   };
 }
