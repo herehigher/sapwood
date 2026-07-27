@@ -2181,7 +2181,18 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
         ...(deps.log !== undefined ? { log: deps.log } : {}),
       });
 
-      return { marker: mark };
+      // #394 (F23): reaching here means this call did NOT take either early-return skip path
+      // above (already-externalized marker; corrupt proposal journal) — per this function's own
+      // module doc, aligning "at most ONE session, dispatched even with an unscoped fresh round"
+      // plus triage "unconditional" plus (#212/#233) round-pool selection almost always means
+      // SOME session ran by the time execution reaches here. Approximate but conservative in the
+      // direction that matters for this issue: aligning is not the phase F23's bug is about (it
+      // already runs every round during a quota storm, per the dogfood evidence) — see
+      // PeripheralStub.ranSession's own doc. A round where align/triage/pool-selection ALL
+      // legitimately had nothing to do (persisted proposals replayed AND zero Ready issues AND
+      // pool-selection found zero candidates) would over-report `true` here; accepted as a
+      // bounded, documented gap rather than instrumenting every internal skip branch.
+      return { marker: mark, ranSession: true };
     },
   };
 }

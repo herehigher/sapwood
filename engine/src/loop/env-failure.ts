@@ -51,12 +51,18 @@ export const DEFAULT_LLM_FAILURE_PATTERNS: readonly string[] = [
   // phrase (never something ordinary worker prose would produce verbatim, same signature-shaped
   // bar as "usage limit reached" above) — extractFailureText (worker.ts) already carries this
   // text through for a FAILED lane's `result` field regardless of the record's (misleadingly
-  // "success") subtype, since `is_error` alone gates inclusion. "5-hour limit"/"weekly limit" are
-  // the CLI's other two plan-quota tiers (same UI family, not yet observed verbatim in this
-  // codebase's own captures, added defensively so all three tiers classify identically).
-  "hit your session limit",
-  "5-hour limit reached",
-  "weekly limit reached",
+  // "success") subtype, since `is_error` alone gates inclusion.
+  //
+  // #394 (F22 dogfood retro, 2026-07-27): #374's own "5-hour limit"/"weekly limit" guesses above
+  // were modeled on a DIFFERENT UI string ("5-hour limit reached" / "weekly limit reached") that
+  // never matched the real CLI output and missed a live weekly-quota storm for ~72 rounds (~$80).
+  // The real captured text, verbatim: "You've hit your weekly limit · resets Jul 27 at 9am
+  // (Asia/Tokyo)" — same "hit your <tier> limit" STEM as the verified session-limit message
+  // above, just a different tier word. Rather than guess each remaining tier's exact wording
+  // again, match the shared stem directly (regex, matchesAny's `new RegExp(p, "i")`) — this
+  // single pattern covers "session"/"weekly"/"5-hour" (all three now verified or directly
+  // implied by the verified pair) and any future tier the CLI introduces, without another guess.
+  "hit your \\S+ limit",
 ];
 
 export const DEFAULT_FORGE_FAILURE_PATTERNS: readonly string[] = [
@@ -90,8 +96,18 @@ function matchesAny(text: string, patterns: readonly string[]): boolean {
  * sets. Pure, deterministic, no LLM. `llm` is checked before `forge` (fixed precedence — a
  * failure text matching both patterns, unlikely in practice, classifies as `llm`). No match on
  * either set -> null, an ordinary task failure (unchanged existing disposition).
+ *
+ * #394 (F22): `rateLimitRejected` is the PRIMARY signal, checked BEFORE any text pattern — the
+ * Claude CLI's own structured `rate_limit_event` telemetry (`rate_limit_info.status:"rejected"`
+ * in the session jsonl, worker.ts's hasRejectedRateLimitEvent) is text-free and authoritative:
+ * unlike the pattern lists below (necessarily a finite, sometimes-stale guess at the CLI's
+ * human-readable wording — exactly what missed the real "weekly limit" text this issue fixes),
+ * a rejected rate-limit event can never be produced by anything other than the provider itself
+ * refusing the request. Defaults to `false` so every pre-#394 call site (omitting the argument)
+ * keeps byte-identical behavior — text-pattern classification only, unchanged.
  */
-export function classifyEnvFailure(output: string, patterns: EnvFailurePatterns): EnvFailureSource | null {
+export function classifyEnvFailure(output: string, patterns: EnvFailurePatterns, rateLimitRejected = false): EnvFailureSource | null {
+  if (rateLimitRejected) return "llm";
   if (!output) return null;
   if (matchesAny(output, patterns.llm)) return "llm";
   if (matchesAny(output, patterns.forge)) return "forge";

@@ -1006,6 +1006,34 @@ export function extractRateLimitResetAt(jsonl: string, nowMs: number = Date.now(
   return resetAtMs;
 }
 
+/** #394 (F22): did this jsonl carry AT LEAST ONE rejected `rate_limit_event` — the Claude CLI's
+ *  own structured, text-free confirmation the provider actually refused a request? Deliberately
+ *  a separate scan from extractRateLimitResetAt above (not "resetAtMs != null"): a rejection is
+ *  real evidence of an env failure regardless of whether its `resetsAt` field also happens to be
+ *  present/parseable/in-range — extractRateLimitResetAt's sanity-horizon rejection is a SCHEDULING
+ *  concern (never schedule a probe centuries out), not a reason to discard classification
+ *  evidence too. Same tolerant parsing as extractRateLimitResetAt: a malformed/truncated line is
+ *  skipped, never thrown. Feeds env-failure.ts's classifyEnvFailure as the PRIMARY, text-free
+ *  classification signal (see that function's own doc) — this is the read half; conductor.ts's
+ *  LaneProbe.rateLimitRejected / peripheral.ts's RoleSessionResult.rateLimitRejected are the
+ *  write/thread halves. */
+export function hasRejectedRateLimitEvent(jsonl: string): boolean {
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // mid-write/truncated stream fragment
+    }
+    if (obj.type !== "rate_limit_event") continue;
+    const info = obj.rate_limit_info as Record<string, unknown> | undefined;
+    if (info?.status === "rejected") return true;
+  }
+  return false;
+}
+
 /** Per-worker Claude Code settings wiring the fail-closed PreToolUse guard hook (#26). The
  *  command runs `node <hookPath>` (hookPath is trusted — our own dist path — and quoted); the
  *  matcher covers exactly the tools the guard inspects — Read/Grep/Glob/NotebookRead joined
@@ -2331,6 +2359,10 @@ export class WorkerSupervisor implements Supervisor {
     // #374: same "only for a FAILED lane" gating as failureText above — this is only ever
     // consumed at the FAILED reclaim path's env-classification site.
     const rateLimitResetAtMs = failed ? this.terminalRateLimitResetAtMs(name) : undefined;
+    // #394 (F22): same "only for a FAILED lane" gating — the PRIMARY, text-free classification
+    // signal (env-failure.ts's classifyEnvFailure), computed from the SAME jsonl read as
+    // rateLimitResetAtMs above (no new I/O).
+    const rateLimitRejected = failed ? this.terminalRateLimitRejected(name) : false;
     // #247: only for a DONE lane — same "compute it lazily, only where a consumer could ever
     // use it" stance failureText already takes for FAILED lanes (conductor.ts's fix-leg harvest
     // is the first reader; an ordinary worker's DONE result text is otherwise unconsumed).
@@ -2355,6 +2387,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(resultText !== undefined ? { resultText } : {}),
       ...(actualModel != null ? { actualModel } : {}),
       ...(rateLimitResetAtMs != null ? { rateLimitResetAtMs } : {}),
+      ...(rateLimitRejected ? { rateLimitRejected } : {}),
     };
   }
 
@@ -2407,6 +2440,12 @@ export class WorkerSupervisor implements Supervisor {
    *  CLI's own structured rate-limit telemetry names one. */
   private terminalRateLimitResetAtMs(name: string): number | null {
     return extractRateLimitResetAt(this.readJsonl(this.path(name, "jsonl")));
+  }
+
+  /** #394 (F22): same shape as terminalRateLimitResetAtMs — a new READ of the SAME jsonl,
+   *  feeding conductor.ts's env-park classification with the primary, text-free signal. */
+  private terminalRateLimitRejected(name: string): boolean {
+    return hasRejectedRateLimitEvent(this.readJsonl(this.path(name, "jsonl")));
   }
 
   /** #247: a DONE lane's own final-message text — parseResultText over this lane's CURRENT LEG

@@ -4733,6 +4733,28 @@ test("#168: FAILED lane with an LLM env-failure signature, no PR -> classified e
   st.close();
 });
 
+test("#394 (F22, AC2): FAILED lane with rateLimitRejected=true but UNRECOGNIZED failure text -> still classified llm (the structured signal is authoritative, independent of text patterns)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-rle", 503);
+  sup.probes["lane-rle"] = {
+    ...DEFAULT_PROBE,
+    failed: true,
+    hasPr: false,
+    // Deliberately NOT matching any configured llm/forge pattern — a brand-new CLI wording this
+    // classifier's text patterns were never updated for. Only rateLimitRejected proves the park.
+    failureText: "some completely novel error string nobody guessed",
+    rateLimitRejected: true,
+  };
+  const r = await tick({ forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  assert.deepEqual(r.reclaimed, [{ kind: "env-failure", worker: "lane-rle", issue: 503, source: "llm", costUsd: 0, modelUsage: [] }]);
+  assert.equal(st.isParked(), true);
+  assert.equal(st.parkRow("llm")?.triggerIssue, 503);
+  st.close();
+});
+
 test("#168: FAILED lane with a forge env-failure signature, no PR -> same disposition, park source: forge; the requeue is SUSPENDED durably (P1-2: zero forge writes while forge-parked)", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

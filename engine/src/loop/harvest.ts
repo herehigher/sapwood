@@ -248,7 +248,13 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
       // source of truth), and harvest keeps only judgment + the needs-human briefing.
       const artifact = buildRoundArtifact(deps.state, round, deps.cfg.cost.roundBudgetUsd, null);
       const needsHumanIssues = artifact.escalations.needsHuman;
+      // #394 (F23): did THIS call actually dispatch a harvest session? Nothing-to-brief
+      // (needsHumanIssues.length === 0) is the ONLY skip path — see PeripheralStub.ranSession's
+      // own doc for why round.ts's empty-spin breaker needs this distinguished from "ran and
+      // succeeded silently".
+      let ranSession = false;
       if (needsHumanIssues.length > 0) {
+        ranSession = true;
         const template = loadRolePromptTemplate(deps.cfg.roles.harvest.promptFile, defaultHarvestPromptPath());
         const artifactMd = capRoundArtifactMarkdown(renderRoundArtifactMarkdown(artifact), deps.cfg.roles.harvest.artifactMaxChars);
         const rendered = renderFactsTemplate(template, factVars(artifact, artifactMd));
@@ -321,7 +327,7 @@ export function createHarvestStub(deps: HarvestDeps): PeripheralStub {
           }
         }
       }
-      return { marker: harvestMarker(roundId) };
+      return { marker: harvestMarker(roundId), ranSession };
     },
   };
 }

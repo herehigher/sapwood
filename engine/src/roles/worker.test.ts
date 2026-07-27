@@ -35,6 +35,7 @@ import {
   extractFailureText,
   extractRateLimitResetAt,
   guardSettings,
+  hasRejectedRateLimitEvent,
   loadFixPromptTemplate,
   loadWorkerPromptTemplate,
   MAX_EGRESS_SUSPECTS_PER_LEG,
@@ -2396,6 +2397,46 @@ test("extractRateLimitResetAt: a resetsAt exactly at the Date-valid boundary is 
   // basis too — this test only asserts neither call throws and the out-of-range one is null.
   assert.doesNotThrow(() => extractRateLimitResetAt(validJsonl, nowMs));
   assert.equal(extractRateLimitResetAt(invalidJsonl, nowMs), null);
+});
+
+// ── #394 (F22): hasRejectedRateLimitEvent — the structured, text-free classification signal ──
+
+test("hasRejectedRateLimitEvent: a real captured rejected rate_limit_event line -> true", () => {
+  const jsonl =
+    `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1784885400,"rateLimitType":"five_hour",` +
+    `"overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false},"session_id":"s1"}`;
+  assert.equal(hasRejectedRateLimitEvent(jsonl), true);
+});
+
+test("hasRejectedRateLimitEvent: no rate_limit_event line at all -> false", () => {
+  const jsonl = `{"type":"assistant","message":{}}\n{"type":"result","subtype":"success","result":"ok"}`;
+  assert.equal(hasRejectedRateLimitEvent(jsonl), false);
+});
+
+test("hasRejectedRateLimitEvent: a non-'rejected' status (e.g. 'allowed') is ignored -> false", () => {
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1784885400}}`;
+  assert.equal(hasRejectedRateLimitEvent(jsonl), false);
+});
+
+test("hasRejectedRateLimitEvent: true EVEN WITHOUT a resetsAt field — the rejection itself is the signal, not the reset hint", () => {
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`;
+  assert.equal(hasRejectedRateLimitEvent(jsonl), true);
+});
+
+test("hasRejectedRateLimitEvent: true even when resetsAt is malformed/out-of-range — extractRateLimitResetAt's sanity horizon is a SCHEDULING concern, not a classification one", () => {
+  const jsonl = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":-1e20}}`;
+  assert.equal(hasRejectedRateLimitEvent(jsonl), true);
+  assert.equal(extractRateLimitResetAt(jsonl), null, "sanity check: the scheduling hint itself IS rejected as out-of-range");
+});
+
+test("hasRejectedRateLimitEvent: malformed/truncated JSON lines and a missing rate_limit_info are tolerated, never throw", () => {
+  const jsonl = [`{"type":"rate_limit_event"`, `{"type":"rate_limit_event","rate_limit_info":null}`, "not json at all"].join("\n");
+  assert.doesNotThrow(() => hasRejectedRateLimitEvent(jsonl));
+  assert.equal(hasRejectedRateLimitEvent(jsonl), false);
+});
+
+test("hasRejectedRateLimitEvent: empty input -> false", () => {
+  assert.equal(hasRejectedRateLimitEvent(""), false);
 });
 
 test("#168 P1-3 contractual negative: exact configured signatures inside ASSISTANT text + a non-env failure -> task failure, no env classification, no park", async () => {

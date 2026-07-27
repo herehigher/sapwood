@@ -913,6 +913,11 @@ export function createPlanReviewStub(deps: PlanReviewDeps): PeripheralStub {
       const l = deps.cfg.labels;
       const eligible = await deps.forge.getPoolEligibleIssues();
       const poolMembers = eligible.filter((i) => labelsInclude(i.labels, l.roundPool));
+      // #394 (F23): did THIS call actually dispatch at least one reviewer/confirm session? An
+      // empty pool (poolMembers.length === 0 — the exact dogfood scenario this issue fixes) or a
+      // pool consisting entirely of verifyNa/class-3 members never sets this true — see
+      // PeripheralStub.ranSession's own doc.
+      let ranSession = false;
       if (poolMembers.length > 0) {
         const reviewerTemplate = loadRolePromptTemplate(deps.cfg.roles.planReviewer.promptFile, defaultPlanReviewerPromptPath());
         const drafterTemplate = loadRolePromptTemplate(deps.cfg.roles.planDrafter.promptFile, defaultPlanDrafterPromptPath());
@@ -923,10 +928,12 @@ export function createPlanReviewStub(deps: PlanReviewDeps): PeripheralStub {
           let sawEnvPark: boolean;
           if (!labelsInclude(issue.labels, l.planApproved)) {
             sawEnvPark = await reviewOneIssue(deps, issue, reviewerTemplate, drafterTemplate, roundId); // class 1
+            ranSession = true;
           } else if (approvedThisRound(deps.state, roundId, issue.number)) {
             continue; // class 3: skip, no session at all — nothing to observe
           } else {
             sawEnvPark = await confirmOneIssue(deps, issue, confirmTemplate, reviewerTemplate, drafterTemplate, roundId); // class 2
+            ranSession = true;
           }
           // #374 review (Codex sol-high verify-pass finding 1, P1 — fixes a recovery canary
           // starvation the original finding-6 fix introduced): checked AFTER dispatching, never
@@ -946,7 +953,7 @@ export function createPlanReviewStub(deps: PlanReviewDeps): PeripheralStub {
           }
         }
       }
-      return { marker: planReviewMarker(roundId) };
+      return { marker: planReviewMarker(roundId), ranSession };
     },
   };
 }

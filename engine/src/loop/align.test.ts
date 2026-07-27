@@ -378,9 +378,10 @@ test("createAligningStub: dispatches the align session with the PO tool pair (PO
   const state = new State(":memory:");
   const deps: AlignDeps = { forge, state, cfg: mkCfg(), runner };
   const stub = createAligningStub(deps);
-  const { marker } = await stub.run({ roundId: 5, phase: "aligning", marker: null });
+  const { marker, ranSession } = await stub.run({ roundId: 5, phase: "aligning", marker: null });
   assert.equal(marker, alignMarker(5));
   assert.equal(runner.calls.length, 1);
+  assert.equal(ranSession, true, "#394 (F23): a real align session dispatched -> ranSession true");
   assert.equal(runner.calls[0]!.roleId, "po-align");
   assert.equal(runner.calls[0]!.allowedTools, PO_ALLOWED_TOOLS);
   // Security: the create-flag deny list (file exfil via --body-file, gate⓪ bypass via
@@ -1001,6 +1002,7 @@ test("createAligningStub #216: divergent proposal journal records honesty and ad
 
   assert.equal(result.marker, alignMarker(roundId));
   assert.equal(runner.calls.length, 0);
+  assert.equal(result.ranSession, undefined, "#394 (F23): a corrupt proposal journal skips outright -> ranSession stays unset");
   assert.equal(forge.createdIssues.length, 0);
   assert.equal(forge.issueCommentsPosted.length, 0);
   assert.equal(Object.values(forge.issueLabels).flat().length, 0);

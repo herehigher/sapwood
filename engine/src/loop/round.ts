@@ -129,7 +129,12 @@ function appendRoundPhase(state: Pick<State, "appendEvent">, roundId: number, ph
  *  only ever mean "the session succeeded, something else broke", turning an unrelated forge/git
  *  hiccup into a false contributor toward parking the whole engine. The breaker must UNDER-fire
  *  on an ambiguous signal, never over-fire on a well-understood one. */
-export function isRoundFullyDegraded(cfg: SapwoodConfig, artifact: RoundArtifact, roundId: number): boolean {
+export function isRoundFullyDegraded(
+  cfg: SapwoodConfig,
+  artifact: RoundArtifact,
+  roundId: number,
+  ranPhases: ReadonlySet<PeripheralPhase>,
+): boolean {
   const degradedRoundPhases = new Set<PeripheralPhase>();
   for (const d of artifact.degradedPhases) {
     const rp = DEGRADED_PHASE_TO_ROUND_PHASE[d.phase];
@@ -143,8 +148,19 @@ export function isRoundFullyDegraded(cfg: SapwoodConfig, artifact: RoundArtifact
   if (cfg.roles.harvest.enabled && artifact.escalations.needsHuman.length > 0) requiredPhases.push("harvesting");
   if (cfg.roles.retro.enabled && roundId % cfg.roles.retro.everyNRounds === 0) requiredPhases.push("retro");
 
-  if (requiredPhases.length === 0) return false; // nothing was even configured to run a session
-  return requiredPhases.every((p) => degradedRoundPhases.has(p));
+  // #394 (F23): a phase configured (and, per the checks above, expected) to run this round is
+  // only genuinely "required" for the breaker if it ACTUALLY ran a session — round.ts's own
+  // PeripheralStub.ranSession bookkeeping, threaded in as `ranPhases`. Without this intersection,
+  // a phase that structurally short-circuited with NO session at all (architect/plan_review
+  // hitting an EMPTY round pool — the exact dogfood scenario this issue fixes: aligning/retro
+  // degraded every round, but architect/plan_review/harvest silently skipped, so they never
+  // joined degradedRoundPhases either, and requiredPhases.every() stayed false forever) would be
+  // wrongly counted as an unfulfilled requirement. "Skipped phases are evidence of nothing" — the
+  // breaker must judge only the phases that actually attempted work.
+  const ranRequiredPhases = requiredPhases.filter((p) => ranPhases.has(p));
+
+  if (ranRequiredPhases.length === 0) return false; // nothing that could have run actually ran
+  return ranRequiredPhases.every((p) => degradedRoundPhases.has(p));
 }
 
 /** One externalized-artifact-producing peripheral role session — STUBBED in #86 (the real
@@ -154,13 +170,24 @@ export function isRoundFullyDegraded(cfg: SapwoodConfig, artifact: RoundArtifact
  *  non-null when a prior attempt crashed after externalizing something (a comment, a document,
  *  ...) but before the round advanced past this phase. A correct stub must treat a non-null
  *  marker as "already done — do not duplicate that side effect" (it may simply return the same
- *  marker unchanged). */
+ *  marker unchanged).
+ *
+ *  #394 (F23): `ranSession` — did this call actually dispatch at least one real role session,
+ *  as opposed to short-circuiting (already-externalized marker, no candidates/pool members, no
+ *  needs-human to brief, off-cadence, etc.)? OPTIONAL and defaults to `false` when omitted — the
+ *  conservative, "under-trigger on an ambiguous signal" direction this codebase already takes
+ *  elsewhere (env-failure.ts's own doc): an unset/false ranSession is read as "no evidence this
+ *  phase ran," never as "assume it did." round.ts's own runPeripheral collects this per round
+ *  into the `ranPhases` set isRoundFullyDegraded uses to decide which configured phases were
+ *  genuinely required THIS round — see that function's own doc for why a bare "was it configured
+ *  to run" check silently mis-served the exact scenario the empty-spin breaker exists for. */
 export interface PeripheralStub {
-  run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }): Promise<{ marker: string }>;
+  run(ctx: { roundId: number; phase: PeripheralPhase; marker: string | null }): Promise<{ marker: string; ranSession?: boolean }>;
 }
 
 /** The only implementation shipped in #86 — every peripheral phase is a true no-op. Real role
- *  sessions are a follow-up issue (#86's own "out of scope" note). */
+ *  sessions are a follow-up issue (#86's own "out of scope" note). ranSession stays unset/false —
+ *  a no-op never runs a real session. */
 export const noopPeripheralStub: PeripheralStub = {
   async run({ marker }) {
     return { marker: marker ?? "noop" };
@@ -1090,11 +1117,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     ...(deps.probeLlmReachable !== undefined ? { probeLlmReachable: deps.probeLlmReachable } : {}),
   });
 
-  /** Run one peripheral phase's stub, persist its marker, fire the observability hook. Returns
+  /** Run one peripheral phase's stub, persist its marker, fire the observability hook. `ok`
    *  false (never invoking the stub) when KILL_SWITCH is active — the caller must stop the
-   *  whole loop without advancing past this phase. */
-  const runPeripheral = async (round: RoundRow, phase: PeripheralPhase): Promise<boolean> => {
-    if (deps.state.isKillSwitchActive()) return false;
+   *  whole loop without advancing past this phase; `ranSession` is threaded straight from the
+   *  stub's own PeripheralStub.run() return (#394 F23) — see that interface's own doc. */
+  const runPeripheral = async (round: RoundRow, phase: PeripheralPhase): Promise<{ ok: boolean; ranSession: boolean }> => {
+    if (deps.state.isKillSwitchActive()) return { ok: false, ranSession: false };
     const stub = peripherals[phase] ?? noopPeripheralStub;
     // Rerun-not-resume marker: only the phase we are CURRENTLY sitting in (round.phase ===
     // phase — true both for a fresh phase just advanced into this run, and for a phase we
@@ -1102,10 +1130,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     // phase in the sequence is being entered fresh this run, so its marker is null regardless
     // of what artifact_ref happens to hold (it belongs to whatever phase set it last).
     const marker = round.phase === phase ? round.artifact_ref : null;
-    const { marker: newMarker } = await stub.run({ roundId: round.round_id, phase, marker });
+    const { marker: newMarker, ranSession } = await stub.run({ roundId: round.round_id, phase, marker });
     deps.state.setRoundMarker(round.round_id, newMarker, iso());
     deps.onRoundPhase?.(round.round_id, phase);
-    return true;
+    return { ok: true, ranSession: ranSession ?? false };
   };
 
   /** #95 follow-up: persist a round-stop hit to the durable event log (in addition to firing
@@ -1444,6 +1472,11 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // about idleness — and it must not arm standby, or a restart lands straight back in
       // standby without the fresh PO shot the restart-as-wakeup path documents.
       let ranExecuting = false;
+      // #394 (F23): every peripheral phase THIS round that actually ran a session (not a
+      // structural skip) — accumulated as runPeripheral reports back, fed to
+      // isRoundFullyDegraded at round close. Fresh per round, same lifetime as workersThisRound/
+      // ranExecuting above.
+      const ranPeripheralPhases = new Set<PeripheralPhase>();
 
       while (SEQUENCE[idx] !== "closed") {
         const phase = SEQUENCE[idx]!;
@@ -1462,11 +1495,12 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
           // Narrowed to PeripheralPhase: every RoundPhase except "executing" (handled above)
           // and "closed" (excluded by the while guard — this branch is unreachable at
           // runtime, kept only so TypeScript can see the exhaustive narrowing).
-          const ok = await runPeripheral(round, phase);
-          if (!ok) {
+          const result = await runPeripheral(round, phase);
+          if (!result.ok) {
             killSwitchStop = true;
             break;
           }
+          if (result.ranSession) ranPeripheralPhases.add(phase);
         }
         idx++;
         const nextPhase = SEQUENCE[idx]!;
@@ -1568,7 +1602,10 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       // THREW, see the try/catch above) counts as NOT degraded — a contained observability
       // failure must never itself trip a safety breaker.
       const roundDegraded =
-        ranExecuting && workersThisRound === 0 && artifact != null && isRoundFullyDegraded(cfg, artifact, round.round_id);
+        ranExecuting &&
+        workersThisRound === 0 &&
+        artifact != null &&
+        isRoundFullyDegraded(cfg, artifact, round.round_id, ranPeripheralPhases);
       consecutiveDegradedRounds = roundDegraded ? consecutiveDegradedRounds + 1 : 0;
       if (emptySpinBreached(consecutiveDegradedRounds, cfg.round.emptySpin.consecutiveDegradedRoundsThreshold)) {
         const reason =
