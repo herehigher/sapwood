@@ -119,6 +119,21 @@ test("#411: the loaded doctrine contains the authoritative-signals-over-inferred
   assert.match(loaded, /residual blind spot|genuinely narrow gap/i);
 });
 
+// #419 review round 2 (Codex sol high, P2-1): the ORIGINAL wording here called a missed
+// classification "bounded and recoverable" on its own — false against env-failure.ts:93-104,
+// which states a WORKER-lane miss is bounded by nothing in that file (it can recur on every
+// subsequently dispatched issue); only the engine's own outer cost ceiling bounds it. These
+// assertions pin the corrected claim so a future edit can't silently reintroduce the overclaim.
+test("#419 review: the authoritative-signals invariant names the OUTER safety ceiling (not local boundedness) as what actually bounds a recurring worker-lane miss, traceable to env-failure.ts:93-104", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.ok(loaded.includes("env-failure.ts:93-104"), "expected a citation to engine/src/loop/env-failure.ts:93-104");
+  assert.match(loaded, /OUTER safety ceiling/);
+  assert.ok(loaded.includes("cost.roundBudgetUsd"), "expected a citation to the cost.roundBudgetUsd config key");
+  // The overclaim this review round retracted: must NOT appear anywhere in the loaded text.
+  assert.doesNotMatch(loaded, /bounded and recoverable/i);
+});
+
 test("#411: the loaded doctrine contains the no-timing-dependent-assertions invariant, citing #403 and #416", () => {
   const cfg = loadConfig(REPO_CONFIG_PATH);
   const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
@@ -129,6 +144,23 @@ test("#411: the loaded doctrine contains the no-timing-dependent-assertions inva
   assert.ok(loaded.includes("#418"), "expected a citation to PR #418 (the canonical fix shape)");
 });
 
+// #419 review round 2 (Codex sol high, P2-2): the ORIGINAL wording banned ANY dependence on a
+// real timer/subprocess/scheduler, which is broader than the actual lesson and would condemn
+// this repo's own accepted practice (materializer.test.ts's real hang-guards + bounded real-git
+// passthroughs, and #418 round 3's own documented, non-load-bearing REAL_OP_TIMEOUT_MS widen).
+// Refined to distinguish a BANNED load-bearing race from a FINE outer guard / documented margin,
+// citing #418's margin-ordering pattern as the worked example. Pinned so a future edit can't
+// silently regress to the overbroad version.
+test("#419 review: the timing invariant distinguishes a BANNED load-bearing race from a FINE outer hang-guard / documented non-load-bearing margin, citing #418's margin-ordering pattern", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.match(loaded, /BANNED/);
+  assert.match(loaded, /FINE/);
+  assert.match(loaded, /LOAD-BEARING/);
+  assert.ok(loaded.includes("REAL_OP_TIMEOUT_MS"), "expected a citation to REAL_OP_TIMEOUT_MS (the #418 round 3 margin-ordering example)");
+  assert.ok(loaded.includes("500ms"), "expected the concrete before/after margin values from #418 round 3");
+});
+
 test("#411: the loaded doctrine is comfortably under doctrine.maxChars with NO truncation marker (not silently cut)", () => {
   const cfg = loadConfig(REPO_CONFIG_PATH);
   const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
@@ -136,5 +168,10 @@ test("#411: the loaded doctrine is comfortably under doctrine.maxChars with NO t
     loaded.length < cfg.doctrine.maxChars,
     `expected content (${loaded.length} chars) to be under maxChars (${cfg.doctrine.maxChars})`,
   );
-  assert.doesNotMatch(loaded, /truncated/i);
+  // #419 review round 2 (Codex sol high, P3): a bare /truncated/i regex would false-fail CI the
+  // moment legitimate doctrine prose ever contains the word "truncated" (this file already
+  // discusses truncation in prose, e.g. the no-timing-dependent-assertions invariant's own
+  // wording could evolve to mention it). Pin the EXACT marker capDigest emits instead
+  // (retro-digest.ts's `capDigest`) — no other string in this file's prose can accidentally match it.
+  assert.ok(!loaded.includes("[... digest truncated:"), "expected no capDigest truncation marker in the loaded doctrine text");
 });

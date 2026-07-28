@@ -68,26 +68,46 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   provider-authoritative signals first (a rejected `rate_limit_event`, an errored result carrying
   `api_error_status:429`) and falls back to an enumerated text-pattern list only when both are
   absent — deliberately narrow, not a `hit your \S+ limit` wildcard, because the two failure
-  directions are NOT symmetric: a too-narrow pattern list produces a false NEGATIVE (misses a
-  real signal — costs money, bounded and recoverable), while a too-wide pattern produces a false
-  POSITIVE (fires on an unrelated failure — halts a healthy system, worse). When a reviewer is
-  choosing between widening a match or narrowing it, name which of these two failure directions
-  the change trades toward, and prefer the narrower one by default. State the residual blind spot
-  honestly rather than claiming full coverage: even with structured signals checked first, a
-  failure that clears every structured check AND uses unlisted wording still goes unclassified —
-  a genuinely narrow gap, not zero, and the doctrine here is to say so rather than overclaim.
-- **No timing-dependent assertions.** A test must never depend on a real timer, subprocess speed,
-  or scheduler/OS ordering to pass — this class has reddened `main` three separate times,
-  including twice on the same day (#403; most recently #416, PR #418). The fix is always removing
-  the dependence, never widening the margin: inject a fake clock/collaborator at the seam the code
-  already has (or add one), replace a real subprocess with a fast, deterministic, selectively
-  self-terminating fake (PR #418's fake-git shim — a stand-in that returns control on the exact
-  condition the test needs, not a sleep-then-check race) rather than asserting against real
-  wall-clock elapsed time. A red PR that passed on its own branch but reds on `main` under the
-  same CI runner is a strong signal this class is in play. When reviewing a new test, ask whether
-  it would still pass on a machine ten times slower or faster — if the answer depends on actual
-  elapsed time, subprocess scheduling, or which of two concurrent operations happens to finish
-  first, the test needs a seam, not a bigger margin.
+  directions are NOT symmetric in kind, not just in size: a too-wide pattern produces a false
+  POSITIVE that fires immediately and visibly on an unrelated failure, halting a healthy,
+  unaffected engine. A too-narrow pattern list produces a false NEGATIVE (misses a real signal)
+  whose worst case is NOT locally bounded — `env-failure.ts:93-104` states this honestly rather
+  than overclaiming: on the peripheral-role path a miss still eventually trips the empty-spin
+  breaker, but on the dispatched-WORKER-lane path nothing in the classifier itself stops the SAME
+  unclassified failure text from recurring on every subsequently dispatched issue; only the
+  engine's own OUTER safety ceiling (`cost.roundBudgetUsd` / `dailyBudgetUsd`), not anything in
+  this file, bounds that recurring spend. Prefer the narrower pattern list anyway — an immediate,
+  engine-halting false positive is worse than a false negative whose worst case is contained by
+  an outer layer — but name that outer-layer dependency explicitly rather than calling a false
+  negative "bounded" on its own account. When a reviewer is choosing between widening a match or
+  narrowing it, name which of these two failure directions the change trades toward. State the
+  residual blind spot honestly rather than claiming full coverage: even with structured signals
+  checked first, a failure that clears every structured check AND uses unlisted wording still
+  goes unclassified — a genuinely narrow gap, not zero, and the doctrine here is to say so rather
+  than overclaim.
+- **No timing-dependent assertions.** BANNED: an assertion whose PASS/FAIL outcome is decided by
+  a close race between uncontrolled real operations — real work vs. a real timer, a single winner
+  asserted, with no seam controlling either side. This class has reddened `main` three separate
+  times, including twice on the same day (#403; most recently #416). For a LOAD-BEARING race —
+  one where the timing decides the actual behavior under test — the fix is always a seam, never a
+  bigger margin: inject a fake clock/collaborator at the seam the code already has (or add one),
+  or replace a real subprocess with a fast, deterministic, selectively self-terminating fake (PR
+  #418's fake-git shim — hangs ONLY on the specific operation under test, `exec`s the real binary
+  for everything else, so a timeout signal lands directly on the process actually sleeping, no
+  orphan possible) rather than asserting against real wall-clock elapsed time.
+
+  FINE, and NOT the same failure class: an outer hang-guard whose only job is bounding
+  catastrophe (a wedged process reaching the test-runner's own ceiling) rather than deciding the
+  test's pass/fail outcome; a real, bounded passthrough operation timed against a generous,
+  documented, non-load-bearing margin. PR #418 round 3's `REAL_OP_TIMEOUT_MS` 500ms->1000ms widen
+  is the worked example of doing this correctly: the margin sits ~20-60x above the measured real
+  op cost and ~20x below the fake shim's sleep, and that ordering (measured cost < margin < guard
+  ceiling) is stated in the code as the reason for the number, not chosen by feel. A red PR that
+  passed on its own branch but reds on `main` under the same CI runner is a strong signal the
+  BANNED shape, not the FINE one, is in play. When reviewing a new test with a timing element,
+  ask: does the test's verdict itself depend on which of two uncontrolled real operations finishes
+  first? If yes, it needs a seam. If the timing is only a generous, documented backstop around a
+  deterministic fake or a bounded real passthrough, it is doctrine-compliant as written.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
