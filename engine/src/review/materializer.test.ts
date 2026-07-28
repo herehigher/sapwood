@@ -67,6 +67,102 @@ function withHangGuard<T>(promise: Promise<T>, ms: number, message: string): Pro
   });
 }
 
+/** Resolves the REAL system `git` binary's absolute path via the shell builtin `command -v`,
+ *  invoked through `/bin/sh -c` (a real, standalone binary execFileSync can spawn directly --
+ *  `command` itself is a shell builtin, not a standalone executable). Must be called BEFORE any
+ *  test swaps `process.env.PATH` to point at a fake `git` -- baking the resolved ABSOLUTE path
+ *  into the fake `git` script (below) means the fake script's own passthrough `exec` never has to
+ *  consult `PATH` at all, so it always reaches the real binary regardless of what the swapped
+ *  `PATH` says. */
+function resolveRealGit(): string {
+  return execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+}
+
+/** #416 round-2 (Codex sol high): writes a SELECTIVE, SELF-TERMINATING fake `git` into `binDir`,
+ *  replacing the blanket "hang on literally every invocation" shim the round-1 fix used. Round 1
+ *  had two problems this fixes:
+ *
+ *  1. (P2) Hanging on the FIRST git call a test makes meant later calls in the same chain (e.g.
+ *     the post-checkout `rev-parse --verify` in `materialize`, or the reuse fetch in
+ *     `createPrivateClone`'s reuse path) were never actually reached -- a regression that dropped
+ *     the `timeout` option from one of THOSE calls specifically would have left the test green.
+ *     Fixed here by only faking the SPECIFIC operation(s) named in `targetWords`: any invocation
+ *     whose argv contains one of those words as an EXACT positional argument -- never a substring
+ *     match, since this suite's own clone/tree tmpdir paths routinely contain "clone" as a
+ *     substring (`sapwood-materializer-clone-XXXX/clone.git`), which would false-positive a naive
+ *     `includes()` check -- gets replaced with `exec sleep 20`; every other invocation `exec`s the
+ *     REAL git at `realGitPath`. Earlier, cheap probes in the same call chain (config read,
+ *     rev-parse --is-bare-repository, remote get-url) therefore complete for real, so the test
+ *     genuinely walks the chain up to the specific call `targetWords` names before that call is
+ *     the one that hangs.
+ *  2. (P3) Both branches use `exec`, not a plain invocation -- this replaces the `sh` process
+ *     image entirely rather than forking a child under it, so there is never an orphaned `sleep`
+ *     grandchild left behind when execFile's `timeout` SIGTERMs the fake `git` (round 1's shim was
+ *     `sh -c 'while true; do sleep 3600; done'`, where killing `sh` orphaned the `sleep 3600` for
+ *     up to an hour). The kill signal now lands directly on the process actually doing the (fake)
+ *     work.
+ *
+ *  Margin ordering (why none of this is a race between real work and a timer): the assertion path
+ *  in every fixed test depends on EXACTLY ONE thing -- execFile's own `timeout` option (1ms in
+ *  every one of these tests) killing a `sleep 20` child that does zero real work, a 4-order-of-
+ *  magnitude gap (1ms vs 20,000ms) that is never close. The file's `withHangGuard` (5000ms) and
+ *  this script's own self-exit (20s) only matter on the REGRESSION path -- if a future change
+ *  drops the `timeout` option, `withHangGuard` still delivers a fast, named failure at 5s (another
+ *  4-order-of-magnitude gap below the 20s self-exit), and the self-exit is pure defense in depth
+ *  so the test FILE process still terminates on its own even if `withHangGuard` somehow didn't
+ *  fire either -- never a multi-hour zombie the way an un-self-terminating hang would be. */
+function writeSelectiveFakeGit(binDir: string, targetWords: readonly string[], realGitPath: string): void {
+  const targets = targetWords.map((w) => `"${w}"`).join(" ");
+  const script = `#!/bin/sh
+for arg in "$@"; do
+  for target in ${targets}; do
+    if [ "$arg" = "$target" ]; then
+      exec sleep 20
+    fi
+  done
+done
+exec "${realGitPath}" "$@"
+`;
+  writeFileSync(join(binDir, "git"), script);
+  chmodSync(join(binDir, "git"), 0o755);
+}
+
+/** `timeoutMs` used by the "#395 P2" tests below THAT ROUTE ONE OR MORE REAL GIT CALLS through
+ *  `writeSelectiveFakeGit`'s passthrough branch. Deliberately NOT `1` (unlike the plain
+ *  fresh-clone test, which never runs a real git call at all): measured locally, a real local
+ *  `git` subprocess invocation against these tiny fixture repos (`checkout`, `config --list`,
+ *  `rev-parse --is-bare-repository`, `remote get-url`) consistently takes 15-30ms -- comfortably
+ *  under this bound, but routinely OVER 1ms. Racing those real passthrough calls against `1` would
+ *  reintroduce the exact real-subprocess-vs-real-timer nondeterminism this whole fix removes (this
+ *  was caught empirically: an earlier draft of this fix used `timeoutMs: 1` here and the real
+ *  passthrough `checkout` itself got killed before completing, contradicting the very
+ *  "checkout genuinely happened" assertion the test makes).
+ *
+ *  1000, not 500 (#418 round-3 P3): under a STARVED runner (CI under heavy contention, not just
+ *  "slow"), a real passthrough op that exceeds this bound fails the test EARLY for the wrong
+ *  reason -- e.g. in the reuse-candidate test, an early real probe timing out sends the reused
+ *  clone down the same fallback-clone path the fetch itself would have, so `assert.rejects` is
+ *  satisfied without the fetch call under test ever running; in the materialize test, a starved
+ *  `checkout` fails before `rev-parse` is even reached. Doubling the measured 15-30ms margin to
+ *  1000ms (vs. the previous 500ms) buys real headroom against exactly that kind of contention
+ *  without weakening the fake side of the margin.
+ *
+ *  Margin ordering (why this is still not a race): the TARGET operation named in each test is
+ *  faked to `exec sleep 20` regardless of `timeoutMs` -- the fake never does real work, so its
+ *  20,000ms is not competing with anything, it just has to comfortably clear whatever `timeoutMs`
+ *  is. `REAL_OP_TIMEOUT_MS` (1000ms) sits ~30-60x above the real ops' measured 15-30ms (generous
+ *  headroom for a loaded machine) and ~20x below the fake's 20,000ms sleep (so the `timeout`
+ *  option always kills the fake, never lets it complete) -- two non-adjacent orders of magnitude
+ *  on either side, not a close call in either direction. `withHangGuard`'s 5000ms bounds the WORST
+ *  case in the reuse-candidate test, which can burn up to two sequential target timeouts (the
+ *  reuse fetch, then the fresh-clone fallback) -- at 1000ms that's ~2000ms worst case, still
+ *  comfortably under the 5000ms guard. This is also why 1000 was chosen over doubling again to
+ *  2000: at 2000ms per step, that same worst case (~4000ms) would leave only ~1000ms of guard
+ *  headroom, eroding the very margin this constant exists to protect. The fake's own 20s
+ *  self-exit only matters on the REGRESSION path (the `timeout` option dropped from production
+ *  code), never on the normal assertion path. */
+const REAL_OP_TIMEOUT_MS = 1000;
+
 function headOid(dir: string): string {
   return git(dir, ["rev-parse", "HEAD"]).trim();
 }
@@ -226,19 +322,41 @@ test("createPrivateClone (#395 P2): a timeoutMs too tight for a real `git clone`
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
   const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
   const shared = initSharedRepo();
+  // #416-class fix: the original version raced a REAL `git clone` subprocess against a 1ms
+  // timeout, on the assumption a full clone (fork+exec + git loading the repo) can never finish
+  // that fast. That is the same unproven-margin assumption #416 found false for the much cheaper
+  // `git rev-parse --verify` call elsewhere in this file — this repo's discipline (#403/#406/#416)
+  // is to never rely on real subprocess speed losing a race, no matter how tight the margin looks.
+  // Same fix as the sibling tests in this file: point PATH at a fake `git` that fakes ONLY the
+  // "clone" subcommand -- this call chain has nothing to reach BEFORE the clone (cloneDir doesn't
+  // exist yet, so `createPrivateClone` skips the reuse branch entirely), so there's no earlier
+  // real invocation to pass through here; the fake still resolves the real binary for
+  // completeness/consistency with the sibling tests.
+  const fakeGitBin = mkdtempSync(join(tmpdir(), "sapwood-materializer-fakegit-"));
+  const originalPath = process.env.PATH;
   try {
     writeFileSync(join(shared, "f.txt"), "hello\n");
     git(shared, ["add", "f.txt"]);
     git(shared, ["commit", "-qm", "init"]);
     const cloneDir = join(cloneRoot, "clone.git");
-    // 1ms is comfortably tighter than a real `git clone` subprocess's own startup overhead
-    // (fork+exec + git loading the repo) — deterministic, the same "artificially tiny timeout"
-    // technique used elsewhere in this codebase for gh.ts/spawn-confirm timeout tests.
-    await assert.rejects(() => createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot, timeoutMs: 1 }), MaterializerError);
+    const realGit = resolveRealGit();
+    writeSelectiveFakeGit(fakeGitBin, ["clone"], realGit);
+    process.env.PATH = `${fakeGitBin}:${originalPath ?? ""}`;
+    await assert.rejects(
+      () =>
+        withHangGuard(
+          createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot, timeoutMs: 1 }),
+          5000,
+          "createPrivateClone did not settle within 5000ms — the timeout option is missing or not wired",
+        ),
+      MaterializerError,
+    );
   } finally {
+    process.env.PATH = originalPath;
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(cloneRoot, { recursive: true, force: true });
     rmSync(shared, { recursive: true, force: true });
+    rmSync(fakeGitBin, { recursive: true, force: true });
   }
 });
 
@@ -300,21 +418,54 @@ test("createPrivateClone (#395 P2): a matching, already-cloned reuse candidate i
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
   const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
   const shared = initSharedRepo();
+  // #416-class fix: the SECOND call below chains several real `git` subprocesses (the reuse-path
+  // config-clean/rev-parse/remote-url probes, the reuse fetch, and — on fallback — a fresh clone)
+  // all racing a 1ms timeout, on the assumption none of them could ever finish that fast. #416
+  // proved that assumption false for `git rev-parse --verify` on a fast/warm-cache CI runner, and
+  // this repo's discipline (#403/#406/#416) is to never rely on real subprocess speed losing a
+  // race. Same fix as the sibling tests in this file: swap PATH to a SELECTIVE fake `git` (see
+  // `writeSelectiveFakeGit`) that only fakes "fetch" and "clone" -- the two operations this test's
+  // own name claims are timeout-bounded (the reuse fetch, and its fresh-clone fallback). The
+  // earlier reuse-path probes (`assertLocalConfigClean`'s config read, `rev-parse
+  // --is-bare-repository`, `remote get-url origin`) all pass through to the REAL git, so this test
+  // genuinely walks the whole reuse chain up to the fetch (#416 round-2 P2: the round-1 version
+  // hung on the very FIRST probe and never actually reached the fetch it claims to cover) before
+  // hitting an operation guaranteed to hang; the fresh-clone fallback is faked too so the tail of
+  // the chain stays just as deterministic as the fetch itself, rather than trading one real-timer
+  // race for another at the very last step. `REAL_OP_TIMEOUT_MS` (not `1`) bounds the call under
+  // test -- see its own doc for why: those three earlier probes are REAL git calls now, and need
+  // enough real wall-clock room to actually finish.
+  const fakeGitBin = mkdtempSync(join(tmpdir(), "sapwood-materializer-fakegit-"));
+  const originalPath = process.env.PATH;
   try {
     writeFileSync(join(shared, "f.txt"), "hello\n");
     git(shared, ["add", "f.txt"]);
     git(shared, ["commit", "-qm", "init"]);
     const cloneDir = join(cloneRoot, "clone.git");
-    // First call: generous timeout, creates the clone (the reuse candidate for the next call).
+    // First call: real git, generous default timeout, creates the clone (the reuse candidate for
+    // the next call) -- this is SETUP, not under test.
     await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
-    // Second call: 1ms — every probe/fetch on the reuse path is bounded, so this either falls
-    // back to a fresh clone (also bounded, also fails at 1ms) or throws; either way it must
-    // reject rather than hang.
-    await assert.rejects(() => createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot, timeoutMs: 1 }), MaterializerError);
+    const realGit = resolveRealGit();
+    writeSelectiveFakeGit(fakeGitBin, ["fetch", "clone"], realGit);
+    process.env.PATH = `${fakeGitBin}:${originalPath ?? ""}`;
+    // Second call: every reuse-path probe runs for real and completes (proving the chain reaches
+    // the fetch), then the fetch (and, if reached, the fresh-clone fallback) is guaranteed to hang
+    // and be killed by the `timeout` option; either way this must reject rather than hang.
+    await assert.rejects(
+      () =>
+        withHangGuard(
+          createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot, timeoutMs: REAL_OP_TIMEOUT_MS }),
+          5000,
+          "createPrivateClone did not settle within 5000ms — the timeout option is missing or not wired",
+        ),
+      MaterializerError,
+    );
   } finally {
+    process.env.PATH = originalPath;
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(cloneRoot, { recursive: true, force: true });
     rmSync(shared, { recursive: true, force: true });
+    rmSync(fakeGitBin, { recursive: true, force: true });
   }
 });
 
@@ -323,24 +474,65 @@ test("materialize (#395 P2): the post-checkout OID verification (`git rev-parse 
   const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
   const treeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-tree-"));
   const shared = initSharedRepo();
+  // #416-class fix (same technique as the #403 fix just above for assertLocalConfigClean): the
+  // original version raced a REAL `git checkout` + `git rev-parse --verify` pair against a 1ms
+  // timeout, on the assumption neither could ever finish that fast. On a fast CI runner (warm
+  // page/inode cache) `git rev-parse --verify` sometimes CAN — this is the third instance of the
+  // banned "real subprocess vs. real timer, single winner asserted" class (#416, actions/runs/
+  // 30339000575: `actual: 'materialized', expected: 'failure'`). No injectable execFile seam
+  // exists in materializer.ts to stub (pexecFile is a private module-level constant, same as the
+  // #403 precedent), so instead of racing real git's speed, point PATH at a SELECTIVE fake `git`
+  // (see `writeSelectiveFakeGit`) that fakes ONLY "rev-parse" -- the specific operation this
+  // test's name is about. `checkout` passes through to the REAL git, so it genuinely runs and
+  // populates `treeDir` (asserted below, cheap to check) BEFORE the post-checkout OID verification
+  // is reached; that verification's `rev-parse --verify` is then guaranteed to hang, and the
+  // `timeout` option is the only thing that can produce a `{ kind: "failure" }` result,
+  // deterministically, on any machine at any speed. (#416 round-2 P2: a round-1 version of this
+  // fix faked EVERY invocation, so the checkout step itself never ran for real and a regression
+  // that dropped `timeout` from only the `rev-parse --verify` call specifically would have gone
+  // undetected -- this version genuinely exercises that exact call.) This mutates the
+  // process-global PATH; node:test runs the tests in this file sequentially (no `concurrency` used
+  // anywhere in this suite) and each test FILE is its own process, so the mutation can never leak
+  // into a concurrently-running test.
+  const fakeGitBin = mkdtempSync(join(tmpdir(), "sapwood-materializer-fakegit-"));
+  const originalPath = process.env.PATH;
   try {
     writeFileSync(join(shared, "f.txt"), "hello\n");
     git(shared, ["add", "f.txt"]);
     git(shared, ["commit", "-qm", "init"]);
     const head = headOid(shared);
     const cloneDir = join(cloneRoot, "clone.git");
-    // Generous timeout for the SETUP clone (not under test).
+    // Real git, generous default timeout, for the SETUP clone (not under test).
     const clone = await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
-    // 1ms is tight enough that EITHER the checkout step or the post-checkout OID verification
-    // (both now bounded) fails first — materialize()'s own contract (#284 AC) is that every
-    // failure path returns { kind: "failure" }, never a rejected promise.
-    const result = await materialize({ clone, oid: head, treeDir: join(treeRoot, "tree"), timeoutMs: 1 });
+    const realGit = resolveRealGit();
+    writeSelectiveFakeGit(fakeGitBin, ["rev-parse"], realGit);
+    process.env.PATH = `${fakeGitBin}:${originalPath ?? ""}`;
+    // #406-class guard: bound the call under test so a future regression that drops the `timeout`
+    // option fails fast with a named cause instead of hanging the whole suite against this
+    // never-exiting fake `git`. `REAL_OP_TIMEOUT_MS` (not `1`) is what materialize()'s own
+    // `timeoutMs` is bound to -- see that constant's doc: the checkout call ALSO shares this same
+    // `timeoutMs` (materialize() has only one), and it is now a REAL passthrough git call that
+    // needs real wall-clock room to finish before the (always-hanging) rev-parse is even reached.
+    const result = await withHangGuard(
+      materialize({ clone, oid: head, treeDir: join(treeRoot, "tree"), timeoutMs: REAL_OP_TIMEOUT_MS }),
+      5000,
+      "materialize did not settle within 5000ms — the timeout option is missing or not wired",
+    );
     assert.equal(result.kind, "failure");
+    // Proves the checkout genuinely ran (via the real git passthrough) before the post-checkout
+    // OID verification hung -- this is specifically the step the test's own name claims to cover.
+    assert.equal(
+      readFileSync(join(treeRoot, "tree", "f.txt"), "utf8"),
+      "hello\n",
+      "the real checkout must have populated treeDir before the post-checkout rev-parse hung",
+    );
   } finally {
+    process.env.PATH = originalPath;
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(cloneRoot, { recursive: true, force: true });
     rmSync(treeRoot, { recursive: true, force: true });
     rmSync(shared, { recursive: true, force: true });
+    rmSync(fakeGitBin, { recursive: true, force: true });
   }
 });
 
