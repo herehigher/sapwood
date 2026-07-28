@@ -894,13 +894,33 @@ export class RoleRunner {
       // WHOLE engine over one lost signal from one child — the exact overclaim/regression this
       // fix closes. `return` still skips the exit-loss check for the SAME tick that just crossed
       // the timeout (avoids evaluating a probe result from before the kill was even issued).
+      //
+      // #395 gate② follow-up (P1, final-review finding): keeping the interval alive was right for
+      // the DETECTOR and wrong for the HEARTBEAT — heartbeatGate.tick() below is gated on
+      // `!timedOut`, unlike exitLossDetector.tick() a few lines down, which keeps running
+      // regardless. A heartbeat asserts "this session is legitimately still working, do not treat
+      // the quiet as a stall" — the SAME claim the engine-wide liveness watchdog reads off
+      // state.maxEventId()/lastTickAt(). Once `timedOut` latches, that assertion is no longer
+      // true, and continuing to make it would blind the engine-wide backstop exactly when it's
+      // needed most: if `killTree` fails to make the pid read dead (a stuck kill, a zombie, a
+      // false-positive liveness probe), heartbeats would keep advancing the watchdog tuple
+      // forever AND the exit-loss detector would never fire either (the pid still reads alive) —
+      // converting a BOUNDED failure (pre-round-5: clearing the interval at least let the
+      // engine-wide watchdog notice and exit nonzero) into an UNBOUNDED one (`await exitPromise`
+      // hangs forever with nothing left to notice). Two mechanisms sharing one timer, opposite
+      // dispositions once a timeout has been decided.
       const hb = setInterval(() => {
         const elapsedSec = (this.now().getTime() - startedMs) / 1000;
-        heartbeatGate?.tick("role-session-heartbeat", { name, roleId: opts.roleId, elapsedSec: Math.round(elapsedSec) });
+        // Latch the crossing FIRST — the heartbeat gate right below reads `timedOut` AFTER this,
+        // so the SAME tick that decides to kill the session already stops vouching for it (never
+        // one more heartbeat "for the road" at the exact moment we've given up on it).
         if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
           timedOut = true;
           void this.killTree(session);
-          return;
+          return; // also skips the exit-loss check this SAME tick — see the block comment above
+        }
+        if (!timedOut) {
+          heartbeatGate?.tick("role-session-heartbeat", { name, roleId: opts.roleId, elapsedSec: Math.round(elapsedSec) });
         }
         if (!exitNotified && exitLossDetector.tick()) {
           clearInterval(hb);
