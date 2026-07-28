@@ -24,6 +24,7 @@ import { labelsInclude } from "../forge/labels.js";
 import type { ProxyForge } from "../proxy/mcp-server.js";
 import { createProxyMint } from "../proxy/mint.js";
 import type { RoundPhase, RoundRow, State } from "../state/state.js";
+import { createHeartbeatGate } from "../util/heartbeat.js";
 import {
   type CeilingReason,
   engineSessionGapSec,
@@ -40,6 +41,7 @@ import {
 import { issuesMergedThisTick, prsOpenedThisTick, type StopConditionHit, type StopConfig } from "./driver.js";
 import { emptySpinBreached, parkDurationExceededSec, probeBackoffSec, probeDueWithHint } from "./env-failure.js";
 import { buildRoundArtifact, persistRoundArtifact, type RoundArtifact } from "./round-artifact.js";
+import { startProgressWatchdog } from "./watchdog.js";
 
 export type { RoundPhase, RoundRow } from "../state/state.js";
 
@@ -259,6 +261,9 @@ export interface RoundDeps {
   registerSignals?: (requestStop: () => void) => () => void;
   onTick?: (result: TickResult) => void;
   log?: (message: string) => void;
+  /** #395: the liveness watchdog's exit hook — same contract as driver.ts's
+   *  DriverDeps.watchdogExit (see its own doc). Default: `process.exit`. */
+  watchdogExit?: (code: number) => void;
   /** Observability/test hook: fired once a peripheral phase's stub has run and its marker has
    *  been persisted (i.e. right before advancing past that phase). */
   onRoundPhase?: (roundId: number, phase: PeripheralPhase) => void;
@@ -362,7 +367,10 @@ export interface RoundsResult {
   /** "kill-switch": a peripheral phase was blocked by an active KILL_SWITCH — the round loop
    *  stops immediately, without running that (or any later) peripheral for the round in
    *  flight. "signal"/"stop-condition": graceful — the round already open always finishes
-   *  harvest+retro and closes before the loop stops; only a NEW round is withheld. */
+   *  harvest+retro and closes before the loop stops; only a NEW round is withheld. #395's
+   *  liveness watchdog (watchdog.ts) is NOT a `stoppedBy` value here — it runs as an
+   *  independent background timer, never cooperatively unwinding this loop; a real stall means
+   *  `runRounds` itself never returns (the nonzero exit is the operative signal). */
   stoppedBy: "signal" | "stop-condition" | "kill-switch";
   stopCondition?: StopConditionHit;
 }
@@ -760,6 +768,20 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     signalled = true;
     wakeFromSleep?.();
   });
+  // #395: the liveness watchdog — an INDEPENDENT background timer for this call's whole
+  // lifetime (every round-phase: aligning/architecting/plan_review/executing/harvesting/retro,
+  // not just tick()'s own dispatch/reclaim/drive), stopped in this function's `finally`
+  // alongside `unregister()`. Same contract as driver.ts's runDriver — see watchdog.ts's own
+  // doc for why this is progress-based, never raced against any single tick() call.
+  const watchdog = startProgressWatchdog({
+    windowMs: deps.tickIntervalSec * 1000 * cfg.liveness.watchdogTickMultiplier,
+    state: deps.state,
+    exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),
+    eventPayload: { tickIntervalSec: deps.tickIntervalSec, watchdogTickMultiplier: cfg.liveness.watchdogTickMultiplier },
+    // #395 item 2: deps.state is the real State here — every enrichment read is a genuine table
+    // read, never a fake.
+    enrich: deps.state,
+  });
   // Same signal-abortable inter-tick wait as driver.ts's interTickWait — see its comment there
   // for the shutdown-latency rationale this shape closes.
   const interTickWait = (ms: number): Promise<void> =>
@@ -795,6 +817,13 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
   // anchor (afterSpendUsd starts back at $0), unlike cfg.cost.dailyBudgetUsd's cross-restart sum.
   const runSpendAnchorId = deps.state.maxSpendLedgerId();
   let finalStopHit: StopConditionHit | undefined;
+  // #395 (gate② round 3): shared by BOTH the standby-backoff wait and the park-recovery wait
+  // below (mutually exclusive execution paths — never both live at once, so one cursor is
+  // enough). No child process to probe here (isAlive: () => true — see each call site's own
+  // comment for exactly what these heartbeats do and do not prove), so only the gate's
+  // spam-suppression half is load-bearing: skip the append once something ELSE (a park-probe, a
+  // standby-wait, a tick-error, ...) has already proven progress this cadence.
+  const loopHeartbeatGate = createHeartbeatGate(deps.state, () => true);
   // #125 standby: consecutive empty probes since the last time a round actually opened — the
   // exponential-backoff exponent. In-memory only (never persisted): a process restart is a fresh
   // start at n=0, same as #109's idle throttle carries no state across restarts either.
@@ -963,6 +992,15 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
       if (signalled) return;
       await interTickWait(deps.tickIntervalSec * 1000);
       if (deps.state.isKillSwitchActive()) return;
+      // #395 (gate② round 3): a per-iteration heartbeat — this loop's own probe cadence
+      // (envFailure.probeBackoffMaxSec / parkEscalateAfterSec, both up to 1800-3600s default) can
+      // leave many consecutive iterations with no probe due and therefore no park-probe event,
+      // well past the liveness watchdog's own window. This evidences ONLY that this loop's own
+      // interTickWait cycle is still running (bounded by tickIntervalSec each time) — it proves
+      // NOTHING about whether the forge/probe calls THIS loop makes will ever complete; it is not
+      // a progress proxy for those. loopHeartbeatGate additionally skips the append whenever a
+      // real park-probe/standby-wait/etc. already fired this cadence (#395 P2-2).
+      loopHeartbeatGate.tick("park-wait-heartbeat", { parked: deps.state.isParked() });
     }
   };
 
@@ -1482,6 +1520,17 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
               const sliceSec = Math.min(remainingSec, deps.tickIntervalSec);
               await interTickWait(sliceSec * 1000);
               remainingSec -= sliceSec;
+              // #395 (gate② round 3): a per-slice heartbeat, SEPARATE from standby-wait above
+              // (which keeps its existing one-per-backoff-step schedule, unchanged) — a single
+              // backoff step can legitimately run up to cfg.round.standby.backoffCapSec (default
+              // 1800s), well past the liveness watchdog's own window, with standby-wait itself
+              // firing only once at the start. This evidences ONLY that this loop's own
+              // interTickWait slicing is still running (bounded by tickIntervalSec each time,
+              // the SAME cadence the KILL_SWITCH check above already uses — no new cadence
+              // introduced) — it proves NOTHING about probeHasWork or any other awaited call
+              // ever completing; it is not a progress proxy for those. loopHeartbeatGate
+              // additionally skips the append whenever real progress already fired this cadence.
+              loopHeartbeatGate.tick("standby-heartbeat", { attempt: standbyAttempts, remainingSec });
             }
             if (deps.state.isKillSwitchActive()) break; // let the round open & block normally
             if (signalled) break;
@@ -1688,5 +1737,6 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     }
   } finally {
     unregister();
+    watchdog.stop();
   }
 }

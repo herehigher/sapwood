@@ -21,6 +21,8 @@ import type { SapwoodConfig } from "../config/config.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
+import { createExitLossDetector, createHeartbeatGate } from "../util/heartbeat.js";
+import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 import {
   assembleContextManifest,
   type ContextManifest,
@@ -342,6 +344,27 @@ export interface RoleRunnerDeps {
   guardHookPath?: string;
   heartbeatMs?: number;
   now?: () => Date;
+  /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
+   *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
+   *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
+  sleep?: (ms: number) => Promise<void>;
+  /** #395 (gate② round 2/3): narrow State surface for the run() heartbeat interval's own
+   *  progress signal (util/heartbeat.ts's createHeartbeatGate — a `role-session-heartbeat` event,
+   *  appended on the SAME `hb` interval this runner already keeps alive for the whole session).
+   *  `maxEventId` is needed for the gate's own "don't speak over other progress" check, on top of
+   *  `appendEvent`. Same optional/omitted = zero-behavior-change contract as every other narrow-
+   *  state dep in this codebase (e.g. worker.ts's WorkerDeps.state) — cli.ts's real production
+   *  construction always supplies it; a bare test fake simply never gets the heartbeat event. */
+  state?: Pick<State, "appendEvent" | "maxEventId">;
+  /** #395 item 1: the pid-liveness probe run()'s heartbeat interval uses BOTH to gate the
+   *  `role-session-heartbeat` event (via createHeartbeatGate's `isAlive`) AND to detect a lost
+   *  child-exit notification (util/heartbeat.ts's createExitLossDetector) — the SAME probe for
+   *  both, never two independent implementations of "is this pid alive." Default:
+   *  `process.kill(pid, 0)` in a try/catch (ESRCH -> dead). Injectable so a test can script a
+   *  scenario ("the pid probe says dead") without depending on the real OS's child-reaping
+   *  timing, which makes a genuine lost-notification effectively unreproducible on demand with a
+   *  real spawned process (see createExitLossDetector's own doc). */
+  isPidAlive?: (pid: number) => boolean;
   /** #236 (Codex F1, corrected in R1): bounded poll of the session's OWN stream-json jsonl file
    *  for its `{"type":"system","subtype":"init"}` line, before capturing the filesystem-derived
    *  half of the context manifest. The init line is the CLI's own signal that it finished
@@ -683,18 +706,60 @@ export class RoleRunner {
       // Register the exit listener BEFORE any await — same rationale as worker.ts's dispatch():
       // Node does not replay `exit` to late listeners, so a very fast exit must already be caught.
       let timedOut = false;
+      // #395 item 1: `exitNotified` + the captured `resolveExit` let the heartbeat interval below
+      // resolve this SAME promise itself (a synthetic "lost notification" outcome) — see that
+      // interval's own comment for when and why. `exitNotified` is the interval's guard against
+      // ever racing a real, just-arrived exit event (checked BEFORE the interval reads the pid
+      // probe each tick).
+      let exitNotified = false;
+      let resolveExit: (code: number | null) => void = () => {};
       const exitPromise = new Promise<number | null>((resolve) => {
-        session.onExit((code) => resolve(code));
-      });
-
-      let spawnErr: unknown;
-      await new Promise<void>((resolve) => {
-        session.onSpawn(() => resolve());
-        session.onError((e) => {
-          spawnErr = e;
-          resolve();
+        resolveExit = resolve;
+        session.onExit((code) => {
+          exitNotified = true;
+          resolve(code);
         });
       });
+
+      // #395: bounded — Node gives spawn confirmation no timeout of its own, and the live
+      // incident was exactly this await never resolving (a host sleep lost the child's `spawn`
+      // notification, wedging the engine 30+ minutes with zero events). A timeout is folded into
+      // `spawnErr` and handled by the SAME cleanup/throw below a genuine spawn `error` already
+      // uses — no new failure path, just a bound on this one.
+      const spawnConfirm = await awaitSpawnConfirmation(
+        (onSpawn, onError) => {
+          session.onSpawn(onSpawn);
+          session.onError(onError);
+        },
+        this.deps.cfg.liveness.spawnConfirmTimeoutMs,
+        this.deps.sleep,
+      );
+      let spawnErr: unknown = spawnConfirm.err;
+      if (spawnConfirm.timedOut) {
+        spawnErr = new Error(
+          `spawn confirmation timed out after ${this.deps.cfg.liveness.spawnConfirmTimeoutMs}ms ` +
+            "(host sleep or a lost spawn notification) — killing the possibly-still-alive child",
+        );
+        // #395 (gate② P2-1b): this throw is caught NOWHERE between here and cli.ts's top-level
+        // `process.exit(1)` — runSessionWithRetry only ever retries a returned (non-done)
+        // RESULT, never a run() throw — so without a durable event here, the exact incident
+        // this issue is about (a wedged spawn confirmation) would exit the whole process with
+        // no record of what happened, contradicting AC1's "clean nonzero exit WITH a durable
+        // event". Best-effort — the thrown Error's own message is still the fallback signal if
+        // even this write fails.
+        try {
+          this.deps.state?.appendEvent("role-session-spawn-timeout", {
+            name,
+            roleId: opts.roleId,
+            timeoutMs: this.deps.cfg.liveness.spawnConfirmTimeoutMs,
+          });
+        } catch {
+          /* best-effort */
+        }
+        // Best-effort: the child may actually be alive despite the lost notification. killTree
+        // itself never throws (peripheral.ts's own SpawnedSession.killGroup swallows kill errors).
+        await this.killTree(session);
+      }
       if (spawnErr) {
         try {
           closeSync(jsonlFd);
@@ -702,6 +767,21 @@ export class RoleRunner {
           /* noop */
         }
         this.removeIfExists(jsonlPath);
+        // #395: on a genuinely-lost spawn notification (spawnConfirm.timedOut), the child may
+        // have already started provisioning its OWN worktree (the `claude` CLI's own
+        // `--worktree name` startup step) — the ordinary end-of-run cleanup a few lines below
+        // (`materializedCwd === undefined` branch) never runs on this early-throw path, so
+        // nothing else would ever remove it. Same "a role session never has WIP worth
+        // preserving" rationale as that cleanup — safe to discard unconditionally. Skipped in
+        // review-session mode for the SAME reason the end-of-run cleanup skips it: this runner
+        // never created that directory and doesn't own its lifecycle.
+        if (materializedCwd === undefined) {
+          try {
+            rmSync(join(this.worktreeRoot, name), { recursive: true, force: true });
+          } catch {
+            /* best-effort */
+          }
+        }
         throw new Error(`role session spawn failed (${this.bin}): ${String(spawnErr)}`);
       }
       session.onError(() => {
@@ -740,16 +820,126 @@ export class RoleRunner {
       const worktreeAppeared = existsSync(worktreePath);
       const preSpawn = this.capturePreSpawnManifestData(worktreePath, worktreeAppeared, captureBasis);
 
+      // #395 (gate② round 3, P1): this heartbeat must PROVE liveness, not just that its own
+      // timer fired — an unconditional append (round 2's shape) keeps advancing
+      // state.maxEventId() even after a post-spawn wedge where the session process itself has
+      // already died with its exit notification lost (this issue's own premise), masking the
+      // liveness watchdog until worker.timeoutSec (up to 60x the watchdog's own window) instead
+      // of letting it fire at the window. `isChildAlive` probes the ACTUAL child (`process.kill
+      // (pid, 0)`, the pid populated synchronously by spawn() independent of whether the async
+      // 'spawn'/'exit' event ever arrived) — deliberately NOT a progress-content check (no JSONL
+      // growth / child-output gate): a legitimately quiet-but-working session (no output for
+      // minutes) must keep heart-beating as long as the child is alive, or a healthy slow
+      // session would be killed. createHeartbeatGate (util/heartbeat.ts) also folds in the P2-2
+      // spam fix: skip the append when something ELSE already advanced maxEventId this cadence
+      // (an otherwise-busy engine emits ~zero of these). Optional (RoleRunnerDeps.state) for the
+      // same "omitted = zero behavior change" contract every other optional dep here uses.
+      //
+      // #395 item 1: this SAME probe (never a second implementation) also backs
+      // createExitLossDetector below — reused, not new machinery. `deps.isPidAlive` is injectable
+      // (default: the try/catch shown here) so a test can script "the pid probe says dead"
+      // without depending on real OS child-reaping timing.
+      const isChildAlive = (): boolean => {
+        const pid = session.pid;
+        if (pid == null) return false;
+        if (this.deps.isPidAlive) return this.deps.isPidAlive(pid);
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const heartbeatGate = this.deps.state ? createHeartbeatGate(this.deps.state, isChildAlive) : undefined;
+      // #395 item 1: the pid probe above already POSITIVELY detects a dead child — today (before
+      // this) that detection only silenced the heartbeat, and the engine's sole response to a
+      // genuinely lost exit notification (this issue's whole premise) was to fall silent on
+      // `await exitPromise` below and let the liveness watchdog eventually kill the ENTIRE engine
+      // process over one lost signal from one child. Wire the SAME detection to the await
+      // instead: on TWO CONSECUTIVE dead pid readings with no `exit` event having arrived by the
+      // second one (createExitLossDetector's own doc has the full "why two" rationale, including
+      // why the pid-reuse direction can never falsely trigger this), resolve `exitPromise`
+      // SYNTHETICALLY (`null`) and stop. `exitCode === 0` is the only "done" case a few lines
+      // below this method — a synthetic `null` therefore ALWAYS reads as non-"done": `outcome:
+      // "failed"` through that SAME existing branch when this fires with no timeout in play, or
+      // `outcome: "timeout"` (unaffected — `timedOut` is checked FIRST in that computation) when
+      // it fires AFTER our own timeout kill (see the `hb` interval's own comment below for that
+      // case) — no new outcome kind either way. The session's jsonl is already on disk (whatever
+      // the child managed to write before it died) and gets parsed same as any other non-done
+      // outcome, so runSessionWithRetry's env-failure classification takes over from there
+      // exactly like a real exit-3 failure would (a genuine timeout is separately EXCLUDED from
+      // that classification regardless of how exitPromise settled — see handleEnvFailure's own
+      // doc). That is the entire point: a hang becomes a failure the engine already knows how to
+      // absorb (park / probe / standby / the round phase cursor), not a new recovery path.
+      // `killTree` is a defensive, best-effort no-op if the child is truly already gone (same
+      // call the spawn-confirm-timeout branch above already makes on a "maybe still alive"
+      // child) — never a new kill mechanism.
+      const exitLossDetector = createExitLossDetector(isChildAlive);
       // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
       // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
-      // mid-run): past worker.timeoutSec, kill the tree; the exit handler above still resolves
-      // exitPromise (with whatever code the kill produces), so run() always returns normally.
+      // mid-run): past worker.timeoutSec, kill the tree. `timedOut` is latched true HERE, before
+      // the kill is even issued — outcome computation below (`timedOut ? "timeout" : ...`) checks
+      // `timedOut` FIRST, so it stays "timeout" no matter how `exitPromise` eventually settles: a
+      // normal delayed real `exit` event from the kill, or (see below) this SAME exit-loss
+      // detector's own synthetic resolution.
+      //
+      // #395 gate② follow-up (P2, initial-review finding): this branch deliberately does NOT
+      // `clearInterval(hb)` — the exit-loss detector below must keep running ACROSS this kill,
+      // not stop the instant it's issued. Reasoning: `killTree` sends SIGTERM, waits, then
+      // SIGKILL — and a SIGKILL'd child's own exit notification is exactly the class of signal a
+      // host sleep mid-kill can lose (arguably the MOST likely place to lose one, since we just
+      // killed the child ourselves — precisely the scenario item 1 exists to catch). Without this,
+      // a timeout kill whose own exit notification is lost would hang `await exitPromise` forever
+      // with no in-process resolver left, and the engine-wide watchdog would eventually kill the
+      // WHOLE engine over one lost signal from one child — the exact overclaim/regression this
+      // fix closes. `return` still skips the exit-loss check for the SAME tick that just crossed
+      // the timeout (avoids evaluating a probe result from before the kill was even issued).
+      //
+      // #395 gate② follow-up (P1, final-review finding): keeping the interval alive was right for
+      // the DETECTOR and wrong for the HEARTBEAT — heartbeatGate.tick() below is gated on
+      // `!timedOut`, unlike exitLossDetector.tick() a few lines down, which keeps running
+      // regardless. A heartbeat asserts "this session is legitimately still working, do not treat
+      // the quiet as a stall" — the SAME claim the engine-wide liveness watchdog reads off
+      // state.maxEventId()/lastTickAt(). Once `timedOut` latches, that assertion is no longer
+      // true, and continuing to make it would blind the engine-wide backstop exactly when it's
+      // needed most: if `killTree` fails to make the pid read dead (a stuck kill, a zombie, a
+      // false-positive liveness probe), heartbeats would keep advancing the watchdog tuple
+      // forever AND the exit-loss detector would never fire either (the pid still reads alive) —
+      // converting a BOUNDED failure (pre-round-5: clearing the interval at least let the
+      // engine-wide watchdog notice and exit nonzero) into an UNBOUNDED one (`await exitPromise`
+      // hangs forever with nothing left to notice). Two mechanisms sharing one timer, opposite
+      // dispositions once a timeout has been decided.
       const hb = setInterval(() => {
         const elapsedSec = (this.now().getTime() - startedMs) / 1000;
+        // Latch the crossing FIRST — the heartbeat gate right below reads `timedOut` AFTER this,
+        // so the SAME tick that decides to kill the session already stops vouching for it (never
+        // one more heartbeat "for the road" at the exact moment we've given up on it).
         if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
           timedOut = true;
-          clearInterval(hb);
           void this.killTree(session);
+          return; // also skips the exit-loss check this SAME tick — see the block comment above
+        }
+        if (!timedOut) {
+          heartbeatGate?.tick("role-session-heartbeat", { name, roleId: opts.roleId, elapsedSec: Math.round(elapsedSec) });
+        }
+        if (!exitNotified && exitLossDetector.tick()) {
+          clearInterval(hb);
+          try {
+            this.deps.state?.appendEvent("role-session-exit-lost", {
+              name,
+              roleId: opts.roleId,
+              pid: session.pid ?? null,
+              elapsedSec: Math.round(elapsedSec),
+              // #395 gate② follow-up: same event kind either way (PM ruling: no second kind) —
+              // this field is what lets a reader tell "exit lost after OUR OWN timeout kill"
+              // (timedOut: true) apart from "exit lost with no timeout in play at all".
+              timedOut,
+            });
+          } catch {
+            /* best-effort — the synthetic resolution below is still the operative signal */
+          }
+          void this.killTree(session); // best-effort: the child may somehow still be alive
+          resolveExit(null);
         }
       }, this.hbMs);
 

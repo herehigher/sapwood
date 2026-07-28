@@ -16,6 +16,7 @@
 // than needing its own cancellation machinery.
 import { type TickDeps, type TickResult, tick } from "./conductor.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
+import { startProgressWatchdog } from "./watchdog.js";
 
 /** How the loop decides to stop ticking. Default ("forever") is the normal daemon mode — only a
  *  signal stops it. "once": run exactly one tick then stop (scripting / cron / a manual poke).
@@ -75,6 +76,19 @@ export interface DriverDeps extends TickDeps {
    *  touching the actual process signal handlers (and so multiple driver instances in one test
    *  process don't fight over them). */
   registerSignals?: (requestStop: () => void) => () => void;
+  /** #395: the liveness watchdog's exit hook — fired (after the durable `engine-stalled` event
+   *  is appended) once `state.maxEventId()` has gone unchanged for a full
+   *  tickIntervalSec * cfg.liveness.watchdogTickMultiplier window (watchdog.ts's
+   *  startProgressWatchdog — see its own doc for why this is progress-based, not a race against
+   *  any single tick() call). Default: `process.exit`, which never returns. The watchdog runs
+   *  as an INDEPENDENT background timer for this call's whole lifetime (started here, stopped
+   *  in this function's own `finally`) — it is never awaited or raced against anything runDriver
+   *  itself does, so it fires on schedule even while runDriver sits blocked on a single stuck
+   *  tick() call. Tests inject a fake exit hook so a deliberately-quiet State doesn't kill the
+   *  test runner; runDriver's own returned promise is NOT expected to resolve in that scenario
+   *  (a real stall means runDriver genuinely never returns — that's the whole point of the
+   *  nonzero exit being the operative signal, not a cooperative unwind). */
+  watchdogExit?: (code: number) => void;
 }
 
 export type StopReason = "signal" | "once" | "idle" | "stop-condition";
@@ -182,6 +196,19 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
   const unregister = (deps.registerSignals ?? defaultRegisterSignals)(() => {
     signalled = true;
     wakeFromSleep?.();
+  });
+  // #395: the liveness watchdog — an INDEPENDENT background timer for this call's whole
+  // lifetime, covering every tick (not raced against any single one — see watchdog.ts's own
+  // doc for why). Started before the loop below ever runs, stopped in this function's `finally`
+  // alongside `unregister()`.
+  const watchdog = startProgressWatchdog({
+    windowMs: deps.tickIntervalSec * 1000 * deps.cfg.liveness.watchdogTickMultiplier,
+    state: deps.state,
+    exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),
+    eventPayload: { tickIntervalSec: deps.tickIntervalSec, watchdogTickMultiplier: deps.cfg.liveness.watchdogTickMultiplier },
+    // #395 item 2: deps.state is the real State here — every enrichment read is a genuine table
+    // read, never a fake.
+    enrich: deps.state,
   });
   /** The inter-tick wait: resolves after `ms` OR immediately on a stop signal, whichever is
    *  first. With the default timer the signal path also clears the timeout (no stray timer
@@ -363,5 +390,6 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
     }
   } finally {
     unregister();
+    watchdog.stop();
   }
 }

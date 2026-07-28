@@ -42,6 +42,8 @@ import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "..
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import { sanitizeUpstreamError } from "../proxy/tools.js";
 import type { CategorizedTokenUsage, ModelUsageEntry, State } from "../state/state.js";
+import { createHeartbeatGate, type HeartbeatGate } from "../util/heartbeat.js";
+import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 
 /** A durable resume intent exists, but the engine restarted before spawn confirmation made
  *  the outcome knowable. Retrying could create a second Claude process in the same worktree. */
@@ -1207,14 +1209,20 @@ export interface WorkerDeps {
   guardHookPath?: string;
   heartbeatMs?: number; // default 30_000
   now?: () => Date;
+  /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
+   *  race (util/spawn-confirm.ts's awaitSpawnConfirmation) without depending on real OS
+   *  process-spawn timing. Default: a real, cancelable `setTimeout`. */
+  sleep?: (ms: number) => Promise<void>;
   /** #244 (Codex sol-high PR #260 review, P2): the narrow State surface WorkerSupervisor needs
-   *  ONLY to record a durable `proxy-mint-failed` event when a `dispatch()` caller's `proxy.mint`
-   *  throws — kept as a `Pick` (not the whole State class), same convention as every other
-   *  narrow-state-dependency field in this codebase (e.g. peripheral.ts's RetriedSession.state).
-   *  Optional and additive: omitted -> mint-failure observability degrades to the existing
-   *  stderr log line only (today's #244 behavior, unchanged) — never a hard requirement for
-   *  ordinary dispatch, which never even supplies a `proxy` opt. */
-  state?: Pick<State, "appendEvent">;
+   *  to record a durable `proxy-mint-failed` event when a `dispatch()` caller's `proxy.mint`
+   *  throws, and (#395 gate② round 2/3) `heartbeatTick`'s own progress heartbeat (util/
+   *  heartbeat.ts's createHeartbeatGate — `maxEventId` is the gate's "don't speak over other
+   *  progress" check) — kept as a `Pick` (not the whole State class), same convention as every
+   *  other narrow-state-dependency field in this codebase (e.g. peripheral.ts's
+   *  RetriedSession.state). Optional and additive: omitted -> both degrade to zero behavior
+   *  change (mint-failure observability falls back to the existing stderr log line; the
+   *  heartbeat simply never fires) — never a hard requirement for ordinary dispatch. */
+  state?: Pick<State, "appendEvent" | "maxEventId">;
 }
 
 /** #244: an optional, per-session revocable forge MCP proxy handle for a WORKER LEG (the fix-loop
@@ -1364,6 +1372,12 @@ export class WorkerSupervisor implements Supervisor {
   // A missing/malformed configured file throws HERE, at startup, before any dispatch.
   private readonly pricing: PricingTable;
   private readonly lanes = new Map<string, Lane>();
+  // #395 (gate② round 3): one liveness-gated heartbeat per live lane, keyed by lane name —
+  // persisted across setInterval ticks (util/heartbeat.ts's createHeartbeatGate needs its own
+  // "id seen at the last check" cursor to remember). Created lazily in heartbeatTick, removed in
+  // onExit (the one place a lane truly terminates) — a spawn-failure lane never gets an entry at
+  // all, since `lane.hb`/heartbeatTick are only ever set up after a confirmed spawn.
+  private readonly heartbeatGates = new Map<string, HeartbeatGate>();
   // Detached lanes (persisted running.json, no in-memory handle — engine restarted while the
   // worker kept running) already asked to hand off. Keeps requestHandoff idempotent-per-tick
   // for lanes we can only reach by persisted pid (Codex PR #41 P1). Also consulted by
@@ -1610,14 +1624,31 @@ export class WorkerSupervisor implements Supervisor {
     // spawn() reports a bad CLAUDE_BIN / missing `claude` via an async `error` event, not a
     // throw — AWAIT the spawn outcome before reporting success. On failure clean up + reject
     // so the conductor's claim-rollback runs and no bogus running marker is left (Codex R1 P2).
-    let spawnErr: unknown;
-    await new Promise<void>((resolve) => {
-      child.once("spawn", () => resolve());
-      child.once("error", (e) => {
-        spawnErr = e;
-        resolve();
-      });
-    });
+    // #395: bounded — Node gives this confirmation no timeout of its own, and the live incident
+    // was exactly this class of await never resolving (a host sleep lost a spawn/exit
+    // notification). A timeout folds into `spawnErr` and reuses the SAME cleanup/throw below a
+    // genuine spawn `error` already takes — no new failure path.
+    const spawnConfirm = await awaitSpawnConfirmation(
+      (onSpawn, onError) => {
+        child.once("spawn", onSpawn);
+        child.once("error", onError);
+      },
+      this.deps.cfg.liveness.spawnConfirmTimeoutMs,
+      this.deps.sleep,
+    );
+    let spawnErr: unknown = spawnConfirm.err;
+    if (spawnConfirm.timedOut) {
+      spawnErr = new Error(
+        `spawn confirmation timed out after ${this.deps.cfg.liveness.spawnConfirmTimeoutMs}ms ` +
+          "(host sleep or a lost spawn notification) — killing the possibly-still-alive child",
+      );
+      // #395 (gate② P3): AWAIT the kill (SIGTERM, a short grace window, then SIGKILL — the same
+      // killTree() ordering resume()'s own timeout branch and peripheral.ts's RoleRunner both
+      // already use) before the cleanup below rmSync's this lane's worktree — a fire-and-forget
+      // SIGKILL followed immediately by rmSync could race a still-alive process's own in-flight
+      // writes to that same directory.
+      await this.killTree(child);
+    }
     if (spawnErr) {
       this.lanes.delete(laneName);
       try {
@@ -1640,6 +1671,19 @@ export class WorkerSupervisor implements Supervisor {
       // #244 (Codex sol-high PR #260 review round 2, P2): the per-lane GH_CONFIG_DIR scratch
       // directory is lane-scoped litter otherwise — clean it up on this path too, not just onExit.
       this.removeGhConfigDir(lane.ghConfigDir, laneName);
+      // #395: on a genuinely-lost spawn notification (spawnConfirm.timedOut), the child may have
+      // already started provisioning its OWN worktree (the `claude` CLI's `--worktree laneName`
+      // startup step, which runs entirely inside the spawned process — this engine never creates
+      // it). This is a FRESH lane's first-ever worktree, never prior WIP (unlike resume(), which
+      // reuses an existing one and must never delete it here) — safe to discard. No running.json/
+      // State row was ever written for this lane, so nothing else would ever sweep it. A no-op
+      // when nothing was created yet (the ordinary bad-binary spawn-error case, which never gets
+      // this far).
+      try {
+        rmSync(join(this.worktreeRoot, laneName), { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
       throw new Error(`worker spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     // Post-spawn error (rare) must not crash the host — route to a failed exit.
@@ -1945,23 +1989,45 @@ export class WorkerSupervisor implements Supervisor {
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
 
-    let spawnErr: unknown;
-    await new Promise<void>((resolve) => {
-      child.once("spawn", () => {
-        try {
-          this.writeJsonAtomic(runningPath, { ...runningMarker, spawn_confirmed: true, wrapper_pid: child.pid });
-          resolve();
-        } catch (e) {
-          spawnErr = e;
-          lane.reclaiming = true;
-          void this.killTree(child).finally(resolve);
-        }
-      });
-      child.once("error", (e) => {
-        spawnErr = e;
-        resolve();
-      });
-    });
+    // #395: bounded — same rationale as dispatch()'s own spawn-confirmation await (Node gives
+    // this confirmation no timeout of its own, and the live incident was exactly this class of
+    // await never resolving). The on-success write (spawn_confirmed/wrapper_pid) is preserved
+    // exactly as before: a write failure there is still routed through onError (killTree first,
+    // then reported), never silently dropped.
+    const spawnConfirm = await awaitSpawnConfirmation(
+      (onSpawn, onError, isSettled) => {
+        child.once("spawn", () => {
+          // #395 (gate② P2-2): a merely-DELAYED (not lost) real 'spawn' racing the timeout must
+          // not perform its side effect once the outer race has already settled on "timed out"
+          // — the failure path below may already have killed this child, removed `runningPath`,
+          // and thrown; writing a fresh spawn_confirmed:true/wrapper_pid marker here would
+          // resurrect exactly the marker the adoption/RESUME_UNDECIDABLE machinery trusts, now
+          // pointing at a dead pid. dispatch() and the peripheral site have no such side effect
+          // in their own `onSpawn` — this guard is resume()-specific.
+          if (isSettled()) return;
+          try {
+            this.writeJsonAtomic(runningPath, { ...runningMarker, spawn_confirmed: true, wrapper_pid: child.pid });
+            onSpawn();
+          } catch (e) {
+            lane.reclaiming = true;
+            void this.killTree(child).finally(() => onError(e));
+          }
+        });
+        child.once("error", onError);
+      },
+      this.deps.cfg.liveness.spawnConfirmTimeoutMs,
+      this.deps.sleep,
+    );
+    let spawnErr: unknown = spawnConfirm.err;
+    if (spawnConfirm.timedOut) {
+      spawnErr = new Error(
+        `spawn confirmation timed out after ${this.deps.cfg.liveness.spawnConfirmTimeoutMs}ms ` +
+          "(host sleep or a lost spawn notification) — killing the possibly-still-alive child",
+      );
+      // Best-effort: the child may actually be alive despite the lost notification.
+      lane.reclaiming = true;
+      await this.killTree(child);
+    }
     if (spawnErr) {
       this.lanes.delete(name);
       try {
@@ -2093,6 +2159,33 @@ export class WorkerSupervisor implements Supervisor {
       void this.killTree(lane.child);
       return;
     }
+    // #395 (gate② round 3, P1): this heartbeat must PROVE liveness, not just that its own timer
+    // fired — same rationale as peripheral.ts's RoleRunner heartbeat (see its own comment for
+    // the full reasoning): an unconditional append kept masking the liveness watchdog until
+    // worker.timeoutSec for a post-spawn wedge where the child itself had already died with its
+    // exit notification lost. `isAlive` probes `lane.child.pid` directly (`process.kill(pid,
+    // 0)`) — deliberately not a progress-content check, so a legitimately quiet-but-working leg
+    // keeps heart-beating. createHeartbeatGate also folds in the P2-2 spam fix (skip when
+    // something else already advanced state.maxEventId() this cadence). Optional
+    // (WorkerDeps.state, already used for proxy-mint-failed) — omitted means zero behavior
+    // change, same as before.
+    if (this.deps.state) {
+      let gate = this.heartbeatGates.get(name);
+      if (!gate) {
+        gate = createHeartbeatGate(this.deps.state, () => {
+          const pid = lane.child.pid;
+          if (pid == null) return false;
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        this.heartbeatGates.set(name, gate);
+      }
+      gate.tick("worker-heartbeat", { worker: name, issue: lane.issue, elapsedSec: Math.round(elapsedSec) });
+    }
     this.touchHeartbeat(name);
     this.checkSoftBudget(name, lane);
   }
@@ -2220,6 +2313,11 @@ export class WorkerSupervisor implements Supervisor {
       );
     }
     this.lanes.delete(name);
+    // #395 (gate② round 3): drop this lane's heartbeat gate along with the lane itself — onExit
+    // is the one place a lane truly terminates (this method's own doc), so this is the one
+    // place its cursor ever needs clearing; never left to grow unboundedly over a long-running
+    // engine process's lifetime.
+    this.heartbeatGates.delete(name);
   }
 
   /** The ~10 lines every terminal-transition path (onExit here, and #63's detached-lane

@@ -211,8 +211,13 @@ test("board.status.backlog is overridable and the status object remains strict",
 test("engine.tickIntervalSec (#46 loop driver): defaults to 60s, positive-int-guarded, overridable", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.engine.tickIntervalSec, 60);
-  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 30 }");
-  assert.equal(over.engine.tickIntervalSec, 30);
+  // 90s, not 30s: #395 (gate② round 3, P2) added a cross-field floor tying the liveness watchdog
+  // window (engine.tickIntervalSec x liveness.watchdogTickMultiplier) to a minimum safe against
+  // the default role/worker heartbeat cadence — see that test for the dedicated coverage. 30s
+  // combined with the default 10x multiplier would now fail THAT check; 90s clears it comfortably
+  // while still exercising this test's own concern (a plain override is accepted and applied).
+  const over = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 90 }");
+  assert.equal(over.engine.tickIntervalSec, 90);
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 0 }"), /tickIntervalSec/i);
 });
 
@@ -1474,6 +1479,56 @@ test("envFailure: probeBackoffMaxSec below probeBackoffBaseSec is rejected at lo
     "board: { owner: a, repo: r, projectNumber: 1 }\nenvFailure: { probeBackoffBaseSec: 60, probeBackoffMaxSec: 60 }",
   );
   assert.equal(flat.envFailure.probeBackoffMaxSec, 60);
+});
+
+// ── #395 (gate② round 3, P2): the liveness watchdog window's cross-field floor/ceiling ─────────
+
+test("liveness: shipped defaults produce a watchdog window that exactly clears the cross-field floor (never rejected)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.engine.tickIntervalSec, 60);
+  assert.equal(cfg.liveness.watchdogTickMultiplier, 10);
+  // 60 x 10 x 1000 = 600_000ms, exactly 20 x the 30_000ms default heartbeat cadence — the floor
+  // is inclusive (>=), so the shipped defaults must never trip their own validation.
+});
+
+test("liveness: a watchdogTickMultiplier/tickIntervalSec combo whose PRODUCT falls below the heartbeat-cadence floor is rejected at load — a healthy role session or worker leg would be killed before its first heartbeat", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 1 }\nliveness: { watchdogTickMultiplier: 10 }",
+      ),
+    /liveness-watchdog window.*below the 600000ms floor/,
+  );
+  // Below the floor even with the multiplier left at its default (10) — tickIntervalSec alone
+  // can trip it, exactly the PM-reported footgun (tickIntervalSec: 1 -> a 10s window).
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 1 }"),
+    /liveness-watchdog window/,
+  );
+  // A fractional multiplier can ALSO trip it even with the default tickIntervalSec.
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nliveness: { watchdogTickMultiplier: 0.5 }"),
+    /liveness-watchdog window/,
+  );
+});
+
+test("liveness: raising BOTH tickIntervalSec and watchdogTickMultiplier so their product clears the floor is accepted", () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 1 }\nliveness: { watchdogTickMultiplier: 601 }",
+  );
+  assert.equal(cfg.engine.tickIntervalSec, 1);
+  assert.equal(cfg.liveness.watchdogTickMultiplier, 601);
+});
+
+test("liveness: a watchdog window past Node's own setTimeout ceiling (~24.8 days) is rejected at load — Node silently clamps an over-large delay to fire almost immediately, the opposite of 'conservative'", () => {
+  // 2_147_484 x 1 x 1000 = 2_147_484_000ms, just over Node's 2_147_483_647ms 32-bit-int ceiling.
+  assert.throws(
+    () =>
+      parseConfig(
+        "board: { owner: a, repo: r, projectNumber: 1 }\nengine: { tickIntervalSec: 2147484 }\nliveness: { watchdogTickMultiplier: 1 }",
+      ),
+    /setTimeout ceiling/,
+  );
 });
 
 // ── #234: forge MCP proxy config — ships OFF, shadow-mode-first when enabled ────────────────

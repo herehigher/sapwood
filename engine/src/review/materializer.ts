@@ -44,6 +44,12 @@ import { promisify } from "node:util";
 
 const pexecFile = promisify(execFile);
 
+// #395 (gate② P3): default ceiling for the fetch/clone/checkout `git` invocations below when a
+// caller doesn't supply its own (PrivateCloneOptions.timeoutMs / MaterializeOptions.timeoutMs) —
+// same 60s default as gh.ts's own DEFAULT_GH_TIMEOUT_MS, for the same reason (a dead socket/hung
+// upstream must fail toward retry, never wedge the caller forever).
+const DEFAULT_GIT_TIMEOUT_MS = 60_000;
+
 /** Every failure this module produces is a `MaterializerError` (thrown by the clone-setup
  *  helpers) or a `{ kind: "failure" }` result (returned by `materialize`, never thrown — the
  *  caller drives one review attempt per head and maps a failure straight onto the engine's
@@ -176,10 +182,10 @@ const ALLOWED_REMOTE_SUBKEYS = new Set(["url", "fetch"]);
  *  from the private clone and fails closed on anything outside the allowlist above. Called after
  *  every fresh clone and both before and after every reuse fetch: reuse is never treated as
  *  evidence that config stayed clean between materialization attempts. */
-export async function assertLocalConfigClean(cloneDir: string): Promise<void> {
+export async function assertLocalConfigClean(cloneDir: string, timeoutMs: number = DEFAULT_GIT_TIMEOUT_MS): Promise<void> {
   let stdout: string;
   try {
-    ({ stdout } = await pexecFile("git", ["-C", cloneDir, "config", "--local", "--list"], { env: gitIsolationEnv() }));
+    ({ stdout } = await pexecFile("git", ["-C", cloneDir, "config", "--local", "--list"], { env: gitIsolationEnv(), timeout: timeoutMs }));
   } catch (err) {
     // An unreadable local config is itself a failure, not a silent pass -- a private clone this
     // module can't even introspect can't be asserted clean.
@@ -317,6 +323,12 @@ export interface PrivateCloneOptions {
   cloneDir: string;
   /** Worker worktree mount root (worker.ts's own convention) the clone is checked against. */
   worktreeRoot: string;
+  /** #395 (gate② P3): hard ceiling on the fetch/clone `git` invocations below — same rationale
+   *  as gh.ts's own bound (a dead socket/hung upstream must never wedge the caller forever).
+   *  Default: DEFAULT_GIT_TIMEOUT_MS. Production callers (review/production.ts) pass
+   *  cfg.liveness.forgeCallTimeoutMs explicitly, so the two external-process bounds share one
+   *  user-tunable knob rather than a second, parallel one for this module alone. */
+  timeoutMs?: number;
 }
 
 /** Reuses a matching engine-private bare clone when every assertion succeeds. The fast path is
@@ -330,16 +342,23 @@ export async function createPrivateClone(opts: PrivateCloneOptions): Promise<Pri
   assertOutsideWorktreeMounts(cloneDir, opts.worktreeRoot);
   if (existsSync(cloneDir)) {
     try {
-      await assertLocalConfigClean(cloneDir);
-      const probe = await pexecFile("git", ["-C", cloneDir, "rev-parse", "--is-bare-repository"], { env: gitIsolationEnv() });
+      const timeoutMs = opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
+      await assertLocalConfigClean(cloneDir, timeoutMs);
+      const probe = await pexecFile("git", ["-C", cloneDir, "rev-parse", "--is-bare-repository"], {
+        env: gitIsolationEnv(),
+        timeout: timeoutMs,
+      });
       if (probe.stdout.trim() !== "true") throw new MaterializerError(`existing private clone at "${cloneDir}" is not bare`);
-      const origin = await pexecFile("git", ["-C", cloneDir, "remote", "get-url", "origin"], { env: gitIsolationEnv() });
+      const origin = await pexecFile("git", ["-C", cloneDir, "remote", "get-url", "origin"], {
+        env: gitIsolationEnv(),
+        timeout: timeoutMs,
+      });
       if (origin.stdout.trim() !== sourceRepoDir) {
         throw new MaterializerError(`existing private clone origin does not match "${sourceRepoDir}"`);
       }
       const { args, env } = buildFetchInvocation(cloneDir);
-      await pexecFile("git", args, { env });
-      await assertLocalConfigClean(cloneDir);
+      await pexecFile("git", args, { env, timeout: timeoutMs });
+      await assertLocalConfigClean(cloneDir, timeoutMs);
       return { dir: cloneDir };
     } catch {
       // Optimization only: every doubt discards the clone and resumes at the proven fresh path.
@@ -350,12 +369,12 @@ export async function createPrivateClone(opts: PrivateCloneOptions): Promise<Pri
 
   const { args, env } = buildCloneInvocation(sourceRepoDir, cloneDir);
   try {
-    await pexecFile("git", args, { env });
+    await pexecFile("git", args, { env, timeout: opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS });
   } catch (err) {
     throw new MaterializerError(`private clone of "${opts.sourceRepoDir}" into "${cloneDir}" failed: ${(err as Error).message}`);
   }
 
-  await assertLocalConfigClean(cloneDir);
+  await assertLocalConfigClean(cloneDir, opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS);
   return { dir: cloneDir };
 }
 
@@ -401,6 +420,10 @@ export interface MaterializeOptions {
   /** Destination directory for the materialized tree. Must not already exist with content --
    *  this module never merges onto an existing tree. */
   treeDir: string;
+  /** #395 (gate② P3): hard ceiling on the checkout `git` invocation below — see
+   *  PrivateCloneOptions.timeoutMs's own doc for the full rationale. Default:
+   *  DEFAULT_GIT_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 /** #284's core operation: private-clone checkout into a plain source tree, per design #279 §3.
@@ -434,7 +457,7 @@ export async function materialize(opts: MaterializeOptions): Promise<Materialize
 
   const { args, env } = buildCheckoutInvocation(clone.dir, dir, oid);
   try {
-    await pexecFile("git", args, { env });
+    await pexecFile("git", args, { env, timeout: opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS });
   } catch (err) {
     return { kind: "failure", reason: `checkout of ${oid} failed: ${(err as Error).message}` };
   }
@@ -447,7 +470,10 @@ export async function materialize(opts: MaterializeOptions): Promise<Materialize
   // to check out here), but it uses the exact same `gitIsolationEnv`.
   let resolvedOid: string;
   try {
-    const { stdout } = await pexecFile("git", ["-C", clone.dir, "rev-parse", "--verify", `${oid}^{commit}`], { env: gitIsolationEnv() });
+    const { stdout } = await pexecFile("git", ["-C", clone.dir, "rev-parse", "--verify", `${oid}^{commit}`], {
+      env: gitIsolationEnv(),
+      timeout: opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
+    });
     resolvedOid = stdout.trim();
   } catch (err) {
     return { kind: "failure", reason: `post-checkout oid verification of ${oid} failed: ${(err as Error).message}` };

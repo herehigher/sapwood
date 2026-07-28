@@ -2586,6 +2586,15 @@ export class State {
     return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
   }
 
+  /** #395 item 2: the single latest event's id + kind (no payload — unlike latestEvent(kind)
+   *  above, this is not filtered to one kind; it's the ledger's own tail). The liveness
+   *  watchdog's stall-record enrichment reads this, alongside maxEventId(), at fire time — "what
+   *  was the last thing that happened, and what kind of thing was it" is a materially different
+   *  (and cheaper-to-eyeball) fact than the bare id the tuple sampling already compares against. */
+  lastEventKind(): { id: number; kind: string } | undefined {
+    return this.db.prepare("SELECT id, kind FROM events ORDER BY id DESC LIMIT 1").get() as { id: number; kind: string } | undefined;
+  }
+
   /** Cumulative spend_ledger sum at or after `sinceIso` — harvest's "spend vs round budget"
    *  fact. Same table/column as dailySpendUsd; a `>=` cutoff rather than a calendar-day prefix
    *  match, since a round doesn't align to a day boundary. */
@@ -2604,6 +2613,16 @@ export class State {
       .prepare(`SELECT kind, payload FROM events WHERE id > ? AND kind IN (${placeholders}) ORDER BY id`)
       .all(afterId, ...kinds) as { kind: string; payload: string }[];
     return rows.map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload) as unknown }));
+  }
+
+  /** #395 (F24 round 2): the events table's own MAX(id) — the liveness watchdog's progress
+   *  signal (watchdog.ts's startProgressWatchdog). Same cheap MAX(id) pattern as
+   *  maxSpendLedgerId below; `state.appendEvent` is the engine's one durable progress channel
+   *  (round-phase entries, dispatched, reclaim outcomes, tick-error, heartbeats, ...) — an
+   *  unchanged reading across a full watchdog window means nothing was appended, independent of
+   *  which phase is running or how long it legitimately takes. */
+  maxEventId(): number {
+    return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM events").get() as { m: number }).m;
   }
 
   /** #123: id-cursor variant of spentUsdSince (same rationale as eventsAfterId). */

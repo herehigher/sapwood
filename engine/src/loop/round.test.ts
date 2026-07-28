@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type {
   CommitInfo,
@@ -3425,5 +3426,192 @@ test("runRounds (#253): cfg.proxy.enabled: false (the default) -> no fixLegResum
     events.some(([kind]) => kind === "fix-leg-dispatch-unconfigured"),
     "the unwired-fixLegResume degrade path (#246 C1) fired, visible and actionable — never a silent retry-forever",
   );
+  state.close();
+});
+
+// ── #395 round 2 (gate② P1): the liveness watchdog is PROGRESS-based, not tick-duration-based ──
+// ── — an independent background timer for the WHOLE run, covering every round phase, never ─────
+// ── raced against any single tick() call. See watchdog.ts's own doc for why. ───────────────────
+
+test("runRounds (#395): a never-resolving forge await during the executing phase is bounded by the INDEPENDENT progress watchdog — durable engine-stalled event + the injected exit hook fire even though runRounds itself never returns", async () => {
+  const forge = new FakeForge();
+  // The exact live-incident shape: an in-flight forge/spawn await that never resolves (a host
+  // sleep losing the completion notification). getReadyIssues is called from tick()'s DISPATCH
+  // phase, reached the instant the round enters `executing` (wave 1 fires immediately, no
+  // inter-tick wait) — this wedges tick() itself, and by construction runRounds's own returned
+  // promise, which is why this test does NOT await it (see driver.test.ts's equivalent test for
+  // the full rationale — a genuine stall means it legitimately never resolves).
+  forge.getReadyIssues = () => new Promise<Issue[]>(() => {});
+  const state = new State(":memory:");
+  // Default liveness config (its watchdogTickMultiplier=10 already clears #395 gate② round 3's
+  // cross-field floor against cfg.engine.tickIntervalSec's own default — see
+  // config.test.ts's dedicated coverage) — deps.tickIntervalSec below is a SEPARATE field from
+  // cfg.engine.tickIntervalSec (only cli.ts's real wiring ties them together), so shrinking it
+  // here keeps this test's REAL watchdog timer in the low hundreds of milliseconds without
+  // touching cfg at all. Deterministic (not flaky): the OTHER side, progress on `state`, never
+  // happens at all.
+  const cfg = mkCfg();
+  const exitCalls: number[] = [];
+  let resolveExited: () => void;
+  const exited = new Promise<void>((resolve) => {
+    resolveExited = resolve;
+  });
+  const deps = baseDeps({
+    forge,
+    state,
+    cfg,
+    tickIntervalSec: 0.02, // 20ms -> watchdog windowMs = 0.02s * 1000 * 10 (default multiplier) = 200ms
+    watchdogExit: (code) => {
+      exitCalls.push(code);
+      resolveExited();
+    },
+  });
+  void runRounds(deps); // deliberately not awaited
+  await exited;
+  assert.deepEqual(exitCalls, [1], "the injected exit hook fired exactly once, with a nonzero code");
+  const stalled = state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 1, "a durable engine-stalled event was appended before the exit hook fired");
+  // #395 item 2: round.ts wires `enrich: deps.state` (the real State) — the fired event carries
+  // the richer stall-record fields on top of the caller's own eventPayload. `lastTickAt` is a
+  // real timestamp (dynamic, asserted only for shape/presence); everything else is asserted
+  // exactly, pinning that the enrichment reads the SAME round/lane state this scenario set up
+  // (round 1, phase "executing", no lanes ever dispatched — the wedge happened in DISPATCH before
+  // any lane was created).
+  const payload = stalled[0]!.payload as Record<string, unknown>;
+  assert.equal(payload.tickIntervalSec, 0.02);
+  assert.equal(payload.watchdogTickMultiplier, 10);
+  assert.equal(payload.windowMs, 200);
+  assert.equal(payload.openRoundId, 1);
+  assert.equal(payload.openRoundPhase, "executing");
+  assert.equal(payload.activeLaneCount, 0);
+  assert.equal(payload.gatedLaneCount, 0);
+  assert.equal(typeof payload.lastEventId, "number");
+  assert.equal(typeof payload.lastEventKind, "string");
+  assert.equal(typeof payload.lastTickAt, "string");
+  state.close();
+});
+
+test("runRounds (#395): a healthy fast round never trips the watchdog — a LARGE window (P2-4: window size is irrelevant to this assertion, so make it CI-safe) never even gets the chance to elapse before runRounds's own clean return stops it", async () => {
+  const { sleep } = mkSleepSpy();
+  const forge = new FakeForge();
+  const log: Array<{ phase: PeripheralPhase; marker: string | null }> = [];
+  // tickIntervalSec=60 x multiplier=10 (the shipped defaults) -> a 600s real window, never
+  // remotely close to elapsing before this fast fake round completes and runRounds's own
+  // `finally` stops the watchdog — see driver.test.ts's equivalent test for the same rationale.
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
+  const deps = baseDeps({ forge, sleep, cfg, tickIntervalSec: 60, peripherals: allPeripherals(log) });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  const result = await runRounds(deps);
+  stopSafety();
+  assert.equal(result.rounds, 1, "the fast fake round completed normally");
+  const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 0, "no engine-stalled event on the healthy path");
+  deps.state.close();
+});
+
+test("runRounds (#395): a contained tick() THROW during executing settles quickly (a plain tick-error, progress counter advances) — the watchdog is stopped cleanly, same large-window CI-safety as the healthy-path test above", async () => {
+  const forge = new FakeForge();
+  forge.getReadyIssues = async () => {
+    throw new Error("HTTP 502");
+  };
+  const cfg = mkCfg({ liveness: { watchdogTickMultiplier: 10 } });
+  const deps = baseDeps({ forge, cfg, tickIntervalSec: 60 });
+  const stopSafety = boundedStopOnPhase(deps, 5);
+  await runRounds(deps);
+  stopSafety();
+  const stalled = deps.state.eventsAfterId(0, ["engine-stalled"]);
+  assert.equal(stalled.length, 0, "a thrown (settled) tick is a tick-error, never a stall");
+  const errored = deps.state.eventsAfterId(0, ["tick-error"]);
+  assert.ok(
+    errored.some((e) => String((e.payload as { error: string }).error).includes("HTTP 502")),
+    "the throw was still recorded as an ordinary tick-error, exactly as before #395",
+  );
+  deps.state.close();
+});
+
+// ── #395 gate② round 4 P1 (SHIPPING BLOCKER): a WAIT-gated lane (PR on pending CI) ticks ───────
+// ── healthily every tickIntervalSec (last_tick_at advances every tick) but the EVENT LOG goes ──
+// ── quiet — drive-queued is deduped (appended once, never per tick) — so an event-log-only ─────
+// ── watchdog self-kills a perfectly healthy, actively-draining engine. ──────────────────────────
+
+test("runRounds (#395 gate② round 4): a WAIT-gated lane (PR on pending CI) never trips the liveness watchdog — TODAY that holds because drive-queued fires every tick (a fact issue #383 is about to remove); the tuple sampling is what keeps this assertion true once it does", async () => {
+  const forge = new FakeForge();
+  forge.ready = [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  const sup = new FakeSupervisor();
+  // The dispatched lane reports DONE with a PR on every probe — reclaim moves it straight to
+  // `driving` on the first tick that observes it.
+  sup.probes["lane-1-1"] = { done: true, failed: false, handoff: false, hbAge: 5, wrapperAlive: 1, hasPr: true, prNumber: 1 };
+  // Every DRIVE pass reports "queued" (driveDecision's WAIT case) — a PR sitting on pending CI —
+  // until `stillWaiting` flips below, after the observation window: a plain ScriptedMergeGate
+  // (a fixed outcome list) has no clean way to let the round close afterward, and a permanently
+  // WAIT-ing lane leaves runRounds() with no cooperative way to stop (runExecuting's own drain
+  // loop only exits on activeWorkers()===0, never checks `signalled`) — including its liveness
+  // watchdog, an independent real-timer chain stopped only in runRounds's own `finally`. So this
+  // gate switches to "merged" once the observation window closes, and `deps.stop.afterIssuesMerged`
+  // below lets the OUTER round loop wind down and return cleanly once it does.
+  //
+  // WHY THIS TEST IS NOT VACUOUS, EVEN THOUGH IT PASSES TODAY FOR A REASON UNRELATED TO THE FIX
+  // UNDER TEST: conductor.ts:2711's drive-queued append has NO dedup guard today — `case
+  // "queued": state.appendEvent("drive-queued", ...)` runs unconditionally on EVERY DRIVE pass
+  // that sees this outcome (confirmed by instrumenting state.appendEvent while running this exact
+  // fixture: ~30 drive-queued rows landed in 600ms of ticking, one per tick; conductor.ts:2640's
+  // review-silence-escalated has the same shape). So today, the event log alone already stays
+  // warm every tick for a WAIT-gated lane, and the assertion below would hold even against the
+  // OLD maxEventId()-only watchdog. issue #383 ("transition-dedupe drive-queued — 75% of the
+  // dogfood event log was steady-state spam") is open in this same milestone and names this exact
+  // event: once it lands, drive-queued stops firing per tick, the event log genuinely goes quiet
+  // for this scenario, and the self-kill this test guards against becomes real UNLESS something
+  // else keeps the tuple moving. That something is `state.lastTickAt()` — written every tick
+  // regardless of what it did — which is what the tuple-sampling watchdog.ts fix (this round)
+  // actually adds. This test is the regression guard for whoever implements #383: it stays green
+  // after that change only because of the tuple fix, not because of anything #383 preserves.
+  // (Some conductor.ts appendEvent sites are per-tick, like the two above; others are genuinely
+  // transition-anchored, like the hold-visibility pair pr-held/pr-released via
+  // state.lastHoldEvent. Which kind any given site is, is an implementation detail that can — and
+  // per #383, will — change; the watchdog must not depend on which, which is exactly why it
+  // samples last_tick_at too.)
+  let stillWaiting = true;
+  const gate: MergeGate = {
+    driveOne: async (pr: number) =>
+      stillWaiting ? { kind: "queued", pr, reason: "ci-pending" } : { kind: "merged", pr, headOid: "deadbeef" },
+  };
+  const state = new State(":memory:");
+  const cfg = mkCfg({ lanes: { max: 1, roundDispatchCap: 1 } });
+  const exitCalls: number[] = [];
+  const deps = baseDeps({
+    forge,
+    state,
+    supervisor: sup,
+    mergeGate: gate,
+    cfg,
+    // Fast real ticks so the drain loop cycles (and the watchdog's own sampling) quickly in
+    // wall-clock time. windowMs = 0.02 * 1000 * 10 (default multiplier) = 200ms — several
+    // multiples of a real tick's own (near-instant) duration, so many genuinely-healthy,
+    // zero-new-event ticks happen inside one window, exactly the scenario under test.
+    tickIntervalSec: 0.02,
+    watchdogExit: (code) => exitCalls.push(code),
+    stop: { afterIssuesMerged: 1 },
+  });
+  const runPromise = runRounds(deps);
+  // Comfortably past where the watchdog's own window (200ms) would have fired under the OLD
+  // (event-log-only) design — proves the engine survived a full window (and then some) of a
+  // healthy, event-quiet drain.
+  await sleep(600);
+  const stalled = state.eventsAfterId(0, ["engine-stalled"]);
+  // Sanity: confirm the scenario actually reached the steady WAIT state this test is about,
+  // not some other early exit.
+  const queued = state.eventsAfterId(0, ["drive-queued"]);
+  assert.deepEqual(
+    exitCalls,
+    [],
+    "the liveness watchdog killed a HEALTHY, actively-ticking engine (event log quiet, but last_tick_at was advancing every tick) — the P1 shipping blocker",
+  );
+  assert.equal(stalled.length, 0, "no engine-stalled event should ever be appended for this healthy-drain scenario");
+  assert.ok(queued.length >= 1, "sanity: the DRIVE loop actually reached the queued/WAIT outcome under test");
+  // Let the PR "merge" so the round (and runRounds itself, via afterIssuesMerged) winds down and
+  // returns cleanly — proper teardown (its watchdog stopped in runRounds's own `finally`) instead
+  // of leaving background activity running past this test.
+  stillWaiting = false;
+  await runPromise;
   state.close();
 });

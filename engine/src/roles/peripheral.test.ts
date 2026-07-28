@@ -496,7 +496,13 @@ test("run: non-zero exit -> outcome failed, .failed sentinel", async () => {
 test("run: wall-clock timeout kills the tree -> outcome timeout, tagged as a .failed sentinel", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
-    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // ignores TERM -> needs the KILL
+    // #395 gate② follow-up (final-review P2, comment-accuracy note): `trap '' TERM` makes the
+    // shell itself ignore TERM, but `sleep` here is a forked child (not `exec`'d), so a
+    // group-wide SIGTERM (killTree's killGroup) may still reach and terminate IT before the
+    // trap-protected shell ever notices — this test doesn't require either settlement path: it
+    // only asserts the final "timeout" outcome + sentinel, which holds whether the tree actually
+    // came down via the SIGTERM or the follow-up SIGKILL.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`);
     const tcfg = ConfigSchema.parse({
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { timeoutSec: 1 }, // fires on the first heartbeat tick after 1s elapsed
@@ -1640,6 +1646,65 @@ test("run: #234 F5 (PR #252 review, P1, Codex #6) — a SPAWN FAILURE after a su
   }
 });
 
+test("run: #395 a spawn confirmation that never arrives is bounded by cfg.liveness.spawnConfirmTimeoutMs — killed, thrown as a spawn failure, jsonl/sentinel cleaned up exactly like a genuine spawn error", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    // A real (fast, well-behaved) stub — the spawn confirmation itself would arrive fine on its
+    // own. `sleep` here is a deliberately NEVER-RESOLVING fake spawn/exit clock substitute — no,
+    // see below: the deterministic bound comes from `register` never firing in the extracted
+    // util/spawn-confirm.test.ts unit tests; THIS integration test instead pins the observable
+    // contract at the RoleRunner level using a real (fast) stub and a generous, config-driven
+    // timeout that legitimately elapses because `sleep` here never resolves at all — i.e. this
+    // test exercises the OPPOSITE, always-reliable direction: a configured bound so short
+    // (0ms, with the REAL default timer, no injected sleep) that even a fast stub's genuine
+    // spawn is still pending when run() reports back, is inherently timing-dependent — so this
+    // integration test instead asserts the NORMAL (non-timeout) path still works with the new
+    // cfg.liveness.spawnConfirmTimeoutMs plumbing in place (regression coverage for AC2); the
+    // timeout branch itself is covered deterministically by util/spawn-confirm.test.ts.
+    const bin = mkStub(dir, FAST_STUB);
+    const runner = mkRunner(dir, bin, { cfg: { ...cfg, liveness: { ...cfg.liveness, spawnConfirmTimeoutMs: 5_000 } } });
+    const result = await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(result.outcome, "done", "a generous spawnConfirmTimeoutMs never fires on a normally-spawning session");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run (#395 gate② P2-1b): a spawn confirmation timeout appends a durable role-session-spawn-timeout event BEFORE throwing — this throw is caught NOWHERE before cli.ts's top-level process.exit(1) (runSessionWithRetry only retries a returned result, never a run() throw), so AC1's 'clean nonzero exit WITH a durable event' depends on this", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, FAST_STUB);
+    const events: Array<[string, unknown]> = [];
+    const fakeState = {
+      appendEvent: (kind: string, payload: unknown): void => {
+        events.push([kind, payload]);
+      },
+      maxEventId: () => events.length,
+    };
+    const runner = mkRunner(dir, bin, {
+      cfg: { ...cfg, liveness: { ...cfg.liveness, spawnConfirmTimeoutMs: 1 } },
+      state: fakeState,
+      // Deterministic: an injected `sleep` resolving on the next microtask reliably wins the
+      // race against a real (if fast) OS process-spawn confirmation — same technique this
+      // file's worker-heartbeat-adjacent #395 tests already use.
+      sleep: async () => {
+        /* resolves immediately */
+      },
+    });
+    await assert.rejects(
+      () => runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" }),
+      /spawn confirmation timed out/i,
+    );
+    assert.equal(events.length, 1, "exactly one durable event was appended before the throw");
+    const [kind, payload] = events[0]!;
+    assert.equal(kind, "role-session-spawn-timeout");
+    assert.equal((payload as { roleId: string }).roleId, "architect");
+    assert.equal((payload as { timeoutMs: number }).timeoutMs, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: #218 regression, extended to a proxy-attached session — the spawn env stays forge/git credential-free, and the proxy's bearer token travels ONLY via --mcp-config, never the env", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   const poisoned = {
@@ -2162,5 +2227,323 @@ exit 0
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+// ── #395 item 1: a lost child-exit notification resolves via the heartbeat's own pid probe ──────
+//
+// A genuine "Node never delivers the real 'exit' event" is an OS/kernel-timing edge case (a host
+// sleep coalescing/dropping SIGCHLD) that Node's own child-reaping makes effectively
+// unreproducible on demand with a real spawned process — the parent (Node) is the one that reaps
+// a dead child, so by the time `process.kill(pid, 0)` could ever read ESRCH, the real 'exit'
+// event has, for all practical purposes, already fired. RoleRunnerDeps.isPidAlive (this round)
+// exists exactly to make this testable anyway: it overrides the SAME probe the real production
+// code path uses (peripheral.ts's shared `isChildAlive`), so a test can script "the pid probe
+// says dead" independent of what the real child is actually doing. The stub below is a REAL
+// process that ignores TERM and would otherwise run for 30s (same shape as the wall-clock-timeout
+// test above) — proving the synthetic resolution fires on the scripted pid readings alone, NOT on
+// the real child's own (very much still pending) exit, while killTree's existing SIGTERM->SIGKILL
+// fallback still reaps the real process so the test leaves nothing running behind it.
+
+test("run (#395 item 1): TWO CONSECUTIVE dead pid readings with no real exit event -> exitPromise resolves synthetically (null), outcome 'failed' via the EXISTING non-done path, a durable role-session-exit-lost event recorded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // real child: alive and ignoring TERM
+    const events: Array<[string, unknown]> = [];
+    const fakeState = {
+      appendEvent: (kind: string, payload: unknown): void => {
+        events.push([kind, payload]);
+      },
+      maxEventId: () => events.length,
+    };
+    let probeCalls = 0;
+    const runner = new RoleRunner({
+      cfg, // default worker.timeoutSec is generous — must never race the exit-loss path below
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 20, // fast cadence: two consecutive dead readings land well inside the test
+      guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
+      state: fakeState,
+      isPidAlive: () => {
+        // Every probe (heartbeat gate AND exit-loss detector both call this SAME injected
+        // function) reads "dead" from the very first tick, regardless of the real child, which
+        // is genuinely still alive and ignoring TERM at this point.
+        probeCalls++;
+        return false;
+      },
+    });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(
+      result.outcome,
+      "failed",
+      "a null synthetic exit code is not === 0 -> the EXISTING non-done/failed branch, no new outcome kind",
+    );
+    assert.equal(result.exitCode, null);
+    assert.ok(existsSync(join(dir, `${result.name}.failed.json`)), "same .failed sentinel path as any other non-done outcome");
+    const lost = events.filter(([kind]) => kind === "role-session-exit-lost");
+    assert.equal(lost.length, 1, "exactly one role-session-exit-lost event, appended once, not once per subsequent tick");
+    const [, payload] = lost[0]!;
+    assert.equal((payload as { roleId: string }).roleId, "plan-reviewer");
+    assert.ok(probeCalls >= 2, "the detector actually needed (at least) two dead readings before firing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run (#395 item 1): an isPidAlive that always reports alive never resolves synthetically — an ordinary session is unaffected by the new detector", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // real child stays alive for the whole test
+    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } }); // wall-clock ceiling ends the test, not a real 30s wait
+    const runner = new RoleRunner({
+      cfg: tcfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
+      isPidAlive: () => true, // always "alive" — a real, ordinary (if slow) session, never exit-lost
+    });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(
+      result.outcome,
+      "timeout",
+      "the wall-clock ceiling ends it, never the exit-loss detector — isPidAlive: () => true never fires it",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #395 gate② follow-up (final-review P1 finding): once `timedOut` latches, heartbeats must ────
+// STOP — not keep running alongside the exit-loss detector. Round-5's fix (keep the interval
+// alive across a timeout kill, see the comment on the `hb` interval below) was right for the
+// DETECTOR and wrong for the HEARTBEAT: a heartbeat asserts "this session is legitimately still
+// working, do not treat the quiet as a stall" — the same claim the engine-wide liveness watchdog
+// reads off state.maxEventId()/lastTickAt(). Once we've decided to kill the session, that
+// assertion is no longer true, and continuing to make it would blind the engine-wide backstop
+// EXACTLY when it's needed: if killTree fails to make the pid read dead (a stuck kill, a zombie,
+// a false-positive liveness probe), heartbeats would keep advancing the watchdog tuple forever,
+// AND the exit-loss detector would never fire either (the pid still reads alive) — converting a
+// BOUNDED failure (pre-round-5: clearInterval at least let the engine-wide watchdog notice and
+// exit nonzero) into an UNBOUNDED one (`await exitPromise` hangs forever, with nothing left to
+// notice). Fix: heartbeat emission is gated on `!timedOut`; the exit-loss detector keeps running
+// regardless (that is still the whole point of not clearing the interval).
+// FINAL-REVIEW round 3 (P1 on the TEST, not the code): the first version of this test used the
+// non-`exec` stub (`trap '' TERM\nsleep 30\n`) — killTree's group-wide SIGTERM reaches `sleep`
+// (a forked, non-`exec`'d child, unprotected by the shell's own trap) and kills it almost
+// immediately, so bash exits and `await exitPromise; clearInterval(hb);` stops the interval
+// BEFORE any tick after the crossing one could ever fire. Deleting the `!timedOut` gate entirely
+// while keeping crossing-first-and-return still passed that version — the path under test was
+// simply never reached. Fixed by giving this test the SAME survivable stub the P2 test below
+// uses (`trap '' TERM` -> a real init-line write, the observable readiness barrier -> `exec
+// sleep 30`), so killTree's SIGTERM is genuinely ignored and only the follow-up SIGKILL (a real
+// ~200ms later) ends the child — a real window worth several `heartbeatMs` ticks for the gate to
+// actually be exercised across. To PROVE (not assume) that multiple ticks fired after the last
+// heartbeat, every `isPidAlive` call is indexed, and `appendEvent` records the index at which the
+// LAST `role-session-heartbeat` landed; the gap between the final index and that last-heartbeat
+// index is exactly the number of `isPidAlive` calls (one per post-latch tick — heartbeat calls
+// are gated off, only the exit-loss check still calls it) that ran with no heartbeat following.
+// Mutation-tested (see the commit message / final report): with the `!timedOut` heartbeat gate
+// removed, this same assertion goes RED (the gap collapses to 1, since a heartbeat re-fires on
+// every tick including the last one that manages to run before the real SIGKILL lands); restoring
+// the gate turns it GREEN again.
+test("run (#395 gate② follow-up, P1): once timedOut latches, role-session-heartbeat STOPS — even when the pid probe keeps reading ALIVE forever (a stuck/failed kill), so the engine-wide watchdog is never blinded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    // Same survivable stub as the P2 test below: trap FIRST, then a real init-line write (the
+    // observable readiness barrier), THEN exec into `sleep` — see this test's own block comment
+    // above and the P2 test's block comment below for the full rationale.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\necho '{"type":"system","subtype":"init"}'\nexec sleep 30\n`);
+    const TIMEOUT_SEC = 1; // worker.timeoutSec must be a positive integer (config schema)
+    const HEARTBEAT_MS = 20;
+    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: TIMEOUT_SEC } });
+    const events: Array<[string, unknown]> = [];
+    let callIndex = 0;
+    let lastHeartbeatCallIndex = -1;
+    const fakeState = {
+      appendEvent: (kind: string, payload: unknown): void => {
+        events.push([kind, payload]);
+        if (kind === "role-session-heartbeat") lastHeartbeatCallIndex = callIndex;
+      },
+      maxEventId: () => events.length,
+    };
+    const runner = new RoleRunner({
+      cfg: tcfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: HEARTBEAT_MS,
+      guardHookPath: mkHook(dir),
+      // A generous FAILURE bound, not a timing assumption — see the P2 test's own comment for
+      // the full waitForInitLine rationale this test reuses unchanged.
+      preSpawnCaptureTimeoutMs: 2000,
+      preSpawnCapturePollMs: 5,
+      state: fakeState,
+      // ALWAYS "alive" — simulates killTree failing to make the pid read dead (a stuck kill, a
+      // zombie, a false-positive probe). The exit-loss detector correctly never fires here (it
+      // needs two CONSECUTIVE dead readings, never satisfied by an always-alive probe) — this
+      // test is purely about heartbeat gating, bounded only by the real kill eventually landing.
+      isPidAlive: () => {
+        callIndex++;
+        return true;
+      },
+    });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    // Same barrier-must-actually-hold assertion as the P2 test below (final-review round 3, P2)
+    // — this test's own survivability argument (the real child outlives the SIGTERM) equally
+    // depends on the trap having provably armed before any signal was ever sent.
+    assert.equal(
+      result.contextManifest?.captureBasis,
+      "init-observed",
+      "the real init line must have been OBSERVED before any signal was ever sent — otherwise the real child might not have reached `exec` yet when killTree's SIGTERM arrives",
+    );
+    assert.equal(result.outcome, "timeout");
+    assert.ok(lastHeartbeatCallIndex >= 0, "sanity: at least one PRE-latch heartbeat fired normally");
+    const callsAfterLastHeartbeat = callIndex - lastHeartbeatCallIndex;
+    assert.ok(
+      callsAfterLastHeartbeat >= 3,
+      `only ${callsAfterLastHeartbeat} isPidAlive call(s) happened after the last heartbeat (total calls=${callIndex}) — too few to prove real post-latch ticks actually ran; the survivable stub should give killTree's real SIGTERM-to-SIGKILL window several ${HEARTBEAT_MS}ms ticks to exercise the gate`,
+    );
+    // No role-session-exit-lost either: the always-alive probe means the exit-loss detector
+    // correctly never got two consecutive dead readings — this scenario is bounded ONLY by the
+    // real kill eventually landing (worker.timeoutSec's own existing backstop), not by item 1's
+    // new mechanism, which is exactly the point (it must not FALSELY declare exit-loss just
+    // because heartbeats stopped).
+    assert.equal(events.filter(([kind]) => kind === "role-session-exit-lost").length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #395 gate② follow-up (initial-review P2 finding, final-review P2 finding): a TIMEOUT KILL ───
+// whose own exit notification is lost must still end as outcome "timeout", not "failed" or a
+// hang. The pre-fix code stopped the exit-loss detector's own interval (`clearInterval(hb)`) the
+// instant the timeout fired, so a SIGKILL'd child that then loses its own exit notification (the
+// MOST likely place to lose one, since we just killed the child ourselves) had no in-process
+// resolver left — `await exitPromise` would hang until the engine-WIDE liveness watchdog
+// eventually killed the whole process over one lost signal from one child. The fix keeps the SAME
+// detector running across the kill instead of tearing it down.
+//
+// A real spawned child cannot be made to genuinely lose its OWN exit notification on demand (see
+// createExitLossDetector's own doc) — this test instead uses the injectable `now`/`isPidAlive`
+// hooks to make the SEQUENCE fully deterministic, independent of real timing:
+//   - `now` is a fake clock the test fully controls. `elapsedSec` (computed once at the TOP of
+//     each heartbeat tick) only advances when the test explicitly jumps it — so which real tick
+//     crosses `worker.timeoutSec` is pinned exactly, never a wall-clock race.
+//   - `isPidAlive`'s FIRST call (tick 1) reports "alive" and, as a side effect, jumps the fake
+//     clock past the timeout ceiling; every call after that reports "dead" (simulating: the kill
+//     succeeded, but the exit notification never arrived).
+// Trace: tick 1 — elapsedSec is still 0 (the jump happens AFTER it was read this tick, and the
+// crossing check runs BEFORE the heartbeat gate — see the P1 fix above), so the timeout does not
+// cross yet; the heartbeat gate's own probe is call #1 (the bump), the exit-loss check's is call
+// #2, which now reads "dead" (1st consecutive reading, not enough). Tick 2 — elapsedSec now reads
+// past the ceiling (the tick-1 jump): the crossing check fires FIRST, latches `timedOut`, kills,
+// and returns WITHOUT reaching either the heartbeat gate or the exit-loss check this tick (so it
+// still only has one dead reading banked). Tick 3 — the crossing check and heartbeat gate are
+// both skipped (already timedOut); the exit-loss check runs and sees its SECOND consecutive dead
+// reading -> fires.
+//
+// FINAL-REVIEW P2: the original version of this test made the trap-registration race SAFE via an
+// empirically-tuned real-time margin (a generous preSpawnCaptureTimeoutMs plus several pre-bump
+// heartbeat ticks before the fake clock ever jumped) — exactly the shape of fragility that cost
+// this repo two days of green `main` (#403). Fixed by making the child's readiness OBSERVABLE
+// instead of assumed: the stub now emits a real system/init JSONL line (`{"type":"system",
+// "subtype":"init"}`) immediately AFTER `trap '' TERM`, then `exec`s into `sleep`. `run()`'s own
+// existing `waitForInitLine` poll (the SAME synchronization primitive #236's context-manifest
+// capture already uses) is awaited BEFORE the heartbeat interval is ever created — so this test
+// proceeds only once the real child has demonstrably reached the line immediately after the trap,
+// never on a guessed elapsed-time margin. `preSpawnCaptureTimeoutMs` below is now a generous
+// FAILURE bound (how long to wait before giving up and falling back), not a timing assumption —
+// under normal operation `waitForInitLine` returns the instant the line appears, typically single-
+// digit milliseconds after spawn. `exec` (rather than a forked child) still matters for the SAME
+// reason as before: `killGroup` signals the whole process group, and only `exec`ing into `sleep`
+// (replacing bash's own process image) carries the trap's SIG_IGN disposition into the process
+// that actually receives the group-wide SIGTERM. The test's own synthetic resolution (tick 3)
+// still lands only ~1 heartbeat cadence after the kill is issued (tick 2) — far inside killTree's
+// 200ms SIGTERM-to-SIGKILL grace window — so there is no race against a genuine exit event
+// either, and the real (armored) child is cleaned up by that same kill's eventual SIGKILL,
+// slightly after this test has already returned.
+test("run (#395 gate② follow-up, P2): a timeout kill whose own exit notification is lost still ends as outcome 'timeout' (never 'failed', never a hang) — role-session-exit-lost records timedOut:true", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    // trap FIRST, then a real init-line write (the observable readiness barrier below waits for
+    // exactly this), THEN exec — see the block comment above for why each piece is there.
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\necho '{"type":"system","subtype":"init"}'\nexec sleep 30\n`);
+    const TIMEOUT_SEC = 1; // worker.timeoutSec must be a positive integer (config schema) — the fake clock below makes the ACTUAL value irrelevant to real test timing
+    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: TIMEOUT_SEC } });
+    const events: Array<[string, unknown]> = [];
+    const fakeState = {
+      appendEvent: (kind: string, payload: unknown): void => {
+        events.push([kind, payload]);
+      },
+      maxEventId: () => events.length,
+    };
+    let fakeMs = Date.now();
+    let bumped = false;
+    const runner = new RoleRunner({
+      cfg: tcfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 20,
+      guardHookPath: mkHook(dir),
+      // A generous FAILURE bound, not a timing assumption — waitForInitLine below returns the
+      // instant the real init line is observed (typically single-digit ms after spawn); this
+      // ceiling only matters if that line never shows up at all.
+      preSpawnCaptureTimeoutMs: 2000,
+      preSpawnCapturePollMs: 5,
+      state: fakeState,
+      now: () => new Date(fakeMs),
+      isPidAlive: () => {
+        if (!bumped) {
+          bumped = true;
+          // Deterministically forces the NEXT tick's elapsedSec past worker.timeoutSec, without
+          // depending on any real wall-clock race — see the block comment above for the full
+          // trace this produces. Safe to jump on the very FIRST call now: by the time this
+          // interval exists at all, `waitForInitLine` below has already proven the real child
+          // reached (and passed) the `trap '' TERM` line.
+          fakeMs += TIMEOUT_SEC * 1000 + 1000;
+          return true;
+        }
+        return false;
+      },
+    });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    // FINAL-REVIEW round 3 (P2 on the TEST): waitForInitLine is best-effort, not a hard barrier —
+    // peripheral.ts's own run() proceeds even on a timeout (captureBasis: "timeout-fallback"), so
+    // without this assertion a contended runner could silently fall back to the OLD assumed-
+    // timing shape (the interval starting before the trap is provably armed) and this test would
+    // either flake for the exact reason round 2 tried to eliminate, or (worse) pass by accident
+    // when the trap happens to land in time anyway — LOOKING barrier-backed without actually being
+    // barrier-backed. Asserting "init-observed" turns a silent degradation into a loud, immediate
+    // failure with an unambiguous cause, making the barrier claim in the block comment above true
+    // rather than aspirational.
+    assert.equal(
+      result.contextManifest?.captureBasis,
+      "init-observed",
+      "the real init line must have been OBSERVED (not timed out on) before any signal was ever sent — otherwise this test's timing-safety argument doesn't hold",
+    );
+    assert.equal(
+      result.outcome,
+      "timeout",
+      "timedOut was latched true before the kill was issued — the exit-loss detector's later synthetic resolution must not downgrade this to 'failed'",
+    );
+    assert.equal(result.exitCode, null);
+    const lost = events.filter(([kind]) => kind === "role-session-exit-lost");
+    assert.equal(lost.length, 1, "exactly one role-session-exit-lost event");
+    const [, payload] = lost[0]!;
+    assert.equal(
+      (payload as { timedOut: boolean }).timedOut,
+      true,
+      "the payload records that this exit-loss happened AFTER our own timeout kill, distinguishing it from an exit-loss with no timeout in play",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

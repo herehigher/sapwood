@@ -749,6 +749,91 @@ const Engine = z
   })
   .strict();
 
+// #395 (gate② round 3, P2): cross-field validation reference constants for the watchdog window
+// (ConfigSchema's own top-level superRefine below, where engine.tickIntervalSec and
+// liveness.watchdogTickMultiplier are both in scope) — NOT independently user-configurable
+// themselves; they anchor the "the window must comfortably outlive a heartbeat cadence" rule a
+// bare per-field .positive() can't express.
+//   - DEFAULT_HEARTBEAT_CADENCE_MS: the role-session/worker-leg heartbeat interval both
+//     peripheral.ts's RoleRunner and worker.ts's WorkerSupervisor default `heartbeatMs`/`hbMs`
+//     to when a caller doesn't override it (neither is cfg-driven today). A watchdog window
+//     shorter than this would kill a healthy session before its very first heartbeat could ever
+//     prove it's still alive.
+//   - WATCHDOG_HEARTBEAT_MARGIN: how many heartbeat cadences the window must clear — 20x, chosen
+//     so it reproduces the shipped defaults exactly (engine.tickIntervalSec=60 x
+//     liveness.watchdogTickMultiplier=10 = 600_000ms = 30_000ms x 20) rather than introducing a
+//     second, independently-tunable number nobody asked for; this validation only ever bites an
+//     OVERRIDE that shrinks the window well below what the defaults already establish as safe.
+//   - NODE_MAX_TIMEOUT_MS: Node's own `setTimeout`/`execFile({timeout})` ceiling (a 32-bit signed
+//     int of milliseconds) — a configured window past this is SILENTLY CLAMPED by Node to an
+//     effectively-immediate fire, the opposite of what a large, "conservative" value is meant to
+//     do. Rejected at config-parse time rather than silently misbehaving at runtime.
+const DEFAULT_HEARTBEAT_CADENCE_MS = 30_000;
+const WATCHDOG_HEARTBEAT_MARGIN = 20;
+const NODE_MAX_TIMEOUT_MS = 2_147_483_647;
+
+// #395 (F24 dogfood incident, gate② round 2): engine liveness — bounded external awaits (every
+// `gh`/`git` call, role-session/worker-leg spawn confirmation) plus a PROGRESS-BASED liveness
+// watchdog (watchdog.ts's startProgressWatchdog). User-tunable per the config rule (never
+// hardcoded) — the live incident was a host sleeping ~49h mid-round with a role-session spawn/
+// network call in flight: the process woke alive but emitted zero events for 30+ minutes because
+// nothing bounded that await and nothing noticed. Every duration here exists to close exactly
+// that class of wedge.
+const Liveness = z
+  .object({
+    // Hard per-call ceiling on a single `gh`/`git` CLI invocation (gh.ts's
+    // `gh`/`ghText`/`ghWithTimeout` — the ONE place the engine shells out to `gh`, forge.ts's
+    // GithubForge.gh routes every forge call through it; review/materializer.ts's private-clone
+    // fetch/clone/checkout reuse this same knob rather than a second one just for git). Same
+    // rationale/shape as proxy.timeoutMs's own doc ("a hung upstream `gh` call must never wedge
+    // a session waiting ... forever"). Most callers fail toward retry — GithubForge is called
+    // either from inside tick() (an unguarded throw there is CONTAINED by driver.ts's/round.ts's
+    // own tick-error handling, retried next tick/round) or from a caller with its own local
+    // try/catch (probeForgeReachable, checkFinalMilestone, escalatePark's forge-comment
+    // fallback, ...) — classifyEnvFailure/park itself is driven exclusively by WORKER-LEG
+    // output TEXT, never by GithubForge's own exceptions, so a `gh` timeout cannot directly
+    // trigger a park episode. It CAN still reach a fatal exit indirectly, by design: peripheral
+    // stubs (e.g. align.ts's own crash-rerun-safe forge calls) call the forge directly and are
+    // deliberately NOT contained the way tick()'s own forge calls are, so a burst of timeouts
+    // there can propagate to cli.ts's top-level `process.exit(1)` — the same pre-existing
+    // fail-fast stance any other burst of forge failures on that path already has, not a new gap
+    // this default introduces. 60s (not 30s, proxy.timeoutMs's own value): several forge.ts
+    // reads are `gh api --paginate` over potentially large pages (getCommitsSince,
+    // getPRReviewData's reactions/comments, getIssueComments) — a legitimately slow-but-would-
+    // succeed call on that shape needs more headroom than a single small read. Empirically ample
+    // for this repo's own heaviest paginated read (~0.5s).
+    forgeCallTimeoutMs: z.number().int().positive().default(60_000),
+    // Hard ceiling on the wait for a freshly spawned child (a role session, peripheral.ts's
+    // RoleRunner.run, or a worker leg, worker.ts's WorkerSupervisor.dispatch/resume) to report
+    // Node's own `spawn`/`error` event. Node gives that confirmation no timeout of its own — a
+    // callback lost across a host sleep (the #395 live incident) hangs the await forever without
+    // one. On timeout the (possibly still-alive) child is best-effort killed and the attempt
+    // fails toward retry, the same way a genuine spawn error already does.
+    spawnConfirmTimeoutMs: z.number().int().positive().default(30_000),
+    // The liveness watchdog (watchdog.ts's startProgressWatchdog, armed once per engine run by
+    // BOTH the "tick" driver — driver.ts's runDriver — and the "rounds" driver — round.ts's
+    // runRounds, the production default): a generous MULTIPLE of engine.tickIntervalSec — never
+    // a fixed absolute duration, so a legitimately slow cadence is never itself a false alarm —
+    // past which NO DURABLE EVENT has been appended (state.maxEventId unchanged), regardless of
+    // which phase is running or how long it legitimately takes. Deliberately NOT keyed on tick()
+    // completion or duration: `reviewer.mode: engine-agent` awaits a full LLM review session
+    // INLINE inside tick(), bounded only by worker.timeoutSec (default 3600s, up to two
+    // attempts) — a healthy 10-20 minute review would trip any duration-based window tight
+    // enough to be useful, self-killing the engine mid-review. Progress-based sidesteps that
+    // trade entirely (see watchdog.ts's own doc for the full reasoning) — but only works because
+    // several otherwise-quiet stretches (an inline review/role session, an ordinary worker leg,
+    // round.ts's standby backoff and park-recovery waits) now emit a periodic heartbeat event
+    // specifically so they don't starve this counter; see each site's own comment. Fires a
+    // durable `engine-stalled` event (state.appendEvent) and exits the process nonzero so a
+    // supervisor can restart it — deliberately NOT an in-process self-heal/abort (PM ruling: the
+    // smallest thing that works; a stuck await's resources are reclaimed by the process exit
+    // itself, never by cancelling it in place). Conservative default (10x): with the shipped
+    // tickIntervalSec default (60s) that's a 10-minute window with no progress at all —
+    // comfortably longer than any healthy heartbeat cadence (hbMs defaults to 30s).
+    watchdogTickMultiplier: z.number().positive().default(10),
+  })
+  .strict();
+
 const Logging = z
   .object({
     path: z.string().min(1).default("data/logs/sapwood.log"),
@@ -1067,6 +1152,7 @@ const ConfigSchemaRaw = z
   .object({
     board: Board,
     engine: Engine.default({}),
+    liveness: Liveness.default({}),
     logging: Logging.default({}),
     dashboard: Dashboard.default({}),
     lanes: Lanes.default({}),
@@ -1372,6 +1458,48 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
         "acceptance criteria can at best be claim-based (no trusted CI execution evidence exists to confirm " +
         "against, design #279 §4.3); configure ci.requiredChecks to enable confirmed verdicts.",
     );
+  }
+  // #395 (gate② round 3, P2): the liveness watchdog's window (engine.tickIntervalSec x
+  // liveness.watchdogTickMultiplier, in ms) has no lower bound tying it to the heartbeat cadence
+  // that keeps a healthy long session/leg from false-tripping it — `tickIntervalSec: 1` with the
+  // default multiplier gives a 10s window, which kills a healthy role session or worker leg
+  // before its very first ~30s heartbeat has a chance to prove it's still alive. See
+  // DEFAULT_HEARTBEAT_CADENCE_MS/WATCHDOG_HEARTBEAT_MARGIN's own doc for why the floor is
+  // exactly the shipped defaults' own value, not a new number. The shipped defaults themselves
+  // always pass this (600_000ms == the floor exactly) — this only ever rejects an override that
+  // shrinks the window below what the defaults already establish as safe.
+  const watchdogWindowMs = cfg.engine.tickIntervalSec * cfg.liveness.watchdogTickMultiplier * 1000;
+  const watchdogFloorMs = DEFAULT_HEARTBEAT_CADENCE_MS * WATCHDOG_HEARTBEAT_MARGIN;
+  if (watchdogWindowMs < watchdogFloorMs) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["liveness", "watchdogTickMultiplier"],
+      message:
+        `engine.tickIntervalSec (${cfg.engine.tickIntervalSec}s) x liveness.watchdogTickMultiplier ` +
+        `(${cfg.liveness.watchdogTickMultiplier}) = a ${watchdogWindowMs}ms liveness-watchdog window, below the ` +
+        `${watchdogFloorMs}ms floor (${WATCHDOG_HEARTBEAT_MARGIN}x the ${DEFAULT_HEARTBEAT_CADENCE_MS}ms role-session/` +
+        "worker-leg heartbeat cadence) — a window this short would self-kill a healthy long-running role " +
+        "session or worker leg before its very first heartbeat could ever prove it's still alive. Raise " +
+        "engine.tickIntervalSec and/or liveness.watchdogTickMultiplier so their product clears the floor.",
+    });
+  }
+  // #395 (gate② round 3, P2): the OTHER end of the same knob — Node's setTimeout/execFile
+  // silently CLAMP a delay beyond ~24.8 days (a 32-bit signed int of ms) to an effectively-
+  // immediate fire, so an operator deliberately configuring something conservative and large
+  // would get an immediate self-kill instead — the opposite of "conservative." Reject at parse
+  // time rather than silently misbehaving at the first tick.
+  if (watchdogWindowMs > NODE_MAX_TIMEOUT_MS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["liveness", "watchdogTickMultiplier"],
+      message:
+        `engine.tickIntervalSec (${cfg.engine.tickIntervalSec}s) x liveness.watchdogTickMultiplier ` +
+        `(${cfg.liveness.watchdogTickMultiplier}) = a ${watchdogWindowMs}ms liveness-watchdog window, past ` +
+        `Node's own ${NODE_MAX_TIMEOUT_MS}ms setTimeout ceiling (~24.8 days) — Node silently CLAMPS a delay ` +
+        "beyond this to fire almost immediately, so a value meant to be conservative would instead self-kill " +
+        "the engine right away. Lower engine.tickIntervalSec and/or liveness.watchdogTickMultiplier so their " +
+        "product stays under the ceiling.",
+    });
   }
 });
 
