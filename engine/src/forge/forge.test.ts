@@ -17,6 +17,7 @@ import {
   findOptionId,
   GithubForge,
   hasVerificationPlan,
+  OPEN_ISSUES_LIMIT,
   parseIssueLabels,
   parseIssueMeta,
   parseIssueRelations,
@@ -798,6 +799,58 @@ test("listIssuesAbsentFromBoard: cross-references the board's placements with th
   };
   assert.deepEqual(await forge.listIssuesAbsentFromBoard(), [999]);
   assert.ok(!seen.flat().some((arg) => ["edit", "create", "merge", "comment"].includes(arg)), "read-only — no write verb in any gh call");
+});
+
+test("listIssuesAbsentFromBoard: fetchProject hitting its page ceiling degrades to a thrown error, never a wrong absent report (#415 review finding 1)", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  let projectPages = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "api") {
+      projectPages++;
+      // hasNextPage stays true forever — a runaway cursor, same shape fetchAllReviewThreads'
+      // own page-ceiling test uses. The real 50-page loop in fetchProject must run to
+      // completion (not a shortcut) and mark the merged result truncated.
+      return JSON.stringify({
+        data: {
+          user: {
+            projectV2: {
+              id: "PVT_x",
+              field: { id: "F1", options: [] },
+              items: { pageInfo: { hasNextPage: true, endCursor: `CUR${projectPages}` }, nodes: [] },
+            },
+          },
+        },
+      });
+    }
+    return JSON.stringify([]); // listOpenIssueNumbers: no open issues, irrelevant to this case
+  };
+  await assert.rejects(() => forge.listIssuesAbsentFromBoard(), /page ceiling/);
+  assert.equal(projectPages, 50, "the real 50-page ceiling ran to completion, not a shortcut");
+});
+
+test("listIssuesAbsentFromBoard: an open-issue read at the exact --limit ceiling degrades to a thrown error, never a wrong absent report (#415 review finding 2)", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "api") {
+      return JSON.stringify({
+        data: {
+          user: {
+            projectV2: {
+              id: "PVT_x",
+              field: { id: "F1", options: [] },
+              items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+            },
+          },
+        },
+      });
+    }
+    // Exactly OPEN_ISSUES_LIMIT rows — indistinguishable, from this response alone, between
+    // "the repo genuinely has exactly this many open issues" and "gh truncated at --limit".
+    return JSON.stringify(Array.from({ length: OPEN_ISSUES_LIMIT }, (_, i) => ({ number: i + 1 })));
+  };
+  await assert.rejects(() => forge.listIssuesAbsentFromBoard(), new RegExp(`${OPEN_ISSUES_LIMIT}-issue limit`));
 });
 
 test("projectQuery: no line is a // comment (GraphQL uses #, not //) — Codex R5 P1 guard", () => {

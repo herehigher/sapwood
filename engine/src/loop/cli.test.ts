@@ -445,6 +445,51 @@ test("normalizeUnplacedBoardItems: a computation failure logs and lets startup c
   assert.ok(logs.some((line) => /could not compute/.test(line) && /gh boom/.test(line)));
 });
 
+// #415 review findings 1+2: a wrong report is worse than no report. GithubForge.
+// listIssuesAbsentFromBoard throws (rather than compute) whenever either read feeding it might
+// be truncated — fetchProject's page ceiling, or listOpenIssueNumbers hitting its --limit
+// ceiling. These extend the generic failure-isolation test above to prove BOTH specific
+// truncation signals degrade the same way through the real integration: logged skip, zero
+// event — never a falsely-confident "absent" report.
+
+test("normalizeUnplacedBoardItems: fetchProject's page-ceiling truncation degrades to a logged skip, no event (#415 finding 1)", async () => {
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => {
+        throw new Error("listIssuesAbsentFromBoard: board read hit fetchProject's page ceiling — refusing a possibly-wrong absent report");
+      },
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [], "no board-gap-detected event when the board read may be truncated");
+  assert.ok(logs.some((line) => /could not compute/.test(line) && /page ceiling/.test(line)));
+});
+
+test("normalizeUnplacedBoardItems: listOpenIssueNumbers' --limit truncation degrades to a logged skip, no event (#415 finding 2)", async () => {
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => {
+        throw new Error(
+          "listIssuesAbsentFromBoard: open-issue read may be incomplete (hit the 1000-issue limit) — refusing a possibly-wrong absent report",
+        );
+      },
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [], "no board-gap-detected event when the open-issue read may be truncated");
+  assert.ok(logs.some((line) => /could not compute/.test(line) && /1000-issue limit/.test(line)));
+});
+
 test("normalizeUnplacedBoardItems: the No-Status normalization loop and the absent-issue report never write to the board on the report path itself", async () => {
   const writes: unknown[] = [];
   const events: Array<[string, unknown]> = [];
