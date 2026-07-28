@@ -778,6 +778,9 @@ export async function runRounds(deps: RoundDeps): Promise<RoundsResult> {
     state: deps.state,
     exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),
     eventPayload: { tickIntervalSec: deps.tickIntervalSec, watchdogTickMultiplier: cfg.liveness.watchdogTickMultiplier },
+    // #395 item 2: deps.state is the real State here — every enrichment read is a genuine table
+    // read, never a fake.
+    enrich: deps.state,
   });
   // Same signal-abortable inter-tick wait as driver.ts's interTickWait — see its comment there
   // for the shutdown-latency rationale this shape closes.

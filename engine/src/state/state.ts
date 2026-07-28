@@ -2586,6 +2586,15 @@ export class State {
     return row ? { kind: row.kind, payload: JSON.parse(row.payload) as unknown } : undefined;
   }
 
+  /** #395 item 2: the single latest event's id + kind (no payload — unlike latestEvent(kind)
+   *  above, this is not filtered to one kind; it's the ledger's own tail). The liveness
+   *  watchdog's stall-record enrichment reads this, alongside maxEventId(), at fire time — "what
+   *  was the last thing that happened, and what kind of thing was it" is a materially different
+   *  (and cheaper-to-eyeball) fact than the bare id the tuple sampling already compares against. */
+  lastEventKind(): { id: number; kind: string } | undefined {
+    return this.db.prepare("SELECT id, kind FROM events ORDER BY id DESC LIMIT 1").get() as { id: number; kind: string } | undefined;
+  }
+
   /** Cumulative spend_ledger sum at or after `sinceIso` — harvest's "spend vs round budget"
    *  fact. Same table/column as dailySpendUsd; a `>=` cutoff rather than a calendar-day prefix
    *  match, since a round doesn't align to a day boundary. */

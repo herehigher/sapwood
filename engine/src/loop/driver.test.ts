@@ -818,7 +818,22 @@ test("runDriver (#395): a never-resolving forge await is bounded by the INDEPEND
   assert.deepEqual(exitCalls, [1], "the injected exit hook fired exactly once, with a nonzero code");
   const stalled = state.eventsAfterId(0, ["engine-stalled"]);
   assert.equal(stalled.length, 1, "a durable engine-stalled event was appended before the exit hook fired");
-  assert.deepEqual(stalled[0]!.payload, { tickIntervalSec: 0.02, watchdogTickMultiplier: 10 });
+  // #395 item 2: driver.ts wires `enrich: deps.state` (the real State) too — same enrichment as
+  // round.ts's equivalent test. runDriver never touches the `rounds` table at all, so
+  // state.openRound() is genuinely undefined here (not a bug — a "tick driver" run has no round
+  // concept), and no lane/event ever got created before the DISPATCH-phase wedge fired.
+  // `lastTickAt` is a real timestamp, asserted only for shape.
+  const payload = stalled[0]!.payload as Record<string, unknown>;
+  assert.equal(payload.tickIntervalSec, 0.02);
+  assert.equal(payload.watchdogTickMultiplier, 10);
+  assert.equal(payload.windowMs, 200);
+  assert.equal(payload.openRoundId, null);
+  assert.equal(payload.openRoundPhase, null);
+  assert.equal(payload.activeLaneCount, 0);
+  assert.equal(payload.gatedLaneCount, 0);
+  assert.equal(payload.lastEventId, null);
+  assert.equal(payload.lastEventKind, null);
+  assert.equal(typeof payload.lastTickAt, "string");
   state.close();
 });
 

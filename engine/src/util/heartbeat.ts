@@ -26,6 +26,13 @@
 // round.ts's standby/park-recovery waits have no child to probe — they reuse this same gate with
 // `isAlive: () => true` (guard 1 is a no-op there; only guard 2 applies). See each call site's
 // own comment for what that specific heartbeat does and does not prove.
+//
+// #395 item 1 (peripheral.ts's RoleRunner.run(), gate② round tail): `isAlive()`'s pid probe above
+// already POSITIVELY detects a dead child — guard 1 just uses that to silence the heartbeat.
+// createExitLossDetector below reuses the EXACT SAME probe for a second purpose: resolving a
+// lost-exit-notification `await exitPromise` (this issue's own premise — the child died and
+// Node's 'exit' event for it never arrived) instead of only silencing telemetry and leaving the
+// engine to fall silent until the liveness watchdog kills the whole process over one lost signal.
 import type { State } from "../state/state.js";
 
 export interface HeartbeatGate {
@@ -54,6 +61,55 @@ export function createHeartbeatGate(state: Pick<State, "appendEvent" | "maxEvent
       // reflects it (otherwise every subsequent tick would see "changed" against a stale id and
       // silently skip forever).
       lastSeenId = state.maxEventId();
+    },
+  };
+}
+
+export interface ExitLossDetector {
+  /** Call once per heartbeat tick while the real `exit` event hasn't arrived yet. Returns
+   *  `true` the FIRST time `REQUIRED_CONSECUTIVE_DEAD_READINGS` consecutive dead readings have
+   *  been seen — the caller should treat that as "the exit notification is lost," resolve its
+   *  own await synthetically, and stop calling `tick()` (a detector that already declared loss
+   *  has nothing further to track). Returns `false` otherwise, including every reading before
+   *  the threshold and any reading that finds the process alive again (the counter resets — see
+   *  the module doc above for why an alive reading, even after a dead one, is always trustworthy:
+   *  `process.kill(pid, 0)` cannot false-negative a live process). */
+  tick: () => boolean;
+}
+
+// #395 item 1: why TWO consecutive dead readings, not one. A single dead reading bounds nothing
+// on its own — it could be a transient probe artifact (e.g. a signal delivered but the kernel
+// hasn't finished the zombie-reap bookkeeping this exact tick). Requiring the SAME reading twice
+// in a row, with no alive reading in between, is a cheap way to bound that without adding a
+// second timer or a wall-clock grace period: at default heartbeatMs (30s) that is a worst-case
+// ~30-60s detection latency for a genuinely lost notification — far below worker.timeoutSec (the
+// ceiling this replaces) and utterly negligible next to the live incident's 30+ minutes of total
+// silence. The pid-reuse direction is the SAFE one and needs no separate guard: `kill(pid, 0)`
+// against a pid the kernel has since reassigned to an unrelated live process reads ALIVE (no
+// ESRCH), which only resets the counter back to 0 — it can never manufacture a false "dead"
+// reading, so two consecutive dead readings can only underclaim liveness, never overclaim it.
+const REQUIRED_CONSECUTIVE_DEAD_READINGS = 2;
+
+/** Create a detector for a lost child-exit notification: counts CONSECUTIVE `isAlive() === false`
+ *  readings across calls to `tick()`, firing (returning `true`, once) after
+ *  `REQUIRED_CONSECUTIVE_DEAD_READINGS` in a row with no alive reading between them. Pure and
+ *  state-free beyond its own counter — no durable-event write, no exit-resolution side effect;
+ *  the caller (peripheral.ts's RoleRunner.run()) owns both of those, keeping this detector
+ *  trivially unit-testable against a scripted `isAlive` sequence instead of a real child
+ *  process (a real "lost notification" is an OS/kernel-timing edge case — Node's own child
+ *  reaping makes it effectively unreproducible on demand in-process; see this module's own
+ *  heartbeat.test.ts for how the reuse-safety and consecutive-requirement claims above are
+ *  pinned instead). */
+export function createExitLossDetector(isAlive: () => boolean): ExitLossDetector {
+  let consecutiveDead = 0;
+  return {
+    tick(): boolean {
+      if (isAlive()) {
+        consecutiveDead = 0;
+        return false;
+      }
+      consecutiveDead++;
+      return consecutiveDead >= REQUIRED_CONSECUTIVE_DEAD_READINGS;
     },
   };
 }

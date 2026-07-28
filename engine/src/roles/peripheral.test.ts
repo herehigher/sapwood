@@ -2223,3 +2223,93 @@ exit 0
     rmSync(materializedDir, { recursive: true, force: true });
   }
 });
+
+// ── #395 item 1: a lost child-exit notification resolves via the heartbeat's own pid probe ──────
+//
+// A genuine "Node never delivers the real 'exit' event" is an OS/kernel-timing edge case (a host
+// sleep coalescing/dropping SIGCHLD) that Node's own child-reaping makes effectively
+// unreproducible on demand with a real spawned process — the parent (Node) is the one that reaps
+// a dead child, so by the time `process.kill(pid, 0)` could ever read ESRCH, the real 'exit'
+// event has, for all practical purposes, already fired. RoleRunnerDeps.isPidAlive (this round)
+// exists exactly to make this testable anyway: it overrides the SAME probe the real production
+// code path uses (peripheral.ts's shared `isChildAlive`), so a test can script "the pid probe
+// says dead" independent of what the real child is actually doing. The stub below is a REAL
+// process that ignores TERM and would otherwise run for 30s (same shape as the wall-clock-timeout
+// test above) — proving the synthetic resolution fires on the scripted pid readings alone, NOT on
+// the real child's own (very much still pending) exit, while killTree's existing SIGTERM->SIGKILL
+// fallback still reaps the real process so the test leaves nothing running behind it.
+
+test("run (#395 item 1): TWO CONSECUTIVE dead pid readings with no real exit event -> exitPromise resolves synthetically (null), outcome 'failed' via the EXISTING non-done path, a durable role-session-exit-lost event recorded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // real child: alive and ignoring TERM
+    const events: Array<[string, unknown]> = [];
+    const fakeState = {
+      appendEvent: (kind: string, payload: unknown): void => {
+        events.push([kind, payload]);
+      },
+      maxEventId: () => events.length,
+    };
+    let probeCalls = 0;
+    const runner = new RoleRunner({
+      cfg, // default worker.timeoutSec is generous — must never race the exit-loss path below
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 20, // fast cadence: two consecutive dead readings land well inside the test
+      guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
+      state: fakeState,
+      isPidAlive: () => {
+        // Every probe (heartbeat gate AND exit-loss detector both call this SAME injected
+        // function) reads "dead" from the very first tick, regardless of the real child, which
+        // is genuinely still alive and ignoring TERM at this point.
+        probeCalls++;
+        return false;
+      },
+    });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(
+      result.outcome,
+      "failed",
+      "a null synthetic exit code is not === 0 -> the EXISTING non-done/failed branch, no new outcome kind",
+    );
+    assert.equal(result.exitCode, null);
+    assert.ok(existsSync(join(dir, `${result.name}.failed.json`)), "same .failed sentinel path as any other non-done outcome");
+    const lost = events.filter(([kind]) => kind === "role-session-exit-lost");
+    assert.equal(lost.length, 1, "exactly one role-session-exit-lost event, appended once, not once per subsequent tick");
+    const [, payload] = lost[0]!;
+    assert.equal((payload as { roleId: string }).roleId, "plan-reviewer");
+    assert.ok(probeCalls >= 2, "the detector actually needed (at least) two dead readings before firing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run (#395 item 1): an isPidAlive that always reports alive never resolves synthetically — an ordinary session is unaffected by the new detector", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n`); // real child stays alive for the whole test
+    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: 1 } }); // wall-clock ceiling ends the test, not a real 30s wait
+    const runner = new RoleRunner({
+      cfg: tcfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 150,
+      preSpawnCapturePollMs: 10,
+      isPidAlive: () => true, // always "alive" — a real, ordinary (if slow) session, never exit-lost
+    });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(
+      result.outcome,
+      "timeout",
+      "the wall-clock ceiling ends it, never the exit-loss detector — isPidAlive: () => true never fires it",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

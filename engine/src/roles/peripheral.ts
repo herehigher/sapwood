@@ -21,7 +21,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
-import { createHeartbeatGate } from "../util/heartbeat.js";
+import { createExitLossDetector, createHeartbeatGate } from "../util/heartbeat.js";
 import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 import {
   assembleContextManifest,
@@ -356,6 +356,15 @@ export interface RoleRunnerDeps {
    *  state dep in this codebase (e.g. worker.ts's WorkerDeps.state) — cli.ts's real production
    *  construction always supplies it; a bare test fake simply never gets the heartbeat event. */
   state?: Pick<State, "appendEvent" | "maxEventId">;
+  /** #395 item 1: the pid-liveness probe run()'s heartbeat interval uses BOTH to gate the
+   *  `role-session-heartbeat` event (via createHeartbeatGate's `isAlive`) AND to detect a lost
+   *  child-exit notification (util/heartbeat.ts's createExitLossDetector) — the SAME probe for
+   *  both, never two independent implementations of "is this pid alive." Default:
+   *  `process.kill(pid, 0)` in a try/catch (ESRCH -> dead). Injectable so a test can script a
+   *  scenario ("the pid probe says dead") without depending on the real OS's child-reaping
+   *  timing, which makes a genuine lost-notification effectively unreproducible on demand with a
+   *  real spawned process (see createExitLossDetector's own doc). */
+  isPidAlive?: (pid: number) => boolean;
   /** #236 (Codex F1, corrected in R1): bounded poll of the session's OWN stream-json jsonl file
    *  for its `{"type":"system","subtype":"init"}` line, before capturing the filesystem-derived
    *  half of the context manifest. The init line is the CLI's own signal that it finished
@@ -697,8 +706,19 @@ export class RoleRunner {
       // Register the exit listener BEFORE any await — same rationale as worker.ts's dispatch():
       // Node does not replay `exit` to late listeners, so a very fast exit must already be caught.
       let timedOut = false;
+      // #395 item 1: `exitNotified` + the captured `resolveExit` let the heartbeat interval below
+      // resolve this SAME promise itself (a synthetic "lost notification" outcome) — see that
+      // interval's own comment for when and why. `exitNotified` is the interval's guard against
+      // ever racing a real, just-arrived exit event (checked BEFORE the interval reads the pid
+      // probe each tick).
+      let exitNotified = false;
+      let resolveExit: (code: number | null) => void = () => {};
       const exitPromise = new Promise<number | null>((resolve) => {
-        session.onExit((code) => resolve(code));
+        resolveExit = resolve;
+        session.onExit((code) => {
+          exitNotified = true;
+          resolve(code);
+        });
       });
 
       // #395: bounded — Node gives spawn confirmation no timeout of its own, and the live
@@ -805,8 +825,8 @@ export class RoleRunner {
       // state.maxEventId() even after a post-spawn wedge where the session process itself has
       // already died with its exit notification lost (this issue's own premise), masking the
       // liveness watchdog until worker.timeoutSec (up to 60x the watchdog's own window) instead
-      // of letting it fire at the window. `isAlive` probes the ACTUAL child (`process.kill(pid,
-      // 0)`, the pid populated synchronously by spawn() independent of whether the async
+      // of letting it fire at the window. `isChildAlive` probes the ACTUAL child (`process.kill
+      // (pid, 0)`, the pid populated synchronously by spawn() independent of whether the async
       // 'spawn'/'exit' event ever arrived) — deliberately NOT a progress-content check (no JSONL
       // growth / child-output gate): a legitimately quiet-but-working session (no output for
       // minutes) must keep heart-beating as long as the child is alive, or a healthy slow
@@ -814,18 +834,42 @@ export class RoleRunner {
       // spam fix: skip the append when something ELSE already advanced maxEventId this cadence
       // (an otherwise-busy engine emits ~zero of these). Optional (RoleRunnerDeps.state) for the
       // same "omitted = zero behavior change" contract every other optional dep here uses.
-      const heartbeatGate = this.deps.state
-        ? createHeartbeatGate(this.deps.state, () => {
-            const pid = session.pid;
-            if (pid == null) return false;
-            try {
-              process.kill(pid, 0);
-              return true;
-            } catch {
-              return false;
-            }
-          })
-        : undefined;
+      //
+      // #395 item 1: this SAME probe (never a second implementation) also backs
+      // createExitLossDetector below — reused, not new machinery. `deps.isPidAlive` is injectable
+      // (default: the try/catch shown here) so a test can script "the pid probe says dead"
+      // without depending on real OS child-reaping timing.
+      const isChildAlive = (): boolean => {
+        const pid = session.pid;
+        if (pid == null) return false;
+        if (this.deps.isPidAlive) return this.deps.isPidAlive(pid);
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const heartbeatGate = this.deps.state ? createHeartbeatGate(this.deps.state, isChildAlive) : undefined;
+      // #395 item 1: the pid probe above already POSITIVELY detects a dead child — today (before
+      // this) that detection only silenced the heartbeat, and the engine's sole response to a
+      // genuinely lost exit notification (this issue's whole premise) was to fall silent on
+      // `await exitPromise` below and let the liveness watchdog eventually kill the ENTIRE engine
+      // process over one lost signal from one child. Wire the SAME detection to the await
+      // instead: on TWO CONSECUTIVE dead pid readings with no `exit` event having arrived by the
+      // second one (createExitLossDetector's own doc has the full "why two" rationale, including
+      // why the pid-reuse direction can never falsely trigger this), resolve `exitPromise`
+      // SYNTHETICALLY (`null`) and stop. `exitCode === 0` is the only "done" case a few lines
+      // below this method — `null` reads as `outcome: "failed"` through that SAME existing
+      // branch, no new outcome kind. The session's jsonl is already on disk (whatever the child
+      // managed to write before it died) and gets parsed same as any other non-done outcome, so
+      // runSessionWithRetry's env-failure classification takes over from there exactly like a
+      // real exit-3 failure would. That is the entire point: a hang becomes a failure the engine
+      // already knows how to absorb (park / probe / standby / the round phase cursor), not a new
+      // recovery path. `killTree` is a defensive, best-effort no-op if the child is truly already
+      // gone (same call the spawn-confirm-timeout branch above already makes on a "maybe still
+      // alive" child) — never a new kill mechanism.
+      const exitLossDetector = createExitLossDetector(isChildAlive);
       // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
       // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
       // mid-run): past worker.timeoutSec, kill the tree; the exit handler above still resolves
@@ -837,6 +881,22 @@ export class RoleRunner {
           timedOut = true;
           clearInterval(hb);
           void this.killTree(session);
+          return;
+        }
+        if (!exitNotified && exitLossDetector.tick()) {
+          clearInterval(hb);
+          try {
+            this.deps.state?.appendEvent("role-session-exit-lost", {
+              name,
+              roleId: opts.roleId,
+              pid: session.pid ?? null,
+              elapsedSec: Math.round(elapsedSec),
+            });
+          } catch {
+            /* best-effort — the synthetic resolution below is still the operative signal */
+          }
+          void this.killTree(session); // best-effort: the child may somehow still be alive
+          resolveExit(null);
         }
       }, this.hbMs);
 

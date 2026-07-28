@@ -206,6 +206,9 @@ export async function runDriver(deps: DriverDeps): Promise<DriverResult> {
     state: deps.state,
     exit: deps.watchdogExit ?? ((code: number) => process.exit(code)),
     eventPayload: { tickIntervalSec: deps.tickIntervalSec, watchdogTickMultiplier: deps.cfg.liveness.watchdogTickMultiplier },
+    // #395 item 2: deps.state is the real State here — every enrichment read is a genuine table
+    // read, never a fake.
+    enrich: deps.state,
   });
   /** The inter-tick wait: resolves after `ms` OR immediately on a stop signal, whichever is
    *  first. With the default timer the signal path also clears the timeout (no stray timer

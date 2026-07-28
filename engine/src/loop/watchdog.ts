@@ -1,4 +1,4 @@
-// watchdog.ts (#395 round 2 — gate② P1): a PROGRESS-based liveness watchdog, not a
+// watchdog.ts (#395 round 2/4 — gate② P1): a PROGRESS-based liveness watchdog, not a
 // tick-completion race.
 //
 // The original design armed a timer against each tick() call and treated "this one tick took
@@ -14,35 +14,70 @@
 // is lanes x attempts x worker.timeoutSec, so any window safe against a busy tick is far too
 // coarse to detect a real stall, and any window tight enough to be useful self-kills.
 //
-// So the watchdog no longer measures tick DURATION at all. Instead: the engine is stalled when
-// no DURABLE EVENT has been appended for a full window, regardless of which phase is running or
-// how long that phase legitimately takes — the live incident's own signature (an operator
-// diagnosed it as "zero events for 30+ minutes", not "a tick that ran long"). Armed ONCE per
-// engine run (at the top of driver.ts's runDriver / round.ts's runRounds, stopped in their own
-// `finally`) as an INDEPENDENT recurring real timer — never raced against any specific await —
-// so it covers every phase (aligning/architecting/plan_review/executing/harvesting/retro), not
-// just tick()'s own dispatch/reclaim/drive. peripheral.ts's own unbounded `await exitPromise`
-// (RoleRunner.run) needs no SEPARATE bound as a result — this watchdog already covers it.
+// So the watchdog no longer measures tick DURATION at all. Instead it samples a TUPLE of two
+// independent liveness signals:
+//   - state.maxEventId(): the event log's high-water mark. Some conductor.ts appendEvent sites
+//     are transition-anchored (fire once per state change); others are per-tick (e.g.
+//     drive-queued, conductor.ts:2711, fires on EVERY DRIVE pass that sees a WAIT-gated lane —
+//     confirmed by tracing the source, not assumed). Which kind any given site is, is an
+//     implementation detail of conductor.ts that can change (see #383, which explicitly plans to
+//     dedupe drive-queued) — the watchdog must not depend on it either way.
+//   - state.lastTickAt(): engine_session.last_tick_at, written on EVERY tick regardless of what
+//     that tick did (conductor.ts's engineSessionStart call) — the SAME column the dashboard's
+//     deriveEngineState already reads (State.lastTickAt's own doc). A pure read, never touched
+//     here via a second path.
+// Stalled only when BOTH have gone unchanged across a full window — a tick that's actually
+// running (even one that appends nothing) keeps last_tick_at moving, so it alone is enough to
+// prove the loop isn't wedged; maxEventId alone would (correctly) prove the same for a busy
+// tick. Requiring both dead is not a weaker bar for genuine stalls: a truly wedged tick (stuck
+// inside a single await — a hung `gh` call, a lost spawn/exit notification) never reaches the
+// point where either signal advances, so it still fires. What this buys, concretely: it decouples
+// the watchdog from event-log VOLUME, so a legitimate spam-reduction change (#383's drive-queued
+// dedupe) can never silently turn into a liveness regression — and it makes the engine's own
+// definition of "stalled" the same fact `sapwood status`/the dashboard already read, from the
+// same columns.
 //
-// This only works if something appends an event at least once per window during every
+// Armed ONCE per engine run (at the top of driver.ts's runDriver / round.ts's runRounds, stopped
+// in their own `finally`) as an INDEPENDENT recurring real timer — never raced against any
+// specific await — so it covers every phase (aligning/architecting/plan_review/executing/
+// harvesting/retro), not just tick()'s own dispatch/reclaim/drive. peripheral.ts's own unbounded
+// `await exitPromise` (RoleRunner.run) needs no separate BLANKET bound as a result — this
+// watchdog already covers the case where it wedges the whole engine; peripheral.ts additionally
+// resolves it directly once a dead child is positively detected (see that module's own comment).
+//
+// This only works if something advances the tuple at least once per window during every
 // legitimately long, otherwise-quiet stretch. Verified (see each site's own comment for the
-// evidence) that four such stretches previously emitted NOTHING and needed a heartbeat added
-// for this round: peripheral.ts's RoleRunner.run() heartbeat interval (the review-session path
-// above, and every other role session), worker.ts's WorkerSupervisor heartbeatTick (the same
-// class of gap for an ordinary, non-review worker leg), and round.ts's standby backoff wait AND
-// park-recovery wait (both can legitimately run quiet for far longer than any reasonable
-// window — up to round.standby.backoffCapSec / envFailure.probeBackoffMaxSec / parkEscalateAfterSec).
+// evidence) that four such stretches previously emitted NOTHING and needed a heartbeat added:
+// peripheral.ts's RoleRunner.run() heartbeat interval (the review-session path above, and every
+// other role session), worker.ts's WorkerSupervisor heartbeatTick (the same class of gap for an
+// ordinary, non-review worker leg), and round.ts's standby backoff wait AND park-recovery wait
+// (both can legitimately run quiet for far longer than any reasonable window — up to
+// round.standby.backoffCapSec / envFailure.probeBackoffMaxSec / parkEscalateAfterSec). Those
+// heartbeats still matter with the tuple sampling: last_tick_at only advances while a TICK is
+// running, and standby/park-recovery wait BETWEEN ticks, so their own heartbeats are still the
+// only thing keeping the tuple moving during those specific stretches.
 import type { State } from "../state/state.js";
 
 export interface ProgressWatchdogOpts {
   /** engine.tickIntervalSec * 1000 * liveness.watchdogTickMultiplier — the caller's own cadence
    *  and multiplier, computed once. */
   windowMs: number;
-  state: Pick<State, "appendEvent" | "maxEventId">;
+  state: Pick<State, "appendEvent" | "maxEventId" | "lastTickAt">;
   /** `process.exit` in production; tests inject a fake so a deliberately-quiet State doesn't
    *  kill the test runner. */
   exit: (code: number) => void;
   eventPayload: Record<string, unknown>;
+  /** #395 item 2: additional CHEAP reads taken at FIRE TIME (never at construction time — the
+   *  values below can only be stale by then, and staleness is exactly what a stall record must
+   *  not have) to enrich the `engine-stalled` event: the open round's id/phase, active/gated lane
+   *  counts, and the last event's id+kind. No new table, no schema change — every field here is
+   *  an EXISTING State read (openRound/activeWorkers/drivingWorkers/lastEventKind), the same
+   *  ledger `sapwood status`/the dashboard already read. Deliberately a SEPARATE, OPTIONAL pick
+   *  from `state` above (which the round-2/3/4 tuple-sampling unit tests already construct as a
+   *  minimal fake) — omitting `enrich` costs nothing beyond a slightly thinner stalled event; the
+   *  tuple sampling itself never depends on it. Real callers (round.ts/driver.ts) always pass the
+   *  full `State`, so production behavior always includes it. */
+  enrich?: Pick<State, "openRound" | "activeWorkers" | "drivingWorkers" | "lastEventKind">;
 }
 
 export interface ProgressWatchdogHandle {
@@ -59,7 +94,7 @@ export interface ProgressWatchdogHandle {
 // notices. That contradicts both the stated contract ("fires at the window") and AC1. Fix:
 // sample SEVERAL times per window and require several CONSECUTIVE unchanged readings before
 // declaring a stall — SAMPLES_PER_WINDOW=4, so sampleMs = windowMs/4 and firing requires 4
-// consecutive unchanged samples. Worst case: the last real event lands just after a sample —
+// consecutive unchanged samples. Worst case: the last real progress lands just after a sample —
 // the NEXT sample (up to 1 sampleMs later) is the first to see "unchanged," and firing needs
 // SAMPLES_PER_WINDOW MORE consecutive unchanged samples after that — total detection latency is
 // therefore between (SAMPLES_PER_WINDOW-1)*sampleMs and (SAMPLES_PER_WINDOW+1)*sampleMs, i.e.
@@ -67,29 +102,63 @@ export interface ProgressWatchdogHandle {
 // approaching two.
 const SAMPLES_PER_WINDOW = 4;
 
-/** Start the progress watchdog: re-checks `state.maxEventId()` every `windowMs/SAMPLES_PER_WINDOW`
- *  against its own previous reading, firing once `SAMPLES_PER_WINDOW` CONSECUTIVE samples have
- *  seen no change (see the module-level comment above for the exact arithmetic this bounds).
- *  Firing: append the durable `engine-stalled` event (best-effort — a failed write still lets
- *  the nonzero exit be the operative signal), then call `exit(1)`. Deliberately does NOT
- *  reschedule after firing — the watchdog fires once and stops itself, whether or not the exit
- *  hook actually terminated the process (production: it always does; tests inject a
+/** Start the progress watchdog: re-checks the TUPLE `(state.maxEventId(), state.lastTickAt())`
+ *  every `windowMs/SAMPLES_PER_WINDOW` against its own previous reading, firing once
+ *  `SAMPLES_PER_WINDOW` CONSECUTIVE samples have seen NEITHER change (see the module-level
+ *  comment for why both, and the comment above SAMPLES_PER_WINDOW for the exact arithmetic this
+ *  bounds). Firing: append the durable `engine-stalled` event, enriched (item 2) with
+ *  `opts.enrich`'s cheap reads taken AT FIRE TIME (open round id/phase, active/gated lane
+ *  counts, last event id+kind) alongside `opts.eventPayload`, `lastTickAt`, and `windowMs` — all
+ *  best-effort, a failed write (or a failed enrichment read) still lets the nonzero exit be the
+ *  operative signal — then call `exit(1)`. Deliberately does
+ *  NOT reschedule after firing — the watchdog fires once and stops itself, whether or not the
+ *  exit hook actually terminated the process (production: it always does; tests inject a
  *  non-terminating fake). Never reads the real clock (no `Date.now()`/`new Date()` anywhere
  *  here) — purely timer-driven, so a test drives the stalled branch with a real-but-tiny
- *  `windowMs` against a State nothing else ever touches, which is deterministic since the
- *  "progress" side never happens at all. */
+ *  `windowMs` against a State nothing else ever touches, which is deterministic since neither
+ *  side of the tuple ever moves. */
 export function startProgressWatchdog(opts: ProgressWatchdogOpts): ProgressWatchdogHandle {
   const sampleMs = opts.windowMs / SAMPLES_PER_WINDOW;
   let lastSeenId = opts.state.maxEventId();
+  let lastSeenTickAt = opts.state.lastTickAt();
   let unchangedSamples = 0;
   let timer: ReturnType<typeof setTimeout>;
   const check = (): void => {
     const currentId = opts.state.maxEventId();
-    if (currentId === lastSeenId) {
+    const currentTickAt = opts.state.lastTickAt();
+    if (currentId === lastSeenId && currentTickAt === lastSeenTickAt) {
       unchangedSamples++;
       if (unchangedSamples >= SAMPLES_PER_WINDOW) {
         try {
-          opts.state.appendEvent("engine-stalled", opts.eventPayload);
+          // #395 item 2: enrich the stall record with cheap reads taken NOW, at fire time — see
+          // ProgressWatchdogOpts.enrich's own doc for why these are a separate optional pick and
+          // why "at fire time" matters. Best-effort ALONGSIDE the base payload/append below: an
+          // `enrich` read throwing (or `enrich` simply being omitted) must never suppress the
+          // stalled event itself, so failures here are swallowed into an absent field rather than
+          // aborting the whole append.
+          let enrichment: Record<string, unknown> = {};
+          if (opts.enrich) {
+            try {
+              const round = opts.enrich.openRound();
+              const lastEvent = opts.enrich.lastEventKind();
+              enrichment = {
+                openRoundId: round?.round_id ?? null,
+                openRoundPhase: round?.phase ?? null,
+                activeLaneCount: opts.enrich.activeWorkers().length,
+                gatedLaneCount: opts.enrich.drivingWorkers().length,
+                lastEventId: lastEvent?.id ?? null,
+                lastEventKind: lastEvent?.kind ?? null,
+              };
+            } catch {
+              /* best-effort — the base payload below still carries the operative signal */
+            }
+          }
+          opts.state.appendEvent("engine-stalled", {
+            ...opts.eventPayload,
+            ...enrichment,
+            lastTickAt: currentTickAt,
+            windowMs: opts.windowMs,
+          });
         } catch {
           /* best-effort — the nonzero exit is still the operative signal */
         }
@@ -98,6 +167,7 @@ export function startProgressWatchdog(opts: ProgressWatchdogOpts): ProgressWatch
       }
     } else {
       lastSeenId = currentId;
+      lastSeenTickAt = currentTickAt;
       unchangedSamples = 0;
     }
     timer = setTimeout(check, sampleMs);
