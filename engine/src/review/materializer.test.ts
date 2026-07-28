@@ -42,6 +42,31 @@ function initSharedRepo(): string {
   return dir;
 }
 
+/** Bounds `promise` so a HANG surfaces as a clearly-labeled, named rejection instead of wedging
+ *  the test runner until the job's own outer ceiling kills it. `ms` is generous — several
+ *  seconds, comfortably above any real execution this suite ever does — so it only ever fires
+ *  when the call under test is genuinely wedged (the exact regression class #406 blocked: a
+ *  guarded assertion whose own failure mode, when the logic it guards regresses, is "hangs
+ *  forever" rather than "fails with a message pointing at the cause"). Cleans up its own timer on
+ *  either branch so a normal passing run never leaves a stray handle behind. Does not change what
+ *  a NORMAL (non-hanging) rejection/resolution looks like -- it only adds a second, much slower,
+ *  race partner. */
+function withHangGuard<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 function headOid(dir: string): string {
   return git(dir, ["rev-parse", "HEAD"]).trim();
 }
@@ -221,19 +246,53 @@ test("assertLocalConfigClean (#395 P2): its own `git config --local --list` read
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
   const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
   const shared = initSharedRepo();
+  // #403-class fix: the original version raced a REAL `git config --local --list` subprocess
+  // against a 1ms timeout, on the assumption real git can never finish that fast. On a fast CI
+  // runner (warm page/inode cache) it sometimes CAN — the direction called out in the failure
+  // report is the opposite of the usual flake: this test fails when the machine is fast, not
+  // slow. There is no injectable execFile seam in materializer.ts to stub (pexecFile is a private
+  // module-level constant), so instead of racing real git's speed, point PATH at a fake `git`
+  // that never returns on its own — the only thing that can produce a rejection is then the
+  // `timeout` option itself, deterministically, on any machine at any speed. This mutates the
+  // process-global PATH; node:test runs the tests in this file sequentially (no `concurrency`
+  // used anywhere in this suite) and each test FILE is its own process, so the mutation can never
+  // leak into a concurrently-running test.
+  const fakeGitBin = mkdtempSync(join(tmpdir(), "sapwood-materializer-fakegit-"));
+  const originalPath = process.env.PATH;
   try {
     writeFileSync(join(shared, "f.txt"), "hello\n");
     git(shared, ["add", "f.txt"]);
     git(shared, ["commit", "-qm", "init"]);
     const cloneDir = join(cloneRoot, "clone.git");
-    // A generous timeout for the SETUP clone (not under test), then a 1ms timeout on the read
-    // under test — isolates which call the timeout is actually bounding.
+    // Real git, generous default timeout, for the SETUP clone (not under test).
     await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
-    await assert.rejects(() => assertLocalConfigClean(cloneDir, 1), /unable to read local config/);
+    // A `git` that never exits on its own -- the read under test can only be resolved by the
+    // execFile `timeout` option killing it.
+    writeFileSync(join(fakeGitBin, "git"), "#!/bin/sh\nwhile true; do sleep 3600; done\n");
+    chmodSync(join(fakeGitBin, "git"), 0o755);
+    process.env.PATH = `${fakeGitBin}:${originalPath ?? ""}`;
+    // #406-class guard: the assertion below is exactly what proves the `timeout` option is
+    // load-bearing -- which also means that if a future change ever drops or breaks that option,
+    // the call hangs forever against this never-exiting fake `git` instead of failing. Bound it
+    // with a generous (well above any real execution) race so THAT regression fails fast with a
+    // named cause instead of wedging the whole suite until the job's outer ceiling kills it. The
+    // 20ms timeout under test itself is unaffected -- this only adds a second, much slower race
+    // partner.
+    await assert.rejects(
+      () =>
+        withHangGuard(
+          assertLocalConfigClean(cloneDir, 20),
+          5000,
+          "assertLocalConfigClean did not settle within 5000ms — the timeout option is missing or not wired",
+        ),
+      /unable to read local config/,
+    );
   } finally {
+    process.env.PATH = originalPath;
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(cloneRoot, { recursive: true, force: true });
     rmSync(shared, { recursive: true, force: true });
+    rmSync(fakeGitBin, { recursive: true, force: true });
   }
 });
 
