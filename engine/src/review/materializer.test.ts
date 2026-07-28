@@ -132,22 +132,36 @@ exec "${realGitPath}" "$@"
  *  fresh-clone test, which never runs a real git call at all): measured locally, a real local
  *  `git` subprocess invocation against these tiny fixture repos (`checkout`, `config --list`,
  *  `rev-parse --is-bare-repository`, `remote get-url`) consistently takes 15-30ms -- comfortably
- *  under 500ms, but routinely OVER 1ms. Racing those real passthrough calls against `1` would
+ *  under this bound, but routinely OVER 1ms. Racing those real passthrough calls against `1` would
  *  reintroduce the exact real-subprocess-vs-real-timer nondeterminism this whole fix removes (this
  *  was caught empirically: an earlier draft of this fix used `timeoutMs: 1` here and the real
  *  passthrough `checkout` itself got killed before completing, contradicting the very
  *  "checkout genuinely happened" assertion the test makes).
  *
+ *  1000, not 500 (#418 round-3 P3): under a STARVED runner (CI under heavy contention, not just
+ *  "slow"), a real passthrough op that exceeds this bound fails the test EARLY for the wrong
+ *  reason -- e.g. in the reuse-candidate test, an early real probe timing out sends the reused
+ *  clone down the same fallback-clone path the fetch itself would have, so `assert.rejects` is
+ *  satisfied without the fetch call under test ever running; in the materialize test, a starved
+ *  `checkout` fails before `rev-parse` is even reached. Doubling the measured 15-30ms margin to
+ *  1000ms (vs. the previous 500ms) buys real headroom against exactly that kind of contention
+ *  without weakening the fake side of the margin.
+ *
  *  Margin ordering (why this is still not a race): the TARGET operation named in each test is
  *  faked to `exec sleep 20` regardless of `timeoutMs` -- the fake never does real work, so its
  *  20,000ms is not competing with anything, it just has to comfortably clear whatever `timeoutMs`
- *  is. `REAL_OP_TIMEOUT_MS` (500ms) sits ~20-30x above the real ops' measured 15-30ms (generous
- *  headroom for a loaded machine) and ~40x below the fake's 20,000ms sleep (so the `timeout`
+ *  is. `REAL_OP_TIMEOUT_MS` (1000ms) sits ~30-60x above the real ops' measured 15-30ms (generous
+ *  headroom for a loaded machine) and ~20x below the fake's 20,000ms sleep (so the `timeout`
  *  option always kills the fake, never lets it complete) -- two non-adjacent orders of magnitude
- *  on either side, not a close call in either direction. `withHangGuard`'s 5000ms (10x above this)
- *  and the fake's own 20s self-exit only matter on the REGRESSION path (the `timeout` option
- *  dropped from production code), never on the normal assertion path. */
-const REAL_OP_TIMEOUT_MS = 500;
+ *  on either side, not a close call in either direction. `withHangGuard`'s 5000ms bounds the WORST
+ *  case in the reuse-candidate test, which can burn up to two sequential target timeouts (the
+ *  reuse fetch, then the fresh-clone fallback) -- at 1000ms that's ~2000ms worst case, still
+ *  comfortably under the 5000ms guard. This is also why 1000 was chosen over doubling again to
+ *  2000: at 2000ms per step, that same worst case (~4000ms) would leave only ~1000ms of guard
+ *  headroom, eroding the very margin this constant exists to protect. The fake's own 20s
+ *  self-exit only matters on the REGRESSION path (the `timeout` option dropped from production
+ *  code), never on the normal assertion path. */
+const REAL_OP_TIMEOUT_MS = 1000;
 
 function headOid(dir: string): string {
   return git(dir, ["rev-parse", "HEAD"]).trim();
