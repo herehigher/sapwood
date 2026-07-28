@@ -718,6 +718,24 @@ const ProxyConfig = z
   })
   .strict();
 
+// #410 (decision record: architect/product-owner/PM three-party review + measurement): the ONE
+// config surface for the built-in WebSearch/WebFetch grant to the three direction-setting role
+// sessions (architect, po-align, po-triage — peripheral.ts's ARCHITECT_ALLOWED_TOOLS/
+// PO_ALIGN_ALLOWED_TOOLS/PO_TRIAGE_ALLOWED_TOOLS named exports). Default true: the capability is
+// read-only, carries no credential into any project system, is strictly weaker than the egress
+// the worker already has unrestricted (docs/security.md's "Worker network egress: accepted blind
+// spot"), and every call is journalled through the SAME scanEgressSuspects path the worker's own
+// tripwire uses (worker.ts). `false` falls every one of those three sessions back to the base
+// ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS pair — no WebSearch/WebFetch reaches them at all. The
+// review family (plan-reviewer/plan-drafter/plan-reviewer-confirm, and every gate② reviewer
+// form) never reads this key — their sessions never widen past ROLE_ALLOWED_TOOLS regardless of
+// this flag, by construction (no call site threads it in), not by convention.
+const WebAccess = z
+  .object({
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+
 const Guard = z
   .object({
     // PreToolUse guard enforcement. HARD (default) = fail-closed deny — the producer≠merger /
@@ -1169,6 +1187,7 @@ const ConfigSchemaRaw = z
     labels: Labels.default({}),
     roles: Roles.default({}),
     proxy: ProxyConfig.default({}),
+    webAccess: WebAccess.default({}),
     envFailure: EnvFailure.default({}),
     // #286 (E4a, design #279 §4): see Ci's own doc above — schema only this PR, E4b (#287)
     // consumes it.

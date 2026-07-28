@@ -205,6 +205,68 @@ test("scanEgressSuspects (#341): per-leg evidence stops at the engine cap", () =
   });
 });
 
+// ── #410: the SAME scanner also recognizes WebFetch/WebSearch tool_use blocks (peripheral role
+// sessions granted the #410 web-access tools) — unconditionally, not gated by the
+// suspectCommands list Bash detection above uses; these two tool names ARE the whole peripheral-
+// egress channel. No second scanner: this is scanEgressSuspects itself, extended. ──────────────
+
+const webToolUseLine = (name: "WebFetch" | "WebSearch", detail: string): string =>
+  JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", name, input: name === "WebFetch" ? { url: detail } : { query: detail } }] },
+  });
+
+test("scanEgressSuspects (#410): WebFetch/WebSearch tool_use blocks hit UNCONDITIONALLY — an EMPTY suspectCommands list (Bash detection fully disabled) still catches both", () => {
+  const jsonl = [
+    webToolUseLine("WebFetch", "https://example.invalid/docs"),
+    webToolUseLine("WebSearch", "does a mature library already cover this"),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, []), {
+    hits: [
+      { executable: "WebFetch", snippet: "https://example.invalid/docs" },
+      { executable: "WebSearch", snippet: "does a mature library already cover this" },
+    ],
+    truncated: false,
+  });
+});
+
+test("scanEgressSuspects (#410): Bash and WebFetch/WebSearch hits share ONE dedup set and ONE per-session cap — a mixed transcript is bounded together, not one cap each", () => {
+  const jsonl = [bashToolUseLine("curl https://example.invalid/a"), webToolUseLine("WebFetch", "https://example.invalid/b")].join("\n");
+  const { hits, truncated } = scanEgressSuspects(jsonl, ["curl"]);
+  assert.deepEqual(hits, [
+    { executable: "curl", snippet: "curl https://example.invalid/a" },
+    { executable: "WebFetch", snippet: "https://example.invalid/b" },
+  ]);
+  assert.equal(truncated, false);
+});
+
+test("scanEgressSuspects (#410): a non-string url/query, or a name other than WebFetch/WebSearch/Bash, is a non-hit — never a throw", () => {
+  const jsonl = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "WebFetch", input: { url: 42 } }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "WebSearch", input: {} }] } }),
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Read", input: { url: "https://example.invalid" } }] },
+    }),
+  ].join("\n");
+  assert.deepEqual(scanEgressSuspects(jsonl, []), { hits: [], truncated: false });
+});
+
+test("scanEgressSuspects (#410): WebFetch/WebSearch snippets are capped at 200 characters, same bound as a Bash snippet", () => {
+  const longUrl = `https://example.invalid/${"x".repeat(240)}`;
+  const { hits } = scanEgressSuspects(webToolUseLine("WebFetch", longUrl), []);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.snippet.length, 200);
+  assert.equal(hits[0]?.snippet, longUrl.slice(0, 200));
+});
+
+test("scanEgressSuspects (#410): the per-session cap is shared across a long run of WebFetch/WebSearch calls too, same MAX_EGRESS_SUSPECTS_PER_LEG bound Bash detection uses", () => {
+  const jsonl = Array.from({ length: MAX_EGRESS_SUSPECTS_PER_LEG + 5 }, (_, i) => webToolUseLine("WebSearch", `query ${i}`)).join("\n");
+  const scan = scanEgressSuspects(jsonl, []);
+  assert.equal(scan.hits.length, MAX_EGRESS_SUSPECTS_PER_LEG);
+  assert.equal(scan.truncated, true);
+});
+
 // ── #110 PR0: parseResultText — the read side for a role session's structured final-message
 //    output. Mirrors parseCostUsd's own tolerance test shapes exactly (same fixture style). ──
 test("parseResultText: takes the last result line's `result` string", () => {

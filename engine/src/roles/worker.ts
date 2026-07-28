@@ -89,8 +89,11 @@ export function parseCostUsdOrNull(jsonl: string): number | null {
   return cost;
 }
 
-/** #304: one lexically suspicious Bash executable observed in a completed worker leg's
- *  stream-json transcript. `snippet` is evidence, not a command to replay, and is capped so a
+/** #304 / #410: one suspicious egress-shaped call observed in a completed session's stream-json
+ *  transcript — either a lexically suspicious Bash executable (a worker leg) or a structured
+ *  WebFetch/WebSearch tool_use block (a peripheral role session granted the #410 web-access
+ *  tools). `executable` names the Bash executable OR the literal tool name (`"WebFetch"`/
+ *  `"WebSearch"`); `snippet` is evidence, not a command/query to replay, and is capped so a
  *  single tool call cannot inflate the events ledger without bound. */
 export interface EgressSuspect {
   executable: string;
@@ -244,16 +247,38 @@ export interface EgressSuspectScan {
   truncated: boolean;
 }
 
-/** #304: scans Bash `tool_use` blocks from stream-json and returns deduplicated lexical hits.
- *  Only executable position is considered (after leading assignments plus ordinary `env`/
- *  `sudo` prefixes); suspect names appearing in arguments are intentionally ignored. Same
- *  tolerance as the sibling parsers: malformed/partial lines and malformed blocks are skipped
- *  silently. Collection stops at the engine-owned per-leg cap, bounding both evidence and its
- *  dedup set. This is a post-hoc tripwire, never a deny decision. */
+/** #304 / #410: scans `tool_use` blocks from stream-json and returns deduplicated egress hits —
+ *  the ONE scanner for both egress-shaped signals this codebase has (#410's decision record:
+ *  "the audit reuses the existing scanner... no second scanner is introduced"):
+ *
+ *  - **Bash** (#304, worker legs): only the executable position is considered (after leading
+ *    assignments plus ordinary `env`/`sudo` prefixes) against the CALLER-SUPPLIED
+ *    `suspectCommands` list; suspect names appearing in arguments are intentionally ignored.
+ *  - **WebFetch/WebSearch** (#410, peripheral role sessions granted the web-access tools):
+ *    UNCONDITIONALLY a hit — every call is journalled, not just a configured subset, because
+ *    these two tool names ARE the entire sanctioned peripheral-egress channel (unlike Bash,
+ *    where most executables are legitimate worker activity and only a configured suspect list is
+ *    worth flagging). Structural, not lexical: a worker leg never holds either tool (peripheral.ts
+ *    grants them to `architect`/`po-align`/`po-triage` only), so this branch is a no-op there.
+ *    `executable` carries the literal tool name; `snippet` is `WebFetch`'s `url` or `WebSearch`'s
+ *    `query`, truncated the same way a Bash snippet is.
+ *
+ *  Same tolerance as the sibling parsers: malformed/partial lines and malformed blocks are
+ *  skipped silently. Collection stops at the engine-owned per-leg cap, bounding both evidence and
+ *  its dedup set (shared across both signal kinds — one session emitting a mix of Bash suspects
+ *  and web calls is still bounded by ONE cap, not one each). This is a post-hoc tripwire, never a
+ *  deny decision. */
 export function scanEgressSuspects(jsonl: string, suspectCommands: readonly string[]): EgressSuspectScan {
   const suspects = new Set(suspectCommands);
   const hits: EgressSuspect[] = [];
   const seen = new Set<string>();
+  const addHit = (executable: string, snippet: string): boolean => {
+    const key = `${executable}\0${snippet}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    hits.push({ executable, snippet });
+    return hits.length === MAX_EGRESS_SUSPECTS_PER_LEG;
+  };
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
     if (!t.startsWith("{")) continue;
@@ -271,20 +296,21 @@ export function scanEgressSuspects(jsonl: string, suspectCommands: readonly stri
     for (const block of content) {
       if (!block || typeof block !== "object" || Array.isArray(block)) continue;
       const b = block as Record<string, unknown>;
-      if (b.type !== "tool_use" || b.name !== "Bash") continue;
+      if (b.type !== "tool_use") continue;
       const input = b.input;
       if (!input || typeof input !== "object" || Array.isArray(input)) continue;
-      const command = (input as Record<string, unknown>).command;
-      if (typeof command !== "string") continue;
-      for (const fragment of shellFragments(command)) {
-        const executable = fragmentExecutable(fragment);
-        if (!executable || !suspects.has(executable)) continue;
-        const snippet = fragment.slice(0, EGRESS_SNIPPET_MAX_CHARS);
-        const key = `${executable}\0${snippet}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        hits.push({ executable, snippet });
-        if (hits.length === MAX_EGRESS_SUSPECTS_PER_LEG) return { hits, truncated: true };
+      if (b.name === "Bash") {
+        const command = (input as Record<string, unknown>).command;
+        if (typeof command !== "string") continue;
+        for (const fragment of shellFragments(command)) {
+          const executable = fragmentExecutable(fragment);
+          if (!executable || !suspects.has(executable)) continue;
+          if (addHit(executable, fragment.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
+        }
+      } else if (b.name === "WebFetch" || b.name === "WebSearch") {
+        const detail = (input as Record<string, unknown>)[b.name === "WebFetch" ? "url" : "query"];
+        if (typeof detail !== "string") continue;
+        if (addHit(b.name, detail.slice(0, EGRESS_SNIPPET_MAX_CHARS))) return { hits, truncated: true };
       }
     }
   }

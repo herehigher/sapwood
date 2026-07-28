@@ -23,10 +23,10 @@ decision weight" section for the standing structured-output write inventory this
 complements (that table tracks *what each role's output drives*; this doc explains
 *the shape every role's session/output/idempotency/escalation must have*).
 
-## The five-element contract
+## The six-element contract
 
-Every role in this codebase is defined by five elements. A new role (built-in or,
-post-v1.0, user-defined) must specify all five before it ships:
+Every role in this codebase is defined by six elements. A new role (built-in or,
+post-v1.0, user-defined) must specify all six before it ships:
 
 1. **Responsibility** — what judgment the role's session contributes, and when in the
    round it runs.
@@ -41,6 +41,10 @@ post-v1.0, user-defined) must specify all five before it ships:
 5. **Escalation path** — what the role does when its session degrades (crashes,
    times out, or produces output that never validates): degrade-and-proceed
    (advisory) vs. escalate-needs-human (gate-blocking).
+6. **Evidence channel** — for every judgment the role's prompt asks of it, name the channel
+   through which the session can actually earn the evidence, or the first-class abstention it
+   returns instead; a prompt may never ask a question the role can neither answer from a held
+   channel nor explicitly decline.
 
 ## Gate② reviewer kinds, including engine-agent
 
@@ -280,9 +284,10 @@ bounds the loop — at the bound, the engine escalates rather than cycling forev
 
 The governed extension points backlog item depends on this doc (M5 items 1 & 10, per
 `docs/system-review-2026-07.md`'s roadmap). A user-defined role — inserted before/after
-any phase — will need to declare all five elements above explicitly rather than
+any phase — will need to declare all six elements above explicitly rather than
 inheriting them from a hardcoded module: a write scope chosen from the SAME
 engine-enumerated tier ladder (never a bespoke tool grant), a marker-idempotent
-`PeripheralStub.run()`, a schema-validated output the engine parses fail-closed, and an
-explicit escalation choice (advisory vs. gate-blocking). This doc is that prerequisite
-contract, written against what the six built-in roles already do.
+`PeripheralStub.run()`, a schema-validated output the engine parses fail-closed, an
+explicit escalation choice (advisory vs. gate-blocking), and a named evidence channel
+(or first-class abstention) for every judgment its prompt asks of it. This doc is that
+prerequisite contract, written against what the six built-in roles already do.

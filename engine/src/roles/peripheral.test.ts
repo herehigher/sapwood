@@ -12,11 +12,14 @@ import { DEFAULT_LLM_FAILURE_PATTERNS, type EnvFailureSource } from "../loop/env
 import type { ParkRow } from "../state/state.js";
 import type { ContextManifest } from "./context-manifest.js";
 import {
+  ARCHITECT_ALLOWED_TOOLS,
   CONFIRM_ALLOWED_TOOLS,
   CONFIRM_DISALLOWED_TOOLS,
   PLAN_DRAFTER_DISALLOWED_TOOLS,
+  PO_ALIGN_ALLOWED_TOOLS,
   PO_ALLOWED_TOOLS,
   PO_DISALLOWED_TOOLS,
+  PO_TRIAGE_ALLOWED_TOOLS,
   type RetriedSession,
   ROLE_ALLOWED_TOOLS,
   ROLE_DISALLOWED_TOOLS,
@@ -666,6 +669,193 @@ test("run: fallbackModel none omits Claude's fallback flag for a role session", 
     await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "none" });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.ok(!seen.includes("--fallback-model"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #410: settings pinning extends to EVERY peripheral session, not just review mode ──────────
+// This test is RED on pre-#410 main: a plain (non-review, no-proxy) role session passed neither
+// --strict-mcp-config nor --setting-sources at all, and no --mcp-config flag either — an
+// operator's own ~/.claude/settings.json (a "deny": ["WebSearch","WebFetch"] entry, per #410's
+// own decision-record measurement) would have been free to reach the session's settings sources
+// unpinned. Argv is the same mechanism #285's review-mode test already pins this via — see that
+// test ("reviewCwd closes the MCP + settings-source execution surface") for the live-CLI
+// verification this flag combination is built on.
+
+test('run (#410): an ORDINARY (non-review, no-proxy) role session ALSO pins --strict-mcp-config, an explicit empty --mcp-config, and --setting-sources "" — an operator-level settings deny of WebFetch/WebSearch can neither grant nor strip a tool because no file-based settings source loads at all', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
+    assert.ok(seen.includes("--strict-mcp-config"), "pinned for an ordinary session too, not just reviewCwd");
+    assert.equal(at("--mcp-config"), '{"mcpServers":{}}', "explicit empty map, same as review mode, when no proxy is attached");
+    assert.equal(
+      at("--setting-sources"),
+      "",
+      "zero file-based settings sources load — the operator's own settings can neither grant nor deny",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #410: per-role web-access grant exports — the CONFIRM_ALLOWED_TOOLS named-export-plus-
+// pinned-test precedent, applied to the three granted roles. ────────────────────────────────
+
+test("ARCHITECT_ALLOWED_TOOLS / PO_ALIGN_ALLOWED_TOOLS / PO_TRIAGE_ALLOWED_TOOLS (#410): each widens the base read-only allow-list with exactly WebSearch,WebFetch — no Bash, no write tool, byte-identical to each other and to the base plus the two web tools", () => {
+  for (const [name, granted] of Object.entries({
+    ARCHITECT_ALLOWED_TOOLS,
+    PO_ALIGN_ALLOWED_TOOLS,
+    PO_TRIAGE_ALLOWED_TOOLS,
+  })) {
+    assert.equal(granted, `${ROLE_ALLOWED_TOOLS},WebSearch,WebFetch`, name);
+    assert.ok(granted.includes("WebSearch"), name);
+    assert.ok(granted.includes("WebFetch"), name);
+    assert.ok(!granted.includes("Bash"), `${name}: no Bash grant of any kind`);
+    assert.ok(!granted.includes("Write") && !granted.includes("Edit"), `${name}: no write channel`);
+  }
+});
+
+test("ARCHITECT_ALLOWED_TOOLS / PO_ALIGN_ALLOWED_TOOLS / PO_TRIAGE_ALLOWED_TOOLS (#410): NOT PO_ALLOWED_TOOLS/ROLE_ALLOWED_TOOLS — the widening is real, not an accidental no-op alias", () => {
+  assert.notEqual(ARCHITECT_ALLOWED_TOOLS, ROLE_ALLOWED_TOOLS);
+  assert.notEqual(PO_ALIGN_ALLOWED_TOOLS, PO_ALLOWED_TOOLS);
+  assert.notEqual(PO_TRIAGE_ALLOWED_TOOLS, PO_ALLOWED_TOOLS);
+});
+
+// ── #410: the review family refuses the grant BY CONSTRUCTION — no config value could ever
+// reach a review-family session, because none of their construction paths ever reference it. ──
+
+test("#410: a review-family session (plan-reviewer/plan-drafter/plan-reviewer-confirm, constructed exactly as plan-review.ts constructs them) carries no web tool in its effective allowlist, regardless of any config — CONFIRM_ALLOWED_TOOLS/PLAN_DRAFTER_DISALLOWED_TOOLS/ROLE_ALLOWED_TOOLS never reference cfg.webAccess at all", () => {
+  for (const [name, allow] of Object.entries({
+    "plan-reviewer (ROLE_ALLOWED_TOOLS)": ROLE_ALLOWED_TOOLS,
+    "plan-reviewer-confirm (CONFIRM_ALLOWED_TOOLS)": CONFIRM_ALLOWED_TOOLS,
+    // plan-drafter's own allow-list override is PLAN_DRAFTER_DISALLOWED_TOOLS's counterpart —
+    // plan-review.ts never supplies an allowedTools override for the drafter either, so its
+    // EFFECTIVE allow-list is also the base ROLE_ALLOWED_TOOLS (peripheral.ts's `opts.allowedTools
+    // ?? ROLE_ALLOWED_TOOLS` fallback) — asserted directly rather than via a nonexistent
+    // PLAN_DRAFTER_ALLOWED_TOOLS export.
+    "plan-drafter (falls back to ROLE_ALLOWED_TOOLS, no override exists)": ROLE_ALLOWED_TOOLS,
+  })) {
+    assert.ok(!allow.includes("WebSearch"), name);
+    assert.ok(!allow.includes("WebFetch"), name);
+  }
+});
+
+test("#410: gate② review-session mode (reviewCwd) hardcodes ROLE_ALLOWED_TOOLS regardless of any caller-supplied allowedTools — a caller attempting to widen it (even with the #410 web-grant strings) is REFUSED (thrown), never silently accepted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`);
+    const runner = mkRunner(dir, bin);
+    await assert.rejects(
+      () =>
+        runner.run({
+          roleId: "engine-reviewer",
+          prompt: "p",
+          model: "opus",
+          effort: "high",
+          fallbackModel: "none",
+          reviewCwd: materializedDir,
+          allowedTools: ARCHITECT_ALLOWED_TOOLS,
+        }),
+      /reviewCwd/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+// ── #410: audit — peripheral WebFetch/WebSearch calls reuse the SAME scanner + ledger event
+// kind the worker's own Bash egress tripwire uses. ─────────────────────────────────────────
+
+test("#410: only ONE scanEgressSuspects implementation exists in the tree — the audit reuses the existing scanner, no second one was introduced", () => {
+  const src = readFileSync(fileURLToPath(new URL("./worker.ts", import.meta.url)), "utf8");
+  const defs = src.match(/export function scanEgressSuspects\(/g) ?? [];
+  assert.equal(defs.length, 1, "exactly one scanEgressSuspects function definition in worker.ts");
+  // And peripheral.ts itself defines no scanner of its own — it only ever imports and calls the
+  // one above.
+  const peripheralSrc = readFileSync(fileURLToPath(new URL("./peripheral.ts", import.meta.url)), "utf8");
+  assert.ok(!/function scanEgressSuspects\(/.test(peripheralSrc), "peripheral.ts defines no scanner of its own");
+  assert.ok(peripheralSrc.includes("scanEgressSuspects(jsonl,"), "peripheral.ts calls the imported scanner");
+});
+
+test("#410: a peripheral session's WebFetch/WebSearch tool_use calls produce the SAME `egress-suspect` ledger event kind the worker's Bash tripwire uses", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const stream = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", name: "WebFetch", input: { url: "https://example.com/some-page" } },
+            { type: "tool_use", name: "WebSearch", input: { query: "does a mature library already exist" } },
+          ],
+        },
+      }),
+      JSON.stringify({ type: "result", total_cost_usd: 0 }),
+    ].join("\n");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ncat <<'EOF'\n${stream}\nEOF\nexit 0\n`);
+    const events: Array<{ kind: string; payload: unknown }> = [];
+    const runner = mkRunner(dir, bin, {
+      state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }), maxEventId: () => 0 },
+    });
+    const result = await runner.run({
+      roleId: "architect",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: ARCHITECT_ALLOWED_TOOLS,
+    });
+    assert.equal(result.outcome, "done");
+    const egress = events.filter((e) => e.kind === "egress-suspect");
+    assert.equal(egress.length, 2, "one event per web tool call, deduplicated by (tool, snippet)");
+    const payloads = egress.map((e) => e.payload as { worker: string; issue: number; executable: string; snippet: string });
+    assert.ok(payloads.some((p) => p.executable === "WebFetch" && p.snippet === "https://example.com/some-page"));
+    assert.ok(payloads.some((p) => p.executable === "WebSearch" && p.snippet === "does a mature library already exist"));
+    for (const p of payloads) {
+      assert.equal(p.issue, 0, "round-level sentinel — a role session has no single associated issue at this layer");
+      assert.equal(p.worker, result.name, "the session's own lane/sentinel name, same field name worker.ts's event uses");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#410: a role session that never holds WebFetch/WebSearch (e.g. plan-reviewer, the base ROLE_ALLOWED_TOOLS grant) emits NO egress-suspect event even if its transcript somehow named one — structurally a no-op, not a role-id check inside the scanner", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    // A transcript naming a WebFetch call is itself unrealistic for a session without the tool
+    // (the CLI wouldn't honor the call) — this proves the scanner has no OTHER gate suppressing
+    // it either: the same jsonl that produces a hit for a granted role still produces a hit here,
+    // audit and grant are independent layers, and it's the CALLER'S allowedTools that determines
+    // whether the tool could ever really appear.
+    const stream = [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "WebFetch", input: { url: "https://example.com" } }] },
+      }),
+      JSON.stringify({ type: "result", total_cost_usd: 0 }),
+    ].join("\n");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ncat <<'EOF'\n${stream}\nEOF\nexit 0\n`);
+    const events: Array<{ kind: string; payload: unknown }> = [];
+    const runner = mkRunner(dir, bin, {
+      state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }), maxEventId: () => 0 },
+    });
+    await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(
+      events.filter((e) => e.kind === "egress-suspect").length,
+      1,
+      "the scanner is jsonl-content-driven, not role-id-gated — it still recognizes the block; the REAL boundary is that a real CLI session without the grant could never have produced this jsonl in the first place",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1607,7 +1797,13 @@ test("run: a proxy mint FAILURE is non-fatal — the session still runs to compl
     });
     assert.equal(result.outcome, "done");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
-    assert.ok(!seen.includes("--mcp-config"), "no proxy attached -> no --mcp-config flag");
+    const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
+    // #410: EVERY peripheral session now pins the mcp/settings triple, proxy attached or not —
+    // no proxy still means an EXPLICIT empty --mcp-config (never the bare absence of the flag
+    // the pre-#410 behavior had), alongside --strict-mcp-config and --setting-sources "".
+    assert.equal(at("--mcp-config"), '{"mcpServers":{}}', "no proxy attached -> the explicit empty map, not a bare absence of the flag");
+    assert.ok(seen.includes("--strict-mcp-config"), "#410: pinned even without a proxy attached");
+    assert.equal(at("--setting-sources"), "", "#410: pinned even without a proxy attached");
     assert.equal(seen[seen.indexOf("--allowedTools") + 1], ROLE_ALLOWED_TOOLS, "falls back to the base allowedTools, unwidened");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1835,7 +2031,7 @@ test("run: #253 a session's OWN RoleSessionOpts.proxy wins over RoleRunnerDeps.d
   }
 });
 
-test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> today's behavior, byte-for-byte unchanged (no --mcp-config, base allowedTools)", async () => {
+test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> base allowedTools, unwidened; #410 update — --mcp-config is now ALWAYS present (an explicit empty map, part of the settings-pinning triple every peripheral session gets, proxy or not)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
     const bin = mkStub(
@@ -1846,8 +2042,17 @@ test("run: #253 no RoleRunnerDeps.defaultProxy and no opts.proxy -> today's beha
     const result = await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
-    assert.ok(!seen.includes("--mcp-config"), "no proxy anywhere -> no --mcp-config flag");
-    assert.equal(seen[seen.indexOf("--allowedTools") + 1], ROLE_ALLOWED_TOOLS, "base allowedTools, unwidened");
+    const at = (flag: string): string => seen[seen.indexOf(flag) + 1] ?? "";
+    assert.equal(
+      at("--mcp-config"),
+      '{"mcpServers":{}}',
+      "#410: no proxy anywhere -> the explicit empty map, not a bare absence of the flag",
+    );
+    // Since this test's roleId ("architect") is one of the #410-granted roles, allowedTools falls
+    // back to ROLE_ALLOWED_TOOLS here only because no `allowedTools` opt was supplied at all — the
+    // grant is applied by the CALLER (architect.ts), never inside RoleRunner itself; see the
+    // dedicated ARCHITECT_ALLOWED_TOOLS tests above for the call-site-level behavior.
+    assert.equal(at("--allowedTools"), ROLE_ALLOWED_TOOLS, "base allowedTools, unwidened — no allowedTools opt supplied to run() directly");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

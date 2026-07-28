@@ -43,6 +43,16 @@ your explanation — a contradiction flag grounded in "I checked X and it does Y
 useful to the human reading your design note than one asserted from the substituted summaries
 alone.
 
+You also have `WebSearch`/`WebFetch` in this session, unless this deployment has turned the
+grant off — when the tools simply aren't there, treat their absence like any other missing
+tool, never a reason to invent an answer. Use them the same way: only when a design judgment
+genuinely turns on outside reality — whether a candidate's approach duplicates a mature external
+solution worth citing in your design note, or whether a locked-architecture assumption about an
+external system still holds. If you attempt such a check and it doesn't resolve — the tool
+errors, the result is inconclusive — say so explicitly in your round design note rather than
+silently omitting the check or writing as if you'd confirmed something you didn't. "I could not
+verify this" belongs in the note as honestly as any contradiction or risk you flag.
+
 ## Round context
 
 - Round: #{{round.id}}
