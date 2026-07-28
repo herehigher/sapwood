@@ -207,15 +207,42 @@ test("startProgressWatchdog (#395 gate② follow-up, P3): a THROWING enrich read
 });
 
 test("startProgressWatchdog: event-log progress before the window elapses resets it — no false fire", async () => {
-  const state = fakeState();
+  // #403-class fix (this test was originally #395's, and flaked on CI as another instance of
+  // #403 "date-bomb fixtures / timing-dependent tests"): the original version drove "progress"
+  // via a real `sleep()` racing the watchdog's OWN internal setTimeout sampling loop — two
+  // independent real timers whose relative ordering under a loaded scheduler is not guaranteed
+  // (CI saw the watchdog complete its 4 consecutive unchanged samples before the test's `bump()`
+  // landed). Rebuilt so "progress" is a pure function of the watchdog's own SAMPLE COUNT (how
+  // many times maxEventId() has been called), never of elapsed wall-clock time: this fake bumps
+  // its id on every 2nd sample -- strictly fewer than SAMPLES_PER_WINDOW (4 in watchdog.ts) -- so
+  // unchangedSamples can structurally never accumulate to 4 consecutive unchanged reads, no
+  // matter how the real setTimeout cadence actually gets scheduled. That makes "progress arrives
+  // before the window elapses" a property of the call SEQUENCE, true on any machine at any
+  // speed -- there is no longer a second clock to race against at all.
+  let sampleCalls = 0;
+  let id = 0;
+  const state = {
+    maxEventId: (): number => {
+      sampleCalls++;
+      if (sampleCalls % 2 === 0) id++;
+      return id;
+    },
+    lastTickAt: (): string | null => "T0",
+    appendEvent: (): void => {
+      /* not exercised by this test -- it only asserts on exitCalls */
+    },
+  };
   const exitCalls: number[] = [];
-  const handle = startProgressWatchdog({ windowMs: 100, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
-  await sleep(30); // well inside the first 100ms window
-  state.bump(); // progress happens
-  await sleep(120); // total 150ms since start: past the FIRST window's original 100ms deadline,
-  // but progress at t=30ms reset it — the NEXT check lands at roughly t=130ms, so t=150ms should
-  // already have seen it reschedule again rather than fire; generous margin either side.
-  assert.deepEqual(exitCalls, [], "progress reset the window — no stall was ever declared");
+  const handle = startProgressWatchdog({ windowMs: 20, state, exit: (code) => exitCalls.push(code), eventPayload: {} });
+  // Generous real-time margin -- safe to be generous here (unlike the original) because nothing
+  // hinges on hitting an exact wall-clock boundary anymore: the reset-every-2-samples pattern
+  // guarantees no fire no matter how many, or how few, samples actually land during this sleep.
+  await sleep(400);
+  assert.deepEqual(exitCalls, [], "progress reset the window on every sample pair — no stall was ever declared");
+  assert.ok(
+    sampleCalls >= 6,
+    `sanity: the watchdog must have actually sampled several times to exercise the reset repeatedly, got ${sampleCalls}`,
+  );
   handle.stop();
 });
 

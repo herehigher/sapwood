@@ -221,19 +221,38 @@ test("assertLocalConfigClean (#395 P2): its own `git config --local --list` read
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-wtroot-"));
   const cloneRoot = mkdtempSync(join(tmpdir(), "sapwood-materializer-clone-"));
   const shared = initSharedRepo();
+  // #403-class fix: the original version raced a REAL `git config --local --list` subprocess
+  // against a 1ms timeout, on the assumption real git can never finish that fast. On a fast CI
+  // runner (warm page/inode cache) it sometimes CAN — the direction called out in the failure
+  // report is the opposite of the usual flake: this test fails when the machine is fast, not
+  // slow. There is no injectable execFile seam in materializer.ts to stub (pexecFile is a private
+  // module-level constant), so instead of racing real git's speed, point PATH at a fake `git`
+  // that never returns on its own — the only thing that can produce a rejection is then the
+  // `timeout` option itself, deterministically, on any machine at any speed. This mutates the
+  // process-global PATH; node:test runs the tests in this file sequentially (no `concurrency`
+  // used anywhere in this suite) and each test FILE is its own process, so the mutation can never
+  // leak into a concurrently-running test.
+  const fakeGitBin = mkdtempSync(join(tmpdir(), "sapwood-materializer-fakegit-"));
+  const originalPath = process.env.PATH;
   try {
     writeFileSync(join(shared, "f.txt"), "hello\n");
     git(shared, ["add", "f.txt"]);
     git(shared, ["commit", "-qm", "init"]);
     const cloneDir = join(cloneRoot, "clone.git");
-    // A generous timeout for the SETUP clone (not under test), then a 1ms timeout on the read
-    // under test — isolates which call the timeout is actually bounding.
+    // Real git, generous default timeout, for the SETUP clone (not under test).
     await createPrivateClone({ sourceRepoDir: shared, cloneDir, worktreeRoot });
-    await assert.rejects(() => assertLocalConfigClean(cloneDir, 1), /unable to read local config/);
+    // A `git` that never exits on its own -- the read under test can only be resolved by the
+    // execFile `timeout` option killing it.
+    writeFileSync(join(fakeGitBin, "git"), "#!/bin/sh\nwhile true; do sleep 3600; done\n");
+    chmodSync(join(fakeGitBin, "git"), 0o755);
+    process.env.PATH = `${fakeGitBin}:${originalPath ?? ""}`;
+    await assert.rejects(() => assertLocalConfigClean(cloneDir, 20), /unable to read local config/);
   } finally {
+    process.env.PATH = originalPath;
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(cloneRoot, { recursive: true, force: true });
     rmSync(shared, { recursive: true, force: true });
+    rmSync(fakeGitBin, { recursive: true, force: true });
   }
 });
 
