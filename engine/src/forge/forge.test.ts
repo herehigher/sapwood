@@ -39,6 +39,7 @@ import {
   projectQuery,
   SUB_ISSUE_IDS_QUERY,
   SUB_ISSUES_QUERY,
+  selectIssuesAbsentFromBoard,
   selectPlanReviewCandidates,
   selectPlanTriageCandidates,
   selectPoolEligibleIssues,
@@ -786,6 +787,19 @@ test("readStartupReconcileData returns board placements plus open PR bodies usin
   assert.ok(!seen.flat().some((arg) => ["edit", "create", "merge", "comment"].includes(arg)));
 });
 
+test("listIssuesAbsentFromBoard: cross-references the board's placements with this repo's open issues, read-only", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "herehigher", repo: "sapwood", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    // PROJECT_JSON's ITEM_10 (repo herehigher/sapwood) is on the board; #999 is not.
+    return args[0] === "api" ? PROJECT_JSON : JSON.stringify([{ number: 10 }, { number: 999 }]);
+  };
+  assert.deepEqual(await forge.listIssuesAbsentFromBoard(), [999]);
+  assert.ok(!seen.flat().some((arg) => ["edit", "create", "merge", "comment"].includes(arg)), "read-only — no write verb in any gh call");
+});
+
 test("projectQuery: no line is a // comment (GraphQL uses #, not //) — Codex R5 P1 guard", () => {
   for (const root of ["user", "organization"] as const) {
     const q = projectQuery(root, "Status");
@@ -843,6 +857,34 @@ test("selectUnplacedIssues: a foreign-repo No-Status item is skipped, never sele
     issues: [],
     skipped: 1,
   });
+});
+
+// ── #412: selectIssuesAbsentFromBoard — the No-Status normalizer's detect-only sibling ─────────
+
+test("selectIssuesAbsentFromBoard: an open issue with no board item at all is absent", () => {
+  assert.deepEqual(
+    selectIssuesAbsentFromBoard([10, 11, 12], [{ number: 10, repo: "herehigher/sapwood", status: "Ready" }], "herehigher/sapwood"),
+    [11, 12],
+  );
+});
+
+test("selectIssuesAbsentFromBoard: an issue present in ANY lane, including Done and No-Status, is not absent", () => {
+  const placements = [
+    { number: 10, repo: "herehigher/sapwood", status: "Todo" },
+    { number: 11, repo: "herehigher/sapwood", status: "Ready" },
+    { number: 12, repo: "herehigher/sapwood", status: "In Progress" },
+    { number: 13, repo: "herehigher/sapwood", status: "Done" },
+    { number: 14, repo: "herehigher/sapwood", status: null },
+  ];
+  assert.deepEqual(selectIssuesAbsentFromBoard([10, 11, 12, 13, 14], placements, "herehigher/sapwood"), []);
+});
+
+test("selectIssuesAbsentFromBoard: a foreign-repo item with the same number cannot mask a genuinely absent issue", () => {
+  assert.deepEqual(selectIssuesAbsentFromBoard([50], [{ number: 50, repo: "other/widgets", status: "Ready" }], "herehigher/sapwood"), [50]);
+});
+
+test("selectIssuesAbsentFromBoard: a draft item (no issue number) is jurisdiction-excluded, never masks an absence", () => {
+  assert.deepEqual(selectIssuesAbsentFromBoard([60], [{ number: null, repo: null, status: "Ready" }], "herehigher/sapwood"), [60]);
 });
 
 test("selectReadyIssues: Ready lane + OPEN + this repo + has verification plan (Decision #8, tightened by #88 gate⓪)", () => {

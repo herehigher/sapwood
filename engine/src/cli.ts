@@ -742,33 +742,62 @@ export async function assertStopMilestoneExists(forge: Pick<IForge, "listMilesto
   }
 }
 
+/** #412: the enumeration cap for normalizeUnplacedBoardItems' absent-issue report — a large
+ *  open-issue backlog must never produce an unbounded log line or event payload. The reported
+ *  TOTAL is always the true count regardless of this cap; only the enumerated list is capped. */
+const ABSENT_ISSUES_LOG_CAP = 25;
+
 /** Adopt GitHub's implicit No-Status board entries into the configured backlog once per
  *  engine start. This is deliberately separate from every dispatch read: Ready remains the
  *  only execution queue. Individual moves are best-effort so one malformed/stale item cannot
  *  prevent the engine from starting; the next startup naturally sees and retries any item
- *  whose move failed. */
+ *  whose move failed.
+ *
+ *  #412: also answers the strictly wider "is every issue reachable by the queue" question —
+ *  after adopting No-Status items, report (never place) any OPEN issue of the configured repo
+ *  that isn't on the board AT ALL. No-Status normalization above cannot see this case: its own
+ *  input is board membership already (fetchProject().placements), so an issue that was never
+ *  added to the board is outside its input set by construction. Detect-and-report only: this
+ *  function adds no auto-placement write, matching listIssuesAbsentFromBoard's own read-only
+ *  contract. Both passes are independently best-effort — a failure in one never blocks the
+ *  other, or engine startup. */
 export async function normalizeUnplacedBoardItems(
-  forge: Pick<IForge, "listUnplacedIssues" | "setBoardStatus">,
+  forge: Pick<IForge, "listUnplacedIssues" | "setBoardStatus" | "listIssuesAbsentFromBoard">,
   state: Pick<State, "appendEvent">,
   log: (message: string) => void = console.error,
 ): Promise<void> {
-  let unplaced: Awaited<ReturnType<IForge["listUnplacedIssues"]>>;
   try {
-    unplaced = await forge.listUnplacedIssues();
+    const unplaced = await forge.listUnplacedIssues();
+    if (unplaced.skipped > 0) {
+      log(
+        `[sapwood:startup] skipped ${unplaced.skipped} No-Status draft/foreign-repo board item(s) outside this repo's write jurisdiction`,
+      );
+    }
+    for (const issue of unplaced.issues) {
+      try {
+        await forge.setBoardStatus(issue, "backlog");
+        state.appendEvent("board-normalized", { issue, status: "backlog" });
+      } catch (error) {
+        log(`[sapwood:startup] issue #${issue}: failed to move No-Status item to backlog; continuing: ${String(error)}`);
+      }
+    }
   } catch (error) {
     log(`[sapwood:startup] could not list No-Status board items; normalization skipped: ${String(error)}`);
-    return;
   }
-  if (unplaced.skipped > 0) {
-    log(`[sapwood:startup] skipped ${unplaced.skipped} No-Status draft/foreign-repo board item(s) outside this repo's write jurisdiction`);
-  }
-  for (const issue of unplaced.issues) {
-    try {
-      await forge.setBoardStatus(issue, "backlog");
-      state.appendEvent("board-normalized", { issue, status: "backlog" });
-    } catch (error) {
-      log(`[sapwood:startup] issue #${issue}: failed to move No-Status item to backlog; continuing: ${String(error)}`);
+
+  try {
+    const absent = await forge.listIssuesAbsentFromBoard();
+    if (absent.length > 0) {
+      const shown = absent.slice(0, ABSENT_ISSUES_LOG_CAP);
+      const truncated = absent.length > shown.length;
+      log(
+        `[sapwood:startup] ${absent.length} open issue(s) absent from the configured board altogether: ` +
+          `#${shown.join(", #")}${truncated ? ", ..." : ""}`,
+      );
+      state.appendEvent("board-gap-detected", { total: absent.length, issues: shown });
     }
+  } catch (error) {
+    log(`[sapwood:startup] could not compute open issues absent from the board; check skipped: ${String(error)}`);
   }
 }
 

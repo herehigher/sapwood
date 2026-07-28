@@ -403,6 +403,9 @@ export class RoundScopedForge implements IForge {
   listUnplacedIssues() {
     return this.inner.listUnplacedIssues();
   }
+  listIssuesAbsentFromBoard() {
+    return this.inner.listIssuesAbsentFromBoard();
+  }
   readStartupReconcileData() {
     return this.inner.readStartupReconcileData();
   }
@@ -583,6 +586,9 @@ export class PoolScopedForge implements IForge {
 
   listUnplacedIssues() {
     return this.inner.listUnplacedIssues();
+  }
+  listIssuesAbsentFromBoard() {
+    return this.inner.listIssuesAbsentFromBoard();
   }
   readStartupReconcileData() {
     return this.inner.readStartupReconcileData();

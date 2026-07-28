@@ -169,6 +169,13 @@ export interface IForge {
   /** Issue-number-addressable board items with no Status, plus draft/non-issue items that
    *  cannot be moved through setBoardStatus. Used once at engine startup, never for dispatch. */
   listUnplacedIssues(): Promise<UnplacedIssues>;
+  /** #412: every OPEN issue of the configured repo that is NOT a board item at all, in any
+   *  lane (unlike listUnplacedIssues, whose input is board membership already and therefore
+   *  cannot see an issue that was never added to the board). Read-only, startup-only,
+   *  detect-and-report: the engine never places an issue on a board itself — see cli.ts's
+   *  normalizeUnplacedBoardItems, the sole caller. Same jurisdiction as listUnplacedIssues:
+   *  draft board items and items belonging to another repo don't count as "on board". */
+  listIssuesAbsentFromBoard(): Promise<number[]>;
   /** One startup-only, read-only view used to surface management-side orphans after local
    *  state loss. It is observability input only: callers must never rebuild workers from it.
    *  PR orphan detection shares findOpenPrForIssue's 200-open-PR bound (#50 residual), so PRs
@@ -618,6 +625,11 @@ export class GithubForge implements IForge {
   async listUnplacedIssues(): Promise<UnplacedIssues> {
     const project = await this.fetchProject();
     return selectUnplacedIssues(project.placements, `${this.cfg.board.owner}/${this.cfg.board.repo}`);
+  }
+
+  async listIssuesAbsentFromBoard(): Promise<number[]> {
+    const [project, openIssues] = await Promise.all([this.fetchProject(), this.listOpenIssueNumbers()]);
+    return selectIssuesAbsentFromBoard(openIssues, project.placements, `${this.cfg.board.owner}/${this.cfg.board.repo}`);
   }
 
   async readStartupReconcileData(): Promise<StartupReconcileData> {
@@ -1385,6 +1397,21 @@ export function selectUnplacedIssues(items: readonly BoardPlacement[], repoFullN
     issues: unplaced.flatMap((item) => (item.number !== null && item.repo === repoFullName ? [item.number] : [])),
     skipped: unplaced.filter((item) => item.number === null || item.repo !== repoFullName).length,
   };
+}
+
+/** #412: the No-Status normalizer above answers "is this board item misplaced" — this answers
+ *  the strictly earlier question, "is this OPEN issue on the board at all". `placements` is
+ *  ANY-status board membership (unlike selectUnplacedIssues' filtered input): an item counts as
+ *  "on board" regardless of which lane it's in, No-Status included — only a genuinely absent
+ *  issue number is reported. Same jurisdiction as selectUnplacedIssues: a draft item (number
+ *  null) or a foreign-repo item can never mask (or falsely stand in for) a real absence. */
+export function selectIssuesAbsentFromBoard(
+  openIssues: readonly number[],
+  placements: readonly BoardPlacement[],
+  repoFullName: string,
+): number[] {
+  const onBoard = new Set(placements.flatMap((item) => (item.number !== null && item.repo === repoFullName ? [item.number] : [])));
+  return openIssues.filter((issue) => !onBoard.has(issue));
 }
 
 /** The project query. `root` is "user" or "organization" (owner-kind agnostic downstream). */
