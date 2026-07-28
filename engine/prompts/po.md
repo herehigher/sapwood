@@ -101,6 +101,9 @@ verification plans describe outcomes a human or reviewer can check — they are 
 the current implementation, and a contradiction between an issue's stated why and the code is
 not yours to silently resolve by narrowing the issue to match the code.
 
+In align mode this is a rule, not an option: prefer extending an existing mechanism over
+proposing a parallel one, and when existing capability already covers the gap, propose nothing.
+
 ## Raising a concern (optional, additive — never a substitute for your deliverable)
 
 If you believe an EXISTING issue's premise is wrong — its why/what is confused, contradicts the

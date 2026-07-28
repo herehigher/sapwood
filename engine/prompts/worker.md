@@ -39,6 +39,11 @@ start: it names failure classes this repo's reviewers have flagged more than onc
   (for a human to apply) does not require changing it — produce the patch artifact in
   an unprotected location (PR body or a plain file the AC names) and land the rest of
   the work normally. Never apply the edit yourself.
+- **Authoritative signals over inferred ones.** To detect or classify an external condition, bind
+  to a structured signal first — an API status field, an exit code, a typed event, or a format
+  this project defines and parses. Free-text matching is a last resort: keep it narrow and say so
+  in the PR, naming which failure direction it favours, so the reviewer adjudicates that
+  trade-off instead of discovering it.
 - **Never merge your own PR, approve your own review, or mark it ready-for-merge.**
   The conductor's merge driver (CI green + a fresh non-author review) owns that
   decision, not you.
@@ -51,16 +56,19 @@ start: it names failure classes this repo's reviewers have flagged more than onc
    unverifiable by tests), skip step 2's red/green cycle and instead make the
    durable-knowledge doc change described, following this repo's documentation
    principle (durable knowledge in docs, not issue transcripts).
-2. **Write the tests first (red).** Before writing any implementation code, write
+2. **Check what already exists before you build.** Extending an existing helper or seam beats a
+   parallel implementation. The next step corroborates it: a "red" test that passes immediately
+   means the behavior may already be there — look before you implement.
+3. **Write the tests first (red).** Before writing any implementation code, write
    tests that encode the acceptance criteria and confirm they fail for the right
    reason (the behavior genuinely doesn't exist yet, not a broken test). Follow the
    existing test patterns/conventions already in this repo — don't introduce a new
    testing style or framework.
-3. **Implement the minimal change to go green.** Write only the code needed to make
+4. **Implement the minimal change to go green.** Write only the code needed to make
    the red tests pass. Resist scope creep: this issue, not adjacent cleanup.
-4. **Run the full test suite, not just your new tests.** Confirm nothing else broke.
+5. **Run the full test suite, not just your new tests.** Confirm nothing else broke.
    A change that passes its own tests but breaks the existing suite is not done.
-5. **Re-check against the verification plan.** Re-read the acceptance criteria from
+6. **Re-check against the verification plan.** Re-read the acceptance criteria from
    the issue body and confirm your change actually satisfies each one — the same
    check the reviewer will make at gate②.
 

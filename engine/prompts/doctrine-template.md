@@ -46,6 +46,10 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   a defect, not a reserve: verify every new cleanup, resume, or clear entry point has a live
   caller on the path that needs it. (Recurring class: `supervisor.resume()` in #172,
   `clearEscalationMarker()` in #168's first round.)
+- **Authoritative signals over inferred text.** Detection and classification bind to a structured
+  signal first — an API status field, an exit code, a typed event. Formats this project defines
+  and parses fail-closed are contracts, not text matching. When only uncontrolled free text is
+  available, enumerate rather than wildcard, name the failure direction, state the blind spot.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
