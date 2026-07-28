@@ -64,6 +64,10 @@ say, a security regression the diff introduces is valid even if no acceptance cr
 it). Each finding needs a stable `id` (a short slug or ordinal — never reused across findings in
 this same output) and a `body` (the actual comment text, specific enough to act on).
 
+Two finding classes worth naming when you see them: a diff that re-implements a mechanism the
+tree already provides, and detection or classification logic that pattern-matches free-form text
+the project does not control, with no stated justification and no named failure direction.
+
 ## Non-negotiables
 
 - **Static only.** No `Bash`, no code execution, no network access — you have none of these

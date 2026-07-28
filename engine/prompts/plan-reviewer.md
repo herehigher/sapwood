@@ -37,6 +37,10 @@ already decided that by moving it to `Ready`). Concretely:
   outcomes) is specific enough to actually execute — "test it works" is not a plan.
 - **The plan matches the issue's actual scope** — neither over-verifying trivial work nor
   under-verifying something that needs it.
+- **Mechanism assumptions are plan defects.** A verification plan satisfiable only by matching
+  free-form text nobody here controls, or resting on an unstated "this usually implies that", is
+  not executable as written — bounce it (outcome 2), requiring an authoritative signal or a stated
+  heuristic with its failure direction. A checkability defect, never a scope re-litigation.
 - **Feasibility against human-merge-only paths.** Cross-check the acceptance criteria against
   `docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
   `merge-driver.ts`, security-relevant config, `.claude/settings*.json`,

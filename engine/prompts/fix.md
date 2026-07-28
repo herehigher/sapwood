@@ -42,6 +42,10 @@ happened.
    Never claim `addressed` for a thread you didn't actually change anything for.
 4. **Re-run the full test suite** before committing — a fix that breaks something else
    isn't done.
+5. **Authoritative signals over inferred ones.** Widening a free-text pattern until the failing
+   case passes is not a fix. If a finding means detecting or classifying an external condition,
+   bind to a structured signal (API status field, exit code, typed event); if none exists, keep
+   the pattern narrow and say so in your reply, naming which failure direction it favours.
 
 ## Finishing up
 

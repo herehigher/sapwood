@@ -8,9 +8,12 @@ import { test } from "node:test";
 import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
+import { defaultDoctrineTemplatePath } from "../loop/init.js";
 import { defaultRetroPromptPath } from "../retro/retro.js";
+import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
 import { defaultArchitectPromptPath } from "./architect.js";
 import { defaultPlanConfirmPromptPath, defaultPlanDrafterPromptPath, defaultPlanReviewerPromptPath } from "./plan-review.js";
+import { defaultFixPromptPath, defaultPromptPath } from "./worker.js";
 
 function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
@@ -24,9 +27,9 @@ function readPrompt(path: string): string {
 
 const SNAPSHOT_HASHES: Record<string, string> = {
   // #321: intentional edits — sentinel examples are plain text, never markdown-fenced.
-  "po.md": "d33d20062d903584608e0799e3d825cb7a0b1fea23c070a5c0271a82a7b8896e",
+  "po.md": "49fe0cd968ac611a4f7cb12c624f9196e44e9fa90f0be58a588791afeb263781",
   "architect.md": "08ae9bd5a164533d3d6c96b6a3c98e48c0fa666d41cc85b73d2457358d17f3b2",
-  "plan-reviewer.md": "a9ed1a2277fdbd0bdbf0eec415e997c1a342eea26fa8a8196efd795a51ccefd8",
+  "plan-reviewer.md": "4f957b12d2ff056233cd111d9c968547cc2b4988761c4d1ba6ba40e314c10c93",
   "plan-reviewer-confirm.md": "250c0752f7e2b91418cc76a772123107a36d7de16fa9728c33399061993497fa",
   "plan-drafter.md": "dce0f4aca4c0d323ad8f7176a6612527075d9e6ec83b19396e9d3dc2f68903eb",
   "harvest.md": "59fb5fb1a8a3bebb2429c878c309caffe3105a3f9a32262268b7a14525026d4b",
@@ -154,4 +157,100 @@ test("plan-drafter.md (#283): mandates literal `- [ ]` checkbox acceptance crite
   const body = readPrompt(defaultPlanDrafterPromptPath());
   assert.ok(body.includes("- [ ] ...`"), "shows the literal checkbox syntax");
   assert.ok(body.toLowerCase().includes("not dispatchable"), "states the dispatch consequence explicitly");
+});
+
+// ── #409: reuse-before-build + authoritative-signals-over-inferred, worded per role ───────────
+
+test("#409 worker.md: the reuse check is a Method step placed BEFORE the red-test step and anchored on it, and authoritative-signals is a non-negotiable", () => {
+  const body = readPrompt(defaultPromptPath());
+  const reuse = body.indexOf("Check what already exists before you build.");
+  const red = body.indexOf("Write the tests first (red).");
+  assert.ok(reuse > 0, "the reuse step is present");
+  assert.ok(reuse < red, "it precedes the red-test step rather than trailing it");
+  assert.match(body, /a "red" test that passes immediately/, "anchored on the existing red-test signal, not a bolted-on survey process");
+  assert.ok(body.includes("Authoritative signals over inferred ones."), "the signal rule is present");
+  assert.ok(
+    body.indexOf("Authoritative signals over inferred ones.") > body.indexOf("## Non-negotiables"),
+    "and it lives under Non-negotiables, not buried in Method",
+  );
+});
+
+test("#409 fix.md: carries the authoritative-signals rule (a fix leg is where patterns get widened to pass) and deliberately NOT the reuse step", () => {
+  const body = readPrompt(defaultFixPromptPath());
+  assert.ok(
+    body.includes("Authoritative signals over inferred ones."),
+    "the signal rule reaches the fix leg, which runs on its own prompt",
+  );
+  assert.match(
+    body,
+    /Widening a free-text pattern until the failing\s+case passes is not a fix/,
+    "named in fix-leg terms, not copied from worker.md",
+  );
+  assert.ok(!body.includes("Check what already exists before you build."), "reuse-before-build is scoped to fresh work, not rework");
+});
+
+test("#409 plan-reviewer.md: unexecutable-mechanism plans are bounceable, WITHOUT licensing a re-litigation of the human's why/what", () => {
+  const body = readPrompt(defaultPlanReviewerPromptPath());
+  assert.ok(body.includes("Mechanism assumptions are plan defects."), "the plan-defect ground is present");
+  assert.match(body, /A checkability defect, never a scope re-litigation\./, "explicitly bounded away from re-litigating scope");
+  assert.ok(body.includes("not whether the underlying work is a good idea"), "the charter line forbidding re-litigation survives the edit");
+  assert.ok(
+    !body.includes("Check what already exists before you build."),
+    "gate⓪ does not survey the repo for prior art — that would re-litigate a human's Ready call",
+  );
+});
+
+test("#409 engine-reviewer.md: both finding classes are named, and the closed-output contract is untouched", () => {
+  const body = readPrompt(defaultEngineReviewerPromptPath());
+  assert.match(body, /re-implements a mechanism the\s+tree already provides/, "the reinvention finding class");
+  assert.match(body, /pattern-matches free-form text\s+the project does not control/, "the inferred-signal finding class");
+  assert.ok(
+    body.includes("beyond exactly `perAC` and `findings`"),
+    "no new output field was introduced — the closed schema statement still stands",
+  );
+});
+
+test("#409 po.md: align mode states reuse-before-build as a rule, including the propose-nothing case", () => {
+  const body = readPrompt(defaultPoPromptPath());
+  assert.match(body, /In align mode this is a rule, not an option/, "upgraded from the old discretionary half-sentence");
+  assert.match(body, /propose nothing/, "the propose-nothing case is explicit");
+});
+
+test("#409 doctrine-template.md: the authoritative-signals invariant carries the ordering, the contract-format exemption, and the failure-direction requirement", () => {
+  const body = readPrompt(defaultDoctrineTemplatePath());
+  assert.ok(body.includes("Authoritative signals over inferred text."), "the invariant is present in the shipped starter doctrine");
+  assert.match(body, /bind to a structured\s+signal first/, "structured-signal-first ordering");
+  assert.match(
+    body,
+    /are contracts, not text matching/,
+    "the contract-internal-format exemption — this project's own grammars stay allowed",
+  );
+  assert.match(body, /name the failure direction/, "the false-positive-vs-false-negative choice must be stated");
+});
+
+test("#409: the rule is worded per role rather than one paragraph duplicated, and no shared prompt-include mechanism was added", () => {
+  const worker = readPrompt(defaultPromptPath());
+  const others = [
+    defaultFixPromptPath(),
+    defaultPlanReviewerPromptPath(),
+    defaultEngineReviewerPromptPath(),
+    defaultDoctrineTemplatePath(),
+  ].map(readPrompt);
+  const workerSentence = "To detect or classify an external condition, bind";
+  assert.ok(worker.includes(workerSentence), "worker.md's own phrasing");
+  for (const body of others) {
+    assert.ok(!body.includes(workerSentence), "no file repeats worker.md's sentence verbatim — each role gets wording it can act on");
+  }
+  for (const body of [worker, ...others]) {
+    assert.doesNotMatch(
+      body,
+      /\{\{\s*(?:include|partial|shared)[^}]*\}\}/,
+      "no include/partial directive was introduced into the template language",
+    );
+  }
+});
+
+test("#409: plan-drafter.md and architect.md are deliberately untouched (charter conflicts recorded in the issue)", () => {
+  assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
+  assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
 });
