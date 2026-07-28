@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
 // (/sapwood-run, /sapwood-status, /sapwood-stop) are thin wrappers that shell out to this CLI
 // — see ../../commands/.
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { configHash, DEFAULT_CONFIG_PATHS, dashboardConfigSubset, loadConfig, type SapwoodConfig } from "./config/config.js";
@@ -801,6 +802,105 @@ export async function normalizeUnplacedBoardItems(
   }
 }
 
+/** #410 amendment (owner ruling 2026-07-28): the tool names a `permissions.deny` entry can name
+ *  to strip the #410 web-access grant — matched bare ("WebSearch") or `Tool(...)`-qualified (a
+ *  "WebSearch(" prefix, e.g. "WebSearch(domain:x)"). */
+const WEB_ACCESS_TOOLS = ["WebSearch", "WebFetch"] as const;
+
+/** #410 amendment: injectable seam for checkWebAccessSettingsDenial's two OS reads — same
+ *  "inject the collaborator, not the CLI" convention every other cli.ts test-support type here
+ *  uses. Omitted -> the real `node:fs`/`node:os` calls. */
+export interface WebAccessDenialCheckDeps {
+  homedir?: () => string;
+  /** Reads the file at `path` and returns its text, or THROWS (missing/unreadable) — same
+   *  contract as `readFileSync(path, "utf8")`, which is the real default. */
+  readFile?: (path: string) => string;
+}
+
+/** #410 amendment (owner ruling 2026-07-28): lightweight startup detection, NOT settings
+ *  pinning — see docs/security.md's peripheral-egress section for the full rationale. An
+ *  earlier version of this PR pinned `--setting-sources ""` for every peripheral session; a
+ *  live measurement found that flag ALSO stops loading the repo's own CLAUDE.md, colliding
+ *  with the locked #236 ruling ("Ambient repo context: record, don't seal" — a peripheral
+ *  session absorbing the target repo's CLAUDE.md is a deliberately OPEN channel). The #410
+ *  decision record's own reserved fallback — "if pinning turns out to have side effects, the
+ *  fallback is startup detection and reporting" — is what this function is.
+ *
+ *  Reads ONLY the operator's user-level settings (`$CLAUDE_CONFIG_DIR/settings.json`, or
+ *  `~/.claude/settings.json` when unset — the SAME resolution peripheral.ts's ambient
+ *  CLAUDE.md probe already uses, `capturePreSpawnManifestData`'s `userConfigDir`). NEVER
+ *  project/local settings: project settings are repo-governed (a target repo's own
+ *  `.claude/settings.json`), and an engine-managed peripheral worktree carries no local
+ *  settings of its own to read in the first place.
+ *
+ *  When `cfg.webAccess.enabled` is true and `permissions.deny` names `WebSearch`/`WebFetch`
+ *  (see WEB_ACCESS_TOOLS), this is exactly the silent-capability-loss failure mode the #410
+ *  decision record measured: the granted role session's own reported tool list simply omits
+ *  the tool, with ZERO permission-denial signal — indistinguishable from "this CLI version
+ *  doesn't have the tool" without this check. Emits ONE warning log line plus ONE durable
+ *  `web-access-denied-by-operator-settings` state event naming the denied entries.
+ *
+ *  Detection only: never blocks startup, never spawns a probe session, never mutates the
+ *  operator's settings. `cfg.webAccess.enabled: false` skips the read ENTIRELY (not just the
+ *  report) — no reason to inspect settings for a grant that isn't even offered. A missing,
+ *  unreadable, or malformed settings file is a normal case (most operators carry no deny list
+ *  at all) — logged at low severity and treated as "nothing to report", never an error, never
+ *  a durable event. */
+export function checkWebAccessSettingsDenial(
+  cfg: Pick<SapwoodConfig, "webAccess">,
+  state: Pick<State, "appendEvent">,
+  log: (message: string) => void = console.error,
+  deps: WebAccessDenialCheckDeps = {},
+): void {
+  if (!cfg.webAccess.enabled) return;
+  // Codex sol-high PR #417 review, P1: the ENTIRE body below — including `homedir()`'s own
+  // resolution and the final `state.appendEvent` — must be inside ONE best-effort containment,
+  // not just the two file-read/parse steps. Reproduced: a SQLite write failure on the
+  // (uncaught) `appendEvent` call after a real detected deny would THROW and abort BOTH
+  // drivers' startup, violating this function's own "never blocks startup" contract — the
+  // same contract normalizeUnplacedBoardItems (just above) already honors end to end. A
+  // detection feature must never itself become a NEW startup-failure mode.
+  try {
+    const readFile = deps.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+    const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join((deps.homedir ?? homedir)(), ".claude");
+    const settingsPath = join(configDir, "settings.json");
+    let raw: string;
+    try {
+      raw = readFile(settingsPath);
+    } catch (error) {
+      log(`[sapwood:startup] no operator settings readable at ${settingsPath}; web-access denial check skipped: ${String(error)}`);
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      log(
+        `[sapwood:startup] operator settings at ${settingsPath} could not be parsed as JSON; web-access denial check skipped: ${String(error)}`,
+      );
+      return;
+    }
+    const deny = (parsed as { permissions?: { deny?: unknown } } | null)?.permissions?.deny;
+    if (!Array.isArray(deny)) return;
+    const denied = deny.filter(
+      (entry): entry is string =>
+        typeof entry === "string" && WEB_ACCESS_TOOLS.some((tool) => entry === tool || entry.startsWith(`${tool}(`)),
+    );
+    if (denied.length === 0) return;
+    log(
+      `[sapwood:startup] operator settings (${settingsPath}) deny ${denied.join(", ")} — the #410 web-access grant to ` +
+        "architect/po-align/po-triage will be silently stripped from these sessions (zero permission-denial signal); " +
+        "a granted session should abstain, per its prompt's first-class-abstention wording, rather than guess when the tool turns out absent",
+    );
+    state.appendEvent("web-access-denied-by-operator-settings", { settingsPath, denied });
+  } catch (error) {
+    // Best-effort, same stance as every other startup-pass check in this function's
+    // neighborhood: a failure HERE (e.g. state.appendEvent throwing on a SQLite write error)
+    // is logged and swallowed, never allowed to propagate out and abort engine startup.
+    log(`[sapwood:startup] web-access denial check failed (non-fatal, startup continues): ${String(error)}`);
+  }
+}
+
 /** #76: the exit log line naming whichever stop condition fired — e.g. "sapwood run: stop
  *  condition hit — afterIssuesMerged=3 (merged 3)". Pure + exported for testing; only called
  *  when result.stopCondition is set (stoppedBy "stop-condition", or "once" when the single
@@ -990,6 +1090,9 @@ async function runTickEngine(argv: string[], cfg: SapwoodConfig, overrides: Engi
   // startup with zero dispatch, not silently stop the run after the first wave of workers.
   await assertStopMilestoneExists(forge, stop);
   await normalizeUnplacedBoardItems(forge, state, log);
+  // #410 amendment: same best-effort startup-pass stance as the board normalization above —
+  // detects, never blocks, never mutates.
+  checkWebAccessSettingsDenial(cfg, state, log);
   await reconcileStartup(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
     log,
@@ -1111,6 +1214,9 @@ async function runRoundsEngine(argv: string[], cfg: SapwoodConfig, overrides: En
   // with zero dispatch, checked here identically for the round path's own FINAL stop condition.
   await assertStopMilestoneExists(forge, stop);
   await normalizeUnplacedBoardItems(forge, state, log);
+  // #410 amendment: same best-effort startup-pass stance as the board normalization above —
+  // detects, never blocks, never mutates.
+  checkWebAccessSettingsDenial(cfg, state, log);
   await reconcileStartup(forge, state, cfg, log);
   sweepStaleRoleSessions(state, {
     log,

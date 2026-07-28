@@ -26,9 +26,10 @@ function readPrompt(path: string): string {
 // ── Snapshot hashes — update deliberately, alongside a reviewed prompt edit, never casually ───
 
 const SNAPSHOT_HASHES: Record<string, string> = {
-  // #321: intentional edits — sentinel examples are plain text, never markdown-fenced.
-  "po.md": "49fe0cd968ac611a4f7cb12c624f9196e44e9fa90f0be58a588791afeb263781",
-  "architect.md": "08ae9bd5a164533d3d6c96b6a3c98e48c0fa666d41cc85b73d2457358d17f3b2",
+  // #410: intentional edits — WebSearch/WebFetch usage + abstention wording (both), and the
+  // reworded "stay inside your scope" bullet (po.md, no longer read-able as a concern ban).
+  "po.md": "921a55442e8bd8186145e5c1a97b672df7ed68d28c4129e2d16de8c54be02db8",
+  "architect.md": "7d7f623ad8779892f2e3fb67fe7e957d33de7ae7092f93b6e8dbc481c6913515",
   "plan-reviewer.md": "4f957b12d2ff056233cd111d9c968547cc2b4988761c4d1ba6ba40e314c10c93",
   "plan-reviewer-confirm.md": "250c0752f7e2b91418cc76a772123107a36d7de16fa9728c33399061993497fa",
   "plan-drafter.md": "dce0f4aca4c0d323ad8f7176a6612527075d9e6ec83b19396e9d3dc2f68903eb",
@@ -253,4 +254,73 @@ test("#409: the rule is worded per role rather than one paragraph duplicated, an
 test("#409: plan-drafter.md and architect.md are deliberately untouched (charter conflicts recorded in the issue)", () => {
   assert.equal(sha256(readPrompt(defaultPlanDrafterPromptPath())), SNAPSHOT_HASHES["plan-drafter.md"]);
   assert.equal(sha256(readPrompt(defaultArchitectPromptPath())), SNAPSHOT_HASHES["architect.md"]);
+});
+
+// ── #410: WebSearch/WebFetch grant wording — po.md's mode-aware external-check section, the
+// reworded "stay inside your scope" bullet, and both roles' first-class abstention wording ──
+
+test("#410 po.md: names WebSearch/WebFetch and is mode-aware — the align/triage sections both reference {{po.mode}}, never leaking one mode's wording into the other", () => {
+  const body = readPrompt(defaultPoPromptPath());
+  assert.ok(body.includes("`WebSearch`/`WebFetch`"), "names the actual granted tools");
+  assert.match(
+    body,
+    /### If `\{\{po\.mode\}\}` is `align`\s*\n\s*\nBefore proposing/,
+    "align-mode external-check subsection, keyed on the template var",
+  );
+  assert.match(
+    body,
+    /### If `\{\{po\.mode\}\}` is `triage`\s*\n\s*\nYou may verify a factual claim/,
+    "triage-mode external-check subsection, keyed on the template var",
+  );
+});
+
+test("#410 po.md: triage may raise a verified why/what concern through the existing concern channel, never an edit", () => {
+  const body = readPrompt(defaultPoPromptPath());
+  assert.match(
+    body,
+    /VERIFIED problem with the\s*\nwhy\/what itself, you still never edit it: say so through the concern channel/,
+    "triage's external check explicitly routes a verified problem to the concern channel, not an edit",
+  );
+});
+
+test("#410 po.md: the 'stay inside your scope' bullet no longer reads as a ban on raising a concern — it names the edit ban and the concern channel side by side", () => {
+  const body = readPrompt(defaultPoPromptPath());
+  assert.match(body, /fix only the missing plan BY EDITING THE BODY/, "the ban is scoped to edits, stated explicitly");
+  assert.match(
+    body,
+    /This is a\s*\n\s*ban on silent edits, not on speaking up: if you verify a genuine problem with the why\/what,\s*\n\s*raise it through the concern channel above/,
+    "the bullet itself now points at the concern channel rather than reading as a blanket ban",
+  );
+});
+
+test("#410 po.md + architect.md: both name a first-class abstention — an explicit way to report an external check that didn't resolve, never a silent omission or a claimed-but-unverified answer", () => {
+  const po = readPrompt(defaultPoPromptPath());
+  const architect = readPrompt(defaultArchitectPromptPath());
+  assert.match(po, /Abstention — say so, never guess/, "po.md names the abstention channel as its own heading");
+  assert.ok(
+    po.includes("Never silently drop the attempt, and never write as if you'd confirmed something you"),
+    "po.md's abstention wording is explicit about the failure mode it forbids",
+  );
+  assert.ok(
+    po.includes('"I could not verify this" is a complete, honest answer'),
+    "po.md states the abstention explicitly, not just implies it",
+  );
+  assert.ok(
+    architect.includes("say so explicitly in your round design note rather than"),
+    "architect.md routes abstention through its own always-emitted design-note channel",
+  );
+  assert.ok(
+    architect.includes('verify this" belongs in the note as honestly as any contradiction or risk you flag.'),
+    "architect.md states the abstention explicitly, not just implies it",
+  );
+});
+
+test("#410 architect.md: names WebSearch/WebFetch alongside the existing read-only grant, gated on the deployment's own grant state", () => {
+  const body = readPrompt(defaultArchitectPromptPath());
+  assert.ok(body.includes("`WebSearch`/`WebFetch`"), "names the actual granted tools");
+  assert.match(
+    body,
+    /unless this deployment has turned the\s*\ngrant off/,
+    "names the config off-switch, never assumes the grant is unconditional",
+  );
 });

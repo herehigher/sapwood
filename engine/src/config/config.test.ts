@@ -1551,6 +1551,17 @@ test("proxy: defaults are off, shadow, and conservative caps/budget/timeout", ()
   assert.equal(cfg.proxy.timeoutMs, 30_000);
 });
 
+test("webAccess (#410): default is enabled — unlike proxy, this grant ships ON by default", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n");
+  assert.equal(cfg.webAccess.enabled, true);
+});
+
+test("webAccess (#410): a config key can disable it, and the section remains strict (rejects an unknown key)", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\n" + "webAccess:\n  enabled: false\n");
+  assert.equal(cfg.webAccess.enabled, false);
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nwebAccess: { bogusKey: true }\n"));
+});
+
 test("proxy: every key is overridable, and the section remains strict (rejects an unknown key)", () => {
   const cfg = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\n" +

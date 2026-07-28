@@ -35,7 +35,13 @@ import {
   validateArchitectOutput,
 } from "./architect.js";
 import type { ContextManifest } from "./context-manifest.js";
-import { ROLE_ALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS, type RoleSessionOpts, type RoleSessionResult } from "./peripheral.js";
+import {
+  ARCHITECT_ALLOWED_TOOLS,
+  ROLE_ALLOWED_TOOLS,
+  ROLE_DISALLOWED_TOOLS,
+  type RoleSessionOpts,
+  type RoleSessionResult,
+} from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 
 class FakeForge implements IForge {
@@ -883,7 +889,7 @@ test("createArchitectStub: cfg.roles.architect.promptFile override is actually l
 
 // ── scope assertion: role write scope limited to issues (acceptance criterion 4) ───────────
 
-test("createArchitectStub: the architect session runs under the base issues-only role scope — no widened tool grant", async () => {
+test("createArchitectStub: the architect session runs under the base issues-only DENY scope — no write/exec grant, ever", async () => {
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 8, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
@@ -898,8 +904,32 @@ test("createArchitectStub: the architect session runs under the base issues-only
   // granted a docs-file write tool or PR visibility. #235 PR-B: the architect IS now granted
   // Read/Grep/Glob (ROLE_ALLOWED_TOOLS, no longer "" — architect is not a special case), scoped
   // to its own worktree by #235 PR-A's guard containment, but that's an ALLOW-side change; this
-  // assertion is about the (unchanged) deny half.
+  // assertion is about the (unchanged) deny half. #410: the ALLOW side is now widened by default
+  // too (ARCHITECT_ALLOWED_TOOLS, WebSearch/WebFetch) — see the two dedicated tests just below.
   assert.equal(runner.calls[0]!.disallowedTools, undefined);
+});
+
+test("createArchitectStub (#410): the architect session's allowedTools is widened to ARCHITECT_ALLOWED_TOOLS (WebSearch/WebFetch) by default — mkCfg()'s default cfg carries webAccess.enabled: true", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 8, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const deps: ArchitectDeps = { forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
+  const stub = createArchitectStub(deps);
+  await stub.run({ roundId: 4, phase: "architecting", marker: null });
+  assert.equal(runner.calls[0]!.allowedTools, ARCHITECT_ALLOWED_TOOLS);
+});
+
+test("createArchitectStub (#410): webAccess.enabled: false falls the architect session back to the ungranted ROLE_ALLOWED_TOOLS — no WebSearch/WebFetch reaches it", async () => {
+  const forge = new FakeForge();
+  forge.planReviewCandidates = [{ number: 8, title: "t", labels: [] }];
+  const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+  const state = new State(":memory:");
+  const cfg = mkCfg({ webAccess: { enabled: false } });
+  const deps: ArchitectDeps = { forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+  const stub = createArchitectStub(deps);
+  await stub.run({ roundId: 4, phase: "architecting", marker: null });
+  assert.equal(runner.calls[0]!.allowedTools, ROLE_ALLOWED_TOOLS);
 });
 
 test("ROLE_ALLOWED_TOOLS / ROLE_DISALLOWED_TOOLS: issues-only role scope — #235 PR-B: Read/Grep/Glob allowed (confined to the worktree by PR-A's guard containment), NO Bash grant at all, no file write, no git, no PR/API access", () => {

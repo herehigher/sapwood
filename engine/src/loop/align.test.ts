@@ -19,7 +19,7 @@ import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge
 import { extractVerificationPlan } from "../forge/forge.js";
 import type { ContextManifest } from "../roles/context-manifest.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
-import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS } from "../roles/peripheral.js";
+import { PO_ALIGN_ALLOWED_TOOLS, PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, PO_TRIAGE_ALLOWED_TOOLS } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -375,7 +375,7 @@ test("createAligningStub: marker present -> returns it unchanged, no forge/sessi
   state.close();
 });
 
-test("createAligningStub: dispatches the align session with the PO tool pair (PO_ALLOWED_TOOLS + PO_DISALLOWED_TOOLS), no issues declared -> returns the round's marker", async () => {
+test("createAligningStub: dispatches the align session with the PO tool pair (PO_ALIGN_ALLOWED_TOOLS + PO_DISALLOWED_TOOLS — #410's default-on web grant), no issues declared -> returns the round's marker", async () => {
   const forge = new FakeForge();
   const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
   const state = new State(":memory:");
@@ -386,11 +386,25 @@ test("createAligningStub: dispatches the align session with the PO tool pair (PO
   assert.equal(runner.calls.length, 1);
   assert.equal(ranSession, true, "#394 (F23): a real align session dispatched -> ranSession true");
   assert.equal(runner.calls[0]!.roleId, "po-align");
-  assert.equal(runner.calls[0]!.allowedTools, PO_ALLOWED_TOOLS);
+  // #410: mkCfg()'s default cfg carries webAccess.enabled: true, so po-align gets the widened
+  // grant — see the dedicated webAccess:false test below for the ungranted fallback.
+  assert.equal(runner.calls[0]!.allowedTools, PO_ALIGN_ALLOWED_TOOLS);
   // Security: the create-flag deny list (file exfil via --body-file, gate⓪ bypass via
   // --label, board writes via --project) must reach the session, not just exist as a const.
   assert.equal(runner.calls[0]!.disallowedTools, PO_DISALLOWED_TOOLS);
   assert.equal(state.spentUsdForWorker("po-align-1"), 0.01);
+  state.close();
+});
+
+test("createAligningStub (#410): webAccess.enabled: false falls the align session back to the ungranted PO_ALLOWED_TOOLS — no WebSearch/WebFetch reaches it", async () => {
+  const forge = new FakeForge();
+  const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+  const state = new State(":memory:");
+  const cfg = mkCfg({ webAccess: { enabled: false } });
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 5, phase: "aligning", marker: null });
+  assert.equal(runner.calls[0]!.allowedTools, PO_ALLOWED_TOOLS);
   state.close();
 });
 
@@ -1138,7 +1152,9 @@ test("createAligningStub: triage pass briefs a po-triage session per plan-less c
     runner.calls.map((c) => c.roleId),
     ["po-align", "po-triage"],
   );
-  assert.equal(runner.calls[1]!.allowedTools, PO_ALLOWED_TOOLS);
+  // #410: mkCfg()'s default cfg carries webAccess.enabled: true, so po-triage gets the widened
+  // grant too.
+  assert.equal(runner.calls[1]!.allowedTools, PO_TRIAGE_ALLOWED_TOOLS);
   assert.equal(runner.calls[1]!.disallowedTools, PO_DISALLOWED_TOOLS);
   assert.ok(runner.calls[1]!.prompt.includes("#50"));
   assert.equal(state.spentUsdForWorker("po-triage-50"), 0.01);
@@ -1147,6 +1163,23 @@ test("createAligningStub: triage pass briefs a po-triage session per plan-less c
   assert.ok(comment.includes("PO triage"));
   assert.ok(comment.includes(alignMarker(6)));
   assert.equal(marker, alignMarker(6));
+  state.close();
+});
+
+test("createAligningStub (#410): webAccess.enabled: false falls the triage session back to the ungranted PO_ALLOWED_TOOLS too", async () => {
+  const forge = new FakeForge();
+  forge.planTriageCandidates = [{ number: 50, title: "human-filed, no plan", labels: [], body: "just a description" }];
+  const cfg = mkCfg({ webAccess: { enabled: false } });
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-50", triageResultText(50, "just a description\n## Verification\n- run npm test")),
+  ]);
+  const state = new State(":memory:");
+  const deps: AlignDeps = { forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 6, phase: "aligning", marker: null });
+  assert.equal(runner.calls[0]!.allowedTools, PO_ALLOWED_TOOLS);
+  assert.equal(runner.calls[1]!.allowedTools, PO_ALLOWED_TOOLS);
   state.close();
 });
 

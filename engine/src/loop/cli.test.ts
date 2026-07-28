@@ -8,6 +8,7 @@ import {
   applyMilestoneOverride,
   assertStopMilestoneExists,
   buildTickFixLegResume,
+  checkWebAccessSettingsDenial,
   computeDryRunPreview,
   formatDryRunPreview,
   formatStatus,
@@ -509,6 +510,176 @@ test("normalizeUnplacedBoardItems: the No-Status normalization loop and the abse
     ["board-normalized", { issue: 7, status: "backlog" }],
     ["board-gap-detected", { total: 2, issues: [201, 202] }],
   ]);
+});
+
+// ── #410 amendment (owner ruling 2026-07-28): checkWebAccessSettingsDenial — lightweight
+// startup DETECTION, the fallback adopted after the settings-pinning approach was rejected
+// (colliding with the locked #236 "ambient repo context: record, don't seal" ruling). Same
+// best-effort startup-pass shape as normalizeUnplacedBoardItems above: never blocks, never
+// throws, at most one log line + one durable event. ──────────────────────────────────────────
+
+test("checkWebAccessSettingsDenial: a bare WebSearch/WebFetch deny entry -> one warning log line + one durable event naming both", () => {
+  const logs: string[] = [];
+  const events: Array<[string, unknown]> = [];
+  checkWebAccessSettingsDenial(
+    { webAccess: { enabled: true } },
+    { appendEvent: (kind, payload) => events.push([kind, payload]) },
+    (line) => logs.push(line),
+    {
+      homedir: () => "/home/op",
+      readFile: (path) => {
+        assert.equal(path, "/home/op/.claude/settings.json");
+        return JSON.stringify({ permissions: { deny: ["WebSearch", "WebFetch", "Bash(rm *)"] } });
+      },
+    },
+  );
+  assert.equal(events.length, 1);
+  const [kind, payload] = events[0]!;
+  assert.equal(kind, "web-access-denied-by-operator-settings");
+  assert.deepEqual(payload, { settingsPath: "/home/op/.claude/settings.json", denied: ["WebSearch", "WebFetch"] });
+  assert.ok(logs.some((line) => line.includes("WebSearch") && line.includes("WebFetch")));
+});
+
+test("checkWebAccessSettingsDenial: a Tool(...)-qualified deny entry (e.g. WebFetch(domain:x)) is detected by prefix match, not just an exact bare name", () => {
+  const logs: string[] = [];
+  const events: Array<[string, unknown]> = [];
+  checkWebAccessSettingsDenial(
+    { webAccess: { enabled: true } },
+    { appendEvent: (kind, payload) => events.push([kind, payload]) },
+    (line) => logs.push(line),
+    { homedir: () => "/home/op", readFile: () => JSON.stringify({ permissions: { deny: ["WebFetch(domain:example.com)"] } }) },
+  );
+  assert.equal(events.length, 1);
+  assert.deepEqual((events[0]![1] as { denied: string[] }).denied, ["WebFetch(domain:example.com)"]);
+});
+
+test("checkWebAccessSettingsDenial: no permissions.deny naming WebSearch/WebFetch -> completely silent (no log, no event)", () => {
+  const logs: string[] = [];
+  const events: unknown[] = [];
+  checkWebAccessSettingsDenial(
+    { webAccess: { enabled: true } },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+    { homedir: () => "/home/op", readFile: () => JSON.stringify({ permissions: { deny: ["Bash(curl *)", "Bash(rm *)"] } }) },
+  );
+  assert.deepEqual(events, []);
+  assert.deepEqual(logs, []);
+});
+
+test("checkWebAccessSettingsDenial: no permissions key at all, or deny absent/not-an-array -> silent, never throws", () => {
+  const logs: string[] = [];
+  const events: unknown[] = [];
+  const log = (line: string): void => {
+    logs.push(line);
+  };
+  const state = { appendEvent: (_kind: string, payload: unknown) => events.push(payload) };
+  for (const body of ["{}", JSON.stringify({ permissions: {} }), JSON.stringify({ permissions: { deny: "WebSearch" } })]) {
+    checkWebAccessSettingsDenial({ webAccess: { enabled: true } }, state, log, { homedir: () => "/home/op", readFile: () => body });
+  }
+  assert.deepEqual(events, []);
+  assert.deepEqual(logs, []);
+});
+
+test("checkWebAccessSettingsDenial: cfg.webAccess.enabled: false -> the injected reader is NEVER called, no log, no event", () => {
+  const logs: string[] = [];
+  const events: unknown[] = [];
+  let readCalled = false;
+  checkWebAccessSettingsDenial(
+    { webAccess: { enabled: false } },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+    {
+      homedir: () => {
+        readCalled = true; // homedir() would also be a tell — the whole check should short-circuit first
+        return "/home/op";
+      },
+      readFile: () => {
+        readCalled = true;
+        return "{}";
+      },
+    },
+  );
+  assert.equal(readCalled, false, "webAccess disabled -> no settings read of any kind, not even a homedir() lookup");
+  assert.deepEqual(events, []);
+  assert.deepEqual(logs, []);
+});
+
+test("checkWebAccessSettingsDenial: a missing settings file (readFile throws) logs a low-severity note and completes — no event, never blocks startup", () => {
+  const logs: string[] = [];
+  const events: unknown[] = [];
+  checkWebAccessSettingsDenial(
+    { webAccess: { enabled: true } },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+    {
+      homedir: () => "/home/op",
+      readFile: () => {
+        throw new Error("ENOENT: no such file or directory");
+      },
+    },
+  );
+  assert.deepEqual(events, []);
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0]!.includes("web-access denial check skipped"));
+});
+
+test("checkWebAccessSettingsDenial: malformed JSON logs a low-severity note and completes — no event, never throws out of the function", () => {
+  const logs: string[] = [];
+  const events: unknown[] = [];
+  checkWebAccessSettingsDenial(
+    { webAccess: { enabled: true } },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+    { homedir: () => "/home/op", readFile: () => "not { valid json" },
+  );
+  assert.deepEqual(events, []);
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0]!.includes("could not be parsed as JSON"));
+});
+
+test("checkWebAccessSettingsDenial: CLAUDE_CONFIG_DIR, when set, overrides the ~/.claude fallback — same resolution peripheral.ts's ambient CLAUDE.md probe uses", () => {
+  const prior = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = "/custom/claude-config";
+  try {
+    let seenPath = "";
+    checkWebAccessSettingsDenial({ webAccess: { enabled: true } }, { appendEvent: () => {} }, () => {}, {
+      homedir: () => {
+        throw new Error("homedir() must not be called when CLAUDE_CONFIG_DIR is set");
+      },
+      readFile: (path) => {
+        seenPath = path;
+        return "{}";
+      },
+    });
+    assert.equal(seenPath, "/custom/claude-config/settings.json");
+  } finally {
+    if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prior;
+  }
+});
+
+test("checkWebAccessSettingsDenial (Codex sol-high PR #417 review, P1): state.appendEvent THROWING (e.g. a SQLite write failure) never escapes the function — the deny warning is still logged before the throw, a second failure note is logged, and the call returns normally, never blocking either driver's startup", () => {
+  const logs: string[] = [];
+  assert.doesNotThrow(() => {
+    checkWebAccessSettingsDenial(
+      { webAccess: { enabled: true } },
+      {
+        appendEvent: () => {
+          throw new Error("SQLITE_BUSY: database is locked");
+        },
+      },
+      (line) => logs.push(line),
+      { homedir: () => "/home/op", readFile: () => JSON.stringify({ permissions: { deny: ["WebSearch"] } }) },
+    );
+  });
+  assert.ok(
+    logs.some((line) => line.includes("WebSearch")),
+    "the deny warning is logged BEFORE the throwing appendEvent call",
+  );
+  assert.ok(
+    logs.some((line) => line.includes("web-access denial check failed") && line.includes("non-fatal")),
+    "the containment catch's own note is also logged",
+  );
 });
 
 // ── #129: `--milestone NAME` shortcut — scope + stop in one flag ───────────────────────────────

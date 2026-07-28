@@ -109,6 +109,83 @@ It can catch naive or accidental exfiltration attempts and leave an audit trail,
 deliberate adversary can trivially evade lexical executable matching — for example with an
 interpreter one-liner or DNS exfiltration.
 
+## Peripheral network egress: WebSearch/WebFetch, detected not pinned (#410)
+
+Three role sessions — `architect`, `po-align`, `po-triage` — are granted the CLI's built-in
+`WebSearch`/`WebFetch` tools, `webAccess.enabled` (default `true`, a config key can disable it).
+This is a bounded widening, not a relaxation of the posture above: unlike the worker's Bash
+egress, this channel is exactly two named, read-only tools, carries no credential into any
+project system, and every call is journalled (see the audit paragraph below). The decision
+record (issue #410) rejected a domain allowlist (self-defeating — the point is discovering
+things nobody knew to look for, and an allowlisted domain accepting an arbitrary path/query is
+itself an egress channel) and MCP delivery (the guard hook has no `mcp__` handling at all, so a
+built-in-tool grant stays visible to the engine's own enforcement layer and journal in a way an
+engine-hosted MCP tool would not).
+
+**Grant, per-role, named exports.** `peripheral.ts`'s `ARCHITECT_ALLOWED_TOOLS`/
+`PO_ALIGN_ALLOWED_TOOLS`/`PO_TRIAGE_ALLOWED_TOOLS` each widen the base `ROLE_ALLOWED_TOOLS`/
+`PO_ALLOWED_TOOLS` with `WebSearch,WebFetch` — the same named-export-plus-pinned-regression-test
+pattern `CONFIRM_ALLOWED_TOOLS` already established. `cfg.webAccess.enabled` is read at each
+role's OWN call site (`architect.ts`, `align.ts`'s po-align/po-triage sessions), never inside
+`peripheral.ts` itself — a role whose call site never threads that ternary in has no config path
+that could ever reach the grant. `po-pool` (align.ts's third `PO_ALLOWED_TOOLS` caller) stays on
+the ungranted base unconditionally: it renders a distinct prompt (`po-pool.md`), never `po.md`.
+
+**The review family stays offline by construction.** `plan-reviewer`, `plan-drafter`,
+`plan-reviewer-confirm`, and every gate② `engine-agent` review session never reference
+`cfg.webAccess` at all — refusal is the absence of a wire-up, not a check that could be
+misconfigured. Gate②'s review-session mode (`reviewCwd`, see below) goes further still: it
+REFUSES a caller-supplied `allowedTools` outright (thrown, not silently accepted) alongside
+`reviewCwd`, so even a future direct call attempting to widen it would fail loudly rather than
+reopen the surface. A gate whose conclusions could drift run to run over a live web result is
+not an inspectable gate — this is recorded as a deliberate reproducibility property. Gate②'s
+`--strict-mcp-config`/`--setting-sources ""` seal (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
+below) is unaffected by anything in this section — it was justified independently, for a
+materialized PR tree, and #410 leaves it exactly as it was.
+
+**Detected, not pinned — the operator's own settings can still silently strip the grant.** An
+earlier version of this feature pinned `--strict-mcp-config`/`--setting-sources ""` for EVERY
+peripheral session (the same triple #285 uses for gate②'s materialized-tree review sessions).
+A live measurement found that `--setting-sources ""` ALSO stops loading the target repo's own
+`CLAUDE.md` — colliding with the locked ruling below ([Ambient repo context: record, don't
+seal](#ambient-repo-context-record-dont-seal-236)): a peripheral session absorbing the repo's
+own `CLAUDE.md` is a deliberately OPEN channel, never sealed, and pinning would have sealed it
+as a side effect for every non-review session. The owner rejected the pinning and adopted the
+fallback the original decision record reserved for exactly this case: **lightweight startup
+detection**, not containment. `cli.ts`'s `checkWebAccessSettingsDenial` — called from the same
+best-effort startup pass as `normalizeUnplacedBoardItems`, right after `assertStopMilestoneExists`
+— reads ONLY the operator's user-level settings (`$CLAUDE_CONFIG_DIR/settings.json`, or
+`~/.claude/settings.json`; never project/local settings — project settings are repo-governed,
+and an engine worktree carries no local settings of its own) and, when `webAccess.enabled` is
+true and `permissions.deny` names `WebSearch`/`WebFetch` (bare, or a `Tool(...)`-qualified
+prefix like `WebFetch(domain:x)`), emits one warning log line plus one durable
+`web-access-denied-by-operator-settings` state event. This is exactly the failure mode #410's
+own measurement hit: a granted session's own reported tool list simply omits the denied tool,
+with **zero** permission-denial signal — indistinguishable from "this CLI version doesn't have
+the tool" without this check. Detection only: it never blocks startup, never spawns a probe
+session, and never mutates the operator's settings. The prompts' first-class abstention wording
+(`po.md`/`architect.md`, below) is the session-side complement this fallback depends on: a
+session whose tool turned out silently absent is expected to report that it could not verify
+something externally, rather than silently omit the check or guess.
+
+**Audit: the SAME scanner, not a second one.** `worker.ts`'s `scanEgressSuspects` — the function
+the worker's own Bash lexical tripwire already calls — now ALSO recognizes `WebFetch`/
+`WebSearch` `tool_use` blocks directly from the structured stream-json transcript
+(unconditionally, not gated by `worker.egressSuspectCommands`: unlike Bash, where most
+executables are legitimate, these two tool names ARE the entire sanctioned peripheral-egress
+channel). `RoleRunner.run()` calls it on every session's own completed jsonl and emits the
+identical `egress-suspect` ledger event kind the worker's tripwire uses — `round-artifact.ts`'s
+existing assembler needs no changes to surface either kind. This flagging is deliberately
+**content-driven, not role-gated**: `--allowedTools`/`--disallowedTools` is a noise-reduction
+permission layer, not a schema removal (see [Worker denylist vs. peripheral allowlist](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
+below), so a session without the grant — a worker leg, or a peripheral role the #410 grant
+doesn't cover — can still EMIT a `WebFetch`/`WebSearch` tool_use block; the CLI's own
+permission layer denies it at the paired `tool_result`, which this scanner does not read. A hit
+therefore records an attempt, never proof of execution — the same "evidence, not a verdict"
+stance the Bash tripwire above already takes. The engine deliberately keeps this unconditional
+for every session kind: an attempted egress through a tool a session was never granted is
+exactly what a post-hoc tripwire should surface, not suppress.
+
 ## Worker denylist vs. peripheral allowlist: deliberate asymmetry
 
 The stronger-looking policy belongs to the narrower job by design. Issues-only peripheral
@@ -301,11 +378,15 @@ the engine (`plan-review.ts`), never by a tool call of its own.
 
 ### The forge MCP proxy's role x tool matrix (#234, #244)
 
-`RoleRunner` peripheral sessions and worker legs can be attached (config-gated, shadow-mode-first,
-not yet a live consumer wiring — see [`configuration.md`](configuration.md#roles)) to a
-per-session, revocable, read-only forge MCP proxy that returns sanitized forge data verbatim, with
-no gate/verdict logic of its own (fresh-head counting, identity filtering, trigger-pin checks stay
-in `reviewer.ts`/`merge-driver.ts`). Each session's role scopes it to a fixed subset of the tool
+`RoleRunner` peripheral sessions and worker legs can be attached (config-gated, shadow-mode-first
+— see [`configuration.md`](configuration.md#roles)) to a per-session, revocable, read-only forge
+MCP proxy that returns sanitized forge data verbatim, with no gate/verdict logic of its own
+(fresh-head counting, identity filtering, trigger-pin checks stay
+in `reviewer.ts`/`merge-driver.ts`). The live (state 3: `enabled: true, shadow: false`)
+production-attachment path is real code, exercised by tests — not merely
+constructible-but-inert — but whether a given deployment's OWN config flips it live is that
+deployment's choice; this shipped tree's own default config keeps the proxy off
+(`enabled: false`). Each session's role scopes it to a fixed subset of the tool
 algebra (`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX`), enforced server-side in the proxy itself
 (the CLI's own `--allowedTools` widening is noise reduction only, same stance as every other
 allow/deny pair on this page) — a role absent from the table below is granted **no tool at all**

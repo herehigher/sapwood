@@ -60,7 +60,14 @@ import { capDigest } from "../retro/retro-digest.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
 import { extractMarkdownSections } from "../util/markdown.js";
-import { envFailureHook, type RoleRunner, type RoleSessionResult, runSessionWithRetry } from "./peripheral.js";
+import {
+  ARCHITECT_ALLOWED_TOOLS,
+  envFailureHook,
+  ROLE_ALLOWED_TOOLS,
+  type RoleRunner,
+  type RoleSessionResult,
+  runSessionWithRetry,
+} from "./peripheral.js";
 import { loadRolePromptTemplate } from "./plan-review.js";
 
 export interface ArchitectDeps {
@@ -760,7 +767,16 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       const result = await runSessionWithRetry({
         runner: deps.runner,
         state: deps.state,
-        session: { roleId: "architect", prompt, model: role.model, effort: role.effort, fallbackModel: role.fallbackModel },
+        session: {
+          roleId: "architect",
+          prompt,
+          model: role.model,
+          effort: role.effort,
+          fallbackModel: role.fallbackModel,
+          // #410: WebSearch/WebFetch grant, default on — see PO_ALIGN_ALLOWED_TOOLS' own doc
+          // (peripheral.ts) for why cfg.webAccess.enabled is read HERE, at the call site.
+          allowedTools: deps.cfg.webAccess.enabled ? ARCHITECT_ALLOWED_TOOLS : ROLE_ALLOWED_TOOLS,
+        },
         issue: 0, // round-scoped, not tied to any single issue (spend_ledger's documented sentinel)
         now: deps.now ?? (() => new Date()),
         ...(deps.log !== undefined ? { log: deps.log } : {}),

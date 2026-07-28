@@ -41,12 +41,14 @@ import {
   hasQuotaErrorStatus,
   hasRejectedRateLimitEvent,
   hasSessionInitLine,
+  MAX_EGRESS_SUSPECTS_PER_LEG,
   parseCostUsdOrNull,
   parseModelUsage,
   parseResultText,
   parseSessionInit,
   parseToolUsage,
   type SpawnedSession,
+  scanEgressSuspects,
   spawnClaudeSession,
 } from "./worker.js";
 
@@ -120,6 +122,24 @@ export const CONFIRM_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS;
  *  Bash deny and have been dropped. */
 export const PO_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS;
 export const PO_DISALLOWED_TOOLS = ROLE_DISALLOWED_TOOLS;
+
+/** #410 (decision record): the built-in web-search/fetch grant — exactly three role sessions
+ *  (`architect`, `po-align`, `po-triage`), no other role, per-role named exports pinned by their
+ *  own regression-trip-wire tests, same "named export + pinned test" stance
+ *  CONFIRM_ALLOWED_TOOLS/PO_ALLOWED_TOOLS above already take. Each call site (architect.ts,
+ *  align.ts's po-align/po-triage sessions) chooses between its own granted export here and the
+ *  ungranted base (ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS) depending on `cfg.webAccess.enabled` —
+ *  the config key is read AT THE CALL SITE, never inside RoleRunner itself, so a role this
+ *  module doesn't wire the ternary for (every review-family session: plan-reviewer,
+ *  plan-drafter, plan-reviewer-confirm, and reviewCwd's hardcoded gate② profile) has NO config
+ *  path that could ever reach WebSearch/WebFetch — refusal by construction, not by convention.
+ *  `po-pool` (align.ts's third PO_ALLOWED_TOOLS caller) is deliberately excluded — it renders a
+ *  DIFFERENT prompt (`po-pool.md`, never `po.md`) and stays on the ungranted base regardless of
+ *  this config key. */
+const PERIPHERAL_WEB_TOOLS = "WebSearch,WebFetch";
+export const ARCHITECT_ALLOWED_TOOLS = `${ROLE_ALLOWED_TOOLS},${PERIPHERAL_WEB_TOOLS}`;
+export const PO_ALIGN_ALLOWED_TOOLS = `${ROLE_ALLOWED_TOOLS},${PERIPHERAL_WEB_TOOLS}`;
+export const PO_TRIAGE_ALLOWED_TOOLS = `${ROLE_ALLOWED_TOOLS},${PERIPHERAL_WEB_TOOLS}`;
 
 export interface RoleSessionOpts {
   /** A short, log-friendly role identity ("plan-reviewer", "plan-drafter", ...) — becomes
@@ -682,6 +702,16 @@ export class RoleRunner {
         // `settingSources` doc has the empirical verification). reviewMode is checked FIRST —
         // proxyHandle is always undefined in review mode (enforced above), so these branches
         // never conflict.
+        //
+        // #410 amendment (owner ruling 2026-07-28): this triple is DELIBERATELY review-mode-only
+        // — an earlier version of this PR pinned it for EVERY peripheral session, but a live
+        // measurement found `--setting-sources ""` also stops loading the repo's own CLAUDE.md,
+        // colliding with the locked #236 ruling (docs/security.md "Ambient repo context: record,
+        // don't seal" — peripheral sessions absorbing the target repo's CLAUDE.md is a
+        // deliberately OPEN channel, never sealed). The #410 decision record's own reserved
+        // fallback — lightweight startup detection + warning (cli.ts's
+        // checkWebAccessSettingsDenial) — replaces the pinning for non-review sessions instead;
+        // see docs/security.md's peripheral-egress section for the full rationale.
         ...(reviewMode
           ? { mcpConfig: EMPTY_MCP_CONFIG_JSON, strictMcpConfig: true, settingSources: "" }
           : proxyHandle
@@ -952,6 +982,17 @@ export class RoleRunner {
       }
 
       const jsonl = this.readJsonl(jsonlPath);
+      // #410: audit by REUSING worker.ts's existing egress scanner (no second scanner) — reads
+      // this SAME jsonl for WebFetch/WebSearch tool_use blocks and emits the identical
+      // `egress-suspect` ledger event worker.ts's own Bash tripwire uses. Codex sol-high PR #417
+      // review, P2-b (corrects an earlier, inaccurate version of this comment): this is
+      // content-driven, not role-gated — scanEgressSuspects hits on ANY WebFetch/WebSearch
+      // tool_use block in this jsonl regardless of whether opts.allowedTools actually granted
+      // the tool (see scanEgressSuspects' own doc, worker.ts). For an UNGRANTED role
+      // (plan-reviewer, etc.) a hit here would mean the session attempted a tool call the CLI's
+      // permission layer then denied — evidence worth surfacing, not a case this scan silently
+      // drops. Contained: best-effort, never throws, never affects the session's own outcome.
+      this.recordEgressSuspects(name, jsonl);
       // #302 review (Codex P1, cost cap): parse once via the null-honest variant — `costUsd`
       // keeps its 0-fallback shape for spend accounting, `costKnown` records whether a cost
       // record actually existed (see RoleSessionResult.costKnown's doc).
@@ -1229,6 +1270,33 @@ export class RoleRunner {
     session.killGroup("SIGTERM");
     await sleep(200);
     session.killGroup("SIGKILL");
+  }
+
+  /** #410: peripheral-session half of the SAME audit worker.ts's `WorkerSupervisor.
+   *  recordEgressSuspects` runs for a code-producing worker leg — this method exists purely so
+   *  each has its own contained try/catch tied to its own state shape (a `worker`/`issue` pair
+   *  there, a role/session pair here); the SCANNER itself (worker.ts's `scanEgressSuspects`) is
+   *  shared, not reimplemented (#410's own AC: "no second scanner"). Emits the identical
+   *  `egress-suspect` event kind round-artifact.ts's assembler already reads, with `worker: name`
+   *  (this session's own lane/sentinel name) and `issue: 0` (the same round-level sentinel every
+   *  other role-session spend/event record uses — RetriedSession.issue's own doc — a role session
+   *  has no single associated issue at this layer). Best-effort: a scanner or event-write failure
+   *  is logged, never allowed to affect the session's own outcome. */
+  private recordEgressSuspects(name: string, jsonl: string): void {
+    if (!this.deps.state) return;
+    try {
+      const scan = scanEgressSuspects(jsonl, this.deps.cfg.worker.egressSuspectCommands);
+      for (const suspect of scan.hits) {
+        this.deps.state.appendEvent("egress-suspect", { worker: name, issue: 0, ...suspect });
+      }
+      if (scan.truncated) {
+        (this.deps.log ?? console.error)(
+          `[sapwood:role] session ${name}: egress tripwire evidence capped at ${MAX_EGRESS_SUSPECTS_PER_LEG} suspects for this session`,
+        );
+      }
+    } catch (e) {
+      (this.deps.log ?? console.error)(`[sapwood:role] session ${name}: egress tripwire failed (non-fatal): ${String(e)}`);
+    }
   }
 
   private readJsonl(p: string): string {

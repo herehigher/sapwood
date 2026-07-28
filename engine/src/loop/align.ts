@@ -36,7 +36,14 @@ import type { IForge, Issue } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
-import { envFailureHook, PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
+import {
+  envFailureHook,
+  PO_ALIGN_ALLOWED_TOOLS,
+  PO_ALLOWED_TOOLS,
+  PO_DISALLOWED_TOOLS,
+  PO_TRIAGE_ALLOWED_TOOLS,
+  runSessionWithRetry,
+} from "../roles/peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
@@ -1615,7 +1622,11 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
               model: role.model,
               effort: role.effort,
               fallbackModel: role.fallbackModel,
-              allowedTools: PO_ALLOWED_TOOLS,
+              // #410: WebSearch/WebFetch grant, default on — cfg.webAccess.enabled read HERE, at
+              // the call site, never inside peripheral.ts itself (see PO_ALIGN_ALLOWED_TOOLS'
+              // own doc for why that placement is what makes the ungranted roles' refusal
+              // structural rather than conventional).
+              allowedTools: deps.cfg.webAccess.enabled ? PO_ALIGN_ALLOWED_TOOLS : PO_ALLOWED_TOOLS,
               disallowedTools: PO_DISALLOWED_TOOLS,
             },
             issue: 0,
@@ -1958,7 +1969,8 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
               model: role.model,
               effort: role.effort,
               fallbackModel: role.fallbackModel,
-              allowedTools: PO_ALLOWED_TOOLS,
+              // #410: same grant/call-site rationale as the po-align session above.
+              allowedTools: deps.cfg.webAccess.enabled ? PO_TRIAGE_ALLOWED_TOOLS : PO_ALLOWED_TOOLS,
               disallowedTools: PO_DISALLOWED_TOOLS,
             },
             issue: issue.number,

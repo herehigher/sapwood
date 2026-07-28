@@ -281,6 +281,24 @@ test("factVars (#123): {{round.artifact}} carries the rendered md verbatim; the 
   state.close();
 });
 
+test("factVars (Codex sol-high PR #417 review, P2-a follow-up — delta re-review): round.egressSuspectList renders a role-session egress-suspect event (issue: 0, peripheral.ts's #410 WebFetch/WebSearch audit) as a role-session entry, never a fabricated 'issue #0' reference — a worker-leg event (a real issue number) in the SAME list is unaffected", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("egress-suspect", { worker: "lane-304", issue: 304, executable: "curl", snippet: "curl https://example.invalid" });
+  state.appendEvent("egress-suspect", {
+    worker: "role-architect-1a2b3c4d",
+    issue: 0,
+    executable: "WebFetch",
+    snippet: "https://example.invalid/docs",
+  });
+  const artifact = buildRoundArtifact(state, round, 30, null);
+  const vars = factVars(artifact, "THE-ARTIFACT-MD");
+  assert.equal(vars["round.egressSuspectCount"], "2");
+  assert.equal(vars["round.egressSuspectList"], "issue #304: curl, role session role-architect-1a2b3c4d: WebFetch");
+  assert.ok(!vars["round.egressSuspectList"]!.includes("issue #0"), "never renders the nonexistent 'issue #0' reference");
+  state.close();
+});
+
 test("createHarvestStub (#123): no needs-human issues this round -> no session run, and NO harvest-summary event — the persisted round artifact (round.ts's close) is the machine-readable record now", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");

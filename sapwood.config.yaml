@@ -489,6 +489,15 @@ reviewer:
 #     maxBytesPerSession: 2000000
 #   timeoutMs: 30000              # hard per-call ceiling, independent of worker.timeoutSec
 
+# #410: built-in WebSearch/WebFetch grant to architect/po-align/po-triage (no other role — the
+# review family, plan-reviewer/plan-drafter/plan-reviewer-confirm and every gate② reviewer
+# session, never reads this key at all, so no value here ever reaches them). Ships enabled BY
+# DEFAULT, unlike proxy above: the capability is read-only, carries no credential into any
+# project system, is strictly weaker than the worker's own unrestricted Bash egress, and every
+# call is journalled through the same egress-suspect ledger event the worker's own tripwire uses.
+# webAccess:
+#   enabled: true   # false falls all three roles back to the base Read/Grep/Glob allow-list
+
 # escalation omitted: humanLabels/holdLabels derive from the default labels.prefix, and
 # instructionPaths uses the reviewer-authority trust-chain defaults shown below.
 # escalation:

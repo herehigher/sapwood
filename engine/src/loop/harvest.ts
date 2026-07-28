@@ -111,8 +111,19 @@ export function factVars(artifact: RoundArtifact, artifactMd: string): Record<st
     "round.needsHumanCount": String(needsHuman.length),
     "round.needsHumanList": needsHuman.length > 0 ? needsHuman.map((n) => `#${n}`).join(", ") : "(none)",
     "round.egressSuspectCount": String(egressSuspects.length),
+    // Codex sol-high PR #417 review, P2-a follow-up (delta re-review): a role session's own
+    // egress-suspect events (peripheral.ts's #410 WebFetch/WebSearch audit) carry `issue: 0`
+    // — the SAME round-level sentinel every other role-session record uses, never a real
+    // issue number. `issue #0: ...` would read as a reference to a nonexistent issue; render
+    // these as a role-session line instead, keyed off `worker` (the session's own lane/
+    // sentinel name), matching round-artifact.ts's `renderRoundArtifactMarkdown` fix for the
+    // SAME underlying data. Worker-leg events (a real issue number) are unaffected.
     "round.egressSuspectList":
-      egressSuspects.length > 0 ? egressSuspects.map((s) => `issue #${s.issue}: ${s.executable}`).join(", ") : "(none)",
+      egressSuspects.length > 0
+        ? egressSuspects
+            .map((s) => (s.issue === 0 ? `role session ${s.worker}: ${s.executable}` : `issue #${s.issue}: ${s.executable}`))
+            .join(", ")
+        : "(none)",
   };
 }
 

@@ -12,11 +12,14 @@ import { DEFAULT_LLM_FAILURE_PATTERNS, type EnvFailureSource } from "../loop/env
 import type { ParkRow } from "../state/state.js";
 import type { ContextManifest } from "./context-manifest.js";
 import {
+  ARCHITECT_ALLOWED_TOOLS,
   CONFIRM_ALLOWED_TOOLS,
   CONFIRM_DISALLOWED_TOOLS,
   PLAN_DRAFTER_DISALLOWED_TOOLS,
+  PO_ALIGN_ALLOWED_TOOLS,
   PO_ALLOWED_TOOLS,
   PO_DISALLOWED_TOOLS,
+  PO_TRIAGE_ALLOWED_TOOLS,
   type RetriedSession,
   ROLE_ALLOWED_TOOLS,
   ROLE_DISALLOWED_TOOLS,
@@ -666,6 +669,160 @@ test("run: fallbackModel none omits Claude's fallback flag for a role session", 
     await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "none" });
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     assert.ok(!seen.includes("--fallback-model"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #410: per-role web-access grant exports — the CONFIRM_ALLOWED_TOOLS named-export-plus-
+// pinned-test precedent, applied to the three granted roles. ────────────────────────────────
+
+test("ARCHITECT_ALLOWED_TOOLS / PO_ALIGN_ALLOWED_TOOLS / PO_TRIAGE_ALLOWED_TOOLS (#410): each widens the base read-only allow-list with exactly WebSearch,WebFetch — no Bash, no write tool, byte-identical to each other and to the base plus the two web tools", () => {
+  for (const [name, granted] of Object.entries({
+    ARCHITECT_ALLOWED_TOOLS,
+    PO_ALIGN_ALLOWED_TOOLS,
+    PO_TRIAGE_ALLOWED_TOOLS,
+  })) {
+    assert.equal(granted, `${ROLE_ALLOWED_TOOLS},WebSearch,WebFetch`, name);
+    assert.ok(granted.includes("WebSearch"), name);
+    assert.ok(granted.includes("WebFetch"), name);
+    assert.ok(!granted.includes("Bash"), `${name}: no Bash grant of any kind`);
+    assert.ok(!granted.includes("Write") && !granted.includes("Edit"), `${name}: no write channel`);
+  }
+});
+
+test("ARCHITECT_ALLOWED_TOOLS / PO_ALIGN_ALLOWED_TOOLS / PO_TRIAGE_ALLOWED_TOOLS (#410): NOT PO_ALLOWED_TOOLS/ROLE_ALLOWED_TOOLS — the widening is real, not an accidental no-op alias", () => {
+  assert.notEqual(ARCHITECT_ALLOWED_TOOLS, ROLE_ALLOWED_TOOLS);
+  assert.notEqual(PO_ALIGN_ALLOWED_TOOLS, PO_ALLOWED_TOOLS);
+  assert.notEqual(PO_TRIAGE_ALLOWED_TOOLS, PO_ALLOWED_TOOLS);
+});
+
+// ── #410: the review family refuses the grant BY CONSTRUCTION — no config value could ever
+// reach a review-family session, because none of their construction paths ever reference it. ──
+
+test("#410: a review-family session (plan-reviewer/plan-drafter/plan-reviewer-confirm, constructed exactly as plan-review.ts constructs them) carries no web tool in its effective allowlist, regardless of any config — CONFIRM_ALLOWED_TOOLS/PLAN_DRAFTER_DISALLOWED_TOOLS/ROLE_ALLOWED_TOOLS never reference cfg.webAccess at all", () => {
+  for (const [name, allow] of Object.entries({
+    "plan-reviewer (ROLE_ALLOWED_TOOLS)": ROLE_ALLOWED_TOOLS,
+    "plan-reviewer-confirm (CONFIRM_ALLOWED_TOOLS)": CONFIRM_ALLOWED_TOOLS,
+    // plan-drafter's own allow-list override is PLAN_DRAFTER_DISALLOWED_TOOLS's counterpart —
+    // plan-review.ts never supplies an allowedTools override for the drafter either, so its
+    // EFFECTIVE allow-list is also the base ROLE_ALLOWED_TOOLS (peripheral.ts's `opts.allowedTools
+    // ?? ROLE_ALLOWED_TOOLS` fallback) — asserted directly rather than via a nonexistent
+    // PLAN_DRAFTER_ALLOWED_TOOLS export.
+    "plan-drafter (falls back to ROLE_ALLOWED_TOOLS, no override exists)": ROLE_ALLOWED_TOOLS,
+  })) {
+    assert.ok(!allow.includes("WebSearch"), name);
+    assert.ok(!allow.includes("WebFetch"), name);
+  }
+});
+
+test("#410: gate② review-session mode (reviewCwd) hardcodes ROLE_ALLOWED_TOOLS regardless of any caller-supplied allowedTools — a caller attempting to widen it (even with the #410 web-grant strings) is REFUSED (thrown), never silently accepted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-role-materialized-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`);
+    const runner = mkRunner(dir, bin);
+    await assert.rejects(
+      () =>
+        runner.run({
+          roleId: "engine-reviewer",
+          prompt: "p",
+          model: "opus",
+          effort: "high",
+          fallbackModel: "none",
+          reviewCwd: materializedDir,
+          allowedTools: ARCHITECT_ALLOWED_TOOLS,
+        }),
+      /reviewCwd/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+// ── #410: audit — peripheral WebFetch/WebSearch calls reuse the SAME scanner + ledger event
+// kind the worker's own Bash egress tripwire uses. ─────────────────────────────────────────
+
+test("#410: only ONE scanEgressSuspects implementation exists in the tree — the audit reuses the existing scanner, no second one was introduced", () => {
+  const src = readFileSync(fileURLToPath(new URL("./worker.ts", import.meta.url)), "utf8");
+  const defs = src.match(/export function scanEgressSuspects\(/g) ?? [];
+  assert.equal(defs.length, 1, "exactly one scanEgressSuspects function definition in worker.ts");
+  // And peripheral.ts itself defines no scanner of its own — it only ever imports and calls the
+  // one above.
+  const peripheralSrc = readFileSync(fileURLToPath(new URL("./peripheral.ts", import.meta.url)), "utf8");
+  assert.ok(!/function scanEgressSuspects\(/.test(peripheralSrc), "peripheral.ts defines no scanner of its own");
+  assert.ok(peripheralSrc.includes("scanEgressSuspects(jsonl,"), "peripheral.ts calls the imported scanner");
+});
+
+test("#410: a peripheral session's WebFetch/WebSearch tool_use calls produce the SAME `egress-suspect` ledger event kind the worker's Bash tripwire uses", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const stream = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", name: "WebFetch", input: { url: "https://example.com/some-page" } },
+            { type: "tool_use", name: "WebSearch", input: { query: "does a mature library already exist" } },
+          ],
+        },
+      }),
+      JSON.stringify({ type: "result", total_cost_usd: 0 }),
+    ].join("\n");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ncat <<'EOF'\n${stream}\nEOF\nexit 0\n`);
+    const events: Array<{ kind: string; payload: unknown }> = [];
+    const runner = mkRunner(dir, bin, {
+      state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }), maxEventId: () => 0 },
+    });
+    const result = await runner.run({
+      roleId: "architect",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: ARCHITECT_ALLOWED_TOOLS,
+    });
+    assert.equal(result.outcome, "done");
+    const egress = events.filter((e) => e.kind === "egress-suspect");
+    assert.equal(egress.length, 2, "one event per web tool call, deduplicated by (tool, snippet)");
+    const payloads = egress.map((e) => e.payload as { worker: string; issue: number; executable: string; snippet: string });
+    assert.ok(payloads.some((p) => p.executable === "WebFetch" && p.snippet === "https://example.com/some-page"));
+    assert.ok(payloads.some((p) => p.executable === "WebSearch" && p.snippet === "does a mature library already exist"));
+    for (const p of payloads) {
+      assert.equal(p.issue, 0, "round-level sentinel — a role session has no single associated issue at this layer");
+      assert.equal(p.worker, result.name, "the session's own lane/sentinel name, same field name worker.ts's event uses");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#410 (Codex sol-high PR #417 review, P2-b): a role session WITHOUT the WebFetch/WebSearch grant (e.g. plan-reviewer, the base ROLE_ALLOWED_TOOLS scope) STILL produces an egress-suspect event for a WebFetch tool_use block in its transcript — the scanner is jsonl-CONTENT-driven, never role-id-gated; a session's `--allowedTools` is a noise-reduction permission layer (worker.ts's own header doc), not a schema removal, so an ungranted session can still ATTEMPT the call (permission-denied at the paired tool_result, which this scanner never reads) and this tripwire correctly flags that attempt", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    // Not a synthetic edge case: a real CLI session without the grant CAN emit exactly this
+    // shape (the model attempts the call, the CLI permission-denies it in the tool_use's own
+    // paired tool_result) — this stub reproduces that transcript shape directly rather than
+    // asserting anything about whether the real call would have "worked".
+    const stream = [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "WebFetch", input: { url: "https://example.com" } }] },
+      }),
+      JSON.stringify({ type: "result", total_cost_usd: 0 }),
+    ].join("\n");
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ncat <<'EOF'\n${stream}\nEOF\nexit 0\n`);
+    const events: Array<{ kind: string; payload: unknown }> = [];
+    const runner = mkRunner(dir, bin, {
+      state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }), maxEventId: () => 0 },
+    });
+    await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(
+      events.filter((e) => e.kind === "egress-suspect").length,
+      1,
+      "the scanner is jsonl-content-driven, not role-id-gated — an ungranted role's attempted call is flagged exactly like a granted one's, by design (PM ruling: keep this unconditional)",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

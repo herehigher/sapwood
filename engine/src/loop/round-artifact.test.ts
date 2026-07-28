@@ -354,6 +354,28 @@ test("renderRoundArtifactMarkdown: an empty artifact renders '(none)' placeholde
   assert.ok(md.includes("(no proposal this round)"));
 });
 
+test("renderRoundArtifactMarkdown (#410 amendment, Codex sol-high PR #417 review, P2-a): a role-session egress-suspect event (issue: 0, peripheral.ts's #410 WebFetch/WebSearch audit) renders as a role-session line, never a fabricated '#0' issue reference — a worker-leg event (a real issue number) is unaffected", () => {
+  const artifact = assembleRoundArtifact(
+    [
+      { kind: "egress-suspect", payload: { worker: "lane-1", issue: 7, executable: "curl", snippet: "curl https://example.invalid" } },
+      {
+        kind: "egress-suspect",
+        payload: { worker: "role-architect-1a2b3c4d", issue: 0, executable: "WebFetch", snippet: "https://example.invalid/docs" },
+      },
+    ],
+    meta,
+    0,
+    30,
+  );
+  const md = renderRoundArtifactMarkdown(artifact);
+  assert.ok(md.includes("- #7 (lane-1): curl — curl https://example.invalid"), "worker-shaped event: unchanged #N form");
+  assert.ok(
+    md.includes("- role session role-architect-1a2b3c4d: WebFetch — https://example.invalid/docs"),
+    "role-session-shaped event (issue: 0): role-session form, never '#0'",
+  );
+  assert.ok(!md.includes("#0 ("), "never renders the nonexistent '#0' issue reference");
+});
+
 test("renderRoundArtifactMarkdown #237: an 'Objections raised' section lists every delivered concern; '(none)' when empty", () => {
   const empty = renderRoundArtifactMarkdown(assembleRoundArtifact([], meta, 0, 30));
   assert.match(empty, /## Objections raised\n\(none\)/);
