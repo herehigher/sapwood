@@ -3,12 +3,27 @@
 // deterministically via retro-digest.ts's capDigest, with a marked truncation. Present-but-
 // unreadable is its own third branch (#167 review, Codex P2) — split from "absent" and now
 // fail-fast, matching worker.ts's loadWorkerPromptTemplate contract.
+//
+// #411: also proves the CHANNEL is actually turned on for THIS repo — #167 shipped the
+// mechanism, but sapwood.config.yaml's doctrine block sat commented out (defaulting to a path,
+// docs/REVIEW-DOCTRINE.md, that didn't exist) until #411, so every real dispatch/architect/
+// gated-reentry render silently took the NO_DOCTRINE placeholder path. loadDoctrine's own units
+// above already cover the mechanism; this section is an end-to-end check against this repo's
+// actual sapwood.config.yaml + docs/REVIEW-DOCTRINE.md, the pair loadDoctrine's unit tests can't
+// see (they only ever construct throwaway fixture files/dirs).
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { loadConfig } from "./config.js";
 import { loadDoctrine, NO_DOCTRINE } from "./doctrine.js";
+
+// engine/src/config/doctrine.test.ts -> three levels up is the repo root (same pattern as
+// guard.fuzz.test.ts's/init.test.ts's own repoRoot constants).
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const REPO_CONFIG_PATH = join(REPO_ROOT, "sapwood.config.yaml");
 
 test("loadDoctrine: a missing file returns the explicit NO_DOCTRINE placeholder, never an error", () => {
   const result = loadDoctrine("/nonexistent/REVIEW-DOCTRINE.md", 1000);
@@ -72,4 +87,54 @@ test("loadDoctrine: a PRESENT-but-unreadable path (a directory, not a file) thro
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #411: the channel actually turned on for THIS repo ──────────────────────────────────────
+// Loads sapwood.config.yaml + docs/REVIEW-DOCTRINE.md exactly as the real worker/architect
+// renderers do (loadConfig resolves doctrine.file to an absolute, config-file-relative path;
+// loadDoctrine reads + caps it) — no fixture, the actual repo files. Before #411 this test fails
+// on `main`: doctrine.file falls back to its default (docs/REVIEW-DOCTRINE.md), that file didn't
+// exist, and loadDoctrine took the NO_DOCTRINE placeholder branch instead of loading real content.
+
+test("#411: this repo's own sapwood.config.yaml resolves doctrine.file and loads NON-EMPTY, non-placeholder content (fails on main before #411 — the file didn't exist)", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.notEqual(loaded, NO_DOCTRINE, "expected real doctrine content, not the 'no doctrine available' placeholder");
+  assert.ok(loaded.length > 0, "expected non-empty doctrine content");
+});
+
+test("#411: the loaded doctrine contains the authoritative-signals-over-inferred-text invariant, traceable to env-failure.ts:31-91", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.match(loaded, /Authoritative signals over inferred text/);
+  // Traceable to the source file this invariant was distilled from.
+  assert.ok(loaded.includes("env-failure.ts:31-91"), "expected a citation to engine/src/loop/env-failure.ts:31-91");
+  // The false-positive-vs-false-negative asymmetry this file's own comments name explicitly.
+  assert.match(loaded, /false\s+NEGATIVE/);
+  assert.match(loaded, /false\s+POSITIVE/);
+  // The contract-internal-format exemption (a self-produced, fail-closed-parsed format counts as
+  // authoritative even though it's serialized as text).
+  assert.match(loaded, /contracts, not text matching/i);
+  // The residual blind spot, stated honestly rather than overclaiming full coverage.
+  assert.match(loaded, /residual blind spot|genuinely narrow gap/i);
+});
+
+test("#411: the loaded doctrine contains the no-timing-dependent-assertions invariant, citing #403 and #416", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.match(loaded, /No timing-dependent assertions/);
+  assert.match(loaded, /real timer|subprocess speed|scheduler/i);
+  assert.ok(loaded.includes("#403"), "expected a citation to #403");
+  assert.ok(loaded.includes("#416"), "expected a citation to #416");
+  assert.ok(loaded.includes("#418"), "expected a citation to PR #418 (the canonical fix shape)");
+});
+
+test("#411: the loaded doctrine is comfortably under doctrine.maxChars with NO truncation marker (not silently cut)", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.ok(
+    loaded.length < cfg.doctrine.maxChars,
+    `expected content (${loaded.length} chars) to be under maxChars (${cfg.doctrine.maxChars})`,
+  );
+  assert.doesNotMatch(loaded, /truncated/i);
 });
