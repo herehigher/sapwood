@@ -860,26 +860,45 @@ export class RoleRunner {
       // second one (createExitLossDetector's own doc has the full "why two" rationale, including
       // why the pid-reuse direction can never falsely trigger this), resolve `exitPromise`
       // SYNTHETICALLY (`null`) and stop. `exitCode === 0` is the only "done" case a few lines
-      // below this method — `null` reads as `outcome: "failed"` through that SAME existing
-      // branch, no new outcome kind. The session's jsonl is already on disk (whatever the child
-      // managed to write before it died) and gets parsed same as any other non-done outcome, so
-      // runSessionWithRetry's env-failure classification takes over from there exactly like a
-      // real exit-3 failure would. That is the entire point: a hang becomes a failure the engine
-      // already knows how to absorb (park / probe / standby / the round phase cursor), not a new
-      // recovery path. `killTree` is a defensive, best-effort no-op if the child is truly already
-      // gone (same call the spawn-confirm-timeout branch above already makes on a "maybe still
-      // alive" child) — never a new kill mechanism.
+      // below this method — a synthetic `null` therefore ALWAYS reads as non-"done": `outcome:
+      // "failed"` through that SAME existing branch when this fires with no timeout in play, or
+      // `outcome: "timeout"` (unaffected — `timedOut` is checked FIRST in that computation) when
+      // it fires AFTER our own timeout kill (see the `hb` interval's own comment below for that
+      // case) — no new outcome kind either way. The session's jsonl is already on disk (whatever
+      // the child managed to write before it died) and gets parsed same as any other non-done
+      // outcome, so runSessionWithRetry's env-failure classification takes over from there
+      // exactly like a real exit-3 failure would (a genuine timeout is separately EXCLUDED from
+      // that classification regardless of how exitPromise settled — see handleEnvFailure's own
+      // doc). That is the entire point: a hang becomes a failure the engine already knows how to
+      // absorb (park / probe / standby / the round phase cursor), not a new recovery path.
+      // `killTree` is a defensive, best-effort no-op if the child is truly already gone (same
+      // call the spawn-confirm-timeout branch above already makes on a "maybe still alive"
+      // child) — never a new kill mechanism.
       const exitLossDetector = createExitLossDetector(isChildAlive);
       // Wall-clock timeout ceiling (worker.ts's heartbeatTick semantics, minus the live
       // soft-budget estimator — a role session's cost is bounded by its own scope, not tracked
-      // mid-run): past worker.timeoutSec, kill the tree; the exit handler above still resolves
-      // exitPromise (with whatever code the kill produces), so run() always returns normally.
+      // mid-run): past worker.timeoutSec, kill the tree. `timedOut` is latched true HERE, before
+      // the kill is even issued — outcome computation below (`timedOut ? "timeout" : ...`) checks
+      // `timedOut` FIRST, so it stays "timeout" no matter how `exitPromise` eventually settles: a
+      // normal delayed real `exit` event from the kill, or (see below) this SAME exit-loss
+      // detector's own synthetic resolution.
+      //
+      // #395 gate② follow-up (P2, initial-review finding): this branch deliberately does NOT
+      // `clearInterval(hb)` — the exit-loss detector below must keep running ACROSS this kill,
+      // not stop the instant it's issued. Reasoning: `killTree` sends SIGTERM, waits, then
+      // SIGKILL — and a SIGKILL'd child's own exit notification is exactly the class of signal a
+      // host sleep mid-kill can lose (arguably the MOST likely place to lose one, since we just
+      // killed the child ourselves — precisely the scenario item 1 exists to catch). Without this,
+      // a timeout kill whose own exit notification is lost would hang `await exitPromise` forever
+      // with no in-process resolver left, and the engine-wide watchdog would eventually kill the
+      // WHOLE engine over one lost signal from one child — the exact overclaim/regression this
+      // fix closes. `return` still skips the exit-loss check for the SAME tick that just crossed
+      // the timeout (avoids evaluating a probe result from before the kill was even issued).
       const hb = setInterval(() => {
         const elapsedSec = (this.now().getTime() - startedMs) / 1000;
         heartbeatGate?.tick("role-session-heartbeat", { name, roleId: opts.roleId, elapsedSec: Math.round(elapsedSec) });
         if (!timedOut && elapsedSec > this.deps.cfg.worker.timeoutSec) {
           timedOut = true;
-          clearInterval(hb);
           void this.killTree(session);
           return;
         }
@@ -891,6 +910,10 @@ export class RoleRunner {
               roleId: opts.roleId,
               pid: session.pid ?? null,
               elapsedSec: Math.round(elapsedSec),
+              // #395 gate② follow-up: same event kind either way (PM ruling: no second kind) —
+              // this field is what lets a reader tell "exit lost after OUR OWN timeout kill"
+              // (timedOut: true) apart from "exit lost with no timeout in play at all".
+              timedOut,
             });
           } catch {
             /* best-effort — the synthetic resolution below is still the operative signal */

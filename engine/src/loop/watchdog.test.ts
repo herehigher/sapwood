@@ -158,17 +158,25 @@ test("startProgressWatchdog (#395 item 2): no open round (enrich.openRound() ret
   handle.stop();
 });
 
-test("startProgressWatchdog (#395 item 2): a THROWING enrich read still fires + still appends the base engine-stalled event (best-effort — enrichment is never load-bearing for the operative nonzero exit)", async () => {
+test("startProgressWatchdog (#395 gate② follow-up, P3): a THROWING enrich read degrades ONLY its own field(s) — sibling reads that succeed still populate normally, per-read independence, not all-or-nothing", async () => {
   const state = fakeState();
   const exitCalls: number[] = [];
   const enrich = {
+    // Throws — exactly the corrupted-state case this record exists to diagnose.
     openRound: () => {
       throw new Error("simulated DB read failure");
     },
-    activeWorkers: () => [] as unknown as ReturnType<NonNullable<Parameters<typeof startProgressWatchdog>[0]["enrich"]>["activeWorkers"]>,
-    drivingWorkers: () => [] as unknown as ReturnType<NonNullable<Parameters<typeof startProgressWatchdog>[0]["enrich"]>["drivingWorkers"]>,
+    // These three all SUCCEED with distinct, non-empty values — if the old all-or-nothing guard
+    // regressed, EVERY one of these would be silently discarded by openRound()'s throw; the
+    // assertion below pins that each is present and correct despite the sibling failure.
+    activeWorkers: () =>
+      [{}, {}, {}] as unknown as ReturnType<NonNullable<Parameters<typeof startProgressWatchdog>[0]["enrich"]>["activeWorkers"]>,
+    drivingWorkers: () =>
+      [{}, {}] as unknown as ReturnType<NonNullable<Parameters<typeof startProgressWatchdog>[0]["enrich"]>["drivingWorkers"]>,
     lastEventKind: () =>
-      undefined as unknown as ReturnType<NonNullable<Parameters<typeof startProgressWatchdog>[0]["enrich"]>["lastEventKind"]>,
+      ({ id: 9, kind: "tick-error" }) as unknown as ReturnType<
+        NonNullable<Parameters<typeof startProgressWatchdog>[0]["enrich"]>["lastEventKind"]
+      >,
   };
   const handle = startProgressWatchdog({
     windowMs: 20,
@@ -178,9 +186,23 @@ test("startProgressWatchdog (#395 item 2): a THROWING enrich read still fires + 
     enrich,
   });
   await sleep(80);
-  assert.deepEqual(exitCalls, [1], "the nonzero exit still fires even though enrichment blew up");
+  assert.deepEqual(exitCalls, [1], "the nonzero exit still fires even though one enrichment read blew up");
   assert.equal(state.appended.length, 1);
-  assert.deepEqual(state.appended[0], ["engine-stalled", { tickIntervalSec: 1, lastTickAt: "T0", windowMs: 20 }]);
+  const [, payload] = state.appended[0]!;
+  assert.deepEqual(payload, {
+    tickIntervalSec: 1,
+    lastTickAt: "T0",
+    windowMs: 20,
+    // Degraded — the ONLY field(s) touched by the throwing read.
+    openRoundId: null,
+    openRoundPhase: null,
+    // NOT degraded — these three succeeded and must carry their real values, proving the throw
+    // in openRound() did not discard them too.
+    activeLaneCount: 3,
+    gatedLaneCount: 2,
+    lastEventId: 9,
+    lastEventKind: "tick-error",
+  });
   handle.stop();
 });
 

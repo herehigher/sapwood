@@ -2313,3 +2313,105 @@ test("run (#395 item 1): an isPidAlive that always reports alive never resolves 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #395 gate② follow-up (initial-review P2 finding): a TIMEOUT KILL whose own exit ─────────────
+// notification is lost must still end as outcome "timeout", not "failed" or a hang. The pre-fix
+// code stopped the exit-loss detector's own interval (`clearInterval(hb)`) the instant the
+// timeout fired, so a SIGKILL'd child that then loses its own exit notification (the MOST likely
+// place to lose one, since we just killed the child ourselves) had no in-process resolver left —
+// `await exitPromise` would hang until the engine-WIDE liveness watchdog eventually killed the
+// whole process over one lost signal from one child. The fix keeps the SAME detector running
+// across the kill instead of tearing it down.
+//
+// A real spawned child cannot be made to genuinely lose its OWN exit notification on demand (see
+// createExitLossDetector's own doc) — this test instead uses the injectable `now`/`isPidAlive`
+// hooks to make the SEQUENCE fully deterministic, independent of real timing:
+//   - `now` is a fake clock the test fully controls. `elapsedSec` (computed once at the TOP of
+//     each heartbeat tick) only advances when the test explicitly jumps it — so which real tick
+//     crosses `worker.timeoutSec` is pinned exactly, never a wall-clock race.
+//   - `isPidAlive` reports "alive" for its first few calls (covering real startup — see below)
+//     and, on the Nth call, jumps the fake clock past the timeout ceiling as a side effect; every
+//     call after that reports "dead" (simulating: the kill succeeded, but the exit notification
+//     never arrived).
+// Trace (2 isPidAlive calls per tick: the heartbeat gate's own probe, then the exit-loss check's —
+// both share the exact same injected function): ticks 1-2 stay "alive" (calls #1-4). Tick 3's
+// FIRST call (#5) is the bump — elapsedSec for THIS tick was already read before the bump landed,
+// so the timeout does not cross yet; its SECOND call (#6, the exit-loss check) now reads "dead"
+// (1st consecutive reading, not enough). Tick 4 — elapsedSec now reads past the ceiling: the
+// timeout branch fires, latches `timedOut`, kills, and returns WITHOUT reaching the exit-loss
+// check this tick (still only one dead reading banked). Tick 5 — the timeout branch is skipped
+// (already timedOut); the exit-loss check sees its SECOND consecutive dead reading -> fires.
+//
+// Why the real child needs a real head start (calls #1-4, ~2 heartbeat cadences, on TOP of a
+// deliberately un-tiny preSpawnCaptureTimeoutMs) before the fake clock ever jumps: a bash script's
+// `trap '' TERM` is not yet REGISTERED for the first handful of milliseconds after spawn (shell
+// startup), so a SIGTERM delivered in that narrow window still kills it via the OS default
+// disposition despite the trap — confirmed empirically (a raw spawn+immediate-SIGTERM probe here
+// survives from ~20ms after spawn onward, dies before that). Giving the real process a generous,
+// real head start before killTree's SIGTERM is ever issued avoids that window entirely — the
+// script below also `exec`s into `sleep` (replacing the shell's own process image, not forking a
+// separate child) so its SIG_IGN disposition for TERM survives a group-wide signal, not just a
+// direct one (killGroup signals the whole process group). The test's own synthetic resolution
+// (tick 5) still lands only ~1 heartbeat cadence after the kill is issued (tick 4) — far inside
+// killTree's 200ms SIGTERM-to-SIGKILL grace window — so there is no race against a genuine exit
+// event either, and the real (now armored) child is cleaned up by that same kill's eventual
+// SIGKILL, slightly after this test has already returned.
+test("run (#395 gate② follow-up, P2): a timeout kill whose own exit notification is lost still ends as outcome 'timeout' (never 'failed', never a hang) — role-session-exit-lost records timedOut:true", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\ntrap '' TERM\nexec sleep 30\n`); // see block comment above for why exec, not a forked child, and why TERM-immunity needs a moment to arm
+    const TIMEOUT_SEC = 1; // worker.timeoutSec must be a positive integer (config schema) — the fake clock below makes the ACTUAL value irrelevant to real test timing
+    const tcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { timeoutSec: TIMEOUT_SEC } });
+    const events: Array<[string, unknown]> = [];
+    const fakeState = {
+      appendEvent: (kind: string, payload: unknown): void => {
+        events.push([kind, payload]);
+      },
+      maxEventId: () => events.length,
+    };
+    let fakeMs = Date.now();
+    let callCount = 0;
+    const BUMP_AT_CALL = 5; // lands on tick 3's first (heartbeat-gate) probe — see the trace above
+    const runner = new RoleRunner({
+      cfg: tcfg,
+      stateDir: dir,
+      worktreeRoot: join(dir, "worktrees"),
+      claudeBin: bin,
+      heartbeatMs: 40,
+      guardHookPath: mkHook(dir),
+      preSpawnCaptureTimeoutMs: 250, // a real, un-tiny wait — gives the real child's shell startup (trap registration) a comfortable margin before any signal is ever sent
+      preSpawnCapturePollMs: 10,
+      state: fakeState,
+      now: () => new Date(fakeMs),
+      isPidAlive: () => {
+        callCount++;
+        if (callCount < BUMP_AT_CALL) return true;
+        if (callCount === BUMP_AT_CALL) {
+          // Deterministically forces the NEXT tick's elapsedSec past worker.timeoutSec, without
+          // depending on any real wall-clock race — see the block comment above for the full
+          // trace this produces.
+          fakeMs += TIMEOUT_SEC * 1000 + 1000;
+          return true;
+        }
+        return false;
+      },
+    });
+    const result = await runner.run({ roleId: "plan-reviewer", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(
+      result.outcome,
+      "timeout",
+      "timedOut was latched true before the kill was issued — the exit-loss detector's later synthetic resolution must not downgrade this to 'failed'",
+    );
+    assert.equal(result.exitCode, null);
+    const lost = events.filter(([kind]) => kind === "role-session-exit-lost");
+    assert.equal(lost.length, 1, "exactly one role-session-exit-lost event");
+    const [, payload] = lost[0]!;
+    assert.equal(
+      (payload as { timedOut: boolean }).timedOut,
+      true,
+      "the payload records that this exit-loss happened AFTER our own timeout kill, distinguishing it from an exit-loss with no timeout in play",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -102,15 +102,30 @@ export interface ProgressWatchdogHandle {
 // approaching two.
 const SAMPLES_PER_WINDOW = 4;
 
+/** #395 item 2 (gate② follow-up, P3): run `fn`, returning its value or `undefined` on a throw —
+ *  the per-read independence primitive the stall-record enrichment below uses so ONE throwing
+ *  read (e.g. openRound() against the very corrupted state this record exists to diagnose)
+ *  degrades only its OWN field(s) to `null`, never discards sibling reads that would have
+ *  succeeded. */
+function safe<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Start the progress watchdog: re-checks the TUPLE `(state.maxEventId(), state.lastTickAt())`
  *  every `windowMs/SAMPLES_PER_WINDOW` against its own previous reading, firing once
  *  `SAMPLES_PER_WINDOW` CONSECUTIVE samples have seen NEITHER change (see the module-level
  *  comment for why both, and the comment above SAMPLES_PER_WINDOW for the exact arithmetic this
  *  bounds). Firing: append the durable `engine-stalled` event, enriched (item 2) with
  *  `opts.enrich`'s cheap reads taken AT FIRE TIME (open round id/phase, active/gated lane
- *  counts, last event id+kind) alongside `opts.eventPayload`, `lastTickAt`, and `windowMs` — all
- *  best-effort, a failed write (or a failed enrichment read) still lets the nonzero exit be the
- *  operative signal — then call `exit(1)`. Deliberately does
+ *  counts, last event id+kind) alongside `opts.eventPayload`, `lastTickAt`, and `windowMs` —
+ *  each enrichment read is independently best-effort (`safe()`, one throwing read degrades only
+ *  its own field(s) to `null`, never its siblings), and the append+exit(1) themselves are ALSO
+ *  best-effort/never skipped: a failed write, or every enrichment read throwing, still lets the
+ *  nonzero exit be the operative signal — then call `exit(1)`. Deliberately does
  *  NOT reschedule after firing — the watchdog fires once and stops itself, whether or not the
  *  exit hook actually terminated the process (production: it always does; tests inject a
  *  non-terminating fake). Never reads the real clock (no `Date.now()`/`new Date()` anywhere
@@ -130,29 +145,30 @@ export function startProgressWatchdog(opts: ProgressWatchdogOpts): ProgressWatch
       unchangedSamples++;
       if (unchangedSamples >= SAMPLES_PER_WINDOW) {
         try {
-          // #395 item 2: enrich the stall record with cheap reads taken NOW, at fire time — see
-          // ProgressWatchdogOpts.enrich's own doc for why these are a separate optional pick and
-          // why "at fire time" matters. Best-effort ALONGSIDE the base payload/append below: an
-          // `enrich` read throwing (or `enrich` simply being omitted) must never suppress the
-          // stalled event itself, so failures here are swallowed into an absent field rather than
-          // aborting the whole append.
-          let enrichment: Record<string, unknown> = {};
-          if (opts.enrich) {
-            try {
-              const round = opts.enrich.openRound();
-              const lastEvent = opts.enrich.lastEventKind();
-              enrichment = {
+          // #395 item 2 (gate② follow-up, P3): enrich the stall record with cheap reads taken
+          // NOW, at fire time — see ProgressWatchdogOpts.enrich's own doc for why these are a
+          // separate optional pick and why "at fire time" matters. PER-READ independence, not a
+          // single guard around all four: `safe()` wraps EACH read separately, so one throwing
+          // read (openRound() against exactly the corrupted state this record exists to
+          // diagnose, say) degrades ONLY its own field(s) to `null` — it must never discard the
+          // OTHER reads that would have succeeded. `enrich` being entirely omitted, or every read
+          // throwing, degrades to the base payload below (lastTickAt/windowMs still present) —
+          // either way, safety here is unaffected: append+exit(1) stay outside this try, so a
+          // catastrophic enrichment failure still lets the nonzero exit be the operative signal.
+          const round = opts.enrich ? safe(() => opts.enrich!.openRound()) : undefined;
+          const active = opts.enrich ? safe(() => opts.enrich!.activeWorkers()) : undefined;
+          const driving = opts.enrich ? safe(() => opts.enrich!.drivingWorkers()) : undefined;
+          const lastEvent = opts.enrich ? safe(() => opts.enrich!.lastEventKind()) : undefined;
+          const enrichment: Record<string, unknown> = opts.enrich
+            ? {
                 openRoundId: round?.round_id ?? null,
                 openRoundPhase: round?.phase ?? null,
-                activeLaneCount: opts.enrich.activeWorkers().length,
-                gatedLaneCount: opts.enrich.drivingWorkers().length,
+                activeLaneCount: active?.length ?? null,
+                gatedLaneCount: driving?.length ?? null,
                 lastEventId: lastEvent?.id ?? null,
                 lastEventKind: lastEvent?.kind ?? null,
-              };
-            } catch {
-              /* best-effort — the base payload below still carries the operative signal */
-            }
-          }
+              }
+            : {};
           opts.state.appendEvent("engine-stalled", {
             ...opts.eventPayload,
             ...enrichment,
