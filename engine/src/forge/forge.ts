@@ -12,7 +12,9 @@ import { extractMarkdownSections } from "../util/markdown.js";
 import { ghWithTimeout } from "./gh.js";
 import { labelsInclude } from "./labels.js";
 
-const OPEN_ISSUES_LIMIT = 1000;
+// Exported (#415 review, finding 2) so a test can assert against the real ceiling value
+// instead of duplicating the literal 1000.
+export const OPEN_ISSUES_LIMIT = 1000;
 
 /** #237 finding 2: appended to EVERY issue comment GithubForge.addIssueComment posts (see that
  *  method's own doc comment) — the single, unconditional "this engine wrote this" stamp,
@@ -169,6 +171,13 @@ export interface IForge {
   /** Issue-number-addressable board items with no Status, plus draft/non-issue items that
    *  cannot be moved through setBoardStatus. Used once at engine startup, never for dispatch. */
   listUnplacedIssues(): Promise<UnplacedIssues>;
+  /** #412: every OPEN issue of the configured repo that is NOT a board item at all, in any
+   *  lane (unlike listUnplacedIssues, whose input is board membership already and therefore
+   *  cannot see an issue that was never added to the board). Read-only, startup-only,
+   *  detect-and-report: the engine never places an issue on a board itself — see cli.ts's
+   *  normalizeUnplacedBoardItems, the sole caller. Same jurisdiction as listUnplacedIssues:
+   *  draft board items and items belonging to another repo don't count as "on board". */
+  listIssuesAbsentFromBoard(): Promise<number[]>;
   /** One startup-only, read-only view used to surface management-side orphans after local
    *  state loss. It is observability input only: callers must never rebuild workers from it.
    *  PR orphan detection shares findOpenPrForIssue's 200-open-PR bound (#50 residual), so PRs
@@ -601,7 +610,10 @@ export class GithubForge implements IForge {
       if (!pi.hasNextPage || !pi.endCursor) return merged;
       after = pi.endCursor;
     }
-    return merged!; // page ceiling hit; return what we have rather than loop unbounded
+    // page ceiling hit; return what we have rather than loop unbounded. #415 review: mark it
+    // truncated so listIssuesAbsentFromBoard (the one consumer for which a partial view can
+    // produce a FALSE "absent" report) can refuse to report instead of risking a wrong answer.
+    return { ...merged!, truncated: true };
   }
 
   async getReadyIssues(): Promise<Issue[]> {
@@ -618,6 +630,27 @@ export class GithubForge implements IForge {
   async listUnplacedIssues(): Promise<UnplacedIssues> {
     const project = await this.fetchProject();
     return selectUnplacedIssues(project.placements, `${this.cfg.board.owner}/${this.cfg.board.repo}`);
+  }
+
+  /** #415 review (Codex sol-high P1/P1): a wrong report is worse than no report — refuses to
+   *  compute at all (throws, letting normalizeUnplacedBoardItems' existing best-effort catch
+   *  degrade to a logged skip) whenever either read that feeds this comparison might be
+   *  incomplete: fetchProject hit its page ceiling (a real board item beyond it would be
+   *  wrongly reported "absent"), or listOpenIssueNumbers returned exactly its own `gh --limit`
+   *  ceiling (a real open issue beyond it could be silently missing from the "absent" set, or
+   *  the reported total could undercount). Neither existing method's OWN behavior changes for
+   *  its other callers — this is a read-time check layered on top, not a new fetch mode. */
+  async listIssuesAbsentFromBoard(): Promise<number[]> {
+    const [project, openIssues] = await Promise.all([this.fetchProject(), this.listOpenIssueNumbers()]);
+    if (project.truncated) {
+      throw new Error("listIssuesAbsentFromBoard: board read hit fetchProject's page ceiling — refusing a possibly-wrong absent report");
+    }
+    if (openIssues.length >= OPEN_ISSUES_LIMIT) {
+      throw new Error(
+        `listIssuesAbsentFromBoard: open-issue read may be incomplete (hit the ${OPEN_ISSUES_LIMIT}-issue limit) — refusing a possibly-wrong absent report`,
+      );
+    }
+    return selectIssuesAbsentFromBoard(openIssues, project.placements, `${this.cfg.board.owner}/${this.cfg.board.repo}`);
   }
 
   async readStartupReconcileData(): Promise<StartupReconcileData> {
@@ -973,7 +1006,11 @@ export class GithubForge implements IForge {
 
   async listOpenIssueNumbers(): Promise<number[]> {
     // Same --limit rationale as countOpenIssuesInMilestone: generously above any realistic
-    // open-issue count for this loop's use case (ponytail).
+    // open-issue count for this loop's use case (ponytail). Shares OPEN_ISSUES_LIMIT with
+    // listOpenIssues below rather than a duplicated literal (#415 review) — this method's own
+    // behavior for its existing callers is unchanged: it still silently returns whatever `gh`
+    // gave it, same as before. Only listIssuesAbsentFromBoard treats a result that hits this
+    // exact limit as possibly-truncated (see its own doc).
     const out = await this.gh([
       "issue",
       "list",
@@ -984,7 +1021,7 @@ export class GithubForge implements IForge {
       "--json",
       "number",
       "--limit",
-      "1000",
+      String(OPEN_ISSUES_LIMIT),
     ]);
     const issues = JSON.parse(out) as { number: number }[];
     return issues.map((i) => i.number);
@@ -1353,6 +1390,15 @@ export interface ParsedProject {
   options: { name: string; id: string }[];
   items: ProjectItem[];
   placements: BoardPlacement[];
+  /** #415 review (Codex sol-high P1): set ONLY on fetchProject's page-ceiling path — true means
+   *  `items`/`placements` are a PARTIAL view of the board, not the whole thing. Every existing
+   *  consumer of ParsedProject (getReadyIssues, listUnplacedIssues, readStartupReconcileData,
+   *  ...) ignores this field, unchanged from before it existed — a partial board read was
+   *  already possible pre-#412 and none of them treated it specially. listIssuesAbsentFromBoard
+   *  is the one consumer for which a partial view is actively dangerous (a board item that sits
+   *  beyond the ceiling would be wrongly reported "absent"), so it is the only reader that
+   *  checks this and refuses to report rather than risk a false positive. */
+  truncated?: true;
 }
 
 export interface BoardPlacement {
@@ -1385,6 +1431,21 @@ export function selectUnplacedIssues(items: readonly BoardPlacement[], repoFullN
     issues: unplaced.flatMap((item) => (item.number !== null && item.repo === repoFullName ? [item.number] : [])),
     skipped: unplaced.filter((item) => item.number === null || item.repo !== repoFullName).length,
   };
+}
+
+/** #412: the No-Status normalizer above answers "is this board item misplaced" — this answers
+ *  the strictly earlier question, "is this OPEN issue on the board at all". `placements` is
+ *  ANY-status board membership (unlike selectUnplacedIssues' filtered input): an item counts as
+ *  "on board" regardless of which lane it's in, No-Status included — only a genuinely absent
+ *  issue number is reported. Same jurisdiction as selectUnplacedIssues: a draft item (number
+ *  null) or a foreign-repo item can never mask (or falsely stand in for) a real absence. */
+export function selectIssuesAbsentFromBoard(
+  openIssues: readonly number[],
+  placements: readonly BoardPlacement[],
+  repoFullName: string,
+): number[] {
+  const onBoard = new Set(placements.flatMap((item) => (item.number !== null && item.repo === repoFullName ? [item.number] : [])));
+  return openIssues.filter((issue) => !onBoard.has(issue));
 }
 
 /** The project query. `root` is "user" or "organization" (owner-kind agnostic downstream). */

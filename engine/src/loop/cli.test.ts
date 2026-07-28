@@ -329,6 +329,7 @@ test("normalizeUnplacedBoardItems: moves every issue to backlog and records one 
     {
       listUnplacedIssues: async () => ({ issues: [17, 18], skipped: 0 }),
       setBoardStatus: async (issue, status) => moves.push([issue, status]),
+      listIssuesAbsentFromBoard: async () => [],
     },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
     () => {},
@@ -354,6 +355,7 @@ test("normalizeUnplacedBoardItems: a failed move is logged and does not block la
         moves.push(issue);
         if (issue === 21) throw new Error("boom");
       },
+      listIssuesAbsentFromBoard: async () => [],
     },
     { appendEvent: (_kind, payload) => events.push(payload) },
     (line) => logs.push(line),
@@ -362,6 +364,151 @@ test("normalizeUnplacedBoardItems: a failed move is logged and does not block la
   assert.deepEqual(events, [{ issue: 22, status: "backlog" }]);
   assert.equal(logs.filter((line) => /draft\/foreign-repo/.test(line)).length, 1);
   assert.ok(logs.some((line) => /#21/.test(line) && /continuing/.test(line)));
+});
+
+// ── #412: normalizeUnplacedBoardItems' detect-and-report sibling — open issues absent from the
+// configured board altogether (never placed there at all, unlike the No-Status case above). ──
+
+test("normalizeUnplacedBoardItems: reports open issues absent from the board — one log line + one state event naming the exact count (regression: absent on main)", async () => {
+  const events: Array<[string, unknown]> = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => [101, 102],
+    },
+    { appendEvent: (kind, payload) => events.push([kind, payload]) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [["board-gap-detected", { total: 2, issues: [101, 102] }]]);
+  assert.ok(logs.some((line) => /\b2\b/.test(line) && /#101/.test(line) && /#102/.test(line)));
+});
+
+test("normalizeUnplacedBoardItems: no absent issues -> no report event, no noise", async () => {
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => [],
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, []);
+  assert.deepEqual(logs, []);
+});
+
+test("normalizeUnplacedBoardItems: the enumeration is capped, but the reported total is always the true count", async () => {
+  const absentIssues = Array.from({ length: 40 }, (_, i) => 1000 + i); // 40 absent issues
+  const events: Array<[string, unknown]> = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => absentIssues,
+    },
+    { appendEvent: (kind, payload) => events.push([kind, payload]) },
+    (line) => logs.push(line),
+  );
+  assert.equal(events.length, 1);
+  const [kind, payload] = events[0]!;
+  assert.equal(kind, "board-gap-detected");
+  const { total, issues } = payload as { total: number; issues: number[] };
+  assert.equal(total, 40, "the reported total is the TRUE count, never the truncated enumeration length");
+  assert.ok(issues.length < 40, "the enumerated list is capped");
+  assert.deepEqual(issues, absentIssues.slice(0, issues.length));
+  assert.ok(
+    logs.some((line) => /\b40\b/.test(line)),
+    "the log line states the true total, not the capped length",
+  );
+});
+
+test("normalizeUnplacedBoardItems: a computation failure logs and lets startup complete — never blocks", async () => {
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => {
+        throw new Error("gh boom");
+      },
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [], "no event on a failed computation");
+  assert.ok(logs.some((line) => /could not compute/.test(line) && /gh boom/.test(line)));
+});
+
+// #415 review findings 1+2: a wrong report is worse than no report. GithubForge.
+// listIssuesAbsentFromBoard throws (rather than compute) whenever either read feeding it might
+// be truncated — fetchProject's page ceiling, or listOpenIssueNumbers hitting its --limit
+// ceiling. These extend the generic failure-isolation test above to prove BOTH specific
+// truncation signals degrade the same way through the real integration: logged skip, zero
+// event — never a falsely-confident "absent" report.
+
+test("normalizeUnplacedBoardItems: fetchProject's page-ceiling truncation degrades to a logged skip, no event (#415 finding 1)", async () => {
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => {
+        throw new Error("listIssuesAbsentFromBoard: board read hit fetchProject's page ceiling — refusing a possibly-wrong absent report");
+      },
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [], "no board-gap-detected event when the board read may be truncated");
+  assert.ok(logs.some((line) => /could not compute/.test(line) && /page ceiling/.test(line)));
+});
+
+test("normalizeUnplacedBoardItems: listOpenIssueNumbers' --limit truncation degrades to a logged skip, no event (#415 finding 2)", async () => {
+  const events: unknown[] = [];
+  const logs: string[] = [];
+  await normalizeUnplacedBoardItems(
+    {
+      listUnplacedIssues: async () => ({ issues: [], skipped: 0 }),
+      setBoardStatus: async () => assert.fail("must not write to the board while reporting"),
+      listIssuesAbsentFromBoard: async () => {
+        throw new Error(
+          "listIssuesAbsentFromBoard: open-issue read may be incomplete (hit the 1000-issue limit) — refusing a possibly-wrong absent report",
+        );
+      },
+    },
+    { appendEvent: (_kind, payload) => events.push(payload) },
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(events, [], "no board-gap-detected event when the open-issue read may be truncated");
+  assert.ok(logs.some((line) => /could not compute/.test(line) && /1000-issue limit/.test(line)));
+});
+
+test("normalizeUnplacedBoardItems: the No-Status normalization loop and the absent-issue report never write to the board on the report path itself", async () => {
+  const writes: unknown[] = [];
+  const events: Array<[string, unknown]> = [];
+  await normalizeUnplacedBoardItems(
+    {
+      // A real No-Status item DOES get moved (existing behavior, unchanged) — proves the two
+      // passes coexist — while the absent-issue report itself performs zero additional writes.
+      listUnplacedIssues: async () => ({ issues: [7], skipped: 0 }),
+      setBoardStatus: async (issue, status) => writes.push([issue, status]),
+      listIssuesAbsentFromBoard: async () => [201, 202],
+    },
+    { appendEvent: (kind, payload) => events.push([kind, payload]) },
+    () => {},
+  );
+  assert.deepEqual(writes, [[7, "backlog"]], "only the pre-existing No-Status move writes — nothing else");
+  assert.deepEqual(events, [
+    ["board-normalized", { issue: 7, status: "backlog" }],
+    ["board-gap-detected", { total: 2, issues: [201, 202] }],
+  ]);
 });
 
 // ── #129: `--milestone NAME` shortcut — scope + stop in one flag ───────────────────────────────
